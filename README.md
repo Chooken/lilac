@@ -2,6 +2,6 @@
     <picture>
         <img 
         src="https://github.com/Chooken/lilac/blob/main/assets/LilacLogo.svg" 
-        width="50%">
+        width="60%">
     </picture>
 </div>
