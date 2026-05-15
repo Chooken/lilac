@@ -15,6 +15,10 @@ main: func () nothing {
     fifth: ref @bit32 = ref first
 
     fifth = 0b0
+
+    sixth: AddOneAble = second
+
+    sixth.addOne()
 }
 
 capture_function: func () cond: @bit8, value: @bit32 {
@@ -47,4 +51,9 @@ object: obj {
     @conversion: func (from: @number) to: object {
         to = object(@to_int32(from))
     }
+}
+
+AddOneAble = interface {
+
+    addOne: func (self) nothing
 }
