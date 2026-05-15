@@ -1,0 +1,50 @@
+
+main: func () nothing {
+
+    first: @bit32 = 0x5
+
+    if capture_function() -> value: @bit32 {
+        first = @iadd(first, value)
+    }
+
+    second: object(0b1)
+    third: object = second + object(0b1)
+
+    fourth: object = 1.0
+
+    fifth: ref @bit32 = ref first
+
+    fifth = 0b0
+}
+
+capture_function: func () cond: @bit8, value: @bit32 {
+    cond = 0b1
+    value = 0xf
+}
+
+object: obj {
+
+    value: @bit8
+
+    @init: func (self, value: @bit8) nothing {
+        self.value = value
+    }
+
+    // This is an Object
+
+    addOne: func (self) nothing {
+        self.value = @iadd(self.value, 0b1)
+    } 
+
+    @on_copy: func (self) nothing {
+        self.value = @iadd(self.value, 0b1)
+    } 
+
+    @add: func (lhs: object, rhs: object) result: object {
+        result = @iadd(lhs, rhs)
+    }
+
+    @conversion: func (from: @number) to: object {
+        to = object(@to_int32(from))
+    }
+}
