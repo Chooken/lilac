@@ -19,6 +19,12 @@ pub const Token = struct {
         .{"false", TokenType.Bool},
         .{"ref", TokenType.Reference},
         .{"unknown", TokenType.Unknown},
+        .{"if", TokenType.If},
+        .{"match", TokenType.Match},
+        .{"loop", TokenType.Loop},
+        .{"using", TokenType.Using},
+        .{"as", TokenType.As},
+        .{"private", TokenType.Private},
     });
 
     pub fn getReserved(token: []const u8) ?TokenType {
@@ -90,6 +96,14 @@ pub const TokenType = enum {
     Object,
     Enum,
     Interface,
+
+    // Statements.
+    If,
+    Match,
+    Loop,
+    Using,
+    As,
+    Private,
 
     // Jump Tokens
     Return,

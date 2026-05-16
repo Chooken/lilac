@@ -21,6 +21,10 @@ main: func () nothing {
     sixth.addOne()
 }
 
+function: func (one: int, two: int) result: int {
+
+}
+
 capture_function: func () cond: @bit8, value: @bit32 {
     cond = 0b1
     value = 0xf
