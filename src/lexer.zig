@@ -276,7 +276,6 @@ pub const Tokenizer = struct {
                 self.index += 1;
                 switch (self.source[self.index]) {
                     '0', '1', '_' => {
-                        self.index += 1;
                         continue :start .BinLiteral;
                     },
 
@@ -288,7 +287,6 @@ pub const Tokenizer = struct {
                 self.index += 1;
                 switch (self.source[self.index]) {
                     '0'...'9', 'a'...'f', '_' => {
-                        self.index += 1;
                         continue :start .HexLiteral;
                     },
 
@@ -446,11 +444,6 @@ pub const Tokenizer = struct {
                 self.index += 1;
                 switch (self.source[self.index]) {
 
-                    '<' => {
-                        self.index += 1;
-                        token.token_type = TokenType.ShiftLeft;
-                    },
-
                     '=' => {
                         self.index += 1;
                         token.token_type = TokenType.LessThanOrEquals;
@@ -463,11 +456,6 @@ pub const Tokenizer = struct {
             .GreaterThan => {
                 self.index += 1;
                 switch (self.source[self.index]) {
-
-                    '>' => {
-                        self.index += 1;
-                        token.token_type = TokenType.ShiftRight;
-                    },
 
                     '=' => {
                         self.index += 1;

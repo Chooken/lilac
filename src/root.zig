@@ -1,6 +1,7 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 const Token = @import("tokens.zig").Token;
+const parser = @import("parser.zig");
 
 pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) void {
 
@@ -8,18 +9,9 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
 
     if (opt_file) |file| {
 
-        var tokenizer = lexer.Tokenizer.init(file);
-        var file_tokens: std.ArrayList(Token) = .empty;
-
-        while (tokenizer.next()) |token| {
-            //std.debug.print("{s} - {s}\n", .{@tagName(token.token_type), file[token.start..token.end]});
-            file_tokens.append(allocator, token) catch {
-                std.debug.print("Ran out of memory whilst lexing.\n", .{});
-                return;
-            };
-        }
-
-
+        _ = parser.parse(file, allocator) catch {
+            return;
+        };
     }
 }
 

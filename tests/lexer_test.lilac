@@ -37,11 +37,11 @@ false
 =
 ==
 <
-<<
 <=
 >
->>
 >=
+and
+or
 .
 ;
 return

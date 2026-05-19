@@ -25,6 +25,8 @@ pub const Token = struct {
         .{"using", TokenType.Using},
         .{"as", TokenType.As},
         .{"private", TokenType.Private},
+        .{"and", TokenType.And},
+        .{"or", TokenType.Or},
     });
 
     pub fn getReserved(token: []const u8) ?TokenType {
@@ -66,10 +68,10 @@ pub const TokenType = enum {
     Asterisk, // *
     LessThan, // <
     LessThanOrEquals, // <=
-    ShiftLeft, // <<
     GreaterThan, // >
     GreaterThanOrEquals, // >=
-    ShiftRight, // >>
+    And,
+    Or,
 
     Exclamation, // !
 

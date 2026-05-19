@@ -2,17 +2,16 @@ const std = @import("std");
 const tokens = @import("tokens.zig");
 const lexer = @import("lexer.zig");
 
-const Block = struct {
-    usings: std.ArrayList(Using),
+pub const Block = struct {
     body: std.ArrayList(Node(Statement)),
 };
 
-const Using = struct {
-    alias: Node(Expression),
+pub const Using = struct {
+    alias: ?Node(Expression),
     namespace: Node(Expression),
 };
 
-fn Node(comptime T: type) type {
+pub fn Node(comptime T: type) type {
     return struct {
         data: *T,
         start_token: usize,
@@ -29,10 +28,11 @@ fn Node(comptime T: type) type {
     };
 }
 
-const Statement = union(enum) {
+pub const Statement = union(enum) {
     Block: Node(Block),
-    Private: Node(Statement),
+    Private: Node(Block),
     Loop: Node(Statement),
+    Using: Using,
     Return,
     Break,
     Continue,
@@ -40,7 +40,7 @@ const Statement = union(enum) {
     Error,
 };
 
-const Expression = union(enum) {
+pub const Expression = union(enum) {
     If: Conditional,
     Match: Match,
     Assignment: Assignment,
@@ -65,93 +65,92 @@ const Expression = union(enum) {
     Error,
 };
 
-const FuncPrototype = struct {
+pub const FuncPrototype = struct {
     arguments: ?Node(Expression),
     return_type: Node(Expression),
 };
 
-const Assignment = struct {
+pub const Assignment = struct {
     assignee: Node(Expression),
     value: Node(Expression),
     op_token_index: usize,
 };
 
-const List = struct {
+pub const List = struct {
     expressions: std.ArrayList(Node(Expression)),
 };
 
-const Declaration = struct {
-    is_reference: bool,
+pub const Declaration = struct {
     name: Node(Expression),
     decl_type: Node(Expression),
 };
 
-const Conditional = struct {
+pub const Conditional = struct {
     condition: Node(Expression),
     captures: ?Node(Expression),
     block: Node(Statement),
 };
 
-const Match = struct {
+pub const Match = struct {
     value: Node(Expression),
     cases: std.ArrayList(Case),
 };
 
-const Case = struct {
+pub const Case = struct {
     value: Node(Expression),
     capture: ?Node(Expression),
     block: Node(Statement),
 };
 
-const Binop = struct {
+pub const Binop = struct {
     left: Node(Expression),
     right: Node(Expression),
     op_token_index: usize,
 };
 
-const Unary = struct {
+pub const Unary = struct {
     right: Node(Expression),
     op_token_index: usize,
 };
 
-const Setter = struct {
+pub const Setter = struct {
     settee: Node(Expression),
     assignments: Node(Block)
 };
 
-const Call = struct {
+pub const Call = struct {
+    callee: Node(Expression),
+    arguements: ?Node(Expression),
+};
+
+pub const Generic = struct {
     callee: Node(Expression),
     arguements: Node(Expression),
 };
 
-const Generic = struct {
-    callee: Node(Expression),
-    arguements: Node(Expression),
-};
-
-const Member = struct {
+pub const Member = struct {
     parent: Node(Expression),
     member: Node(Expression),
 };
 
-const Identifier = struct { 
+pub const Identifier = struct { 
     token_index: usize,
 };
 
-const Literal = struct {
+pub const Literal = struct {
     literal_type: tokens.TokenType,
     token_index: usize,
 };
 
-const AstError = struct {
+pub const AstError = struct {
     token_index: usize,
     message: []const u8,
 };
 
-const Ast = struct {
+pub const Ast = struct {
 
     source: []const u8,
-    tokens: []lexer.Token,
+    tokens: []tokens.Token,
     root_block: Block,
     errors: std.ArrayList(AstError),
 
@@ -159,3 +158,4 @@ const Ast = struct {
         allocator.free(self.tokens);
     }
 };
+
