@@ -20,6 +20,7 @@ pub const Token = struct {
         .{"ref", TokenType.Reference},
         .{"unknown", TokenType.Unknown},
         .{"if", TokenType.If},
+        .{"else", TokenType.Else},
         .{"match", TokenType.Match},
         .{"loop", TokenType.Loop},
         .{"using", TokenType.Using},
@@ -101,6 +102,7 @@ pub const TokenType = enum {
 
     // Statements.
     If,
+    Else,
     Match,
     Loop,
     Using,
@@ -121,4 +123,80 @@ pub const TokenType = enum {
     EndOfFile,
 
     Invalid,
+
+    pub fn toString(token_type: TokenType) []const u8 {
+        return switch (token_type) {
+            .Object => "obj",
+            .Function => "func",
+            .Enum => "enum",
+            .Interface => "interface",
+            .Self => "self",
+            .Nothing => "nothing",
+            .Return => "return",
+            .Break => "break",
+            .Continue => "continue",
+            .Reference => "ref",
+            .Unknown => "unknown",
+            .If => "if",
+            .Else => "else",
+            .Match => "match",
+            .Loop => "loop",
+            .Using => "using",
+            .As => "as",
+            .Private => "private",
+            .And => "and",
+            .Or => "or",
+
+            .Binary => "Binary",
+            .Number => "Number",
+            .Bool => "Bool",
+            .String => "String",
+            .Char => "Char",
+            
+            .Identifier => "Indentifier",
+            .Builtin => "Builtin",
+
+            .Equals => "=",
+            .PlusEquals => "+=",
+            .MinusEquals => "-=",
+            .TimesEquals => "*=",
+            .DivEquals => "/=",
+            .PercentEquals => "%=",
+
+            .EqualsEquals => "==",
+            .ExclamationEquals => "!=",
+            .Plus => "+",
+            .Minus => "-",
+            .Asterisk => "*",
+            .Slash => "/",
+            .Percentage => "%",
+            .LessThan => "<",
+            .LessThanOrEquals => "<=",
+            .GreaterThan => ">",
+            .GreaterThanOrEquals => ">=",
+
+            .Exclamation => "!",
+
+            .OpenParentheses => "(",
+            .CloseParentheses => ")",
+
+            .OpenBrace => "{",
+            .CloseBrace => "}",
+
+            .OpenBracket => "[",
+            .CloseBracket => "]",
+
+            .Semicolon => ";",
+            .Colon => ":",
+            .Comma => ",",
+            .Dot => ".",
+
+            .RightArrow => "->",
+            .FatRightArrow => "=>",
+
+            .EndOfFile => "End of File",
+
+            .Invalid => "Invalid",
+        };
+    }
 };

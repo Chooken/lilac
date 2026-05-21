@@ -1,3 +1,4 @@
+using x as y.x
 
 main: func () nothing {
 
@@ -5,6 +6,8 @@ main: func () nothing {
 
     if capture_function() -> value: @bit32 {
         first = @iadd(first, value)
+    } else {
+        first = @iadd(first, 0x4)
     }
 
     second: object(0b1)
@@ -19,11 +22,30 @@ main: func () nothing {
     sixth: AddOneAble = second
 
     sixth.addOne()
+
+    e: Enum = .One
+
+    match e {
+        .One {
+
+        }
+
+        .Two => 1
+
+        else => 1
+
+        else {}
+    }
+
+    1 + 2 * 3 == 1 and 1 == 2 - 1
+
+    x: int, y: int = 1
 }
 
-function: func (one: int, two: int) result: int {
-
+function: func (one: @bit32, two: @bit32) result: @bit32 {
+    
 }
+
 
 capture_function: func () cond: @bit8, value: @bit32 {
     cond = 0b1
@@ -46,7 +68,7 @@ object: obj {
 
     @on_copy: func (self) nothing {
         self.value = @iadd(self.value, 0b1)
-    } 
+    }
 
     @add: func (lhs: object, rhs: object) result: object {
         result = @iadd(lhs, rhs)
@@ -55,6 +77,11 @@ object: obj {
     @conversion: func (from: @number) to: object {
         to = object(@to_int32(from))
     }
+}
+
+Enum: enum {
+    One
+    Two
 }
 
 AddOneAble = interface {
