@@ -61,7 +61,41 @@ fn indent_print(indent: usize) void {
     for (0..indent) |_| terminal.writer.writeByte(' ') catch return;
 }
 
-const LogLevel = enum {
+pub const Logger = struct {
+    allocator: std.mem.Allocator,
+    logs: std.ArrayList(Log) = .empty,
+    
+    pub fn logAt(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, log_level: LogLevel, source: []const u8) void {
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        
+        self.logs.append(self.allocator, .{
+            .start = start,
+            .end = end,
+            .source = source,
+            .message = message,
+            .hint = hint,
+            .level = log_level,
+        }) catch @panic("Out of Memory.");
+    }
+
+    pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
+        self.logAt(fmt, args, hint, start, end, .Error, source);
+    }
+
+    pub fn logWarning(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
+        self.logAt(fmt, args, hint, start, end, .Warning, source);
+    }
+
+    pub fn logNote(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
+        self.logAt(fmt, args, hint, start, end, .Note, source);
+    }
+
+    pub fn deinit(self: *Logger) void {
+        self.logs.deinit(self.allocator);
+    }
+};
+
+pub const LogLevel = enum {
     Error,
     Warning,
     Note,
@@ -144,7 +178,7 @@ pub const Location = struct {
             start_print -= 1;
         }
 
-        var end_print = log.end;
+        var end_print = log.start;
 
         while (end_print < log.source.len - 1) {
 
@@ -165,8 +199,8 @@ pub const Location = struct {
     }
 };
 
-pub fn printLogs(logs: std.ArrayList(Log)) void {
-    for (logs.items) |log| {
+pub fn printLogs(logger: Logger) void {
+    for (logger.logs.items) |log| {
         printLog(log);
     }
 }
@@ -201,7 +235,7 @@ pub fn printLog(log: Log) void {
     startLine(line_options);
     setColor(log_color);
     setColor(.bold);
-    for (log.start - 1..log.end - 1) |_| print("^");
+    for (log.start - 1..@min(log.end - 1, location.end - 1)) |_| print("^");
     setColor(.reset);
     endLine();
     

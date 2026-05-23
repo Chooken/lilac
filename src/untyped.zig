@@ -3,6 +3,26 @@ const tokens = @import("tokens.zig");
 const lexer = @import("lexer.zig");
 const logger = @import("logger.zig");
 
+pub const Program = struct {
+    root_module: Module = .{},
+};
+
+pub const Module = struct {
+    submodules: std.StringHashMapUnmanaged(Module) = .empty,
+    asts: std.ArrayList(Ast) = .empty,
+};
+
+pub const Ast = struct {
+
+    source: []const u8,
+    tokens: []tokens.Token,
+    root_block: Block,
+
+    pub fn deinit(self: *Ast, allocator: std.mem.Allocator) void {
+        allocator.free(self.tokens);
+    }
+};
+
 pub const Block = struct {
     body: std.ArrayList(Node(Statement)),
 };
@@ -15,17 +35,17 @@ pub const Using = struct {
 pub fn Node(comptime T: type) type {
     return struct {
         data: *T,
-        start_token: usize,
-        end_token: usize,
+        start: usize,
+        end: usize,
 
-        pub fn init(allocator: std.mem.Allocator, start_token: usize, end_token: usize, value: T) !Node(T) {
+        pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, value: T) !Node(T) {
             const data = try allocator.create(T);
             data.* = value;
 
             return .{
                 .data = data,
-                .start_token = start_token,
-                .end_token = end_token,
+                .start = start,
+                .end = end,
             };
         }
     };
@@ -150,22 +170,6 @@ pub const Identifier = struct {
 pub const Literal = struct {
     literal_type: tokens.TokenType,
     token_index: usize,
-};
-
-pub const AstError = struct {
-    token_index: usize,
-    message: []const u8,
-};
-
-pub const Ast = struct {
-
-    source: []const u8,
-    tokens: []tokens.Token,
-    root_block: Block,
-
-    pub fn deinit(self: *Ast, allocator: std.mem.Allocator) void {
-        allocator.free(self.tokens);
-    }
 };
 
 pub fn printAST(ast: *Ast) void {

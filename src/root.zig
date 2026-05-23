@@ -2,7 +2,7 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const Token = @import("tokens.zig").Token;
 const parser = @import("parser.zig");
-const ast = @import("ast.zig");
+const untyped = @import("untyped.zig");
 const logger = @import("logger.zig");
 
 pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) void {
@@ -14,7 +14,9 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
 
     if (opt_file) |file| {
 
-        _ = parser.parse(file, allocator, false) catch {
+        var uprogram = untyped.Program {};
+
+        uprogram.root_module.asts.append(allocator, parser.parse(file, allocator, false)) catch {
             return;
         };
 
