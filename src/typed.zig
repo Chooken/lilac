@@ -3,10 +3,8 @@ const tokens = @import("tokens.zig");
 
 pub fn TypedNode(comptime T: type) type {
     return struct {
-        typeid: TypeId,
+        returns: std.ArrayList(TypeRef),
         data: *T,
-        start_token: usize,
-        end_token: usize,
 
         pub fn init(allocator: std.mem.Allocator, start_token: usize, end_token: usize, typeid: TypeId, value: T) !TypedNode(T) {
             const data = try allocator.create(T);
@@ -28,7 +26,7 @@ pub const Program = struct {
     functions: std.ArrayList(Function) = .empty,
 
     pub fn addType(self: *Program, allocator: std.mem.Allocator, typedata: Type) TypeId {
-        self.types.append(allocator, typedata);
+        self.types.append(allocator, typedata) catch @panic("Out of Memory.");
         return .{
             .index = self.types.items.len - 1,
         };
@@ -36,59 +34,80 @@ pub const Program = struct {
 };
 
 pub const Type = struct {
-    size: ?usize,
-    data: ?TypeData,
+    name: ?[]const u8,
+    size: ?usize = null,
+    data: ?TypeData = null,
+};
+
+pub const Visability = enum {
+    public,
+    private,
 };
 
 pub const TypeId = struct {
     index: usize,
 };
 
+pub const TypeRef = struct {
+    id: TypeId,
+    is_ref: bool,
+
+    pub fn cmp(self: TypeRef, other: TypeRef) bool {
+        return self.id.index == other.id.index and self.is_ref == other.is_ref;
+    }
+};
+
 pub const TypeData = union(enum) {
-    Primative: Primative,
+    Primative,
     Object: Object,
     Enum: Enum,
     Function: FunctionProto,
     Interface: Interface,
-    Namespace,
+    Module: Module,
     Nothing,
 };
 
 pub const Conversion = struct {
-    from: TypeId,
-    to: TypeId,
+    from: TypeRef,
+    to: TypeRef,
 };
 
 pub const Operator = struct {
-    lhs: TypeId,
-    rhs: TypeId,
+    lhs: TypeRef,
+    rhs: TypeRef,
     op: tokens.TokenType,
 };
 
-pub const Primative = struct {
-    size: usize,
-};
-
 pub const Field = struct {
+    visability: Visability,
     name: []const u8,
-    typeid: TypeId,
+    type_ref: ?TypeRef,
 };
 
 pub const Object = struct {
-    structure: std.ArrayList(Field),
+    structure: std.ArrayList(Field) = .empty,
 };
 
 pub const Enum = struct {
-    structure: std.ArrayList(Field),
+    structure: std.ArrayList(Field) = .empty,
 };
 
 pub const FunctionProto = struct {
-    inputs: std.ArrayList(TypeId),
-    outputs: std.ArrayList(TypeId),
+    inputs: std.ArrayList(TypeRef) = .empty,
+    outputs: std.ArrayList(TypeRef) = .empty,
+
+    pub fn deinit(self: *FunctionProto, allocator: std.mem.Allocator) void {
+        self.inputs.deinit(allocator);
+        self.outputs.deinit(allocator);
+    }
 };
 
 pub const Interface = struct {
-    structure: std.ArrayList(Field),
+    structure: std.ArrayList(Field) = .empty,
+};
+
+pub const Module = struct {
+    globals: std.ArrayList(Field) = .empty,
 };
 
 // Typed Ast.
@@ -98,17 +117,20 @@ pub const FunctionId = struct {
 };
 
 pub const Function = struct {
+    requires_self: bool,
+    is_inlined: bool,
     typeid: TypeId, 
-    block: Block,
+    block: ?Block,
 };
 
 pub const Block = struct {
-    body: std.ArrayList(Statement),
+    body: std.ArrayList(Statement) = .empty,
 };
 
 pub const Statement = union(enum) {
-    Block,
-    Loop,
+    Block: TypedNode(Block),
+    Loop: TypedNode(Block),
+    Defer: TypedNode(Block),
     Return,
     Break,
     Continue,

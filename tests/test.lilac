@@ -25,6 +25,10 @@ main: func () nothing {
 
     e: Enum = .One
 
+    r: Object {
+
+    }
+
     match e {
         .One {
 
@@ -32,7 +36,9 @@ main: func () nothing {
 
         .Two => 1
 
-        else => 2
+        else => 2 
+        
+        else => 1
     }
 
     1 + 2 * 3 == 1 and 1 == 2 - 1
@@ -40,8 +46,19 @@ main: func () nothing {
     x: int, y: int = 1
 }
 
+other: func () nothing {
+    
+}
+
+inlined: func () @bit32 => 0x2
+
 function: func (one: @bit32, two: @bit32) result: @bit32 {
     
+    if true {
+
+    } else {
+
+    }
 }
 
 
@@ -50,9 +67,23 @@ capture_function: func () cond: @bit8, value: @bit32 {
     value = 0xf
 }
 
+gen[T]: obj {
+
+    val: T
+
+    gen2[T2]: obj {
+        t: T
+        t2: T2
+    }
+
+    funct: func () result: @bit8 {
+        result = 0x2
+    }
+}
+
 object: obj {
 
-    value: @bit8
+    value: gen[@bit8]
 
     @init: func (self, value: @bit8) nothing {
         self.value = value
@@ -82,7 +113,15 @@ Enum: enum {
     Two
 }
 
-AddOneAble = interface {
+AddOneAble: interface {
 
     addOne: func (self) nothing
+}
+
+private {
+
+    Enum2: enum {
+        One
+        Two
+    }
 }

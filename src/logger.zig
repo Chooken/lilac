@@ -1,5 +1,6 @@
 const std = @import("std");
 const tokens = @import("tokens.zig");
+const files = @import("files.zig");
 
 pub const LineOptions = struct {
     indent: usize,
@@ -64,30 +65,39 @@ fn indent_print(indent: usize) void {
 pub const Logger = struct {
     allocator: std.mem.Allocator,
     logs: std.ArrayList(Log) = .empty,
-    
-    pub fn logAt(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, log_level: LogLevel, source: []const u8) void {
-        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        
-        self.logs.append(self.allocator, .{
-            .start = start,
-            .end = end,
-            .source = source,
-            .message = message,
+
+    pub fn log(self: *Logger, _log: Log) void {
+        self.logs.append(self.allocator, _log) catch @panic("Out of Memory.");
+    }
+
+    pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+        self.log(.{
+            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
             .hint = hint,
-            .level = log_level,
-        }) catch @panic("Out of Memory.");
+            .level = .Error,
+        });
+
+        return &self.logs.items[self.logs.items.len - 1];
     }
 
-    pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
-        self.logAt(fmt, args, hint, start, end, .Error, source);
+    pub fn logWarning(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+        self.log(.{
+            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
+            .hint = hint,
+            .level = .Warning,
+        });
+
+        return &self.logs.items[self.logs.items.len];
     }
 
-    pub fn logWarning(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
-        self.logAt(fmt, args, hint, start, end, .Warning, source);
-    }
+    pub fn logNote(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+        self.log(.{
+            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
+            .hint = hint,
+            .level = .Note,
+        });
 
-    pub fn logNote(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, start: usize, end: usize, source: []const u8) void {
-        self.logAt(fmt, args, hint, start, end, .Note, source);
+        return &self.logs.items[self.logs.items.len];
     }
 
     pub fn deinit(self: *Logger) void {
@@ -109,39 +119,38 @@ pub const LogLevel = enum {
     }
 };
 
-pub const Log = struct {
+pub const LogLine = struct { 
     start: usize,
     end: usize,
-    source: []const u8,
     message: []const u8,
+};
+
+pub const Log = struct {
+    message: []const u8,
+    logs: std.AutoHashMapUnmanaged(files.FileId, std.ArrayList(LogLine)) = .empty,
     hint: ?[]const u8,
     level: LogLevel,
 
-    pub fn Error(msg: []const u8, token: tokens.Token, source: []const u8) Log {
-        return .{
-            .token = token,
-            .source = source,
-            .message = msg,
-            .level = .Error,  
-        };
-    }
+    pub fn addLine(
+        self: *Log, 
+        allocator: std.mem.Allocator, 
+        file_id: files.FileId, 
+        comptime fmt: []const u8, 
+        args: anytype, 
+        start: usize, 
+        end: usize
+    ) void {
+        const val = self.logs.getOrPut(allocator, file_id) catch @panic("Out of Memory.");
 
-    pub fn Warning(msg: []const u8, token: tokens.Token, source: []const u8) Log {
-        return .{
-            .token = token,
-            .source = source,
-            .message = msg,
-            .level = .Warning,  
-        };
-    }
+        if (!val.found_existing) {
+            val.value_ptr.* = .empty;
+        }
 
-    pub fn Note(msg: []const u8, token: tokens.Token, source: []const u8) Log {
-        return .{
-            .token = token,
-            .source = source,
-            .message = msg,
-            .level = .Note,  
-        };
+        val.value_ptr.append(allocator, .{
+            .message = std.fmt.allocPrint(allocator, fmt, args) catch @panic("Out of Memory."),
+            .start = start,
+            .end = end,
+        }) catch @panic("Out of Memory.");
     }
 };
 
@@ -149,114 +158,172 @@ pub const Location = struct {
     start: usize,
     end: usize,
     line: usize,
-    character: usize,
 
-    pub fn get(log: Log) Location {
+    pub fn get(allocator: std.mem.Allocator, log: LogLine, source: []const u8) std.ArrayList(Location) {
+
+        var locations = std.ArrayList(Location).empty;
 
         var line: usize = 1;
-        var character: usize = 1;
+        var last_line_index: usize = 0;
+        var current_line_index: usize = 0;
 
         for (0..log.start) |index| {
 
-            character += 1;
-
-            if (log.source[index] == '\n') {
+            if (source[index] == '\n') {
                 line += 1;
-                character = 1;
+                last_line_index = current_line_index;
+                current_line_index = index + 1;
             }
         }
 
-        var start_print = log.start;
+        line -= 1;
 
-        while (start_print > 0) {
+        var start_print = last_line_index;
+        var index: usize = last_line_index;
+        var count: usize = 3;
 
-            if (log.source[start_print] == '\n') {
-                start_print += 1;
+        while (count != 0 and index < source.len) {
+
+            if (index >= source.len) {
+                locations.append(allocator, .{
+                    .start = start_print,
+                    .end = index,
+                    .line = line,
+                }) catch @panic("Out of Memory.");
                 break;
             }
 
-            start_print -= 1;
-        }
-
-        var end_print = log.start;
-
-        while (end_print < log.source.len - 1) {
-
-            if (log.source[end_print] == '\n') {
-                end_print -= 1;
-                break;
+            if (source[index] == '\n') {
+                locations.append(allocator, .{
+                    .start = start_print,
+                    .end = index,
+                    .line = line,
+                }) catch @panic("Out of Memory.");
+                line += 1;
+                count -= 1;
+                start_print = index + 1;
             }
 
-            end_print += 1;
+            index += 1;
         }
 
-        return .{
-            .start = start_print,
-            .end = end_print,
-            .line = line,
-            .character = character,
-        };
+        return locations;
     }
 };
 
-pub fn printLogs(logger: Logger) void {
+pub fn printLogs(logger: Logger, allocator: std.mem.Allocator) void {
     for (logger.logs.items) |log| {
-        printLog(log);
+        printLog(log, allocator);
     }
 }
 
-pub fn printLog(log: Log) void {
+pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
 
-    const location = Location.get(log);
     const log_color = log.level.getColor();
 
     setColor(log_color);
     setColor(.bold);
     print(@tagName(log.level));
     setColor(.reset);
-    printFmt(":{d}:{d}", .{location.line, location.character});
+    printFmt(": {s}", .{log.message});
     endLine();
 
-    setColor(log_color);
-    setColor(.bold);
-    print("| ");
-    setColor(.reset);
-    printFmt("{s}", .{log.source[location.start..location.end]});
-    endLine();
+    // Log lines and Hints
+    var log_iterator = log.logs.iterator();
 
-    const line_options = LineOptions { 
-        .indent = log.start - location.start 
-    };
+    var prev_last: usize = 0;
 
-    setColor(log_color);
-    setColor(.bold);
-    print("| ");
-    setColor(.reset);
-    startLine(line_options);
-    setColor(log_color);
-    setColor(.bold);
-    for (log.start - 1..@min(log.end - 1, location.end - 1)) |_| print("^");
-    setColor(.reset);
-    endLine();
-    
-    setColor(log_color);
-    setColor(.bold);
-    print("| ");
-    setColor(.reset);
-    startLine(line_options);
-    print(log.message);
-    endLine();
+    while (log_iterator.next()) |file_logs| {
+        const log_file = file_logs.key_ptr.getFile();
+
+        _ = printPadding(log_color, null, 0);
+        setColor(.dim);
+        printFmt("file: {s}", .{log_file.file});
+        setColor(.reset);
+        endLine();
+
+        var offset: usize = 0;
+
+        for (file_logs.value_ptr.items) |logline| {
+
+            var locations = Location.get(allocator, logline, log_file.source);
+            defer locations.deinit(allocator);
+
+            for (locations.items, 0..) |location, index| {
+
+                if (prev_last < location.line) {
+                    
+                    if (location.line - prev_last > 1) {
+                        _ = printPadding(log_color, "...", 0);
+                        endLine();      
+                    }
+
+                    prev_last = location.line;
+
+                    const line_number = std.fmt.allocPrint(allocator, "{d}", .{location.line}) catch @panic("Out of Memory.");
+                    defer allocator.free(line_number);
+
+                    offset = printPadding(log_color, line_number, 6);
+                    
+                    print(log_file.source[location.start..location.end]);
+                    endLine();
+                }
+
+                if (index == 1) {
+
+                    const token_offset: usize = offset + (logline.start - location.start - 1);
+
+                    _ = printPadding(log_color, "|", token_offset);
+                    
+                    setColor(.red);
+                    setColor(.bold);
+                    for (logline.start..logline.end) |_| {
+                        print("^");
+                    }
+                    setColor(.reset);
+                    endLine();
+
+                    _ = printPadding(log_color, "|", token_offset);
+                    print(logline.message);
+                    setColor(.reset);
+                    endLine();
+                }
+            }
+        }
+    }
 
     if (log.hint) |hint| {
-        setColor(log_color);
-        setColor(.bold);
-        print("| ");
-        setColor(.reset);
-        startLine(line_options);
+        _ = printPadding(log_color, null, 0);
         printColored("hint: ", .{}, .bright_green);
         setColor(.dim);
         print(hint);
         setColor(.reset);
         endLine();
     }
+}
+
+fn printPadding(log_color: std.Io.Terminal.Color, line_head: ?[]const u8, padding: usize) usize {
+    setColor(log_color);
+    setColor(.bold);
+    print("| ");
+    setColor(.reset);
+
+    var length: usize = padding;
+
+    if (line_head) |string| {
+
+        setColor(.dim);
+        print(string); 
+        setColor(.reset);
+
+        if (string.len < padding) {
+            indent_print(padding - string.len);
+        } else {
+            length = string.len;
+        }
+    } else {
+        indent_print(padding);
+    }
+
+    return length + 1;
 }

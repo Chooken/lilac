@@ -21,4 +21,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = debug_allocator.allocator();
 
     Lilac.testCompile(io, allocator, "tests/test.lilac");
+
+    _ = debug_allocator.deinit();
 }

@@ -6,6 +6,7 @@ const Tokenizer = @import("lexer.zig").Tokenizer;
 const untyped = @import("untyped.zig");
 const Ast = untyped.Ast;
 const logger = @import("logger.zig");
+const files = @import("files.zig");
 
 const Parser = struct { 
     ast: Ast,
@@ -13,9 +14,17 @@ const Parser = struct {
     current_index: usize = 0,
     allocator: std.mem.Allocator,
 
-    pub fn LogAtToken(self: *Parser, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, log_level: logger.LogLevel, token_index: usize) void {
+    pub fn LogInvalidToken(self: *Parser, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, token_index: usize) void {
         const token = self.ast.tokens[token_index];
-        self.logger.logAt(fmt, args, hint, token.start, token.end, log_level, self.ast.source);
+        var log = self.logger.logError(
+            "Invalid Token", .{}, 
+            hint);
+        log.addLine(
+            self.allocator, 
+            self.ast.file, 
+            fmt, args, 
+            token.start, 
+            token.end);
     }
     
     pub fn current(self: *Parser) Token {
@@ -58,11 +67,10 @@ const Parser = struct {
         const prev_token = self.current();
 
         if (prev_token.token_type != token_type) {
-            self.LogAtToken(
+            self.LogInvalidToken(
                 "Unexpected token. Expected \x22{s}\x22 but got \x22{s}\x22 instead.", 
                 .{ token_type.toString(), self.ast.source[prev_token.start..prev_token.end] },
                 hint,
-                .Error,
                 self.current_index);
             return null;
         }
@@ -89,11 +97,10 @@ const Parser = struct {
         const prev_token = self.current();
 
         if (prev_token.token_type != token_type) {
-            self.LogAtToken(
+            self.LogInvalidToken(
                 "Unexpected token. Expected \x22{s}\x22 but got \x22{s}\x22 instead.", 
                 .{ token_type.toString(), self.ast.source[prev_token.start..prev_token.end]},
                 hint,
-                .Error,
                 self.current_index);
             return true;
         }
@@ -106,10 +113,9 @@ const Parser = struct {
         const prev_token = self.current();
 
         if (prev_token.token_type != token_type) {
-            self.LogAtToken(
+            self.LogInvalidToken(
                 "Failed to find closing \x22{s}\x22 token.", .{ token_type.toString() }, 
                 null,
-                .Error,
                 open_token_position);
             return true;
         }
@@ -149,9 +155,11 @@ const Parser = struct {
 
 var _debug: bool = false;
 
-pub fn parse(source: [:0]const u8, allocator: std.mem.Allocator, debug: bool) Ast {
+pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool) Ast {
 
     _debug = debug;
+
+    const source = file_id.getFile().source;
 
     var tokens: std.ArrayList(Token) = .empty;
     defer tokens.deinit(allocator);
@@ -172,6 +180,7 @@ pub fn parse(source: [:0]const u8, allocator: std.mem.Allocator, debug: bool) As
 
     var parser = Parser { 
         .ast = Ast {
+            .file = file_id,
             .source = source,
             .tokens = tokens.toOwnedSlice(allocator) catch @panic("Out of Memory."),
             .root_block = undefined,
@@ -185,7 +194,7 @@ pub fn parse(source: [:0]const u8, allocator: std.mem.Allocator, debug: bool) As
 
     parser.ast.root_block = parseTopBlock(&parser);
 
-    logger.printLogs(parser.logger);
+    logger.printLogs(parser.logger, allocator);
 
     return parser.ast;
 }
@@ -243,12 +252,12 @@ fn parseStatement(parser: *Parser) untyped.Node(untyped.Statement) {
 
             parser.skip();
 
-            const namespace = parseMember(parser);
+            const namespace = parseMember(parser, false);
 
             var alias: ?untyped.Node(untyped.Expression) = null;
 
             if (parser.skip_if(.As)) {
-                alias = parseExpression(parser);
+                alias = parseExpression(parser, false);
             }
 
             return parser.makeStmtNode(parser.current_index, .{ 
@@ -302,10 +311,9 @@ fn parseStatement(parser: *Parser) untyped.Node(untyped.Statement) {
         },
 
         .Invalid => {
-            parser.LogAtToken(
+            parser.LogInvalidToken(
                 "Invalid Token", .{}, 
                 null,
-                .Error,
                 parser.current_index);
             parser.skip();
             return parser.makeStmtNode(parser.current_index - 1, .Error);
@@ -313,34 +321,34 @@ fn parseStatement(parser: *Parser) untyped.Node(untyped.Statement) {
 
         else => { 
             const node = parser.makeStmtNode(parser.current_index, .{
-                .Expression = parseExpression(parser),
+                .Expression = parseExpression(parser, true),
             });
             return node;
         },
     }
 }
 
-fn parseExpression(parser: *Parser) untyped.Node(untyped.Expression) {
-    const node = parseAssignment(parser);
+fn parseExpression(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+    const node = parseAssignment(parser, allow_setters);
     return node;
 }
 
-// =, -=, +=, *=, /=, %=, =>
-fn parseAssignment(parser: *Parser) untyped.Node(untyped.Expression) {
+// =, -=, +=, *=, /=, %=
+fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
 
     const start_of_expression = parser.current_index;
 
-    const lhs = parseConditionals(parser);
+    const lhs = parseList(parser, allow_setters);
     
     switch (parser.current().token_type) {
 
-        .Equals, .PlusEquals, .MinusEquals, .TimesEquals, .DivEquals, .PercentEquals, .FatRightArrow => {
+        .Equals, .PlusEquals, .MinusEquals, .TimesEquals, .DivEquals, .PercentEquals => {
 
             const op = parser.current_index;
 
             parser.skip();
 
-            const value = parseConditionals(parser);
+            const value = parseList(parser, allow_setters);
 
             return parser.makeExprNode(start_of_expression, .{
                 .Assignment = .{
@@ -357,11 +365,424 @@ fn parseAssignment(parser: *Parser) untyped.Node(untyped.Expression) {
     }
 }
 
-fn parseConditionals(parser: *Parser) untyped.Node(untyped.Expression) {
+fn parseList(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    const lhs = parseDeclaration(parser, allow_setters);
+
+    if (parser.current().token_type != .Comma) {
+        return lhs;
+    }
+
+    var list = std.ArrayList(untyped.Node(untyped.Expression)).empty;
+    list.append(parser.allocator, lhs) catch @panic("Out of Memory.");
+
+    while (parser.skip_if(.Comma)) {
+        list.append(parser.allocator, parseDeclaration(parser, allow_setters)) catch @panic("Out of Memory.");
+    }
+
+    return parser.makeExprNode(start_of_expression, .{
+        .List = .{
+            .expressions = list,
+        }
+    });
+}
+
+fn parseDeclaration(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseBinop1(parser, allow_setters);
+    
+    if (parser.skip_if(.Colon)) {
+
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .Declaration = .{
+                .name = lhs,
+                .decl_type = parseUnary(parser, allow_setters),
+            }
+        });
+    }
+
+    return lhs;
+}
+
+// and, or
+fn parseBinop1(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseBinop2(parser, allow_setters);
+   
+    outer: switch (parser.current().token_type) {
+
+        .And, .Or => {
+            const op = parser.current_index;
+            parser.skip();
+            lhs = parser.makeExprNode(start_of_expression, .{ 
+                .Binop = .{ 
+                    .left = lhs, 
+                    .right = parseBinop2(parser, allow_setters), 
+                    .op_token_index = op }});
+            continue: outer parser.current().token_type;
+        },
+
+        else => {
+            return lhs;
+        },
+    }
+}
+
+// ==, <, >, <=, >=
+fn parseBinop2(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseBinop3(parser, allow_setters);
+   
+    outer: switch (parser.current().token_type) {
+
+        .EqualsEquals, .LessThan, .GreaterThan, .LessThanOrEquals, .GreaterThanOrEquals => {
+            const op = parser.current_index;
+            parser.skip();
+            lhs = parser.makeExprNode(start_of_expression, .{ 
+                .Binop = .{ 
+                    .left = lhs, 
+                    .right = parseBinop3(parser, allow_setters), 
+                    .op_token_index = op }});
+
+            continue: outer parser.current().token_type;
+        },
+
+        else => {
+            return lhs;
+        },
+    }
+}
+
+// +, -
+fn parseBinop3(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseBinop4(parser, allow_setters);
+   
+    outer: switch (parser.current().token_type) {
+
+        .Plus, .Minus => {
+            const op = parser.current_index;
+            parser.skip();
+            lhs = parser.makeExprNode(start_of_expression, .{ 
+                .Binop = .{ 
+                    .left = lhs, 
+                    .right = parseBinop4(parser, allow_setters), 
+                    .op_token_index = op }});
+            continue: outer parser.current().token_type;
+        },
+
+        else => {
+            return lhs;
+        },
+    }
+}
+
+// *, /, %
+fn parseBinop4(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseUnary(parser, allow_setters);
+
+    outer: switch (parser.current().token_type) {
+
+        .Asterisk, .Slash, .Percentage => {
+            const op = parser.current_index;
+            parser.skip();
+            lhs = parser.makeExprNode(start_of_expression, .{ 
+                .Binop = .{ 
+                    .left = lhs, 
+                    .right = parseUnary(parser, allow_setters), 
+                    .op_token_index = op }});
+            continue: outer parser.current().token_type;
+        },
+
+        else => {
+            return lhs;
+        },
+    }
+}
+
+fn parseUnary(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    const op = parser.current_index;
+
+    switch (parser.current().token_type) {
+
+        .Minus, .Exclamation, .Reference => {
+            parser.skip();
+            const node = parser.makeExprNode(start_of_expression, .{
+                .Unary = .{
+                    .right = parseSetter(parser,allow_setters),
+                    .op_token_index = op,
+                }
+            });
+            
+            return node;
+        },
+
+        else => {},
+    }
+
+    return parseSetter(parser, allow_setters);
+}
+
+fn parseSetter(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseMember(parser, allow_setters);
+
+    if (allow_setters and parser.current().token_type == .OpenBrace) {
+
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .Setter = .{
+                .settee = lhs,
+                .body = parseBlockWithNode(parser),
+            }
+        });
+    }
+
+    return lhs;
+}
+
+fn parseMember(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs: untyped.Node(untyped.Expression) = undefined;
+
+    if (parser.skip_if(.Dot)) {
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .ImplicitMember = parseCall(parser, allow_setters),
+        });
+    } else {
+        lhs = parseCall(parser, allow_setters);
+    }
+
+    while (parser.skip_if(.Dot)) {
+
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .Member = .{ 
+                .parent = lhs,
+                .child = parseCall(parser, allow_setters) 
+            }
+        });
+    }
+    return lhs;
+}
+
+fn parseCall(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseGeneric(parser, allow_setters);
+
+    const open_pos = parser.current_index;
+
+    if (parser.skip_if(.OpenParentheses)) {
+
+        var args: ?untyped.Node(untyped.Expression) = null;
+
+        if (parser.current().token_type != .CloseParentheses) {
+            args = parseList(parser, true);
+        }
+
+        if (parser.skip_closing(open_pos, .CloseParentheses)) {
+            return parser.makeExprNode(start_of_expression, .Error);
+        }
+
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .Call = .{
+                .callee = lhs,
+                .arguements = args,
+            }
+        });
+    }
+
+    return lhs;
+}
+
+fn parseGeneric(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    var lhs = parseParentheisis(parser, allow_setters);
+
+    const open_pos = parser.current_index;
+
+    if (parser.skip_if(.OpenBracket)) {
+
+        const args = parseList(parser, false);
+
+        if (parser.skip_closing(open_pos, .CloseBracket)) {
+            return parser.makeExprNode(start_of_expression, .Error);
+        }
+
+        lhs = parser.makeExprNode(start_of_expression, .{
+            .Generic =  .{
+                .callee = lhs,
+                .arguements = args,
+            }
+        });
+    }
+
+    return lhs;
+}
+
+fn parseParentheisis(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    const open_pos = parser.current_index;
+    
+    if (parser.skip_if(.OpenParentheses)) {
+
+        const rhs = parseBinop1(parser, allow_setters);
+
+        if (parser.skip_closing(open_pos, .CloseParentheses)) {
+            return parser.makeExprNode(start_of_expression, .Error);
+        }
+        
+        return rhs;
+    }
+
+    const node = parseBase(parser);
+    return node;
+}
+
+fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
 
     const start_of_expression = parser.current_index;
     
-    switch (parser.current().token_type) {
+    const expr: untyped.Expression = switch (parser.current().token_type) {
+
+        .Identifier => .{
+            .Identifier = .{
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Builtin => .{
+            .Builtin = .{
+                .token_index = parser.current_index,
+            }
+        },
+
+        .String => .{
+            .Literal = .{
+                .literal_type = parser.current().token_type,
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Char => .{
+            .Literal = .{
+                .literal_type = parser.current().token_type,
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Bool => .{
+            .Literal = .{
+                .literal_type = parser.current().token_type,
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Number => .{
+            .Literal = .{
+                .literal_type = parser.current().token_type,
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Binary => .{
+            .Literal = .{
+                .literal_type = parser.current().token_type,
+                .token_index = parser.current_index,
+            }
+        },
+
+        .Self => .Self,
+
+        .Nothing => .Nothing,
+
+        .Unknown => .Unknown,
+
+        .Function => { 
+            const proto = parseFunctionPrototype(parser);
+            var is_inline: bool = undefined;
+            var body: untyped.Node(untyped.Statement) = undefined;
+
+            switch (parser.current().token_type) {
+
+                .OpenBrace => {
+                    is_inline = false;
+                    body = parser.makeStmtNode(parser.current_index, .{
+                        .Block = parseBlockWithNode(parser)
+                    }); 
+                },
+
+                .FatRightArrow => {
+                    parser.skip();
+                    is_inline = true;
+                    body = parseStatement(parser); 
+                },
+
+                else => return proto,
+            }
+
+            return parser.makeExprNode(start_of_expression, .{
+                .Function = .{
+                    .prototype = proto,
+                    .body = body,
+                    .is_inline = is_inline,
+                }
+            });
+        },
+
+        .Object => { 
+            parser.skip();
+
+            const node = parser.makeExprNode(start_of_expression, .{
+                .Object = parseBlockWithNode(parser)
+            });
+            
+            return node;
+        },
+
+        .Enum => {
+            parser.skip();
+            
+            const node = parser.makeExprNode(start_of_expression, .{
+                .Enum = parseBlockWithNode(parser)
+            });
+
+            return node;
+        },
+
+        .Interface => {
+            parser.skip();
+            
+            const node = parser.makeExprNode(start_of_expression, .{
+                .Interface = parseBlockWithNode(parser)
+            });
+            
+            return node;
+        },
 
         .If => {
             parser.skip();
@@ -370,20 +791,19 @@ fn parseConditionals(parser: *Parser) untyped.Node(untyped.Expression) {
             
             if (parser.current().token_type == .OpenBrace) {
                 condition = parser.makeExprNode(start_of_expression, .Error);
-                parser.LogAtToken(
+                parser.LogInvalidToken(
                     "You forgot the if condition.", .{}, 
                     "if condition {}",
-                    .Error,
                     parser.current_index - 1);
             } else {
-                condition = parseBinop1(parser);
+                condition = parseBinop1(parser, false);
             }
 
             var captures: ?untyped.Node(untyped.Expression) = null;
 
             if (parser.skip_if(.RightArrow)) {
 
-                captures = parseDeclarationList(parser);
+                captures = parseParamList(parser);
             }
 
             const body: untyped.Node(untyped.Statement) = parseStatement(parser);
@@ -418,13 +838,12 @@ fn parseConditionals(parser: *Parser) untyped.Node(untyped.Expression) {
 
             if (parser.current().token_type == .OpenBrace) {
                 value = parser.makeExprNode(start_of_expression, .Error);
-                parser.LogAtToken(
+                parser.LogInvalidToken(
                     "You forgot the matches value.", .{}, 
                     "match value {}",
-                    .Error,
                     parser.current_index);
             } else {
-                value = parseMember(parser);
+                value = parseMember(parser, false);
             }
 
             var body = std.ArrayList(untyped.Case).empty;
@@ -438,20 +857,24 @@ fn parseConditionals(parser: *Parser) untyped.Node(untyped.Expression) {
 
             while (parser.current().token_type != .CloseBrace and !parser.eof()) {
                 if (parser.current().token_type == .Else) {
-                    if (else_case != null) {
+                    if (else_case) |else_| {
                         const other_else = parseElseCase(parser);
-                        parser.logger.logError(
-                            "Else has been declared twice in match expression.", .{}, 
-                            "Try removing or merging your else blocks.", 
-                            other_else.start, 
-                            other_else.end, 
-                            parser.ast.source);
-                        parser.logger.logNote(
+
+                        var log = parser.logger.logError(
+                            "Invalid Match", .{}, 
+                            "Try removing or merging your else blocks.");
+                        log.addLine(
+                            parser.allocator, 
+                            parser.ast.file, 
                             "This is the first else block declaration.", .{}, 
-                            null, 
-                            else_case.?.start, 
-                            else_case.?.end, 
-                            parser.ast.source);
+                            else_.start, 
+                            else_.end);
+                        log.addLine(
+                            parser.allocator, 
+                            parser.ast.file, 
+                            "Else has been declared twice in match expression.", .{}, 
+                            other_else.start, 
+                            other_else.end);
                     } else {
                         else_case = parseElseCase(parser);
                     }
@@ -474,20 +897,105 @@ fn parseConditionals(parser: *Parser) untyped.Node(untyped.Expression) {
         },
 
         else => {
-            const node = parseList(parser);
-            return node;
+            parser.LogInvalidToken(
+                "Invalid Token \x22{s}\x22.", .{parser.current().token_type.toString()}, 
+                null,
+                parser.current_index);
+            parser.skip();
+            return parser.makeExprNode(start_of_expression, .Error);
         },
+    };
+
+    parser.skip();
+
+    return parser.makeExprNode(start_of_expression, expr);
+}
+
+fn parseFunctionPrototype(parser: *Parser) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    const function_hint = "func (arg: type) return: type";
+
+    if (parser.skip_expected(.Function, function_hint)) {
+        return parser.makeExprNode(start_of_expression, .Error);
     }
+
+    if (parser.skip_expected(.OpenParentheses, function_hint)) {
+        return parser.makeExprNode(start_of_expression, .Error);
+    }
+
+    var left: ?untyped.Node(untyped.Expression) = null;
+
+    if (parser.current().token_type != .CloseParentheses) {
+        left = parseParamList(parser);
+    }
+
+    if (parser.current().token_type != .CloseParentheses) {
+        parser.LogInvalidToken(
+            "Either Missing \x22)\x22 or \x22,\x22", .{}, 
+            function_hint,
+            parser.current_index);
+    } else {
+        parser.skip();
+    }
+
+    var returns: untyped.Node(untyped.Expression) = undefined;
+
+    if (parser.current().token_type == .OpenBrace) {
+        returns = parser.makeExprNode(start_of_expression, .Error);
+        parser.LogInvalidToken(
+            "You are required to have a return declarations", .{}, 
+            function_hint,
+            parser.current_index);
+    } else {
+        returns = parseParamList(parser);
+    }
+
+    const node =  parser.makeExprNode(start_of_expression, .{ 
+        .FuncPrototype = .{
+            .arguments = left,
+            .returns = returns,
+        }
+    });
+
+    return node;
+}
+
+fn parseParamList(parser: *Parser) untyped.Node(untyped.Expression) {
+
+    const start_of_expression = parser.current_index;
+
+    const node: untyped.Node(untyped.Expression) = parseExpression(parser, false);
+
+    if (parser.current().token_type != .Comma) {
+        return node;
+    }
+
+    var list = untyped.List {
+        .expressions = .empty,
+    };
+
+    list.expressions.append(parser.allocator, node) catch @panic("Out of Memory.");
+
+    while (parser.skip_if(.Comma)) {
+        const node2: untyped.Node(untyped.Expression) = parseUnary(parser, false);
+        list.expressions.append(parser.allocator, node2) catch @panic("Out of Memory.");
+    }
+
+    return parser.makeExprNode(start_of_expression, .{
+        .List = list
+    });
 }
 
 fn parseCase(parser: *Parser) untyped.Case {
 
-    const pattern = parseMember(parser);
+    const pattern = parseMember(parser, false);
 
     var captures: ?untyped.Node(untyped.Expression) = null;
 
     if (parser.skip_if(.RightArrow)) {
-        captures = parseDeclarationList(parser);
+        captures = parseParamList(parser);
     }
 
     var body: untyped.Node(untyped.Statement) = undefined;
@@ -504,10 +1012,9 @@ fn parseCase(parser: *Parser) untyped.Case {
         },
 
         else => {
-            parser.LogAtToken(
+            parser.LogInvalidToken(
                 "Invalid case body.", .{}, 
                 "pattern -> capture: type {} or pattern -> capture: type => value",
-                .Error,
                 parser.current_index);
             return untyped.Case {
                 .body = parser.makeStmtNode(parser.current_index, .Error),
@@ -548,629 +1055,13 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
         },
 
         else => {
-            parser.LogAtToken(
+            parser.LogInvalidToken(
                 "Invalid else case body.", .{}, 
                 "else {} or else => value",
-                .Error,
                 parser.current_index);
             return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index].end, .{
                 .body = parser.makeStmtNode(start_token_of_expression, .Error),
             }) catch @panic("Out of Memory.");
         },
     }
-}
-
-fn parseList(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    const lhs = parseDeclaration(parser);
-
-    if (parser.current().token_type != .Comma) {
-        return lhs;
-    }
-
-    var list = std.ArrayList(untyped.Node(untyped.Expression)).empty;
-    list.append(parser.allocator, lhs) catch @panic("Out of Memory.");
-
-    while (parser.skip_if(.Comma)) {
-        list.append(parser.allocator, parseDeclaration(parser)) catch @panic("Out of Memory.");
-    }
-
-    return parser.makeExprNode(start_of_expression, .{
-        .List = .{
-            .expressions = list,
-        }
-    });
-}
-
-fn parseDeclaration(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseBinop1(parser);
-    
-    if (parser.skip_if(.Colon)) {
-
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .Declaration = .{
-                .name = lhs,
-                .decl_type = parseUnary(parser),
-            }
-        });
-    }
-
-    return lhs;
-}
-
-// and, or
-fn parseBinop1(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseBinop2(parser);
-   
-    outer: switch (parser.current().token_type) {
-
-        .And, .Or => {
-            const op = parser.current_index;
-            parser.skip();
-            lhs = parser.makeExprNode(start_of_expression, .{ 
-                .Binop = .{ 
-                    .left = lhs, 
-                    .right = parseBinop2(parser), 
-                    .op_token_index = op }});
-            continue: outer parser.current().token_type;
-        },
-
-        else => {
-            return lhs;
-        },
-    }
-}
-
-// ==, <, >, <=, >=
-fn parseBinop2(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseBinop3(parser);
-   
-    outer: switch (parser.current().token_type) {
-
-        .EqualsEquals, .LessThan, .GreaterThan, .LessThanOrEquals, .GreaterThanOrEquals => {
-            const op = parser.current_index;
-            parser.skip();
-            lhs = parser.makeExprNode(start_of_expression, .{ 
-                .Binop = .{ 
-                    .left = lhs, 
-                    .right = parseBinop3(parser), 
-                    .op_token_index = op }});
-
-            continue: outer parser.current().token_type;
-        },
-
-        else => {
-            return lhs;
-        },
-    }
-}
-
-// +, -
-fn parseBinop3(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseBinop4(parser);
-   
-    outer: switch (parser.current().token_type) {
-
-        .Plus, .Minus => {
-            const op = parser.current_index;
-            parser.skip();
-            lhs = parser.makeExprNode(start_of_expression, .{ 
-                .Binop = .{ 
-                    .left = lhs, 
-                    .right = parseBinop4(parser), 
-                    .op_token_index = op }});
-            continue: outer parser.current().token_type;
-        },
-
-        else => {
-            return lhs;
-        },
-    }
-}
-
-// *, /, %
-fn parseBinop4(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseUnary(parser);
-
-    outer: switch (parser.current().token_type) {
-
-        .Asterisk, .Slash, .Percentage => {
-            const op = parser.current_index;
-            parser.skip();
-            lhs = parser.makeExprNode(start_of_expression, .{ 
-                .Binop = .{ 
-                    .left = lhs, 
-                    .right = parseUnary(parser), 
-                    .op_token_index = op }});
-            continue: outer parser.current().token_type;
-        },
-
-        else => {
-            return lhs;
-        },
-    }
-}
-
-fn parseUnary(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    const op = parser.current_index;
-
-    switch (parser.current().token_type) {
-
-        .Minus, .Exclamation, .Reference => {
-            parser.skip();
-            const node = parser.makeExprNode(start_of_expression, .{
-                .Unary = .{
-                    .right = parseSetter(parser),
-                    .op_token_index = op,
-                }
-            });
-            
-            return node;
-        },
-
-        else => {},
-    }
-
-    return parseSetter(parser);
-}
-
-fn parseSetter(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseMember(parser);
-
-    if (parser.current().token_type == .OpenBrace) {
-
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .Setter = .{
-                .settee = lhs,
-                .body = parseBlockWithNode(parser),
-            }
-        });
-    }
-
-    return lhs;
-}
-
-fn parseMember(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs: untyped.Node(untyped.Expression) = undefined;
-
-    if (parser.skip_if(.Dot)) {
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .ImplicitMember = parseCall(parser),
-        });
-    } else {
-        lhs = parseCall(parser);
-    }
-
-    while (parser.skip_if(.Dot)) {
-
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .Member = .{ 
-                .parent = lhs,
-                .child = parseCall(parser) 
-            }
-        });
-    }
-    return lhs;
-}
-
-fn parseCall(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseGeneric(parser);
-
-    const open_pos = parser.current_index;
-
-    if (parser.skip_if(.OpenParentheses)) {
-
-        var args: ?untyped.Node(untyped.Expression) = null;
-
-        if (parser.current().token_type != .CloseParentheses) {
-            args = parseList(parser);
-        }
-
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .Call = .{
-                .callee = lhs,
-                .arguements = args,
-            }
-        });
-
-        if (parser.skip_closing(open_pos, .CloseParentheses)) {
-            return parser.makeExprNode(start_of_expression, .Error);
-        }
-    }
-
-    return lhs;
-}
-
-fn parseGeneric(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var lhs = parseParentheisis(parser);
-
-    const open_pos = parser.current_index;
-
-    if (parser.skip_if(.OpenBracket)) {
-
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .Generic =  .{
-                .callee = lhs,
-                .arguements = parseDeclarationList(parser),
-            }
-        });
-
-        if (parser.skip_closing(open_pos, .CloseBracket)) {
-            return parser.makeExprNode(start_of_expression, .Error);
-        }
-    }
-
-    return lhs;
-}
-
-fn parseParentheisis(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    const open_pos = parser.current_index;
-    
-    if (parser.skip_if(.OpenParentheses)) {
-
-        const rhs = parseList(parser);
-
-        if (parser.skip_closing(open_pos, .CloseParentheses)) {
-            return parser.makeExprNode(start_of_expression, .Error);
-        }
-        
-        return rhs;
-    }
-
-    const node = parseBase(parser);
-    return node;
-}
-
-fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-    
-    const node = switch (parser.current().token_type) {
-
-        .Identifier => parser.makeExprNode(start_of_expression, .{
-            .Identifier = .{
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Builtin => parser.makeExprNode(start_of_expression, .{
-            .Builtin = .{
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .String => parser.makeExprNode(start_of_expression, .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Char => parser.makeExprNode(start_of_expression, .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Bool => parser.makeExprNode(start_of_expression, .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Number => parser.makeExprNode(start_of_expression, .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Binary => parser.makeExprNode(start_of_expression, .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        }),
-
-        .Self => parser.makeExprNode(start_of_expression, .Self),
-
-        .Nothing => parser.makeExprNode(start_of_expression, .Nothing),
-
-        .Unknown => parser.makeExprNode(start_of_expression, .Unknown),
-
-        .Function => { 
-            const node = parseFunctionPrototype(parser);
-            return node;
-        },
-
-        .Object => { 
-            parser.skip();
-
-            const node = parser.makeExprNode(start_of_expression, .{
-                .Object = parseBlockWithNode(parser)
-            });
-            
-            return node;
-        },
-
-        .Enum => {
-            parser.skip();
-            
-            const node = parser.makeExprNode(start_of_expression, .{
-                .Enum = parseBlockWithNode(parser)
-            });
-
-            return node;
-        },
-
-        .Interface => {
-            parser.skip();
-            
-            const node = parser.makeExprNode(start_of_expression, .{
-                .Interface = parseBlockWithNode(parser)
-            });
-            
-            return node;
-        },
-
-        else => {
-            parser.LogAtToken(
-                "Invalid Token \x22{s}\x22.", .{parser.current().token_type.toString()}, 
-                null,
-                .Error,
-                parser.current_index);
-            parser.skip();
-            return parser.makeExprNode(start_of_expression, .Error);
-        },
-    };
-
-    parser.skip();
-
-    return node;
-}
-
-fn parseFunctionPrototype(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    const function_hint = "func (arg: type) return: type";
-
-    if (parser.skip_expected(.Function, function_hint)) {
-        return parser.makeExprNode(start_of_expression, .Error);
-    }
-
-    if (parser.skip_expected(.OpenParentheses, function_hint)) {
-        return parser.makeExprNode(start_of_expression, .Error);
-    }
-
-    var left: ?untyped.Node(untyped.Expression) = null;
-
-    if (parser.current().token_type != .CloseParentheses) {
-        left = parseDeclarationList(parser);
-    }
-
-    if (parser.current().token_type != .CloseParentheses) {
-        parser.LogAtToken(
-            "Either Missing \x22)\x22 or \x22,\x22", .{}, 
-            function_hint,
-            .Error,
-            parser.current_index);
-    } else {
-        parser.skip();
-    }
-
-    var returns: untyped.Node(untyped.Expression) = undefined;
-
-    if (parser.current().token_type == .OpenBrace) {
-        returns = parser.makeExprNode(start_of_expression, .Error);
-        parser.LogAtToken(
-            "You are required to have a return declarations", .{}, 
-            function_hint,
-            .Error,
-            parser.current_index);
-    } else {
-        returns = parseDeclarationList(parser);
-    }
-
-    const node =  parser.makeExprNode(start_of_expression, .{ 
-        .FuncPrototype = .{
-            .arguments = left,
-            .returns = returns,
-        }
-    });
-
-    return node;
-}
-
-fn parseDeclarationList(parser: *Parser) untyped.Node(untyped.Expression) {
-
-    const start_of_expression = parser.current_index;
-
-    var node: untyped.Node(untyped.Expression) = undefined;
-    
-    switch (parser.current().token_type) {
-
-        .Identifier => { 
-
-            const name = parser.makeExprNode(start_of_expression, .{
-                .Identifier = .{
-                    .token_index = parser.current_index,
-                }
-            });
-
-            parser.skip();
-
-            if (parser.skip_expected(.Colon, "Declarations require a \x22:\x22 to set the type -> variable: type")) {
-                if (parser.next().token_type == .Comma) {
-                    parser.skip();
-                    node = parser.makeExprNode(start_of_expression, .Error);
-                } else {
-                    return parser.makeExprNode(start_of_expression, .Error);
-                }
-            } else {
-                node = parser.makeExprNode(start_of_expression, .{
-                    .Declaration = .{
-                        .name = name,
-                        .decl_type = parseMember(parser),
-                    }
-                });
-            }
-        },
-
-        .Nothing => {
-            parser.skip();
-
-            if (parser.current().token_type != .Comma) {
-                return parser.makeExprNode(start_of_expression, .Nothing);
-            }
-
-            parser.skip();
-            parser.LogAtToken(
-                "Cannot have a list after nothing.", .{}, 
-                "nothing, var: type => var: type",
-                .Error,
-                parser.current_index);
-            return parser.makeExprNode(start_of_expression, .Error);
-        },
-
-        .Self => {
-            parser.skip();
-            node = parser.makeExprNode(start_of_expression, .Self);
-        },
-
-        .Unknown => {
-            parser.skip();
-            node = parser.makeExprNode(start_of_expression, .Unknown);
-        },
-
-        else => {
-            parser.LogAtToken(
-                "Invalid Token \x22{s}\x22 in declaration list.", .{parser.current().token_type.toString()},
-                "decl1: type, decl2: type",
-                .Error,
-                parser.current_index);
-            return parser.makeExprNode(start_of_expression, .Error);
-        }
-    }
-
-    if (parser.current().token_type != .Comma) {
-        return node;
-    }
-
-    var list = untyped.List {
-        .expressions = .empty,
-    };
-
-    list.expressions.append(parser.allocator, node) catch @panic("Out of Memory.");
-
-    while (parser.skip_if(.Comma)) {
-        var node2: untyped.Node(untyped.Expression) = undefined;
-
-        const start_pos = parser.current_index;
-        
-        switch (parser.current().token_type) {
-
-            .Identifier => {
-                 const name = parser.makeExprNode(start_pos, .{
-                    .Identifier = .{
-                        .token_index = parser.current_index,
-                    }
-                });
-
-                parser.skip();
-
-                if (parser.skip_expected(.Colon, "Declarations require a \x22:\x22 to set the type -> variable: type")) {
-                    if (parser.next().token_type == .Comma) {
-                        node2 = parser.makeExprNode(start_pos, .Error);
-                    } else {
-                        return parser.makeExprNode(start_pos, .Error);
-                    }
-                } else {
-                    node2 = parser.makeExprNode(start_pos, .{
-                        .Declaration = .{
-                            .name = name,
-                            .decl_type = parseMember(parser),
-                        }
-                    });
-                }
-            },
-
-            .Nothing => {
-                parser.LogAtToken(
-                    "You cannot have a list with nothing in it", .{},
-                    "var: type, nothing => var: type",
-                    .Error,
-                    parser.current_index);
-                parser.skip();
-                node2 = parser.makeExprNode(start_pos, .Error);
-            },
-
-            .Self => {
-                parser.LogAtToken(
-                    "Self is required to be first in a declaration list.", .{},
-                    "func (self, decl2: type) return: type",
-                    .Error,
-                    parser.current_index);
-                parser.skip();
-                node2 = parser.makeExprNode(start_pos, .Error);
-            },
-
-            .Unknown => {
-                parser.skip(); 
-                node2 = parser.makeExprNode(start_pos, .Unknown);
-            },
-
-            else => {
-                parser.LogAtToken(
-                    "Invalid Token \x22{s}\x22 in declaration list.", .{parser.current().token_type.toString()},
-                    "decl1: type, decl2: type",
-                    .Error,
-                    parser.current_index);
-                return parser.makeExprNode(start_pos, .Error);
-            },
-        }
-
-        list.expressions.append(parser.allocator, node2) catch @panic("Out of Memory.");
-    }
-
-    return parser.makeExprNode(start_of_expression, .{
-        .List = list
-    });
 }
