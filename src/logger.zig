@@ -160,6 +160,10 @@ pub const Line = struct {
     number: usize = 0,
 };
 
+fn sortLogLines(_: usize, lhs: LogLine, rhs: LogLine) bool {
+    return lhs.start < rhs.start;
+}
+
 pub fn printLogs(logger: Logger, allocator: std.mem.Allocator) void {
     for (logger.logs.items) |log| {
         printLog(log, allocator);
@@ -192,6 +196,8 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
         if (file_logs.value_ptr.items.len == 0) {
             continue;
         }
+
+        std.mem.sort(LogLine, file_logs.value_ptr.items, @as(usize, 0), sortLogLines);
 
         var last_line: Line = .{};
         var current_line: Line = .{};

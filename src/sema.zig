@@ -132,6 +132,10 @@ pub const Builder = struct {
     }
 };
 
+pub const Collision = struct {
+    node: ?untyped.Node(untyped.Expression),
+};
+
 pub const Scope = struct {
     builder: *Builder,
     parent: ?*Scope,
@@ -177,6 +181,46 @@ pub const Scope = struct {
         return name;
     }
 
+    pub fn shadows(self: *Scope, identifier: []const u8) bool {
+        var current_scope: *Scope = self;
+        var public_only = false;
+
+        while (true) {
+
+            if (public_only) {
+                if (current_scope.declarations.get(.public)) |decl| {
+                    if (decl.contains(identifier)) {
+                        return true;
+                    }
+                }
+            } else {
+                if (current_scope.contains(identifier)) {
+                    return true;
+                }
+
+                for (current_scope.usings.items) |using| {
+                    if (self.builder.getScope(using)) |using_scope| {
+                        if (using_scope.declarations.get(.public)) |decl| {
+                            if (decl.contains(identifier)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (current_scope.parent) |parent_scope| {
+                current_scope = parent_scope;
+            } else {
+                break;
+            }
+
+            public_only = true;
+        }
+
+        return false;
+    }
+
     pub fn contains(self: *Scope, identifier: []const u8) bool {
         var decl_iter = self.declarations.valueIterator();
 
@@ -189,34 +233,34 @@ pub const Scope = struct {
         return false;
     }
 
-    pub fn addTypeDecl(self: *Scope, identifier: []const u8, visability: typed.Visability) TypeError!typed.TypeId {
+    pub fn addTypeDecl(self: *Scope, identifier: []const u8, visability: typed.Visability, node: ?untyped.Node(untyped.Expression)) TypeError!typed.TypeId {
 
         std.debug.print("Type {s} {s}\n", .{@tagName(visability), identifier});
-
-        if (self.contains(identifier)) {
-            return TypeError.MultipleDefinitions;
-        }
 
         const decls = self.declarations.getOrPut(self.builder.allocator, visability) catch @panic("Out of Memory");
 
         if (!decls.found_existing) {
-            decls.value_ptr.* = .{};
+            decls.value_ptr.* = .{
+                .parent_scope = self,
+            };
         }
 
-        return decls.value_ptr.addTypeDecl(identifier, self);
+        return decls.value_ptr.addTypeDecl(identifier, node);
     }
 
-    pub fn addTypeSubstitution(self: *Scope, identifier: []const u8, typeid: typed.TypeId) void {
+    pub fn addTypeSubstitution(self: *Scope, identifier: []const u8, typeid: typed.TypeId, node: ?untyped.Node(untyped.Expression)) TypeError!void {
 
         std.debug.print("Type Sub {s} -> {s}\n", .{identifier, self.builder.getScope(typeid).?.allocFullName()});
 
         const decls = self.declarations.getOrPut(self.builder.allocator, .public) catch @panic("Out of Memory");
 
         if (!decls.found_existing) {
-            decls.value_ptr.* = .{};
+            decls.value_ptr.* = .{
+                .parent_scope = self,
+            };
         }
 
-        return decls.value_ptr.addTypeSubstitution(self.builder.allocator, identifier, typeid);
+        try decls.value_ptr.addTypeSubstitution( identifier, typeid, node);
     }
 
     pub fn getFunctionTypeId(self: *Scope, proto: *untyped.FuncPrototype, ast: *untyped.Ast, allow_raw_type_in_args: bool, allow_raw_type_in_return: bool) ?typed.TypeId {
@@ -308,7 +352,7 @@ pub const Scope = struct {
             .Nothing => {
                 if (self.builder.getScope(self.builder.root)) |root_scope| {
 
-                    if (root_scope.getType("nothing")) |typeid| {
+                    if (root_scope.getType("nothing", proto.returns) catch return null) |typeid| {
                         return typeid;
                     } else {
                         var log = self.builder.logger.logError(
@@ -431,28 +475,26 @@ pub const Scope = struct {
         return self.builder.getOrAddFunctionType(&proto_type);
     }
 
-    pub fn addFunction(self: *Scope, identifier: []const u8, typeid: typed.TypeId, is_inline: bool, requires_self: bool, visability: typed.Visability) TypeError!void {
+    pub fn addFunction(self: *Scope, identifier: []const u8, typeid: typed.TypeId, is_inline: bool, requires_self: bool, visability: typed.Visability, node: ?untyped.Node(untyped.Expression)) TypeError!void {
 
         std.debug.print("Function {s} {s}\n", .{@tagName(visability), identifier});
-
-        if (self.contains(identifier)) {
-            return TypeError.MultipleDefinitions;
-        }
 
         const decls = self.declarations.getOrPut(self.builder.allocator, visability) catch @panic("Out of Memory");
 
         if (!decls.found_existing) {
-            decls.value_ptr.* = .{};
+            decls.value_ptr.* = .{
+                .parent_scope = self,
+            };
         }
 
         const functionid = self.builder.addFunction(typeid, is_inline, requires_self);
 
-        decls.value_ptr.addFunction(self.builder.allocator, identifier, functionid);
+        try decls.value_ptr.addFunction(identifier, functionid, node);
     }
 
-    pub fn getPublicType(self: *Scope, identifier: []const u8) ?typed.TypeId {
+    pub fn getPublicType(self: *Scope, identifier: []const u8, node: untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
         if (self.declarations.get(.public)) |private_decls| {
-            if (private_decls.getType(identifier)) |typeid| {
+            if (try private_decls.getType(identifier, node)) |typeid| {
                 return typeid;
             }
         }
@@ -460,16 +502,16 @@ pub const Scope = struct {
         return null;
     }
 
-    pub fn getType(self: *Scope, identifier: []const u8) ?typed.TypeId {
+    pub fn getType(self: *Scope, identifier: []const u8, node: ?untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
         
         if (self.declarations.get(.private)) |private_decls| {
-            if (private_decls.getType(identifier)) |typeid| {
+            if (try private_decls.getType(identifier, node)) |typeid| {
                 return typeid;
             }
         }
 
         if (self.declarations.get(.public)) |private_decls| {
-            if (private_decls.getType(identifier)) |typeid| {
+            if (try private_decls.getType(identifier, node)) |typeid| {
                 return typeid;
             }
         }
@@ -481,34 +523,32 @@ pub const Scope = struct {
         return null;
     }
 
-    pub fn addGenericType(self: *Scope, identifier: []const u8, generic: *untyped.Generic, base: untyped.Node(untyped.Expression), visability: typed.Visability, ast: *untyped.Ast) TypeError!void {
+    pub fn addGenericType(self: *Scope, identifier: []const u8, generic: *untyped.Generic, base: untyped.Node(untyped.Expression), visability: typed.Visability, ast: *untyped.Ast, node: untyped.Node(untyped.Expression)) TypeError!void {
 
         std.debug.print("Generic Type {s} {s}", .{@tagName(visability), ast.source[generic.callee.start..generic.arguements.end]});
         std.debug.print("]\n", .{});
-
-        if (self.contains(identifier)) {
-            return TypeError.MultipleDefinitions;
-        }
         
         const decls = self.declarations.getOrPut(self.builder.allocator, visability) catch @panic("Out of Memory");
 
         if (!decls.found_existing) {
-            decls.value_ptr.* = .{};
+            decls.value_ptr.* = .{
+                .parent_scope = self,
+            };
         }
 
-        decls.value_ptr.addGeneric(self.builder.allocator, identifier, generic, base, self, ast);
+        try decls.value_ptr.addGeneric(identifier, generic, base, ast, node);
     }
 
-    pub fn getGenericType(self: *Scope, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), ast: *untyped.Ast) ?typed.TypeId {
+    pub fn getGenericType(self: *Scope, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), ast: *untyped.Ast, node: untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
 
         if (self.declarations.get(.private)) |*decl| {
-            if (decl.getGeneric(identifier, sub_types, self, ast)) |typeid| {
+            if (try decl.getGeneric(identifier, sub_types, ast, node)) |typeid| {
                 return typeid;
             }
         }
 
         if (self.declarations.get(.public)) |*decl| {
-            if (decl.getGeneric(identifier, sub_types, self, ast)) |typeid| {
+            if (try decl.getGeneric(identifier, sub_types, ast, node)) |typeid| {
                 return typeid;
             }
         }
@@ -516,48 +556,126 @@ pub const Scope = struct {
         return null;
     }
 
-    pub fn getPublicGenericType(self: *Scope, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), ast: *untyped.Ast) ?typed.TypeId {
+    pub fn getPublicGenericType(self: *Scope, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), ast: *untyped.Ast, node: untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
         
         if (self.declarations.get(.public)) |*decl| {
-            if (decl.getGeneric(identifier, sub_types, self, ast)) |typeid| {
+            if (try decl.getGeneric(identifier, sub_types, ast, node)) |typeid| {
                 return typeid;
             }
         }
 
         return null;
+    }
+
+    pub fn addField(self: *Scope, identifier: []const u8, node: untyped.Node(untyped.Expression), visability: typed.Visability, type_ref: typed.TypeRef) TypeError!void {
+        const decls = self.declarations.getOrPut(self.builder.allocator, visability) catch @panic("Out of Memory");
+
+        if (!decls.found_existing) {
+            decls.value_ptr.* = .{
+                .parent_scope = self,
+            };
+        }
+
+        try decls.value_ptr.addField(identifier, node, type_ref);
     }
 };
 
+pub const Declaration = struct {
+    node: ?untyped.Node(untyped.Expression),
+    decl_type: DeclarationType,
+    collisions: std.ArrayList(?untyped.Node(untyped.Expression)) = .empty,
+};
+
+pub const DeclarationType = union(enum) {
+    Field: typed.TypeRef,
+    Type: typed.TypeId,
+    Function: typed.FunctionId,
+    Generic: Generic,
+};
+
 pub const Declarations = struct {
-    types: std.StringHashMapUnmanaged(typed.TypeId) = .empty,
-    functions: std.StringHashMapUnmanaged(typed.FunctionId) = .empty,
-    generics: std.StringHashMapUnmanaged(Generic) = .empty,
+
+    parent_scope: *Scope,
+    decls: std.StringHashMapUnmanaged(Declaration) = .empty,
 
     pub fn contains(self: *Declarations, identifier: []const u8) bool {
-        return self.types.contains(identifier) or 
-            self.functions.contains(identifier) or 
-            self.generics.contains(identifier);
+        return self.decls.contains(identifier);
     }
 
-    pub fn addTypeDecl(self: *Declarations, identifier: []const u8, scope: *Scope) typed.TypeId {
-        const typeid= scope.builder.getNewType(identifier, scope);
-        self.types.put(scope.builder.allocator, identifier, typeid) catch @panic("Out of Memory.");
+    pub fn addDecl(self: *Declarations, identifier: []const u8, node: ?untyped.Node(untyped.Expression), decl_type: DeclarationType) TypeError!void {
+        const decl = self.decls.getOrPut(self.parent_scope.builder.allocator, identifier) catch @panic("Out of Memory.");
+
+        if (decl.found_existing) {
+            decl.value_ptr.collisions.append(self.parent_scope.builder.allocator, node) catch @panic("Out of Memory.");
+            return TypeError.MultipleDefinitions;
+        }
+
+        decl.value_ptr.* = .{
+            .node = node,
+            .decl_type = decl_type,
+        };
+    }
+
+    pub fn addTypeDecl(self: *Declarations, identifier: []const u8, node: ?untyped.Node(untyped.Expression)) TypeError!typed.TypeId {
+        const typeid= self.parent_scope.builder.getNewType(identifier, self.parent_scope);
+        try self.addDecl(
+            identifier, 
+            node, 
+            .{ .Type = typeid, });
         return typeid;
     }
 
-    pub fn addTypeSubstitution(self: *Declarations, allocator: std.mem.Allocator, identifier: []const u8, typeid: typed.TypeId) void {
-        self.types.put(allocator, identifier, typeid) catch @panic("Out of Memory.");
+    pub fn addTypeSubstitution(self: *Declarations, identifier: []const u8, typeid: typed.TypeId, node: ?untyped.Node(untyped.Expression)) TypeError!void {
+        try self.addDecl(
+            identifier, 
+            node, 
+            .{ .Type = typeid, });
     }
 
-    pub fn getType(self: *const Declarations, identifier: []const u8) ?typed.TypeId {
-        return self.types.get(identifier);
+    pub fn getType(self: *const Declarations, identifier: []const u8, identifer_node: ?untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
+
+        if (self.decls.get(identifier)) |decl| {
+
+            switch (decl.decl_type) {
+                
+                .Type => |typeid| {
+                    return typeid;
+                },
+
+                else => {
+                    var log = self.parent_scope.builder.logger.logError(
+                        "Type Error", .{}, 
+                        null);
+                    if (identifer_node) |ident_node| {
+                        log.addLine(
+                            self.parent_scope.builder.allocator, 
+                            ident_node.file_id, 
+                            "Declaration is not an type.", .{}, 
+                            ident_node.start, ident_node.end);
+                    }
+                    if (decl.node) |node| {
+                        log.addLine(
+                            self.parent_scope.builder.allocator, 
+                            node.file_id, 
+                            "This is the types declaration.", .{}, 
+                            node.start, node.end);
+                    }
+                    return TypeError.InvalidType;
+                },
+            }
+        }
+
+        return null;
     }
 
-    pub fn addFunction(self: *Declarations, allocator: std.mem.Allocator, identifier: []const u8, functionid: typed.FunctionId) void {
-        self.functions.put(allocator, identifier, functionid) catch @panic("Out of Memory.");
+    pub fn addFunction(self: *Declarations, identifier: []const u8, functionid: typed.FunctionId, node: ?untyped.Node(untyped.Expression)) TypeError!void {
+        try self.addDecl(
+            identifier, 
+            node, 
+            .{ .Function = functionid, });
     }
 
-    pub fn addGeneric(self: *Declarations, allocator: std.mem.Allocator, identifier: []const u8, generic: *untyped.Generic, base: untyped.Node(untyped.Expression), scope: *Scope, ast: *untyped.Ast) void {
+    pub fn addGeneric(self: *Declarations, identifier: []const u8, generic: *untyped.Generic, base: untyped.Node(untyped.Expression), ast: *untyped.Ast, node: ?untyped.Node(untyped.Expression)) TypeError!void {
 
         var sub_list = std.ArrayList([]const u8).empty;
 
@@ -566,7 +684,7 @@ pub const Declarations = struct {
             .Identifier => |ident| {
                 const token = ast.tokens[ident.token_index];
                 const name = ast.source[token.start..token.end];
-                sub_list.append(allocator, name) catch @panic("Out of Memory.");
+                sub_list.append(self.parent_scope.builder.allocator, name) catch @panic("Out of Memory.");
             },
 
             .List => |list| {
@@ -576,15 +694,15 @@ pub const Declarations = struct {
                         .Identifier => |ident| {
                             const token = ast.tokens[ident.token_index];
                             const name = ast.source[token.start..token.end];
-                            sub_list.append(allocator, name) catch @panic("Out of Memory.");
+                            sub_list.append(self.parent_scope.builder.allocator, name) catch @panic("Out of Memory.");
                         },
 
                         else => {
-                            var log = scope.builder.logger.logError(
+                            var log = self.parent_scope.builder.logger.logError(
                                 "Invalid Generic", .{}, 
                                 "You can only use names in a generic list. Generic[T, T2]");
                             log.addLine(
-                                scope.builder.allocator, 
+                                self.parent_scope.builder.allocator, 
                                 ast.file, 
                                 "Invalid format for a generic.", .{}, 
                                 generic.arguements.start, 
@@ -596,11 +714,11 @@ pub const Declarations = struct {
             },
 
             else => {
-                var log = scope.builder.logger.logError(
+                var log = self.parent_scope.builder.logger.logError(
                     "Invalid Generic", .{}, 
                     "You can only use names in a generic list. Generic[T, T2]");
                 log.addLine(
-                    scope.builder.allocator, 
+                    self.parent_scope.builder.allocator, 
                     ast.file, 
                     "Invalid format for a generic.", .{}, 
                     generic.arguements.start, 
@@ -609,92 +727,131 @@ pub const Declarations = struct {
             }
         }
 
-        self.generics.put(allocator, identifier, .{
-            .base = base,
-            .sub_identifiers = sub_list,
-        }) catch @panic("Out of Memory.");
+        try self.addDecl(
+            identifier, 
+            node, 
+            .{ .Generic = .{
+                .base = base,
+                .sub_identifiers = sub_list,
+            }, });
     }
 
-    pub fn getGeneric(self: *const Declarations, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), scope: *Scope, ast: *untyped.Ast) ?typed.TypeId {
+    pub fn getGeneric(self: *const Declarations, identifier: []const u8, sub_types: std.ArrayList(typed.TypeId), ast: *untyped.Ast, identifier_node: untyped.Node(untyped.Expression)) TypeError!?typed.TypeId {
 
-        if (self.generics.getPtr(identifier)) |gen| {
+        var gen: *Generic = undefined;
+        var node: ?untyped.Node(untyped.Expression) = undefined;
 
-            if (sub_types.items.len != gen.sub_identifiers.items.len) {
-                return null;
-            }
+        if (self.decls.getPtr(identifier)) |decl| {
 
-            cache_loop: for (gen.cache.items) |gen_type| {
+            node = decl.node;
 
-                for (0..gen_type.sub_types.items.len) |index| {
-                    if (gen_type.sub_types.items[index].index == sub_types.items[index].index) {
-                        continue :cache_loop;
-                    }
-                }
-
-                return gen_type.typeid;
-            }
-
-            std.debug.print("Type {s}[", .{identifier});
-            std.debug.print("{s}", .{scope.builder.getScope(sub_types.items[0]).?.allocFullName()});
-
-            for (sub_types.items[1..]) |typeid| {
-                std.debug.print(", {s}", .{scope.builder.getScope(typeid).?.allocFullName()});
-            }
-
-            std.debug.print("]\n", .{});
-
-            const typeid = scope.builder.getNewType(identifier, scope);
-
-            var gen_type = scope.builder.getType(typeid);
-            var body: untyped.Node(untyped.Block) = undefined;
-
-            switch (gen.base.data.*) {
-
-                .Object => |obj| {
-                    gen_type.data = .{ .Object = .{} };
-                    body = obj;
-                },  
-
-                .Enum => |_enum| {
-                    gen_type.data = .{ .Enum = .{} };
-                    body = _enum;
-                },
-
-                .Interface => |interface| {
-                    gen_type.data = .{ .Interface = .{} };
-                    body = interface;
+            switch (decl.decl_type) {
+                
+                .Generic => |*generic| {
+                    gen = generic;
                 },
 
                 else => {
-                    var log = scope.builder.logger.logError(
-                        "Invalid Generic", .{}, 
-                        "You can only put a generic on object, enum, and interfaces.");
+                    var log = self.parent_scope.builder.logger.logError(
+                        "Type Error", .{}, 
+                        "If it is meant to be generic add [] to the type declaration. Type[T]");
+
                     log.addLine(
-                        scope.builder.allocator, 
-                        ast.file, 
-                        "Invalid body for a Generic.", .{}, 
-                        gen.base.start, 
-                        gen.base.end);
-                    return null;
+                        self.parent_scope.builder.allocator, 
+                        identifier_node.file_id, 
+                        "This type is not a generic.", .{}, 
+                        identifier_node.start, identifier_node.end);
+
+                    if (node) |decl_node| {
+                        log.addLine(
+                            self.parent_scope.builder.allocator, 
+                            decl_node.file_id, 
+                            "This is the types declaration.", .{}, 
+                            decl_node.start, decl_node.end);
+                    }
+                    return TypeError.InvalidType;
                 },
             }
+        } else return null;
 
-            gen.cache.append(scope.builder.allocator, .{
-                .sub_types = sub_types,
-                .typeid = typeid,
-            }) catch @panic("Out of Memory.");
-
-            if (scope.builder.getScope(typeid)) |type_scope| {
-                for (0..sub_types.items.len) |index| {
-                    type_scope.addTypeSubstitution(gen.sub_identifiers.items[index], sub_types.items[index]);
-                }
-                collectTypeDataFromBlock(type_scope, ast, body.data, .public);
-            }
-
-            return typeid;
+        if (sub_types.items.len != gen.sub_identifiers.items.len) {
+            return null;
         }
 
-        return null;
+        cache_loop: for (gen.cache.items) |gen_type| {
+
+            for (0..gen_type.sub_types.items.len) |index| {
+                if (gen_type.sub_types.items[index].index == sub_types.items[index].index) {
+                    continue :cache_loop;
+                }
+            }
+
+            return gen_type.typeid;
+        }
+
+        std.debug.print("Type {s}[", .{identifier});
+        std.debug.print("{s}", .{self.parent_scope.builder.getScope(sub_types.items[0]).?.allocFullName()});
+
+        for (sub_types.items[1..]) |typeid| {
+            std.debug.print(", {s}", .{self.parent_scope.builder.getScope(typeid).?.allocFullName()});
+        }
+
+        std.debug.print("]\n", .{});
+
+        const typeid = self.parent_scope.builder.getNewType(identifier, self.parent_scope);
+
+        var gen_type = self.parent_scope.builder.getType(typeid);
+        var body: untyped.Node(untyped.Block) = undefined;
+
+        switch (gen.base.data.*) {
+
+            .Object => |obj| {
+                gen_type.data = .{ .Object = .{} };
+                body = obj;
+            },  
+
+            .Enum => |_enum| {
+                gen_type.data = .{ .Enum = .{} };
+                body = _enum;
+            },
+
+            .Interface => |interface| {
+                gen_type.data = .{ .Interface = .{} };
+                body = interface;
+            },
+
+            else => {
+                var log = self.parent_scope.builder.logger.logError(
+                    "Invalid Generic", .{}, 
+                    "You can only put a generic on object, enum, and interfaces.");
+                log.addLine(
+                    self.parent_scope.builder.allocator, 
+                    ast.file, 
+                    "Invalid body for a Generic.", .{}, 
+                    gen.base.start, 
+                    gen.base.end);
+                return null;
+            },
+        }
+
+        gen.cache.append(self.parent_scope.builder.allocator, .{
+            .sub_types = sub_types,
+            .typeid = typeid,
+        }) catch @panic("Out of Memory.");
+
+        if (self.parent_scope.builder.getScope(typeid)) |type_scope| {
+            for (0..sub_types.items.len) |index| {
+                type_scope.addTypeSubstitution(gen.sub_identifiers.items[index], sub_types.items[index], node) catch continue;
+            }
+            collectTypeIdsFromBlock(type_scope, ast, body.data, .public);
+            collectTypeDataFromBlock(type_scope, ast, body.data, .public);
+        }
+
+        return typeid;
+    }
+
+    pub fn addField(self: *Declarations, identifier: []const u8, node: untyped.Node(untyped.Expression), type_ref: typed.TypeRef) TypeError!void {
+        try self.addDecl(identifier, node, .{ .Field = type_ref });
     }
 };
 
@@ -723,6 +880,7 @@ pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program) typed.P
 
     collectTypeIds(&builder);
     collectTypeData(&builder);
+    logCollisionErrors(&builder);
 
     logging.printLogs(builder.logger, allocator);
 
@@ -737,14 +895,14 @@ pub fn collectTypeIds(builder: *Builder) void {
     
     if (builder.getScope(builder.root)) |scope| {
 
-        _ = scope.addTypeDecl("@bit8", .public) catch @panic("@bit8 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit16", .public) catch @panic("@bit16 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit32", .public) catch @panic("@bit32 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit64", .public) catch @panic("@bit64 was already added to root scope.");
-        _ = scope.addTypeDecl("@bitNative", .public) catch @panic("@bitNative was already added to root scope.");
-        _ = scope.addTypeDecl("@numberLiteral", .public) catch @panic("@numberLiteral was already added to root scope.");
-        _ = scope.addTypeDecl("unknown", .public) catch @panic("unknown was already added to root scope.");
-        _ = scope.addTypeDecl("nothing", .public) catch @panic("nothing was already added to root scope.");
+        _ = scope.addTypeDecl("@bit8", .public, null) catch @panic("@bit8 was already added to root scope.");
+        _ = scope.addTypeDecl("@bit16", .public, null) catch @panic("@bit16 was already added to root scope.");
+        _ = scope.addTypeDecl("@bit32", .public, null) catch @panic("@bit32 was already added to root scope.");
+        _ = scope.addTypeDecl("@bit64", .public, null) catch @panic("@bit64 was already added to root scope.");
+        _ = scope.addTypeDecl("@bitNative", .public, null) catch @panic("@bitNative was already added to root scope.");
+        _ = scope.addTypeDecl("@numberLiteral", .public, null) catch @panic("@numberLiteral was already added to root scope.");
+        _ = scope.addTypeDecl("unknown", .public, null) catch @panic("unknown was already added to root scope.");
+        _ = scope.addTypeDecl("nothing", .public, null) catch @panic("nothing was already added to root scope.");
 
         collectTypeIdsFromModule(scope, &builder.uprogram.root_module);
     }
@@ -752,13 +910,13 @@ pub fn collectTypeIds(builder: *Builder) void {
 
 pub fn collectTypeIdsFromModule(scope: *Scope, module: *untyped.Module) void {
     for (module.asts.items) |*ast| {
-        collectTypeIdsFromAst(scope, ast);
+        collectTypeIdsFromBlock(scope, ast, &ast.root_block, .public);
     }
 
     var sub_mod_iter = module.submodules.iterator();
 
     while (sub_mod_iter.next()) |sub_mod_entry| {
-        const typeid = scope.addTypeDecl(sub_mod_entry.key_ptr.*, .public) catch return;
+        const typeid = scope.addTypeDecl(sub_mod_entry.key_ptr.*, .public, null) catch return;
         const module_type = scope.builder.getType(typeid);
         module_type.data = .{ .Module = .{} };
 
@@ -768,10 +926,9 @@ pub fn collectTypeIdsFromModule(scope: *Scope, module: *untyped.Module) void {
     }
 }
 
-pub fn collectTypeIdsFromAst(scope: *Scope, ast: *untyped.Ast) void {
-    
-    for (ast.root_block.body.items) |statement| {
-        collectTypeIdsFromStatements(scope, ast, statement, .public);
+pub fn collectTypeIdsFromBlock(scope: *Scope, ast: *untyped.Ast, block: *untyped.Block, visability: typed.Visability) void {
+    for (block.body.items) |statement| {
+        collectTypeIdsFromStatements(scope, ast, statement, visability);
     }
 }
 
@@ -780,10 +937,7 @@ pub fn collectTypeIdsFromStatements(scope: *Scope, ast: *untyped.Ast, statement:
     switch (statement.data.*) {
 
         .Block => |block| {
-
-            for (block.data.body.items) |child_statement| {
-                collectTypeIdsFromStatements(scope, ast, child_statement, visability);
-            }
+            collectTypeIdsFromBlock(scope, ast, block.data, visability);
         },
 
         .Expression => |expr| {
@@ -791,10 +945,7 @@ pub fn collectTypeIdsFromStatements(scope: *Scope, ast: *untyped.Ast, statement:
         },
 
         .Private => |private| {
-
-            for (private.data.body.items) |child_statement| {
-                collectTypeIdsFromStatements(scope, ast, child_statement, .private);
-            }
+            collectTypeIdsFromBlock(scope, ast, private.data, .private);
         },
 
         else => return,
@@ -816,7 +967,7 @@ pub fn collectTypeIdsFromExpressions(scope: *Scope, ast: *untyped.Ast, expressio
                     switch (decl.decl_type.data.*) {
 
                         .Object => |obj| {
-                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability) catch return;
+                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability, decl.name) catch return;
                             const obj_type = scope.builder.getType(typeid);
                             obj_type.data = .{ .Object = .{} };
 
@@ -826,7 +977,7 @@ pub fn collectTypeIdsFromExpressions(scope: *Scope, ast: *untyped.Ast, expressio
                         },  
 
                         .Enum => |_enum| {
-                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability) catch return;
+                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability, decl.name) catch return;
                             const obj_type = scope.builder.getType(typeid);
                             obj_type.data = .{ .Enum = .{} };
 
@@ -836,7 +987,7 @@ pub fn collectTypeIdsFromExpressions(scope: *Scope, ast: *untyped.Ast, expressio
                         },
 
                         .Interface => |interfaces| {
-                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability) catch return;
+                            const typeid = scope.addTypeDecl(ast.source[token.start..token.end], visability, decl.name) catch return;
                             const obj_type = scope.builder.getType(typeid);
                             obj_type.data = .{ .Interface = .{} };
 
@@ -859,7 +1010,7 @@ pub fn collectTypeIdsFromExpressions(scope: *Scope, ast: *untyped.Ast, expressio
                             
                             const token = ast.tokens[ident.token_index];
 
-                            scope.addGenericType(ast.source[token.start..token.end], generic, base, visability, ast) catch return;
+                            scope.addGenericType(ast.source[token.start..token.end], generic, base, visability, ast, decl.name) catch return;
                         },
 
                         else => {
@@ -919,7 +1070,7 @@ pub fn collectTypeDataModule(scope: *Scope, module: *untyped.Module) void {
     var sub_mod_iter = module.submodules.iterator();
 
     while (sub_mod_iter.next()) |sub_mod_entry| {
-        if (scope.getType(sub_mod_entry.key_ptr.*)) |typeid| {
+        if (scope.getType(sub_mod_entry.key_ptr.*, null) catch continue) |typeid| {
 
             if (scope.builder.getScope(typeid)) |sub_scope| {
                 collectTypeDataModule(sub_scope, sub_mod_entry.value_ptr);
@@ -1007,7 +1158,7 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
                     switch (decl.decl_type.data.*) {
 
                         .Object => |obj| {
-                            if (scope.getType(name)) |typeid| {
+                            if (scope.getType(name, decl.name) catch return) |typeid| {
                                 if (scope.builder.getScope(typeid)) |new_scope| {
                                     collectTypeDataFromBlock(new_scope, ast, obj.data, .public);
                                 }
@@ -1015,7 +1166,7 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
                         },  
 
                         .Enum => |_enum| {
-                            if (scope.getType(name)) |typeid| {
+                            if (scope.getType(name, decl.name) catch return) |typeid| {
                                 if (scope.builder.getScope(typeid)) |new_scope| {
                                     collectTypeDataFromBlock(new_scope, ast, _enum.data, .public);
                                 }
@@ -1023,7 +1174,7 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
                         },
 
                         .Interface => |interfaces| {
-                            if (scope.getType(name)) |typeid| {
+                            if (scope.getType(name, decl.name) catch return) |typeid| {
                                 if (scope.builder.getScope(typeid)) |new_scope| {
                                     collectTypeDataFromBlock(new_scope, ast, interfaces.data, .public);
                                 }
@@ -1065,17 +1216,24 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
                             }
 
                             if (result) |typeid| {
-                                scope.addFunction(name, typeid, function.is_inline, requires_self, visability) catch return;
+                                scope.addFunction(
+                                    name, 
+                                    typeid, 
+                                    function.is_inline, 
+                                    requires_self, 
+                                    visability, 
+                                    decl.name) catch return;
                             }
                         },
 
                         else => {
                             addFieldToTypeData(
-                                    scope, 
-                                    ast, 
-                                    name, 
-                                    decl.decl_type, 
-                                    visability);
+                                scope, 
+                                ast, 
+                                name, 
+                                decl.name,
+                                decl.decl_type, 
+                                visability);
                         },
                     }
                 },
@@ -1108,60 +1266,9 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
     }
 }
 
-pub fn addFieldToTypeData(scope: *Scope, ast: *untyped.Ast, identifier: []const u8, type_expr: untyped.Node(untyped.Expression), visability: typed.Visability) void {
-    if (ExprToTypeRef(scope, ast, type_expr)) |typeref| {
-
-        const self_type_data = &(scope.builder.getType(scope.typeid).data orelse return);
-
-        std.debug.print("Added Field: {s} to {s}\n", .{identifier, scope.allocFullName()});
-
-        switch (self_type_data.*) {
-            
-            .Object => |*obj| {
-                obj.structure.append(scope.builder.allocator, .{
-                    .visability = visability,
-                    .name = identifier,
-                    .type_ref = typeref,
-                }) catch @panic("Out of Memory.");
-            },
-
-            .Enum => |*_enum| {
-                std.debug.print("{d} - {d}\n", .{_enum.structure.items.len, @sizeOf(typed.Field)});
-                _enum.structure.append(scope.builder.allocator, .{
-                    .visability = visability,
-                    .name = identifier,
-                    .type_ref = typeref,
-                }) catch @panic("Out of Memory.");
-            },
-
-            .Interface => |*interface| {
-                interface.structure.append(scope.builder.allocator, .{
-                    .visability = visability,
-                    .name = identifier,
-                    .type_ref = typeref,
-                }) catch @panic("Out of Memory.");
-            },
-
-            .Module => |*module| {
-                module.globals.append(scope.builder.allocator, .{
-                    .visability = visability,
-                    .name = identifier,
-                    .type_ref = typeref,
-                }) catch @panic("Out of Memory.");
-            },
-
-            else => {
-                var log = scope.builder.logger.logError(
-                    "Invalid Declaration", .{}, 
-                    null);
-                log.addLine(
-                    scope.builder.allocator, 
-                    ast.file, 
-                    "You cannot place a field in a {s}.", .{@tagName(self_type_data.*)}, 
-                    type_expr.start, 
-                    type_expr.end);
-            }
-        }
+pub fn addFieldToTypeData(scope: *Scope, ast: *untyped.Ast, identifier: []const u8, node: untyped.Node(untyped.Expression), type_expr: untyped.Node(untyped.Expression), visability: typed.Visability) void {
+    if (ExprToTypeRef(scope, ast, type_expr)) |type_ref| {
+        scope.addField(identifier, node, visability, type_ref) catch return;
     }
 }
 
@@ -1251,13 +1358,13 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
             const token = ast.tokens[ident.token_index];
             const name = ast.source[token.start..token.end];
 
-            return if (public_only) scope.getPublicType(name) else scope.getType(name);
+            return if (public_only) scope.getPublicType(name, expression) else scope.getType(name, expression);
         },
 
         .Unknown => {
             if (scope.builder.getScope(scope.builder.root)) |root_scope| {
 
-                if (root_scope.getType("unknown")) |typeid| {
+                if (try root_scope.getType("unknown", expression)) |typeid| {
                     return typeid;
                 } else {
                     var log = scope.builder.logger.logError(
@@ -1280,7 +1387,7 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
             if (scope.builder.getScope(scope.builder.root)) |root_scope| {
                 const token = ast.tokens[builtin.token_index];
                 
-                if (root_scope.getType(ast.source[token.start..token.end])) |typeid| {
+                if (try root_scope.getType(ast.source[token.start..token.end], expression)) |typeid| {
                     return typeid;
                 } else {
                     var log = scope.builder.logger.logError(
@@ -1374,9 +1481,9 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
                     const token = ast.tokens[ident.token_index];
 
                     if (public_only) {
-                        return scope.getPublicGenericType(ast.source[token.start..token.end], sub_list, ast);
+                        return try scope.getPublicGenericType(ast.source[token.start..token.end], sub_list, ast, expression);
                     }
-                    return scope.getGenericType(ast.source[token.start..token.end], sub_list, ast);
+                    return try scope.getGenericType(ast.source[token.start..token.end], sub_list, ast, expression);
                 },
 
                 else => @panic("Generic callee can't be anything but identifier."),
@@ -1394,6 +1501,48 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
                 expression.start, 
                 expression.end);
             return TypeError.InvalidType;
+        }
+    }
+}
+
+pub fn logCollisionErrors(builder: *Builder) void {
+
+    var iter = builder.scopes.valueIterator();
+
+    while (iter.next()) |scope| {
+        var decl_iter = scope.*.*.declarations.valueIterator();
+
+        while (decl_iter.next()) |decl| {
+            var decl_iter_2 = decl.decls.valueIterator();
+
+            while (decl_iter_2.next()) |declaration| {
+                
+                if (declaration.collisions.items.len == 0) {
+                    continue;
+                }
+
+                var log = builder.logger.logError(
+                    "Declaration Collision", .{}, 
+                    "Try renaming the conflicting declarations.");
+
+                if (declaration.node) |first_decl| {
+                    log.addLine(
+                        builder.allocator, 
+                        first_decl.file_id, 
+                        "First declaration here.", .{}, 
+                        first_decl.start, first_decl.end);
+                }
+
+                for (declaration.collisions.items) |collision| {
+                    if (collision) |collision_decl| {
+                        log.addLine(
+                            builder.allocator, 
+                            collision_decl.file_id, 
+                            "Collision here.", .{}, 
+                            collision_decl.start, collision_decl.end);
+                    }
+                }
+            }
         }
     }
 }

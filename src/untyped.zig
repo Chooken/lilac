@@ -34,8 +34,9 @@ pub fn Node(comptime T: type) type {
         data: *T,
         start: usize,
         end: usize,
+        file_id: files.FileId,
 
-        pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, value: T) !Node(T) {
+        pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, value: T, file_id: files.FileId) !Node(T) {
             const data = try allocator.create(T);
             data.* = value;
 
@@ -43,6 +44,7 @@ pub fn Node(comptime T: type) type {
                 .data = data,
                 .start = start,
                 .end = end,
+                .file_id = file_id,
             };
         }
     };

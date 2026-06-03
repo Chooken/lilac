@@ -141,7 +141,8 @@ const Parser = struct {
             self.allocator, 
             self.ast.tokens[start_token].start,
             self.ast.tokens[self.current_index - 1].end, 
-            expression) catch @panic("Out of Memory.");
+            expression,
+            self.ast.file) catch @panic("Out of Memory.");
     }
 
     pub fn makeExprNode(self: *Parser, start_token: usize, expression: untyped.Expression) untyped.Node(untyped.Expression) {
@@ -149,7 +150,8 @@ const Parser = struct {
             self.allocator, 
             self.ast.tokens[start_token].start,
             self.ast.tokens[self.current_index - 1].end, 
-            expression) catch @panic("Out of Memory.");
+            expression,
+            self.ast.file) catch @panic("Out of Memory.");
     }
 };
 
@@ -214,7 +216,7 @@ fn parseTopBlock(parser: *Parser) untyped.Block {
 fn parseBlockWithNode(parser: *Parser) untyped.Node(untyped.Block) {
     const start = parser.ast.tokens[parser.current_index];
     const block = parseBlock(parser);
-    return untyped.Node(untyped.Block).init(parser.allocator, start.start, parser.ast.tokens[parser.current_index - 1].end, block) catch @panic("Out of Memory.");
+    return untyped.Node(untyped.Block).init(parser.allocator, start.start, parser.ast.tokens[parser.current_index - 1].end, block, parser.ast.file) catch @panic("Out of Memory.");
 }
 
 fn parseBlock(parser: *Parser) untyped.Block {
@@ -817,7 +819,8 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
                     parser.current_index, 
                     .{
                         .body = parseStatement(parser),
-                    }
+                    },
+                    parser.ast.file
                 ) catch @panic("Out of Memory.");
             }
 
@@ -1045,13 +1048,18 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
             const statement = parseStatement(parser);
             return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index - 1].end, .{
                 .body = statement,
-            }) catch @panic("Out of Memory.");
+            }, parser.ast.file) catch @panic("Out of Memory.");
         },
         
         .OpenBrace => {
-            return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index].end, .{
-                .body = parser.makeStmtNode(parser.current_index, .{ .Block = parseBlockWithNode(parser) }),
-            }) catch @panic("Out of Memory.");
+            return untyped.Node(untyped.Else).init(
+                parser.allocator, 
+                start, 
+                parser.ast.tokens[parser.current_index].end, 
+                .{
+                    .body = parser.makeStmtNode(parser.current_index, .{ .Block = parseBlockWithNode(parser) }),
+                }, 
+                parser.ast.file) catch @panic("Out of Memory.");
         },
 
         else => {
@@ -1059,9 +1067,14 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
                 "Invalid else case body.", .{}, 
                 "else {} or else => value",
                 parser.current_index);
-            return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index].end, .{
-                .body = parser.makeStmtNode(start_token_of_expression, .Error),
-            }) catch @panic("Out of Memory.");
+            return untyped.Node(untyped.Else).init(
+                parser.allocator, 
+                start, 
+                parser.ast.tokens[parser.current_index].end, 
+                .{
+                    .body = parser.makeStmtNode(start_token_of_expression, .Error),
+                }, 
+                parser.ast.file) catch @panic("Out of Memory.");
         },
     }
 }
