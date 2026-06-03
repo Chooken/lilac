@@ -1269,7 +1269,7 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
                         "Failed to get unknown type.", .{}, 
                         expression.start, 
                         expression.end);
-                    return null;
+                    return TypeError.InvalidType;
                 }
             }
 
@@ -1292,7 +1292,7 @@ pub fn isTypeInScope(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
                         "Built-in type \x22{s}\x22 doesn't exist.", .{ast.source[token.start..token.end]}, 
                         expression.start, 
                         expression.end);
-                    return null;
+                    return TypeError.InvalidType;
                 }
             }
             

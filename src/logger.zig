@@ -295,7 +295,7 @@ fn printLine(allocator: std.mem.Allocator, log_color: std.Io.Terminal.Color, lin
 fn printLineComment(log_color: std.Io.Terminal.Color, offset: usize, logline: LogLine) void {
     _ = printPadding(log_color, "|", offset);
                     
-    setColor(.red);
+    setColor(log_color);
     setColor(.bold);
     for (logline.start..logline.end) |_| {
         print("^");
@@ -304,6 +304,7 @@ fn printLineComment(log_color: std.Io.Terminal.Color, offset: usize, logline: Lo
     endLine();
 
     _ = printPadding(log_color, "|", offset);
+    setColor(.bold);
     print(logline.message);
     setColor(.reset);
     endLine();
@@ -326,7 +327,8 @@ fn printPadding(log_color: std.Io.Terminal.Color, line_head: ?[]const u8, paddin
         if (string.len < padding) {
             indent_print(padding - string.len);
         } else {
-            length = string.len;
+            length = string.len + 1;
+            print(" ");
         }
     } else {
         indent_print(padding);
