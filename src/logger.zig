@@ -154,61 +154,10 @@ pub const Log = struct {
     }
 };
 
-pub const Location = struct {
-    start: usize,
-    end: usize,
-    line: usize,
-
-    pub fn get(allocator: std.mem.Allocator, log: LogLine, source: []const u8) std.ArrayList(Location) {
-
-        var locations = std.ArrayList(Location).empty;
-
-        var line: usize = 1;
-        var last_line_index: usize = 0;
-        var current_line_index: usize = 0;
-
-        for (0..log.start) |index| {
-
-            if (source[index] == '\n') {
-                line += 1;
-                last_line_index = current_line_index;
-                current_line_index = index + 1;
-            }
-        }
-
-        line -= 1;
-
-        var start_print = last_line_index;
-        var index: usize = last_line_index;
-        var count: usize = 3;
-
-        while (count != 0 and index < source.len) {
-
-            if (index >= source.len) {
-                locations.append(allocator, .{
-                    .start = start_print,
-                    .end = index,
-                    .line = line,
-                }) catch @panic("Out of Memory.");
-                break;
-            }
-
-            if (source[index] == '\n') {
-                locations.append(allocator, .{
-                    .start = start_print,
-                    .end = index,
-                    .line = line,
-                }) catch @panic("Out of Memory.");
-                line += 1;
-                count -= 1;
-                start_print = index + 1;
-            }
-
-            index += 1;
-        }
-
-        return locations;
-    }
+pub const Line = struct {
+    start: usize = 0,
+    end: usize = 0,
+    number: usize = 0,
 };
 
 pub fn printLogs(logger: Logger, allocator: std.mem.Allocator) void {
@@ -231,8 +180,6 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
     // Log lines and Hints
     var log_iterator = log.logs.iterator();
 
-    var prev_last: usize = 0;
-
     while (log_iterator.next()) |file_logs| {
         const log_file = file_logs.key_ptr.getFile();
 
@@ -242,52 +189,83 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
         setColor(.reset);
         endLine();
 
-        var offset: usize = 0;
+        if (file_logs.value_ptr.items.len == 0) {
+            continue;
+        }
 
-        for (file_logs.value_ptr.items) |logline| {
+        var last_line: Line = .{};
+        var current_line: Line = .{};
+        var line_number: usize = 1;
+        var opt_last_printed_line: ?usize = null;
 
-            var locations = Location.get(allocator, logline, log_file.source);
-            defer locations.deinit(allocator);
+        var current_log_index: usize = 0;
+        var last_line_offset: usize = 0;
 
-            for (locations.items, 0..) |location, index| {
+        var comment_last_line: bool = false;
 
-                if (prev_last < location.line) {
-                    
-                    if (location.line - prev_last > 1) {
+        for (log_file.source, 0..) |character, index| {
+
+            if (character != '\n') {
+                continue;
+            }
+
+            last_line = current_line;
+            current_line = Line {
+                .start = if (last_line.end == 0) 0 else last_line.end + 1,
+                .end = index,
+                .number = line_number,
+            };
+            line_number += 1;
+
+            if (comment_last_line) {
+                last_line_offset = printLine(allocator, log_color, current_line.number, current_line.start, current_line.end, log_file.source);
+                opt_last_printed_line = current_line.number;
+                comment_last_line = false;
+            }
+
+            while (current_log_index < file_logs.value_ptr.items.len) {
+                
+                const logline = file_logs.value_ptr.items[current_log_index];
+
+                if (logline.start >= index) {
+                    break;
+                }
+
+                if (opt_last_printed_line) |last_printed_line| {
+
+                    const distance = current_line.number - last_printed_line;
+
+                    if (distance > 2) {
                         _ = printPadding(log_color, "...", 0);
-                        endLine();      
+                        endLine();  
                     }
 
-                    prev_last = location.line;
-
-                    const line_number = std.fmt.allocPrint(allocator, "{d}", .{location.line}) catch @panic("Out of Memory.");
-                    defer allocator.free(line_number);
-
-                    offset = printPadding(log_color, line_number, 6);
-                    
-                    print(log_file.source[location.start..location.end]);
-                    endLine();
-                }
-
-                if (index == 1) {
-
-                    const token_offset: usize = offset + (logline.start - location.start - 1);
-
-                    _ = printPadding(log_color, "|", token_offset);
-                    
-                    setColor(.red);
-                    setColor(.bold);
-                    for (logline.start..logline.end) |_| {
-                        print("^");
+                    if (distance > 1 and last_line.number != 0) {
+                        _ = printLine(allocator, log_color, last_line.number, last_line.start, last_line.end, log_file.source);
                     }
-                    setColor(.reset);
-                    endLine();
 
-                    _ = printPadding(log_color, "|", token_offset);
-                    print(logline.message);
-                    setColor(.reset);
-                    endLine();
+                    if (distance > 0) {
+                        last_line_offset = printLine(allocator, log_color, current_line.number, current_line.start, current_line.end, log_file.source);
+                        opt_last_printed_line = current_line.number;
+                    }
+
+                } else {
+
+                    if (last_line.number != 0) {
+                        _ = printLine(allocator, log_color, last_line.number, last_line.start, last_line.end, log_file.source);
+                    }
+
+                    last_line_offset = printLine(allocator, log_color, current_line.number, current_line.start, current_line.end, log_file.source);
+                    opt_last_printed_line = current_line.number;
                 }
+
+                printLineComment(log_color, last_line_offset + (logline.start - current_line.start) - 1, logline);
+                current_log_index += 1;
+                comment_last_line = true;
+            }
+
+            if (!comment_last_line and current_log_index >= file_logs.value_ptr.items.len) {
+                break;
             }
         }
     }
@@ -300,6 +278,35 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
         setColor(.reset);
         endLine();
     }
+}
+
+fn printLine(allocator: std.mem.Allocator, log_color: std.Io.Terminal.Color, line: usize, start: usize, end: usize, source: []const u8) usize {
+    const line_number = std.fmt.allocPrint(allocator, "{d}", .{line}) catch @panic("Out of Memory.");
+    defer allocator.free(line_number);
+
+    const offset = printPadding(log_color, line_number, 6);
+    
+    print(source[start..end]);
+    endLine();
+
+    return offset;
+}
+
+fn printLineComment(log_color: std.Io.Terminal.Color, offset: usize, logline: LogLine) void {
+    _ = printPadding(log_color, "|", offset);
+                    
+    setColor(.red);
+    setColor(.bold);
+    for (logline.start..logline.end) |_| {
+        print("^");
+    }
+    setColor(.reset);
+    endLine();
+
+    _ = printPadding(log_color, "|", offset);
+    print(logline.message);
+    setColor(.reset);
+    endLine();
 }
 
 fn printPadding(log_color: std.Io.Terminal.Color, line_head: ?[]const u8, padding: usize) usize {
