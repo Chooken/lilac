@@ -65,9 +65,21 @@ capture_function: func () cond: @bit8, value: @bit32 {
     value = 0xf
 }
 
+o1: obj {
+    o: o2
+}
+
+o2: obj {
+    o: o1
+}
+
 gen[T]: obj {
 
-    val: T
+    val: gen3[T]
+
+    object2: obj {
+        val: T
+    }
 
     gen2[T2]: obj {
         t: T
@@ -79,9 +91,13 @@ gen[T]: obj {
     }
 }
 
+gen3[T]: obj {
+    c: gen[T]
+}
+
 object: obj {
 
-    value: gen[@bit8]
+    value: gen[@bit8].gen2[@bit16]
 
     @init: func (self, value: @bit8) nothing {
         self.value = value

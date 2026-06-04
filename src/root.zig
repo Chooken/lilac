@@ -27,7 +27,7 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
             return;
         };
 
-        //untyped.printAST(&uprogram.root_module.asts.items[0]);
+        untyped.printAST(&uprogram.root_module.asts.items[0]);
     }
 
     // Convert Untyped Program to Typed Program.
