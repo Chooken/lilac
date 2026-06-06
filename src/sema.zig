@@ -1,4 +1,5 @@
 const std = @import("std");
+const tokens = @import("tokens.zig");
 const untyped = @import("untyped.zig");
 const typed = @import("typed.zig");
 const logging = @import("logger.zig");
@@ -27,13 +28,16 @@ pub const Builder = struct {
     root: typed.TypeId,
     
     // Events
-    initialisers: std.AutoHashMapUnmanaged(typed.TypeId, typed.FunctionId) = .empty,
-    oncopy: std.AutoHashMapUnmanaged(typed.TypeId, typed.FunctionId) = .empty,
-    onoverride: std.AutoHashMapUnmanaged(typed.TypeId, typed.FunctionId) = .empty,
-    ondrop: std.AutoHashMapUnmanaged(typed.TypeId, typed.FunctionId) = .empty,
 
-    conversions: std.AutoHashMapUnmanaged(typed.Conversion, typed.FunctionId) = .empty,
-    operation: std.AutoHashMapUnmanaged(typed.Operator, typed.FunctionId) = .empty,
+    // Typeid is the type its for.
+    initialisers: std.AutoHashMapUnmanaged(typed.TypeId, Declaration) = .empty,
+    oncopy: std.AutoHashMapUnmanaged(typed.TypeId, Declaration) = .empty,
+    onoverride: std.AutoHashMapUnmanaged(typed.TypeId, Declaration) = .empty,
+    ondrop: std.AutoHashMapUnmanaged(typed.TypeId, Declaration) = .empty,
+
+    conversions: std.AutoHashMapUnmanaged(typed.Conversion, Declaration) = .empty,
+    binop_operation: std.AutoHashMapUnmanaged(typed.BinopOperator, Declaration) = .empty,
+    prefix_operation: std.AutoHashMapUnmanaged(typed.UnaryOperator, Declaration) = .empty,
 
     pub fn getNewType(self: *Builder, name: ?[]const u8, parent: ?*Scope) typed.TypeId {
         const typeid = self.program.addType(self.allocator, .{
@@ -53,57 +57,48 @@ pub const Builder = struct {
         return typeid;
     }
 
-    pub fn getOrAddFunctionType(self: *Builder, proto: *typed.FunctionProto) typed.TypeId {
+    pub fn getOrAddFunctionType(self: *Builder, proto: typed.FunctionProto) typed.TypeId {
 
-        type_loop: for (self.program.func_types.items) |func_typeid| {
-            const func_type = self.getType(func_typeid);
+        const result = self.program.func_types.getOrPut(self.allocator, proto) catch @panic("Out of Memory.");
 
-            if (func_type.data) |data| {
-                switch (data) {
+        if (!result.found_existing) {
 
-                    .Function => |function| {
+            std.debug.print("Added function type func (", .{});
 
-                        if (function.inputs.items.len != proto.inputs.items.len or 
-                            function.outputs.items.len != proto.outputs.items.len)
-                        {
-                            continue :type_loop;
-                        }
-                        
-                        for (0..function.inputs.items.len) |index| {
-                            if (!function.inputs.items[index].cmp(proto.inputs.items[index])) {
-                                continue :type_loop;
-                            }
-                        }
-
-                        for (0..function.outputs.items.len) |index| {
-                            if (!function.outputs.items[index].cmp(proto.outputs.items[index])) {
-                                continue :type_loop;
-                            }
-                        }
-
-                        proto.deinit(self.allocator);
-                        std.debug.print("Found function type.\n", .{});
-
-                        return func_typeid;
-                    },
-
-                    else => @panic("Non function type in the FunctionTypes list")
+            for (proto.inputs.items) |input| {
+                if (input.is_ref) {
+                    std.debug.print("ref ", .{});
+                }
+                if (self.getScope(input.id)) |scope| {
+                    std.debug.print("{s}", .{scope.allocFullName()});
                 }
             }
+            
+            std.debug.print(") ", .{});
+
+            if (proto.outputs.items.len == 0) {
+                std.debug.print("nothing", .{});
+            }
+
+            for (proto.outputs.items) |output| {
+                if (output.is_ref) {
+                    std.debug.print("ref ", .{});
+                }
+                if (self.getScope(output.id)) |scope| {
+                    std.debug.print("{s}", .{scope.allocFullName()});
+                }
+            }
+            std.debug.print("\n", .{});
+
+            result.value_ptr.* = self.program.addType(self.allocator, typed.Type{
+                .name = null,
+                .data = .{
+                    .Function = proto
+                },
+            });
         }
 
-        std.debug.print("Added function type.\n", .{});
-
-        const typeid = self.program.addType(self.allocator, typed.Type{
-            .name = null,
-            .data = .{
-                .Function = proto.*
-            },
-        });
-
-        self.program.func_types.append(self.allocator, typeid) catch @panic("Out of Memory.");
-
-        return typeid;
+        return result.value_ptr.*;
     }
 
     pub fn addFunction(self: *Builder, typeid: typed.TypeId, is_inlined: bool, requires_self: bool) typed.FunctionId {
@@ -127,6 +122,10 @@ pub const Builder = struct {
         return self.scopes.get(typeid);
     }
 
+    pub fn getFunction(self: *Builder, function_id: typed.FunctionId) *typed.Function {
+        return &self.program.functions.items[function_id.index];
+    }
+ 
     pub fn deinit(self: *Builder) void {
         self.logger.deinit();
     }
@@ -266,6 +265,8 @@ pub const Scope = struct {
                 .Declaration => |decl| {
                     if (ExprToTypeRef(self, ast, decl.decl_type)) |typeref| {
                         proto_type.inputs.append(self.builder.allocator, typeref) catch @panic("Out of Memory.");
+                    } else {
+                        return null;
                     }
                 },
 
@@ -283,6 +284,8 @@ pub const Scope = struct {
                             .Declaration => |decl| {
                                 if (ExprToTypeRef(self, ast, decl.decl_type)) |typeref| {
                                     proto_type.inputs.append(self.builder.allocator, typeref) catch @panic("Out of Memory.");
+                                } else {
+                                    return null;
                                 }
                             },
                              
@@ -335,32 +338,12 @@ pub const Scope = struct {
 
         switch (proto.returns.data.*) {
 
-            .Nothing => {
-                if (self.builder.getScope(self.builder.root)) |root_scope| {
-
-                    if (root_scope.getType("nothing", proto.returns) catch return null) |typeid| {
-                        return typeid;
-                    } else {
-                        var log = self.builder.logger.logError(
-                            "Invalid Type", .{}, 
-                            "This is a compiler error. Contact the developer.");
-                        log.addLine(
-                            self.builder.allocator, 
-                            ast.file, 
-                            "Failed to get nothing type.", .{}, 
-                            proto.returns.start, 
-                            proto.returns.end);
-                        return null;
-                    }
-                }
-
-                return null;
-            },
+            .Nothing => {},
 
             .Self => {
-                proto_type.inputs.append(self.builder.allocator, .{
+                proto_type.outputs.append(self.builder.allocator, .{
                     .id = self.typeid,
-                    .is_ref = true,
+                    .is_ref = false,
                 }) catch @panic("Out of Memory.");
             },
 
@@ -391,18 +374,18 @@ pub const Scope = struct {
                             if (index > 0) {
                                 var log = self.builder.logger.logError(
                                     "Invalid Type", .{}, 
-                                    "func (other: type, self) -> func (self, other: type)");
+                                    "func () other: type, self -> func () self, other: type");
                                 log.addLine(
                                     self.builder.allocator, 
                                     ast.file, 
-                                    "You can only have the self parameter in the first position.", .{}, 
+                                    "You can only have the self result in the first position.", .{}, 
                                     expr.start, 
                                     expr.end);
                                 return null;
                             }
-                            proto_type.inputs.append(self.builder.allocator, .{
+                            proto_type.outputs.append(self.builder.allocator, .{
                                 .id = self.typeid,
-                                .is_ref = true,
+                                .is_ref = false,
                             }) catch @panic("Out of Memory.");
                         },
 
@@ -458,7 +441,7 @@ pub const Scope = struct {
             },
         }
 
-        return self.builder.getOrAddFunctionType(&proto_type);
+        return self.builder.getOrAddFunctionType(proto_type);
     }
 
     pub fn addFunction(self: *Scope, identifier: []const u8, typeid: typed.TypeId, is_inline: bool, requires_self: bool, visability: typed.Visability, node: ?untyped.Node(untyped.Expression)) TypeError!void {
@@ -889,6 +872,30 @@ pub fn collectTypeIdsFromExpressions(scope: *Scope, ast: *untyped.Ast, expressio
     
     switch (expression.data.*) {
 
+        .Assignment => |assignment| {
+
+            const token = ast.tokens[assignment.op_token_index];
+
+            switch (token.token_type) {
+
+                .FatRightArrow => {
+                    return;
+                },
+
+                else => {
+                    var log = scope.builder.logger.logError(
+                        "Assignment Error", .{}, 
+                        "You can't assign to a field.");
+                    log.addLine(
+                        scope.builder.allocator, 
+                        ast.file, 
+                        "Assignment here.", .{}, 
+                        token.start, token.end);
+                    return;
+                }
+            }
+        },
+
         .Declaration => |decl| {
 
             switch (decl.name.data.*) {
@@ -1171,9 +1178,411 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
                     }
                 },
 
+                .Builtin => |builtin| {
+                    
+                    const token = ast.tokens[builtin.token_index];
+                    const identifier = ast.source[token.start..token.end];
+
+                    const function = switch (decl.decl_type.data.*) {
+
+                        .Function => |*f| f,
+
+                        else => {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "You can only declare builtin functions like: @init: func () self");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "This type isn't a function. Is it meant to be a builtin?", .{}, 
+                                decl.decl_type.start, decl.decl_type.end);
+                            return;
+                        }
+                    };
+
+                    const proto = switch (function.prototype.data.*) {
+                        .FuncPrototype => |*proto| proto,
+                        else => {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "Functions can only have function prototype as types.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "This type isn't a function prototype.", .{}, 
+                                decl.decl_type.start, decl.decl_type.end);
+                            return;
+                        }
+                    };
+
+                    if (std.mem.eql(u8, "@init", identifier)) {
+
+                        if (proto.arguments) |args| {
+                            switch (args.data.*) {
+                                .Self => {
+                                    var log = scope.builder.logger.logError(
+                                        "Type Error", .{}, 
+                                        "@init can't have self as a parameter.");
+                                    log.addLine(
+                                        scope.builder.allocator, 
+                                        ast.file, 
+                                        "Self parameter declared here.", .{}, 
+                                        args.start, args.end);
+                                    return;
+                                },
+
+                                .List => |list| {
+                                    switch (list.expressions.items[0].data.*) {
+                                        .Self => {
+                                            var log = scope.builder.logger.logError(
+                                                "Type Error", .{}, 
+                                                "@init can't have self as a parameter.");
+                                            log.addLine(
+                                                scope.builder.allocator, 
+                                                ast.file, 
+                                                "Self parameter declared here.", .{}, 
+                                                list.expressions.items[0].start, list.expressions.items[0].end);
+                                            return;
+                                        },
+
+                                        else => {},
+                                    }
+                                },
+
+                                else => {},
+                            }
+                        }
+
+                        if (proto.returns.data.* != .Self) {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@init requires self as the only return.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "This needs to just be self.", .{}, 
+                                proto.returns.start, proto.returns.end);
+                            return;
+                        }
+
+                        if (scope.getFunctionTypeId(proto, ast, false, function.is_inline)) |typeid| {
+
+                            const funct_id = scope.builder.addFunction(typeid, function.is_inline, false);
+
+                            const result = scope.builder.initialisers.getOrPut(scope.builder.allocator, scope.typeid) catch @panic("Out of Memory.");
+
+                            if (result.found_existing) {
+                                result.value_ptr.collisions.append(scope.builder.allocator, decl.name) catch @panic("Out of Memory.");
+                                return;
+                            }
+
+                            result.value_ptr.* = .{
+                                .node = decl.name,
+                                .visability = .public,
+                                .decl_type = .{
+                                    .Function = funct_id,
+                                }
+                            };
+                        }
+                    } 
+                    else if (std.mem.eql(u8, "@on_override", identifier)) {
+
+                        if (proto.arguments) |args| {
+                            if (args.data.* != .Self) {
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{}, 
+                                    "@on_override requires have self as the only parameter.");
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    ast.file, 
+                                    "Only put self in here.", .{}, 
+                                    args.start, args.end);
+                                return;
+                            }
+                        } else {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_override requires have self as the parameter.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add self as a parameter.", .{}, 
+                                function.prototype.start, function.prototype.end);
+                            return;
+                        }
+
+                        if (proto.returns.data.* != .Nothing) {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_override requires have nothing as the return.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add nothing here.", .{}, 
+                                proto.returns.start, proto.returns.end);
+                            return;
+                        }
+
+                        if (scope.getFunctionTypeId(proto, ast, false, function.is_inline)) |typeid| {
+
+                            const funct_id = scope.builder.addFunction(typeid, function.is_inline, false);
+
+                            const result = scope.builder.onoverride.getOrPut(scope.builder.allocator, scope.typeid) catch @panic("Out of Memory.");
+
+                            if (result.found_existing) {
+                                result.value_ptr.collisions.append(scope.builder.allocator, decl.name) catch @panic("Out of Memory.");
+                                return;
+                            }
+
+                            result.value_ptr.* = .{
+                                .node = decl.name,
+                                .visability = .public,
+                                .decl_type = .{
+                                    .Function = funct_id,
+                                }
+                            };
+                        }
+                    } 
+                    else if (std.mem.eql(u8, "@on_copy", identifier)) {
+                        
+                        if (proto.arguments) |args| {
+                            if (args.data.* != .Self) {
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{}, 
+                                    "@on_copy requires have self as the only parameter.");
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    ast.file, 
+                                    "Only put self in here.", .{}, 
+                                    args.start, args.end);
+                                return;
+                            }
+                        } else {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_copy requires have self as the parameter.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add self as a parameter.", .{}, 
+                                function.prototype.start, function.prototype.end);
+                            return;
+                        }
+
+                        if (proto.returns.data.* != .Nothing) {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_copy requires have nothing as the return.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add nothing here.", .{}, 
+                                proto.returns.start, proto.returns.end);
+                            return;
+                        }
+
+                        if (scope.getFunctionTypeId(proto, ast, false, function.is_inline)) |typeid| {
+
+                            const funct_id = scope.builder.addFunction(typeid, function.is_inline, false);
+
+                            const result = scope.builder.oncopy.getOrPut(scope.builder.allocator, scope.typeid) catch @panic("Out of Memory.");
+
+                            if (result.found_existing) {
+                                result.value_ptr.collisions.append(scope.builder.allocator, decl.name) catch @panic("Out of Memory.");
+                                return;
+                            }
+
+                            result.value_ptr.* = .{
+                                .node = decl.name,
+                                .visability = .public,
+                                .decl_type = .{
+                                    .Function = funct_id,
+                                }
+                            };
+                        }
+                    } 
+                    else if (std.mem.eql(u8, "@on_drop", identifier)) {
+                        
+                        if (proto.arguments) |args| {
+                            if (args.data.* != .Self) {
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{}, 
+                                    "@on_drop requires have self as the only parameter.");
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    ast.file, 
+                                    "Only put self in here.", .{}, 
+                                    args.start, args.end);
+                                return;
+                            }
+                        } else {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_drop requires have self as the parameter.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add self as a parameter.", .{}, 
+                                function.prototype.start, function.prototype.end);
+                            return;
+                        }
+
+                        if (proto.returns.data.* != .Nothing) {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@on_drop requires have nothing as the return.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add nothing here.", .{}, 
+                                proto.returns.start, proto.returns.end);
+                            return;
+                        }
+
+                        if (scope.getFunctionTypeId(proto, ast, false, function.is_inline)) |typeid| {
+
+                            const funct_id = scope.builder.addFunction(typeid, function.is_inline, false);
+
+                            const result = scope.builder.ondrop.getOrPut(scope.builder.allocator, scope.typeid) catch @panic("Out of Memory.");
+
+                            if (result.found_existing) {
+                                result.value_ptr.collisions.append(scope.builder.allocator, decl.name) catch @panic("Out of Memory.");
+                                return;
+                            }
+
+                            result.value_ptr.* = .{
+                                .node = decl.name,
+                                .visability = .public,
+                                .decl_type = .{
+                                    .Function = funct_id,
+                                }
+                            };
+                        }
+                    } 
+                    else if (std.mem.eql(u8, "@conversion", identifier)) {
+
+                        if (proto.arguments) |args| {
+                            switch (args.data.*) {
+
+                                .Self => {
+                                    var log = scope.builder.logger.logWarning(
+                                        "Concerning self type.", .{}, 
+                                        "@conversion with a ref type as a from.");
+                                    log.addLine(
+                                        scope.builder.allocator, 
+                                        ast.file, 
+                                        "The self type is a ref type.", .{}, 
+                                        args.start, args.end);
+                                },
+
+                                .List => {
+                                    var log = scope.builder.logger.logError(
+                                        "Type Error", .{}, 
+                                        "@conversion can't have multiple parameters.");
+                                    log.addLine(
+                                        scope.builder.allocator, 
+                                        ast.file, 
+                                        "Here are the parameters.", .{}, 
+                                        args.start, args.end);
+                                    return;
+                                },
+
+                                else => {}
+                            }
+                        } else {
+                            var log = scope.builder.logger.logError(
+                                "Type Error", .{}, 
+                                "@conversion requires a parameter as the from type.");
+                            log.addLine(
+                                scope.builder.allocator, 
+                                ast.file, 
+                                "Add a from parameter.", .{}, 
+                                function.prototype.start, function.prototype.end);
+                            return;
+                        }
+
+                        switch (proto.returns.data.*) {
+
+                            .List => {
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{}, 
+                                    "@conversion can't have multiple results.");
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    ast.file, 
+                                    "Here are the parameters.", .{}, 
+                                    proto.returns.start, proto.returns.end);
+                                return;
+                            },
+
+                            else => {},
+                        }
+
+                        if (scope.getFunctionTypeId(proto, ast, false, function.is_inline)) |typeid| {
+
+                            const func_type = scope.builder.getType(typeid);
+
+                            const funct_id = scope.builder.addFunction(typeid, function.is_inline, false);
+
+                            const result = scope.builder.conversions.getOrPut(scope.builder.allocator, .{ 
+                                .from = func_type.data.?.Function.inputs.items[0], 
+                                .to = func_type.data.?.Function.outputs.items[0]
+                            }) catch @panic("Out of Memory.");
+
+                            if (result.found_existing) {
+                                result.value_ptr.collisions.append(scope.builder.allocator, decl.name) catch @panic("Out of Memory.");
+                                return;
+                            }
+                            
+                            const from_scope = scope.builder.getScope(result.key_ptr.from.id).?;
+                            const to_scope = scope.builder.getScope(result.key_ptr.to.id).?;
+
+                            std.debug.print("Added conversion {s} -> {s}\n", .{from_scope.allocFullName(), to_scope.allocFullName()});
+
+                            result.value_ptr.* = .{
+                                .node = decl.name,
+                                .visability = .public,
+                                .decl_type = .{
+                                    .Function = funct_id,
+                                }
+                            };
+                        }
+                    } 
+                    else if (std.mem.eql(u8, "@add", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Plus);
+                    } 
+                    else if (std.mem.eql(u8, "@sub", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Minus);
+                    } 
+                    else if (std.mem.eql(u8, "@mul", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Asterisk);
+                    } 
+                    else if (std.mem.eql(u8, "@div", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Slash);
+                    } 
+                    else if (std.mem.eql(u8, "@mod", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Percentage);
+                    } 
+                    else if (std.mem.eql(u8, "@less_than", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .LessThan);
+                    } 
+                    else if (std.mem.eql(u8, "@greater_than", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .GreaterThan);
+                    } 
+                    else if (std.mem.eql(u8, "@less_than_or_equal", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .LessThanOrEquals);
+                    } 
+                    else if (std.mem.eql(u8, "@greater_than_or_equal", identifier)) {
+                        addBinopOperatorFunction(scope, identifier, decl.name, ast, function, proto, .GreaterThanOrEquals);
+                    }
+                    else if (std.mem.eql(u8, "@negate", identifier)) {
+                        addPrefixOperatorFunction(scope, identifier, decl.name, ast, function, proto, .Minus);
+                    } 
+                },
+
                 // Built-ins don't need to be added.
                 // Generics get genned by usage not declaration.
-                .Builtin, .Generic => return,
+                .Generic => return,
 
                 else => {
                     var log = scope.builder.logger.logError(
@@ -1451,6 +1860,213 @@ pub fn isTypeInScope(access_scope: *Scope, scope: *Scope, ast: *untyped.Ast, exp
     }
 }
 
+pub fn addBinopOperatorFunction(scope: *Scope, name: []const u8, name_node: untyped.Node(untyped.Expression), ast: *untyped.Ast, func: *untyped.Function, proto: *untyped.FuncPrototype, operation: tokens.TokenType) void {
+
+    if (proto.arguments) |args| {
+        switch (args.data.*) {
+
+            .List => |list| {
+                
+                if (list.expressions.items.len != 2) {
+                    var log = scope.builder.logger.logError(
+                        "Type Error", .{}, 
+                        std.fmt.allocPrint(
+                            scope.builder.allocator, 
+                            "{s} requires two parameters for the left and right sides of the operator", 
+                            .{name}) catch @panic("Out of Memory."));
+                    log.addLine(
+                        scope.builder.allocator, 
+                        ast.file, 
+                        "Remove some parameters.", .{}, 
+                        args.start, args.end);
+                    return;
+                }
+            },
+
+            else => {
+                var log = scope.builder.logger.logError(
+                    "Type Error", .{}, 
+                    std.fmt.allocPrint(
+                        scope.builder.allocator, 
+                        "{s} requires two parameters for the left and right sides of the operator", 
+                        .{name}) catch @panic("Out of Memory."));
+                log.addLine(
+                    scope.builder.allocator, 
+                    ast.file, 
+                    "Add another parameter.", .{}, 
+                    args.start, args.end);
+                return;
+            }
+        }
+    } else {
+        var log = scope.builder.logger.logError(
+            "Type Error", .{}, 
+            std.fmt.allocPrint(
+                scope.builder.allocator, 
+                "{s} requires two parameters for the left and right sides of the operator", 
+                .{name}) catch @panic("Out of Memory."));
+        log.addLine(
+            scope.builder.allocator, 
+            ast.file, 
+            "Add a left and right parameter.", .{}, 
+            func.prototype.start, func.prototype.end);
+        return;
+    }
+
+    switch (proto.returns.data.*) {
+
+        .Nothing => {
+            var log = scope.builder.logger.logWarning(
+                "Concerning Operator", .{}, 
+                "Operators typically return a value. This could be a sign you are using them weirdly.");
+            log.addLine(
+                scope.builder.allocator, 
+                ast.file, 
+                "Did you mean to put nothing here?", .{}, 
+                proto.returns.start, proto.returns.end);
+        },
+
+        .List => {
+            var log = scope.builder.logger.logWarning(
+                "Concerning Operator", .{}, 
+                "Operators typically return a value. This could be a sign you are using them weirdly.");
+            log.addLine(
+                scope.builder.allocator, 
+                ast.file, 
+                "Did you mean to put multiple returns here?", .{}, 
+                proto.returns.start, proto.returns.end);
+        },
+
+        else => {},
+    }
+
+    if (scope.getFunctionTypeId(proto, ast, false, func.is_inline)) |typeid| {
+
+        const func_type = scope.builder.getType(typeid);
+
+        const funct_id = scope.builder.addFunction(typeid, func.is_inline, false);
+
+        const result = scope.builder.binop_operation.getOrPut(scope.builder.allocator, .{ 
+            .lhs = func_type.data.?.Function.inputs.items[0],
+            .rhs = func_type.data.?.Function.inputs.items[1],
+            .op = operation,
+        }) catch @panic("Out of Memory.");
+
+        if (result.found_existing) {
+            result.value_ptr.collisions.append(scope.builder.allocator, name_node) catch @panic("Out of Memory.");
+            return;
+        }
+        
+        const lhs_scope = scope.builder.getScope(result.key_ptr.lhs.id).?;
+        const rhs_scope = scope.builder.getScope(result.key_ptr.rhs.id).?;
+
+        std.debug.print("Added op {s} {s} {s}\n", .{lhs_scope.allocFullName(), operation.toString(), rhs_scope.allocFullName()});
+
+        result.value_ptr.* = .{
+            .node = name_node,
+            .visability = .public,
+            .decl_type = .{
+                .Function = funct_id,
+            }
+        };
+    }
+}
+
+pub fn addPrefixOperatorFunction(scope: *Scope, name: []const u8, name_node: untyped.Node(untyped.Expression), ast: *untyped.Ast, func: *untyped.Function, proto: *untyped.FuncPrototype, operation: tokens.TokenType) void {
+
+    if (proto.arguments) |args| {
+        switch (args.data.*) {
+
+            .List => {
+                
+                var log = scope.builder.logger.logError(
+                    "Type Error", .{}, 
+                    std.fmt.allocPrint(
+                        scope.builder.allocator, 
+                        "{s} requires only one parameter for the unary operator.", 
+                        .{name}) catch @panic("Out of Memory."));
+                log.addLine(
+                    scope.builder.allocator, 
+                    ast.file, 
+                    "Remove some parameters.", .{}, 
+                    args.start, args.end);
+                return;
+            },
+
+            else => {}
+        }
+    } else {
+        var log = scope.builder.logger.logError(
+            "Type Error", .{}, 
+            std.fmt.allocPrint(
+                scope.builder.allocator, 
+                "{s} requires one parameters for the unary operator.", 
+                .{name}) catch @panic("Out of Memory."));
+        log.addLine(
+            scope.builder.allocator, 
+            ast.file, 
+            "Add a parameter.", .{}, 
+            func.prototype.start, func.prototype.end);
+        return;
+    }
+
+    switch (proto.returns.data.*) {
+
+        .Nothing => {
+            var log = scope.builder.logger.logWarning(
+                "Concerning Operator", .{}, 
+                "Operators typically return a value. This could be a sign you are using them weirdly.");
+            log.addLine(
+                scope.builder.allocator, 
+                ast.file, 
+                "Did you mean to put nothing here?", .{}, 
+                proto.returns.start, proto.returns.end);
+        },
+
+        .List => {
+            var log = scope.builder.logger.logWarning(
+                "Concerning Operator", .{}, 
+                "Operators typically return a value. This could be a sign you are using them weirdly.");
+            log.addLine(
+                scope.builder.allocator, 
+                ast.file, 
+                "Did you mean to put multiple returns here?", .{}, 
+                proto.returns.start, proto.returns.end);
+        },
+
+        else => {},
+    }
+
+    if (scope.getFunctionTypeId(proto, ast, false, func.is_inline)) |typeid| {
+
+        const func_type = scope.builder.getType(typeid);
+
+        const funct_id = scope.builder.addFunction(typeid, func.is_inline, false);
+
+        const result = scope.builder.prefix_operation.getOrPut(scope.builder.allocator, .{ 
+            .value = func_type.data.?.Function.inputs.items[0],
+            .op = operation,
+        }) catch @panic("Out of Memory.");
+
+        if (result.found_existing) {
+            result.value_ptr.collisions.append(scope.builder.allocator, name_node) catch @panic("Out of Memory.");
+            return;
+        }
+        
+        const value_scope = scope.builder.getScope(result.key_ptr.value.id).?;
+
+        std.debug.print("Added op {s} {s}\n", .{operation.toString(), value_scope.allocFullName()});
+
+        result.value_ptr.* = .{
+            .node = name_node,
+            .visability = .public,
+            .decl_type = .{
+                .Function = funct_id,
+            }
+        };
+    }
+}
+
 pub fn logCollisionErrors(builder: *Builder) void {
 
     var iter = builder.scopes.valueIterator();
@@ -1459,32 +2075,48 @@ pub fn logCollisionErrors(builder: *Builder) void {
         var decl_iter = scope.*.*.declarations.valueIterator();
 
         while (decl_iter.next()) |decl| {
+            logDeclaration(builder, decl);
+        }
+    }
 
-            if (decl.collisions.items.len == 0) {
-                continue;
-            }
+    var init_iter = builder.initialisers.valueIterator();
 
-            var log = builder.logger.logError(
-                "Declaration Collision", .{}, 
-                "Try renaming the conflicting declarations.");
+    while (init_iter.next()) |decl| {
+        logDeclaration(builder, decl);
+    }
 
-            if (decl.node) |first_decl| {
-                log.addLine(
-                    builder.allocator, 
-                    first_decl.file_id, 
-                    "First declaration here.", .{}, 
-                    first_decl.start, first_decl.end);
-            }
+    var copy_iter = builder.oncopy.valueIterator();
 
-            for (decl.collisions.items) |collision| {
-                if (collision) |collision_decl| {
-                    log.addLine(
-                        builder.allocator, 
-                        collision_decl.file_id, 
-                        "Collision here.", .{}, 
-                        collision_decl.start, collision_decl.end);
-                }
-            }
+    while (copy_iter.next()) |decl| {
+        logDeclaration(builder, decl);
+    }
+}
+
+fn logDeclaration(builder: *Builder, decl: *Declaration) void {
+
+    if (decl.collisions.items.len == 0) {
+        return;
+    }
+
+    var log = builder.logger.logError(
+        "Declaration Collision", .{}, 
+        "Try renaming the conflicting declarations.");
+
+    if (decl.node) |first_decl| {
+        log.addLine(
+            builder.allocator, 
+            first_decl.file_id, 
+            "First declaration here.", .{}, 
+            first_decl.start, first_decl.end);
+    }
+
+    for (decl.collisions.items) |collision| {
+        if (collision) |collision_decl| {
+            log.addLine(
+                builder.allocator, 
+                collision_decl.file_id, 
+                "Collision here.", .{}, 
+                collision_decl.start, collision_decl.end);
         }
     }
 }

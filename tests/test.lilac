@@ -59,7 +59,6 @@ function: func (one: @bit32, two: @bit32) result: @bit32 {
     }
 }
 
-
 capture_function: func () cond: @bit8, value: @bit32 {
     cond = 0b1
     value = 0xf
@@ -99,8 +98,10 @@ object: obj {
 
     value: gen[@bit8].gen2[@bit16]
 
-    @init: func (self, value: @bit8) nothing {
-        self.value = value
+    @init: func (value: @bit8) self {
+        self = object {
+            value = value
+        }
     }
 
     // This is an Object
@@ -117,13 +118,13 @@ object: obj {
         result = @iadd(lhs, rhs)
     }
 
-    @conversion: func (from: @number) to: object {
+    @conversion: func (from: @numberLiteral) to: object {
         to = object(@to_int32(from))
     }
 }
 
 Enum: enum {
-    One
+    One: @bit8
     Two
 }
 

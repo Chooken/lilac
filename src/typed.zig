@@ -22,7 +22,7 @@ pub fn TypedNode(comptime T: type) type {
 
 pub const Program = struct {
     types: std.ArrayList(Type) = .empty,
-    func_types: std.ArrayList(TypeId) = .empty,
+    func_types: std.HashMapUnmanaged(FunctionProto, TypeId, FunctionProto.HashContext, 80) = .empty,
     functions: std.ArrayList(Function) = .empty,
 
     pub fn addType(self: *Program, allocator: std.mem.Allocator, typedata: Type) TypeId {
@@ -32,6 +32,8 @@ pub const Program = struct {
         };
     }
 };
+
+
 
 pub const Type = struct {
     name: ?[]const u8,
@@ -72,9 +74,14 @@ pub const Conversion = struct {
     to: TypeRef,
 };
 
-pub const Operator = struct {
+pub const BinopOperator = struct {
     lhs: TypeRef,
     rhs: TypeRef,
+    op: tokens.TokenType,
+};
+
+pub const UnaryOperator = struct {
+    value: TypeRef,
     op: tokens.TokenType,
 };
 
@@ -96,14 +103,45 @@ pub const FunctionProto = struct {
     inputs: std.ArrayList(TypeRef) = .empty,
     outputs: std.ArrayList(TypeRef) = .empty,
 
-    pub fn deinit(self: *FunctionProto, allocator: std.mem.Allocator) void {
-        self.inputs.deinit(allocator);
-        self.outputs.deinit(allocator);
-    }
+    pub const HashContext = struct {
+
+        pub fn hash(_: HashContext, proto: FunctionProto) u64 {
+
+            var hasher = std.hash.XxHash64.init(0);
+
+            const input_bytes = std.mem.sliceAsBytes(proto.inputs.items);
+            hasher.update(input_bytes);
+            const output_bytes = std.mem.sliceAsBytes(proto.inputs.items);
+            hasher.update(output_bytes);
+
+            return hasher.final();
+        }
+
+        pub fn eql(_: HashContext, left: FunctionProto, right: FunctionProto) bool {
+            
+            if (left.inputs.items.len != right.inputs.items.len or left.outputs.items.len != right.outputs.items.len) {
+                return false;
+            }
+
+            for (0..left.inputs.items.len) |index| {
+                if (!left.inputs.items[index].cmp(right.inputs.items[index])) {
+                    return false;
+                }
+            }
+
+            for (0..left.outputs.items.len) |index| {
+                if (!left.outputs.items[index].cmp(right.outputs.items[index])) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    };
 };
 
 pub const Interface = struct {
-    structure: std.ArrayList(Field) = .empty,
+    structure: std.ArrayList(struct { []const u8,  }) = .empty,
 };
 
 pub const Module = struct {

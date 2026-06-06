@@ -335,7 +335,7 @@ fn parseExpression(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Ex
     return node;
 }
 
-// =, -=, +=, *=, /=, %=
+// =, -=, +=, *=, /=, %=, => 
 fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
 
     const start_of_expression = parser.current_index;
@@ -344,7 +344,7 @@ fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Ex
     
     switch (parser.current().token_type) {
 
-        .Equals, .PlusEquals, .MinusEquals, .TimesEquals, .DivEquals, .PercentEquals => {
+        .Equals, .PlusEquals, .MinusEquals, .TimesEquals, .DivEquals, .PercentEquals, .FatRightArrow => {
 
             const op = parser.current_index;
 
@@ -515,6 +515,7 @@ fn parseBinop4(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
     }
 }
 
+// -, !, ref
 fn parseUnary(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
 
     const start_of_expression = parser.current_index;
@@ -969,26 +970,31 @@ fn parseParamList(parser: *Parser) untyped.Node(untyped.Expression) {
 
     const start_of_expression = parser.current_index;
 
-    const node: untyped.Node(untyped.Expression) = parseExpression(parser, false);
+    const node: untyped.Node(untyped.Expression) = parseDeclaration(parser, false);
 
-    if (parser.current().token_type != .Comma) {
-        return node;
+    switch (parser.current().token_type) {
+        
+        .Comma => {
+            var list = untyped.List {
+                .expressions = .empty,
+            };
+
+            list.expressions.append(parser.allocator, node) catch @panic("Out of Memory.");
+
+            while (parser.skip_if(.Comma)) {
+                const node2: untyped.Node(untyped.Expression) = parseDeclaration(parser, false);
+                list.expressions.append(parser.allocator, node2) catch @panic("Out of Memory.");
+            }
+
+            return parser.makeExprNode(start_of_expression, .{
+                .List = list
+            });
+        },
+
+        else => {
+            return node;
+        }
     }
-
-    var list = untyped.List {
-        .expressions = .empty,
-    };
-
-    list.expressions.append(parser.allocator, node) catch @panic("Out of Memory.");
-
-    while (parser.skip_if(.Comma)) {
-        const node2: untyped.Node(untyped.Expression) = parseUnary(parser, false);
-        list.expressions.append(parser.allocator, node2) catch @panic("Out of Memory.");
-    }
-
-    return parser.makeExprNode(start_of_expression, .{
-        .List = list
-    });
 }
 
 fn parseCase(parser: *Parser) untyped.Case {
