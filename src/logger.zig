@@ -87,7 +87,7 @@ pub const Logger = struct {
             .level = .Warning,
         });
 
-        return &self.logs.items[self.logs.items.len];
+        return &self.logs.items[self.logs.items.len - 1];
     }
 
     pub fn logNote(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
@@ -97,7 +97,7 @@ pub const Logger = struct {
             .level = .Note,
         });
 
-        return &self.logs.items[self.logs.items.len];
+        return &self.logs.items[self.logs.items.len - 1];
     }
 
     pub fn deinit(self: *Logger) void {
