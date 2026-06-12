@@ -1,20 +1,26 @@
 const std = @import("std");
 const tokens = @import("tokens.zig");
+const files = @import("files.zig");
 
 pub fn TypedNode(comptime T: type) type {
     return struct {
-        returns: std.ArrayList(TypeRef),
+        value: std.ArrayList(TypeRef),
         data: *T,
+        start: usize,
+        end: usize,
+        file_id: files.FileId,
 
-        pub fn init(allocator: std.mem.Allocator, start_token: usize, end_token: usize, typeid: TypeId, value: T) !TypedNode(T) {
-            const data = try allocator.create(T);
-            data.* = value;
+        pub fn init(allocator: std.mem.Allocator, start_token: usize, end_token: usize, file_id: files.FileId, value: std.ArrayList(TypeRef), data: T) !TypedNode(T) {
+            
+            const data_ptr = try allocator.create(T);
+            data_ptr.* = data;
 
             return .{
-                .typeid = typeid,
-                .data = data,
+                .value = value,
+                .data = data_ptr,
                 .start_token = start_token,
                 .end_token = end_token,
+                .file_id = file_id,
             };
         }
     };

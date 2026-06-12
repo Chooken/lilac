@@ -31,7 +31,9 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
     }
 
     // Convert Untyped Program to Typed Program.
-    _ = sema.runSema(user_allocator, &uprogram);
+    _ = sema.runSema(user_allocator, &uprogram, .{
+        .WarnOnOperatorTypeChange = true,
+    });
 
     // Make a new arena for IR so we can free user data structures.
     var ir_arena = std.heap.ArenaAllocator.init(allocator);

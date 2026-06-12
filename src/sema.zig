@@ -15,11 +15,17 @@ const TypeSubstitution = struct {
     typeid: typed.TypeId,
 };
 
+pub const BuilderSettings = struct {
+    WarnOnOperatorTypeChange: bool,
+};  
+
 pub const Builder = struct {
 
     allocator: std.mem.Allocator,
 
     logger: logging.Logger,
+
+    settings: BuilderSettings,
 
     program: typed.Program = .{},
     uprogram: *untyped.Program,
@@ -354,6 +360,7 @@ pub const Scope = struct {
             },
 
             .List => |list| {
+                
                 for (list.expressions.items, 0..) |expr, index| {
                     switch (expr.data.*) {
 
@@ -732,6 +739,42 @@ pub const Scope = struct {
         return null;
     }
 
+    pub fn getFunction(self: *Scope, identifier: []const u8, node: ?untyped.Node(untyped.Expression)) TypeError!?typed.FunctionId {
+        const opt_decl = self.declarations.get(identifier);
+
+        if (opt_decl) |decl| {
+            switch (decl.decl_type) {
+
+                .Function => |func_id| {
+                    return func_id;
+                },
+
+                else => {
+                    var log = self.builder.logger.logError(
+                        "Type Error", .{}, 
+                        null);
+                    if (node) |ident_node| {
+                        log.addLine(
+                            self.builder.allocator, 
+                            ident_node.file_id, 
+                            "Declaration is not an type.", .{}, 
+                            ident_node.start, ident_node.end);
+                    }
+                    if (decl.node) |decl_node| {
+                        log.addLine(
+                            self.builder.allocator, 
+                            decl_node.file_id, 
+                            "This is the types declaration.", .{}, 
+                            decl_node.start, decl_node.end);
+                    }
+                    return TypeError.InvalidType;
+                }
+            }
+        }
+
+        return null;
+    }
+
     pub fn addField(self: *Scope, identifier: []const u8, node: untyped.Node(untyped.Expression), visability: typed.Visability, type_ref: typed.TypeRef) TypeError!void {
         std.debug.print("Added Field: {s} to {s}\n", .{identifier, self.allocFullName()});
         try self.addDecl(
@@ -754,6 +797,26 @@ pub const Scope = struct {
             .visability = visability,
             .decl_type = decl_type,
         };
+    }
+
+    pub fn createTypedStatement(self: *Scope, old_node: untyped.Node(untyped.Statement), stmt: typed.Statement, value: std.ArrayList(typed.TypeRef)) typed.TypedNode(typed.Statement) {
+        return typed.TypedNode(typed.Statement).init(
+            self.builder.allocator, 
+            old_node.start, 
+            old_node.end, 
+            old_node.file_id,
+            value, 
+            stmt);
+    }
+
+    pub fn createTypedExpression(self: *Scope, old_node: untyped.Node(untyped.Expression), expr: typed.Expression, value: std.ArrayList(typed.TypeRef)) typed.TypedNode(typed.Expression) {
+        return typed.TypedNode(typed.Expression).init(
+            self.builder.allocator, 
+            old_node.start, 
+            old_node.end, 
+            old_node.file_id,
+            value, 
+            expr);
     }
 };
 
@@ -782,20 +845,25 @@ pub const GenericTypeCache = struct {
     typeid: typed.TypeId,
 };
 
-pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program) typed.Program {
+pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program, settings: BuilderSettings) typed.Program {
 
     var builder = Builder {
         .allocator = allocator,
         .logger = logging.Logger {
             .allocator = allocator,
         },
+        .settings = settings,
         .uprogram = uprogram,
         .root = undefined,
     };
     defer builder.deinit();
 
+    std.debug.print("Collecting ID's\n", .{});
     collectTypeIds(&builder);
+    std.debug.print("Collecting Type Data\n", .{});
     collectTypeData(&builder);
+    std.debug.print("Generate Typed Ast\n", .{});
+    generate(&builder);
     logCollisionErrors(&builder);
 
     logging.printLogs(builder.logger, allocator);
@@ -1598,6 +1666,10 @@ pub fn collectTypeDataFromExpressions(scope: *Scope, ast: *untyped.Ast, expressi
             }
         },
 
+        .Assignment => |assignment| {
+            collectTypeDataFromExpressions(scope, ast, assignment.assignee, visability);
+        },
+
         .List => |list| {
             for (list.expressions.items) |expr| {
                 collectTypeDataFromExpressions(scope, ast, expr, visability);
@@ -2064,6 +2136,278 @@ pub fn addPrefixOperatorFunction(scope: *Scope, name: []const u8, name_node: unt
                 .Function = funct_id,
             }
         };
+    }
+}
+
+pub fn generate(builder: *Builder) void {
+
+    if (builder.getScope(builder.root)) |scope| {
+        generateModule(scope, &builder.uprogram.root_module);
+    }
+}
+
+pub fn generateModule(scope: *Scope, module: *untyped.Module) void {
+    for (module.asts.items) |*ast| {
+        generateFromBlock(scope, ast, &ast.root_block);
+    }
+
+    var sub_mod_iter = module.submodules.iterator();
+
+    while (sub_mod_iter.next()) |sub_mod_entry| {
+        if (scope.getType(sub_mod_entry.key_ptr.*, null) catch continue) |typeid| {
+
+            if (scope.builder.getScope(typeid)) |sub_scope| {
+                generateModule(sub_scope, sub_mod_entry.value_ptr);
+            }
+        }
+    }
+}
+
+pub fn generateFromBlock(scope: *Scope, ast: *untyped.Ast, block: *untyped.Block) void {
+    for (block.body.items) |stmt| {
+        generateFromStatements(scope, ast, stmt);
+    }
+}
+
+pub fn generateFromStatements(scope: *Scope, ast: *untyped.Ast, statement: untyped.Node(untyped.Statement)) void {
+    
+    switch (statement.data.*) {
+
+        .Block => |block| {
+            generateFromBlock(scope, ast, block.data);
+        },
+
+        .Expression => |expr| {
+            generateFromExpressions(scope, ast, expr);
+        },
+
+        .Private => |private| {
+            generateFromBlock(scope, ast, private.data);
+        },
+
+        else => return,
+    }
+}
+
+pub fn generateFromExpressions(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(untyped.Expression)) void {
+
+    switch (expression.data.*) {
+
+        .Declaration => |decl| {
+
+            const ident = switch (decl.name.data.*) {
+                
+                .Identifier => |ident| ident,
+
+                else => return,
+            };
+
+            const token = ast.tokens[ident.token_index];
+            const name = ast.source[token.start..token.end];
+            
+            switch (decl.decl_type.data.*) {
+                
+                .Function => |*function| {
+
+                    if (scope.getFunction(name, decl.name) catch return) |func_id| {
+                        generateFunction(scope, ast, function, func_id);
+                    }
+                },
+
+                else => {},
+            }
+        },
+
+        else => {},
+    }
+}
+
+pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Function, func_id: typed.FunctionId) void {
+
+    const prototype = switch (function.prototype.data.*) {
+
+        .FuncPrototype => |proto| proto,
+
+        else => return,
+    };
+
+    const funct = scope.builder.getFunction(func_id);
+    const proto_type = scope.builder.getType(funct.typeid).data.?.Function;
+
+    const funct_scope = scope.builder.getScope(scope.builder.getNewType(null, scope)).?;
+
+    if (prototype.arguments) |args| {
+
+        switch (args.data.*) {
+
+            .Declaration => |decl| {
+
+                const ident = switch (decl.name.data.*) {
+                    
+                    .Identifier => |ident| ident,
+
+                    else => return,
+                };
+                
+                const token = ast.tokens[ident.token_index];
+                const name = ast.source[token.start..token.end];
+
+                funct_scope.addField(name, args, .public, proto_type.inputs.items[0]);
+            }, 
+
+            .List => |list| {
+
+                for (list.expressions.items, 0..) |arg, index| {
+
+                    switch (arg.data.*) {
+
+                        .Declaration => |decl| {
+                            const ident = switch (decl.name.data.*) {
+                                
+                                .Identifier => |ident| ident,
+
+                                else => return,
+                            };
+                            
+                            const token = ast.tokens[ident.token_index];
+                            const name = ast.source[token.start..token.end];
+
+                            funct_scope.addField(name, arg, .public, proto_type.inputs.items[index]);
+                        },
+
+                        else => return,
+                    }
+                }
+            },
+
+            else => return,
+        }
+    }
+
+    switch (prototype.returns.data.*) {
+
+        .Declaration => |decl| {
+
+            const ident = switch (decl.name.data.*) {
+                
+                .Identifier => |ident| ident,
+
+                else => return,
+            };
+            
+            const token = ast.tokens[ident.token_index];
+            const name = ast.source[token.start..token.end];
+
+            funct_scope.addField(name, prototype.returns, .public, proto_type.inputs.items[0]);
+        }, 
+
+        .List => |list| {
+
+            for (list.expressions.items, 0..) |return_, index| {
+
+                switch (return_.data.*) {
+
+                    .Declaration => |decl| {
+                        const ident = switch (decl.name.data.*) {
+                            
+                            .Identifier => |ident| ident,
+
+                            else => return,
+                        };
+                        
+                        const token = ast.tokens[ident.token_index];
+                        const name = ast.source[token.start..token.end];
+
+                        funct_scope.addField(name, return_, .public, proto_type.inputs.items[index]);
+                    },
+
+                    else => return,
+                }
+            }
+        },
+
+        else => return,
+    }
+
+    generateFromStatements(funct_scope, ast, function.body);
+}
+
+pub fn generateFunctionBlock(scope: *Scope, ast: *untyped.Ast, block: *untyped.Block) typed.TypedNode(typed.Block) {
+
+    const block_scope = scope.builder.getScope(scope.builder.getNewType(null, scope)).?;
+
+    for (block.body.items) |stmt| {
+        generateFromStatements(block_scope, ast, stmt);
+    }
+}
+
+pub fn generateFunctionStatements(scope: *Scope, ast: *untyped.Ast, statement: untyped.Node(untyped.Statement)) typed.TypedNode(typed.Statement) {
+
+    switch (statement.data.*) {
+
+        .Block => |block| {
+
+            const typed_block = generateFunctionBlock(scope, ast, block.data);
+
+            return scope.createTypedStatement(
+                statement, 
+                .{ 
+                    .Block = block,
+                }, 
+                typed_block.value);
+        },
+
+        .Loop => |body| {
+            const loop = generateFunctionStatements(scope, ast, body);
+
+            return scope.createTypedStatement(
+                statement, 
+                .{
+                    .Loop = loop,
+                },
+                .empty);
+        },
+
+        .Expression => |expr| {
+            const typed_expr = generateFunctionExpressions(scope, ast, expr);
+
+            return scope.createTypedStatement(
+                statement, 
+                .{
+                    .Expression = typed_expr,
+                }, 
+                .empty);
+        },
+
+        .Return, .Break, .Continue => return,
+
+        else => {
+            return scope.createTypedStatement(
+                statement, 
+                .Error, 
+                .empty);
+        },
+    }
+}
+
+pub fn generateFunctionExpressions(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(untyped.Expression)) typed.TypedNode(typed.Expression) {
+
+    switch (expression.data.*) {
+        
+        .Assignment => |assignment| {
+            
+            switch (assignment.assignee.data.*) {
+                
+                .Identifier, .Member, .Declaration => { },
+
+                else => {
+                    return scope.createTypedExpression(expression, .Error, .empty);
+                }
+            }
+
+            const assignee = generateFunctionExpressions(scope, ast, assignment.assignee);
+            const value = generateFunctionExpressions(scope, ast, assignment.value);
+        }
     }
 }
 
