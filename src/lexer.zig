@@ -286,7 +286,7 @@ pub const Tokenizer = struct {
             .HexLiteral => {
                 self.index += 1;
                 switch (self.source[self.index]) {
-                    '0'...'9', 'a'...'f', '_' => {
+                    '0'...'9', 'a'...'f', 'A'...'F', '_' => {
                         continue :start .HexLiteral;
                     },
 

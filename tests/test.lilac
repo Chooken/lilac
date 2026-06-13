@@ -2,7 +2,7 @@ using x as y.x
 
 main: func () nothing {
 
-    first: @bit32 = 0x5
+    first: @bit32 = 0xFFFF_FFFF_FFFF
 
     if capture_function() -> value: @bit32 {
         first = @iadd(first, value)
@@ -25,7 +25,7 @@ main: func () nothing {
 
     e: Enum = .One
 
-    r: Object {
+    r: object {
 
     }
 

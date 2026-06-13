@@ -8,6 +8,7 @@ const TypeError = error {
     MultipleDefinitions,
     InvalidType,
     Visability,
+    TypeMismatch,
 };
 
 const TypeSubstitution = struct {
@@ -16,7 +17,8 @@ const TypeSubstitution = struct {
 };
 
 pub const BuilderSettings = struct {
-    WarnOnOperatorTypeChange: bool,
+    bitNativeSize: usize,
+    warnOnOperatorTypeChange: bool,
 };  
 
 pub const Builder = struct {
@@ -32,6 +34,16 @@ pub const Builder = struct {
 
     scopes: std.AutoHashMapUnmanaged(typed.TypeId, *Scope) = .empty,
     root: typed.TypeId,
+
+    // default types
+    bit8: typed.TypeId = undefined,
+    bit16: typed.TypeId = undefined,
+    bit32: typed.TypeId = undefined,
+    bit64: typed.TypeId = undefined,
+    bitNative: typed.TypeId = undefined,
+    nothing: typed.TypeId = undefined,
+    unknown: typed.TypeId = undefined,
+    numberLiteral: typed.TypeId = undefined,
     
     // Events
 
@@ -167,9 +179,11 @@ pub const Scope = struct {
             }
         }
 
-        const self_name = self.builder.getType(self.typeid).name orelse @panic("Getting a Name of a type without a name. possibly a function type.");
+        const opt_self_name = self.builder.getType(self.typeid).name;
 
-        size += self_name.len;
+        if (opt_self_name) |self_name|
+            size += self_name.len
+        else size -= 1;
 
         var name: []u8 = self.builder.allocator.alloc(u8, size) catch @panic("Out of Memory.");
         var offset: usize = 0;
@@ -177,12 +191,16 @@ pub const Scope = struct {
         while (parents.pop()) |parent| {
             if (self.builder.getType(parent.typeid).name) |parent_name| {
                 @memcpy(name[offset..offset + parent_name.len], parent_name);
-                name[offset + parent_name.len] = '.';
+                if (parents.items.len != 0 or opt_self_name != null) {
+                    name[offset + parent_name.len] = '.';
+                }
                 offset += parent_name.len + 1;
             }
         }
 
-        @memcpy(name[offset..offset + self_name.len], self_name);
+        if (opt_self_name) |self_name| {
+            @memcpy(name[offset..offset + self_name.len], self_name);
+        }
         return name;
     }
 
@@ -818,6 +836,176 @@ pub const Scope = struct {
             value, 
             expr);
     }
+
+    pub fn typeEql(self: *Scope, lhs: typed.TypedNode(typed.Expression), rhs: *typed.TypedNode(typed.Expression)) bool {
+
+        if (lhs.value.items.len != rhs.value.items.len) {
+
+            var log = self.builder.logger.logError(
+                "Type Error", .{}, 
+                null);
+            log.addLine(
+                self.builder.allocator, 
+                lhs.file_id, 
+                "Has {d} Types", .{lhs.value.items.len}, 
+                lhs.start, lhs.end);
+            log.addLine(
+                self.builder.allocator, 
+                lhs.file_id, 
+                "Has {d} Types", .{rhs.value.items.len}, 
+                rhs.start, rhs.end);
+
+            return false;
+        }
+
+        if (lhs.value.items.len < 1) {
+            return true;
+        }
+
+        if (lhs.value.items.len == 1) {
+            const lhs_type = lhs.value.items[0];
+            const rhs_type = rhs.value.items[0];
+
+            if (lhs_type.cmp(rhs_type)) {
+                return true;
+            }
+
+            if (self.builder.conversions.get(.{
+                .from = rhs_type,
+                .to = lhs_type,
+            })) |conversion| {
+
+                const conv = typed.Call {
+                    .arguements = rhs.*,
+                    .callee = conversion.decl_type.Function
+                };
+
+                rhs.* = typed.TypedNode(typed.Expression).init(
+                    self.builder.allocator, 
+                    rhs.start, rhs.end, 
+                    rhs.file_id, 
+                    lhs.value, 
+                    .{ .Call = conv });
+
+                return true;
+            }
+
+            const lhs_scope = self.builder.getScope(lhs_type.id);
+            const rhs_scope = self.builder.getScope(rhs_type.id);
+
+            var log = self.builder.logger.logError(
+                "Type Error", .{}, 
+                "The left and right types do not match.");
+            if (lhs_scope) |scope| {
+                log.addLine(
+                    self.builder.allocator, 
+                    lhs.file_id, 
+                    "Has Type: {s}{s}", .{ if (lhs_type.is_ref) "ref " else "", scope.allocFullName()}, 
+                    lhs.start, lhs.end);
+            }
+            if (rhs_scope) |scope| {
+                log.addLine(
+                    self.builder.allocator, 
+                    lhs.file_id, 
+                    "Has Type: {s}{s}", .{ if (rhs_type.is_ref) "ref " else "", scope.allocFullName()}, 
+                    rhs.start, rhs.end);
+            }
+
+            return false;
+        }
+
+        var split = typed.Split {
+            .results = .empty,
+            .value = rhs.*,
+        };
+
+        for (0..lhs.value.items.len) |index| {
+
+            const lhs_type = lhs.value.items[index];
+            const rhs_type = rhs.value.items[index];
+
+            if (lhs_type.cmp(rhs_type)) {
+                
+                split.results.append(self.builder.allocator, 
+                    typed.TypedNode(typed.Expression).init(
+                        self.builder.allocator, 
+                        rhs.start, rhs.end, rhs.file_id, 
+                        lhs.value, 
+                        .{ .SplitLiteral = .{ .index = index } })) catch @panic("Out of Memory.");
+                continue;
+            }
+
+            if (self.builder.conversions.get(
+                .{ .from = rhs_type, .to = lhs_type }
+            )) |conversion| {
+
+                const conv_call = typed.Call {
+                    .arguements = typed.TypedNode(typed.Expression).init(
+                        self.builder.allocator, 
+                        rhs.start, rhs.end, rhs.file_id, 
+                        lhs.value, 
+                        .{ .SplitLiteral = .{ .index = index } }),
+                    .callee = conversion.decl_type.Function
+                };
+
+                const conv_expr = typed.TypedNode(typed.Expression).init(
+                    self.builder.allocator, 
+                    rhs.start, rhs.end, 
+                    rhs.file_id, 
+                    lhs.value, 
+                    .{ .Call = conv_call });
+
+                split.results.append(self.builder.allocator, 
+                    conv_expr) catch @panic("Out of Memory.");
+            }
+
+            var log = self.builder.logger.logError(
+                "Type Error", .{}, 
+                "The left and right types do not match.");
+
+            var buffer: [1024]u8 = undefined;
+            var buf_index: usize = 0;
+            
+            for (lhs.value.items) |item| {
+                const item_scope = self.builder.getScope(item.id);
+                if (item_scope) |scope| {
+                    const section = std.fmt.bufPrint(buffer[buf_index..], "{s}{s}", .{ if (item.is_ref) "ref " else "", scope.allocFullName() }) catch @panic("Buffer Print Error.");
+                    buf_index += section.len;
+                }
+            }
+
+            log.addLine(
+                self.builder.allocator, 
+                lhs.file_id, 
+                "Has Type: {s}", .{buffer[0..buf_index]}, 
+                lhs.start, lhs.end);
+
+            buf_index = 0;
+
+            for (rhs.value.items) |item| {
+                const item_scope = self.builder.getScope(item.id);
+                if (item_scope) |scope| {
+                    const section = std.fmt.bufPrint(buffer[buf_index..], "{s}{s}", .{ if (item.is_ref) "ref " else "", scope.allocFullName() }) catch @panic("Buffer Print Error.");
+                    buf_index += section.len;
+                }
+            }
+
+            log.addLine(
+                self.builder.allocator, 
+                lhs.file_id, 
+                "Has Type: {s}", .{buffer[0..buf_index]}, 
+                rhs.start, rhs.end);
+
+            return false;
+        }
+
+        rhs.* = typed.TypedNode(typed.Expression).init(
+            self.builder.allocator, 
+            rhs.start, rhs.end, rhs.file_id, 
+            lhs.value, 
+            .{ .Split = split });
+        return true;
+    }
 };
 
 pub const Declaration = struct {
@@ -879,14 +1067,14 @@ pub fn collectTypeIds(builder: *Builder) void {
     
     if (builder.getScope(builder.root)) |scope| {
 
-        _ = scope.addTypeDecl("@bit8", .public, null) catch @panic("@bit8 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit16", .public, null) catch @panic("@bit16 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit32", .public, null) catch @panic("@bit32 was already added to root scope.");
-        _ = scope.addTypeDecl("@bit64", .public, null) catch @panic("@bit64 was already added to root scope.");
-        _ = scope.addTypeDecl("@bitNative", .public, null) catch @panic("@bitNative was already added to root scope.");
-        _ = scope.addTypeDecl("@numberLiteral", .public, null) catch @panic("@numberLiteral was already added to root scope.");
-        _ = scope.addTypeDecl("unknown", .public, null) catch @panic("unknown was already added to root scope.");
-        _ = scope.addTypeDecl("nothing", .public, null) catch @panic("nothing was already added to root scope.");
+        builder.bit8 = scope.addTypeDecl("@bit8", .public, null) catch @panic("@bit8 was already added to root scope.");
+        builder.bit16 = scope.addTypeDecl("@bit16", .public, null) catch @panic("@bit16 was already added to root scope.");
+        builder.bit32 = scope.addTypeDecl("@bit32", .public, null) catch @panic("@bit32 was already added to root scope.");
+        builder.bit64 = scope.addTypeDecl("@bit64", .public, null) catch @panic("@bit64 was already added to root scope.");
+        builder.bitNative = scope.addTypeDecl("@bitNative", .public, null) catch @panic("@bitNative was already added to root scope.");
+        builder.numberLiteral = scope.addTypeDecl("@numberLiteral", .public, null) catch @panic("@numberLiteral was already added to root scope.");
+        builder.unknown = scope.addTypeDecl("unknown", .public, null) catch @panic("unknown was already added to root scope.");
+        builder.nothing = scope.addTypeDecl("nothing", .public, null) catch @panic("nothing was already added to root scope.");
 
         collectTypeIdsFromModule(scope, &builder.uprogram.root_module);
     }
@@ -1719,7 +1907,7 @@ pub fn ExprToTypeRef(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
 
     while (true) {
 
-        const result = isTypeInScope(scope, current_scope, ast, expression, public_only) catch return null;
+        const result = isTypeInScope(scope, current_scope, ast, expr, public_only) catch return null;
         
         if (result) |found_scope| {
             return typed.TypeRef{
@@ -1743,7 +1931,7 @@ pub fn ExprToTypeRef(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(
     log.addLine(
         scope.builder.allocator, 
         ast.file, 
-        "Type doesn't exist in {s} scope.", .{scope.allocFullName()}, 
+        "Type doesn't exist in scope.", .{}, 
         expression.start, 
         expression.end);
 
@@ -2208,9 +2396,10 @@ pub fn generateFromExpressions(scope: *Scope, ast: *untyped.Ast, expression: unt
             switch (decl.decl_type.data.*) {
                 
                 .Function => |*function| {
-
                     if (scope.getFunction(name, decl.name) catch return) |func_id| {
-                        generateFunction(scope, ast, function, func_id);
+
+                        std.debug.print("generating {s}\n", .{name});
+                        generateFunction(scope, ast, function, name, func_id);
                     }
                 },
 
@@ -2222,7 +2411,7 @@ pub fn generateFromExpressions(scope: *Scope, ast: *untyped.Ast, expression: unt
     }
 }
 
-pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Function, func_id: typed.FunctionId) void {
+pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Function, func_name: []const u8, func_id: typed.FunctionId) void {
 
     const prototype = switch (function.prototype.data.*) {
 
@@ -2234,7 +2423,7 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
     const funct = scope.builder.getFunction(func_id);
     const proto_type = scope.builder.getType(funct.typeid).data.?.Function;
 
-    const funct_scope = scope.builder.getScope(scope.builder.getNewType(null, scope)).?;
+    const funct_scope = scope.builder.getScope(scope.builder.getNewType(func_name, scope)).?;
 
     if (prototype.arguments) |args| {
 
@@ -2252,7 +2441,7 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
                 const token = ast.tokens[ident.token_index];
                 const name = ast.source[token.start..token.end];
 
-                funct_scope.addField(name, args, .public, proto_type.inputs.items[0]);
+                funct_scope.addField(name, args, .public, proto_type.inputs.items[0]) catch return;
             }, 
 
             .List => |list| {
@@ -2272,7 +2461,7 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
                             const token = ast.tokens[ident.token_index];
                             const name = ast.source[token.start..token.end];
 
-                            funct_scope.addField(name, arg, .public, proto_type.inputs.items[index]);
+                            funct_scope.addField(name, arg, .public, proto_type.inputs.items[index]) catch return;
                         },
 
                         else => return,
@@ -2298,7 +2487,7 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
             const token = ast.tokens[ident.token_index];
             const name = ast.source[token.start..token.end];
 
-            funct_scope.addField(name, prototype.returns, .public, proto_type.inputs.items[0]);
+            funct_scope.addField(name, prototype.returns, .public, proto_type.inputs.items[0]) catch return;
         }, 
 
         .List => |list| {
@@ -2318,7 +2507,7 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
                         const token = ast.tokens[ident.token_index];
                         const name = ast.source[token.start..token.end];
 
-                        funct_scope.addField(name, return_, .public, proto_type.inputs.items[index]);
+                        funct_scope.addField(name, return_, .public, proto_type.outputs.items[index]) catch return;
                     },
 
                     else => return,
@@ -2326,19 +2515,30 @@ pub fn generateFunction(scope: *Scope, ast: *untyped.Ast, function: *untyped.Fun
             }
         },
 
+        .Nothing => {},
+
         else => return,
     }
 
-    generateFromStatements(funct_scope, ast, function.body);
+    
+    const funct_ = scope.builder.getFunction(func_id);
+    funct_.block = generateFunctionStatements(funct_scope, ast, function.body);
 }
 
-pub fn generateFunctionBlock(scope: *Scope, ast: *untyped.Ast, block: *untyped.Block) typed.TypedNode(typed.Block) {
+pub fn generateFunctionBlock(scope: *Scope, ast: *untyped.Ast, block: untyped.Node(untyped.Block)) typed.TypedNode(typed.Block) {
 
     const block_scope = scope.builder.getScope(scope.builder.getNewType(null, scope)).?;
+    var typed_block = typed.Block {};
 
-    for (block.body.items) |stmt| {
-        generateFromStatements(block_scope, ast, stmt);
+    for (block.data.body.items) |stmt| {
+        typed_block.body.append(scope.builder.allocator, generateFunctionStatements(block_scope, ast, stmt)) catch @panic("Out of Memory.");
     }
+
+    return typed.TypedNode(typed.Block).init(
+        scope.builder.allocator, 
+        block.start, block.end, block.file_id, 
+        .empty, 
+        typed_block);
 }
 
 pub fn generateFunctionStatements(scope: *Scope, ast: *untyped.Ast, statement: untyped.Node(untyped.Statement)) typed.TypedNode(typed.Statement) {
@@ -2347,12 +2547,12 @@ pub fn generateFunctionStatements(scope: *Scope, ast: *untyped.Ast, statement: u
 
         .Block => |block| {
 
-            const typed_block = generateFunctionBlock(scope, ast, block.data);
+            const typed_block = generateFunctionBlock(scope, ast, block);
 
             return scope.createTypedStatement(
                 statement, 
                 .{ 
-                    .Block = block,
+                    .Block = typed_block,
                 }, 
                 typed_block.value);
         },
@@ -2369,17 +2569,35 @@ pub fn generateFunctionStatements(scope: *Scope, ast: *untyped.Ast, statement: u
         },
 
         .Expression => |expr| {
-            const typed_expr = generateFunctionExpressions(scope, ast, expr);
+            const typed_expr = generateFunctionExpressions(scope, ast, expr, null) catch {
+                return scope.createTypedStatement(
+                    statement, 
+                    .Error, 
+                    .empty);
+            };
 
             return scope.createTypedStatement(
                 statement, 
                 .{
-                    .Expression = typed_expr,
+                    .Expression = typed_expr ,
                 }, 
                 .empty);
         },
 
-        .Return, .Break, .Continue => return,
+        .Return => return scope.createTypedStatement(
+                statement, 
+                .Return, 
+                .empty),
+
+        .Break => return scope.createTypedStatement(
+                statement, 
+                .Break, 
+                .empty),
+
+        .Continue => return scope.createTypedStatement(
+                statement, 
+                .Continue, 
+                .empty),
 
         else => {
             return scope.createTypedStatement(
@@ -2390,11 +2608,20 @@ pub fn generateFunctionStatements(scope: *Scope, ast: *untyped.Ast, statement: u
     }
 }
 
-pub fn generateFunctionExpressions(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(untyped.Expression)) typed.TypedNode(typed.Expression) {
+pub fn generateFunctionExpressions(scope: *Scope, ast: *untyped.Ast, expression: untyped.Node(untyped.Expression), opt_inferred_type: ?typed.TypeRef) TypeError!typed.TypedNode(typed.Expression) {
 
     switch (expression.data.*) {
         
         .Assignment => |assignment| {
+
+            var note_log = scope.builder.logger.logNote(
+                "Assignment", .{}, 
+                null);
+            note_log.addLine(
+                scope.builder.allocator, 
+                expression.file_id, 
+                "Assignment", .{}, 
+                expression.start, expression.end);
             
             switch (assignment.assignee.data.*) {
                 
@@ -2405,8 +2632,307 @@ pub fn generateFunctionExpressions(scope: *Scope, ast: *untyped.Ast, expression:
                 }
             }
 
-            const assignee = generateFunctionExpressions(scope, ast, assignment.assignee);
-            const value = generateFunctionExpressions(scope, ast, assignment.value);
+            const assignee = try generateFunctionExpressions(scope, ast, assignment.assignee, null);
+            var value = try generateFunctionExpressions(scope, ast, assignment.value, assignee.getInferable());
+
+            if (scope.typeEql(assignee, &value)) {
+                return scope.createTypedExpression(
+                    expression, 
+                    .{ .Assignment = .{ 
+                        .assignee = assignee, 
+                        .value = value,
+                        .op_token_type = ast.tokens[assignment.op_token_index].token_type } },
+                    assignee.value);
+            }
+
+            return scope.createTypedExpression(expression, .Error, .empty);
+        },
+
+        .Declaration => |decl| {
+
+            const name = switch (decl.name.data.*) {
+                .Identifier => |identifer| identifer,
+
+                else => {
+                    return TypeError.InvalidType;
+                }
+            };
+
+            const name_token = ast.tokens[name.token_index];
+            const name_string = ast.source[name_token.start..name_token.end];
+
+            const typed_decl = typed.Declaration {
+                .name = typed.TypedNode(typed.Identifier).init(
+                    scope.builder.allocator, 
+                    decl.name.start, decl.name.end, decl.name.file_id, 
+                    .empty, 
+                    .{ .token_index = name.token_index }),
+            };
+
+            switch (decl.decl_type.data.*) {
+
+                .Setter => |setter| {
+                    if (ExprToTypeRef(scope, ast, setter.settee)) |decl_type_ref| {
+
+                        try scope.addField(name_string, decl.name, .public, decl_type_ref);
+
+                        var types = std.ArrayList(typed.TypeRef).empty;
+                        types.append(scope.builder.allocator, decl_type_ref) catch @panic("Out of Memory.");
+
+                        const typed_setter = typed.Setter {
+                            .settee = decl_type_ref.id,
+                            .body = generateFunctionBlock(scope, ast, setter.body),
+                        };
+
+                        const decl_node = scope.createTypedExpression(
+                            expression, 
+                            .{ .Declaration = typed_decl }, 
+                            types);
+
+                        const setter_node = scope.createTypedExpression(
+                            decl.decl_type, 
+                            .{ .Setter = typed_setter }, 
+                            types);
+
+                        const assignment = typed.Assignment {
+                            .assignee = decl_node,
+                            .value = setter_node,
+                            .op_token_type = tokens.TokenType.Equals,
+                        };
+
+                        return scope.createTypedExpression(
+                            expression,
+                            .{ .Assignment = assignment }, 
+                            .empty);
+                    }
+                },
+
+                else => {
+                    if (ExprToTypeRef(scope, ast, decl.decl_type)) |decl_type_ref| {
+
+                        try scope.addField(name_string, decl.name, .public, decl_type_ref);
+
+                        var types = std.ArrayList(typed.TypeRef).empty;
+                        types.append(scope.builder.allocator, decl_type_ref) catch @panic("Out of Memory.");
+
+                        return scope.createTypedExpression(
+                            expression, 
+                            .{ .Declaration = typed_decl }, 
+                            types);
+                    }
+                }
+            }
+
+            return TypeError.InvalidType;
+        },
+
+        .Literal => |literal| {
+
+            var types = std.ArrayList(typed.TypeRef).empty;
+            
+            const token = ast.tokens[literal.token_index];
+            const literal_value = ast.source[token.start..token.end];
+            
+            switch (literal.literal_type) {
+
+                .Number => types.append(scope.builder.allocator, .{ .id = scope.builder.numberLiteral, .is_ref = false }) catch @panic("Out of Memory."),
+
+                .Bool => types.append(scope.builder.allocator, .{ .id = scope.builder.bit8, .is_ref = false }) catch @panic("Out of Memory."),
+
+                .Binary => {
+
+                    const bits_per_char: usize = switch (literal_value[1]) {
+                        'b' => 1,
+                        'x' => 4,
+                        else => {
+                            var log = scope.builder.logger.logError(
+                                "Literal Error", .{},
+                                null);
+
+                            log.addLine(
+                                scope.builder.allocator, 
+                                expression.file_id, 
+                                "Binary Literal Type doesn't exist.", .{}, 
+                                expression.start, expression.end);
+
+                            return TypeError.InvalidType;
+                        }
+                    };
+
+                    var bit_size: usize = 0;
+                    var padding: bool = true;
+
+                    for (literal_value[2..]) |char| {
+
+                        if (padding) {
+                            if (char == '0') {
+                                continue;
+                            }
+                            padding = false;
+                        }
+
+                        if (char != '_') {
+                            bit_size += 1;
+                        }
+                    }
+
+                    bit_size *= bits_per_char;
+
+                    if (bit_size > 64) {
+
+                        var log = scope.builder.logger.logError(
+                            "Type Error", .{},
+                            "Literals can only go up to 0xFFFF_FFFF_FFFF_FFFF or 64 bits. Use a smaller value.");
+
+                        log.addLine(
+                            scope.builder.allocator, 
+                            expression.file_id, 
+                            "This value would be {d} bits long.", .{bit_size}, 
+                            expression.start, expression.end);
+
+                        return TypeError.TypeMismatch;
+                    }
+
+                    if (opt_inferred_type) |inferred_type| {
+
+                        if (inferred_type.id.index == scope.builder.bit8.index) {
+
+                            if (bit_size > 8) {
+
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{},
+                                    "@bit8 can only fit values up to 0b1000_0000 or 0xFF. Use a smaller value or a larger type.");
+
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    expression.file_id, 
+                                    "This value is {d} bits long.", .{bit_size}, 
+                                    expression.start, expression.end);
+
+                                return scope.createTypedExpression(
+                                    expression, 
+                                    .Error, 
+                                    .empty);
+                            }
+
+                            types.append(scope.builder.allocator, .{ .id = scope.builder.bit8, .is_ref = false }) catch @panic("Out of Memory.");
+
+                        } else if (inferred_type.id.index == scope.builder.bit16.index) {
+
+                            if (bit_size > 16) {
+
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{},
+                                    "@bit16 can only fit values up to 0b1000_0000_0000_0000 or 0xFFFF. Use a smaller value or a larger type.");
+
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    expression.file_id, 
+                                    "This value is {d} bits long.", .{bit_size}, 
+                                    expression.start, expression.end);
+
+                                return scope.createTypedExpression(
+                                    expression, 
+                                    .Error, 
+                                    .empty);
+                            }
+
+                            types.append(scope.builder.allocator, .{ .id = scope.builder.bit16, .is_ref = false }) catch @panic("Out of Memory.");
+
+                        } else if (inferred_type.id.index == scope.builder.bit32.index) {
+
+                            if (bit_size > 32) {
+
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{},
+                                    "@bit32 can only fit values up to 0xFFFF_FFFF. Use a smaller value or a larger type.");
+
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    expression.file_id, 
+                                    "This value is {d} bits long.", .{bit_size}, 
+                                    expression.start, expression.end);
+
+                                return TypeError.TypeMismatch;
+                            }
+
+                            types.append(scope.builder.allocator, .{ .id = scope.builder.bit32, .is_ref = false }) catch @panic("Out of Memory.");
+
+                        } else if (inferred_type.id.index == scope.builder.bitNative.index){
+
+                            if (bit_size > scope.builder.settings.bitNativeSize) {
+
+                                var log = scope.builder.logger.logError(
+                                    "Type Error", .{},
+                                    "@bit64 can only fit values up to 0xFFFF_FFFF_FFFF_FFFF. Use a smaller value or a larger type.");
+
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    expression.file_id, 
+                                    "This value is {d} bits long.", .{bit_size}, 
+                                    expression.start, expression.end);
+
+                                return TypeError.TypeMismatch;
+
+                            } else if (bit_size > 32) {
+
+                                var log = scope.builder.logger.logWarning(
+                                    "Concerning Literal", .{},
+                                    "@bitNative recommendeds to only use literals up to 0xFFFF_FFFF as you don't know if the target is 32 bit.");
+
+                                log.addLine(
+                                    scope.builder.allocator, 
+                                    expression.file_id, 
+                                    "This value is {d} bits long.", .{bit_size}, 
+                                    expression.start, expression.end);
+                            }
+
+                            types.append(scope.builder.allocator, .{ .id = scope.builder.bitNative, .is_ref = false }) catch @panic("Out of Memory.");
+
+                        } else {
+                            types.append(scope.builder.allocator, .{ .id = scope.builder.bit64, .is_ref = false }) catch @panic("Out of Memory.");
+                        }
+                        
+                    } else {
+                        types.append(scope.builder.allocator, .{ .id = scope.builder.bit64, .is_ref = false }) catch @panic("Out of Memory.");
+                    }
+                },
+
+                else => {
+                    var log = scope.builder.logger.logError(
+                        "Type Error", .{},
+                        "Literal not implemented yet....");
+
+                    log.addLine(
+                        scope.builder.allocator, 
+                        expression.file_id, 
+                        "{s} literal", .{@tagName(literal.literal_type)}, 
+                        expression.start, expression.end);
+
+                    return TypeError.InvalidType;
+                }
+            }
+
+            return scope.createTypedExpression(
+                expression, 
+                .{ .Literal = .{ 
+                    .literal_type = literal.literal_type, 
+                    .token_index = literal.token_index } }, 
+                types);
+        },
+
+        else => {
+            var log = scope.builder.logger.logError(
+                "Invalid Expression", .{},
+                null);
+
+            log.addLine(
+                scope.builder.allocator, 
+                expression.file_id, 
+                "Here", .{}, 
+                expression.start, expression.end);
+
+            return TypeError.InvalidType;
         }
     }
 }

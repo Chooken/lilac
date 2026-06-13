@@ -10,18 +10,25 @@ pub fn TypedNode(comptime T: type) type {
         end: usize,
         file_id: files.FileId,
 
-        pub fn init(allocator: std.mem.Allocator, start_token: usize, end_token: usize, file_id: files.FileId, value: std.ArrayList(TypeRef), data: T) !TypedNode(T) {
+        pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, file_id: files.FileId, value: std.ArrayList(TypeRef), data: T) TypedNode(T) {
             
-            const data_ptr = try allocator.create(T);
+            const data_ptr = allocator.create(T) catch @panic("Out of Memory.");
             data_ptr.* = data;
 
             return .{
                 .value = value,
                 .data = data_ptr,
-                .start_token = start_token,
-                .end_token = end_token,
+                .start = start,
+                .end = end,
                 .file_id = file_id,
             };
+        }
+
+        pub fn getInferable(self: TypedNode(T)) ?TypeRef {
+            if (self.value.items.len == 1) {
+                return self.value.items[0];
+            }
+            return null;
         }
     };
 }
@@ -164,25 +171,26 @@ pub const Function = struct {
     requires_self: bool,
     is_inlined: bool,
     typeid: TypeId, 
-    block: ?Block,
+    block: ?TypedNode(Statement),
 };
 
 pub const Block = struct {
-    body: std.ArrayList(Statement) = .empty,
+    body: std.ArrayList(TypedNode(Statement)) = .empty,
 };
 
 pub const Statement = union(enum) {
     Block: TypedNode(Block),
-    Loop: TypedNode(Block),
-    Defer: TypedNode(Block),
+    Loop: TypedNode(Statement),
+    Defer: TypedNode(Statement),
+    Expression: TypedNode(Expression),
     Return,
     Break,
     Continue,
-    Expression,
     Error,
 };
 
 pub const Expression = union(enum) {
+    Split: Split,
     If: Conditional,
     Match: Match,
     Assignment: Assignment,
@@ -196,13 +204,19 @@ pub const Expression = union(enum) {
     Identifier: Identifier,
     Builtin: Identifier,
     Literal: Literal,
+    SplitLiteral: SplitLiteral,
     Error,
+};
+
+pub const Split = struct { 
+    results: std.ArrayList(TypedNode(Expression)),
+    value: TypedNode(Expression),
 };
 
 pub const Assignment = struct {
     assignee: TypedNode(Expression),
     value: TypedNode(Expression),
-    op_token_index: usize,
+    op_token_type: tokens.TokenType,
 };
 
 pub const List = struct {
@@ -210,8 +224,7 @@ pub const List = struct {
 };
 
 pub const Declaration = struct {
-    name: TypedNode(Expression),
-    decl_type: TypedNode(Expression),
+    name: TypedNode(Identifier),
 };
 
 pub const Conditional = struct {
@@ -249,12 +262,12 @@ pub const Unary = struct {
 };
 
 pub const Setter = struct {
-    settee: TypedNode(Expression),
+    settee: TypeId,
     body: TypedNode(Block)
 };
 
 pub const Call = struct {
-    callee: TypedNode(Expression),
+    callee: FunctionId,
     arguements: ?TypedNode(Expression),
 };
 
@@ -270,4 +283,8 @@ pub const Identifier = struct {
 pub const Literal = struct {
     literal_type: tokens.TokenType,
     token_index: usize,
+};
+
+pub const SplitLiteral = struct {
+    index: usize,
 };

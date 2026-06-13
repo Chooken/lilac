@@ -211,14 +211,14 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
 
         for (log_file.source, 0..) |character, index| {
 
-            if (character != '\n') {
+            if (character != '\n' and character != 0) {
                 continue;
             }
 
             last_line = current_line;
             current_line = Line {
-                .start = if (last_line.end == 0) 0 else last_line.end + 1,
-                .end = index,
+                .start = if (last_line.end == 0) 0 else last_line.end + 2,
+                .end = index - 1,
                 .number = line_number,
             };
             line_number += 1;
@@ -265,7 +265,7 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
                     opt_last_printed_line = current_line.number;
                 }
 
-                printLineComment(log_color, last_line_offset + (logline.start - current_line.start) - 1, logline);
+                printLineComment(log_color, last_line_offset + (logline.start - current_line.start) - 1, logline, current_line.end);
                 current_log_index += 1;
                 comment_last_line = true;
             }
@@ -298,12 +298,12 @@ fn printLine(allocator: std.mem.Allocator, log_color: std.Io.Terminal.Color, lin
     return offset;
 }
 
-fn printLineComment(log_color: std.Io.Terminal.Color, offset: usize, logline: LogLine) void {
+fn printLineComment(log_color: std.Io.Terminal.Color, offset: usize, logline: LogLine, line_length: usize) void {
     _ = printPadding(log_color, "|", offset);
                     
     setColor(log_color);
     setColor(.bold);
-    for (logline.start..logline.end) |_| {
+    for (logline.start..@min(logline.end, line_length)) |_| {
         print("^");
     }
     setColor(.reset);
