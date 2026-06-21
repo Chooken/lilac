@@ -1,14 +1,15 @@
 const std = @import("std");
+const files = @import("files.zig");
 
 pub const Token = struct {
     token_type: TokenType,
-    start: usize,
-    end: usize,
+    span: files.Span,
 
     pub const reserved_tokens = std.StaticStringMap(TokenType).initComptime(.{
         .{"obj", TokenType.Object},
         .{"func", TokenType.Function},
         .{"enum", TokenType.Enum},
+        .{"union", TokenType.Union},
         .{"interface", TokenType.Interface},
         .{"self", TokenType.Self},
         .{"nothing", TokenType.Nothing},
@@ -98,6 +99,7 @@ pub const TokenType = enum {
     Function,
     Object,
     Enum,
+    Union,
     Interface,
 
     // Statements.
@@ -129,6 +131,7 @@ pub const TokenType = enum {
             .Object => "obj",
             .Function => "func",
             .Enum => "enum",
+            .Union => "union",
             .Interface => "interface",
             .Self => "self",
             .Nothing => "nothing",

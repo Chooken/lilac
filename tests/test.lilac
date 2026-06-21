@@ -2,7 +2,7 @@ using x as y.x
 
 main: func () nothing {
 
-    first: @bit32 = 0xFFFF_FFFF_FFFF
+    first: @bitNative = 0xFFFF_FFFF
 
     if capture_function() -> value: @bit32 {
         first = @iadd(first, value)
@@ -25,6 +25,8 @@ main: func () nothing {
 
     e: Enum = .One
 
+    u: Union = .First(0x1)
+
     r: object {
 
     }
@@ -41,7 +43,31 @@ main: func () nothing {
 
     1 + 2 * 3 == 1 and 1 == 2 - 1
 
-    x: int, y: int = 1
+    x: int, y: int = 1,3,3
+}
+
+Enum: enum {
+    One
+    Two
+}
+
+Union: union {
+    First: @bit8
+    Second
+}
+
+interface: obj {
+
+    Vtable: obj {
+        write: ref func (ref unknown) nothing
+    }
+
+    vtable: ref Vtable,
+    data: ref unknown,
+
+    @on_drop: func (self) nothing {
+        @free(self.data)
+    }
 }
 
 other: func () nothing {
@@ -121,11 +147,6 @@ object: obj {
     @conversion: func (from: @numberLiteral) to: object {
         to = object(@to_int32(from))
     }
-}
-
-Enum: enum {
-    One: @bit8
-    Two
 }
 
 AddOneAble: interface {

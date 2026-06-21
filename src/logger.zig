@@ -70,30 +70,33 @@ pub const Logger = struct {
         self.logs.append(self.allocator, _log) catch @panic("Out of Memory.");
     }
 
-    pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+    pub fn logError(self: *Logger, comptime msg_fmt: []const u8, msg_args: anytype, comptime opt_hint_fmt: ?[]const u8, hint_args: anytype) *Log {
         self.log(.{
-            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
-            .hint = hint,
+            .allocator = self.allocator,
+            .message = std.fmt.allocPrint(self.allocator, msg_fmt, msg_args) catch @panic("Out of Message."),
+            .hint = if (opt_hint_fmt) |hint_fmt| std.fmt.allocPrint(self.allocator, hint_fmt, hint_args) catch @panic("Out of Message.") else null,
             .level = .Error,
         });
 
         return &self.logs.items[self.logs.items.len - 1];
     }
 
-    pub fn logWarning(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+    pub fn logWarning(self: *Logger, comptime msg_fmt: []const u8, msg_args: anytype, comptime opt_hint_fmt: ?[]const u8, hint_args: anytype) *Log {
         self.log(.{
-            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
-            .hint = hint,
+            .allocator = self.allocator,
+            .message = std.fmt.allocPrint(self.allocator, msg_fmt, msg_args) catch @panic("Out of Message."),
+            .hint = if (opt_hint_fmt) |hint_fmt| std.fmt.allocPrint(self.allocator, hint_fmt, hint_args) catch @panic("Out of Message.") else null,
             .level = .Warning,
         });
 
         return &self.logs.items[self.logs.items.len - 1];
     }
 
-    pub fn logNote(self: *Logger, comptime fmt: []const u8, args: anytype, hint: ?[]const u8) *Log {
+    pub fn logNote(self: *Logger, comptime msg_fmt: []const u8, msg_args: anytype, comptime opt_hint_fmt: ?[]const u8, hint_args: anytype) *Log {
         self.log(.{
-            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Message."),
-            .hint = hint,
+            .allocator = self.allocator,
+            .message = std.fmt.allocPrint(self.allocator, msg_fmt, msg_args) catch @panic("Out of Message."),
+            .hint = if (opt_hint_fmt) |hint_fmt| std.fmt.allocPrint(self.allocator, hint_fmt, hint_args) catch @panic("Out of Message.") else null,
             .level = .Note,
         });
 
@@ -126,30 +129,28 @@ pub const LogLine = struct {
 };
 
 pub const Log = struct {
+    allocator: std.mem.Allocator,
     message: []const u8,
     logs: std.AutoHashMapUnmanaged(files.FileId, std.ArrayList(LogLine)) = .empty,
     hint: ?[]const u8,
     level: LogLevel,
 
     pub fn addLine(
-        self: *Log, 
-        allocator: std.mem.Allocator, 
-        file_id: files.FileId, 
+        self: *Log,
         comptime fmt: []const u8, 
         args: anytype, 
-        start: usize, 
-        end: usize
+        span: files.Span,
     ) void {
-        const val = self.logs.getOrPut(allocator, file_id) catch @panic("Out of Memory.");
+        const val = self.logs.getOrPut(self.allocator, span.file_id) catch @panic("Out of Memory.");
 
         if (!val.found_existing) {
             val.value_ptr.* = .empty;
         }
 
-        val.value_ptr.append(allocator, .{
-            .message = std.fmt.allocPrint(allocator, fmt, args) catch @panic("Out of Memory."),
-            .start = start,
-            .end = end,
+        val.value_ptr.append(self.allocator, .{
+            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("Out of Memory."),
+            .start = span.start,
+            .end = span.end,
         }) catch @panic("Out of Memory.");
     }
 };

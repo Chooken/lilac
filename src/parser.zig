@@ -14,25 +14,25 @@ const Parser = struct {
     current_index: usize = 0,
     allocator: std.mem.Allocator,
 
-    pub fn LogInvalidToken(self: *Parser, comptime fmt: []const u8, args: anytype, hint: ?[]const u8, token_index: usize) void {
+    pub fn LogInvalidToken(self: *Parser, comptime fmt: []const u8, args: anytype, comptime hint: ?[]const u8, token_index: usize) void {
         const token = self.ast.tokens[token_index];
         var log = self.logger.logError(
             "Invalid Token", .{}, 
-            hint);
+            hint, .{});
         log.addLine(
-            self.allocator, 
-            self.ast.file, 
             fmt, args, 
-            token.start, 
-            token.end);
+            token.span);
     }
     
     pub fn current(self: *Parser) Token {
 
         if (self.eof()) return .{
-            .start = self.current_index,
-            .end = self.current_index,
             .token_type = .Invalid,
+            .span = .{
+                .start = self.current_index,
+                .end = self.current_index,
+                .file_id = self.ast.file,
+            },
         };
 
         return self.ast.tokens[self.current_index];
@@ -92,14 +92,14 @@ const Parser = struct {
         self.current_index += 1;
     }
 
-    pub fn skip_expected(self: *Parser, token_type: TokenType, hint: ?[]const u8) bool {
+    pub fn skip_expected(self: *Parser, token_type: TokenType, comptime hint: ?[]const u8) bool {
 
         const prev_token = self.current();
 
         if (prev_token.token_type != token_type) {
             self.LogInvalidToken(
                 "Unexpected token. Expected \x22{s}\x22 but got \x22{s}\x22 instead.", 
-                .{ token_type.toString(), self.ast.source[prev_token.start..prev_token.end]},
+                .{ token_type.toString(), prev_token.span.getString()},
                 hint,
                 self.current_index);
             return true;
@@ -139,8 +139,8 @@ const Parser = struct {
     pub fn makeStmtNode(self: *Parser, start_token: usize, expression: untyped.Statement) untyped.Node(untyped.Statement) {
         return untyped.Node(untyped.Statement).init(
             self.allocator, 
-            self.ast.tokens[start_token].start,
-            self.ast.tokens[self.current_index - 1].end, 
+            self.ast.tokens[start_token].span.start,
+            self.ast.tokens[self.current_index - 1].span.end, 
             expression,
             self.ast.file) catch @panic("Out of Memory.");
     }
@@ -148,8 +148,8 @@ const Parser = struct {
     pub fn makeExprNode(self: *Parser, start_token: usize, expression: untyped.Expression) untyped.Node(untyped.Expression) {
         return untyped.Node(untyped.Expression).init(
             self.allocator, 
-            self.ast.tokens[start_token].start,
-            self.ast.tokens[self.current_index - 1].end, 
+            self.ast.tokens[start_token].span.start,
+            self.ast.tokens[self.current_index - 1].span.end, 
             expression,
             self.ast.file) catch @panic("Out of Memory.");
     }
@@ -161,12 +161,10 @@ pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool) A
 
     _debug = debug;
 
-    const source = file_id.getFile().source;
-
     var tokens: std.ArrayList(Token) = .empty;
     defer tokens.deinit(allocator);
 
-    var tokenizer = Tokenizer.init(source);
+    var tokenizer = Tokenizer.init(file_id);
 
     
     while (tokenizer.next()) |token| {
@@ -176,14 +174,13 @@ pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool) A
     if (debug) {
         std.debug.print("-- Tokens --\n", .{});
         for (tokens.items) |token| {   
-            std.debug.print("{s} - {s}\n", .{@tagName(token.token_type), source[token.start..token.end]});
+            std.debug.print("{s} - {s}\n", .{@tagName(token.token_type), token.span.getString()});
         }
     }
 
     var parser = Parser { 
         .ast = Ast {
             .file = file_id,
-            .source = source,
             .tokens = tokens.toOwnedSlice(allocator) catch @panic("Out of Memory."),
             .root_block = undefined,
         },
@@ -216,7 +213,7 @@ fn parseTopBlock(parser: *Parser) untyped.Block {
 fn parseBlockWithNode(parser: *Parser) untyped.Node(untyped.Block) {
     const start = parser.ast.tokens[parser.current_index];
     const block = parseBlock(parser);
-    return untyped.Node(untyped.Block).init(parser.allocator, start.start, parser.ast.tokens[parser.current_index - 1].end, block, parser.ast.file) catch @panic("Out of Memory.");
+    return untyped.Node(untyped.Block).init(parser.allocator, start.span.start, parser.ast.tokens[parser.current_index - 1].span.end, block, parser.ast.file) catch @panic("Out of Memory.");
 }
 
 fn parseBlock(parser: *Parser) untyped.Block {
@@ -344,9 +341,52 @@ fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Ex
     
     switch (parser.current().token_type) {
 
-        .Equals, .PlusEquals, .MinusEquals, .TimesEquals, .DivEquals, .PercentEquals, .FatRightArrow => {
+        .PlusEquals => {
+            return UnwrapAssignment(
+                parser, 
+                .Plus, 
+                lhs, 
+                start_of_expression, 
+                allow_setters);
+        },
 
-            const op = parser.current_index;
+        .MinusEquals => {
+            return UnwrapAssignment(
+                parser, 
+                .Minus, 
+                lhs, 
+                start_of_expression, 
+                allow_setters);
+        },
+
+        .TimesEquals => {
+            return UnwrapAssignment(
+                parser, 
+                .Asterisk, 
+                lhs, 
+                start_of_expression, 
+                allow_setters);
+        },
+
+        .DivEquals => {
+            return UnwrapAssignment(
+                parser, 
+                .Slash, 
+                lhs, 
+                start_of_expression, 
+                allow_setters);
+        },
+
+        .PercentEquals => {
+            return UnwrapAssignment(
+                parser, 
+                .Percentage, 
+                lhs, 
+                start_of_expression, 
+                allow_setters);
+        },
+
+        .Equals => {
 
             parser.skip();
 
@@ -356,7 +396,22 @@ fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Ex
                 .Assignment = .{
                     .assignee = lhs,
                     .value = value,
-                    .op_token_index = op,
+                    .inlined = false,
+                }
+            });
+        },
+
+        .FatRightArrow => {
+
+            parser.skip();
+
+            const value = parseList(parser, allow_setters);
+
+            return parser.makeExprNode(start_of_expression, .{
+                .Assignment = .{
+                    .assignee = lhs,
+                    .value = value,
+                    .inlined = true,
                 }
             });
         },
@@ -365,6 +420,33 @@ fn parseAssignment(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Ex
             return lhs;
         },
     }
+}
+
+fn UnwrapAssignment(parser: *Parser, token_type: TokenType, lhs: untyped.Node(untyped.Expression), start_of_expression: usize, allow_setters: bool) untyped.Node(untyped.Expression) {
+
+    const op = parser.current();
+
+    parser.skip();
+
+    const value = parseList(parser, allow_setters);
+
+    const binop = parser.makeExprNode(
+        start_of_expression,
+        .{ .Binop = .{ 
+            .left = lhs,
+            .right = value,
+            .op_token = .{ 
+                .token_type = token_type,
+                .span = op.span } } }
+    );
+
+    return parser.makeExprNode(start_of_expression, .{
+        .Assignment = .{
+            .assignee = lhs,
+            .value = binop,
+            .inlined = false,
+        }
+    });
 }
 
 fn parseList(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expression) {
@@ -420,13 +502,13 @@ fn parseBinop1(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
     outer: switch (parser.current().token_type) {
 
         .And, .Or => {
-            const op = parser.current_index;
+            const op = parser.current();
             parser.skip();
             lhs = parser.makeExprNode(start_of_expression, .{ 
                 .Binop = .{ 
                     .left = lhs, 
                     .right = parseBinop2(parser, allow_setters), 
-                    .op_token_index = op }});
+                    .op_token = op }});
             continue: outer parser.current().token_type;
         },
 
@@ -446,13 +528,13 @@ fn parseBinop2(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
     outer: switch (parser.current().token_type) {
 
         .EqualsEquals, .LessThan, .GreaterThan, .LessThanOrEquals, .GreaterThanOrEquals => {
-            const op = parser.current_index;
+            const op = parser.current();
             parser.skip();
             lhs = parser.makeExprNode(start_of_expression, .{ 
                 .Binop = .{ 
                     .left = lhs, 
                     .right = parseBinop3(parser, allow_setters), 
-                    .op_token_index = op }});
+                    .op_token = op }});
 
             continue: outer parser.current().token_type;
         },
@@ -473,13 +555,13 @@ fn parseBinop3(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
     outer: switch (parser.current().token_type) {
 
         .Plus, .Minus => {
-            const op = parser.current_index;
+            const op = parser.current();
             parser.skip();
             lhs = parser.makeExprNode(start_of_expression, .{ 
                 .Binop = .{ 
                     .left = lhs, 
                     .right = parseBinop4(parser, allow_setters), 
-                    .op_token_index = op }});
+                    .op_token = op }});
             continue: outer parser.current().token_type;
         },
 
@@ -499,13 +581,13 @@ fn parseBinop4(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
     outer: switch (parser.current().token_type) {
 
         .Asterisk, .Slash, .Percentage => {
-            const op = parser.current_index;
+            const op = parser.current();
             parser.skip();
             lhs = parser.makeExprNode(start_of_expression, .{ 
                 .Binop = .{ 
                     .left = lhs, 
                     .right = parseUnary(parser, allow_setters), 
-                    .op_token_index = op }});
+                    .op_token = op }});
             continue: outer parser.current().token_type;
         },
 
@@ -520,7 +602,7 @@ fn parseUnary(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Express
 
     const start_of_expression = parser.current_index;
 
-    const op = parser.current_index;
+    const op = parser.current();
 
     switch (parser.current().token_type) {
 
@@ -529,7 +611,7 @@ fn parseUnary(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Express
             const node = parser.makeExprNode(start_of_expression, .{
                 .Unary = .{
                     .right = parseSetter(parser,allow_setters),
-                    .op_token_index = op,
+                    .op_token = op,
                 }
             });
             
@@ -672,50 +754,9 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
     
     const expr: untyped.Expression = switch (parser.current().token_type) {
 
-        .Identifier => .{
+        .Identifier, .Builtin, .String, .Char, .Bool, .Number, .Binary => .{
             .Identifier = .{
-                .token_index = parser.current_index,
-            }
-        },
-
-        .Builtin => .{
-            .Builtin = .{
-                .token_index = parser.current_index,
-            }
-        },
-
-        .String => .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        },
-
-        .Char => .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        },
-
-        .Bool => .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        },
-
-        .Number => .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
-            }
-        },
-
-        .Binary => .{
-            .Literal = .{
-                .literal_type = parser.current().token_type,
-                .token_index = parser.current_index,
+                .token = parser.current(),
             }
         },
 
@@ -777,6 +818,16 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
             return node;
         },
 
+        .Union => {
+            parser.skip();
+            
+            const node = parser.makeExprNode(start_of_expression, .{
+                .Union = parseBlockWithNode(parser)
+            });
+
+            return node;
+        },
+
         .Interface => {
             parser.skip();
             
@@ -796,7 +847,7 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
                 condition = parser.makeExprNode(start_of_expression, .Error);
                 parser.LogInvalidToken(
                     "You forgot the if condition.", .{}, 
-                    "if condition {}",
+                    "if condition {{}}",
                     parser.current_index - 1);
             } else {
                 condition = parseBinop1(parser, false);
@@ -844,7 +895,7 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
                 value = parser.makeExprNode(start_of_expression, .Error);
                 parser.LogInvalidToken(
                     "You forgot the matches value.", .{}, 
-                    "match value {}",
+                    "match value {{}}",
                     parser.current_index);
             } else {
                 value = parseMember(parser, false);
@@ -855,7 +906,7 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
 
             const open_brace_pos = parser.current_index;
 
-            if (parser.skip_expected(.OpenBrace, "match value {}")) {
+            if (parser.skip_expected(.OpenBrace, "match value {{}}")) {
                 return parser.makeExprNode(start_of_expression, .Error);
             }
 
@@ -866,19 +917,13 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
 
                         var log = parser.logger.logError(
                             "Invalid Match", .{}, 
-                            "Try removing or merging your else blocks.");
+                            "Try removing or merging your else blocks.", .{});
                         log.addLine(
-                            parser.allocator, 
-                            parser.ast.file, 
                             "This is the first else block declaration.", .{}, 
-                            else_.start, 
-                            else_.end);
+                            else_.span);
                         log.addLine(
-                            parser.allocator, 
-                            parser.ast.file, 
                             "Else has been declared twice in match expression.", .{}, 
-                            other_else.start, 
-                            other_else.end);
+                            other_else.span);
                     } else {
                         else_case = parseElseCase(parser);
                     }
@@ -1023,7 +1068,7 @@ fn parseCase(parser: *Parser) untyped.Case {
         else => {
             parser.LogInvalidToken(
                 "Invalid case body.", .{}, 
-                "pattern -> capture: type {} or pattern -> capture: type => value",
+                "pattern -> capture: type {{}} or pattern -> capture: type => value",
                 parser.current_index);
             return untyped.Case {
                 .body = parser.makeStmtNode(parser.current_index, .Error),
@@ -1043,7 +1088,7 @@ fn parseCase(parser: *Parser) untyped.Case {
 fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
 
     const start_token_of_expression = parser.current_index;
-    const start = parser.ast.tokens[start_token_of_expression].start;
+    const start = parser.ast.tokens[start_token_of_expression].span.start;
 
     parser.skip();
 
@@ -1052,7 +1097,7 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
         .FatRightArrow => {
             parser.skip();
             const statement = parseStatement(parser);
-            return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index - 1].end, .{
+            return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index - 1].span.end, .{
                 .body = statement,
             }, parser.ast.file) catch @panic("Out of Memory.");
         },
@@ -1061,7 +1106,7 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
             return untyped.Node(untyped.Else).init(
                 parser.allocator, 
                 start, 
-                parser.ast.tokens[parser.current_index].end, 
+                parser.ast.tokens[parser.current_index].span.end, 
                 .{
                     .body = parser.makeStmtNode(parser.current_index, .{ .Block = parseBlockWithNode(parser) }),
                 }, 
@@ -1071,12 +1116,12 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
         else => {
             parser.LogInvalidToken(
                 "Invalid else case body.", .{}, 
-                "else {} or else => value",
+                "else {{}} or else => value",
                 parser.current_index);
             return untyped.Node(untyped.Else).init(
                 parser.allocator, 
                 start, 
-                parser.ast.tokens[parser.current_index].end, 
+                parser.ast.tokens[parser.current_index].span.end, 
                 .{
                     .body = parser.makeStmtNode(start_token_of_expression, .Error),
                 }, 

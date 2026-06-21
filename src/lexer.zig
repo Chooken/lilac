@@ -1,17 +1,20 @@
 const std = @import("std");
+const files = @import("files.zig");
 const tokens = @import("tokens.zig");
 const Token = tokens.Token;
 const TokenType = tokens.TokenType;
 
 pub const Tokenizer = struct {
 
+    file_id: files.FileId,
     source: [:0]const u8,
     index: usize,
 
-    pub fn init(source: [:0]const u8) Tokenizer
+    pub fn init(file_id: files.FileId) Tokenizer
     {
         return .{
-            .source = source,
+            .file_id = file_id,
+            .source = file_id.getFile().source,
             .index = 0,
         };
     }
@@ -45,9 +48,12 @@ pub const Tokenizer = struct {
     pub fn next(self: *Tokenizer) ?Token {
 
         var token = Token {
-            .start = self.index,
-            .end = undefined,
             .token_type = undefined,
+            .span = .{
+                .start = self.index,
+                .end = 0,
+                .file_id = self.file_id,
+            }
         };
 
         start: switch (State.Start) {
@@ -60,7 +66,7 @@ pub const Tokenizer = struct {
 
                     ' ', '\n', '\t', '\r' => {
                         self.index += 1;
-                        token.start = self.index;
+                        token.span.start = self.index;
                         continue :start .Start;
                     },
 
@@ -197,7 +203,7 @@ pub const Tokenizer = struct {
 
                         token.token_type = TokenType.Identifier;
 
-                        const identifier = self.source[token.start..self.index];
+                        const identifier = self.source[token.span.start..self.index];
 
                         if (Token.getReserved(identifier)) |tokenType|
                         {
@@ -476,7 +482,7 @@ pub const Tokenizer = struct {
 
                     '\n' => {
                         self.index += 1;
-                        token.start = self.index;
+                        token.span.start = self.index;
                         continue :start .Start;
                     },
 
@@ -497,7 +503,7 @@ pub const Tokenizer = struct {
             }
         }
 
-        token.end = self.index;
+        token.span.end = self.index;
         return token;
     }
 };

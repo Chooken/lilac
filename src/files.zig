@@ -19,6 +19,17 @@ pub const FileId = struct {
     }
 };
 
+pub const Span = struct {
+    start: usize,
+    end: usize,
+    file_id: FileId,
+
+    pub fn getString(self: *const Span) []const u8 {
+        const file = self.file_id.getFile();
+        return file.source[self.start..self.end];
+    }
+};
+
 var sources = std.ArrayList(File).empty;
 
 pub fn loadFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) ?FileId {

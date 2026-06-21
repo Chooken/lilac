@@ -15,7 +15,6 @@ pub const Module = struct {
 
 pub const Ast = struct {
     file: files.FileId,
-    source: []const u8,
     tokens: []tokens.Token,
     root_block: Block,
 };
@@ -32,9 +31,7 @@ pub const Using = struct {
 pub fn Node(comptime T: type) type {
     return struct {
         data: *T,
-        start: usize,
-        end: usize,
-        file_id: files.FileId,
+        span: files.Span,
 
         pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, value: T, file_id: files.FileId) !Node(T) {
             const data = try allocator.create(T);
@@ -42,9 +39,21 @@ pub fn Node(comptime T: type) type {
 
             return .{
                 .data = data,
-                .start = start,
-                .end = end,
-                .file_id = file_id,
+                .span = .{
+                    .start = start,
+                    .end = end,
+                    .file_id = file_id,
+                }
+            };
+        }
+
+        pub fn initWSpan(allocator: std.mem.Allocator, value: T, span: files.Span) !Node(T) {
+            const data = try allocator.create(T);
+            data.* = value;
+
+            return .{
+                .data = data,
+                .span = span
             };
         }
     };
@@ -79,6 +88,7 @@ pub const Expression = union(enum) {
     FuncPrototype: FuncPrototype,
     Object: Node(Block),
     Enum: Node(Block),
+    Union: Node(Block),
     Interface: Node(Block),
     Identifier: Identifier,
     Builtin: Identifier,
@@ -103,7 +113,7 @@ pub const FuncPrototype = struct {
 pub const Assignment = struct {
     assignee: Node(Expression),
     value: Node(Expression),
-    op_token_index: usize,
+    inlined: bool,
 };
 
 pub const List = struct {
@@ -141,12 +151,12 @@ pub const Case = struct {
 pub const Binop = struct {
     left: Node(Expression),
     right: Node(Expression),
-    op_token_index: usize,
+    op_token: tokens.Token,
 };
 
 pub const Unary = struct {
     right: Node(Expression),
-    op_token_index: usize,
+    op_token: tokens.Token,
 };
 
 pub const Setter = struct {
@@ -170,51 +180,50 @@ pub const Member = struct {
 };
 
 pub const Identifier = struct { 
-    token_index: usize,
+    token: tokens.Token,
 };
 
 pub const Literal = struct {
-    literal_type: tokens.TokenType,
-    token_index: usize,
+    token: tokens.Token,
 };
 
 pub fn printAST(ast: *Ast) void {
-    printBlock(&ast.root_block, 0, ast);
+    printBlock(&ast.root_block, 0);
 }
 
-fn printBlock(block: *Block, indent: usize, ast: *Ast) void {
+fn printBlock(block: *Block, indent: usize) void {
     printWithIndent(indent, "Block:", .{});
     for (block.body.items) |item| {
-        printStatement(item, indent + 1, ast);
+        printStatement(item, indent + 1);
     }
 }
 
-fn printStatement(node: Node(Statement), indent: usize, ast: *Ast) void {
+fn printStatement(node: Node(Statement), indent: usize) void {
 
     switch (node.data.*) {
         .Block => |block| {
-            printBlock(block.data, indent, ast);
+            printBlock(block.data, indent);
         },
 
         .Loop => |loop| {
             printWithIndent(indent, "Loop:", .{});
-            printStatement(loop, indent + 1, ast);
+            printStatement(loop, indent + 1);
         },
 
         .Private => |private| {
             printWithIndent(indent, "Private:", .{});
-            printBlock(private.data, indent + 1, ast);
+            printBlock(private.data, indent + 1);
         },
 
         .Using => |using| {
             printWithIndent(indent, "Using:", .{});
 
             printWithIndent(indent + 1, "Namespace:", .{});
-            printExpression(using.namespace, indent + 2, ast);
+            printExpression(using.namespace, indent + 2);
 
             if (using.alias) |alias| {
                 printWithIndent(indent + 1, "Alias:", .{});
-                printExpression(alias, indent + 2, ast);
+                printExpression(alias, indent + 2);
             }
         },
 
@@ -224,43 +233,43 @@ fn printStatement(node: Node(Statement), indent: usize, ast: *Ast) void {
 
         .Error => printWithIndent(indent, "Error", .{}),
 
-        .Expression => |expr| printExpression(expr, indent, ast),
+        .Expression => |expr| printExpression(expr, indent),
     }
 }
 
-fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
+fn printExpression(node: Node(Expression), indent: usize) void {
     
     switch (node.data.*) {
 
         .Assignment => |assignment| {
             printWithIndent(indent, "Assignment:", .{});
             
-            printWithIndent(indent + 1, "Op: {s}", .{getTokenString(ast.tokens[assignment.op_token_index].start, ast.tokens[assignment.op_token_index].end, ast)});
+            printWithIndent(indent + 1, "Inlined: {any}", .{assignment.inlined});
             printWithIndent(indent + 1, "Assignee:", .{});
-            printExpression(assignment.assignee, indent + 2, ast);
+            printExpression(assignment.assignee, indent + 2);
             printWithIndent(indent + 1, "Value:", .{});
-            printExpression(assignment.value, indent + 2, ast);
+            printExpression(assignment.value, indent + 2);
         },
 
         .Binop => |binop| {
             printWithIndent(indent, "Bin Op:", .{});
             
-            printWithIndent(indent + 1, "Op: {s}", .{getTokenString(ast.tokens[binop.op_token_index].start, ast.tokens[binop.op_token_index].end, ast)});
+            printWithIndent(indent + 1, "Op: {s}", .{binop.op_token.span.getString()});
             printWithIndent(indent + 1, "Left:", .{});
-            printExpression(binop.left, indent + 2, ast);
+            printExpression(binop.left, indent + 2);
             printWithIndent(indent + 1, "Right:", .{});
-            printExpression(binop.right, indent + 2, ast);
+            printExpression(binop.right, indent + 2);
         },
 
         .Call => |call| {
             printWithIndent(indent, "Call:", .{});
             
             printWithIndent(indent + 1, "Callee:", .{});
-            printExpression(call.callee, indent + 2, ast);
+            printExpression(call.callee, indent + 2);
 
             if (call.arguements) |arguements| {
                 printWithIndent(indent + 1, "Args:", .{});
-                printExpression(arguements, indent + 2, ast);
+                printExpression(arguements, indent + 2);
             }
         },
 
@@ -268,24 +277,24 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             printWithIndent(indent, "Declaration:", .{});
 
             printWithIndent(indent + 1, "Name:", .{});
-            printExpression(decl.name, indent + 2, ast);
+            printExpression(decl.name, indent + 2);
             printWithIndent(indent + 1, "Type:", .{});
-            printExpression(decl.decl_type, indent + 2, ast);
+            printExpression(decl.decl_type, indent + 2);
         },
 
         .Generic => |gen| {
             printWithIndent(indent, "Generic:", .{});
 
             printWithIndent(indent + 1, "Callee:", .{});
-            printExpression(gen.callee, indent + 2, ast);
+            printExpression(gen.callee, indent + 2);
             printWithIndent(indent + 1, "Type:", .{});
-            printExpression(gen.arguements, indent + 2, ast);
+            printExpression(gen.arguements, indent + 2);
         },
         
         .List => |list| {
             printWithIndent(indent, "List:", .{});
             for (list.expressions.items) |item| {
-                printExpression(item, indent + 1, ast);
+                printExpression(item, indent + 1);
             }
         },
 
@@ -293,18 +302,18 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             printWithIndent(indent, "If:", .{});
             
             printWithIndent(indent + 1, "Condition:", .{});
-            printExpression(_if.condition, indent + 2, ast);
+            printExpression(_if.condition, indent + 2);
 
             if (_if.captures) |captures| {
                 printWithIndent(indent + 1, "Captures:", .{});
-                printExpression(captures, indent + 2, ast);
+                printExpression(captures, indent + 2);
             }
             printWithIndent(indent + 1, "Body:", .{});
-            printStatement(_if.body, indent + 2, ast);
+            printStatement(_if.body, indent + 2);
 
             if (_if.else_body) |else_body| {
                 printWithIndent(indent + 1, "Else Body:", .{});
-                printStatement(else_body.data.body, indent + 2, ast);
+                printStatement(else_body.data.body, indent + 2);
             }
         },
 
@@ -312,21 +321,21 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             printWithIndent(indent, "Match:", .{});
             
             printWithIndent(indent + 1, "Value:", .{});
-            printExpression(match.value, indent + 2, ast);
+            printExpression(match.value, indent + 2);
             printWithIndent(indent + 1, "Cases:", .{});
             for (match.cases.items) |item| {
                 
                 printWithIndent(indent + 2, "Case:", .{});
                 printWithIndent(indent + 3, "Pattern:", .{});
-                printExpression(item.pattern, indent + 4, ast);
+                printExpression(item.pattern, indent + 4);
                 
                 if (item.captures) |capture| {
                     printWithIndent(indent + 3, "Captures:", .{});
-                    printExpression(capture, indent + 4, ast);
+                    printExpression(capture, indent + 4);
                 }
 
                 printWithIndent(indent + 3, "Body:", .{});
-                printStatement(item.body, indent + 4, ast);
+                printStatement(item.body, indent + 4);
             }
         },
 
@@ -334,22 +343,22 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             printWithIndent(indent, "Member:", .{});
             
             printWithIndent(indent + 1, "Parent:", .{});
-            printExpression(member.parent, indent + 2, ast);
+            printExpression(member.parent, indent + 2);
             printWithIndent(indent + 1, "Child:", .{});
-            printExpression(member.child, indent + 2, ast);
+            printExpression(member.child, indent + 2);
         },
 
         .ImplicitMember => |implicit_member| {
             printWithIndent(indent, "Implicit Member:", .{});
-            printExpression(implicit_member, indent + 1, ast);
+            printExpression(implicit_member, indent + 1);
         },
 
         .Unary => |unary| {
             printWithIndent(indent, "Unary:", .{});
             
-            printWithIndent(indent + 1, "Op: {s}", .{getTokenString(ast.tokens[unary.op_token_index].start, ast.tokens[unary.op_token_index].end, ast)});
+            printWithIndent(indent + 1, "Op: {s}", .{unary.op_token.span.getString()});
             printWithIndent(indent + 1, "Right:", .{});
-            printExpression(unary.right, indent + 2, ast);
+            printExpression(unary.right, indent + 2);
         },
 
         .Setter => |setter| {
@@ -357,31 +366,36 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             printWithIndent(indent, "Setter:", .{});
 
             printWithIndent(indent + 1, "Settee:", .{});
-            printExpression(setter.settee, indent + 2, ast);
-            printBlock(setter.body.data, indent + 1, ast);
+            printExpression(setter.settee, indent + 2);
+            printBlock(setter.body.data, indent + 1);
         },
 
         .Object => |obj| {
             printWithIndent(indent, "Object:", .{});
-            printBlock(obj.data, indent + 1, ast);
+            printBlock(obj.data, indent + 1);
         },
 
         .Enum => |_enum| {
             printWithIndent(indent, "Enum:", .{});
-            printBlock(_enum.data, indent + 1, ast);
+            printBlock(_enum.data, indent + 1);
+        },
+
+        .Union => |_union| {
+            printWithIndent(indent, "Union:", .{});
+            printBlock(_union.data, indent + 1);
         },
 
         .Interface => |interface| {
             printWithIndent(indent, "Interface:", .{});
-            printBlock(interface.data, indent + 1, ast);
+            printBlock(interface.data, indent + 1);
         },
 
         .Function => |function| {
             printWithIndent(indent, "Function", .{});
             printWithIndent(indent + 1, "Is Inlined:", .{});
             printWithIndent(indent + 2, "{}", .{function.is_inline});
-            printExpression(function.prototype, indent + 1, ast);
-            printStatement(function.body, indent + 1, ast);
+            printExpression(function.prototype, indent + 1);
+            printStatement(function.body, indent + 1);
         },
 
         .FuncPrototype => |funcProto| {
@@ -389,24 +403,24 @@ fn printExpression(node: Node(Expression), indent: usize, ast: *Ast) void {
             
             if (funcProto.arguments) |arguements| {
                 printWithIndent(indent + 1, "Arguements:", .{});
-                printExpression(arguements, indent + 2, ast);
+                printExpression(arguements, indent + 2);
             }
             printWithIndent(indent + 1, "Returns:", .{});
-            printExpression(funcProto.returns, indent + 2, ast);
+            printExpression(funcProto.returns, indent + 2);
         },
 
         .Identifier => {
-            printWithIndent(indent, "Indentifier: {s}", .{getTokenString(node.start, node.end, ast)});
+            printWithIndent(indent, "Indentifier: {s}", .{node.span.getString()});
         },
 
         .Builtin => {
-            printWithIndent(indent, "Builtin: {s}", .{getTokenString(node.start, node.end, ast)});
+            printWithIndent(indent, "Builtin: {s}", .{node.span.getString()});
         },
 
         .Literal => |lit| {
             printWithIndent(indent, "Literal:", .{});
-            printWithIndent(indent + 1, "Type: {s}", .{@tagName(lit.literal_type)});
-            printWithIndent(indent + 1, "Value: {s}", .{getTokenString(node.start, node.end, ast)});
+            printWithIndent(indent + 1, "Type: {s}", .{@tagName(lit.token.token_type)});
+            printWithIndent(indent + 1, "Value: {s}", .{node.span.getString()});
         },
 
         .Self => printWithIndent(indent, "Self", .{}),

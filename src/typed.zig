@@ -6,11 +6,9 @@ pub fn TypedNode(comptime T: type) type {
     return struct {
         value: std.ArrayList(TypeRef),
         data: *T,
-        start: usize,
-        end: usize,
-        file_id: files.FileId,
+        span: files.Span,
 
-        pub fn init(allocator: std.mem.Allocator, start: usize, end: usize, file_id: files.FileId, value: std.ArrayList(TypeRef), data: T) TypedNode(T) {
+        pub fn init(allocator: std.mem.Allocator, span: files.Span, value: std.ArrayList(TypeRef), data: T) TypedNode(T) {
             
             const data_ptr = allocator.create(T) catch @panic("Out of Memory.");
             data_ptr.* = data;
@@ -18,9 +16,7 @@ pub fn TypedNode(comptime T: type) type {
             return .{
                 .value = value,
                 .data = data_ptr,
-                .start = start,
-                .end = end,
-                .file_id = file_id,
+                .span = span,
             };
         }
 
@@ -34,9 +30,50 @@ pub fn TypedNode(comptime T: type) type {
 }
 
 pub const Program = struct {
+    data: std.ArrayList(u8) = .empty,
     types: std.ArrayList(Type) = .empty,
-    func_types: std.HashMapUnmanaged(FunctionProto, TypeId, FunctionProto.HashContext, 80) = .empty,
     functions: std.ArrayList(Function) = .empty,
+    globals: std.ArrayList(TypeRef) = .empty,
+
+    pub fn addString(self: *Program, allocator: std.mem.Allocator, string: []const u8) Data {
+        var data_slice = Data {
+            .start = self.data.items.len,
+            .end = 0,
+        };
+        
+        self.data.appendSlice(allocator, string) catch @panic("Out of Memory.");
+
+        data_slice.end = self.data.items.len;
+        return data_slice;
+    }
+
+    pub fn addI8(self: *Program, allocator: std.mem.Allocator, data: i8) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addI16(self: *Program, allocator: std.mem.Allocator, data: i16) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addI32(self: *Program, allocator: std.mem.Allocator, data: i32) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addI64(self: *Program, allocator: std.mem.Allocator, data: i64) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addF16(self: *Program, allocator: std.mem.Allocator, data: f16) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addF32(self: *Program, allocator: std.mem.Allocator, data: f32) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
+
+    pub fn addF64(self: *Program, allocator: std.mem.Allocator, data: f64) Data {
+        return self.addString(allocator, std.mem.asBytes(&data));
+    }
 
     pub fn addType(self: *Program, allocator: std.mem.Allocator, typedata: Type) TypeId {
         self.types.append(allocator, typedata) catch @panic("Out of Memory.");
@@ -46,20 +83,21 @@ pub const Program = struct {
     }
 };
 
-
-
 pub const Type = struct {
     name: ?[]const u8,
     size: ?usize = null,
-    data: ?TypeData = null,
-};
-
-pub const Visability = enum {
-    public,
-    private,
+    fields: std.ArrayList(Variable) = .empty,
 };
 
 pub const TypeId = struct {
+    index: usize,
+};
+
+pub const FunctionId = struct {
+    index: usize,
+};
+
+pub const globalId = struct {
     index: usize,
 };
 
@@ -72,44 +110,9 @@ pub const TypeRef = struct {
     }
 };
 
-pub const TypeData = union(enum) {
-    Primative,
-    Object: Object,
-    Enum: Enum,
-    Function: FunctionProto,
-    Interface: Interface,
-    Module: Module,
-    Nothing,
-};
-
-pub const Conversion = struct {
-    from: TypeRef,
-    to: TypeRef,
-};
-
-pub const BinopOperator = struct {
-    lhs: TypeRef,
-    rhs: TypeRef,
-    op: tokens.TokenType,
-};
-
-pub const UnaryOperator = struct {
-    value: TypeRef,
-    op: tokens.TokenType,
-};
-
-pub const Field = struct {
-    visability: Visability,
+pub const Variable = struct {
     name: []const u8,
     type_ref: ?TypeRef,
-};
-
-pub const Object = struct {
-    structure: std.ArrayList(Field) = .empty,
-};
-
-pub const Enum = struct {
-    structure: std.ArrayList(Field) = .empty,
 };
 
 pub const FunctionProto = struct {
@@ -153,19 +156,7 @@ pub const FunctionProto = struct {
     };
 };
 
-pub const Interface = struct {
-    structure: std.ArrayList(struct { []const u8,  }) = .empty,
-};
-
-pub const Module = struct {
-    globals: std.ArrayList(Field) = .empty,
-};
-
 // Typed Ast.
-
-pub const FunctionId = struct {
-    index: usize,
-};
 
 pub const Function = struct {
     requires_self: bool,
@@ -194,18 +185,24 @@ pub const Expression = union(enum) {
     If: Conditional,
     Match: Match,
     Assignment: Assignment,
-    Declaration: Declaration,
+    Declaration: TypeRef,
     List: List,
-    Binop: Binop,
-    Unary: Unary,
     Setter: Setter,
     Call: Call,
-    Member: Member,
-    Identifier: Identifier,
-    Builtin: Identifier,
-    Literal: Literal,
-    SplitLiteral: SplitLiteral,
+    BuiltinCall: BuiltinCall, 
+    FieldAccessor: FieldAccessor,
+    GlobalId: usize,
+    LocalVar: usize,
+    SplitVar: usize,
+    Function: FunctionId,
+    Data: Data,
+    Type,
     Error,
+};
+
+pub const Data = struct {
+    start: usize,
+    end: usize,
 };
 
 pub const Split = struct { 
@@ -216,20 +213,16 @@ pub const Split = struct {
 pub const Assignment = struct {
     assignee: TypedNode(Expression),
     value: TypedNode(Expression),
-    op_token_type: tokens.TokenType,
+    inlined: bool,
 };
 
 pub const List = struct {
     expressions: std.ArrayList(TypedNode(Expression)),
 };
 
-pub const Declaration = struct {
-    name: TypedNode(Identifier),
-};
-
 pub const Conditional = struct {
     condition: TypedNode(Expression),
-    captures: ?TypedNode(Expression),
+    captures: std.ArrayList(TypedNode(TypeRef)),
     body: TypedNode(Statement),
     else_body: ?TypedNode(Else),
 };
@@ -250,20 +243,15 @@ pub const Case = struct {
     body: TypedNode(Statement),
 };
 
-pub const Binop = struct {
-    left: TypedNode(Expression),
-    right: TypedNode(Expression),
-    op_token_index: usize,
-};
-
-pub const Unary = struct {
-    right: TypedNode(Expression),
-    op_token_index: usize,
-};
-
 pub const Setter = struct {
     settee: TypeId,
-    body: TypedNode(Block)
+    body: std.ArrayList(TypedNode(Assignment))
+};
+
+pub const EnumSetter = struct {
+    settee: TypeId,
+    tag: TypedNode(Expression), 
+    value: ?TypedNode(Expression),
 };
 
 pub const Call = struct {
@@ -271,20 +259,16 @@ pub const Call = struct {
     arguements: ?TypedNode(Expression),
 };
 
-pub const Member = struct {
+pub const BuiltinCall = struct {
+    callee: []const u8,
+    arguements: ?TypedNode(Expression),
+};
+
+pub const FieldAccessor = struct {
     parent: TypedNode(Expression),
-    child: TypedNode(Expression),
+    field_index: usize,
 };
 
-pub const Identifier = struct { 
-    token_index: usize,
-};
-
-pub const Literal = struct {
-    literal_type: tokens.TokenType,
-    token_index: usize,
-};
-
-pub const SplitLiteral = struct {
+pub const SplitVar = struct {
     index: usize,
 };
