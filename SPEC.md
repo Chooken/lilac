@@ -324,8 +324,9 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 | **`@on_copy`** | `(self) new_copy` | Called when a value is copied. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`.|
 | **`@on_drop`** | `(self) nothing` | Called when a value exits scope or a reference is freed. Used for resource deallocation and cleanup.|
 
+Example of defining custom constructors and RAII rules
+
 ```lilac
-// Example of defining custom constructors and RAII rules
 Buffer: obj {
     ptr: ref @bit8
 
