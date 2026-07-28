@@ -9,12 +9,15 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 ### Primitive Bit Containers
 
 * **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's-complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@iadd` vs. `@fadd`).
+
 * **`@bitNative`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
+
 * **`@numberLiteral`**: A compile-time reference to the UTF-8 representation of a numeric literal. Compiler intrinsics (such as `@asInt()` or `@asFloat()`) evaluate the literal at compile time and strip the reference.
 
 ### Special Keywords
 
 * **`unknown`**: An opaque type of indeterminate size. It can only be instantiated behind a reference (`ref unknown`), serving as Lilac's mechanism for type-erased pointers (analogous to `void*`).
+
 * **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables. It is not a type and occupies no memory.
 
 ### Universal Zero-Initialization
@@ -30,6 +33,7 @@ Lilac does not implement move semantics. Value assignment and parameter passing 
 String and number literals desugar into standard library object representations at compile time.
 
 Number literals hold a compile-time reference to their UTF-8 string
+
 ```lilac
 NumberLiteral: obj {
     Size: @bit32
@@ -38,6 +42,7 @@ NumberLiteral: obj {
 ```
 
 String literals are pointers to a UTF-8 character array with an explicit size
+
 ```lilac
 String: obj {
     Size: @bit32
@@ -45,8 +50,9 @@ String: obj {
 }
 ```
 
-Formatted strings ($"Hello {name}") desugar into structured objects
-A .toString() method on the object generates the final UTF-8 output
+Formatted strings (`$"Hello {name}"`) desugar into structured objects.
+A `.toString()` method on the object generates the final UTF-8 output:
+
 ```lilac
 FString: obj {
     Size_1: @bit32
@@ -59,11 +65,12 @@ FString: obj {
 
 ### Variable Declaration
 
-Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization.
+Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@on_init` hook is defined.
 
 ```lilac
 counter: @bit32 = 0x0
 user: Object {}
+custom_user: Object(0x1, "Lilac") // Invokes @on_init with custom params
 ```
 
 The base language enforces no concept of mutability. Read-only variables and immutability guards are implemented in user-land using the `@on_override` compiler hook.
@@ -80,8 +87,8 @@ reference: ref @bit32 = ref variable
 References **auto-dereference by default**. Operators act on the underlying value, not the memory address:
 
 * `ptr + 1` invokes `@add` on the underlying `@bit32`, incrementing the integer value by `1`.
+
 * It does **not** perform pointer arithmetic. To manipulate raw memory addresses, a reference must be explicitly converted to `@bitNative`.
----
 
 ## 4. Composite Types & Namespaces
 
@@ -118,6 +125,7 @@ Enum: enum { One, Two }
 ```
 
 Desugared object equivalent:
+
 ```lilac
 Enum: obj {
     value: @bit8
@@ -135,7 +143,8 @@ Union: union {
 }
 ```
 
-Desugared object equivalent
+Desugared object equivalent:
+
 ```lilac
 Union: obj {
     Tag: enum { Some, None }
@@ -177,27 +186,46 @@ multi_func: func () result_1: @bit8, result_2: @bit16 {
 }
 
 val1: @bit8, val2: @bit16 = multi_func()
-
 ```
 
 ### Control Flow
 
 Conditional statements evaluate expressions as boolean based on strict non-zero testing against `@bit8` (`0x0` is false; any other value is true). Non-`@bit8` types must be explicitly or implicitly converted to `@bit8` before evaluation.
 
-If expressions return values:
+If expressions take a value to conditionally call code:
+
+```lilac
+if condition {
+
+}
+```
+
+You can also attach else blocks to ifs:
+
+```lilac
+if condition {
+    
+} else {
+
+}
+```
+
+If expressions can also return values:
+
 ```lilac
 status: @bit8 = if 0x0 0x0 else 0x1
 ```
 
-Value capturing from multi-return functions
-If the first return value is non-zero, subsequent values are captured into scope
+Value capturing from multi-return functions:
+If the first return value is non-zero, subsequent values are captured into scope:
+
 ```lilac
 if multi_func -> secondary_val: @bit16 {
     // secondary_val is scoped here
 }
 ```
 
-Loops execute infinitely by default unless broken or conditioned.
+Loops execute infinitely by default unless broken or conditioned:
 
 ```lilac
 loop {
@@ -205,7 +233,8 @@ loop {
 }
 ```
 
-To make a standard conditional loop this is a way.
+To make a standard conditional loop this is a way:
+
 ```lilac
 val: @bit8 = 0x0
 loop if @iLessThan(val, 0x1) {
@@ -215,13 +244,21 @@ loop if @iLessThan(val, 0x1) {
 
 ### Pattern Matching
 
-The **`match`** statement inspects union tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else => {}` branch).
+The **`match`** statement inspects union tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else {}` branch).
 
 ```lilac
 match union_val {
     .Some -> value: @bit16 {
         return
     }
+    .None => return
+}
+```
+
+You can attach else to the end of a match to catch invalid matches:
+
+```lilac
+match union_val {
     .None => return
 } else {
     return
@@ -278,14 +315,37 @@ Conversions are unidirectional from left to right. The compiler automatically se
 
 ### Resource Management (RAII)
 
-Memory lifecycle events trigger specific compiler hooks if defined for a type:
+Memory lifecycle events trigger specific compiler hooks if defined for a type.
 
-| Hook | Invocation Trigger | Primary Use Case |
+| Hook | Signature | Invocation Trigger & Behavior Rules |
 | --- | --- | --- |
-| **`@on_init`** | Called immediately after object instantiation. | Resource allocation, validation. |
-| **`@on_override`** | Called when an existing variable's value is overwritten. | Freeing old resources, enforcing immutability. |
-| **`@on_copy`** | Called on the newly created duplicate during assignment. | Deep copying, ref-count increments. |
-| **`@on_drop`** | Called when a value exits scope or a reference is freed. | Resource deallocation, cleanup. |
+| **`@on_init`** | `(...params) self` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`.|
+| **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing variable's value is overwritten. **Rule:** The `@on_drop` hook is automatically invoked on `prev` immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`.|
+| **`@on_copy`** | `(self) new_copy` | Called when a value is copied. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`.|
+| **`@on_drop`** | `(self) nothing` | Called when a value exits scope or a reference is freed. Used for resource deallocation and cleanup.|
+
+```lilac
+// Example of defining custom constructors and RAII rules
+Buffer: obj {
+    ptr: ref @bit8
+
+    // Custom constructor called via Buffer(size)
+    @on_init: func (self, size: @bit32) nothing {
+        // allocation logic
+    }
+
+    // Called before override; do not free 'prev' here as @on_drop handles it!
+    @on_override: func (prev: ref Buffer, new: ref Buffer) nothing {
+        // transfer logic or immutability enforcement
+    }
+
+    // Responsible for generating the copy without causing infinite copy recursion
+    @on_copy: func (self) new_copy: Buffer {
+        // safe copy logic
+        return
+    }
+}
+```
 
 ## 8. Compiler Intrinsics
 
@@ -293,12 +353,12 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 
 | Intrinsic | Signature | Description |
 | --- | --- | --- |
-| **`@iadd`** | `(lhs, rhs)` | Integer addition using standard two's-complement logic. |
-| **`@fadd`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation. |
-| **`@isub`** / **`@fsub`** | `(lhs, rhs)` | Integer and floating-point subtraction. |
-| **`@imul`** / **`@fmul`** | `(lhs, rhs)` | Integer and floating-point multiplication. |
-| **`@idiv`** / **`@fdiv`** | `(lhs, rhs)` | Integer and floating-point division. |
-| **`@imod`** / **`@fmod`** | `(lhs, rhs)` | Integer and floating-point modulo arithmetic. |
-| **`@asInt`** | `(bits)` | Reinterprets a `@numberLiteral` or bit container as an integer. |
-| **`@asFloat`** | `(bits)` | Reinterprets a `@numberLiteral` or bit container as a float. |
-| **`@sizeOf`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. |
+| **`@iadd`** | `(lhs, rhs)` | Integer addition using standard two's-complement logic.|
+| **`@fadd`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation.|
+| **`@isub`** / **`@fsub`** | `(lhs, rhs)` | Integer and floating-point subtraction.|
+| **`@imul`** / **`@fmul`** | `(lhs, rhs)` | Integer and floating-point multiplication.|
+| **`@idiv`** / **`@fdiv`** | `(lhs, rhs)` | Integer and floating-point division.|
+| **`@imod`** / **`@fmod`** | `(lhs, rhs)` | Integer and floating-point modulo arithmetic.|
+| **`@asInt`** | `(bits)` | Reinterprets a `@numberLiteral` or bit container as an integer.|
+| **`@asFloat`** | `(bits)` | Reinterprets a `@numberLiteral` or bit container as a float.|
+| **`@sizeOf`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`.|
