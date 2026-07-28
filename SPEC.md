@@ -147,7 +147,7 @@ Union: union {
 Union: obj {
     Tag: enum { Some, None }
     tag: Tag
-    data: @bit8 # Sized to fit the largest member
+    data: @bit8 // Sized to fit the largest member
 
     Some: func (value: @bit8) Union => Union {
         tag = .Some
