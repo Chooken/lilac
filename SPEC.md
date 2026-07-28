@@ -319,7 +319,7 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 
 | Hook | Signature | Invocation Trigger & Behavior Rules |
 | --- | --- | --- |
-| **`@on_init`** | `(...params) self` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`.|
+| **`@on_init`** | `(...params) Type` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`.|
 | **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing variable's value is overwritten. **Rule:** The `@on_drop` hook is automatically invoked on `prev` immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`.|
 | **`@on_copy`** | `(self) new_copy` | Called when a value is copied. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`.|
 | **`@on_drop`** | `(self) nothing` | Called when a value exits scope or a reference is freed. Used for resource deallocation and cleanup.|
