@@ -2,8 +2,6 @@
 
 Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions—such as strings, dynamic arrays, floating-point types, optionals, and mutability guards—are deliberately excluded from the compiler and implemented within the standard library.
 
----
-
 ## 1. Core Types & Memory Model
 
 Lilac operates on raw memory containers rather than semantic primitives. The compiler attaches no inherent numeric meaning to types; interpretation is deferred entirely to the functions acting upon them.
@@ -27,36 +25,35 @@ All allocated memory—whether on the stack, heap, or within complex objects—i
 
 Lilac does not implement move semantics. Value assignment and parameter passing always execute a **fast bitwise copy** by default. Custom copy behavior (such as deep copying or reference counting) is implemented via RAII hooks.
 
----
-
 ## 2. Literals & Desugaring
 
 String and number literals desugar into standard library object representations at compile time.
 
+Number literals hold a compile-time reference to their UTF-8 string
 ```lilac
-// Number literals hold a compile-time reference to their UTF-8 string
 NumberLiteral: obj {
     Size: @bit32
     Buffer: ref @bit8
 }
+```
 
-// String literals are pointers to a UTF-8 character array with an explicit size
+String literals are pointers to a UTF-8 character array with an explicit size
+```lilac
 String: obj {
     Size: @bit32
     Buffer: ref @bit8
 }
+```
 
-// Formatted strings ($"Hello {name}") desugar into structured objects
-// A .toString() method on the object generates the final UTF-8 output
+Formatted strings ($"Hello {name}") desugar into structured objects
+A .toString() method on the object generates the final UTF-8 output
+```lilac
 FString: obj {
     Size_1: @bit32
     Name: String
     Buffer_1: ref @bit8
 }
-
 ```
-
----
 
 ## 3. Variables, References & Immutability
 
@@ -67,7 +64,6 @@ Variables are declared using `name: Type = value` syntax. Object types can utili
 ```lilac
 counter: @bit32 = 0x0
 user: Object {}
-
 ```
 
 The base language enforces no concept of mutability. Read-only variables and immutability guards are implemented in user-land using the `@on_override` compiler hook.
@@ -79,14 +75,12 @@ References are denoted by the **`ref`** keyword. In Lilac, `ref` acts as a type 
 ```lilac
 variable: @bit32 = 0x0
 reference: ref @bit32 = ref variable
-
 ```
 
 References **auto-dereference by default**. Operators act on the underlying value, not the memory address:
 
 * `ptr + 1` invokes `@add` on the underlying `@bit32`, incrementing the integer value by `1`.
 * It does **not** perform pointer arithmetic. To manipulate raw memory addresses, a reference must be explicitly converted to `@bitNative`.
-
 ---
 
 ## 4. Composite Types & Namespaces
@@ -105,7 +99,6 @@ Object: obj {
     // Instance method using 'self' syntactic sugar (self: ref Object)
     MemberFunction: func (self) nothing {}
 }
-
 ```
 
 ### Namespaces & Visibility
@@ -114,7 +107,6 @@ Namespaces mirror the file system directory structure and object hierarchies. Ev
 
 ```lilac
 using Standard
-
 ```
 
 ### Enums and Tagged Unions
@@ -122,28 +114,29 @@ using Standard
 Enums and unions are syntactic sugar that desugar into standard objects with explicit memory layouts. The `=>` operator maps constructor branches to their resulting object state.
 
 ```lilac
-// Sugar definition
 Enum: enum { One, Two }
+```
 
-// Desugared object equivalent
+Desugared object equivalent:
+```lilac
 Enum: obj {
     value: @bit8
     One: Enum => Enum { value = 0x0 }
     Two: Enum => Enum { value = 0x1 }
 }
-
 ```
 
 Unions are tagged by default. The compiler allocates memory equal to the size of the largest variant plus the tag enum.
 
 ```lilac
-// Sugar definition
 Union: union {
     Some: @bit8
     None
 }
+```
 
-// Desugared object equivalent
+Desugared object equivalent
+```lilac
 Union: obj {
     Tag: enum { Some, None }
     tag: Tag
@@ -155,7 +148,6 @@ Union: obj {
     }
     None: Union => Union { tag = .None }
 }
-
 ```
 
 ### Interfaces & VTables
@@ -169,10 +161,7 @@ Reader: interface {
 
 // Compiler verifies 'File' implements 'read' and generates the VTable
 stream: Reader = File
-
 ```
-
----
 
 ## 5. Functions & Control Flow
 
@@ -195,16 +184,17 @@ val1: @bit8, val2: @bit16 = multi_func()
 
 Conditional statements evaluate expressions as boolean based on strict non-zero testing against `@bit8` (`0x0` is false; any other value is true). Non-`@bit8` types must be explicitly or implicitly converted to `@bit8` before evaluation.
 
+If expressions return values:
 ```lilac
-// If expressions return values
 status: @bit8 = if 0x0 0x0 else 0x1
+```
 
-// Value capturing from multi-return functions
-// If the first return value is non-zero, subsequent values are captured into scope
+Value capturing from multi-return functions
+If the first return value is non-zero, subsequent values are captured into scope
+```lilac
 if multi_func -> secondary_val: @bit16 {
     // secondary_val is scoped here
 }
-
 ```
 
 Loops execute infinitely by default unless broken or conditioned.
@@ -213,13 +203,14 @@ Loops execute infinitely by default unless broken or conditioned.
 loop {
     // This will loop infinitely.
 }
+```
 
-// Standard conditional loop
+To make a standard conditional loop this is a way.
+```lilac
 val: @bit8 = 0x0
 loop if @iLessThan(val, 0x1) {
     // do work
 } else break
-
 ```
 
 ### Pattern Matching
@@ -235,10 +226,7 @@ match union_val {
 } else {
     return
 }
-
 ```
-
----
 
 ## 6. Generics & Inline Declarations
 
@@ -252,9 +240,9 @@ GenObj[T]: obj {
 }
 
 GenFunc[T]: func (value: T) nothing {
-    value.call_something() # Validated only at instantiation time
+    // Validated only at instantiation time
+    value.call_something() 
 }
-
 ```
 
 ### Inline Declarations
@@ -264,10 +252,7 @@ The **`inlined`** keyword defines single-expression declarations that cannot con
 ```lilac
 inlined_const: @bit64 => 0x0
 inlined_func: func (val: @bit8) @bit8 => @iadd(val, 0x1)
-
 ```
-
----
 
 ## 7. Operators, Conversions & RAII Hooks
 
@@ -279,7 +264,6 @@ Binary and unary operators desugar directly into function calls. For example, `a
 
 ```lilac
 @add: func (lhs: @bit8, rhs: @bit8) @bit8 => @iadd(lhs, rhs)
-
 ```
 
 **Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed, bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity.
@@ -290,7 +274,6 @@ Conversions are unidirectional from left to right. The compiler automatically se
 
 ```lilac
 @conversion: func (from: CustomType) to: @bit8
-
 ```
 
 ### Resource Management (RAII)
@@ -303,8 +286,6 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type:
 | **`@on_override`** | Called when an existing variable's value is overwritten. | Freeing old resources, enforcing immutability. |
 | **`@on_copy`** | Called on the newly created duplicate during assignment. | Deep copying, ref-count increments. |
 | **`@on_drop`** | Called when a value exits scope or a reference is freed. | Resource deallocation, cleanup. |
-
----
 
 ## 8. Compiler Intrinsics
 
