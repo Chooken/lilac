@@ -83,10 +83,18 @@ pub const Program = struct {
     }
 };
 
+pub const Layout = enum {
+    Object,
+    Enum,
+    Union,
+    Interface,
+};
+
 pub const Type = struct {
     name: ?[]const u8,
     size: ?usize = null,
-    fields: std.ArrayList(Variable) = .empty,
+    structure: std.ArrayList(TypeRef) = .empty,
+    layout: Layout,
 };
 
 pub const TypeId = struct {
@@ -108,11 +116,6 @@ pub const TypeRef = struct {
     pub fn cmp(self: TypeRef, other: TypeRef) bool {
         return self.id.index == other.id.index and self.is_ref == other.is_ref;
     }
-};
-
-pub const Variable = struct {
-    name: []const u8,
-    type_ref: ?TypeRef,
 };
 
 pub const FunctionProto = struct {

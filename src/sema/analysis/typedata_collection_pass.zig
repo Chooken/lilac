@@ -235,12 +235,12 @@ pub fn collectTypeDataFromExpressions(scope: *sema.Scope, expression: untyped.No
                             }
                         }
 
-                        if (proto.returns.data.* != .Self) {
+                        if (proto.returns.data.* == .List or proto.returns.data.* == .Self) {
                             var log = scope.builder.logger.logError(
                                 "Type Error", .{}, 
-                                "@init requires self as the only return.", .{});
+                                "@init requires a single type as the only return.", .{});
                             log.addLine(
-                                "This needs to just be self.", .{}, 
+                                "This needs to just be the type should be here.", .{}, 
                                 proto.returns.span);
                             return;
                         }

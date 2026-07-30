@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions—such as strings, dynamic arrays, floating-point types, optionals, and mutability guards—are deliberately excluded from the compiler and implemented within the standard library.
+Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions such as strings, dynamic arrays, floating-point types, optionals, and mutability guards are deliberately excluded from the compiler and implemented within the standard library.
 
 ## 1. Core Types & Memory Model
 
@@ -8,7 +8,7 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 ### Primitive Bit Containers
 
-* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's-complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@iadd` vs. `@fadd`).
+* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@iadd` vs. `@fadd`).
 
 * **`@bitNative`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
 
@@ -20,9 +20,11 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables. It is not a type and occupies no memory.
 
+* **`self`**: A function prototype only type that is shorthand for writing self: ref Type. Takes the current namespaces type.
+
 ### Universal Zero-Initialization
 
-All allocated memory—whether on the stack, heap, or within complex objects—is automatically **0-initialized** by the compiler. There is no uninitialized memory in Lilac. This eliminates read-before-write bugs and guarantees deterministic padding bits, ensuring 100% reliability for bit-equality checks.
+All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac. This eliminates read before write bugs and guarantees deterministic padding bits, ensuring 100% reliability for bit equality checks.
 
 ### Copy Semantics
 
@@ -65,12 +67,12 @@ FString: obj {
 
 ### Variable Declaration
 
-Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@on_init` hook is defined.
+Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@init` hook is defined.
 
 ```lilac
 counter: @bit32 = 0x0
 user: Object {}
-custom_user: Object(0x1, "Lilac") // Invokes @on_init with custom params
+custom_user: Object(0x1, "Lilac") // Invokes @init with custom params
 ```
 
 The base language enforces no concept of mutability. Read-only variables and immutability guards are implemented in user-land using the `@on_override` compiler hook.
@@ -284,7 +286,7 @@ GenFunc[T]: func (value: T) nothing {
 
 ### Inline Declarations
 
-The **`inlined`** keyword defines single-expression declarations that cannot contain nested inline rules. Inlined functions may omit the return name but are restricted to a single output type. The `=>` operator directly binds the expression output.
+Inlined functions may omit the return name but are restricted to a single output type. The `=>` operator directly binds the expression output.
 
 ```lilac
 inlined_const: @bit64 => 0x0
@@ -293,7 +295,7 @@ inlined_func: func (val: @bit8) @bit8 => @iadd(val, 0x1)
 
 ## 7. Operators, Conversions & RAII Hooks
 
-Lilac uses designated `@`-prefixed function names to bind global behaviors to types. Multiple bindings can be defined across a program provided their type signatures `(from, to)` or `(lhs, rhs)` remain unique.
+Lilac uses designated `@` prefixed function names to bind global behaviors to types. Multiple bindings can be defined across a program provided their type signatures `(from, to)` or `(lhs, rhs)` remain unique.
 
 ### Operators & Strict Equality
 
@@ -319,7 +321,7 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 
 | Hook | Signature | Invocation Trigger & Behavior Rules |
 | --- | --- | --- |
-| **`@on_init`** | `(...params) Type` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`. |
+| **`@init`** | `(...params) Type` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`. |
 | **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing variable's value is overwritten. **Rule:** The `@on_drop` hook is automatically invoked on `prev` immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. |
 | **`@on_copy`** | `(self) new_copy` | Called when a value is copied. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. |
 | **`@on_drop`** | `(self) nothing` | Called when a value exits scope or a reference is freed. Used for resource deallocation and cleanup. |
@@ -331,7 +333,7 @@ Buffer: obj {
     ptr: ref @bit8
 
     // Custom constructor called via Buffer(size)
-    @on_init: func (self, size: @bit32) nothing {
+    @init: func (self, size: @bit32) nothing {
         // allocation logic
     }
 

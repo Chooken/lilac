@@ -56,20 +56,6 @@ Union: union {
     Second
 }
 
-interface: obj {
-
-    Vtable: obj {
-        write: ref func (ref unknown) nothing
-    }
-
-    vtable: ref Vtable,
-    data: ref unknown,
-
-    @on_drop: func (self) nothing {
-        @free(self.data)
-    }
-}
-
 other: func () nothing {
     
 }
