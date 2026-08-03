@@ -2,6 +2,6 @@ main: function () nothing {
     variable: @bit32 = 0x0
     variable_2: @bit32 = 0x2
     ref_to_variable: ref @bit32 = ref variable
-    ref_to_variable = ref varibale_2
+    ref_to_variable = ref variable_2
     ref_to_variable = 0x1
 }

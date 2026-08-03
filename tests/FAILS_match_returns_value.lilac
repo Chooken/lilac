@@ -3,5 +3,5 @@ main: function () nothing {
 
     variable: @bit32 = match 0x0 {
         0x1 => 0x1
-    } else 0x3
+    }
 }

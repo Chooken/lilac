@@ -4,5 +4,5 @@
 
 main: function () nothing {
     a: @bit32 = 0x1
-    c: @bit8 = -b
+    b: @bit8 = -a
 }
