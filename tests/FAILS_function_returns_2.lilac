@@ -1,0 +1,15 @@
+Object1: object {
+    value: @bit8
+}
+
+Object2: object {
+    value: @bit8
+}
+
+main: function () nothing {
+    result: Object1 = get()
+}
+
+get: function () result: Object2 {
+    result = Object2 { value = 0x0 }
+}

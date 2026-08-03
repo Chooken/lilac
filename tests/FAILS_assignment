@@ -1,0 +1,5 @@
+main: function () nothing {
+    variable: @bit8 = 0x0
+    variable_2: @bit16 = 0x1
+    variable = variable_2
+}

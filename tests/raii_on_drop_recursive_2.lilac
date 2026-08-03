@@ -1,0 +1,19 @@
+// On Drop should still get called
+Object: object {
+
+    value: @bit32
+
+    @on_drop: function (from: ref Object) nothing {
+        from.value = 0x1
+    }
+}
+
+Object2: object {
+    value: Object1
+
+    @on_drop: function (from: ref Object) nothing { }
+}
+
+main: function () nothing {
+    variable: Object2 { value = Object { value = 0x0 } }
+}

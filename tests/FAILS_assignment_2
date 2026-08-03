@@ -1,0 +1,11 @@
+Object_1: object {
+    value: @bit8
+}
+
+Object_2: object {
+    value: @bit8
+}
+
+main: function () nothing {
+    variable: Object_1 = Object_2 { value = 0x0 }
+}
