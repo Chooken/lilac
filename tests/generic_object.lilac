@@ -1,0 +1,9 @@
+GenObject[T]: object {
+    value: T
+}
+
+main: function () nothing {
+    variable: GenObject[@bit32] {
+        value = 0x0
+    }
+}

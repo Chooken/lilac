@@ -1,0 +1,9 @@
+Object: object {
+    member: @bit8
+}
+
+main: function () nothing {
+    variable: Object = Object {
+        member = 0x1
+    }
+}

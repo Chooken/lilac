@@ -41,13 +41,13 @@ pub const UnaryOperator = struct {
 pub const Declaration = struct {
     visability: Visability,
     decl_type: DeclarationType,
-    
     span: ?files.Span,
     collisions: std.ArrayList(?files.Span) = .empty,
 };
 
 pub const DeclarationType = union(enum) {
     Field: typed.TypeRef,
+    InlineExpression: typed.Expression,
     Type: typed.TypeId,
     Function: typed.FunctionId,
     Generic: Generic,
@@ -241,6 +241,9 @@ pub const Scope = struct {
     alias: std.StringHashMapUnmanaged(typed.TypeId) = .empty,
 
     declarations: std.StringHashMapUnmanaged(Declaration) = .empty,
+
+    num_fields: usize = 0,
+    fields: std.StringHashMapUnmanaged(usize, typed.TypeRef) = .empty,
 
     pub fn allocFullName(self: *Scope) []const u8 {
         var parents = std.ArrayList(*Scope).empty;
@@ -502,8 +505,6 @@ pub const Scope = struct {
 
     pub fn addField(self: *Scope, identifier: []const u8, span: files.Span, visability: Visability, type_ref: typed.TypeRef) TypeError!void {
         std.debug.print("Added Field: {s} to {s}\n", .{identifier, self.allocFullName()});
-
-        const self_type = self.builder.getType(self.typeid);
         
         switch (self.scope_type) {
 
@@ -514,17 +515,17 @@ pub const Scope = struct {
                     span, 
                     .{ .Field = type_ref }, 
                     visability);
+
+                self.fields.put(
+                    self.builder.allocator,
+                    identifier,
+                    self.fields,
+                );
+
+                self.fields += 1;
             },
 
             .Enum => {
-
-                var enum_value = std.ArrayList(typed.TypeRef).empty;
-                enum_value.append(self.builder.allocator, .{
-                    .id = self.typeid,
-                    .is_ref = false,
-                }) catch @panic("Out of Memory.");
-
-                var body = std.ArrayList(typed.TypedNode(typed.Assignment)).empty;
 
                 var value = std.ArrayList(typed.TypeRef).empty;
                 value.append(self.builder.allocator, .{ 
@@ -532,53 +533,24 @@ pub const Scope = struct {
                     .is_ref = false,
                 }) catch @panic("Out of Memory.");
 
-                body.append(
-                    self.builder.allocator, 
-                    typed.TypedNode(typed.Assignment).init(
-                        self.builder.allocator, 
-                        span, 
-                        enum_value, 
-                        .{ 
-                            .assignee = typed.TypedNode(typed.Expression).init(
-                                self.builder.allocator,
-                                span,
-                                value,
-                                .{ .Identifier = "value" }
-                            ),
-                            .value = typed.TypedNode(typed.Expression).init(
-                                self.builder.allocator,
-                                span,
-                                value,
-                                .{ .Int = self_type.data.?.Object.statics.items.len }
-                            ),
-                            .inlined = false,
-                        }
-                )) catch @panic("Out of Memory.");
-
-                self_type.data.?.Object.statics.append(self.builder.allocator, typed.Variable {
-                    .name = identifier,
-                    .type_ref = .{
-                        .id = self.builder.bit8,
-                        .is_ref = false,
-                    },
-                    .value = typed.TypedNode(typed.Expression).init(
-                        self.builder.allocator, 
-                        span, 
-                        value, 
-                        .{ 
-                            .Setter = .{ 
-                                .settee = self.typeid,
-                                .body = body, 
-                            } 
-                        }
-                    )
-                }) catch @panic("Out of Memory.");
-
                 try self.addDecl(
                     identifier, 
                     span, 
-                    .{ .Field = type_ref }, 
+                    .{ .InlineExpression = typed.TypedNode(typed.Expression).init(
+                        self.builder.allocator,
+                        span,
+                        value,
+                        .{ .Int = self.fields }
+                    )}, 
                     visability);
+
+                self.fields.put(
+                    self.builder.allocator,
+                    identifier,
+                    self.fields,
+                );
+
+                self.fields += 1;
             },
 
             else => unreachable,

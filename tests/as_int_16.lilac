@@ -1,0 +1,3 @@
+main: function () nothing {
+    integer: @bit16 = @asInt16(5)
+}

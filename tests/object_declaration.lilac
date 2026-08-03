@@ -1,0 +1,5 @@
+Object: object {
+    member: @bit8
+}
+
+main: function () nothing {}

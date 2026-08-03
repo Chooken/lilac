@@ -1,0 +1,10 @@
+main: function () nothing {
+    if get_multi() -> result: @bit32 {
+
+    }
+}
+
+get_multi: function () condition: @bit32, result: @bit32 {
+    condition = 0x1
+    result = 0x2
+}

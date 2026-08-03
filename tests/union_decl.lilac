@@ -1,0 +1,6 @@
+OptionalBit32: enum {
+    Some: @bit32
+    None
+}
+
+main: function () nothing {}

@@ -1,0 +1,14 @@
+Object: object {
+
+    value: @bit32
+
+    @on_override: function (from: ref Object, to: ref Object) nothing {
+        to.value = 0x1
+    }
+}
+
+main: function () nothing {
+    variable: Object { value = 0x2 }
+
+    variable = Object { value = 0x2 }
+}

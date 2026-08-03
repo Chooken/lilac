@@ -1,0 +1,5 @@
+one: @bit32 => 0x1
+
+main: function () nothing {
+    variable: @bit32 = one
+}

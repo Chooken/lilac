@@ -20,7 +20,10 @@ pub fn generateModule(scope: *sema.Scope, module: *untyped.Module) void {
     var sub_mod_iter = module.submodules.iterator();
 
     while (sub_mod_iter.next()) |sub_mod_entry| {
-        if (scope.getType(sub_mod_entry.key_ptr.*, null, .private) catch continue) |typeid| {
+        if (scope.getType(
+            sub_mod_entry.key_ptr.*, 
+            null, 
+            .private) catch continue) |typeid| {
 
             if (scope.builder.getScope(typeid)) |sub_scope| {
                 generateModule(sub_scope, sub_mod_entry.value_ptr);

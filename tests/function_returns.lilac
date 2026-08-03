@@ -1,0 +1,7 @@
+main: function () nothing {
+    return_val: @bit32 = get()
+}
+
+get: function () result: @bit32 {
+    result = 0x1
+}

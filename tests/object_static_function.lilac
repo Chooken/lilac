@@ -1,0 +1,15 @@
+Object: object {
+    member: @bit8
+
+    add: function (num: @bit32) result: @bit32 {
+        result = @iadd(instance.member, num)
+    }
+}
+
+main: function () nothing {
+    variable: Object = Object {
+        member = 0x1
+    }
+
+    member: @bit32 = Object.add(0x2)
+}

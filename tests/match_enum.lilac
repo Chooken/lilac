@@ -1,0 +1,15 @@
+Number: enum {
+    One
+    Two
+    Three
+}
+
+main: function () nothing {
+
+    number: Number = .One
+
+    match number {
+        .One {}
+        .Two {}
+    }
+}

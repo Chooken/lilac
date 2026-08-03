@@ -1,0 +1,31 @@
+IAnimal: interface {
+    get: function (self) @bit32
+}
+
+Cat: object {
+
+    value: @bit32
+
+    get: function (self) result: @bit32 {
+        result = self.value
+    }
+}
+
+Dog: object {
+    get: function (self) result: @bit32 {
+        result = 0x4
+    }
+}
+
+main: function () nothing {
+
+    animal: IAnimal = Cat {
+        value = 0x1
+    }
+
+    cat_val: @bit32 = animal.get()
+
+    animal = Dog {}
+
+    dog_val = animal.get()
+}

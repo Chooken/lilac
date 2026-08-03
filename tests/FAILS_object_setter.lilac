@@ -1,0 +1,8 @@
+// setters need to define all members
+Object: object {
+    member: @bit8
+}
+
+main: function () nothing {
+    variable: Object = Object {}
+}

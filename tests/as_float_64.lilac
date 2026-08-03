@@ -1,0 +1,3 @@
+main: function () nothing {
+    float: @bit64 = @asFloat64(5.25)
+}

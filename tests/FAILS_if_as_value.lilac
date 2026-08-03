@@ -1,0 +1,5 @@
+// conditions must be exhaustitive if returning a value.
+main: function () nothing {
+    
+    conditional: @bit32 = if 0x0 0x0
+}

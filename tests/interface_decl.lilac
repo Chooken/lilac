@@ -1,0 +1,5 @@
+IAnimal: interface {
+    get: function (self) @bit32
+}
+
+main: function () nothing {}

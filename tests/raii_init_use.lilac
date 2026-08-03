@@ -1,0 +1,14 @@
+Object: object {
+
+    value: @bit32
+
+    @init: function (value: @bit32) result: Object {
+        result = Object {
+            value = value
+        }
+    }
+}
+
+main: function () nothing {
+    variable: Object(0x1)
+}

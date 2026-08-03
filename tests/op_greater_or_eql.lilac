@@ -1,0 +1,9 @@
+@greaterThanOrEql: function (lhs: @bit32, rhs: @bit32) result: @bit8 {
+    result = @iGreaterThanOrEql(lhs, rhs)
+}
+
+main: function () nothing {
+    a: @bit32 = 0x1
+    b: @bit32 = 0x2
+    c: @bit8 = a >= b
+}

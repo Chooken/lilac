@@ -1,0 +1,5 @@
+main: function () nothing {
+    variable: @bit32 = 0x0
+    ref_to_variable: ref @bit32 = ref variable
+    ref_to_variable = 0x1
+}

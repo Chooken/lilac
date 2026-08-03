@@ -1,0 +1,9 @@
+@sub: function (lhs: @bit32, rhs: @bit32) result: @bit32 {
+    result = @isub(lhs, rhs)
+}
+
+main: function () nothing {
+    a: @bit32 = 0x1
+    b: @bit32 = 0x2
+    c: @bit32 = a - b
+}

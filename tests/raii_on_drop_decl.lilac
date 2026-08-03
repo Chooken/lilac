@@ -1,0 +1,10 @@
+Object: object {
+
+    value: @bit32
+
+    @on_drop: function (from: ref Object) nothing {
+        from.value = 0x1
+    }
+}
+
+main: function () nothing {}

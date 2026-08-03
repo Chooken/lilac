@@ -1,0 +1,12 @@
+Object: object {
+
+    value: @bit32
+
+    @on_copy: function (from: ref Object) copy: Object {
+        copy = Object {
+            value = from.value
+        }
+    }
+}
+
+main: function () nothing {}

@@ -1,0 +1,7 @@
+Optional[T]: union {
+    Some: T
+}
+
+main: function () nothing {
+    variable: Optional[@bit32] = .Some(0x0)
+}

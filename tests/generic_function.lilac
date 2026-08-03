@@ -1,0 +1,7 @@
+gen_function[T]: function (in: T) out: T {
+    out = in
+}
+
+main: function () nothing {
+    variable: @bit32 = gen_function[@bit32](0x1)
+}

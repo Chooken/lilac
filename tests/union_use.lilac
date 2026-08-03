@@ -1,0 +1,10 @@
+OptionalBit32: enum {
+    Some: @bit32
+    None
+}
+
+main: function () nothing {
+
+    variable: OptionalBit32 = .Some(0x0)
+    variable = .None
+}
