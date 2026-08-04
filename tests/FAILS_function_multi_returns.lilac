@@ -1,0 +1,12 @@
+Object1: object {
+    value: @bit8
+}
+
+main: function () nothing {
+    result: Object1 = get()
+}
+
+get: function () result: Object1, result_2: @bit32 {
+    result = Object1 { value = 0x0 }
+    result_2 = 0x0
+}

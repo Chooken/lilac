@@ -1,0 +1,20 @@
+main: function () nothing {
+
+    add: function (@bit32) @bit32 = addOne
+
+    value: @bit32 = 0x0
+
+    value = add(value)
+
+    add = addTwo
+
+    value = add(value)
+}
+
+addOne: function (value: @bit32) result: @bit32 {
+    result = @iadd(value, 0x1)
+}
+
+addTwo: function (value: @bit32) result: @bit32 {
+    result = @iadd(value, 0x2)
+}

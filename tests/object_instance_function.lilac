@@ -1,0 +1,15 @@
+Object: object {
+    member: @bit8
+
+    get: function (instance: ref Object) result: @bit32 {
+        result = instance.member
+    }
+}
+
+main: function () nothing {
+    variable: Object = Object {
+        member = 0x1
+    }
+
+    member: @bit32 = variable.get()
+}

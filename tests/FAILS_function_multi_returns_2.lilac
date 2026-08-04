@@ -1,0 +1,13 @@
+Object1: object {
+    value: @bit8
+}
+
+main: function () nothing {
+    result: Object1, result_2: @bit32 = get()
+}
+
+// result_2 doesn't get set
+// functions must assign return variables.
+get: function () result: Object1, result_2: @bit32 {
+    result = Object1 { value = 0x0 }
+}

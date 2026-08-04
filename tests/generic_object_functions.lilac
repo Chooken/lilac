@@ -1,0 +1,15 @@
+GenObject[T]: object {
+    value: T
+
+    get: function (self) result: T {
+        result = self.value
+    }
+}
+
+main: function () nothing {
+    variable: GenObject[@bit32] {
+        value = 0x0
+    }
+
+    value: @bit32 = variable.get()
+}
