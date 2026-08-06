@@ -1,5 +1,5 @@
 @lessThanOrEql: function (lhs: @bit32, rhs: @bit32) result: @bit8 {
-    result = @iLessThanOrEql(lhs, rhs)
+    result = @iLessThan(lhs, rhs) or lhs == rhs
 }
 
 main: function () nothing {

@@ -1,0 +1,11 @@
+function @main 
+{
+    allocate #bit32, %variable
+    copy #bit32, 0x0, &1
+    copy #bit32, &1, %variable
+    allocate #bit64, %ref_to_variable
+    address %variable, &2
+    copy #bit64, &2, %ref_to_variable
+    copy #bit32, 0x1, &3
+    copy #bit32, &3, ref ref_to_variable
+}

@@ -1,0 +1,25 @@
+type #Number 
+{
+    #bit8 %value
+}
+
+function @main 
+{
+    allocate #Number, %number
+    allocate #Number, %tmp:1
+    field #Number, %tmp:1, #bit8, 0, &1
+    copy #bit8, 0x0, &2
+    copy #bit8, &2, ref &1
+    copy #Number, %tmp:1, %number
+    allocate #Number, %tmp:2
+    field #Number, %tmp:2, #bit8, 0, &3
+    copy #bit8, 0x1, &4
+    copy #bit8, &4, ref &3
+    copy #Number, %tmp:2, %number
+    allocate #Number, %tmp:3
+    field #Number, %tmp:2, #bit8, 0, &5
+    copy #bit8, 0x1, &6
+    copy #bit8, &6, ref &5
+    copy #Number, %tmp:3, %number
+    return
+}

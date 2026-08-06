@@ -1,0 +1,12 @@
+function @main
+{
+    allocate #bit32, %variable
+    copy #bit32, 0x2, &1
+    copy #bit32, &1, %variable
+    allocate #bit32, %result
+    copy #bit32, %variable, &2
+    copy #bit32, 0x1, &3
+    i.add &2, &3, &4
+    copy #bit32, &4, %result
+    return
+}

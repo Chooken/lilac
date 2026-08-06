@@ -1,0 +1,20 @@
+function @main
+{
+    allocate #bit32, %out
+    allocate #bit32, #tmp:1
+    copy #bit32, 0x1, &1
+    copy #bit32, &1, %tmp:1
+    allocate #bit32, %tmp:2
+    call @get, in %tmp:1, out %tmp:2
+    copy #bit32, %tmp:2, %out
+    return
+}
+
+function @gen_function:bit32
+    in #bit32 %in
+    out #bit32 %out
+{
+    copy #bit32, %in, &1
+    copy #bit32, &1, %out
+    return
+}

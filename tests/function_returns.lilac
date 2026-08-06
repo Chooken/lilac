@@ -1,5 +1,5 @@
 main: function () nothing {
-    return_val: @bit32 = get()
+    result: @bit32 = get()
 }
 
 get: function () result: @bit32 {

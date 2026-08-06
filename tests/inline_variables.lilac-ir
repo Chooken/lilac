@@ -1,0 +1,7 @@
+function @main 
+{
+    allocate #bit32, %variable
+    copy #bit32, 0x1, &1
+    copy #bit32, &1, %variable
+    return
+}

@@ -1,0 +1,22 @@
+function @main
+{
+    allocate #bit32, %condition
+    allocate #bit32, %result
+    allocate #bit32, %tmp:1
+    allocate #bit32, %tmp:2
+    call @get, out %tmp:1, out %tmp:2
+    copy #bit32, %tmp:1, %condition
+    copy #bit32, %tmp:2, %result
+    return
+}
+
+function @get_multi
+    out #bit32 %condition
+    out #bit32 %result
+{
+    copy #bit32, 0x1, &1
+    copy #bit32, &1, %condition
+    copy #bit32, 0x2, &2
+    copy #bit32, &2, %result
+    return
+}

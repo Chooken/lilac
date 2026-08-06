@@ -1,0 +1,37 @@
+function @main
+{
+    allocate #bit8, %condition
+    allocate #bit32, %result
+    allocate #bit32, %tmp:1
+    allocate #bit32, %tmp:2
+    call @get, out %tmp:1, out %tmp:2
+    allocate #bit32, %tmp:3
+    copy #bit32, %tmp:1, &1
+    copy #bit32, &1, %tmp:3
+    allocate #bit8, %tmp:4
+    call @conversion:bit32:bit8, in %tmp:3, out %tmp:4:
+    copy #bit32, %tmp:4, %condition
+    copy #bit32, %tmp:2, %result
+    return
+}
+
+function @get_multi
+    out #bit32 %condition
+    out #bit32 %result
+{
+    copy #bit32, 0x1, &1
+    copy #bit32, &1, %condition
+    copy #bit32, 0x2, &2
+    copy #bit32, &2, %result
+    return
+}
+
+function @conversion:bit32:bit8
+    in #bit32 %from,
+    out #bit8 %to
+{
+    copy #bit32, %from, &1
+    truncate #bit32, &1, #bit8, &2
+    copy #bit8, &2, %to
+    return
+}

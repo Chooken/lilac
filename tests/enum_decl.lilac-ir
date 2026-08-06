@@ -1,0 +1,9 @@
+type #Number 
+{
+    #bit8 %value
+}
+
+function @main 
+{
+    return
+}
