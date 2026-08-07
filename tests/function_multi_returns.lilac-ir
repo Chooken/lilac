@@ -2,9 +2,10 @@ function @main
 {
     allocate #bit32, %condition
     allocate #bit32, %result
+    address @get, &1
     allocate #bit32, %tmp:1
     allocate #bit32, %tmp:2
-    call @get, out %tmp:1, out %tmp:2
+    call &1, out %tmp:1, out %tmp:2
     copy #bit32, %tmp:1, %condition
     copy #bit32, %tmp:2, %result
     return

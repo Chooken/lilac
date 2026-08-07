@@ -58,10 +58,10 @@ allocate #, %
 ```
 
 ### address 
-* From: variable
+* From: variable or function
 * To: register
 ```lilac-ir
-address %, &
+address [%, @], &
 ```
 
 ### copy 
@@ -69,7 +69,7 @@ address %, &
 * From: variable or registor
 * To: variable or registor
 ```lilac-ir
-copy #, [ref]? [%, &], [ref]? [%, &]
+copy #, [ref]? [%, &, @], [ref]? [%, &]
 ```
 
 ## Control Flow

@@ -1,0 +1,9 @@
+type #OptionalBit32 {
+    #bit8
+    #bit32
+}
+
+function @main
+{
+    return
+}

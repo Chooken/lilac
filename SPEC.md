@@ -389,3 +389,121 @@ Buffer: object {
 }
 ```
 
+## Lilac to IR
+
+Binary Literal:
+```lilac-ir
+copy #type, 0x0, &
+```
+String Literal:
+```lilac-ir
+data 
+{
+    name "String"
+}
+```
+Number Literal:
+```lilac-ir
+data
+{
+    name "10.5"
+}
+```
+Variable Declaration:
+```lilac-ir
+allocate #type, %name
+```
+Ref Typed Variable Declaration:
+```lilac-ir
+// bit type depends on target
+allocate #bit64, %name
+```
+Variable:
+```lilac-ir
+copy #type, %name, &
+```
+Variable with ref type:
+```lilac-ir
+copy #type, ref %name, &
+```
+Ref Keyword on a ref typed variable:
+```lilac-ir
+copy #type, %name, &
+```
+Ref Keyword on non ref typed variable:
+```lilac-ir
+address %variable, &
+```
+Function Name: 
+```lilac-ir
+address @name, &
+```
+Call `()`:
+```lilac-ir
+// run the callee. adds to reg
+allocate #param_type, %param
+// run param expression.
+copy #param_type, &, %param
+// repeat for all params.
+allocate #out_type, %out
+// repeat allocate for all outputs
+call &, in %param, out %out
+```
+
+Assignment `=`:
+```lilac-ir
+// Get the left expression.
+// Get the rhs expression.
+copy #type, %lhs, %rhs
+// Repeat for each expression.
+```
+
+Member `.`:
+```lilac-ir
+allocate #field_type, %field
+field #type, %variable, #field_type, member_index, &
+copy #field_type, ref &, %field
+```
+
+
+Function: 
+```lilac-ir
+function @name
+    in #param_type %param
+    // ... more in variables
+    out #out_type %out
+    // ... more out variables
+{
+    // Function Body
+    return
+}
+```
+
+Object: 
+```lilac-ir
+type #name 
+{
+    #sub_type
+    // ... more sub types
+}
+```
+
+Enum: 
+```lilac-ir
+type #name
+{
+    // bit value sized to fit varients
+    #bit8
+}
+```
+
+Union:
+```lilac-ir
+type #name
+{
+    // bit value sized to fit varients
+    #bit8
+    // type of the biggest type
+    #type
+}
+```

@@ -1,0 +1,56 @@
+function @main
+{
+    // add: function (@bit32) @bit32 = addOne
+    allocate #bit64, %add
+    address #bit64, @addOne, &1
+    copy #bit64, &1, %add
+
+    // value: @bit32 = 0x0
+    allocate #bit32, %value
+    copy #bit32, 0x0, &2
+    copy #bit32, &2, %value
+
+    // value = add(value)
+    copy #bit64, %add, &3
+    allocate #bit32, %tmp:1
+    copy #bit32, %value, &4
+    copy #bit32, &4, %tmp:1
+    allocate #bit32, %tmp:2
+    call &3, in %tmp:1, out %tmp:2
+    copy #bit32, %tmp:2, %value
+
+    // add = addTwo
+    address @addTwo, &5
+    copy #bit64, &5, %add
+
+    // value = add(value)
+    copy #bit64, %add, &6
+    allocate #bit32, %tmp:3
+    copy #bit32, %value, &7
+    copy #bit32, &7, %tmp:3
+    allocate #bit32, %tmp:4
+    call &6, in %tmp:3, out %tmp:4
+    copy #bit32, %tmp:4, %value
+}
+
+function @addOne
+    in #bit32 %value
+    out #bit32 %result
+{
+    // result = @iadd(value, 0x1)
+    copy #bit32, %value, &1
+    copy #bit32, 0x1, &2
+    i.add &1, &2, &3
+    copy #bit32, &3, %result
+}
+
+function @addTwo
+    in #bit32 %value
+    out #bit32 %result
+{
+    // result = @iadd(value, 0x2)
+    copy #bit32, %value, &1
+    copy #bit32, 0x2, &2
+    i.add &1, &2, &3
+    copy #bit32, &3, %result
+}

@@ -1,0 +1,15 @@
+function @main {
+    allocate #bit32, %conditional
+    copy #bit8, 0x0, &1
+    copy #bit8, &1, %conditional
+    copy #bit8, 0x0, &2
+    copy #bit8, 0x1, &3
+    and &2, &3, &4
+    branch.if &4, %BRANCH_1_TRUE, %BRANCH_1_END
+    $BRANCH_1_TRUE:
+    copy #bit8, 0x1, &5
+    copy #bit8, &5, %conditional
+    branch $BRANCH_1_END
+    $BRANCH_1_END:
+    return
+}
