@@ -27,10 +27,6 @@ pub fn main(init: std.process.Init) !void {
 
         if (!isTestInput(name)) continue;
 
-        if (opt_filter) |filter| {
-            if (std.mem.indexOf(u8, name, filter) == null) continue;
-        }
-
         const path = try std.fmt.allocPrint(allocator, "tests/{s}", .{name});
 
         const error_count = Lilac.testCompile(io, allocator, path);
