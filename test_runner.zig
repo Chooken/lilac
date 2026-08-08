@@ -9,9 +9,6 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
 
-    const args = try init.minimal.args.toSlice(allocator);
-    const opt_filter: ?[]const u8 = if (args.len > 1) args[1] else null;
-
     var tests_dir = try Io.Dir.cwd().openDir(io, "tests", .{ .iterate = true });
     defer tests_dir.close(io);
 
