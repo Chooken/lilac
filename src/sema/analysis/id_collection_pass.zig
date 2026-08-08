@@ -6,8 +6,6 @@ const typed = @import("../../typed.zig");
 pub fn collectTypeIds(builder: *sema.Builder) void {
 
     builder.root = builder.getNewType("Root", .Module, null);
-    const module_type = builder.getType(builder.root);
-    module_type.data = .{ .Module = .{} };
     
     if (builder.getScope(builder.root)) |scope| {
 
@@ -33,8 +31,6 @@ pub fn collectTypeIdsFromModule(scope: *sema.Scope, module: *untyped.Module) voi
 
     while (sub_mod_iter.next()) |sub_mod_entry| {
         const typeid = scope.addTypeDecl(sub_mod_entry.key_ptr.*, .Module, .public, null) catch return;
-        const module_type = scope.builder.getType(typeid);
-        module_type.data = .{ .Module = .{} };
 
         if (scope.builder.getScope(typeid)) |sub_scope| {
             collectTypeIdsFromModule(sub_scope, sub_mod_entry.value_ptr);

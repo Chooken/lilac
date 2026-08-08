@@ -88,7 +88,7 @@ pub const Builder = struct {
 
     allocator: std.mem.Allocator,
 
-    logger: logging.Logger,
+    logger: *logging.Logger,
 
     settings: Settings,
 
@@ -241,9 +241,6 @@ pub const Scope = struct {
     alias: std.StringHashMapUnmanaged(typed.TypeId) = .empty,
 
     declarations: std.StringHashMapUnmanaged(Declaration) = .empty,
-
-    num_fields: usize = 0,
-    fields: std.StringHashMapUnmanaged(usize, typed.TypeRef) = .empty,
 
     pub fn allocFullName(self: *Scope) []const u8 {
         var parents = std.ArrayList(*Scope).empty;

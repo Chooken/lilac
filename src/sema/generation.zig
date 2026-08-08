@@ -596,7 +596,7 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
                             "Invalid Identifer", .{}, 
                             null, .{});
                         log.addLine(
-                            "This identifier can't be used as a field.", .{}, 
+                            "This Identifier is invalid.", .{}, 
                             expression.span);
                         return sema.SemaError.InvalidType;
                     }
@@ -608,58 +608,6 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
                 null, .{});
             log.addLine(
                 "This field doesn't exist.", .{}, 
-                expression.span);
-
-            return sema.SemaError.InvalidType;
-        },
-
-        .ImplicitMember => |implicit_member| {
-            if (opt_inferred_type) |inferred_type| {
-
-                const opt_implicit_parent = scope.builder.getScope(inferred_type.id);
-
-                if (opt_implicit_parent) |implicit_parent| {
-
-                    var types = std.ArrayList(typed.TypeRef).empty;
-                    types.append(scope.builder.allocator, inferred_type) catch @panic("Out of Memory.");
-
-                    const parent = scope.createTypedExpression(
-                        expression, 
-                        .Type, 
-                        types);
-
-                    var child = try generateFunctionExpressions(implicit_parent, implicit_member, inferred_type);
-
-                    if (generateTypeEquality(scope, parent.value, &child)) {
-                        
-                        const member = scope.createTypedExpression(
-                            expression, 
-                            .{ .Member = .{ .parent = parent, .child = child } }, 
-                            types);
-
-                        return member;
-                    }
-
-                    return sema.SemaError.InvalidType;
-                }
-
-                var log = scope.builder.logger.logError(
-                    "Type Error", .{},
-                    null, .{});
-
-                log.addLine(
-                    "Doesn't Exist.", .{}, 
-                    expression.span);
-
-                return sema.SemaError.InvalidType;
-            }
-
-            var log = scope.builder.logger.logError(
-                "Type Error", .{},
-                null, .{});
-
-            log.addLine(
-                "Can't infer the type of this.", .{}, 
                 expression.span);
 
             return sema.SemaError.InvalidType;

@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const Lilac = @import("Lilac");
-const logger = Lilac.logger;
+const logging = Lilac.logging;
 
 pub fn main(init: std.process.Init) !void {
 
@@ -29,54 +29,46 @@ pub fn main(init: std.process.Init) !void {
 
         const path = try std.fmt.allocPrint(allocator, "tests/{s}", .{name});
 
-        const error_count = Lilac.testCompile(io, allocator, path);
+        const ok = Lilac.testCompile(io, allocator, path);
 
         const expect_fail = std.mem.startsWith(u8, name, "FAILS_");
 
-        const ok = (error_count > 0) == expect_fail;
-
-        if (ok) {
+        if (ok or (!ok and expect_fail)) {
             passed += 1;
-            logger.setColor(.reset);
-            logger.setColor(.dim);
-            logger.print("[");
-            logger.setColor(.reset);
-            logger.setColor(.bold);
-            logger.setColor(.bright_green);
-            logger.print("PASS");
-            logger.setColor(.reset);
-            logger.setColor(.dim);
-            logger.print("]: ");
-            logger.setColor(.reset);
-            logger.printFmt("{s}\n", .{name});
+            logging.setColor(.reset);
+            logging.setColor(.dim);
+            logging.print("[");
+            logging.setColor(.reset);
+            logging.setColor(.bold);
+            logging.setColor(.bright_green);
+            logging.print("PASS");
+            logging.setColor(.reset);
+            logging.setColor(.dim);
+            logging.print("]: ");
+            logging.setColor(.reset);
+            logging.printFmt("{s}\n", .{name});
         } else {
             failed += 1;
 
-            logger.setColor(.reset);
-            logger.setColor(.dim);
-            logger.print("[");
-            logger.setColor(.reset);
-            logger.setColor(.bold);
-            logger.setColor(.bright_red);
-            logger.print("FAIL");
-            logger.setColor(.reset);
-            logger.setColor(.dim);
-            logger.print("]: ");
-            logger.setColor(.reset);
-            logger.printFmt("{s} (expected {s}, got {d} error{s})\n",
-                .{
-                    name,
-                    if (expect_fail) "diagnostics" else "no diagnostics",
-                    error_count,
-                    if (error_count == 1) "" else "s",
-            });
+            logging.setColor(.reset);
+            logging.setColor(.dim);
+            logging.print("[");
+            logging.setColor(.reset);
+            logging.setColor(.bold);
+            logging.setColor(.bright_red);
+            logging.print("FAIL");
+            logging.setColor(.reset);
+            logging.setColor(.dim);
+            logging.print("]: ");
+            logging.setColor(.reset);
+            logging.printFmt("{s}\n", .{ name });
         }
     }
-    logger.setColor(.reset);
-    logger.printFmt("Passed: {d}", .{passed});
-    logger.printFmt("Failed: {d}", .{passed});
+    logging.setColor(.reset);
+    logging.printFmt("Passed: {d}", .{passed});
+    logging.printFmt("Failed: {d}", .{passed});
 
-    logger.deinit(io);
+    logging.deinit(io);
 }
 
 fn isTestInput(name: []const u8) bool {

@@ -5,12 +5,12 @@ const TokenType = _tokens.TokenType;
 const Tokenizer = @import("lexer.zig").Tokenizer;
 const untyped = @import("untyped.zig");
 const Ast = untyped.Ast;
-const logger = @import("logger.zig");
+const logging = @import("logger.zig");
 const files = @import("files.zig");
 
 const Parser = struct { 
     ast: Ast,
-    logger: logger.Logger,
+    logger: *logging.Logger,
     current_index: usize = 0,
     allocator: std.mem.Allocator,
 
@@ -157,7 +157,7 @@ const Parser = struct {
 
 var _debug: bool = false;
 
-pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool) Ast {
+pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool, logger: *logging.Logger) Ast {
 
     _debug = debug;
 
@@ -184,9 +184,7 @@ pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool) A
             .tokens = tokens.toOwnedSlice(allocator) catch @panic("Out of Memory."),
             .root_block = undefined,
         },
-        .logger = .{
-            .allocator = allocator,
-        },
+        .logger = logger,
         .allocator = allocator,
     };
     defer parser.logger.deinit();
@@ -647,15 +645,7 @@ fn parseMember(parser: *Parser, allow_setters: bool) untyped.Node(untyped.Expres
 
     const start_of_expression = parser.current_index;
 
-    var lhs: untyped.Node(untyped.Expression) = undefined;
-
-    if (parser.skip_if(.Dot)) {
-        lhs = parser.makeExprNode(start_of_expression, .{
-            .ImplicitMember = parseCall(parser, allow_setters),
-        });
-    } else {
-        lhs = parseCall(parser, allow_setters);
-    }
+    var lhs = parseCall(parser, allow_setters);
 
     while (parser.skip_if(.Dot)) {
 
@@ -754,8 +744,20 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
     
     const expr: untyped.Expression = switch (parser.current().token_type) {
 
-        .Identifier, .Builtin, .String, .Char, .Bool, .Number, .Binary => .{
+        .Identifier => .{
             .Identifier = .{
+                .token = parser.current(),
+            }
+        },
+
+        .Builtin => .{
+            .Builtin = .{
+                .token = parser.current(),
+            }
+        },
+
+        .String, .Char, .Bool, .Number, .Binary => .{
+            .Literal = .{
                 .token = parser.current(),
             }
         },

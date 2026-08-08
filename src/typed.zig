@@ -52,7 +52,6 @@ pub const Type = struct {
     name: ?[]const u8,
     size: ?usize = null,
     structure: std.ArrayList(TypeRef) = .empty,
-    layout: Layout,
 };
 
 pub const TypeId = struct {

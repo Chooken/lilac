@@ -83,7 +83,6 @@ pub const Expression = union(enum) {
     Call: Call,
     Generic: Generic,
     Member: Member,
-    ImplicitMember: Node(Expression),
     Function: Function,
     FuncPrototype: FuncPrototype,
     Object: Node(Block),
@@ -345,11 +344,6 @@ fn printExpression(node: Node(Expression), indent: usize) void {
             printExpression(member.parent, indent + 2);
             printWithIndent(indent + 1, "Child:", .{});
             printExpression(member.child, indent + 2);
-        },
-
-        .ImplicitMember => |implicit_member| {
-            printWithIndent(indent, "Implicit Member:", .{});
-            printExpression(implicit_member, indent + 1);
         },
 
         .Unary => |unary| {

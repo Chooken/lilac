@@ -105,14 +105,6 @@ pub fn collectTypeDataFromExpressions(scope: *sema.Scope, expression: untyped.No
                             }
                         },
 
-                        .Interface => |interfaces| {
-                            if (scope.getType(name, decl.name.span, .private) catch return) |typeid| {
-                                if (scope.builder.getScope(typeid)) |new_scope| {
-                                    collectTypeDataFromBlock(new_scope, interfaces.data, .public);
-                                }
-                            }
-                        },
-
                         // Will need to do setter for func decl.
                         .Function => |function| {
 

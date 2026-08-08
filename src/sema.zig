@@ -199,13 +199,11 @@ pub fn getFunctionTypeId(scope: *Scope, proto: *untyped.FuncPrototype, allow_raw
     return scope.builder.getOrAddFunctionType(proto_type);
 }
 
-pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program, settings: builder.Settings) typed.Program {
+pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program, settings: builder.Settings, logger: *logging.Logger) typed.Program {
 
     var typed_builder = builder.Builder {
         .allocator = allocator,
-        .logger = logging.Logger {
-            .allocator = allocator,
-        },
+        .logger = logger,
         .settings = settings,
         .uprogram = uprogram,
         .root = undefined,
@@ -219,8 +217,6 @@ pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program, setting
     generation.generate(&typed_builder);
     
     analysis.runCollisionCollection(&typed_builder);
-
-    logging.printLogs(typed_builder.logger, allocator);
 
     return typed_builder.program;
 }

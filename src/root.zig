@@ -6,17 +6,17 @@ const untyped = @import("untyped.zig");
 const typed = @import("typed.zig");
 const sema = @import("sema.zig");
 const files = @import("files.zig");
-pub const logger = @import("logger.zig");
+pub const logging = @import("logger.zig");
 
 pub fn init(io: std.Io) void {
-    logger.init(io);
+    logging.init(io);
 }
 
 pub fn deinit(io: std.Io) void {
-    logger.deinit(io);
+    logging.deinit(io);
 }
 
-pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) void {
+pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) bool {
 
     var user_arena = std.heap.ArenaAllocator.init(allocator);
     const user_allocator = user_arena.allocator();
@@ -25,16 +25,21 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
 
     const opt_file = files.loadFile(io, user_allocator, file_path);
 
+    var logger = logging.Logger {
+        .allocator = allocator,
+    };
+    defer logger.deinit();
+
     if (opt_file) |file| {
 
         // Parsing file to Untyped Ast.
-        uprogram.root_module.asts.append(user_allocator, parser.parse(file, user_allocator, false)) catch {
-            return;
+        uprogram.root_module.asts.append(user_allocator, parser.parse(file, user_allocator, false, &logger)) catch {
+            return false;
         };
 
         untyped.printAST(&uprogram.root_module.asts.items[0]);
     } else {
-        logger.printFmt("Failed to Load File: {s}", .{file_path});
+        logging.printFmt("Failed to Load File: {s}", .{file_path});
         @panic("");
     }
 
@@ -42,7 +47,7 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
     _ = sema.runSema(user_allocator, &uprogram, .{
         .bitNativeSize = 64,
         .warnOnOperatorTypeChange = true,
-    });
+    }, &logger);
 
     // Make a new arena for IR so we can free user data structures.
     var ir_arena = std.heap.ArenaAllocator.init(allocator);
@@ -55,5 +60,15 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
 
     _ = ir_allocator;
     ir_arena.deinit();
+
+    logging.printLogs(logger, allocator);
+
+    for (logger.logs.items) |log| {
+        if (log.level == .Error) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
