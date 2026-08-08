@@ -2,7 +2,7 @@ function @main
 {
     // add: function (@bit32) @bit32 = addOne
     allocate #bit64, %add
-    address #bit64, @addOne, &1
+    address @addOne, &1
     copy #bit64, &1, %add
 
     // value: @bit32 = 0x0

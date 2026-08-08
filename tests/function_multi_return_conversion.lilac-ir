@@ -2,15 +2,20 @@ function @main
 {
     allocate #bit8, %condition
     allocate #bit32, %result
+
+    address @get_multi, &1
     allocate #bit32, %tmp:1
     allocate #bit32, %tmp:2
-    call @get, out %tmp:1, out %tmp:2
+    call &1, out %tmp:1, out %tmp:2
+
+    address @conversion:bit32:bit8, &2
     allocate #bit32, %tmp:3
-    copy #bit32, %tmp:1, &1
-    copy #bit32, &1, %tmp:3
+    copy #bit32, %tmp:1, &3
+    copy #bit32, &3, %tmp:3
     allocate #bit8, %tmp:4
-    call @conversion:bit32:bit8, in %tmp:3, out %tmp:4:
-    copy #bit32, %tmp:4, %condition
+    call &2, in %tmp:3, out %tmp:4
+
+    copy #bit8, %tmp:4, %condition
     copy #bit32, %tmp:2, %result
     return
 }

@@ -89,7 +89,6 @@ pub const Expression = union(enum) {
     Object: Node(Block),
     Enum: Node(Block),
     Union: Node(Block),
-    Interface: Node(Block),
     Identifier: Identifier,
     Builtin: Identifier,
     Literal: Literal,

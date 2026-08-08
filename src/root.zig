@@ -5,13 +5,18 @@ const parser = @import("parser.zig");
 const untyped = @import("untyped.zig");
 const typed = @import("typed.zig");
 const sema = @import("sema.zig");
-const logger = @import("logger.zig");
 const files = @import("files.zig");
+pub const logger = @import("logger.zig");
+
+pub fn init(io: std.Io) void {
+    logger.init(io);
+}
+
+pub fn deinit(io: std.Io) void {
+    logger.deinit(io);
+}
 
 pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) void {
-
-    logger.init(io);
-    defer logger.deinit(io);
 
     var user_arena = std.heap.ArenaAllocator.init(allocator);
     const user_allocator = user_arena.allocator();
@@ -28,6 +33,9 @@ pub fn testCompile(io: std.Io, allocator: std.mem.Allocator, file_path: []const 
         };
 
         untyped.printAST(&uprogram.root_module.asts.items[0]);
+    } else {
+        logger.printFmt("Failed to Load File: {s}", .{file_path});
+        @panic("");
     }
 
     // Convert Untyped Program to Typed Program.

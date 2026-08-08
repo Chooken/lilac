@@ -828,16 +828,6 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
             return node;
         },
 
-        .Interface => {
-            parser.skip();
-            
-            const node = parser.makeExprNode(start_of_expression, .{
-                .Interface = parseBlockWithNode(parser)
-            });
-            
-            return node;
-        },
-
         .If => {
             parser.skip();
 
@@ -911,29 +901,15 @@ fn parseBase(parser: *Parser) untyped.Node(untyped.Expression) {
             }
 
             while (parser.current().token_type != .CloseBrace and !parser.eof()) {
-                if (parser.current().token_type == .Else) {
-                    if (else_case) |else_| {
-                        const other_else = parseElseCase(parser);
-
-                        var log = parser.logger.logError(
-                            "Invalid Match", .{}, 
-                            "Try removing or merging your else blocks.", .{});
-                        log.addLine(
-                            "This is the first else block declaration.", .{}, 
-                            else_.span);
-                        log.addLine(
-                            "Else has been declared twice in match expression.", .{}, 
-                            other_else.span);
-                    } else {
-                        else_case = parseElseCase(parser);
-                    }
-                    continue;
-                }
                 body.append(parser.allocator, parseCase(parser)) catch @panic("Out of Memory");
             }
 
             if (parser.skip_closing(open_brace_pos, .CloseBrace)) {
                 return parser.makeExprNode(start_of_expression, .Error);
+            }
+
+            if (parser.current().token_type == .Else) {
+                else_case = parseElseCase(parser);
             }
             
             return parser.makeExprNode(start_of_expression, .{ 
@@ -1093,14 +1069,6 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
     parser.skip();
 
     switch (parser.current().token_type) {
-
-        .FatRightArrow => {
-            parser.skip();
-            const statement = parseStatement(parser);
-            return untyped.Node(untyped.Else).init(parser.allocator, start, parser.ast.tokens[parser.current_index - 1].span.end, .{
-                .body = statement,
-            }, parser.ast.file) catch @panic("Out of Memory.");
-        },
         
         .OpenBrace => {
             return untyped.Node(untyped.Else).init(
@@ -1108,22 +1076,22 @@ fn parseElseCase(parser: *Parser) untyped.Node(untyped.Else) {
                 start, 
                 parser.ast.tokens[parser.current_index].span.end, 
                 .{
-                    .body = parser.makeStmtNode(parser.current_index, .{ .Block = parseBlockWithNode(parser) }),
+                    .body = parser.makeStmtNode(
+                        parser.current_index, 
+                        .{ .Block = parseBlockWithNode(parser) }),
                 }, 
                 parser.ast.file) catch @panic("Out of Memory.");
         },
 
         else => {
-            parser.LogInvalidToken(
-                "Invalid else case body.", .{}, 
-                "else {{}} or else => value",
-                parser.current_index);
             return untyped.Node(untyped.Else).init(
                 parser.allocator, 
                 start, 
                 parser.ast.tokens[parser.current_index].span.end, 
                 .{
-                    .body = parser.makeStmtNode(start_token_of_expression, .Error),
+                    .body = parser.makeStmtNode(
+                        parser.current_index, 
+                        .{ .Expression = parseExpression(parser, true) }),
                 }, 
                 parser.ast.file) catch @panic("Out of Memory.");
         },

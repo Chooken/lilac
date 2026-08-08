@@ -1,4 +1,4 @@
-OptionalBit32: enum {
+OptionalBit32: union {
     Some: @bit32
     None
 }

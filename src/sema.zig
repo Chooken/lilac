@@ -405,7 +405,7 @@ pub fn isTypeInScope(access_scope: *Scope, scope: *Scope, expression: untyped.No
                 else => {
                     var log = scope.builder.logger.logError(
                         "Invalid Type", .{}, 
-                        "Generics can't have ref types or nothing", .{});
+                        "Generics can't have ref or nothing types", .{});
                     log.addLine(
                         "Invalid type for generic.", .{}, 
                         expression.span);

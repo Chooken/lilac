@@ -6,11 +6,10 @@ pub const Token = struct {
     span: files.Span,
 
     pub const reserved_tokens = std.StaticStringMap(TokenType).initComptime(.{
-        .{"obj", TokenType.Object},
-        .{"func", TokenType.Function},
+        .{"object", TokenType.Object},
+        .{"function", TokenType.Function},
         .{"enum", TokenType.Enum},
         .{"union", TokenType.Union},
-        .{"interface", TokenType.Interface},
         .{"self", TokenType.Self},
         .{"nothing", TokenType.Nothing},
         .{"return", TokenType.Return},
@@ -100,7 +99,6 @@ pub const TokenType = enum {
     Object,
     Enum,
     Union,
-    Interface,
 
     // Statements.
     If,
@@ -132,7 +130,6 @@ pub const TokenType = enum {
             .Function => "func",
             .Enum => "enum",
             .Union => "union",
-            .Interface => "interface",
             .Self => "self",
             .Nothing => "nothing",
             .Return => "return",

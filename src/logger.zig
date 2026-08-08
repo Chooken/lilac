@@ -217,9 +217,11 @@ pub fn printLog(log: Log, allocator: std.mem.Allocator) void {
             }
 
             last_line = current_line;
+            const line_start: usize = if (last_line.number == 0) 0 else last_line.end + 2;
+            const line_end: usize = if (index > 0) index - 1 else 0;
             current_line = Line {
-                .start = if (last_line.end == 0) 0 else last_line.end + 2,
-                .end = index - 1,
+                .start = @min(line_start, line_end),
+                .end = line_end,
                 .number = line_number,
             };
             line_number += 1;

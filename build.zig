@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "Lilac",
+        .name = "Lilac Compiler",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -134,6 +134,20 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    
+    const test_runner = b.addExecutable(.{
+        .name = "test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "Lilac", .module = mod },
+            },
+        }),
+    });
+
+    const run_test_runner = b.addRunArtifact(test_runner);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -141,6 +155,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_test_runner.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

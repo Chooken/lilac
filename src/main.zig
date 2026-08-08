@@ -20,7 +20,11 @@ pub fn main(init: std.process.Init) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = debug_allocator.allocator();
 
+    Lilac.init(io);
+
     Lilac.testCompile(io, allocator, "tests/test.lilac");
+
+    Lilac.deinit(io);
 
     _ = debug_allocator.deinit();
 }

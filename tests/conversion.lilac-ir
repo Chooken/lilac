@@ -4,10 +4,11 @@ function @main
     copy #bit32, 0x1, &1
     copy #bit32, &1, %a
     allocate #bit8, %b
+    address @conversion:bit32:bit8, &2
     allocate #bit32, %tmp:1
     copy #bit32, %a, %tmp:1
     allocate #bit8, %tmp:2
-    call @conversion:bit32:bit8, in %tmp:1, out %tmp:2
+    call &2, in %tmp:1, out %tmp:2
     copy #bit8, %tmp:2, %b
     return
 }

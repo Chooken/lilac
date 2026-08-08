@@ -1,6 +1,6 @@
 type #Number 
 {
-    #bit8 %value
+    #bit8
 }
 
 function @main 

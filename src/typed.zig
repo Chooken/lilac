@@ -30,50 +30,9 @@ pub fn TypedNode(comptime T: type) type {
 }
 
 pub const Program = struct {
-    data: std.ArrayList(u8) = .empty,
     types: std.ArrayList(Type) = .empty,
     functions: std.ArrayList(Function) = .empty,
     globals: std.ArrayList(TypeRef) = .empty,
-
-    pub fn addString(self: *Program, allocator: std.mem.Allocator, string: []const u8) Data {
-        var data_slice = Data {
-            .start = self.data.items.len,
-            .end = 0,
-        };
-        
-        self.data.appendSlice(allocator, string) catch @panic("Out of Memory.");
-
-        data_slice.end = self.data.items.len;
-        return data_slice;
-    }
-
-    pub fn addI8(self: *Program, allocator: std.mem.Allocator, data: i8) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addI16(self: *Program, allocator: std.mem.Allocator, data: i16) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addI32(self: *Program, allocator: std.mem.Allocator, data: i32) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addI64(self: *Program, allocator: std.mem.Allocator, data: i64) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addF16(self: *Program, allocator: std.mem.Allocator, data: f16) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addF32(self: *Program, allocator: std.mem.Allocator, data: f32) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
-
-    pub fn addF64(self: *Program, allocator: std.mem.Allocator, data: f64) Data {
-        return self.addString(allocator, std.mem.asBytes(&data));
-    }
 
     pub fn addType(self: *Program, allocator: std.mem.Allocator, typedata: Type) TypeId {
         self.types.append(allocator, typedata) catch @panic("Out of Memory.");
@@ -87,7 +46,6 @@ pub const Layout = enum {
     Object,
     Enum,
     Union,
-    Interface,
 };
 
 pub const Type = struct {
@@ -198,14 +156,8 @@ pub const Expression = union(enum) {
     LocalVar: usize,
     SplitVar: usize,
     Function: FunctionId,
-    Data: Data,
     Type,
     Error,
-};
-
-pub const Data = struct {
-    start: usize,
-    end: usize,
 };
 
 pub const Split = struct { 
