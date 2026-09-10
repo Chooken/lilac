@@ -191,7 +191,7 @@ pub fn parse(file_id: files.FileId, allocator: std.mem.Allocator, debug: bool, l
 
     parser.ast.root_block = parseTopBlock(&parser);
 
-    logger.printLogs(parser.logger, allocator);
+    logging.printLogs(parser.logger, allocator);
 
     return parser.ast;
 }

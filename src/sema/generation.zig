@@ -94,112 +94,18 @@ pub fn generateFromExpressions(scope: *sema.Scope, expression: untyped.Node(unty
 
 pub fn generateFunction(scope: *sema.Scope, function: *untyped.Function, func_name: []const u8, func_id: typed.FunctionId) void {
 
-    const prototype = switch (function.prototype.data.*) {
-
-        .FuncPrototype => |proto| proto,
-
-        else => return,
-    };
-
     const funct = scope.builder.getFunction(func_id);
-    const proto_type = scope.builder.getType(funct.typeid).data.?.Function;
-
     const funct_scope = scope.builder.getScope(scope.builder.getNewType(func_name, .Function, scope)).?;
 
-    if (prototype.arguments) |args| {
-
-        switch (args.data.*) {
-
-            .Declaration => |decl| {
-
-                const ident = switch (decl.name.data.*) {
-                    
-                    .Identifier => |ident| ident,
-
-                    else => return,
-                };
-                
-                const name = ident.token.span.getString();
-
-                funct_scope.addField(name, args.span, .public, proto_type.inputs.items[0]) catch return;
-            }, 
-
-            .List => |list| {
-
-                for (list.expressions.items, 0..) |arg, index| {
-
-                    switch (arg.data.*) {
-
-                        .Declaration => |decl| {
-                            const ident = switch (decl.name.data.*) {
-                                
-                                .Identifier => |ident| ident,
-
-                                else => return,
-                            };
-                            
-                            const name = ident.token.span.getString();
-
-                            funct_scope.addField(name, arg.span, .public, proto_type.inputs.items[index]) catch return;
-                        },
-
-                        else => return,
-                    }
-                }
-            },
-
-            else => return,
-        }
+    for (funct.in) |in| {
+        scope.addValue(in.data.name, in.span, .public, in.data.type_ref) catch continue;
     }
 
-    switch (prototype.returns.data.*) {
-
-        .Declaration => |decl| {
-
-            const ident = switch (decl.name.data.*) {
-                
-                .Identifier => |ident| ident,
-
-                else => return,
-            };
-            
-            const name = ident.token.span.getString();
-
-            funct_scope.addField(name, prototype.returns.span, .public, proto_type.inputs.items[0]) catch return;
-        }, 
-
-        .List => |list| {
-
-            for (list.expressions.items, 0..) |return_, index| {
-
-                switch (return_.data.*) {
-
-                    .Declaration => |decl| {
-                        const ident = switch (decl.name.data.*) {
-                            
-                            .Identifier => |ident| ident,
-
-                            else => return,
-                        };
-                        
-                        const name = ident.token.span.getString();
-
-                        funct_scope.addField(name, return_.span, .public, proto_type.outputs.items[index]) catch return;
-                    },
-
-                    else => return,
-                }
-            }
-        },
-
-        .Nothing => {},
-
-        else => return,
+    for (funct.out) |out| {
+        scope.addValue(out.data.name, out.span, .public, out.data.type_ref) catch continue;
     }
-
     
-    const funct_ = scope.builder.getFunction(func_id);
-    funct_.block = generateFunctionStatements(funct_scope, function.body);
+    funct.block = generateFunctionStatements(funct_scope, function.body);
 }
 
 pub fn generateFunctionBlock(scope: *sema.Scope, block: untyped.Node(untyped.Block)) typed.TypedNode(typed.Block) {
@@ -311,12 +217,22 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
             var value = try generateFunctionExpressions(scope, assignment.value, assignee.getInferable());
 
             if (generateTypeEquality(scope, assignee.value, &value)) {
+
+                if (assignment.inlined) {
+                    var log = scope.builder.logger.logError(
+                        "Invalid Inline Declaration.", .{}, 
+                        "Move the declaration outside the function.", .{});
+                    log.addLine(
+                        "Can't have inline expressions in functions.", .{}, 
+                        expression.span);
+                    return scope.createTypedExpression(expression, .Error, .empty);
+                }
+
                 return scope.createTypedExpression(
                     expression, 
                     .{ .Assignment = .{ 
                         .assignee = assignee, 
-                        .value = value,
-                        .inlined = assignment.inlined } },
+                        .value = value} },
                     assignee.value);
             }
 
@@ -337,7 +253,7 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
                 .Setter => |setter| {
                     if (sema.ExprToTypeRef(scope, setter.settee)) |decl_type_ref| {
 
-                        scope.addField(name_string, decl.name.span, .public, decl_type_ref) catch return sema.SemaError.InvalidType;
+                        scope.addValue(name_string, decl.name.span, .public, decl_type_ref) catch return sema.SemaError.InvalidType;
 
                         var types = std.ArrayList(typed.TypeRef).empty;
                         types.append(scope.builder.allocator, decl_type_ref) catch @panic("Out of Memory.");
@@ -373,7 +289,7 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
                 else => {
                     if (sema.ExprToTypeRef(scope, decl.decl_type)) |decl_type_ref| {
 
-                        scope.addField(name_string, decl.name.span, .public, decl_type_ref) catch return sema.SemaError.InvalidType;
+                        scope.addValue(name_string, decl.name.span, .public, decl_type_ref) catch return sema.SemaError.InvalidType;
 
                         var types = std.ArrayList(typed.TypeRef).empty;
                         types.append(scope.builder.allocator, decl_type_ref) catch @panic("Out of Memory.");
@@ -569,7 +485,7 @@ pub fn generateFunctionExpressions(scope: *sema.Scope, expression: untyped.Node(
 
                 switch (decl.decl_type) {
 
-                    .Field => |type_ref| {
+                    .Value => |type_ref| {
                         var types = std.ArrayList(typed.TypeRef).empty;
                         types.append(scope.builder.allocator, type_ref) catch @panic("Out of Memory.");
 
@@ -791,7 +707,7 @@ pub fn generateSetterBlock(scope: *sema.Scope, settee_scope: *sema.Scope, block:
             return sema.SemaError.MissingDeclaration;
         };
 
-        if (decl.decl_type != .Field) {
+        if (decl.decl_type != .Value) {
             var log = scope.builder.logger.logError(
                 "Invalid Field", .{}, 
                 "Was this identifier mean't to be a field?", .{});
@@ -807,12 +723,12 @@ pub fn generateSetterBlock(scope: *sema.Scope, settee_scope: *sema.Scope, block:
         }
 
         var types = std.ArrayList(typed.TypeRef).empty;
-        types.append(scope.builder.allocator, decl.decl_type.Field) catch @panic("Out of Memory.");
+        types.append(scope.builder.allocator, decl.decl_type.Value) catch @panic("Out of Memory.");
 
         var value = try generateFunctionExpressions(
             scope, 
             assignment.value, 
-            decl.decl_type.Field);
+            decl.decl_type.Value);
 
         const ident = scope.createTypedExpression(
             assignment.assignee, 
@@ -899,7 +815,7 @@ pub fn generateTypeEquality(scope: *sema.Scope, expected: std.ArrayList(typed.Ty
                         scope.builder.allocator, 
                         expr.span, 
                         expected, 
-                        .{ .SplitLiteral = .{ .index = index } })) catch @panic("Out of Memory.");
+                        .{ .SplitVar = index  })) catch @panic("Out of Memory.");
             },
 
             .Failed => return false,
@@ -910,7 +826,7 @@ pub fn generateTypeEquality(scope: *sema.Scope, expected: std.ArrayList(typed.Ty
                         scope.builder.allocator, 
                         expr.span, 
                         expected, 
-                        .{ .SplitLiteral = .{ .index = index } }),
+                        .{ .SplitVar = index }),
                     .callee = conversion_funct_id,
                 };
 

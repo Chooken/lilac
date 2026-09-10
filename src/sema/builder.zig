@@ -46,8 +46,7 @@ pub const Declaration = struct {
 };
 
 pub const DeclarationType = union(enum) {
-    Field: typed.TypeRef,
-    InlineExpression: typed.Expression,
+    Value: typed.TypeRef,
     Type: typed.TypeId,
     Function: typed.FunctionId,
     Generic: Generic,
@@ -500,7 +499,7 @@ pub const Scope = struct {
         return null;
     }
 
-    pub fn addField(self: *Scope, identifier: []const u8, span: files.Span, visability: Visability, type_ref: typed.TypeRef) TypeError!void {
+    pub fn addValue(self: *Scope, identifier: []const u8, span: files.Span, visability: Visability, type_ref: typed.TypeRef) TypeError!void {
         std.debug.print("Added Field: {s} to {s}\n", .{identifier, self.allocFullName()});
         
         switch (self.scope_type) {
@@ -510,35 +509,7 @@ pub const Scope = struct {
                 try self.addDecl(
                     identifier, 
                     span, 
-                    .{ .Field = type_ref }, 
-                    visability);
-
-                self.fields.put(
-                    self.builder.allocator,
-                    identifier,
-                    self.fields,
-                );
-
-                self.fields += 1;
-            },
-
-            .Enum => {
-
-                var value = std.ArrayList(typed.TypeRef).empty;
-                value.append(self.builder.allocator, .{ 
-                    .id = self.builder.bit8,
-                    .is_ref = false,
-                }) catch @panic("Out of Memory.");
-
-                try self.addDecl(
-                    identifier, 
-                    span, 
-                    .{ .InlineExpression = typed.TypedNode(typed.Expression).init(
-                        self.builder.allocator,
-                        span,
-                        value,
-                        .{ .Int = self.fields }
-                    )}, 
+                    .{ .Value = type_ref }, 
                     visability);
 
                 self.fields.put(

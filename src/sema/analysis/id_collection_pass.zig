@@ -123,16 +123,6 @@ pub fn collectTypeIdsFromExpressions(scope: *sema.Scope, expression: untyped.Nod
                             }
                         },
 
-                        .Interface => |interfaces| {
-                            const typeid = scope.addTypeDecl(token.span.getString(), .Interface, visability, decl.name.span) catch return;
-                            const obj_type = scope.builder.getType(typeid);
-                            obj_type.data = .{ .Object = .{} };
-
-                            for (interfaces.data.body.items) |child_statement| {
-                                collectTypeIdsFromStatements(scope, child_statement, .public);
-                            }
-                        },
-
                         else => return,
                     }
                 },

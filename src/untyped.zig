@@ -378,11 +378,6 @@ fn printExpression(node: Node(Expression), indent: usize) void {
             printBlock(_union.data, indent + 1);
         },
 
-        .Interface => |interface| {
-            printWithIndent(indent, "Interface:", .{});
-            printBlock(interface.data, indent + 1);
-        },
-
         .Function => |function| {
             printWithIndent(indent, "Function", .{});
             printWithIndent(indent + 1, "Is Inlined:", .{});

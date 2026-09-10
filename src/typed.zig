@@ -42,13 +42,12 @@ pub const Program = struct {
     }
 };
 
-pub const Layout = enum {
-    Object,
-    Enum,
-    Union,
+pub const Type = union(enum) {
+    Function: FunctionProto,
+    Data: DataType,
 };
 
-pub const Type = struct {
+pub const DataType = struct {
     name: ?[]const u8,
     size: ?usize = null,
     structure: std.ArrayList(TypeRef) = .empty,
@@ -59,10 +58,6 @@ pub const TypeId = struct {
 };
 
 pub const FunctionId = struct {
-    index: usize,
-};
-
-pub const globalId = struct {
     index: usize,
 };
 
@@ -121,7 +116,8 @@ pub const FunctionProto = struct {
 pub const Function = struct {
     requires_self: bool,
     is_inlined: bool,
-    typeid: TypeId, 
+    in: []const TypedNode(Declaration),
+    out: []const TypedNode(Declaration),
     block: ?TypedNode(Statement),
 };
 
@@ -145,18 +141,26 @@ pub const Expression = union(enum) {
     If: Conditional,
     Match: Match,
     Assignment: Assignment,
-    Declaration: TypeRef,
+    Declaration: Declaration,
     List: List,
     Setter: Setter,
     Call: Call,
     BuiltinCall: BuiltinCall, 
     FieldAccessor: FieldAccessor,
-    GlobalId: usize,
-    LocalVar: usize,
+    GlobalVar: Variable,
+    LocalVar: Variable,
     SplitVar: usize,
     Function: FunctionId,
-    Type,
     Error,
+};
+
+pub const Variable = struct {
+    name: []const u8
+};
+
+pub const Declaration = struct {
+    name: []const u8,
+    type_ref: TypeRef,
 };
 
 pub const Split = struct { 
@@ -167,7 +171,6 @@ pub const Split = struct {
 pub const Assignment = struct {
     assignee: TypedNode(Expression),
     value: TypedNode(Expression),
-    inlined: bool,
 };
 
 pub const List = struct {
@@ -202,12 +205,6 @@ pub const Setter = struct {
     body: std.ArrayList(TypedNode(Assignment))
 };
 
-pub const EnumSetter = struct {
-    settee: TypeId,
-    tag: TypedNode(Expression), 
-    value: ?TypedNode(Expression),
-};
-
 pub const Call = struct {
     callee: FunctionId,
     arguements: ?TypedNode(Expression),
@@ -221,8 +218,4 @@ pub const BuiltinCall = struct {
 pub const FieldAccessor = struct {
     parent: TypedNode(Expression),
     field_index: usize,
-};
-
-pub const SplitVar = struct {
-    index: usize,
 };

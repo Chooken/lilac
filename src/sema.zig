@@ -223,7 +223,7 @@ pub fn runSema(allocator: std.mem.Allocator, uprogram: *untyped.Program, setting
 
 pub fn addFieldToTypeData(scope: *Scope, identifier: []const u8, node: untyped.Node(untyped.Expression), type_expr: untyped.Node(untyped.Expression), visability: Visability) void {
     if (ExprToTypeRef(scope, type_expr)) |type_ref| {
-        scope.addField(identifier, node.span, visability, type_ref) catch return;
+        scope.addValue(identifier, node.span, visability, type_ref) catch return;
     }
 }
 

@@ -88,7 +88,7 @@ pub fn collectTypeDataFromExpressions(scope: *sema.Scope, expression: untyped.No
                                     scope.addDecl("value", 
                                         decl.name.span, 
                                         .{ 
-                                            .Field = .{ 
+                                            .Value = .{ 
                                                 .id = scope.builder.bit8,
                                                 .is_ref = false, }}, 
                                         .private) catch return;
