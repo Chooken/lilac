@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use lilac_ast::{FuncDecl, Item, ItemKind, Program, Type as AstType};
+use lilac_ast::{Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
 use lilac_resolve::{DefId, Module, ResItem, ResKind};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
@@ -192,41 +192,64 @@ struct SigCtx<'a> {
     sigs: &'a mut Sigs,
 }
 
-fn collect_func(
-    name: &str,
-    item: &ResItem,
-    decl: &FuncDecl,
-    parent: Option<(&str, DefId)>,
-    ctx: &mut SigCtx,
-) {
+fn collect_func(name: &str, item: &ResItem, parent: Option<(&str, DefId)>, ctx: &mut SigCtx) {
     let generic = match &item.kind {
-        ResKind::Func { generic, .. } | ResKind::Hook { generic } => *generic,
+        ResKind::Func { generic, .. } => *generic,
         _ => {
             lilac_error::bug!(item.span, "collect_func on non-function item");
         }
     };
     if generic {
-        if matches!(item.kind, ResKind::Hook { .. }) {
-            ctx.diags.emit(
-                Diagnostic::error(
-                    "E052",
-                    "hook bindings must be concrete; generic hooks are rejected",
-                )
-                .label(item.span, true, "generic parameters here".to_owned()),
-            );
-        }
         return;
     }
-    let mut params = Vec::with_capacity(decl.params.len());
-    for param in &decl.params {
-        params.push(collect_param(param, parent, ctx));
+    register(name, item, parent, false, ctx);
+}
+
+fn collect_hook_sig(name: &str, item: &ResItem, ctx: &mut SigCtx) {
+    let generic = match &item.kind {
+        ResKind::Hook { generic, .. } => *generic,
+        _ => {
+            lilac_error::bug!(item.span, "collect_hook_sig on non-hook item");
+        }
+    };
+    if generic {
+        ctx.diags.emit(
+            Diagnostic::error(
+                "E052",
+                "hook bindings must be concrete; generic hooks are rejected",
+            )
+            .label(item.span, true, "generic parameters here".to_owned()),
+        );
+        return;
     }
-    let mut returns = Vec::with_capacity(decl.returns.len());
-    for param in &decl.returns {
-        returns.push(collect_param(param, parent, ctx));
+    register(name, item, None, true, ctx);
+}
+
+fn register(
+    name: &str,
+    item: &ResItem,
+    parent: Option<(&str, DefId)>,
+    is_hook: bool,
+    ctx: &mut SigCtx,
+) {
+    let (ResKind::Func { params, returns, .. } | ResKind::Hook { params, returns, .. }) =
+        &item.kind
+    else {
+        lilac_error::bug!(item.span, "register on non-function item");
+    };
+    let mut sig_params = Vec::with_capacity(params.len());
+    for param in params {
+        sig_params.push(collect_param(param, parent, ctx));
     }
-    let sig = FuncSig { params, returns };
-    if matches!(item.kind, ResKind::Hook { .. }) {
+    let mut sig_returns = Vec::with_capacity(returns.len());
+    for param in returns {
+        sig_returns.push(collect_param(param, parent, ctx));
+    }
+    let sig = FuncSig {
+        params: sig_params,
+        returns: sig_returns,
+    };
+    if is_hook {
         ctx.sigs
             .hooks
             .entry(name.to_owned())
@@ -256,7 +279,10 @@ fn collect_func(
 
 fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, ctx: &mut SigCtx) {
     match &item.kind {
-        ItemKind::Func(decl) => collect_func(&item.name, resolved, decl, parent, ctx),
+        ItemKind::Func(_) => match &resolved.kind {
+            ResKind::Hook { .. } => {}
+            _ => collect_func(&item.name, resolved, parent, ctx),
+        },
         ItemKind::Object { members, .. } => {
             let ResKind::Object {
                 members: resolved_members,
@@ -266,12 +292,16 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
             };
             for member in members {
                 if let Some(resolved_member) = resolved_members.get(&member.name) {
-                    collect_item(
-                        member,
-                        resolved_member,
-                        Some((item.name.as_str(), resolved.id)),
-                        ctx,
-                    );
+                    if matches!(resolved_member.kind, ResKind::Hook { .. }) {
+                        collect_hook_sig(&member.name, resolved_member, ctx);
+                    } else {
+                        collect_item(
+                            member,
+                            resolved_member,
+                            Some((item.name.as_str(), resolved.id)),
+                            ctx,
+                        );
+                    }
                 }
             }
         }
@@ -303,6 +333,17 @@ pub fn collect_sigs(
         if let Some(resolved) = ctx.module.items.get(&item.name) {
             let resolved = resolved.clone();
             collect_item(item, &resolved, None, &mut ctx);
+        }
+    }
+    let top_hooks: Vec<(String, Vec<ResItem>)> = ctx
+        .module
+        .hooks
+        .iter()
+        .map(|(name, overloads)| (name.clone(), overloads.clone()))
+        .collect();
+    for (name, overloads) in &top_hooks {
+        for overload in overloads {
+            collect_hook_sig(name, overload, &mut ctx);
         }
     }
     sigs

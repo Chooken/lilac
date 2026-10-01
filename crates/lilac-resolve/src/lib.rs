@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use lilac_ast::{Item, ItemKind, Program};
-use lilac_error::{Diags, Diagnostic};
+use lilac_ast::{Item, ItemKind, Param, Program};
+use lilac_error::{Diagnostic, Diags};
 use lilac_span::Span;
 
 /// HIR-level definition identity, stable across passes.
@@ -30,15 +30,24 @@ pub struct ResItem {
 #[derive(Clone, Debug)]
 pub enum ResKind {
     /// `name: function ...` (or `extern`, which has no body).
-    Func { /// Foreign declaration without a body.
+    Func {
+        /// Foreign declaration without a body.
         is_extern: bool,
         /// Whether it declares generic parameters (bodies check in M4).
         generic: bool,
+        /// Declared parameters (for signature collection).
+        params: Vec<Param>,
+        /// Declared return slots (for signature collection).
+        returns: Vec<Param>,
     },
     /// `@`-named hook (`@add`, `@conversion`, ...).
     Hook {
         /// Whether it declares generic parameters (rejected with `E052`).
         generic: bool,
+        /// Declared parameters (for signature collection).
+        params: Vec<Param>,
+        /// Declared return slots (for signature collection).
+        returns: Vec<Param>,
     },
     /// `name: object { ... }` with collected members.
     Object {
@@ -61,8 +70,18 @@ pub enum ResKind {
 /// One namespace unit: top-level names of a file.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
-    /// Top-level name → definition.
+    /// Top-level name → definition (first binding wins on duplicates).
     pub items: HashMap<String, ResItem>,
+    /// Hook name → every overload in definition order.
+    pub hooks: HashMap<String, Vec<ResItem>>,
+}
+
+/// Signature key for overload uniqueness (names excluded, types included).
+fn sig_key(params: &[Param], returns: &[Param]) -> String {
+    let one = |p: &Param| format!("{}:{}:{:?}", p.ty.name, p.ty.is_ref, p.ty.generic_args);
+    let ps: Vec<String> = params.iter().map(one).collect();
+    let rs: Vec<String> = returns.iter().map(one).collect();
+    format!("({})->({})", ps.join(","), rs.join(","))
 }
 
 struct Collector<'a> {
@@ -95,12 +114,20 @@ impl Collector<'_> {
         let kind = match &item.kind {
             ItemKind::Func(decl) => {
                 let generic = !decl.generic_params.is_empty();
+                let params = decl.params.clone();
+                let returns = decl.returns.clone();
                 if item.name.starts_with('@') {
-                    ResKind::Hook { generic }
+                    ResKind::Hook {
+                        generic,
+                        params,
+                        returns,
+                    }
                 } else {
                     ResKind::Func {
                         is_extern: decl.is_extern,
                         generic,
+                        params,
+                        returns,
                     }
                 }
             }
@@ -108,7 +135,9 @@ impl Collector<'_> {
                 let mut table = HashMap::new();
                 for member in members {
                     if let Some(resolved) = self.item(member) {
-                        self.insert(&mut table, &member.name, resolved);
+                        // Member scope tracks no overload sets: same-name
+                        // members always report E020, hooks included.
+                        self.insert_overload(&mut table, None, &member.name, resolved);
                     }
                 }
                 ResKind::Object { members: table }
@@ -127,18 +156,71 @@ impl Collector<'_> {
             span: item.span,
         })
     }
+
+    /// Inserts into a scope, allowing hook overloads with distinct signatures.
+    /// Identical hook signatures (and any non-hook redefinition) report `E020`.
+    fn insert_overload(
+        &mut self,
+        scope: &mut HashMap<String, ResItem>,
+        hooks: Option<&mut HashMap<String, Vec<ResItem>>>,
+        name: &str,
+        item: ResItem,
+    ) {
+        let same_sig = |a: &ResItem, b: &ResItem| match (&a.kind, &b.kind) {
+            (
+                ResKind::Hook {
+                    params: ap,
+                    returns: ar,
+                    ..
+                },
+                ResKind::Hook {
+                    params: bp,
+                    returns: br,
+                    ..
+                },
+            ) => sig_key(ap, ar) == sig_key(bp, br),
+            _ => true,
+        };
+        if matches!(item.kind, ResKind::Hook { .. }) {
+            if let Some(hooks) = hooks {
+                let overloads = hooks.entry(name.to_owned()).or_default();
+                if overloads.iter().any(|prev| same_sig(prev, &item)) {
+                    let previous_span =
+                        overloads.first().map_or(item.span, |prev| prev.span);
+                    self.diags.emit(
+                        Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                            .label(item.span, true, "redefined here")
+                            .label(previous_span, false, "first defined here"),
+                    );
+                    return;
+                }
+                let first = overloads.is_empty();
+                overloads.push(item.clone());
+                if !first {
+                    return;
+                }
+            }
+        }
+        self.insert(scope, name, item);
+    }
 }
 
 /// Collects every top-level (and object-member) definition.
 ///
-/// `using` directives are not definitions and are skipped. Duplicates keep
-/// the first binding and report `E020` at each redefinition.
+/// `using` directives are not definitions and are skipped. Non-hook
+/// duplicates keep the first binding and report `E020`; hooks allow overloads
+/// with distinct signatures (identical ones still report `E020`).
 pub fn collect(program: &Program, diags: &mut Diags) -> Module {
     let mut collector = Collector { diags, next: 0 };
     let mut module = Module::default();
     for item in &program.items {
         if let Some(resolved) = collector.item(item) {
-            collector.insert(&mut module.items, &item.name, resolved);
+            collector.insert_overload(
+                &mut module.items,
+                Some(&mut module.hooks),
+                &item.name,
+                resolved,
+            );
         }
     }
     module
@@ -192,7 +274,10 @@ mod tests {
         let ResKind::Object { members } = &object.kind else {
             panic!("expected object, got {:?}", object.kind);
         };
-        assert!(matches!(members.get("member").map(|m| &m.kind), Some(ResKind::Field)));
+        assert!(matches!(
+            members.get("member").map(|m| &m.kind),
+            Some(ResKind::Field)
+        ));
         assert!(matches!(
             members.get("get").map(|m| &m.kind),
             Some(ResKind::Func { .. })
@@ -216,5 +301,22 @@ mod tests {
             panic!("expected enum, got {:?}", number.kind);
         };
         assert_eq!(variants, &["One".to_owned(), "Two".to_owned()]);
+    }
+
+    #[test]
+    fn hook_overloads_with_distinct_sigs_pass() {
+        let (module, diags) = resolve_src(
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @iadd(lhs, rhs)\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(module.hooks.get("@add").map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn identical_hook_sigs_emit_e020() {
+        let (_, diags) = resolve_src(
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n",
+        );
+        assert_eq!(e020_count(&diags), 1);
     }
 }

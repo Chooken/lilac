@@ -5,6 +5,7 @@
 //! `E052` once checking exists.
 
 pub mod check;
+pub mod ops;
 pub mod sigs;
 
 pub use check::check_bodies;

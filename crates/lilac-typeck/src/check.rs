@@ -112,7 +112,10 @@ impl Checker<'_> {
         )
     }
 
-    /// Unifies actual against expected (exact only; Task 5 adds conversions).
+    /// Unifies an actual value against an expected type: exact first (with
+    /// silent auto-deref), then one directed `@conversion` step for non-`ref`
+    /// mismatches. `ref` shape mismatches stay `E010`; failed searches are
+    /// `E043`. Never chains.
     fn expect_type(
         &mut self,
         actual: TypeRef,
@@ -123,22 +126,34 @@ impl Checker<'_> {
         if is_poison(actual) || expected == TypeId::ERROR {
             return Ok(());
         }
-        let actual_base = actual.id;
-        if actual_base == expected && !actual.is_ref {
+        if actual.id == expected && !actual.is_ref {
             return Ok(());
         }
-        if actual.is_ref && actual_base == expected {
-            return Ok(());
+        if actual.is_ref {
+            if actual.id == expected {
+                return Ok(());
+            }
+            return Err(self.mismatch(
+                TypeRef {
+                    id: expected,
+                    is_ref: false,
+                },
+                actual,
+                expected_span,
+                actual_span,
+            ));
         }
-        Err(self.mismatch(
-            TypeRef {
-                id: expected,
-                is_ref: false,
-            },
+        match super::ops::convert(
+            self.types,
+            self.diags,
+            self.sigs,
             actual,
-            expected_span,
+            expected,
             actual_span,
-        ))
+        ) {
+            Ok(_) => Ok(()),
+            Err(guaranteed) => Err(guaranteed),
+        }
     }
 
     fn check_item(&mut self, item: &Item, resolved: &ResItem) {
@@ -196,7 +211,7 @@ impl Checker<'_> {
         }
         if matches!(
             &resolved.kind,
-            ResKind::Func { generic: true, .. } | ResKind::Hook { generic: true }
+            ResKind::Func { generic: true, .. } | ResKind::Hook { generic: true, .. }
         ) {
             return;
         }
@@ -573,8 +588,43 @@ impl Checker<'_> {
             is_ref: false,
         };
         if op != BinOp::EqEq {
-            deferred(self.diags, span, "binary operators", "later in M1");
-            return poison;
+            let Some(hook) = super::ops::binop_hook_name(op) else {
+                lilac_error::bug!(span, "equality handled above");
+            };
+            let left = self.check_expr(fctx, lhs, None);
+            let right = self.check_expr(fctx, rhs, None);
+            if is_poison(left) || is_poison(right) {
+                return poison;
+            }
+            match super::ops::resolve_binop(self.sigs, hook, left.id, right.id) {
+                Ok(sig) => {
+                    return TypeRef {
+                        id: sig.returns[0].id,
+                        is_ref: false,
+                    };
+                }
+                Err(miss) => {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E043",
+                            format!(
+                                "no {} for ({}, {}); no conversion from {} to {}",
+                                miss.hook,
+                                self.types.display(miss.lhs),
+                                self.types.display(miss.rhs),
+                                self.types.display(miss.rhs),
+                                self.types.display(miss.lhs),
+                            ),
+                        )
+                        .label(
+                            span,
+                            true,
+                            "operator and conversion search failed".to_owned(),
+                        ),
+                    );
+                    return poison;
+                }
+            }
         }
         let left = self.check_expr(fctx, lhs, None);
         let right = self.check_expr(fctx, rhs, None);
@@ -665,7 +715,7 @@ impl Checker<'_> {
                     return Err(deferred(self.diags, span, "generic calls", "M4"));
                 }
             }
-            ResKind::Hook { generic } => {
+            ResKind::Hook { generic, .. } => {
                 if *generic {
                     return Err(ErrorGuaranteed::new());
                 }
@@ -736,7 +786,7 @@ impl Checker<'_> {
                 failed = true;
                 continue;
             }
-            if self.unify(got, param.id, span, arg.span()).is_err() {
+            if self.expect_type(got, param.id, span, arg.span()).is_err() {
                 failed = true;
             }
         }
@@ -1111,20 +1161,8 @@ impl Checker<'_> {
         if is_poison(got) {
             return Err(ErrorGuaranteed::new());
         }
-        self.unify(got, want_id, arg.span(), arg.span())?;
+        self.expect_type(got, want_id, arg.span(), arg.span())?;
         Ok(())
-    }
-
-    /// Unifies an actual value against an expected type (exact only in Task 4;
-    /// Task 5 routes mismatches through `ops::convert`).
-    fn unify(
-        &mut self,
-        actual: TypeRef,
-        expected: TypeId,
-        expected_span: Span,
-        actual_span: Span,
-    ) -> Result<(), ErrorGuaranteed> {
-        self.expect_type(actual, expected, expected_span, actual_span)
     }
 
     fn ident_type(
@@ -1285,10 +1323,12 @@ mod tests {
     }
 
     #[test]
-    fn mismatch_shows_both_sides() {
+    fn mismatch_without_conversion_is_e043() {
+        // Task 5: without a binding, a type mismatch is a failed conversion
+        // search. The diagnostic still shows both sides.
         let diags =
             check_src("main: function () nothing {\n    y: @bit32 = 0x1\n    x: @bit8 = y\n}\n");
-        assert!(has_code(&diags, "E010"), "{diags:?}");
+        assert!(has_code(&diags, "E043"), "{diags:?}");
         let msgs = messages(&diags);
         assert!(
             msgs.iter()
