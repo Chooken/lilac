@@ -1,21 +1,34 @@
+# Lilac IR Specification (v2)
+
+> Version: `lilac_ir = "0.2"`. Status: normative for the Rust rewrite.
+> `SPEC.md` is normative for language semantics; this file is normative for IR text,
+> verification, and backend contract. Plan-only material lives in `RUST_REWRITE_PLAN.md`.
+
 # Declaration Syntax
 * ! = Constant in data section
 * @ = Function
 * \# = type
-* % = variable
-* $ = Label
-* & = register
-* ref = tells the compiler its a ref and it needs to deref it.
+* % = mutable place (allocad variable)
+* $ = Label (block)
+* & = SSA register value within a block (`&n: #type`, defined once before use)
+* `addr` / `addr.func` / `load` = explicit address and dereference operations.
+  There is no bare `ref` modifier on operands.
 
 # Sections
 
-Data sections hold constant declarations:
+Data sections hold constant declarations. String and number literals lower to
+`@byte_buffer` consts before IR; f-strings lower to `@format_args` construction
+plus conversions/calls and introduce no new instruction shapes (see `SPEC.md`).
 ```lilac-ir
 data {
     !const_name "String",
     !const_name "0.54",
 }
 ```
+
+String const bytes are UTF-8. `"` escapes as `\22` and `\` as `\5C`.
+`{{` / `}}` from f-string source are already resolved to `{` / `}` before
+lowering, so they never appear as escapes here.
 
 Types are defined as like:
 
@@ -25,25 +38,44 @@ type #type_name {
 }
 ```
 
+Builtin aggregates usable in `#` positions: `#byte_buffer` (`{len: #bitNative,
+ptr: #ptr}` view, borrows) and `#format_args` (fixed-capacity inline piece table,
+at most 16 pieces). Both are plain values with no hidden behavior.
+
 Functions can be declared as:
 ```lilac-ir
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
 function @func_name
     in #type %param_1,
     in #type %param_2,
     out #type %out_1,
     out #type %out_2
 {
-    
+    $entry:
+      return
 }
+```
+`target` fixes `@bitNative` width. Every block starts with `$label:` and ends
+with exactly one terminator (`return | branch | branch.if | panic | unreachable`).
+
+Foreign symbols are declared without a body; calls to them verify like
+ordinary calls (arity and `in/out` types from the declaration). Backends emit
+native external calls; link libraries come from the package manifest.
+```lilac-ir
+extern @ext_name
+    in #type %param_1,
+    out #type %out_1
 ```
 
 Labels can be defined inside function blocks:
 ```lilac-ir
 {
-    $LABEL:
-    $LABEL(#type %label_param):
+    $entry:
+    $loop:
 }
 ```
+Block parameters are not supported; values flow through `%places` and `&regs`.
 
 # Instructions
 
@@ -51,34 +83,39 @@ Labels can be defined inside function blocks:
 
 ### allocate 
 * Type
-* Variable
+* Variable (mutable place, always zero-initialized)
 
 ```lilac-ir
-allocate #, %
+alloca #type %name : zeroed
+```
+Legacy text `allocate #, %` means the same as `alloca`.
+
+### addr / addr.func / load
+* `addr %var -> &r` takes a place address; `addr.func @f -> &r` takes a function
+  address with pointee signature checked by the verifier; `load ref %x -> &r`
+  dereferences a `ref` place.
+```lilac-ir
+addr %variable -> &1
+addr.func @name -> &2
+load ref %ptr -> &3
 ```
 
-### address 
-* From: variable or function
-* To: register
+### copy / const
+* `copy` moves between places and regs of the same type; `const` defines a typed
+  register from a literal.
 ```lilac-ir
-address [%, @], &
-```
-
-### copy 
-* Type
-* From: variable or registor
-* To: variable or registor
-```lilac-ir
-copy #, [ref]? [%, &, @], [ref]? [%, &]
+copy %a -> %b
+copy &1 -> %b
+&1: #bit32 = const 0x1:#bit32
 ```
 
 ## Control Flow
 
 ### call 
-* To: function or register
-* ...params: in or out variables
+* Callee register holding a function address
+* `in` then `out` operands in signature order; arity and types are verified
 ```lilac-ir
-call [@, &], in %, in %, out %
+call &f (in %a) (out %b)
 ```
 
 ### branch 
@@ -94,18 +131,30 @@ branch [$, &]
 ```lilac-ir
 branch.if [%, &], [$, &], [$, &]?
 ```
+A compile-time folding pass runs before verification. `branch.if` on a constant
+condition is replaced with `branch` to the live target, so verified IR never
+contains `branch.if` on a constant. Dead successors left unreachable are removed.
+`=>` inline functions are substituted before this pass; remaining `call`s with
+all-constant arguments to pure functions with bounded loops may additionally be folded,
+otherwise they are kept as runtime calls.
 
 ### return
 ```lilac-ir
 return
 ```
+`return` requires all `out` places definitely assigned on every path.
+
+### unreachable
+```lilac-ir
+unreachable
+```
+Explicit terminator for pruned `match` fallthrough and eliminated dead branches.
 
 ### panic
-* Message: constant or variable
+* Message: single `!const` byte string (printed as bytes, no `String` involved)
 ```lilac-ir
-panic [!, %]
+panic !msg
 ```
-expects a type with bit64 length in first slot and ptr to start of string in second.
 
 ### compile.error
 * Message: constant or variable
@@ -113,6 +162,11 @@ expects a type with bit64 length in first slot and ptr to start of string in sec
 compile.error [!, %]
 ```
 expects a type with bit64 length in first slot and ptr to start of string in second.
+`compile.error` fires only if still live after constant folding. A `compile.error`
+inside a branch eliminated by folding is dropped without diagnostic. Verified IR
+reaching a backend contains no `compile.error`; it is diagnosed during lowering.
+Byte-buffer intrinsics (`@as_int`, `@as_float`) on constant operands are likewise
+folded to plain constants before verification and never reach the backend.
 
 ## Casts
 
@@ -137,40 +191,43 @@ truncate #, &, #, [%, &]
 ## Field Access
 
 ### field 
-* Type of Parent: type
-* Parent: variable
-* Type of Field: type
-* Fields Index: number
-* Output: variable or register
+* Parent place, field name (index + type shown as comment for readability)
 ```lilac-ir
-field #, %, #, 0, [%, &]
+field %obj .name -> &1  // idx 2, #bit32
 ```
 
 ## Comparisons
-* ```cmp.eql #, [%, &], [%, &], [%, &]```
-* ```i.cmp.gt &, &, [%, &]```
-* ```i.cmp.lt &, &, [%, &]```
-* ```f.cmp.gt &, &, [%, &]```
-* ```f.cmp.lt &, &, [%, &]```
+* ```cmp.eql #type, &a, &b -> &r```
+* ```i.cmp.gt &a, &b -> &r``` / ```i.cmp.lt &a, &b -> &r```
+* ```f.cmp.gt &a, &b -> &r``` / ```f.cmp.lt &a, &b -> &r```
+Result is `@bit8` (`0x0` false, otherwise true). Widths of inputs must match;
+`i.*` vs `f.*` selects two's-complement vs IEEE-754 interpretation.
 
 ## Integer Arithmetic
-* ```i.add &, &, [%, &]```
-* ```i.sub &, &, [%, &]```
-* ```i.mul &, &, [%, &]```
-* ```i.div &, &, [%, &]```
-* ```i.mod &, &, [%, &]```
+* ```i.add &a, &b -> &r``` / ```i.sub``` / ```i.mul``` / ```i.div``` / ```i.mod```
+All operands share one `#bit8/16/32/64/Native` width, carried on the result reg.
 
 ## Float Arithmetic
-* ```f.add &, &, [%, &]```
-* ```f.sub &, &, [%, &]```
-* ```f.mul &, &, [%, &]```
-* ```f.div &, &, [%, &]```
-* ```f.mod &, &, [%, &]```
+* ```f.add &a, &b -> &r``` / ```f.sub``` / ```f.mul``` / ```f.div``` / ```f.mod```
+Same width rule as integer arithmetic.
 
 ## Bitwise Operations
-* ```and &, &, [%, &]```
-* ```or &, &, [%, &]```
-* ```xor &, &, [%, &]```
-* ```not &, [%, &]```
-* ```shift.l &, &, [%, &]```
-* ```shift.r &, &, [%, &]```
+* ```and &a, &b -> &r``` / ```or``` / ```xor``` / ```not &a -> &r```
+* ```shift.l &a, &b -> &r``` / ```shift.r &a, &b -> &r```
+
+## Literals (canonical text)
+* Ints: `0x1:#bit32`, `0b101:#bit8`; width suffix is required in canonical text.
+* Strings/numbers: `!c: str = "..."` / `!c: numlit = "10.5"` in `data`.
+* `@as_int/@as_float` on constant operands never appear in verified IR.
+
+## Verification (`lilac-ir::verify`, runs before any backend)
+1. Header present with supported `lilac_ir` version; `target` resolves `@bitNative`.
+2. All `!/@/#/%/$/&` names resolve; `&regs` defined once before use in block.
+3. Every block ends in exactly one terminator; all branch targets exist.
+4. `call` arity and `in/out` types match callee signature.
+5. `field .name` exists with index in bounds and matching type comment.
+6. Arithmetic/comparison widths match; `i.*`/`f.*` used on allowed widths only.
+7. `return` only when all `out` places are definitely assigned.
+8. No `branch.if` on a constant, no `@as_int/@as_float` on a constant literal,
+   no `compile.error`. Violations are user-facing `Diagnostic`s with HIR spans,
+   never backend crashes.

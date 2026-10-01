@@ -1,5 +1,15 @@
 # The Lilac Programming Language Specification
 
+> Version: 0.2-draft (rewrite baseline). Status: draft, normative for the Rust rewrite.
+> Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
+> `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
+> Keyword spelling is `object` and `function` everywhere; all `@` hooks,
+> intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than`,
+> `@as_int`, `@size_of`, `@compile_error`, `@byte_buffer`, `@extend_zero`).
+> `@bitNative` keeps its legacy spelling. Legacy camelCase spellings from earlier
+> drafts and legacy `tests/` files are renamed on port; the old Zig pass is not
+> authoritative for spelling.
+
 Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions such as strings, dynamic arrays, floating-point types, optionals, and mutability guards are deliberately excluded from the compiler and implemented within the standard library.
 
 ## 1. Core Types & Memory Model
@@ -12,7 +22,16 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`@bitNative`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
 
-* **`@numberLiteral`**: A compile-time reference to the UTF-8 representation of a numeric literal. Compiler intrinsics (such as `@asInt()` or `@asFloat()`) evaluate the literal at compile time and strip the reference.
+* **`@byte_buffer`**: A builtin view over bytes: length plus pointer to the first
+  byte. It is the type of number tokens (`5`), string literal payloads (`"hi"`),
+  and `data` consts — one shared currency for "known bytes". Meaning always comes
+  from use (left-to-right): `@as_int` reads digits, `String` construction reads
+  text. A `@byte_buffer` borrows; it never owns.
+* **`@format_args`**: A builtin fixed-capacity table of `@byte_buffer` pieces
+  (at most 16; more is a compile error suggesting a split). It is the value of
+  an f-string *before* consumption: static chunks reference `data` consts
+  directly, holes hold converted bytes. Stack-only, no allocation, no hidden
+  behavior — storage and flattening are whoever consumes it.
 
 ### Special Keywords
 
@@ -20,7 +39,7 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables. It is not a type and occupies no memory.
 
-* **`self`**: A function prototype only type that is shorthand for writing self: ref Type. Takes the current namespaces type.
+* **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing object type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
 
 ### Universal Zero-Initialization
 
@@ -32,36 +51,112 @@ Lilac does not implement move semantics. Value assignment and parameter passing 
 
 ## 2. Literals & Desugaring
 
-String and number literals desugar into standard library object representations at compile time.
+Literals are compiler-known bytes; their meaning comes from use. There is no
+mirror object to declare.
 
-Number literals hold a compile-time reference to their UTF-8 string
+Number literals (`5`, `0xFF`) have type `@byte_buffer` holding the source bytes.
+`@as_int()` / `@as_float()` on a constant literal are folded at compile time;
+the runtime-parse form is only a semantic model, never emitted code.
+Out-of-range digits or values that do not fit the target width are compile errors.
+Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
+`@as_int` is a fold-time value error (`E060`), not a type error — the price of
+the shared representation.
+
+String literals (`"hi"`) have type `@byte_buffer` backed by a `data` const, with
+no heap allocation: `data !str_N "hi"` plus a borrowed view over it. `String`
+itself is purely a standard library type — the compiler neither names it nor
+knows any layout for it. `s: String = "hi"` works through the ordinary
+`@conversion(from: @byte_buffer) to: String` search (left-to-right, exact-first
+rules in §8); without that binding in scope it is a normal `E043` error.
+UTF-8 validation lives in user-land. Values backed by `data` consts are
+borrowed, not owned, and the same ref-class lifetime caveat as any `ref` applies
+if such a view is stored past its statement.
+
+Char literals (`'A'`) have type `@bit32` holding a Unicode scalar value.
+Single bytes are plain `@bit8` values; multi-byte characters are `String`
+values of length greater than one.
+
+### Lexical grammar (locked for the rewrite)
+
+* Numbers: `0x…` hex, `0b…` binary, otherwise decimal int or float (`10.5`).
+  `_` separators allowed between digits (`0xFF_FF`). No sign is part of the
+  literal: unary `-` is always an operator (`@negate` / `@isub`-family folding).
+* Strings: `"…"` with escapes `\"`, `\\`, `\n`, and `\xHH` only. Anything else
+  after `\` is a lex error.
+* Chars: `'…'` holds exactly one scalar. Empty or multi-scalar char literals are
+  lex errors; use a `String` for those.
+
+### Bracket reservation
+
+`[` and `]` are reserved for generics (`GenObj[T]`, `gen_function[@bit32](...)`).
+There is no `a[i]` indexing, `a[i:j]` slicing, or `[1, 2, 3]` array literal
+syntax. Element access uses methods, exactly like `+` desugars to `@add`:
 
 ```lilac
-NumberLiteral: object {
-    Size: @bit32
-    Buffer: ref @bit8
-}
+first: @bit8 = s.at(0x0)
+view: String = s.slice(0x0, 0x2) // new {Size, Buffer} view, no copy
 ```
 
-String literals are pointers to a UTF-8 character array with an explicit size
+Fixed-size arrays use generic objects plus `@init` constructors
+(e.g. `Array(T, len)`), not `T[N]` const-generics.
+
+### Formatted strings
+
+Formatted strings (`$"Hello {name}"`) lower to a `@format_args` value: one
+`@byte_buffer` piece per literal chunk and per hole. Holes mirror C# `$"{...}"`
+(full expressions, e.g. `{x.toHex()}`); alignment and format clauses do not
+exist in v1. `{{` escapes to `{` and `}}` to `}`. Each piece keeps its own span.
+At most 16 pieces; more is a compile error suggesting a split.
 
 ```lilac
-String: object {
-    Size: @bit32
-    Buffer: ref @bit8
-}
+msg: String = $"Hello {name}!"
+// lowers to (names simplified):
+__f: @format_args = @format_args_new()
+@format_args_push(ref __f, !const "Hello ")   // static chunk, borrowed
+@format_args_push(ref __f, @convert(name))    // hole: @conversion(T -> @byte_buffer)
+@format_args_push(ref __f, !const "!")
+msg: String = @convert(__f)                   // @conversion(@format_args -> String)
 ```
 
-Formatted strings (`$"Hello {name}"`) desugar into structured objects.
-A `.toString()` method on the object generates the final UTF-8 output:
+Holes convert through the ordinary `@conversion(from: T) to: @byte_buffer`
+search — a missing conversion is the usual `E043` naming `T` and the hole span,
+with no method-name coupling of any kind. A `@format_args` is storable
+(`f: @format_args = $"..."`) since it is a declared builtin type, but its pieces
+borrow (static consts plus conversion temps): storing one past its statement
+carries the same caveat as storing a `ref`, while immediate consumption is
+always sound.
 
-```lilac
-FString: object {
-    Size_1: @bit32
-    Name: String
-    Buffer_1: ref @bit8
-}
-```
+Consumption is driven by the expected type (left-to-right, no inference, no
+special result-type rule):
+
+1. A type with `@conversion(from: @format_args)` (e.g. `String`) converts —
+   allocation, if any, happens inside that user-land conversion.
+2. A handler type with structural `append_literal(@byte_buffer)` / `append[T](T)`
+   methods streams instead: the desugar emits piecewise appends into the handler
+   value, formatting each hole straight into the destination with zero temp
+   buffers. The handler type comes from context (a parameter, a binding); only
+   the structural method shapes are fixed, never a nominal stdlib type.
+3. Expected `@format_args` keeps the value itself.
+4. No expected type checks the value as `@format_args` and drops it.
+
+The compiler names zero standard library entities anywhere in this path — only
+builtins, conversions, and structural shapes. Whether an f-string allocates is
+therefore the caller's explicit choice of sink, never hidden sugar behavior.
+
+### Compile-time folding
+
+Constant `if` conditions are folded before code generation: only the live branch
+is kept. `@compile_error(msg)` fires only if it is still live after folding, so
+a `@compile_error` inside a dead branch is silently dropped.
+
+Folding runs after `=>` (inline) functions are substituted, so a conversion
+helper written as `=>` that wraps `@as_int` / `@as_float` folds exactly like a
+direct call. A block-body wrapper — including a hand-written parser — is still
+attempted via best-effort call evaluation of pure bodies with bounded loops and
+all-constant arguments (`MAX_FOLD_STEPS = 100_000`, `MAX_CALL_DEPTH = 16`); if
+that fails the runtime call (and runtime parse) is kept. A missed fold costs
+performance only, never correctness. Tiny conversions that must be zero-cost are
+written as `=>`.
 
 ## 3. Compiler Intrinsics
 
@@ -79,10 +174,28 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@fmul`** | `(lhs, rhs)` | Floating-point multiplication using IEEE-754 bit interpretation. |
 | **`@fdiv`** | `(lhs, rhs)` | Floating-point division using IEEE-754 bit interpretation. |
 | **`@fmod`** | `(lhs, rhs)` | Floating-point modulo using IEEE-754 bit interpretation. |
-| **`@asInt`** | `(bits)` | Reinterprets a `@numberLiteral` |
-| **`@asFloat`** | `(bits)` | Reinterprets a `@numberLiteral` |
-| **`@sizeOf`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. |
-| **`@compileError`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
+| **`@i_less_than`** | `(lhs, rhs)` | Integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
+| **`@i_greater_than`** | `(lhs, rhs)` | Integer greater-than (two's-complement). Returns `@bit8`. |
+| **`@f_less_than`** | `(lhs, rhs)` | Float less-than (IEEE-754). Returns `@bit8`. |
+| **`@f_greater_than`** | `(lhs, rhs)` | Float greater-than (IEEE-754). Returns `@bit8`. |
+| **`@i_negate`** | `(value)` | Integer two's-complement negation. |
+| **`@f_negate`** | `(value)` | Float negation (IEEE-754 sign flip). |
+| **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Folded at compile time when the operand is constant; out-of-range input is a compile error. |
+| **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Folded at compile time when the operand is constant; invalid input is a compile error. |
+| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. |
+| **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
+| **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
+| **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bitNative` byte offset. Returns `@bit8`. |
+| **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bitNative` byte offset. |
+| **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bitNative`) from `ref @bit8` to `ref @bit8`. |
+| **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
+| **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bitNative`. |
+| **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bitNative` length. Same lifetime caveat as any `ref`. |
+| **`@format_args_new`** | `()` | Empty `@format_args` table (zero pieces). |
+| **`@format_args_push`** | `(args, piece)` | Appends a `@byte_buffer` piece to `ref @format_args`. Panics past 16 pieces. |
+| **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bitNative`. |
+| **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
+| **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
 
 ## 4. Functions & Control Flow
 
@@ -149,10 +262,12 @@ To make a standard conditional loop this is a way:
 
 ```lilac
 val: @bit8 = 0x0
-loop if @iLessThan(val, 0x1) {
+loop if @i_less_than(val, 0x1) {
     // do work
 } else break
 ```
+The intrinsic form needs no operator binding. Once `@less_than` is defined for
+the operand types (see §8), the idiomatic form `loop if val < 0x1` works identically.
 
 ### Pattern Matching
 
@@ -210,7 +325,7 @@ References **auto-dereference by default**. Operators act on the underlying valu
 
 ### Objects
 
-An **`obj`** defines both a custom data layout and a namespace. Functions declared inside an object are public members of that namespace by default.
+An **`object`** defines both a custom data layout and a namespace. Functions declared inside an object are public members of that namespace by default.
 
 ```lilac
 Object: object {
@@ -231,7 +346,13 @@ Object: object {
 
 ### Namespaces & Visibility
 
-Namespaces mirror the file system directory structure and object hierarchies. Everything inside a namespace is mutually visible. The **`using`** keyword imports a target namespace into the current scope; imports are non-transitive and do not pull in parent directories.
+Namespaces mirror folders and object hierarchies. Every file in the same folder
+shares one namespace: files in a folder all see each other with no import. The
+**`using`** keyword imports a target folder's namespace into the current scope,
+excluding any declarations inside `private` blocks; imports are non-transitive
+and do not pull in parent folders. A `using` directive is scoped to the file
+that contains it: sibling files never inherit each other's imports, even though
+they share each other's declarations.
 
 ```lilac
 using Standard
@@ -272,25 +393,12 @@ Union: object {
     tag: Tag
     data: @bit8 // Sized to fit the largest member
 
-    Some: func (value: @bit8) Union => Union {
+    Some: function (value: @bit8) Union => Union {
         tag = .Some
         data = value
     }
     None: Union => Union { tag = .None }
 }
-```
-
-### Interfaces & VTables
-
-Interfaces are **shape-based** (structural typing). Types do not explicitly declare interface implementation. When an object is assigned to an interface variable, the compiler validates the structural match and generates a virtual method table (VTable) automatically.
-
-```lilac
-Reader: interface {
-    read: func () nothing
-}
-
-// Compiler verifies 'File' implements 'read' and generates the VTable
-stream: Reader = File
 ```
 
 ## 7. Generics & Inline Declarations
@@ -316,19 +424,37 @@ Inlined functions may omit the return name but are restricted to a single output
 
 ```lilac
 inlined_const: @bit64 => 0x0
-inlined_func: func (val: @bit8) @bit8 => @iadd(val, 0x1)
+inlined_func: function (val: @bit8) @bit8 => @iadd(val, 0x1)
 ```
 
 ## 8. Operators, Conversions & RAII Hooks
 
 Lilac uses designated `@` prefixed function names to bind global behaviors to types. Multiple bindings can be defined across a program provided their type signatures `(from, to)` or `(lhs, rhs)` remain unique.
 
+Hook bindings must be concrete. No conversion, operator, or RAII hook may declare
+generic parameters or mention an unsubstituted generic parameter in its signature —
+a blanket `@add[T](T, T)` is rejected with `E052`. Compatibility checking is then
+always an exact registry lookup over concrete signatures, never
+instantiation-time proving. The one allowance is hooks declared inside a generic
+body: they monomorphize with the parent and register once per concrete
+instantiation, so `GenBox[T]` can still define `@on_drop` for each
+`GenBox[@bit32]`-style instance. Hooks written explicitly against concrete
+instantiations are ordinary concrete bindings.
+
 ### Operators & Strict Equality
 
 Binary and unary operators desugar directly into function calls. For example, `a += b` desugars to `a = @add(a, b)`.
 
+Operators never fall back to intrinsics implicitly: `a < b` requires a matching
+`@less_than(lhs, rhs)` binding for the operand types, even when `@i_less_than`
+would apply. The standard library provides these bindings once per bit width;
+without them only the explicit intrinsic form works:
+
 ```lilac
 @add: function (lhs: @bit8, rhs: @bit8) @bit8 => @iadd(lhs, rhs)
+@less_than: function (lhs: @bit32, rhs: @bit32) result: @bit8 {
+    result = @i_less_than(lhs, rhs)
+}
 ```
 
 **Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed, bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity.
@@ -340,19 +466,62 @@ List of operators:
 | **`lhs - rhs`** | `@sub(lhs, rhs) output` |
 | **`lhs * rhs`** | `@mul(lhs, rhs) output` |
 | **`lhs / rhs`** | `@div(lhs, rhs) output` |
-| **`lhs < rhs`** | `@lessThan(lhs, rhs) output` |
-| **`lhs > rhs`** | `@greaterThan(lhs, rhs) output` |
-| **`lhs <= rhs`** | `@lessThanOrEql(lhs, rhs) output` |
-| **`lhs >= rhs`** | `@greaterThanOrEql(lhs, rhs) output` |
-| **`-value`** | `@negate(lhs, rhs) output` |
+| **`lhs % rhs`** | `@mod(lhs, rhs) output` |
+| **`lhs < rhs`** | `@less_than(lhs, rhs) output` |
+| **`lhs > rhs`** | `@greater_than(lhs, rhs) output` |
+| **`lhs <= rhs`** | `@less_than_or_equal(lhs, rhs) output` |
+| **`lhs >= rhs`** | `@greater_than_or_equal(lhs, rhs) output` |
+| **`-value`** | `@negate(value) output` |
+
+#### Operator type-change lint (`W020`, on by default)
+
+Arithmetic operators should preserve types: `@add/@sub/@mul/@div/@mod` expect
+`lhs == rhs == output`, and `@negate` expects `value == output` (compared by base
+type, ignoring `ref`).
+
+* If every type involved is a `@bit` variant (`@bit8/16/32/64/Native`), mixed
+  shapes stay silent — mixed-width bit algebra and `@less_than(@bit32, @bit32)
+  -> @bit8` are legitimate and conversion/folding handles them.
+* Otherwise any change warns. `@add(Matrix, Matrix) -> @bit32` warns even though
+  it resolves; comparisons keep their designed shape `(T, T) -> @bit8` and only
+  warn when violated (inputs differ from each other, or output is not `@bit8`).
+  Generic `T` counts as non-bit; `@add(T, T) -> T` is silent, `@add(T, T) -> @bit8`
+  warns unless it is a comparison hook.
+
+A warning never blocks compilation. It suggests a named method or an explicit
+`@conversion` when a silent type change was probably not intended. The existing
+`nothing`/multi-return shape warnings stay as-is; this lint covers the remaining
+case the `warnOnOperatorTypeChange` setting was reserved for.
 
 ### Type Conversions
 
-Conversions are unidirectional from left to right. The compiler automatically searches for a valid conversion binding when resolving type expectations.
+Conversions are unidirectional `from -> to` bindings, applied left-to-right:
+the expected type (lval) is the anchor and the provided value (rhs) converts
+toward it. A conversion is attempted only after an exact match fails.
 
 ```lilac
 @conversion: function (from: CustomType) to: @bit8
 ```
+
+Resolution order (normative):
+
+1. **Exact match first.** `b: @bit8 = a` with `a: @bit8` copies directly, even if
+   a `@conversion(from: @bit32) to: @bit8` exists. `a + b` with `@add(a, b)`
+   defined calls it directly, even if `@add(a, a)` plus a `b -> a` conversion
+   also exists. Conversions never steal an exact match.
+2. **Single directed conversion on mismatch.** `b: @bit8 = a` with `a: @bit32`
+   tries exactly one `@conversion(from: @bit32) to: @bit8` step. Call arguments
+   behave the same way (parameter type is the anchor). No transitive chains in v1
+   (`u32 -> u16 -> u8` does not chain); chain requests are future work with a
+   cycle guard.
+3. **Binops anchor on the left.** `a + b` tries exact `@add(typeof(a), typeof(b))`
+   first; on failure it tries converting the right side toward the left
+   (`b -> typeof(a)`, retry `@add(a, a)`). It never converts the left side nor
+   both sides in v1, so `a + b` and `b + a` cannot both claim the same call.
+   If the single-sided retry still fails, the error reports the exact pair tried
+   plus the one conversion attempted (see `E043`).
+
+`==` never converts: equality is always direct bit-equality.
 
 ### Resource Management (RAII)
 
@@ -389,121 +558,65 @@ Buffer: object {
 }
 ```
 
-## Lilac to IR
+## 9. Foreign functions and async
 
-Binary Literal:
-```lilac-ir
-copy #type, 0x0, &
-```
-String Literal:
-```lilac-ir
-data 
-{
-    name "String"
-}
-```
-Number Literal:
-```lilac-ir
-data
-{
-    name "10.5"
-}
-```
-Variable Declaration:
-```lilac-ir
-allocate #type, %name
-```
-Ref Typed Variable Declaration:
-```lilac-ir
-// bit type depends on target
-allocate #bit64, %name
-```
-Variable:
-```lilac-ir
-copy #type, %name, &
-```
-Variable with ref type:
-```lilac-ir
-copy #type, ref %name, &
-```
-Ref Keyword on a ref typed variable:
-```lilac-ir
-copy #type, %name, &
-```
-Ref Keyword on non ref typed variable:
-```lilac-ir
-address %variable, &
-```
-Function Name: 
-```lilac-ir
-address @name, &
-```
-Call `()`:
-```lilac-ir
-// run the callee. adds to reg
-allocate #param_type, %param
-// run param expression.
-copy #param_type, &, %param
-// repeat for all params.
-allocate #out_type, %out
-// repeat allocate for all outputs
-call &, in %param, out %out
+### extern (imports)
+
+`extern` qualifies a declaration: a signature with no body, resolved to a
+foreign symbol at link time.
+
+```lilac
+malloc: extern function (size: @bitNative) ptr: ref @bit8
 ```
 
-Assignment `=`:
-```lilac-ir
-// Get the left expression.
-// Get the rhs expression.
-copy #type, %lhs, %rhs
-// Repeat for each expression.
-```
+Rules: C ABI; the symbol is unmangled and equals the declared name; calls
+typecheck only against the declared signature (a wrong declaration is user
+error and is diagnosed nowhere — declare carefully); libraries to link
+(`link = ["c"]`) are declared in the package manifest, never in code. No
+overloads, no calling-convention annotations in v1.
 
-Member `.`:
-```lilac-ir
-allocate #field_type, %field
-field #type, %variable, #field_type, member_index, &
-copy #field_type, ref &, %field
-```
+### export (reserved)
 
+The dual direction — foreign code calling into Lilac (thread entry points,
+callbacks) — needs exported symbols. `export` is reserved for this and
+unspecified in v1; nothing in the current spec requires it.
 
-Function: 
-```lilac-ir
-function @name
-    in #param_type %param
-    // ... more in variables
-    out #out_type %out
-    // ... more out variables
-{
-    // Function Body
-    return
-}
-```
+### Async lives in the standard library
 
-Object: 
-```lilac-ir
-type #name 
-{
-    #sub_type
-    // ... more sub types
-}
-```
+Async needs no compiler support beyond what exists: futures are objects driven
+by `loop` + `match`, polling fits multi-return (`ready, value = task.poll()`),
+executors accept any type with a structural `poll` via duck-typed generics, and
+`@on_drop` covers task cancellation. Suspending a live call stack — the one
+thing Lilac cannot express in itself — is sourced through `extern` (platform
+context-switch helpers or a tiny C shim via the build script), never through a
+compiler intrinsic. `await` syntax is explicitly deferred: if ever added, it
+desugars to existing constructs the way f-strings do.
 
-Enum: 
-```lilac-ir
-type #name
-{
-    // bit value sized to fit varients
-    #bit8
-}
-```
+## Lilac to IR (informative; `IR_SPEC.md` is normative)
 
-Union:
+Lowering follows the IR v2 rules in `IR_SPEC.md`: typed SSA registers (`&n: #type`),
+explicit `$label:` blocks each ending in one terminator, `alloca : zeroed`,
+verified `call` arity, named `field`, and folding before verification. Examples
+below use canonical v2 text.
+
+Binary literal:
 ```lilac-ir
-type #name
-{
-    // bit value sized to fit varients
-    #bit8
-    // type of the biggest type
-    #type
-}
+&1: #bit32 = const 0x1:#bit32
 ```
+String literal (`"hi"` with no heap allocation):
+```lilac-ir
+data { !str_7 "hi" }
+%tmp: @byte_buffer = @byte_buffer_from(addr !str_7, const 0x2)
+```
+`String` construction from there is ordinary user-land conversion (`@conversion`
+search); f-strings additionally use `@format_args_*` per §2.
+Function call with multi-return (`val1, val2 = multi_func()`):
+```lilac-ir
+$entry:
+  call @multi_func (out %val1, out %val2)
+  return
+```
+Assignment and member access use `copy` / `field .name` as defined in `IR_SPEC.md`.
+`@as_int` / `@as_float` on constant literals, `branch.if` on constant conditions,
+and `compile.error` in dead branches never reach verified IR (see Compile-time
+folding above).
