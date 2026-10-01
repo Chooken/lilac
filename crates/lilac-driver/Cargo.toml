@@ -1,0 +1,19 @@
+[package]
+name = "lilac-driver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-lex = { path = "../lilac-lex" }
+lilac-ast = { path = "../lilac-ast" }
+lilac-parse = { path = "../lilac-parse" }
+lilac-resolve = { path = "../lilac-resolve" }
+lilac-ty = { path = "../lilac-ty" }
+lilac-hir = { path = "../lilac-hir" }
+lilac-typeck = { path = "../lilac-typeck" }
+lilac-ir = { path = "../lilac-ir" }
+
+[lints]
+workspace = true

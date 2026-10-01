@@ -1,0 +1,17 @@
+[package]
+name = "lilac-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lilac"
+path = "src/main.rs"
+
+[dependencies]
+lilac-error = { path = "../lilac-error" }
+lilac-span = { path = "../lilac-span" }
+lilac-driver = { path = "../lilac-driver" }
+lilac-ir = { path = "../lilac-ir" }
+
+[lints]
+workspace = true

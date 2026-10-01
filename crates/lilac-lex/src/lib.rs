@@ -1,0 +1,768 @@
+//! Lexer: `Iterator<Item = Result<Token, Diagnostic>>` over Lilac source.
+//!
+//! Implements `SPEC.md` §2: `0x`/`0b`/decimal/float numbers with `_`
+//! separators, strings with `\"` `\\` `\n` `\xHH` escapes only, single-scalar
+//! chars, and `$"..."` f-strings whose `{hole}` expressions are lexed with the
+//! ordinary expression lexer (brace-depth tracked, so errors point inside the
+//! braces). `[` and `]` are generics-only; there is no indexing syntax.
+
+use lilac_error::Diagnostic;
+use lilac_span::{FileId, Span};
+
+/// Lexer diagnostics always carry this stable code.
+pub const LEX_ERROR_CODE: &str = "E000";
+
+/// Token category; surface text lives in [`Token::text`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TokenKind {
+    /// `foo`, `main`, `gen_function`.
+    Ident,
+    /// `5`, `0xFF`, `0b101`, `10.5` (source bytes; value comes from folding).
+    Number,
+    /// `"hi"` (decoded value).
+    StringLit,
+    /// `'A'` (the scalar value is in [`Token::text`]).
+    CharLit,
+    /// `$"` opening an f-string.
+    FStrStart,
+    /// Literal chunk inside an f-string (decoded value).
+    FStrMid,
+    /// Closing `"` of an f-string.
+    FStrEnd,
+    /// `object`.
+    KwObject,
+    /// `function`.
+    KwFunction,
+    /// `enum`.
+    KwEnum,
+    /// `union`.
+    KwUnion,
+    /// `extern`.
+    KwExtern,
+    /// `using`.
+    KwUsing,
+    /// `private`.
+    KwPrivate,
+    /// `ref`.
+    KwRef,
+    /// `self`.
+    KwSelf,
+    /// `unknown`.
+    KwUnknown,
+    /// `nothing`.
+    KwNothing,
+    /// `loop`.
+    KwLoop,
+    /// `if`.
+    KwIf,
+    /// `else`.
+    KwElse,
+    /// `match`.
+    KwMatch,
+    /// `break`.
+    KwBreak,
+    /// `return`.
+    KwReturn,
+    /// `:`.
+    Colon,
+    /// `,`.
+    Comma,
+    /// `=`.
+    Eq,
+    /// `==` (bit-equality, never overridden).
+    EqEq,
+    /// `=>` (inline bodies, enum/union constructors).
+    FatArrow,
+    /// `->` (multi-return capture types).
+    Arrow,
+    /// `.` (member access, union tags).
+    Dot,
+    /// `{`.
+    LBrace,
+    /// `}`.
+    RBrace,
+    /// `(`.
+    LParen,
+    /// `)`.
+    RParen,
+    /// `[` (generics only).
+    LBracket,
+    /// `]` (generics only).
+    RBracket,
+    /// `+`.
+    Plus,
+    /// `-`.
+    Minus,
+    /// `*`.
+    Star,
+    /// `/`.
+    Slash,
+    /// `%`.
+    Percent,
+    /// `<`.
+    Lt,
+    /// `>`.
+    Gt,
+    /// `<=`.
+    LtEq,
+    /// `>=`.
+    GtEq,
+    /// `!` (e.g. `!const` data names).
+    Bang,
+    /// `@` (`@bit32`, `@add`, `@as_int`, ...).
+    At,
+    /// End of input (emitted once).
+    Eof,
+}
+
+/// One lexical token with its span and surface text.
+#[derive(Clone, Debug)]
+pub struct Token {
+    /// Token category.
+    pub kind: TokenKind,
+    /// Source range covered.
+    pub span: Span,
+    /// Surface text (decoded value for strings/chars/f-string chunks).
+    pub text: String,
+}
+
+impl Token {
+    /// Builds a token covering `[start, end)` in `file`.
+    #[must_use]
+    pub fn new(kind: TokenKind, text: &str, start: usize, end: usize, file: FileId) -> Self {
+        Self {
+            kind,
+            span: Span::new(offset_u32(start), offset_u32(end), file),
+            text: text.to_owned(),
+        }
+    }
+
+    /// Whether this token can open a top-level item (used by parse recovery).
+    #[must_use]
+    pub fn starts_item(&self) -> bool {
+        matches!(
+            self.kind,
+            TokenKind::Ident
+                | TokenKind::KwUsing
+                | TokenKind::KwExtern
+                | TokenKind::At
+                | TokenKind::Eof
+        )
+    }
+}
+
+/// Saturating `usize` -> `u32` for span offsets (files past 4 GiB clamp).
+fn offset_u32(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
+}
+
+/// Lexer mode: ordinary code vs. f-string literal vs. one deferred token.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LexMode {
+    /// Ordinary expression/code tokens.
+    Normal,
+    /// Inside `$"..."` literal text (holes lex as [`LexMode::Normal`]).
+    FStrLiteral,
+    /// The `{` opening a hole is waiting to be emitted.
+    PendingLBrace,
+    /// The `"` closing an f-string is waiting to be emitted.
+    PendingFStrEnd,
+}
+
+/// Lilac lexer; see the module docs for the accepted grammar.
+pub struct Lexer<'a> {
+    src: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    file: FileId,
+    mode: LexMode,
+    hole_depths: Vec<usize>,
+    eof_done: bool,
+}
+
+impl<'a> Lexer<'a> {
+    /// Creates a lexer over `src` (already registered as `file`).
+    #[must_use]
+    pub fn new(src: &'a str, file: FileId) -> Self {
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            file,
+            mode: LexMode::Normal,
+            hole_depths: Vec::new(),
+            eof_done: false,
+        }
+    }
+
+    /// Lexes everything, collecting recoverable errors instead of stopping.
+    #[must_use]
+    pub fn lex_all(src: &'a str, file: FileId) -> (Vec<Token>, Vec<Diagnostic>) {
+        let mut tokens = Vec::new();
+        let mut errors = Vec::new();
+        for result in Self::new(src, file) {
+            match result {
+                Ok(token) => tokens.push(token),
+                Err(diagnostic) => errors.push(diagnostic),
+            }
+        }
+        (tokens, errors)
+    }
+
+    fn at_eof(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    fn peek(&self) -> u8 {
+        self.peek_at(0)
+    }
+
+    fn peek_at(&self, ahead: usize) -> u8 {
+        self.bytes.get(self.pos + ahead).copied().unwrap_or(0)
+    }
+
+    fn err(&self, start: usize, end: usize, msg: &str) -> Diagnostic {
+        Diagnostic::error(LEX_ERROR_CODE, msg).label(
+            Span::new(offset_u32(start), offset_u32(end.max(start)), self.file),
+            true,
+            String::new(),
+        )
+    }
+
+    fn skip_trivia(&mut self) {
+        while !self.at_eof() {
+            match self.peek() {
+                b' ' | b'\t' | b'\r' | b'\n' => self.pos += 1,
+                b'/' if self.peek_at(1) == b'/' => {
+                    while !self.at_eof() && self.peek() != b'\n' {
+                        self.pos += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn lex_normal(&mut self) -> Result<Token, Diagnostic> {
+        let byte = self.peek();
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            return Ok(self.lex_word());
+        }
+        if byte.is_ascii_digit() {
+            return self.lex_number();
+        }
+        match byte {
+            b'"' => self.lex_string(),
+            b'\'' => self.lex_char(),
+            b'$' => self.lex_fstr_start(),
+            _ => self.lex_symbol(),
+        }
+    }
+
+    fn lex_word(&mut self) -> Token {
+        let start = self.pos;
+        while !self.at_eof() && (self.peek().is_ascii_alphanumeric() || self.peek() == b'_') {
+            self.pos += 1;
+        }
+        let word = &self.src[start..self.pos];
+        let kind = match word {
+            "object" => TokenKind::KwObject,
+            "function" => TokenKind::KwFunction,
+            "enum" => TokenKind::KwEnum,
+            "union" => TokenKind::KwUnion,
+            "extern" => TokenKind::KwExtern,
+            "using" => TokenKind::KwUsing,
+            "private" => TokenKind::KwPrivate,
+            "ref" => TokenKind::KwRef,
+            "self" => TokenKind::KwSelf,
+            "unknown" => TokenKind::KwUnknown,
+            "nothing" => TokenKind::KwNothing,
+            "loop" => TokenKind::KwLoop,
+            "if" => TokenKind::KwIf,
+            "else" => TokenKind::KwElse,
+            "match" => TokenKind::KwMatch,
+            "break" => TokenKind::KwBreak,
+            "return" => TokenKind::KwReturn,
+            _ => TokenKind::Ident,
+        };
+        Token::new(kind, word, start, self.pos, self.file)
+    }
+
+    fn check_separators(&self, text: &str, start: usize) -> Result<(), Diagnostic> {
+        let digits: Vec<char> = text.chars().collect();
+        for (i, &ch) in digits.iter().enumerate() {
+            if ch != '_' {
+                continue;
+            }
+            let left_ok = i > 0 && digits[i - 1] != '_';
+            let right_ok = i + 1 < digits.len() && digits[i + 1] != '_';
+            if !(left_ok && right_ok) {
+                return Err(self.err(
+                    start,
+                    start + text.len(),
+                    "misplaced `_` separator; it must sit between digits",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn lex_number(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        if self.peek() == b'0' && (self.peek_at(1) == b'x' || self.peek_at(1) == b'X') {
+            self.pos += 2;
+            let digits_start = self.pos;
+            while !self.at_eof() && (self.peek().is_ascii_hexdigit() || self.peek() == b'_') {
+                self.pos += 1;
+            }
+            let text = &self.src[start..self.pos];
+            if self.pos == digits_start {
+                return Err(self.err(start, self.pos, "hex literal needs digits after `0x`"));
+            }
+            self.check_separators(&text[2..], start)?;
+            return self.finish_number(start);
+        }
+        if self.peek() == b'0' && (self.peek_at(1) == b'b' || self.peek_at(1) == b'B') {
+            self.pos += 2;
+            let digits_start = self.pos;
+            while !self.at_eof()
+                && (self.peek() == b'0' || self.peek() == b'1' || self.peek() == b'_')
+            {
+                self.pos += 1;
+            }
+            if self.pos == digits_start {
+                return Err(self.err(start, self.pos, "binary literal needs digits after `0b`"));
+            }
+            let text = &self.src[start..self.pos];
+            self.check_separators(&text[2..], start)?;
+            if !self.at_eof() && self.peek().is_ascii_alphanumeric() {
+                return Err(self.err(start, self.pos + 1, "invalid digit in binary literal"));
+            }
+            return Ok(Token::new(
+                TokenKind::Number,
+                text,
+                start,
+                self.pos,
+                self.file,
+            ));
+        }
+        while !self.at_eof() && (self.peek().is_ascii_digit() || self.peek() == b'_') {
+            self.pos += 1;
+        }
+        if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
+            self.pos += 1;
+            while !self.at_eof() && (self.peek().is_ascii_digit() || self.peek() == b'_') {
+                self.pos += 1;
+            }
+        }
+        let text = &self.src[start..self.pos];
+        self.check_separators(text, start)?;
+        self.finish_number(start)
+    }
+
+    fn finish_number(&mut self, start: usize) -> Result<Token, Diagnostic> {
+        if !self.at_eof() && self.peek().is_ascii_alphabetic() {
+            return Err(self.err(
+                start,
+                self.pos + 1,
+                "unexpected character after number literal",
+            ));
+        }
+        let text = &self.src[start..self.pos];
+        Ok(Token::new(
+            TokenKind::Number,
+            text,
+            start,
+            self.pos,
+            self.file,
+        ))
+    }
+
+    fn lex_string(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        self.pos += 1; // opening `"`
+        let mut value = String::new();
+        loop {
+            if self.at_eof() || self.peek() == b'\n' {
+                return Err(self.err(
+                    start,
+                    self.pos,
+                    "unterminated string literal; add a closing `\"`",
+                ));
+            }
+            if self.peek() == b'"' {
+                self.pos += 1;
+                return Ok(Token::new(
+                    TokenKind::StringLit,
+                    &value,
+                    start,
+                    self.pos,
+                    self.file,
+                ));
+            }
+            if self.peek() == b'\\' {
+                let (ch, next) = self.decode_escape(self.pos)?;
+                value.push(ch);
+                self.pos = next;
+            } else {
+                let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
+                value.push(ch);
+                self.pos += ch.len_utf8();
+            }
+        }
+    }
+
+    fn lex_char(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        self.pos += 1; // opening `'`
+        if self.at_eof() {
+            return Err(self.err(start, self.pos, "unterminated char literal"));
+        }
+        let value = if self.peek() == b'\\' {
+            let (ch, next) = self.decode_escape(self.pos)?;
+            self.pos = next;
+            ch
+        } else {
+            let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
+            self.pos += ch.len_utf8();
+            ch
+        };
+        if self.at_eof() || self.peek() != b'\'' {
+            return Err(self.err(
+                start,
+                self.pos,
+                "char literal holds exactly one scalar; use a `String` for more",
+            ));
+        }
+        self.pos += 1;
+        Ok(Token::new(
+            TokenKind::CharLit,
+            &value.to_string(),
+            start,
+            self.pos,
+            self.file,
+        ))
+    }
+
+    fn decode_escape(&self, backslash: usize) -> Result<(char, usize), Diagnostic> {
+        let code = self.peek_at(backslash - self.pos + 1);
+        match code {
+            b'"' => Ok(('"', backslash + 2)),
+            b'\\' => Ok(('\\', backslash + 2)),
+            b'n' => Ok(('\n', backslash + 2)),
+            b'x' => {
+                let hi = self.peek_at(backslash - self.pos + 2);
+                let lo = self.peek_at(backslash - self.pos + 3);
+                if !(hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit()) {
+                    return Err(self.err(
+                        backslash,
+                        backslash + 2,
+                        "bad `\\x` escape; write exactly two hex digits like `\\x41`",
+                    ));
+                }
+                let digits = &self.src[backslash + 2..backslash + 4];
+                let byte = u32::from_str_radix(digits, 16).unwrap_or(0);
+                Ok((char::from_u32(byte).unwrap_or('\u{FFFD}'), backslash + 4))
+            }
+            _ => Err(self.err(
+                backslash,
+                backslash + 2,
+                "invalid escape; strings allow `\\\"`, `\\\\`, `\\n`, and `\\xHH` only",
+            )),
+        }
+    }
+
+    fn lex_fstr_start(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        if self.peek_at(1) != b'"' {
+            self.pos += 1;
+            return Err(self.err(start, self.pos, "unexpected `$`; f-strings use `$\"...\"`"));
+        }
+        self.pos += 2;
+        self.mode = LexMode::FStrLiteral;
+        Ok(Token::new(
+            TokenKind::FStrStart,
+            "$\"",
+            start,
+            self.pos,
+            self.file,
+        ))
+    }
+
+    fn lex_fstr_literal(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        let mut text = String::new();
+        loop {
+            if self.at_eof() {
+                // Guarantee progress: the next call ends the iterator.
+                self.mode = LexMode::Normal;
+                self.eof_done = true;
+                return Err(self.err(start, self.pos, "unterminated f-string; add a closing `\"`"));
+            }
+            match self.peek() {
+                b'"' => {
+                    if text.is_empty() {
+                        let start_quote = self.pos;
+                        self.pos += 1;
+                        self.mode = LexMode::Normal;
+                        return Ok(Token::new(
+                            TokenKind::FStrEnd,
+                            "",
+                            start_quote,
+                            self.pos,
+                            self.file,
+                        ));
+                    }
+                    // Leave the quote unconsumed so the next call emits `FStrEnd`.
+                    self.mode = LexMode::PendingFStrEnd;
+                    return Ok(Token::new(
+                        TokenKind::FStrMid,
+                        &text,
+                        start,
+                        self.pos,
+                        self.file,
+                    ));
+                }
+                b'{' => {
+                    if self.peek_at(1) == b'{' {
+                        text.push('{');
+                        self.pos += 2;
+                    } else if text.is_empty() {
+                        self.pos += 1;
+                        self.mode = LexMode::Normal;
+                        self.hole_depths.push(0);
+                        return Ok(Token::new(
+                            TokenKind::LBrace,
+                            "{",
+                            start,
+                            self.pos,
+                            self.file,
+                        ));
+                    } else {
+                        self.mode = LexMode::PendingLBrace;
+                        return Ok(Token::new(
+                            TokenKind::FStrMid,
+                            &text,
+                            start,
+                            self.pos,
+                            self.file,
+                        ));
+                    }
+                }
+                b'}' => {
+                    if self.peek_at(1) == b'}' {
+                        text.push('}');
+                        self.pos += 2;
+                    } else {
+                        return Err(self.err(
+                            self.pos,
+                            self.pos + 1,
+                            "single `}` in f-string; write `}}` for a literal brace",
+                        ));
+                    }
+                }
+                b'\\' => {
+                    let (ch, next) = self.decode_escape(self.pos)?;
+                    text.push(ch);
+                    self.pos = next;
+                }
+                _ => {
+                    let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
+                    text.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    fn lex_symbol(&mut self) -> Result<Token, Diagnostic> {
+        let start = self.pos;
+        let two = [self.peek(), self.peek_at(1)];
+        let two_kind = match two {
+            [b'=', b'='] => Some((TokenKind::EqEq, "==")),
+            [b'=', b'>'] => Some((TokenKind::FatArrow, "=>")),
+            [b'-', b'>'] => Some((TokenKind::Arrow, "->")),
+            [b'<', b'='] => Some((TokenKind::LtEq, "<=")),
+            [b'>', b'='] => Some((TokenKind::GtEq, ">=")),
+            _ => None,
+        };
+        if let Some((kind, text)) = two_kind {
+            self.pos += 2;
+            return Ok(Token::new(kind, text, start, self.pos, self.file));
+        }
+        let (kind, text) = match self.peek() {
+            b':' => (TokenKind::Colon, ":"),
+            b',' => (TokenKind::Comma, ","),
+            b'=' => (TokenKind::Eq, "="),
+            b'.' => (TokenKind::Dot, "."),
+            b'{' => {
+                if let Some(depth) = self.hole_depths.last_mut() {
+                    *depth += 1;
+                }
+                (TokenKind::LBrace, "{")
+            }
+            b'}' => {
+                match self.hole_depths.last().copied() {
+                    Some(0) => {
+                        self.hole_depths.pop();
+                        self.mode = LexMode::FStrLiteral;
+                    }
+                    Some(_) => {
+                        if let Some(depth) = self.hole_depths.last_mut() {
+                            *depth -= 1;
+                        }
+                    }
+                    None => {}
+                }
+                (TokenKind::RBrace, "}")
+            }
+            b'(' => (TokenKind::LParen, "("),
+            b')' => (TokenKind::RParen, ")"),
+            b'[' => (TokenKind::LBracket, "["),
+            b']' => (TokenKind::RBracket, "]"),
+            b'+' => (TokenKind::Plus, "+"),
+            b'-' => (TokenKind::Minus, "-"),
+            b'*' => (TokenKind::Star, "*"),
+            b'/' => (TokenKind::Slash, "/"),
+            b'%' => (TokenKind::Percent, "%"),
+            b'<' => (TokenKind::Lt, "<"),
+            b'>' => (TokenKind::Gt, ">"),
+            b'!' => (TokenKind::Bang, "!"),
+            b'@' => (TokenKind::At, "@"),
+            _ => {
+                // Skip the offending char so errors always make progress.
+                let bad = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
+                self.pos += bad.len_utf8();
+                return Err(self.err(
+                    start,
+                    self.pos,
+                    "unexpected character; `[`/`]` are generics-only and indexing uses methods",
+                ));
+            }
+        };
+        self.pos += 1;
+        Ok(Token::new(kind, text, start, self.pos, self.file))
+    }
+}
+
+impl Iterator for Lexer<'_> {
+    type Item = Result<Token, Diagnostic>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.eof_done {
+            return None;
+        }
+        if self.mode == LexMode::PendingLBrace {
+            self.mode = LexMode::Normal;
+            let start = self.pos;
+            self.pos += 1;
+            self.hole_depths.push(0);
+            return Some(Ok(Token::new(
+                TokenKind::LBrace,
+                "{",
+                start,
+                self.pos,
+                self.file,
+            )));
+        }
+        if self.mode == LexMode::PendingFStrEnd {
+            self.mode = LexMode::Normal;
+            let start = self.pos;
+            self.pos += 1;
+            return Some(Ok(Token::new(
+                TokenKind::FStrEnd,
+                "",
+                start,
+                self.pos,
+                self.file,
+            )));
+        }
+        if self.mode == LexMode::FStrLiteral {
+            return Some(self.lex_fstr_literal());
+        }
+        self.skip_trivia();
+        if self.at_eof() {
+            self.eof_done = true;
+            let pos = self.pos;
+            return Some(Ok(Token::new(TokenKind::Eof, "", pos, pos, self.file)));
+        }
+        Some(self.lex_normal())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens_of(src: &str) -> Vec<Token> {
+        let mut sm = lilac_span::SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        Lexer::new(src, file)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("lexing should succeed")
+    }
+
+    #[test]
+    fn numbers_allow_separators() {
+        let kinds: Vec<TokenKind> = tokens_of("0xFF_FF 0b10_10 10_000 10.5")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_escape_is_e000() {
+        let mut sm = lilac_span::SourceMap::new();
+        let file = sm.add_file("test.lilac", r#""bad \q""#);
+        let errors: Vec<Diagnostic> = Lexer::new(r#""bad \q""#, file)
+            .filter_map(Result::err)
+            .collect();
+        // Recovery keeps going past the typo, so every diagnostic is still E000.
+        assert!(!errors.is_empty());
+        assert!(errors.iter().all(|error| error.code == "E000"));
+        assert!(errors[0].msg.contains("invalid escape"));
+    }
+
+    #[test]
+    fn fstring_holes_use_expression_tokens() {
+        let kinds: Vec<TokenKind> = tokens_of(r#"$"hi {name}!""#)
+            .into_iter()
+            .map(|token| token.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::FStrStart,
+                TokenKind::FStrMid,
+                TokenKind::LBrace,
+                TokenKind::Ident,
+                TokenKind::RBrace,
+                TokenKind::FStrMid,
+                TokenKind::FStrEnd,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn function_header_lexes() {
+        let texts: Vec<String> = tokens_of("main: function () nothing")
+            .into_iter()
+            .map(|token| token.text)
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["main", ":", "function", "(", ")", "nothing", ""]
+        );
+    }
+}

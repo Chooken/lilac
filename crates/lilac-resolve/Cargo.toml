@@ -1,0 +1,12 @@
+[package]
+name = "lilac-resolve"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-ast = { path = "../lilac-ast" }
+
+[lints]
+workspace = true

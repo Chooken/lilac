@@ -1,0 +1,3 @@
+main: function () nothing {
+    value: @bit32 = 0x1
+}

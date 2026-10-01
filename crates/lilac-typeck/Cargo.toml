@@ -1,0 +1,13 @@
+[package]
+name = "lilac-typeck"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-ty = { path = "../lilac-ty" }
+lilac-hir = { path = "../lilac-hir" }
+
+[lints]
+workspace = true

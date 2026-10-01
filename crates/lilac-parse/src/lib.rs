@@ -1,0 +1,1346 @@
+//! Parser: `Vec<Token>` -> untyped [`Program`] with error recovery.
+//!
+//! Recursive descent over [`Lexer`] output. On an item-level failure the parser
+//! emits one `E001` diagnostic, skips to the next item boundary, and keeps
+//! going, so a single broken declaration never hides the rest of the file.
+//! Every fallible node carries a [`Span`]; `-x` desugars to `@negate(x)` per
+//! `SPEC.md` §8 at parse time.
+
+use lilac_ast::{
+    BinOp, Block, EnumVariant, Expr, FStrPart, FuncBody, FuncDecl, Item, ItemKind, MatchArm,
+    MatchArmBody, Param, Program, Stmt, Type, UnionVariant,
+};
+use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_lex::{Token, TokenKind};
+use lilac_span::{FileId, Span};
+
+/// Parser diagnostics always carry this stable code.
+pub const PARSE_ERROR_CODE: &str = "E001";
+
+/// Recursive-descent parser over an owned token buffer.
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+    file: FileId,
+    eof: Token,
+    failed: bool,
+}
+
+impl Parser {
+    /// Creates a parser; `file` must be the id the tokens were lexed with.
+    #[must_use]
+    pub fn new(tokens: Vec<Token>, file: FileId) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            file,
+            eof: Token::new(
+                TokenKind::Eof,
+                "",
+                u32::MAX as usize,
+                u32::MAX as usize,
+                file,
+            ),
+            failed: false,
+        }
+    }
+
+    /// Parses a whole file, recovering past broken items.
+    pub fn parse_program(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Program, ErrorGuaranteed> {
+        let mut items = Vec::new();
+        while self.peek().kind != TokenKind::Eof {
+            let before = self.pos;
+            if let Ok(item) = self.parse_item(diags, false) {
+                items.push(item);
+            } else {
+                self.failed = true;
+                self.synchronize();
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
+        }
+        let span = items
+            .first()
+            .zip(items.last())
+            .map_or_else(Span::dummy, |(first, last)| {
+                join_spans(first.span, last.span)
+            });
+        if self.failed {
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok(Program { items, span })
+    }
+
+    fn peek(&self) -> &Token {
+        self.tokens.get(self.pos).unwrap_or(&self.eof)
+    }
+
+    fn peek_at(&self, ahead: usize) -> &Token {
+        self.tokens.get(self.pos + ahead).unwrap_or(&self.eof)
+    }
+
+    fn bump(&mut self) -> Token {
+        let token = self.peek().clone();
+        if self.pos < self.tokens.len() {
+            self.pos += 1;
+        }
+        token
+    }
+
+    fn err(diags: &mut lilac_error::Diags, span: Span, msg: &str) -> ErrorGuaranteed {
+        diags.emit(Diagnostic::error(PARSE_ERROR_CODE, msg).label(span, true, String::new()))
+    }
+
+    fn expect(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        kind: TokenKind,
+        what: &str,
+    ) -> Result<Token, ErrorGuaranteed> {
+        if self.peek().kind == kind {
+            Ok(self.bump())
+        } else {
+            let span = self.peek().span;
+            Err(Self::err(diags, span, &format!("expected {what}")))
+        }
+    }
+
+    fn synchronize(&mut self) {
+        // Leaves a depth-0 `}` unconsumed so the enclosing block/object parser
+        // sees its own terminator; the caller guarantees progress instead.
+        let mut depth = 0;
+        while self.peek().kind != TokenKind::Eof {
+            match self.peek().kind {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                TokenKind::RBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => {
+                    if depth == 0 && self.peek().starts_item() {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    fn parse_item(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        in_object: bool,
+    ) -> Result<Item, ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::KwUsing {
+            return self.parse_using(diags);
+        }
+        let (name, name_span) = self.parse_item_name(diags)?;
+        let generic_params = self.parse_generic_params(diags)?;
+        self.expect(diags, TokenKind::Colon, "`:` after declaration name")?;
+        let kind_token = self.bump();
+        let kind = match kind_token.kind {
+            TokenKind::KwFunction => {
+                ItemKind::Func(self.parse_func_rest(diags, false, generic_params)?)
+            }
+            TokenKind::KwExtern => {
+                self.expect(diags, TokenKind::KwFunction, "`function` after `extern`")?;
+                ItemKind::Func(self.parse_func_rest(diags, true, generic_params)?)
+            }
+            TokenKind::KwObject => {
+                let members = self.parse_object_members(diags)?;
+                return Ok(Item {
+                    span: join_spans(name_span, self.prev_span()),
+                    name,
+                    kind: ItemKind::Object {
+                        members,
+                        generic_params,
+                    },
+                });
+            }
+            _ => {
+                return self.parse_item_tail(
+                    diags,
+                    name,
+                    name_span,
+                    generic_params,
+                    kind_token,
+                    in_object,
+                )
+            }
+        };
+        Ok(Item {
+            span: join_spans(name_span, self.prev_span()),
+            name,
+            kind,
+        })
+    }
+
+    fn parse_item_tail(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        name: String,
+        name_span: Span,
+        generic_params: Vec<String>,
+        kind_token: Token,
+        in_object: bool,
+    ) -> Result<Item, ErrorGuaranteed> {
+        match kind_token.kind {
+            TokenKind::KwEnum => {
+                let variants = self.parse_enum_variants(diags)?;
+                Ok(Item {
+                    span: join_spans(name_span, self.prev_span()),
+                    name,
+                    kind: ItemKind::Enum {
+                        variants,
+                        generic_params,
+                    },
+                })
+            }
+            TokenKind::KwUnion => {
+                let variants = self.parse_union_variants(diags)?;
+                Ok(Item {
+                    span: join_spans(name_span, self.prev_span()),
+                    name,
+                    kind: ItemKind::Union {
+                        variants,
+                        generic_params,
+                    },
+                })
+            }
+            _ => {
+                let ty = self.parse_type_starting(diags, kind_token)?;
+                if self.peek().kind == TokenKind::FatArrow {
+                    self.bump();
+                    let value = self.parse_expr(diags)?;
+                    return Self::const_item(
+                        diags,
+                        name,
+                        name_span,
+                        &generic_params,
+                        ty,
+                        value,
+                        true,
+                    );
+                }
+                if self.peek().kind == TokenKind::Eq {
+                    self.bump();
+                    let value = self.parse_expr(diags)?;
+                    return Self::const_item(
+                        diags,
+                        name,
+                        name_span,
+                        &generic_params,
+                        ty,
+                        value,
+                        false,
+                    );
+                }
+                if !in_object {
+                    return Err(Self::err(
+                        diags,
+                        self.peek().span,
+                        "expected `=` or `=>` after constant type",
+                    ));
+                }
+                if !generic_params.is_empty() {
+                    return Err(Self::err(
+                        diags,
+                        name_span,
+                        "fields take no generic parameters",
+                    ));
+                }
+                Ok(Item {
+                    span: join_spans(name_span, ty.span),
+                    name,
+                    kind: ItemKind::Field { ty },
+                })
+            }
+        }
+    }
+
+    fn const_item(
+        diags: &mut lilac_error::Diags,
+        name: String,
+        name_span: Span,
+        generic_params: &[String],
+        ty: Type,
+        value: Expr,
+        is_inline: bool,
+    ) -> Result<Item, ErrorGuaranteed> {
+        if !generic_params.is_empty() {
+            return Err(Self::err(
+                diags,
+                name_span,
+                "only `object`, `function`, `enum`, and `union` declarations take generic parameters",
+            ));
+        }
+        Ok(Item {
+            span: join_spans(name_span, value.span()),
+            name,
+            kind: ItemKind::Const {
+                ty,
+                value,
+                is_inline,
+            },
+        })
+    }
+
+    fn parse_item_name(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<(String, Span), ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::At {
+            let at = self.bump();
+            let ident = self.expect(diags, TokenKind::Ident, "hook name after `@`")?;
+            let name = format!("@{}", ident.text);
+            return Ok((name, join_spans(at.span, ident.span)));
+        }
+        let ident = self.expect(diags, TokenKind::Ident, "declaration name")?;
+        let span = ident.span;
+        Ok((ident.text, span))
+    }
+
+    fn parse_generic_params(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<String>, ErrorGuaranteed> {
+        if self.peek().kind != TokenKind::LBracket {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut params = Vec::new();
+        loop {
+            let ident = self.expect(diags, TokenKind::Ident, "generic parameter name")?;
+            params.push(ident.text);
+            match self.peek().kind {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RBracket => {
+                    self.bump();
+                    break;
+                }
+                _ => {
+                    let span = self.peek().span;
+                    return Err(Self::err(
+                        diags,
+                        span,
+                        "expected `,` or `]` in generic parameter list",
+                    ));
+                }
+            }
+        }
+        Ok(params)
+    }
+
+    fn parse_using(&mut self, diags: &mut lilac_error::Diags) -> Result<Item, ErrorGuaranteed> {
+        let using = self.bump();
+        let first = self.expect(diags, TokenKind::Ident, "folder name after `using`")?;
+        let mut path = first.text;
+        let mut end = first.span;
+        while self.peek().kind == TokenKind::Dot {
+            self.bump();
+            let segment = self.expect(diags, TokenKind::Ident, "folder name after `.`")?;
+            path.push('.');
+            path.push_str(&segment.text);
+            end = segment.span;
+        }
+        Ok(Item {
+            span: join_spans(using.span, end),
+            name: path.clone(),
+            kind: ItemKind::Using { path },
+        })
+    }
+
+    fn parse_object_members(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Item>, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LBrace, "`{` to open object body")?;
+        let mut members = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated object body; add a closing `}`",
+                ));
+            }
+            let before = self.pos;
+            if let Ok(item) = self.parse_item(diags, true) {
+                members.push(item);
+            } else {
+                self.failed = true;
+                self.synchronize();
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
+        }
+        self.bump();
+        Ok(members)
+    }
+
+    fn parse_enum_variants(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<EnumVariant>, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LBrace, "`{` to open enum body")?;
+        let mut variants = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated enum body; add a closing `}`",
+                ));
+            }
+            let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
+            variants.push(EnumVariant {
+                name: ident.text,
+                span: ident.span,
+            });
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            }
+        }
+        self.bump();
+        Ok(variants)
+    }
+
+    fn parse_union_variants(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<UnionVariant>, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LBrace, "`{` to open union body")?;
+        let mut variants = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated union body; add a closing `}`",
+                ));
+            }
+            let ident = self.expect(diags, TokenKind::Ident, "union variant name")?;
+            let payload = if self.peek().kind == TokenKind::Colon {
+                self.bump();
+                Some(self.parse_type(diags)?)
+            } else {
+                None
+            };
+            let end = payload.as_ref().map_or(ident.span, |ty| ty.span);
+            variants.push(UnionVariant {
+                name: ident.text,
+                payload,
+                span: join_spans(ident.span, end),
+            });
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            }
+        }
+        self.bump();
+        Ok(variants)
+    }
+
+    fn parse_func_rest(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        is_extern: bool,
+        generic_params: Vec<String>,
+    ) -> Result<FuncDecl, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LParen, "`(` to open parameter list")?;
+        let mut params = Vec::new();
+        while self.peek().kind != TokenKind::RParen {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated parameter list; add a closing `)`",
+                ));
+            }
+            params.push(self.parse_param(diags)?);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            } else if self.peek().kind != TokenKind::RParen {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "expected `,` or `)` in parameter list",
+                ));
+            }
+        }
+        self.bump();
+        let returns = self.parse_returns(diags)?;
+        let body = match self.peek().kind {
+            TokenKind::LBrace => {
+                if is_extern {
+                    let span = self.peek().span;
+                    return Err(Self::err(diags, span, "`extern` declarations have no body"));
+                }
+                Some(FuncBody::Block(self.parse_block(diags)?))
+            }
+            TokenKind::FatArrow => {
+                if is_extern {
+                    let span = self.peek().span;
+                    return Err(Self::err(diags, span, "`extern` declarations have no body"));
+                }
+                self.bump();
+                Some(FuncBody::Inline(self.parse_expr(diags)?))
+            }
+            _ => {
+                if is_extern {
+                    None
+                } else {
+                    let span = self.peek().span;
+                    return Err(Self::err(
+                        diags,
+                        span,
+                        "expected `{` or `=>` for function body",
+                    ));
+                }
+            }
+        };
+        Ok(FuncDecl {
+            generic_params,
+            params,
+            returns,
+            body,
+            is_extern,
+        })
+    }
+
+    fn parse_param(&mut self, diags: &mut lilac_error::Diags) -> Result<Param, ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::At
+            || ((self.peek().kind == TokenKind::Ident || self.peek().kind == TokenKind::KwRef)
+                && self.peek_at(1).kind != TokenKind::Colon)
+        {
+            let ty = self.parse_type(diags)?;
+            let span = ty.span;
+            return Ok(Param {
+                name: String::new(),
+                ty,
+                span,
+            });
+        }
+        let name = self.expect(diags, TokenKind::Ident, "parameter name")?;
+        self.expect(diags, TokenKind::Colon, "`:` after parameter name")?;
+        let ty = self.parse_type(diags)?;
+        let span = join_spans(name.span, ty.span);
+        Ok(Param {
+            name: name.text,
+            ty,
+            span,
+        })
+    }
+
+    fn parse_returns(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Param>, ErrorGuaranteed> {
+        match self.peek().kind {
+            TokenKind::LBrace | TokenKind::FatArrow | TokenKind::Eof => Ok(Vec::new()),
+            TokenKind::KwNothing => {
+                self.bump();
+                Ok(Vec::new())
+            }
+            _ => {
+                let mut returns = Vec::new();
+                loop {
+                    returns.push(self.parse_param(diags)?);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                        continue;
+                    }
+                    break;
+                }
+                Ok(returns)
+            }
+        }
+    }
+
+    fn parse_type(&mut self, diags: &mut lilac_error::Diags) -> Result<Type, ErrorGuaranteed> {
+        let first = self.bump();
+        self.parse_type_starting(diags, first)
+    }
+
+    fn parse_type_starting(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        first: Token,
+    ) -> Result<Type, ErrorGuaranteed> {
+        let start = first.span;
+        let (is_ref, name_token) = match first.kind {
+            TokenKind::KwRef => {
+                if self.peek().kind == TokenKind::KwRef {
+                    let span = self.peek().span;
+                    return Err(Self::err(
+                        diags,
+                        span,
+                        "double references are invalid unless wrapped inside an object",
+                    ));
+                }
+                (true, self.parse_type_name(diags)?)
+            }
+            TokenKind::At | TokenKind::Ident | TokenKind::KwUnknown | TokenKind::KwSelf => {
+                (false, self.type_name_from(diags, first)?)
+            }
+            TokenKind::KwNothing => {
+                return Err(Self::err(
+                    diags,
+                    first.span,
+                    "`nothing` is not a type; it only marks an empty return slot",
+                ));
+            }
+            _ => {
+                return Err(Self::err(diags, first.span, "expected a type"));
+            }
+        };
+        let mut end = name_token.span;
+        let mut generic_args = Vec::new();
+        if self.peek().kind == TokenKind::LBracket {
+            self.bump();
+            loop {
+                generic_args.push(self.parse_type(diags)?);
+                match self.peek().kind {
+                    TokenKind::Comma => {
+                        self.bump();
+                    }
+                    TokenKind::RBracket => {
+                        end = self.bump().span;
+                        break;
+                    }
+                    _ => {
+                        let span = self.peek().span;
+                        return Err(Self::err(
+                            diags,
+                            span,
+                            "expected `,` or `]` in generic argument list",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(Type {
+            name: name_token.text,
+            is_ref,
+            generic_args,
+            span: join_spans(start, end),
+        })
+    }
+
+    fn parse_type_name(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Token, ErrorGuaranteed> {
+        let token = self.bump();
+        self.type_name_from(diags, token)
+    }
+
+    fn type_name_from(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        token: Token,
+    ) -> Result<Token, ErrorGuaranteed> {
+        match token.kind {
+            TokenKind::At => {
+                let ident = self.expect(diags, TokenKind::Ident, "type name after `@`")?;
+                let span = join_spans(token.span, ident.span);
+                Ok(Token::new(
+                    TokenKind::Ident,
+                    &format!("@{}", ident.text),
+                    span.lo.0 as usize,
+                    span.hi.0 as usize,
+                    self.file,
+                ))
+            }
+            TokenKind::Ident | TokenKind::KwUnknown | TokenKind::KwSelf => Ok(token),
+            _ => Err(Self::err(diags, token.span, "expected a type name")),
+        }
+    }
+
+    fn parse_block(&mut self, diags: &mut lilac_error::Diags) -> Result<Block, ErrorGuaranteed> {
+        let open = self.expect(diags, TokenKind::LBrace, "`{` to open block")?;
+        let mut stmts = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated block; add a closing `}`",
+                ));
+            }
+            stmts.push(self.parse_stmt(diags)?);
+        }
+        let close = self.bump();
+        Ok(Block {
+            stmts,
+            span: join_spans(open.span, close.span),
+        })
+    }
+
+    fn parse_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
+        match self.peek().kind {
+            TokenKind::KwReturn => {
+                let keyword = self.bump();
+                if starts_expr(self.peek().kind) {
+                    return Err(Self::err(
+                        diags,
+                        self.peek().span,
+                        "`return` takes no arguments; assign named return slots instead",
+                    ));
+                }
+                Ok(Stmt::Return { span: keyword.span })
+            }
+            TokenKind::KwBreak => {
+                let keyword = self.bump();
+                Ok(Stmt::Break { span: keyword.span })
+            }
+            TokenKind::KwIf => self.parse_if_stmt(diags),
+            TokenKind::KwLoop => self.parse_loop_stmt(diags),
+            TokenKind::KwMatch => self.parse_match_stmt(diags),
+            _ => self.parse_let_or_expr_stmt(diags),
+        }
+    }
+
+    fn parse_if_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
+        let keyword = self.bump();
+        let cond = self.parse_equality(diags)?;
+        let capture = if self.peek().kind == TokenKind::Arrow {
+            self.bump();
+            Some(self.parse_param(diags)?)
+        } else {
+            None
+        };
+        if self.peek().kind != TokenKind::LBrace {
+            let span = self.peek().span;
+            return Err(Self::err(diags, span, "expected `{` after `if` condition"));
+        }
+        let then = self.parse_block(diags)?;
+        let els = if self.peek().kind == TokenKind::KwElse {
+            self.bump();
+            Some(self.parse_block(diags)?)
+        } else {
+            None
+        };
+        let end = els.as_ref().map_or(then.span, |block| block.span);
+        Ok(Stmt::If {
+            cond,
+            capture,
+            then,
+            els,
+            span: join_spans(keyword.span, end),
+        })
+    }
+
+    fn parse_loop_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
+        let keyword = self.bump();
+        let cond = if self.peek().kind == TokenKind::KwIf {
+            self.bump();
+            Some(self.parse_equality(diags)?)
+        } else {
+            None
+        };
+        if self.peek().kind != TokenKind::LBrace {
+            let span = self.peek().span;
+            return Err(Self::err(diags, span, "expected `{` for loop body"));
+        }
+        let body = self.parse_block(diags)?;
+        let els = if self.peek().kind == TokenKind::KwElse {
+            self.bump();
+            Some(self.parse_block(diags)?)
+        } else {
+            None
+        };
+        let end = els.as_ref().map_or(body.span, |block| block.span);
+        Ok(Stmt::Loop {
+            cond,
+            body,
+            els,
+            span: join_spans(keyword.span, end),
+        })
+    }
+
+    fn parse_match_stmt(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Stmt, ErrorGuaranteed> {
+        let keyword = self.bump();
+        let scrutinee = self.parse_equality(diags)?;
+        self.expect(diags, TokenKind::LBrace, "`{` to open match arms")?;
+        let mut arms = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated match; add a closing `}`",
+                ));
+            }
+            arms.push(self.parse_match_arm(diags)?);
+        }
+        self.bump();
+        let els = if self.peek().kind == TokenKind::KwElse {
+            self.bump();
+            Some(self.parse_block(diags)?)
+        } else {
+            None
+        };
+        let end = els
+            .as_ref()
+            .map_or_else(|| self.prev_span(), |block| block.span);
+        Ok(Stmt::Match {
+            scrutinee,
+            arms,
+            els,
+            span: join_spans(keyword.span, end),
+        })
+    }
+
+    fn parse_match_arm(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<MatchArm, ErrorGuaranteed> {
+        let dot = self.expect(diags, TokenKind::Dot, "`.` before match tag")?;
+        let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
+        let capture = if self.peek().kind == TokenKind::Arrow {
+            self.bump();
+            Some(self.parse_param(diags)?)
+        } else {
+            None
+        };
+        let (body, end) = if self.peek().kind == TokenKind::FatArrow {
+            self.bump();
+            let stmt = self.parse_stmt(diags)?;
+            let end = stmt.span();
+            (MatchArmBody::Inline(Box::new(stmt)), end)
+        } else if self.peek().kind == TokenKind::LBrace {
+            let block = self.parse_block(diags)?;
+            let end = block.span;
+            (MatchArmBody::Block(block), end)
+        } else {
+            let span = self.peek().span;
+            return Err(Self::err(
+                diags,
+                span,
+                "expected `=>` or `{` for match arm body",
+            ));
+        };
+        Ok(MatchArm {
+            tag: tag.text,
+            capture,
+            body,
+            span: join_spans(dot.span, end),
+        })
+    }
+
+    fn parse_let_or_expr_stmt(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Stmt, ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::Ident && self.peek_at(1).kind == TokenKind::Colon {
+            let name = self.bump();
+            self.bump();
+            let ty = self.parse_type(diags)?;
+            self.expect(diags, TokenKind::Eq, "`=` after variable type")?;
+            let value = self.parse_expr(diags)?;
+            let span = join_spans(name.span, value.span());
+            return Ok(Stmt::Let {
+                name: name.text,
+                ty,
+                value,
+                span,
+            });
+        }
+        let target = self.parse_expr(diags)?;
+        if self.peek().kind == TokenKind::Eq {
+            self.bump();
+            let value = self.parse_expr(diags)?;
+            let span = join_spans(target.span(), value.span());
+            return Ok(Stmt::Assign {
+                target,
+                value,
+                span,
+            });
+        }
+        Ok(Stmt::ExprStmt(target))
+    }
+
+    fn parse_expr(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        self.parse_equality(diags)
+    }
+
+    fn parse_equality(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_comparison(diags)?;
+        while self.peek().kind == TokenKind::EqEq {
+            self.bump();
+            let rhs = self.parse_comparison(diags)?;
+            let span = join_spans(expr.span(), rhs.span());
+            expr = Expr::BinOp {
+                lhs: Box::new(expr),
+                op: BinOp::EqEq,
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_comparison(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_additive(diags)?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::LtEq => BinOp::LtEq,
+                TokenKind::GtEq => BinOp::GtEq,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.parse_additive(diags)?;
+            let span = join_spans(expr.span(), rhs.span());
+            expr = Expr::BinOp {
+                lhs: Box::new(expr),
+                op,
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_additive(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_multiplicative(diags)?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.parse_multiplicative(diags)?;
+            let span = join_spans(expr.span(), rhs.span());
+            expr = Expr::BinOp {
+                lhs: Box::new(expr),
+                op,
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_multiplicative(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_unary(diags)?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Mod,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.parse_unary(diags)?;
+            let span = join_spans(expr.span(), rhs.span());
+            expr = Expr::BinOp {
+                lhs: Box::new(expr),
+                op,
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_unary(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::Minus {
+            let minus = self.bump();
+            let value = self.parse_unary(diags)?;
+            let span = join_spans(minus.span, value.span());
+            let callee = Expr::Ident("@negate".to_owned(), minus.span);
+            return Ok(Expr::Call {
+                callee: Box::new(callee),
+                generic_args: Vec::new(),
+                args: vec![value],
+                span,
+            });
+        }
+        self.parse_postfix(diags)
+    }
+
+    fn parse_postfix(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_primary(diags)?;
+        loop {
+            match self.peek().kind {
+                TokenKind::Dot => {
+                    self.bump();
+                    let field = self.expect(diags, TokenKind::Ident, "field name after `.`")?;
+                    let span = join_spans(expr.span(), field.span);
+                    expr = Expr::Member {
+                        obj: Box::new(expr),
+                        field: field.text,
+                        span,
+                    };
+                }
+                TokenKind::LParen => {
+                    expr = self.finish_call(diags, expr, Vec::new())?;
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let mut generic_args = Vec::new();
+                    loop {
+                        generic_args.push(self.parse_type(diags)?);
+                        match self.peek().kind {
+                            TokenKind::Comma => {
+                                self.bump();
+                            }
+                            TokenKind::RBracket => {
+                                self.bump();
+                                break;
+                            }
+                            _ => {
+                                let span = self.peek().span;
+                                return Err(Self::err(
+                                    diags,
+                                    span,
+                                    "expected `,` or `]` in generic argument list",
+                                ));
+                            }
+                        }
+                    }
+                    if self.peek().kind != TokenKind::LParen {
+                        let span = self.peek().span;
+                        return Err(Self::err(
+                            diags,
+                            span,
+                            "expected `(` after generic arguments",
+                        ));
+                    }
+                    expr = self.finish_call(diags, expr, generic_args)?;
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    fn finish_call(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        callee: Expr,
+        generic_args: Vec<Type>,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let callee_span = callee.span();
+        self.expect(diags, TokenKind::LParen, "`(` to open call arguments")?;
+        let mut args = Vec::new();
+        while self.peek().kind != TokenKind::RParen {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated call; add a closing `)`",
+                ));
+            }
+            args.push(self.parse_expr(diags)?);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            } else if self.peek().kind != TokenKind::RParen {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "expected `,` or `)` in call arguments",
+                ));
+            }
+        }
+        let close = self.bump();
+        Ok(Expr::Call {
+            span: join_spans(callee_span, close.span),
+            callee: Box::new(callee),
+            generic_args,
+            args,
+        })
+    }
+
+    fn parse_primary(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        let token = self.bump();
+        match token.kind {
+            TokenKind::Ident => Ok(Expr::Ident(token.text, token.span)),
+            TokenKind::Number => Ok(Expr::Number(token.text, token.span)),
+            TokenKind::StringLit => Ok(Expr::Str(token.text, token.span)),
+            TokenKind::CharLit => Ok(Expr::Char(
+                token.text.chars().next().unwrap_or('\u{FFFD}'),
+                token.span,
+            )),
+            TokenKind::At => {
+                let ident = self.expect(diags, TokenKind::Ident, "name after `@`")?;
+                let span = join_spans(token.span, ident.span);
+                Ok(Expr::Ident(format!("@{}", ident.text), span))
+            }
+            TokenKind::LParen => {
+                let expr = self.parse_expr(diags)?;
+                self.expect(diags, TokenKind::RParen, "`)` to close group")?;
+                Ok(expr)
+            }
+            TokenKind::KwIf => self.parse_if_value(diags, token.span),
+            TokenKind::FStrStart => self.parse_fstring(diags, token.span),
+            TokenKind::KwRef => {
+                let value = self.parse_unary(diags)?;
+                let span = join_spans(token.span, value.span());
+                Ok(Expr::RefOf {
+                    value: Box::new(value),
+                    span,
+                })
+            }
+            TokenKind::KwSelf => Ok(Expr::Ident("self".to_owned(), token.span)),
+            TokenKind::Dot => {
+                let tag = self.expect(diags, TokenKind::Ident, "tag name after `.`")?;
+                let span = join_spans(token.span, tag.span);
+                Ok(Expr::Tag(tag.text, span))
+            }
+            _ => Err(Self::err(diags, token.span, "expected expression")),
+        }
+    }
+
+    fn parse_if_value(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        keyword_span: Span,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let cond = self.parse_equality(diags)?;
+        if self.peek().kind == TokenKind::LBrace {
+            return Err(Self::err(
+                diags,
+                self.peek().span,
+                "block `if` is a statement; expression `if` needs value branches like `if c 0x0 else 0x1`",
+            ));
+        }
+        let then = self.parse_expr(diags)?;
+        self.expect(diags, TokenKind::KwElse, "`else` in `if` value")?;
+        let els = self.parse_expr(diags)?;
+        let span = join_spans(keyword_span, els.span());
+        Ok(Expr::IfValue {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            els: Box::new(els),
+            span,
+        })
+    }
+
+    fn parse_fstring(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        start_span: Span,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let mut parts = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::FStrMid => {
+                    let chunk = self.bump();
+                    parts.push(FStrPart::Lit(chunk.text));
+                }
+                TokenKind::LBrace => {
+                    self.bump();
+                    parts.push(FStrPart::Hole(self.parse_expr(diags)?));
+                    self.expect(diags, TokenKind::RBrace, "`}` to close f-string hole")?;
+                }
+                TokenKind::FStrEnd => {
+                    let end = self.bump();
+                    return Ok(Expr::FString {
+                        parts,
+                        span: join_spans(start_span, end.span),
+                    });
+                }
+                TokenKind::Eof => {
+                    let span = self.peek().span;
+                    return Err(Self::err(diags, span, "unterminated f-string"));
+                }
+                _ => {
+                    let span = self.peek().span;
+                    return Err(Self::err(
+                        diags,
+                        span,
+                        "expected f-string chunk, `{hole}`, or closing `\"`",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn prev_span(&self) -> Span {
+        self.tokens
+            .get(self.pos.saturating_sub(1))
+            .map_or_else(Span::dummy, |token| token.span)
+    }
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new(Vec::new(), FileId(u32::MAX))
+    }
+}
+
+/// Joins two spans from the same file into their hull.
+fn join_spans(first: Span, last: Span) -> Span {
+    if first.is_dummy() {
+        return last;
+    }
+    if last.is_dummy() {
+        return first;
+    }
+    Span {
+        lo: first.lo.min(last.lo),
+        hi: first.hi.max(last.hi),
+        file: first.file,
+    }
+}
+
+/// Whether a token can start an expression (used for `return` validation).
+fn starts_expr(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::Number
+            | TokenKind::StringLit
+            | TokenKind::CharLit
+            | TokenKind::LParen
+            | TokenKind::Minus
+            | TokenKind::FStrStart
+            | TokenKind::At
+            | TokenKind::KwRef
+            | TokenKind::KwIf
+            | TokenKind::Dot
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lilac_error::Diags;
+    use lilac_lex::Lexer;
+    use lilac_span::SourceMap;
+
+    fn parse(src: &str) -> (Program, Diags, SourceMap) {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser.parse_program(&mut diags).unwrap_or(Program {
+            items: Vec::new(),
+            span: Span::dummy(),
+        });
+        (program, diags, sm)
+    }
+
+    #[test]
+    fn hello_parses_cleanly() {
+        let src = "main: function () nothing {\n    value: @bit32 = 0x1\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(!diags.has_errors());
+        assert_eq!(program.items.len(), 1);
+    }
+
+    #[test]
+    fn missing_value_is_e001() {
+        let (_, diags, _) = parse("main: function () nothing {\n    value: @bit32 =\n}\n");
+        assert!(diags.has_errors());
+        assert!(diags.diagnostics().iter().any(|d| d.code == "E001"));
+    }
+
+    #[test]
+    fn generics_and_calls_parse() {
+        let src = "gen_function[T]: function (in: T) out: T {\n    out = in\n}\n\nmain: function () nothing {\n    out: @bit32 = gen_function[@bit32](0x1)\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(!diags.has_errors());
+        assert_eq!(program.items.len(), 2);
+    }
+
+    #[test]
+    fn recovery_reports_each_broken_item() {
+        let src = "broken1: function ( nothing {}\nbroken2: object {\n";
+        let (_, diags, _) = parse(src);
+        assert!(diags.diagnostics().len() >= 2);
+    }
+
+    #[test]
+    fn object_field_parses() {
+        let src = "Object: object {\n    member: @bit8\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        assert_eq!(program.items.len(), 1);
+        let ItemKind::Object { members, .. } = &program.items[0].kind else {
+            panic!("expected object, got {:?}", program.items[0].kind);
+        };
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "member");
+        let ItemKind::Field { ty } = &members[0].kind else {
+            panic!("expected field, got {:?}", members[0].kind);
+        };
+        assert_eq!(ty.name, "@bit8");
+        assert!(!ty.is_ref);
+    }
+
+    #[test]
+    fn tag_literal_parses() {
+        let src = "main: function () nothing {\n    number: Number = .One\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        assert_eq!(program.items.len(), 1);
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        let Stmt::Let { value, .. } = &block.stmts[0] else {
+            panic!("expected let, got {:?}", block.stmts[0]);
+        };
+        let Expr::Tag(tag, _) = value else {
+            panic!("expected tag literal, got {value:?}");
+        };
+        assert_eq!(tag, "One");
+    }
+
+    #[test]
+    fn bare_top_level_decl_still_errors() {
+        let (_, diags, _) = parse("x: @bit8\n");
+        assert!(diags.has_errors());
+        assert!(diags.diagnostics().iter().any(|d| d.code == "E001"));
+    }
+}

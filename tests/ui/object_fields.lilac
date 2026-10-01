@@ -1,0 +1,18 @@
+Number: enum {
+    One
+    Two
+}
+
+Object: object {
+    member: @bit8
+
+    get: function (value: @bit8) result: @bit8 {
+        result = @iadd(value, member)
+        return
+    }
+}
+
+main: function () nothing {
+    number: Number = .One
+    value: @bit8 = 0x1
+}

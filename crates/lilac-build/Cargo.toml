@@ -1,0 +1,7 @@
+[package]
+name = "lilac-build"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

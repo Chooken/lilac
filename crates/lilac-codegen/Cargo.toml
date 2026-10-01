@@ -1,0 +1,10 @@
+[package]
+name = "lilac-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-ir = { path = "../lilac-ir" }
+
+[lints]
+workspace = true

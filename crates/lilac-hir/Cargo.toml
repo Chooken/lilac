@@ -1,0 +1,12 @@
+[package]
+name = "lilac-hir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-ast = { path = "../lilac-ast" }
+lilac-ty = { path = "../lilac-ty" }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "lilac-lower"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-hir = { path = "../lilac-hir" }
+lilac-ir = { path = "../lilac-ir" }
+
+[lints]
+workspace = true

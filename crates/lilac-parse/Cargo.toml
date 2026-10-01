@@ -1,0 +1,13 @@
+[package]
+name = "lilac-parse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-lex = { path = "../lilac-lex" }
+lilac-ast = { path = "../lilac-ast" }
+
+[lints]
+workspace = true

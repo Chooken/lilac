@@ -1,0 +1,11 @@
+[package]
+name = "lilac-const"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-ir = { path = "../lilac-ir" }
+
+[lints]
+workspace = true

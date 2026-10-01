@@ -1,0 +1,10 @@
+[package]
+name = "lilac-error"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+
+[lints]
+workspace = true
