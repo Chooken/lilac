@@ -123,7 +123,7 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         let snapshot = std::path::Path::new(&common.file).with_extension("lir");
         let Ok(expected) = std::fs::read_to_string(&snapshot) else {
             eprintln!(
-                "snapshot {} missing; run emit-ir without --check to generate it",
+                "cannot read snapshot {}; run emit-ir without --check to generate it",
                 snapshot.display()
             );
             return ExitCode::from(1);

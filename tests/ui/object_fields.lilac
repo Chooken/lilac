@@ -7,7 +7,7 @@ Object: object {
     member: @bit8
 
     get: function (value: @bit8) result: @bit8 {
-        result = @iadd(value, member)
+        result = @iadd(value, 0x1)
         return
     }
 }

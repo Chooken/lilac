@@ -1,0 +1,3 @@
+@add[T]: function (lhs: T, rhs: T) result: T {
+    result = lhs
+}

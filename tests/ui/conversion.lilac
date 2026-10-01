@@ -1,0 +1,8 @@
+@conversion: function (from: @bit32) to: @bit8 {
+    to = @truncate(from)
+}
+
+main: function () nothing {
+    a: @bit32 = 0x1
+    b: @bit8 = a
+}
