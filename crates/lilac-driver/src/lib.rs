@@ -87,7 +87,8 @@ impl Session {
         Self::default()
     }
 
-    /// Lexes + parses one source file (M1+ inserts resolve/typeck here).
+    /// Lexes, parses, resolves, and typechecks one source file (M2+ inserts
+    /// lowering after checking here).
     pub fn compile_source(&mut self, name: &str, src: &str) -> Result<Program, ErrorGuaranteed> {
         let file = self.source_map.add_file(name, src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -96,6 +97,10 @@ impl Session {
         }
         let mut parser = Parser::new(tokens, file);
         let program = parser.parse_program(&mut self.diags)?;
+        let module = lilac_resolve::collect(&program, &mut self.diags);
+        let mut types = lilac_ty::Types::new();
+        let sigs = lilac_typeck::collect_sigs(&module, &program, &mut types, &mut self.diags);
+        lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
@@ -137,5 +142,26 @@ mod tests {
         let result = session.compile_source("bad.lilac", "main: function ( {\n}\n");
         assert!(result.is_err());
         assert!(session.render_diagnostics().contains("error[E001]"));
+    }
+
+    #[test]
+    fn check_runs_typeck() {
+        let mut session = Session::new();
+        let result = session.compile_source(
+            "bad.lilac",
+            "main: function () nothing {\n    x: @bit8 = nope\n}\n",
+        );
+        assert!(result.is_err());
+        assert!(session.render_diagnostics().contains("error[E021]"));
+    }
+
+    #[test]
+    fn check_accepts_clean_typed_source() {
+        let mut session = Session::new();
+        let result = session.compile_source(
+            "ok.lilac",
+            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
+        );
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
     }
 }

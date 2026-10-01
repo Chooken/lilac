@@ -118,6 +118,25 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
     eprint!("{}", session.render_diagnostics());
     let _ = common.check_only;
     let module = LirModule::new(&session.target.triple);
-    print!("{}", module.header_text());
+    let emitted = module.header_text();
+    if common.check_only {
+        let snapshot = std::path::Path::new(&common.file).with_extension("lir");
+        let Ok(expected) = std::fs::read_to_string(&snapshot) else {
+            eprintln!(
+                "snapshot {} missing; run emit-ir without --check to generate it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        };
+        if expected != emitted {
+            eprintln!(
+                "snapshot {} does not match emit-ir output; re-run without --check to refresh it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        }
+        return ExitCode::SUCCESS;
+    }
+    print!("{emitted}");
     ExitCode::SUCCESS
 }
