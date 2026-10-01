@@ -50,10 +50,10 @@ pub enum TypeKind {
 /// Function signature (checked in M1).
 #[derive(Clone, Debug, Default)]
 pub struct FuncSig {
-    /// Parameter types.
-    pub params: Vec<TypeId>,
-    /// Named return-slot types.
-    pub returns: Vec<TypeId>,
+    /// Parameter types in order.
+    pub params: Vec<TypeRef>,
+    /// Named return-slot types in order.
+    pub returns: Vec<TypeRef>,
 }
 
 /// Type table (real interner lands in M1).

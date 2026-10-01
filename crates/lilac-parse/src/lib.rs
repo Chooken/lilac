@@ -527,8 +527,7 @@ impl Parser {
 
     fn parse_param(&mut self, diags: &mut lilac_error::Diags) -> Result<Param, ErrorGuaranteed> {
         if self.peek().kind == TokenKind::At
-            || ((self.peek().kind == TokenKind::Ident || self.peek().kind == TokenKind::KwRef)
-                && self.peek_at(1).kind != TokenKind::Colon)
+            || Self::is_anonymous_param(self.peek(), self.peek_at(1))
         {
             let ty = self.parse_type(diags)?;
             let span = ty.span;
@@ -538,7 +537,13 @@ impl Parser {
                 span,
             });
         }
-        let name = self.expect(diags, TokenKind::Ident, "parameter name")?;
+        let name = match self.peek().kind {
+            TokenKind::Ident | TokenKind::KwSelf => self.bump(),
+            _ => {
+                let span = self.peek().span;
+                return Err(Self::err(diags, span, "parameter name"));
+            }
+        };
         self.expect(diags, TokenKind::Colon, "`:` after parameter name")?;
         let ty = self.parse_type(diags)?;
         let span = join_spans(name.span, ty.span);
@@ -547,6 +552,15 @@ impl Parser {
             ty,
             span,
         })
+    }
+
+    /// Whether `first` starts an anonymous type (`@bit8`, `ref T`, `self`)
+    /// rather than a `name:` slot, given the token after it.
+    fn is_anonymous_param(first: &Token, second: &Token) -> bool {
+        matches!(
+            first.kind,
+            TokenKind::Ident | TokenKind::KwRef | TokenKind::KwSelf | TokenKind::KwUnknown
+        ) && second.kind != TokenKind::Colon
     }
 
     fn parse_returns(

@@ -4,6 +4,10 @@
 //! Hook bindings must be concrete: blanket-generic hooks are rejected with
 //! `E052` once checking exists.
 
+pub mod sigs;
+
+pub use sigs::*;
+
 use lilac_error::{Diagnostic, ErrorGuaranteed};
 
 /// Body-checking entry point (stub until M1).
