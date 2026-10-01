@@ -3,3 +3,4 @@ zig-out/
 .VSCodeCounter/
 target/
 .lilac-cache/
+.superpowers/
