@@ -170,7 +170,11 @@ pub fn resolve_type(
     }
 }
 
-fn collect_param(param: &lilac_ast::Param, parent: Option<(&str, DefId)>, ctx: &mut SigCtx) -> TypeRef {
+fn collect_param(
+    param: &lilac_ast::Param,
+    parent: Option<(&str, DefId)>,
+    ctx: &mut SigCtx,
+) -> TypeRef {
     if let Some((parent_name, parent_def)) = parent {
         if param.name.is_empty() && param.ty.name == "self" && param.ty.generic_args.is_empty() {
             let id = ctx.types.intern_object(parent_def);
