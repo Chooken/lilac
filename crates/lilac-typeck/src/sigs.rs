@@ -232,8 +232,12 @@ fn register(
     is_hook: bool,
     ctx: &mut SigCtx,
 ) {
-    let (ResKind::Func { params, returns, .. } | ResKind::Hook { params, returns, .. }) =
-        &item.kind
+    let (ResKind::Func {
+        params, returns, ..
+    }
+    | ResKind::Hook {
+        params, returns, ..
+    }) = &item.kind
     else {
         lilac_error::bug!(item.span, "register on non-function item");
     };

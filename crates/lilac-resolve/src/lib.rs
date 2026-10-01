@@ -185,8 +185,7 @@ impl Collector<'_> {
             if let Some(hooks) = hooks {
                 let overloads = hooks.entry(name.to_owned()).or_default();
                 if overloads.iter().any(|prev| same_sig(prev, &item)) {
-                    let previous_span =
-                        overloads.first().map_or(item.span, |prev| prev.span);
+                    let previous_span = overloads.first().map_or(item.span, |prev| prev.span);
                     self.diags.emit(
                         Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
                             .label(item.span, true, "redefined here")

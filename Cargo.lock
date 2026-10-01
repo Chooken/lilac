@@ -123,6 +123,8 @@ version = "0.2.0"
 dependencies = [
  "lilac-ast",
  "lilac-error",
+ "lilac-lex",
+ "lilac-parse",
  "lilac-span",
 ]
 
@@ -134,6 +136,7 @@ version = "0.2.0"
 name = "lilac-ty"
 version = "0.2.0"
 dependencies = [
+ "lilac-resolve",
  "lilac-span",
 ]
 
@@ -141,8 +144,12 @@ dependencies = [
 name = "lilac-typeck"
 version = "0.2.0"
 dependencies = [
+ "lilac-ast",
  "lilac-error",
  "lilac-hir",
+ "lilac-lex",
+ "lilac-parse",
+ "lilac-resolve",
  "lilac-span",
  "lilac-ty",
 ]
