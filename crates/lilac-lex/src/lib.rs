@@ -61,6 +61,10 @@ pub enum TokenKind {
     KwMatch,
     /// `break`.
     KwBreak,
+    /// `and` (short-circuit conjunction, no hook).
+    KwAnd,
+    /// `or` (short-circuit disjunction, no hook).
+    KwOr,
     /// `return`.
     KwReturn,
     /// `:`.
@@ -282,6 +286,8 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::KwElse,
             "match" => TokenKind::KwMatch,
             "break" => TokenKind::KwBreak,
+            "and" => TokenKind::KwAnd,
+            "or" => TokenKind::KwOr,
             "return" => TokenKind::KwReturn,
             _ => TokenKind::Ident,
         };

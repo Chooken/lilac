@@ -429,6 +429,9 @@ impl Checker<'_> {
                 let _ = self.check_expr(fctx, expr, None);
             }
             Stmt::Return { .. } | Stmt::Break { .. } => {}
+            Stmt::MultiLet { span, .. } => {
+                let _ = deferred(self.diags, *span, "multi-`let`", "M2");
+            }
             Stmt::If { span, .. } => {
                 let _ = deferred(self.diags, *span, "`if` statements", "M2");
             }
@@ -499,6 +502,20 @@ impl Checker<'_> {
             Expr::BinOp { lhs, op, rhs, span } => self.check_binop_expr(fctx, lhs, *op, rhs, *span),
             Expr::IfValue { span, .. } => {
                 deferred(self.diags, *span, "`if` values", "M2");
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                }
+            }
+            Expr::MatchValue { span, .. } => {
+                deferred(self.diags, *span, "`match` values", "M2");
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                }
+            }
+            Expr::StructLit { span, .. } => {
+                deferred(self.diags, *span, "struct literals", "M2");
                 TypeRef {
                     id: TypeId::ERROR,
                     is_ref: false,
@@ -588,6 +605,10 @@ impl Checker<'_> {
             id: TypeId::ERROR,
             is_ref: false,
         };
+        if matches!(op, BinOp::And | BinOp::Or) {
+            deferred(self.diags, span, "`and`/`or`", "M2");
+            return poison;
+        }
         if op != BinOp::EqEq {
             let Some(hook) = super::ops::binop_hook_name(op) else {
                 lilac_error::bug!(span, "equality handled above");

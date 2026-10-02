@@ -397,6 +397,7 @@ mod tests {
             name: name.to_owned(),
             is_ref: false,
             generic_args: Vec::new(),
+            func: None,
             span: Span::dummy(),
         }
     }

@@ -74,11 +74,13 @@ pub enum ItemKind {
     },
 }
 
-/// One enum variant: `One`.
+/// One enum variant: `One` or `Some: @bit32` (payload).
 #[derive(Clone, Debug)]
 pub struct EnumVariant {
     /// Variant name.
     pub name: String,
+    /// Payload type (`None` for payload-less variants).
+    pub payload: Option<Type>,
     /// Name span.
     pub span: Span,
 }
@@ -129,17 +131,29 @@ pub struct Param {
     pub span: Span,
 }
 
-/// A type reference: `[@]name[args]` with an optional `ref` flag.
+/// A type reference: `[@]name[args]` or `function` type, with an optional `ref` flag.
 #[derive(Clone, Debug)]
 pub struct Type {
-    /// Type name (`@bit32` keeps its `@`; `ref` is in [`Type::is_ref`]).
+    /// Type name (`@bit32` keeps its `@`; `ref` is in [`Type::is_ref`];
+    /// `"function"` when [`Type::func`] is `Some`).
     pub name: String,
     /// `ref T` (a type can never be doubly flagged).
     pub is_ref: bool,
     /// Generic arguments (`GenObj[T]` instantiation).
     pub generic_args: Vec<Type>,
+    /// Function type (`function (params) returns`); `None` for named types.
+    pub func: Option<FuncType>,
     /// Whole-type span.
     pub span: Span,
+}
+
+/// A `function (params) returns` type in type position.
+#[derive(Clone, Debug)]
+pub struct FuncType {
+    /// Parameter slots (names may be empty for anonymous types).
+    pub params: Vec<Param>,
+    /// Return slots.
+    pub returns: Vec<Param>,
 }
 
 /// A `{ ... }` statement sequence.
@@ -161,6 +175,15 @@ pub enum Stmt {
         /// Declared type.
         ty: Type,
         /// Initializer.
+        value: Expr,
+        /// Whole-statement span.
+        span: Span,
+    },
+    /// `a: T, b: U = f()` (multi-return destructuring; one `=`).
+    MultiLet {
+        /// Bound slots in order.
+        bindings: Vec<LetBinding>,
+        /// Call producing one value per binding.
         value: Expr,
         /// Whole-statement span.
         span: Span,
@@ -223,17 +246,37 @@ pub enum Stmt {
     },
 }
 
+/// One `name: Type` slot of a multi-`let`.
+#[derive(Clone, Debug)]
+pub struct LetBinding {
+    /// Bound name.
+    pub name: String,
+    /// Declared type.
+    pub ty: Type,
+    /// Whole-slot span.
+    pub span: Span,
+}
+
 /// One match arm: `.Some -> value: T { ... }` or `.None => return`.
 #[derive(Clone, Debug)]
 pub struct MatchArm {
-    /// Tag after the dot.
-    pub tag: String,
+    /// Tag or byte pattern after the dot.
+    pub pattern: MatchPattern,
     /// Optional `-> binding: Type` capture.
     pub capture: Option<Param>,
     /// Arm body.
     pub body: MatchArmBody,
     /// Whole-arm span.
     pub span: Span,
+}
+
+/// A match arm pattern: `.Tag` or a byte literal.
+#[derive(Clone, Debug)]
+pub enum MatchPattern {
+    /// `.Some` tag (enum/union tag; type comes from the scrutinee).
+    Tag(String),
+    /// `0x0` byte pattern (source bytes).
+    Const(String),
 }
 
 /// Match arm bodies: block or inline `=>` single statement.
@@ -300,6 +343,26 @@ pub enum Expr {
         /// Whole-expression span.
         span: Span,
     },
+    /// `match s { arms } else d` used as a value (`else` required).
+    MatchValue {
+        /// Inspected value.
+        scrutinee: Box<Expr>,
+        /// Arms (same shapes as statement `match`).
+        arms: Vec<MatchArm>,
+        /// Required `else` value.
+        els: Box<Expr>,
+        /// Whole-expression span.
+        span: Span,
+    },
+    /// `Object { member = expr, ... }` (`=` form only).
+    StructLit {
+        /// Type name before the brace.
+        ty_name: String,
+        /// Field initializers in order.
+        fields: Vec<StructField>,
+        /// Whole-literal span.
+        span: Span,
+    },
     /// `$"Hello {name}!"` (lowers to `@format_args` construction).
     FString {
         /// Literal chunks and holes in order.
@@ -339,6 +402,21 @@ pub enum BinOp {
     GtEq,
     /// `==` (strict bit-equality, never converted or overridden).
     EqEq,
+    /// `and` (short-circuit conjunction over `@bit8`, no hook).
+    And,
+    /// `or` (short-circuit disjunction over `@bit8`, no hook).
+    Or,
+}
+
+/// One struct-literal field: `member = expr`.
+#[derive(Clone, Debug)]
+pub struct StructField {
+    /// Field name.
+    pub name: String,
+    /// Field value.
+    pub value: Expr,
+    /// Whole-field span.
+    pub span: Span,
 }
 
 /// One f-string piece: literal text or an interpolated hole.
@@ -364,6 +442,8 @@ impl Expr {
             | Self::Member { span, .. }
             | Self::BinOp { span, .. }
             | Self::IfValue { span, .. }
+            | Self::MatchValue { span, .. }
+            | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
             | Self::FString { span, .. } => *span,
         }
@@ -377,6 +457,7 @@ impl Stmt {
         match self {
             Self::ExprStmt(expr) => expr.span(),
             Self::Let { span, .. }
+            | Self::MultiLet { span, .. }
             | Self::Assign { span, .. }
             | Self::Return { span }
             | Self::Break { span }
@@ -442,7 +523,7 @@ pub fn walk_item<V: Visitor + ?Sized>(visitor: &mut V, item: &Item) {
 /// Default statement walk for [`Visitor`].
 pub fn walk_stmt<V: Visitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
     match stmt {
-        Stmt::Let { value, .. } => visitor.visit_expr(value),
+        Stmt::Let { value, .. } | Stmt::MultiLet { value, .. } => visitor.visit_expr(value),
         Stmt::Assign { target, value, .. } => {
             visitor.visit_expr(target);
             visitor.visit_expr(value);
@@ -524,6 +605,30 @@ pub fn walk_expr<V: Visitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             visitor.visit_expr(cond);
             visitor.visit_expr(then);
             visitor.visit_expr(els);
+        }
+        Expr::MatchValue {
+            scrutinee,
+            arms,
+            els,
+            ..
+        } => {
+            visitor.visit_expr(scrutinee);
+            for arm in arms {
+                match &arm.body {
+                    MatchArmBody::Block(block) => {
+                        for stmt in &block.stmts {
+                            visitor.visit_stmt(stmt);
+                        }
+                    }
+                    MatchArmBody::Inline(stmt) => visitor.visit_stmt(stmt),
+                }
+            }
+            visitor.visit_expr(els);
+        }
+        Expr::StructLit { fields, .. } => {
+            for field in fields {
+                visitor.visit_expr(&field.value);
+            }
         }
         Expr::FString { parts, .. } => {
             for part in parts {

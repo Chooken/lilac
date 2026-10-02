@@ -53,7 +53,8 @@ pub(crate) fn binop_hook_name(op: BinOp) -> Option<&'static str> {
         BinOp::Gt => Some("@greater_than"),
         BinOp::LtEq => Some("@less_than_or_equal"),
         BinOp::GtEq => Some("@greater_than_or_equal"),
-        BinOp::EqEq => None,
+        // `==` is strict bit-equality; `and`/`or` short-circuit (Task 5 builds joins).
+        BinOp::EqEq | BinOp::And | BinOp::Or => None,
     }
 }
 
