@@ -116,7 +116,6 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
     eprint!("{}", session.render_diagnostics());
-    let _ = common.check_only;
     let module = LirModule::new(&session.target.triple);
     let emitted = module.header_text();
     if common.check_only {
@@ -130,7 +129,7 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         };
         if expected != emitted {
             eprintln!(
-                "snapshot {} does not match emit-ir output; re-run without --check to refresh it",
+                "expected {} to match emit-ir output; re-run without --check to refresh it",
                 snapshot.display()
             );
             return ExitCode::from(1);

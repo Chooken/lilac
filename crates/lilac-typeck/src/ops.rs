@@ -19,7 +19,8 @@ pub(crate) fn convert(
     sigs: &Sigs,
     from: TypeRef,
     to: TypeId,
-    span: Span,
+    expected_span: Span,
+    actual_span: Span,
 ) -> Result<TypeId, ErrorGuaranteed> {
     debug_assert!(!from.is_ref);
     if sigs
@@ -29,16 +30,14 @@ pub(crate) fn convert(
     {
         return Ok(to);
     }
+    let target = types.display(to);
     Err(diags.emit(
         Diagnostic::error(
             "E043",
-            format!(
-                "no conversion from {} to {}",
-                types.display(from.id),
-                types.display(to),
-            ),
+            format!("no conversion from {} to {target}", types.display(from.id)),
         )
-        .label(span, true, "conversion attempted here".to_owned()),
+        .label(expected_span, false, format!("expected `{target}` here"))
+        .label(actual_span, true, "conversion attempted here".to_owned()),
     ))
 }
 
@@ -144,6 +143,24 @@ mod tests {
         diags.diagnostics().iter().any(|d| d.code == code)
     }
 
+    fn conversion_count(src: &str) -> usize {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let mut types = Types::new();
+        let sigs = collect_sigs(&module, &program, &mut types, &mut diags);
+        sigs.conversions.len()
+    }
+
     fn conversion_hook() -> &'static str {
         "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\n"
     }
@@ -172,9 +189,11 @@ mod tests {
 
     #[test]
     fn conversion_does_not_chain() {
-        let diags = check_src(
-            "@conversion: function (from: @bit32) to: @bit16 {\n    to = @truncate(from)\n}\n@conversion2: function (from: @bit16) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    c: @bit8 = a\n}\n",
-        );
+        // Both steps exist as overloads, but v1 takes exactly one step: a
+        // chaining compiler would accept this, ours reports E043.
+        let src = "@conversion: function (from: @bit32) to: @bit16 {\n    to = @truncate(from)\n}\n@conversion: function (from: @bit16) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    c: @bit8 = a\n}\n";
+        assert_eq!(conversion_count(src), 2);
+        let diags = check_src(src);
         assert!(has_code(&diags, "E043"), "{diags:?}");
     }
 
@@ -198,6 +217,51 @@ mod tests {
     fn exact_match_beats_conversion() {
         let diags = check_src(
             "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @iadd(lhs, rhs)\n}\n@add: function (lhs: @bit8, rhs: @bit32) result: @bit32 {\n    result = @iadd(@truncate(lhs), rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    x: @bit8 = 0x1\n    y: @bit8 = 0x2\n    z: @bit8 = x + y\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn binop_literal_takes_sibling_width() {
+        let diags = check_src(
+            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @iadd(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    z: @bit32 = a + 0x2\n    w: @bit32 = 0x3 + a\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn equality_literal_takes_sibling_width() {
+        let diags = check_src(
+            "main: function () nothing {\n    a: @bit8 = 0x1\n    c: @bit8 = a == 0x1\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn e043_labels_both_sides() {
+        let diags =
+            check_src("main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n");
+        let e043: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E043")
+            .collect();
+        assert_eq!(e043.len(), 1, "{diags:?}");
+        assert_eq!(e043[0].labels.len(), 2, "{diags:?}");
+    }
+
+    #[test]
+    fn ref_conversion_shape_is_e022() {
+        let diags = check_src(
+            "@conversion: function (from: ref @bit32) to: @bit8 {\n    to = 0x0\n}\nmain: function () nothing {\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn direct_hook_call_picks_exact_overload() {
+        let diags = check_src(
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @iadd(lhs, rhs)\n}\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @iadd(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = 0x2\n    z: @bit32 = @add(a, b)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }

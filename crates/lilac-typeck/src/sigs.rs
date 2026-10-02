@@ -260,11 +260,15 @@ fn register(
             .or_default()
             .push((item.id, sig.clone()));
         if name == "@conversion" {
-            if sig.params.len() != 1 || sig.returns.len() != 1 {
+            let shaped = sig.params.len() == 1
+                && sig.returns.len() == 1
+                && !sig.params[0].is_ref
+                && !sig.returns[0].is_ref;
+            if !shaped {
                 ctx.diags.emit(
                     Diagnostic::error(
                         "E022",
-                        "`@conversion` needs exactly one parameter and one return",
+                        "`@conversion` needs exactly one by-value parameter and one by-value return",
                     )
                     .label(item.span, true, "bad conversion shape".to_owned()),
                 );

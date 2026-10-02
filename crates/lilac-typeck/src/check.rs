@@ -149,6 +149,7 @@ impl Checker<'_> {
             self.sigs,
             actual,
             expected,
+            expected_span,
             actual_span,
         ) {
             Ok(_) => Ok(()),
@@ -591,8 +592,7 @@ impl Checker<'_> {
             let Some(hook) = super::ops::binop_hook_name(op) else {
                 lilac_error::bug!(span, "equality handled above");
             };
-            let left = self.check_expr(fctx, lhs, None);
-            let right = self.check_expr(fctx, rhs, None);
+            let (left, right) = self.check_binop_sides(fctx, lhs, rhs);
             if is_poison(left) || is_poison(right) {
                 return poison;
             }
@@ -626,8 +626,7 @@ impl Checker<'_> {
                 }
             }
         }
-        let left = self.check_expr(fctx, lhs, None);
-        let right = self.check_expr(fctx, rhs, None);
+        let (left, right) = self.check_binop_sides(fctx, lhs, rhs);
         if is_poison(left) || is_poison(right) {
             return poison;
         }
@@ -646,9 +645,62 @@ impl Checker<'_> {
                     self.types.display(right.id),
                 ),
             )
-            .label(span, true, "bit-equality never converts".to_owned()),
+            .label(
+                lhs.span(),
+                false,
+                format!("left side `{}` here", self.types.display(left.id)),
+            )
+            .label(
+                rhs.span(),
+                true,
+                format!("right side `{}` here", self.types.display(right.id)),
+            ),
         );
         poison
+    }
+
+    /// Checks both binop sides exactly once: non-literals first to anchor the
+    /// width, literals take the anchor (or report `E024` without one).
+    fn check_binop_sides(
+        &mut self,
+        fctx: &mut FuncCtx,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> (TypeRef, TypeRef) {
+        let poison = TypeRef {
+            id: TypeId::ERROR,
+            is_ref: false,
+        };
+        let left_lit = matches!(lhs, Expr::Number(..));
+        let right_lit = matches!(rhs, Expr::Number(..));
+        if left_lit && right_lit {
+            let _ = self.check_expr(fctx, lhs, None);
+            return (poison, poison);
+        }
+        let left = if left_lit {
+            None
+        } else {
+            Some(self.check_expr(fctx, lhs, None))
+        };
+        let right = if right_lit {
+            None
+        } else {
+            Some(self.check_expr(fctx, rhs, None))
+        };
+        let anchor = left
+            .iter()
+            .chain(right.iter())
+            .map(|ty| ty.id)
+            .find(|id| is_bit(self.types, *id));
+        let left = match left {
+            Some(ty) => ty,
+            None => self.check_expr(fctx, lhs, anchor),
+        };
+        let right = match right {
+            Some(ty) => ty,
+            None => self.check_expr(fctx, rhs, anchor),
+        };
+        (left, right)
     }
 
     fn check_call(
@@ -675,7 +727,7 @@ impl Checker<'_> {
                     ));
                 }
                 if let Some(item) = self.module.items.get(name).cloned() {
-                    return self.check_named_call(fctx, &item, args, span);
+                    return self.check_named_call(fctx, name, &item, args, span);
                 }
                 if let Some(intrinsic) = lookup_intrinsic(name) {
                     return self.check_intrinsic(fctx, intrinsic, args, span, expected);
@@ -705,6 +757,7 @@ impl Checker<'_> {
     fn check_named_call(
         &mut self,
         fctx: &mut FuncCtx,
+        name: &str,
         item: &ResItem,
         args: &[Expr],
         span: Span,
@@ -714,6 +767,11 @@ impl Checker<'_> {
                 if *generic {
                     return Err(deferred(self.diags, span, "generic calls", "M4"));
                 }
+                let Some(sig) = self.func_sig(item.id) else {
+                    lilac_error::bug!(span, "missing signature for called function");
+                };
+                self.check_args(fctx, &sig, args, span)?;
+                return Ok(sig.returns.clone());
             }
             ResKind::Hook { generic, .. } => {
                 if *generic {
@@ -733,11 +791,50 @@ impl Checker<'_> {
                 ));
             }
         }
-        let Some(sig) = self.func_sig(item.id) else {
-            lilac_error::bug!(span, "missing signature for called function");
+        let overloads = self.sigs.hooks.get(name).cloned().unwrap_or_default();
+        let arity_ok: Vec<FuncSig> = overloads
+            .iter()
+            .filter(|(_, sig)| sig.params.len() == args.len())
+            .map(|(_, sig)| sig.clone())
+            .collect();
+        let Some(first) = arity_ok.first().cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!("no overload of `{name}` takes {} arguments", args.len()),
+                )
+                .label(span, true, "arity mismatch here".to_owned()),
+            ));
         };
-        self.check_args(fctx, &sig, args, span)?;
-        Ok(sig.returns.clone())
+        if arity_ok.len() == 1 {
+            self.check_args(fctx, &first, args, span)?;
+            return Ok(first.returns.clone());
+        }
+        let mut probed: Vec<Option<TypeRef>> = Vec::with_capacity(args.len());
+        for arg in args {
+            if matches!(arg, Expr::Number(..)) {
+                probed.push(None);
+                continue;
+            }
+            let got = self.check_expr(fctx, arg, None);
+            probed.push(if is_poison(got) { None } else { Some(got) });
+        }
+        let winner = arity_ok
+            .iter()
+            .find(|sig| {
+                sig.params
+                    .iter()
+                    .zip(probed.iter())
+                    .all(|(param, got)| match got {
+                        None => true,
+                        Some(ty) if param.is_ref => ty.is_ref && ty.id == param.id,
+                        Some(ty) => ty.id == param.id,
+                    })
+            })
+            .cloned()
+            .unwrap_or(first);
+        self.check_args(fctx, &winner, args, span)?;
+        Ok(winner.returns.clone())
     }
 
     fn check_args(
@@ -768,15 +865,16 @@ impl Checker<'_> {
                 continue;
             }
             if param.is_ref && !got.is_ref {
+                let want = self.types.display_ref(*param);
                 self.diags.emit(
                     Diagnostic::error(
                         "E010",
                         format!(
-                            "mismatched types: expected {}, found {}",
-                            self.types.display_ref(*param),
+                            "mismatched types: expected {want}, found {}",
                             self.types.display_ref(got),
                         ),
                     )
+                    .label(span, false, format!("expected `{want}` here"))
                     .label(
                         arg.span(),
                         true,
@@ -797,7 +895,10 @@ impl Checker<'_> {
     }
 
     fn builtin_ty(&mut self, name: &str) -> TypeId {
-        self.types.builtin(name).expect("builtin present")
+        match self.types.builtin(name) {
+            Some(id) => id,
+            None => lilac_error::bug!(Span::dummy(), "missing builtin `{name}`"),
+        }
     }
 
     fn expect_arity(
@@ -1042,21 +1143,21 @@ impl Checker<'_> {
         match intrinsic {
             Intrinsic::LoadU8 => {
                 self.expect_arity(span, "@load_u8", args, 2)?;
-                self.check_ref_bit8_arg(fctx, &args[0])?;
+                self.check_ref_bit8_arg(fctx, &args[0], span)?;
                 self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
                 Ok(vec![value(self.builtin_ty("@bit8"))])
             }
             Intrinsic::StoreU8 => {
                 self.expect_arity(span, "@store_u8", args, 3)?;
-                self.check_ref_bit8_arg(fctx, &args[0])?;
+                self.check_ref_bit8_arg(fctx, &args[0], span)?;
                 self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
                 self.check_fixed_arg(fctx, &args[2], "@bit8")?;
                 Ok(Vec::new())
             }
             _ => {
                 self.expect_arity(span, "@memcpy", args, 3)?;
-                self.check_ref_bit8_arg(fctx, &args[0])?;
-                self.check_ref_bit8_arg(fctx, &args[1])?;
+                self.check_ref_bit8_arg(fctx, &args[0], span)?;
+                self.check_ref_bit8_arg(fctx, &args[1], span)?;
                 self.check_fixed_arg(fctx, &args[2], "@bitNative")?;
                 Ok(Vec::new())
             }
@@ -1087,7 +1188,7 @@ impl Checker<'_> {
             }
             Intrinsic::ByteBufferFrom => {
                 self.expect_arity(span, "@byte_buffer_from", args, 2)?;
-                self.check_ref_bit8_arg(fctx, &args[0])?;
+                self.check_ref_bit8_arg(fctx, &args[0], span)?;
                 self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
                 Ok(vec![value(self.builtin_ty("@byte_buffer"))])
             }
@@ -1104,6 +1205,7 @@ impl Checker<'_> {
                             "E010",
                             "mismatched types: expected ref @format_args".to_owned(),
                         )
+                        .label(span, false, "expected `ref @format_args` here".to_owned())
                         .label(
                             args[0].span(),
                             true,
@@ -1133,6 +1235,7 @@ impl Checker<'_> {
         &mut self,
         fctx: &mut FuncCtx,
         arg: &Expr,
+        span: Span,
     ) -> Result<(), ErrorGuaranteed> {
         let got = self.check_expr(fctx, arg, None);
         if is_poison(got) {
@@ -1142,11 +1245,9 @@ impl Checker<'_> {
             return Ok(());
         }
         Err(self.diags.emit(
-            Diagnostic::error("E010", "mismatched types: expected ref @bit8".to_owned()).label(
-                arg.span(),
-                true,
-                "needs an explicit `ref`".to_owned(),
-            ),
+            Diagnostic::error("E010", "mismatched types: expected ref @bit8".to_owned())
+                .label(span, false, "expected `ref @bit8` here".to_owned())
+                .label(arg.span(), true, "needs an explicit `ref`".to_owned()),
         ))
     }
 
@@ -1271,10 +1372,7 @@ impl Checker<'_> {
                     ))
                 }
             }
-            Some(ResKind::Union) => Ok(TypeRef {
-                id: want,
-                is_ref: false,
-            }),
+            Some(ResKind::Union) => Err(deferred(self.diags, span, "union tags", "M2")),
             _ => Err(self.diags.emit(
                 Diagnostic::error("E010", format!("tag `.{tag}` needs an enum type")).label(
                     span,
@@ -1378,6 +1476,40 @@ mod tests {
             "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit32 = 0x2\n    c: @bit8 = a == b\n}\n",
         );
         assert!(has_code(&diags, "E010"), "{diags:?}");
+        let e010: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E010")
+            .collect();
+        assert_eq!(e010.len(), 1, "{diags:?}");
+        assert_eq!(e010[0].labels.len(), 2, "{diags:?}");
+    }
+
+    #[test]
+    fn ref_mismatch_labels_both_sides() {
+        let diags = check_src(
+            "set: function (r: ref @bit8) nothing {\n}\nmain: function () nothing {\n    v: @bit8 = 0x1\n    set(v)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+        let e010: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E010")
+            .collect();
+        assert_eq!(e010.len(), 1, "{diags:?}");
+        assert_eq!(e010[0].labels.len(), 2, "{diags:?}");
+        assert!(
+            e010[0].msg.contains("ref @bit8") && e010[0].msg.contains("@bit8"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn union_tag_defers_with_e030() {
+        let diags = check_src(
+            "Maybe: union {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
+        );
+        assert!(has_code(&diags, "E030"), "{diags:?}");
     }
 
     #[test]
@@ -1385,5 +1517,15 @@ mod tests {
         // M1 does not range-check literals; M3 `E060` tightens this.
         let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn poison_types_never_panic() {
+        // Unknown parameter types poison the signature; calling with a
+        // literal must report E023, never crash the compiler.
+        let diags = check_src(
+            "foo: function (x: Nope) nothing {\n}\nmain: function () nothing {\n    foo(0x1)\n}\n",
+        );
+        assert!(has_code(&diags, "E023"), "{diags:?}");
     }
 }

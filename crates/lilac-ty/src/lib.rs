@@ -113,8 +113,12 @@ impl Types {
         self.object_names.insert(def, name.to_owned());
     }
 
-    /// Reads back a kind (all `TypeId`s come from this table).
+    /// Reads back a kind. Total: `TypeId::ERROR` (which is never interned)
+    /// maps to `Error` instead of panicking, so poison is always cheap.
     pub fn kind(&self, id: TypeId) -> &TypeKind {
+        if id == TypeId::ERROR {
+            return &POISON_KIND;
+        }
         &self.kinds[id.0 as usize]
     }
 
@@ -146,19 +150,15 @@ impl Types {
             self.display(ty.id)
         }
     }
-
-    /// Allocates a fresh poison id (`Error` kind) for recovery.
-    pub fn fresh(&mut self) -> TypeId {
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Error);
-        id
-    }
 }
 
 /// Saturating `usize` -> `u32` for table indices.
 fn next_id(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }
+
+/// Shared `Error` kind for [`Types::kind`] on poison ids.
+static POISON_KIND: TypeKind = TypeKind::Error;
 
 #[cfg(test)]
 mod tests {
