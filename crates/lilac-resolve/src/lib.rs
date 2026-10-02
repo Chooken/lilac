@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use lilac_ast::{Item, ItemKind, Param, Program};
+use lilac_ast::{Item, ItemKind, Param, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
 use lilac_span::Span;
 
@@ -54,17 +54,38 @@ pub enum ResKind {
         /// Member name → definition.
         members: HashMap<String, ResItem>,
     },
-    /// `name: enum { ... }` with variant names in order.
+    /// `name: enum { ... }` with variant names and payloads in order.
     Enum {
-        /// Variant names.
-        variants: Vec<String>,
+        /// Variants in declaration order.
+        variants: Vec<EnumMember>,
     },
-    /// `name: union { ... }` (members collect in M2).
-    Union,
+    /// `name: union { ... }` with variant names and payloads in order.
+    Union {
+        /// Variants in declaration order.
+        members: Vec<UnionMember>,
+    },
     /// `name: Type = expr` module constant.
     Const,
     /// `member: Type` bare object field.
     Field,
+}
+
+/// One enum variant: `One` or `Some: @bit32` (payload).
+#[derive(Clone, Debug)]
+pub struct EnumMember {
+    /// Variant name.
+    pub name: String,
+    /// Payload type (`None` for payload-less variants).
+    pub payload: Option<AstType>,
+}
+
+/// One union variant: `Some: @bit32` or bare `None`.
+#[derive(Clone, Debug)]
+pub struct UnionMember {
+    /// Variant name.
+    pub name: String,
+    /// Payload type (`None` for payload-less variants).
+    pub payload: Option<AstType>,
 }
 
 /// One namespace unit: top-level names of a file.
@@ -77,10 +98,20 @@ pub struct Module {
 }
 
 /// Signature key for overload uniqueness (names excluded, types included).
+fn ty_key(ty: &AstType) -> String {
+    match &ty.func {
+        Some(func) => {
+            let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty)).collect();
+            let rs: Vec<String> = func.returns.iter().map(|r| ty_key(&r.ty)).collect();
+            format!("function({})->({})", ps.join(","), rs.join(","))
+        }
+        None => format!("{}:{}:{:?}", ty.name, ty.is_ref, ty.generic_args),
+    }
+}
+
 fn sig_key(params: &[Param], returns: &[Param]) -> String {
-    let one = |p: &Param| format!("{}:{}:{:?}", p.ty.name, p.ty.is_ref, p.ty.generic_args);
-    let ps: Vec<String> = params.iter().map(one).collect();
-    let rs: Vec<String> = returns.iter().map(one).collect();
+    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty)).collect();
+    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty)).collect();
     format!("({})->({})", ps.join(","), rs.join(","))
 }
 
@@ -143,9 +174,23 @@ impl Collector<'_> {
                 ResKind::Object { members: table }
             }
             ItemKind::Enum { variants, .. } => ResKind::Enum {
-                variants: variants.iter().map(|v| v.name.clone()).collect(),
+                variants: variants
+                    .iter()
+                    .map(|v| EnumMember {
+                        name: v.name.clone(),
+                        payload: v.payload.clone(),
+                    })
+                    .collect(),
             },
-            ItemKind::Union { .. } => ResKind::Union,
+            ItemKind::Union { variants, .. } => ResKind::Union {
+                members: variants
+                    .iter()
+                    .map(|v| UnionMember {
+                        name: v.name.clone(),
+                        payload: v.payload.clone(),
+                    })
+                    .collect(),
+            },
             ItemKind::Using { .. } => return None,
             ItemKind::Const { .. } => ResKind::Const,
             ItemKind::Field { .. } => ResKind::Field,
@@ -299,7 +344,9 @@ mod tests {
         let ResKind::Enum { variants } = &number.kind else {
             panic!("expected enum, got {:?}", number.kind);
         };
-        assert_eq!(variants, &["One".to_owned(), "Two".to_owned()]);
+        let names: Vec<_> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["One", "Two"]);
+        assert!(variants.iter().all(|v| v.payload.is_none()));
     }
 
     #[test]
@@ -317,5 +364,34 @@ mod tests {
             "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n",
         );
         assert_eq!(e020_count(&diags), 1);
+    }
+
+    #[test]
+    fn union_members_collected() {
+        let (module, diags) =
+            resolve_src("OptionalBit32: union {\n    Some: @bit32\n    None\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let union = module.items.get("OptionalBit32").expect("has union");
+        let ResKind::Union { members } = &union.kind else {
+            panic!("expected union, got {:?}", union.kind);
+        };
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "Some");
+        assert!(members[0].payload.is_some());
+        assert!(members[1].payload.is_none());
+    }
+
+    #[test]
+    fn enum_payloads_recorded() {
+        let (module, diags) = resolve_src("OptionalBit32: enum {\n    Some: @bit32\n    None\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let number = module.items.get("OptionalBit32").expect("has enum");
+        let ResKind::Enum { variants } = &number.kind else {
+            panic!("expected enum, got {:?}", number.kind);
+        };
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].name, "Some");
+        assert!(variants[0].payload.is_some());
+        assert!(variants[1].payload.is_none());
     }
 }

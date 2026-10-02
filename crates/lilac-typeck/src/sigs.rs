@@ -96,7 +96,8 @@ pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
         "@format_args_push" => Some(Intrinsic::FormatArgsPush),
         "@format_args_count" => Some(Intrinsic::FormatArgsCount),
         "@format_args_piece" => Some(Intrinsic::FormatArgsPiece),
-        "@compile_error" => Some(Intrinsic::CompileError),
+        "@compile_error" | "@compilerError" => Some(Intrinsic::CompileError),
+        // Legacy camelCase spelling of `@compile_error` (see FAILS_compiler_error).
         _ => None,
     }
 }
@@ -112,6 +113,21 @@ pub fn resolve_type(
     module: &Module,
     diags: &mut Diags,
 ) -> TypeRef {
+    if let Some(func) = &ty.func {
+        let mut params = Vec::with_capacity(func.params.len());
+        for param in &func.params {
+            params.push(resolve_type(&param.ty, types, module, diags));
+        }
+        let mut returns = Vec::with_capacity(func.returns.len());
+        for slot in &func.returns {
+            returns.push(resolve_type(&slot.ty, types, module, diags));
+        }
+        let id = types.intern_func(params, returns);
+        return TypeRef {
+            id,
+            is_ref: ty.is_ref,
+        };
+    }
     if !ty.generic_args.is_empty() {
         diags.emit(
             Diagnostic::error("E030", "generic instantiations lower in M4").label(
@@ -146,7 +162,7 @@ pub fn resolve_type(
     }
     if let Some(item) = module.items.get(&ty.name) {
         match &item.kind {
-            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union => {
+            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
                 let id = types.intern_object(item.id);
                 types.set_object_name(item.id, &ty.name);
                 return TypeRef {
@@ -471,5 +487,17 @@ mod tests {
             Some(Intrinsic::Cmp)
         ));
         assert_eq!(lookup_intrinsic("@nope"), None);
+    }
+
+    #[test]
+    fn compiler_error_alias_maps() {
+        assert_eq!(
+            lookup_intrinsic("@compilerError"),
+            Some(Intrinsic::CompileError)
+        );
+        assert_eq!(
+            lookup_intrinsic("@compile_error"),
+            Some(Intrinsic::CompileError)
+        );
     }
 }

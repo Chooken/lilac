@@ -799,7 +799,7 @@ impl Checker<'_> {
                     return Err(ErrorGuaranteed::new());
                 }
             }
-            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union => {
+            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
                 return Err(deferred(self.diags, span, "constructors (`@init`)", "M2"));
             }
             ResKind::Const | ResKind::Field => {
@@ -1304,7 +1304,7 @@ impl Checker<'_> {
                         .label(span, true, "functions are not values in M1".to_owned()),
                 )),
                 ResKind::Const => self.const_type(name, span),
-                ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union => {
+                ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
                     Err(self.diags.emit(
                         Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
                             .label(span, true, "name a variable instead".to_owned()),
@@ -1378,7 +1378,7 @@ impl Checker<'_> {
         let found = self.find_by_def(*def);
         match found {
             Some(ResKind::Enum { variants }) => {
-                if variants.iter().any(|v| v == tag) {
+                if variants.iter().any(|v| v.name == *tag) {
                     Ok(TypeRef {
                         id: want,
                         is_ref: false,
@@ -1393,7 +1393,7 @@ impl Checker<'_> {
                     ))
                 }
             }
-            Some(ResKind::Union) => Err(deferred(self.diags, span, "union tags", "M2")),
+            Some(ResKind::Union { .. }) => Err(deferred(self.diags, span, "union tags", "M2")),
             _ => Err(self.diags.emit(
                 Diagnostic::error("E010", format!("tag `.{tag}` needs an enum type")).label(
                     span,

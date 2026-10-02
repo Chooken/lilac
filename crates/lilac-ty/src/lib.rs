@@ -43,6 +43,13 @@ pub enum TypeKind {
     Unknown,
     /// User-declared `object`.
     Object(DefId),
+    /// `function (params) returns` value type.
+    Func {
+        /// Parameter types in order.
+        params: Vec<TypeRef>,
+        /// Return-slot types in order.
+        returns: Vec<TypeRef>,
+    },
     /// Poison for error recovery; never a real type.
     Error,
 }
@@ -62,6 +69,7 @@ pub struct Types {
     kinds: Vec<TypeKind>,
     objects: HashMap<DefId, TypeId>,
     object_names: HashMap<DefId, String>,
+    funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>), TypeId>,
 }
 
 impl Types {
@@ -108,6 +116,21 @@ impl Types {
         id
     }
 
+    /// Interns (or finds) a `function (params) returns` type.
+    pub fn intern_func(&mut self, params: Vec<TypeRef>, returns: Vec<TypeRef>) -> TypeId {
+        let key = (params, returns);
+        if let Some(&id) = self.funcs.get(&key) {
+            return id;
+        }
+        let id = TypeId(next_id(self.kinds.len()));
+        self.kinds.push(TypeKind::Func {
+            params: key.0.clone(),
+            returns: key.1.clone(),
+        });
+        self.funcs.insert(key, id);
+        id
+    }
+
     /// Records the source name of an object type for diagnostics.
     pub fn set_object_name(&mut self, def: DefId, name: &str) {
         self.object_names.insert(def, name.to_owned());
@@ -138,6 +161,16 @@ impl Types {
                 .get(def)
                 .cloned()
                 .unwrap_or_else(|| format!("object#{}", def.0)),
+            TypeKind::Func { params, returns } => {
+                let ps: Vec<String> = params.iter().map(|p| self.display_ref(*p)).collect();
+                let rs: Vec<String> = returns.iter().map(|r| self.display_ref(*r)).collect();
+                let rs = if rs.is_empty() {
+                    "nothing".to_owned()
+                } else {
+                    rs.join(", ")
+                };
+                format!("function ({}) -> {rs}", ps.join(", "))
+            }
             TypeKind::Error => "<error>".to_owned(),
         }
     }
@@ -199,5 +232,27 @@ mod tests {
             }),
             "ref @bit32"
         );
+    }
+
+    #[test]
+    fn func_types_intern_and_display() {
+        let mut types = Types::new();
+        let bit8 = types.builtin("@bit8").expect("has @bit8");
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let params = vec![TypeRef {
+            id: bit8,
+            is_ref: false,
+        }];
+        let returns = vec![TypeRef {
+            id: bit32,
+            is_ref: false,
+        }];
+        let one = types.intern_func(params.clone(), returns.clone());
+        let again = types.intern_func(params, returns);
+        assert_eq!(one, again);
+        assert_eq!(types.display(one), "function (@bit8) -> @bit32");
+        let nullary = types.intern_func(Vec::new(), Vec::new());
+        assert_ne!(one, nullary);
+        assert_eq!(types.display(nullary), "function () -> nothing");
     }
 }
