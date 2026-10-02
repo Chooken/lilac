@@ -6,7 +6,7 @@
 
 use lilac_resolve::DefId;
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeRef};
+use lilac_ty::TypeRef;
 
 /// Typed program: checked functions.
 #[derive(Clone, Debug, Default)]
@@ -139,8 +139,8 @@ pub enum HirStmt {
 /// One checked expression: type + span + shape.
 #[derive(Clone, Debug)]
 pub struct HirExpr {
-    /// Checked type.
-    pub ty: TypeId,
+    /// Checked type (with its `ref` flag).
+    pub ty: TypeRef,
     /// Source span.
     pub span: Span,
     /// Expression shape.
@@ -184,6 +184,13 @@ pub enum HirExprKind {
         /// Checked arguments.
         args: Vec<HirExpr>,
     },
+    /// `==` bit-equality (primitive: no hook to desugar to).
+    EqEq {
+        /// Left operand.
+        lhs: Box<HirExpr>,
+        /// Right operand.
+        rhs: Box<HirExpr>,
+    },
     /// Field read on an object value.
     Member {
         /// Receiver.
@@ -221,6 +228,11 @@ pub enum HirExprKind {
 pub enum HirCallee {
     /// User function by identity.
     Item(DefId),
+    /// Function-typed local (indirect call through the variable).
+    Local {
+        /// Local name holding the function value.
+        name: String,
+    },
     /// Hook overload by name and identity.
     Hook {
         /// Hook name (`@add`, `@conversion`, …).
@@ -284,11 +296,15 @@ pub enum HirPattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lilac_ty::TypeId;
 
     fn temp_assign(temp: TempId, value: HirExpr) -> HirStmt {
         HirStmt::Assign {
             target: HirExpr {
-                ty: TypeId(0),
+                ty: TypeRef {
+                    id: TypeId(0),
+                    is_ref: false,
+                },
                 span: Span::dummy(),
                 kind: HirExprKind::Temp(temp),
             },
@@ -305,21 +321,30 @@ mod tests {
         };
         let temp = TempId(0);
         let cond = HirExpr {
-            ty: TypeId(0),
+            ty: TypeRef {
+                id: TypeId(0),
+                is_ref: false,
+            },
             span: Span::dummy(),
             kind: HirExprKind::Number {
                 bytes: "0x1".to_owned(),
             },
         };
         let one = HirExpr {
-            ty: TypeId(0),
+            ty: TypeRef {
+                id: TypeId(0),
+                is_ref: false,
+            },
             span: Span::dummy(),
             kind: HirExprKind::Number {
                 bytes: "0x1".to_owned(),
             },
         };
         let zero = HirExpr {
-            ty: TypeId(0),
+            ty: TypeRef {
+                id: TypeId(0),
+                is_ref: false,
+            },
             span: Span::dummy(),
             kind: HirExprKind::Number {
                 bytes: "0x0".to_owned(),

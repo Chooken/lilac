@@ -4,21 +4,60 @@ use std::collections::{HashMap, HashSet};
 
 use lilac_ast::{BinOp, Expr, Item, ItemKind, Program, Stmt, Type as AstType};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_hir::{
+    HirBlock, HirCallee, HirExpr, HirExprKind, HirField, HirFunc, HirInit, HirParam, HirProgram,
+    HirStmt,
+};
 use lilac_resolve::{DefId, Module, ResItem, ResKind};
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
 use super::{lookup_intrinsic, resolve_type, Intrinsic, Sigs};
 
-/// Checks every non-generic body. Generic items belong to M4; `E052` for
-/// generic hooks already fired during signature collection.
+/// One checked call: overload selected, arguments checked.
+struct CheckedCall {
+    /// Return-slot types.
+    outs: Vec<TypeRef>,
+    /// Resolved callee.
+    callee: HirCallee,
+    /// Checked arguments in order.
+    args: Vec<HirExpr>,
+}
+
+/// A call either stays a call or vanishes into an inlined `=>` body.
+enum CallOutcome {
+    /// Ordinary call (emitted as HIR).
+    Call(CheckedCall),
+    /// Substituted `=>` body with its type.
+    Inline(HirExpr, TypeRef),
+}
+
+/// A method-call receiver: checked type plus its HIR.
+struct Receiver {
+    ty: TypeRef,
+    hir: HirExpr,
+}
+
+/// A callee known to have an `=>` body, with everything needed to check it.
+struct InlineCallee<'a> {
+    def: DefId,
+    ast: &'a Item,
+    resolved: ResItem,
+    decl: &'a lilac_ast::FuncDecl,
+    parent: Option<(String, DefId)>,
+}
+
+/// Checks every non-generic body and builds typed HIR in the same walk.
+/// Generic items belong to M4; `E052` for generic hooks already fired during
+/// signature collection. Only error-free programs produce usable HIR: the
+/// driver discards it whenever diagnostics contain errors.
 pub fn check_bodies(
     program: &Program,
     module: &Module,
     sigs: &Sigs,
     types: &mut Types,
     diags: &mut Diags,
-) {
+) -> HirProgram {
     let mut checker = Checker {
         program,
         module,
@@ -27,14 +66,18 @@ pub fn check_bodies(
         diags,
         checked: HashSet::new(),
         fields: HashMap::new(),
+        hir: Vec::new(),
+        inline_bodies: HashMap::new(),
+        in_progress: HashSet::new(),
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
         if let Some(resolved) = checker.module.items.get(&item.name) {
             let resolved = resolved.clone();
-            checker.check_item(item, &resolved);
+            checker.check_item(item, &resolved, None);
         }
     }
+    HirProgram { funcs: checker.hir }
 }
 
 struct Checker<'a> {
@@ -45,6 +88,12 @@ struct Checker<'a> {
     diags: &'a mut Diags,
     checked: HashSet<DefId>,
     fields: HashMap<(String, String), AstType>,
+    hir: Vec<HirFunc>,
+    /// Checked `=>` bodies by function: parameter names plus the value HIR.
+    /// Inline functions never reach `hir` (every call substitutes them).
+    inline_bodies: HashMap<DefId, (Vec<String>, HirExpr)>,
+    /// Functions currently being checked (rejects recursive `=>` calls).
+    in_progress: HashSet<DefId>,
 }
 
 struct FuncCtx {
@@ -55,6 +104,108 @@ struct FuncCtx {
 
 fn is_poison(ty: TypeRef) -> bool {
     ty.id == TypeId::ERROR
+}
+
+/// Well-formed HIR for error paths (never lowered: the driver discards HIR
+/// whenever diagnostics contain errors).
+fn poison_expr(span: Span) -> HirExpr {
+    HirExpr {
+        ty: TypeRef {
+            id: TypeId::ERROR,
+            is_ref: false,
+        },
+        span,
+        kind: HirExprKind::Poison,
+    }
+}
+
+/// An AST item plus its resolution and enclosing object (if any).
+type ItemLookup<'a> = Option<(&'a Item, ResItem, Option<(String, DefId)>)>;
+
+/// Finds the AST item plus its resolution for a definition, tracking the
+/// enclosing object (if any) for implicit-`instance` binding.
+fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLookup<'a> {
+    fn rec<'a>(
+        ast_items: &'a [Item],
+        scope: &HashMap<String, ResItem>,
+        def: DefId,
+        parent: Option<(String, DefId)>,
+    ) -> ItemLookup<'a> {
+        for ast in ast_items {
+            let Some(resolved) = scope.get(&ast.name) else {
+                continue;
+            };
+            if resolved.id == def {
+                return Some((ast, resolved.clone(), parent));
+            }
+            if let (
+                ItemKind::Object { members, .. },
+                ResKind::Object {
+                    members: resolved_members,
+                },
+            ) = (&ast.kind, &resolved.kind)
+            {
+                let grandparent = Some((ast.name.clone(), resolved.id));
+                if let Some(found) = rec(members, resolved_members, def, grandparent) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    rec(&program.items, &module.items, def, None)
+}
+
+/// Clones an HIR tree with `=>` parameters replaced by their call-site
+/// arguments (textual substitution is the documented `=>` semantic: an
+/// argument used twice evaluates twice).
+fn subst_ident(expr: &HirExpr, map: &HashMap<String, HirExpr>) -> HirExpr {
+    let kind = match &expr.kind {
+        HirExprKind::Ident { name, .. } => {
+            if let Some(replacement) = map.get(name) {
+                return replacement.clone();
+            }
+            expr.kind.clone()
+        }
+        HirExprKind::Call { callee, args } => HirExprKind::Call {
+            callee: callee.clone(),
+            args: args.iter().map(|arg| subst_ident(arg, map)).collect(),
+        },
+        HirExprKind::EqEq { lhs, rhs } => HirExprKind::EqEq {
+            lhs: Box::new(subst_ident(lhs, map)),
+            rhs: Box::new(subst_ident(rhs, map)),
+        },
+        HirExprKind::Member { obj, field } => HirExprKind::Member {
+            obj: Box::new(subst_ident(obj, map)),
+            field: field.clone(),
+        },
+        HirExprKind::RefOf { value } => HirExprKind::RefOf {
+            value: Box::new(subst_ident(value, map)),
+        },
+        HirExprKind::StructLit { fields, init } => HirExprKind::StructLit {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    value: subst_ident(&field.value, map),
+                    span: field.span,
+                })
+                .collect(),
+            init: init.clone(),
+        },
+        HirExprKind::Tag { .. }
+        | HirExprKind::Number { .. }
+        | HirExprKind::Str { .. }
+        | HirExprKind::Char { .. }
+        | HirExprKind::Temp(_)
+        | HirExprKind::CompileError { .. }
+        | HirExprKind::Poison => expr.kind.clone(),
+    };
+    HirExpr {
+        ty: expr.ty,
+        span: expr.span,
+        kind,
+    }
 }
 
 fn is_bit(types: &Types, id: TypeId) -> bool {
@@ -157,9 +308,9 @@ impl Checker<'_> {
         }
     }
 
-    fn check_item(&mut self, item: &Item, resolved: &ResItem) {
+    fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
         match &item.kind {
-            ItemKind::Func(decl) => self.check_func(item, resolved, decl),
+            ItemKind::Func(decl) => self.check_func(item, resolved, decl, parent),
             ItemKind::Object { members, .. } => {
                 if let ResKind::Object {
                     members: resolved_members,
@@ -167,7 +318,11 @@ impl Checker<'_> {
                 {
                     for member in members {
                         if let Some(member_resolved) = resolved_members.get(&member.name) {
-                            self.check_item(member, member_resolved);
+                            self.check_item(
+                                member,
+                                member_resolved,
+                                Some((item.name.clone(), resolved.id)),
+                            );
                         }
                     }
                 }
@@ -182,7 +337,7 @@ impl Checker<'_> {
                     slots: Vec::new(),
                     assigned: HashSet::new(),
                 };
-                let got = self.check_expr(&mut fctx, value, Some(declared.id));
+                let (got, _) = self.check_expr(&mut fctx, value, Some(declared.id));
                 let _ = self.expect_type(got, declared.id, ty.span, value.span());
             }
             ItemKind::Enum { .. }
@@ -206,25 +361,25 @@ impl Checker<'_> {
         None
     }
 
-    fn check_func(&mut self, item: &Item, resolved: &ResItem, decl: &lilac_ast::FuncDecl) {
-        if !self.checked.insert(resolved.id) {
-            return;
-        }
-        if matches!(
-            &resolved.kind,
-            ResKind::Func { generic: true, .. } | ResKind::Hook { generic: true, .. }
-        ) {
-            return;
-        }
-        let Some(sig) = self.func_sig(resolved.id) else {
-            lilac_error::bug!(item.span, "missing signature for checked function");
-        };
-        let errors_before = self.diags.diagnostics().len();
+    /// Builds a function context (implicit `instance` for member functions,
+    /// then declared parameters and return slots) plus the HIR signatures.
+    fn func_ctx(
+        &mut self,
+        decl: &lilac_ast::FuncDecl,
+        sig: &FuncSig,
+        parent: Option<(String, DefId)>,
+    ) -> (FuncCtx, Vec<HirParam>, Vec<HirParam>) {
         let mut fctx = FuncCtx {
             locals: HashMap::new(),
             slots: Vec::new(),
             assigned: HashSet::new(),
         };
+        if let Some((parent_name, parent_def)) = parent {
+            let id = self.types.intern_object(parent_def);
+            self.types.set_object_name(parent_def, parent_name.as_str());
+            fctx.locals
+                .insert("instance".to_owned(), TypeRef { id, is_ref: true });
+        }
         for (param, ty) in decl.params.iter().zip(sig.params.iter()) {
             if !param.name.is_empty() {
                 fctx.locals.insert(param.name.clone(), *ty);
@@ -236,12 +391,78 @@ impl Checker<'_> {
                 fctx.slots.push((slot.name.clone(), *ty, slot.span));
             }
         }
+        let params = Self::hir_slots(&decl.params, &sig.params);
+        let returns = Self::hir_slots(&decl.returns, &sig.returns);
+        (fctx, params, returns)
+    }
+
+    /// Pairs declared slots with their resolved types for HIR signatures.
+    fn hir_slots(slots: &[lilac_ast::Param], tys: &[TypeRef]) -> Vec<HirParam> {
+        slots
+            .iter()
+            .zip(tys.iter())
+            .map(|(slot, ty)| HirParam {
+                name: slot.name.clone(),
+                ty: *ty,
+                span: slot.span,
+            })
+            .collect()
+    }
+
+    fn check_func(
+        &mut self,
+        item: &Item,
+        resolved: &ResItem,
+        decl: &lilac_ast::FuncDecl,
+        parent: Option<(String, DefId)>,
+    ) {
+        if !self.checked.insert(resolved.id) {
+            return;
+        }
+        if matches!(
+            &resolved.kind,
+            ResKind::Func { generic: true, .. } | ResKind::Hook { generic: true, .. }
+        ) {
+            return;
+        }
+        self.in_progress.insert(resolved.id);
+        let Some(sig) = self.func_sig(resolved.id) else {
+            lilac_error::bug!(item.span, "missing signature for checked function");
+        };
+        let errors_before = self.diags.diagnostics().len();
+        let (mut fctx, params, returns) = self.func_ctx(decl, &sig, parent);
         match &decl.body {
-            None => return,
+            None => {
+                self.hir.push(HirFunc {
+                    def: resolved.id,
+                    name: item.name.clone(),
+                    params,
+                    returns,
+                    body: HirBlock {
+                        stmts: Vec::new(),
+                        span: item.span,
+                    },
+                    span: item.span,
+                });
+                self.in_progress.remove(&resolved.id);
+                return;
+            }
             Some(lilac_ast::FuncBody::Block(block)) => {
+                let mut stmts = Vec::with_capacity(block.stmts.len());
                 for stmt in &block.stmts {
-                    self.check_stmt(&mut fctx, stmt);
+                    stmts.push(self.check_stmt(&mut fctx, stmt));
                 }
+                self.hir.push(HirFunc {
+                    def: resolved.id,
+                    name: item.name.clone(),
+                    params,
+                    returns,
+                    body: HirBlock {
+                        stmts,
+                        span: block.span,
+                    },
+                    span: item.span,
+                });
             }
             Some(lilac_ast::FuncBody::Inline(expr)) => {
                 if sig.returns.len() != 1 {
@@ -252,14 +473,18 @@ impl Checker<'_> {
                         )
                         .label(expr.span(), true, "here".to_owned()),
                     );
+                    self.in_progress.remove(&resolved.id);
                     return;
                 }
-                let got = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
+                let (got, value) = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
                 let span = expr.span();
                 let _ = self.expect_type(got, sig.returns[0].id, span, span);
                 if let Some((name, _, _)) = fctx.slots.first() {
                     fctx.assigned.insert(name.clone());
                 }
+                let param_names: Vec<String> =
+                    decl.params.iter().map(|param| param.name.clone()).collect();
+                self.inline_bodies.insert(resolved.id, (param_names, value));
             }
         }
         if self.diags.diagnostics().len() == errors_before {
@@ -279,17 +504,26 @@ impl Checker<'_> {
                 }
             }
         }
+        self.in_progress.remove(&resolved.id);
     }
 
     fn place_type(
         &mut self,
         fctx: &mut FuncCtx,
         target: &Expr,
-    ) -> Result<TypeRef, ErrorGuaranteed> {
+    ) -> Result<(TypeRef, HirExpr), ErrorGuaranteed> {
         match target {
             Expr::Ident(name, span) => {
                 if let Some(ty) = fctx.locals.get(name) {
-                    Ok(*ty)
+                    let place = HirExpr {
+                        ty: *ty,
+                        span: *span,
+                        kind: HirExprKind::Ident {
+                            name: name.clone(),
+                            def: DefId::ERROR,
+                        },
+                    };
+                    Ok((*ty, place))
                 } else {
                     Err(self.diags.emit(
                         Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
@@ -301,14 +535,30 @@ impl Checker<'_> {
                 }
             }
             Expr::Member { obj, field, span } => {
-                let obj_ty = self.check_expr(fctx, obj, None);
+                let (obj_ty, obj_hir) = self.check_expr(fctx, obj, None);
                 if is_poison(obj_ty) {
-                    return Ok(TypeRef {
-                        id: TypeId::ERROR,
-                        is_ref: false,
-                    });
+                    return Ok((
+                        TypeRef {
+                            id: TypeId::ERROR,
+                            is_ref: false,
+                        },
+                        poison_expr(*span),
+                    ));
                 }
-                self.field_type(obj_ty.id, field, *span)
+                match self.field_type(obj_ty.id, field, *span) {
+                    Ok(ty) => Ok((
+                        ty,
+                        HirExpr {
+                            ty,
+                            span: *span,
+                            kind: HirExprKind::Member {
+                                obj: Box::new(obj_hir),
+                                field: field.clone(),
+                            },
+                        },
+                    )),
+                    Err(guaranteed) => Err(guaranteed),
+                }
             }
             _ => Err(self.diags.emit(
                 Diagnostic::error("E010", "cannot assign to this expression".to_owned()).label(
@@ -356,13 +606,13 @@ impl Checker<'_> {
         None
     }
 
-    fn check_stmt(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) {
+    fn check_stmt(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) -> HirStmt {
         match stmt {
             Stmt::Let {
                 name,
                 ty,
                 value,
-                span: _,
+                span,
             } => {
                 let declared = resolve_type(ty, self.types, self.module, self.diags);
                 let expected = if is_poison(declared) {
@@ -370,129 +620,392 @@ impl Checker<'_> {
                 } else {
                     Some(declared.id)
                 };
-                let got = self.check_expr(fctx, value, expected);
+                let (got, hir) = self.check_expr(fctx, value, expected);
                 if !is_poison(declared) && !is_poison(got) {
                     let _ = self.expect_type(got, declared.id, ty.span, value.span());
                 }
                 fctx.locals.insert(name.clone(), declared);
-            }
-            Stmt::Assign { target, value, .. } => {
-                let Ok(target_ty) = self.place_type(fctx, target) else {
-                    return;
-                };
-                if is_poison(target_ty) {
-                    let _ = self.check_expr(fctx, value, None);
-                    return;
-                }
-                let base = target_ty.id;
-                let got = self.check_expr(fctx, value, Some(base));
-                if !is_poison(got) {
-                    let _ = self.expect_type(got, base, target.span(), value.span());
-                }
-                if let Expr::Ident(name, _) = target {
-                    if fctx.slots.iter().any(|(slot, _, _)| slot == name) {
-                        fctx.assigned.insert(name.clone());
-                    }
+                HirStmt::Let {
+                    name: name.clone(),
+                    ty: declared,
+                    value: hir,
+                    span: *span,
                 }
             }
-            Stmt::ExprStmt(expr) => {
-                if let Expr::Call {
-                    callee,
-                    generic_args,
-                    args,
-                    span,
-                } = expr
-                {
-                    let Ok(outs) = self.check_call(fctx, callee, generic_args, args, *span, None)
-                    else {
-                        return;
-                    };
-                    if !outs.is_empty() {
+            Stmt::MultiLet {
+                bindings,
+                value,
+                span,
+            } => self.check_multilet(fctx, bindings, value, *span),
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => self.check_assign(fctx, target, value, *span),
+            Stmt::ExprStmt(expr) => self.check_expr_stmt(fctx, expr),
+            Stmt::Return { span } => HirStmt::Return { span: *span },
+            Stmt::Break { span } => HirStmt::Break { span: *span },
+            Stmt::If { span, .. } => {
+                let _ = deferred(self.diags, *span, "`if` statements", "M2");
+                HirStmt::If {
+                    cond: poison_expr(*span),
+                    then: HirBlock {
+                        stmts: Vec::new(),
+                        span: *span,
+                    },
+                    els: HirBlock {
+                        stmts: Vec::new(),
+                        span: *span,
+                    },
+                    out: None,
+                    span: *span,
+                }
+            }
+            Stmt::Loop { span, .. } => {
+                let _ = deferred(self.diags, *span, "`loop` statements", "M2");
+                HirStmt::Loop {
+                    body: HirBlock {
+                        stmts: Vec::new(),
+                        span: *span,
+                    },
+                    span: *span,
+                }
+            }
+            Stmt::Match { span, .. } => {
+                let _ = deferred(self.diags, *span, "`match` statements", "M2");
+                HirStmt::Match {
+                    scrutinee: poison_expr(*span),
+                    arms: Vec::new(),
+                    els: HirBlock {
+                        stmts: Vec::new(),
+                        span: *span,
+                    },
+                    out: None,
+                    span: *span,
+                }
+            }
+        }
+    }
+
+    /// Checks `target = value` (marks return slots assigned).
+    fn check_assign(
+        &mut self,
+        fctx: &mut FuncCtx,
+        target: &Expr,
+        value: &Expr,
+        span: Span,
+    ) -> HirStmt {
+        let Ok((target_ty, target_hir)) = self.place_type(fctx, target) else {
+            let _ = self.check_expr(fctx, value, None);
+            return HirStmt::Assign {
+                target: poison_expr(target.span()),
+                value: poison_expr(value.span()),
+                span,
+            };
+        };
+        if is_poison(target_ty) {
+            let (_, value_hir) = self.check_expr(fctx, value, None);
+            return HirStmt::Assign {
+                target: target_hir,
+                value: value_hir,
+                span,
+            };
+        }
+        let base = target_ty.id;
+        let (got, value_hir) = self.check_expr(fctx, value, Some(base));
+        if !is_poison(got) {
+            let _ = self.expect_type(got, base, target.span(), value.span());
+        }
+        if let Expr::Ident(name, _) = target {
+            if fctx.slots.iter().any(|(slot, _, _)| slot == name) {
+                fctx.assigned.insert(name.clone());
+            }
+        }
+        HirStmt::Assign {
+            target: target_hir,
+            value: value_hir,
+            span,
+        }
+    }
+
+    /// Checks an effect statement (a call must return nothing).
+    fn check_expr_stmt(&mut self, fctx: &mut FuncCtx, expr: &Expr) -> HirStmt {
+        if let Expr::Call {
+            callee,
+            generic_args,
+            args,
+            span: call_span,
+        } = expr
+        {
+            match self.check_call(fctx, callee, generic_args, args, *call_span, None) {
+                Ok(CallOutcome::Call(call)) => {
+                    if !call.outs.is_empty() {
                         self.diags.emit(
                             Diagnostic::error(
                                 "E022",
                                 format!(
                                     "call returns {} value{}, but the statement drops them",
-                                    outs.len(),
-                                    if outs.len() == 1 { "" } else { "s" },
+                                    call.outs.len(),
+                                    if call.outs.len() == 1 { "" } else { "s" },
                                 ),
                             )
                             .label(
-                                *span,
+                                *call_span,
                                 true,
                                 "assign or drop explicitly".to_owned(),
                             ),
                         );
                     }
-                    return;
+                    return HirStmt::ExprStmt(HirExpr {
+                        ty: TypeRef {
+                            id: TypeId::ERROR,
+                            is_ref: false,
+                        },
+                        span: *call_span,
+                        kind: HirExprKind::Call {
+                            callee: call.callee,
+                            args: call.args,
+                        },
+                    });
                 }
-                let _ = self.check_expr(fctx, expr, None);
-            }
-            Stmt::Return { .. } | Stmt::Break { .. } => {}
-            Stmt::MultiLet { span, .. } => {
-                let _ = deferred(self.diags, *span, "multi-`let`", "M2");
-            }
-            Stmt::If { span, .. } => {
-                let _ = deferred(self.diags, *span, "`if` statements", "M2");
-            }
-            Stmt::Loop { span, .. } => {
-                let _ = deferred(self.diags, *span, "`loop` statements", "M2");
-            }
-            Stmt::Match { span, .. } => {
-                let _ = deferred(self.diags, *span, "`match` statements", "M2");
-            }
-        }
-    }
-
-    fn check_expr(&mut self, fctx: &mut FuncCtx, expr: &Expr, expected: Option<TypeId>) -> TypeRef {
-        match expr {
-            Expr::Ident(name, span) => self.ident_type(fctx, name, *span).unwrap_or(TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            }),
-            Expr::Tag(name, span) => self.tag_type(name, *span, expected).unwrap_or(TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            }),
-            Expr::Number(_, _) | Expr::Str(_, _) | Expr::Char(_, _) => {
-                self.check_literal(expr, expected)
-            }
-            Expr::RefOf { value, span } => match self.place_type(fctx, value) {
-                Ok(place) if place.is_ref => {
+                Ok(CallOutcome::Inline(..)) => {
                     self.diags.emit(
-                        Diagnostic::error("E010", "cannot take `ref` of a reference").label(
-                            *span,
+                        Diagnostic::error(
+                            "E022",
+                            "call returns 1 value, but the statement drops it",
+                        )
+                        .label(
+                            *call_span,
                             true,
-                            "double references are invalid".to_owned(),
+                            "assign or drop explicitly".to_owned(),
                         ),
                     );
+                }
+                Err(_) => {}
+            }
+            return HirStmt::ExprStmt(poison_expr(expr.span()));
+        }
+        let (_, hir) = self.check_expr(fctx, expr, None);
+        HirStmt::ExprStmt(hir)
+    }
+
+    /// Checks `ref place` (double references stay `E010`).
+    fn check_ref_of(&mut self, fctx: &mut FuncCtx, value: &Expr, span: Span) -> (TypeRef, HirExpr) {
+        match self.place_type(fctx, value) {
+            Ok((place, _)) if place.is_ref => {
+                self.diags.emit(
+                    Diagnostic::error("E010", "cannot take `ref` of a reference").label(
+                        span,
+                        true,
+                        "double references are invalid".to_owned(),
+                    ),
+                );
+                (
                     TypeRef {
                         id: TypeId::ERROR,
                         is_ref: false,
-                    }
-                }
-                Ok(place) => TypeRef {
+                    },
+                    poison_expr(span),
+                )
+            }
+            Ok((place, place_hir)) => {
+                let ty = TypeRef {
                     id: place.id,
                     is_ref: true,
-                },
-                Err(_) => TypeRef {
+                };
+                (
+                    ty,
+                    HirExpr {
+                        ty,
+                        span,
+                        kind: HirExprKind::RefOf {
+                            value: Box::new(place_hir),
+                        },
+                    },
+                )
+            }
+            Err(_) => (
+                TypeRef {
                     id: TypeId::ERROR,
                     is_ref: false,
                 },
-            },
-            Expr::Member { obj, field, span } => {
-                let obj_ty = self.check_expr(fctx, obj, None);
-                if is_poison(obj_ty) {
-                    return TypeRef {
+                poison_expr(span),
+            ),
+        }
+    }
+
+    /// Checks `obj.field` reads (method calls go through `check_call`).
+    fn check_member_read(
+        &mut self,
+        fctx: &mut FuncCtx,
+        obj: &Expr,
+        field: &str,
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let (obj_ty, obj_hir) = self.check_expr(fctx, obj, None);
+        if is_poison(obj_ty) {
+            return (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                poison_expr(span),
+            );
+        }
+        match self.field_type(obj_ty.id, field, span) {
+            Ok(ty) => (
+                ty,
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Member {
+                        obj: Box::new(obj_hir),
+                        field: field.to_owned(),
+                    },
+                },
+            ),
+            Err(_) => (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                poison_expr(span),
+            ),
+        }
+    }
+
+    /// Checks `a: T, b: U = f()`: the value must be a call returning exactly
+    /// one value per binding (an inlined `=>` body counts as one value).
+    fn check_multilet(
+        &mut self,
+        fctx: &mut FuncCtx,
+        bindings: &[lilac_ast::LetBinding],
+        value: &Expr,
+        span: Span,
+    ) -> HirStmt {
+        let poison_stmt = || HirStmt::MultiLet {
+            bindings: Vec::new(),
+            value: poison_expr(span),
+            span,
+        };
+        let mut hir_bindings = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let ty = resolve_type(&binding.ty, self.types, self.module, self.diags);
+            hir_bindings.push(HirParam {
+                name: binding.name.clone(),
+                ty,
+                span: binding.span,
+            });
+        }
+        let Expr::Call {
+            callee,
+            generic_args,
+            args,
+            span: call_span,
+        } = value
+        else {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!(
+                        "multi-`let` needs a function call with {} returns",
+                        bindings.len(),
+                    ),
+                )
+                .label(span, true, "not a call".to_owned()),
+            );
+            return poison_stmt();
+        };
+        let (outs, value_hir) =
+            match self.check_call(fctx, callee, generic_args, args, *call_span, None) {
+                Ok(CallOutcome::Call(call)) => {
+                    let outs = call.outs.clone();
+                    let hir = HirExpr {
+                        ty: outs.first().copied().unwrap_or(TypeRef {
+                            id: TypeId::ERROR,
+                            is_ref: false,
+                        }),
+                        span: *call_span,
+                        kind: HirExprKind::Call {
+                            callee: call.callee,
+                            args: call.args,
+                        },
+                    };
+                    (outs, hir)
+                }
+                Ok(CallOutcome::Inline(hir, ty)) => (vec![ty], hir),
+                Err(_) => return poison_stmt(),
+            };
+        if outs.len() != bindings.len() {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!(
+                        "wrong number of values: expected {}, call returns {}",
+                        bindings.len(),
+                        outs.len(),
+                    ),
+                )
+                .label(*call_span, true, "arity mismatch here".to_owned()),
+            );
+            return poison_stmt();
+        }
+        for ((binding, expected), got) in bindings.iter().zip(hir_bindings.iter()).zip(outs.iter())
+        {
+            if !is_poison(expected.ty) && !is_poison(*got) {
+                let _ = self.expect_type(*got, expected.ty.id, binding.ty.span, value.span());
+            }
+            fctx.locals.insert(binding.name.clone(), expected.ty);
+        }
+        HirStmt::MultiLet {
+            bindings: hir_bindings,
+            value: value_hir,
+            span,
+        }
+    }
+
+    fn check_expr(
+        &mut self,
+        fctx: &mut FuncCtx,
+        expr: &Expr,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        match expr {
+            Expr::Ident(name, span) => {
+                let (ty, def) = self.ident_type(fctx, name, *span).unwrap_or((
+                    TypeRef {
                         id: TypeId::ERROR,
                         is_ref: false,
-                    };
-                }
-                self.field_type(obj_ty.id, field, *span).unwrap_or(TypeRef {
+                    },
+                    DefId::ERROR,
+                ));
+                let hir = HirExpr {
+                    ty,
+                    span: *span,
+                    kind: HirExprKind::Ident {
+                        name: name.clone(),
+                        def,
+                    },
+                };
+                (ty, hir)
+            }
+            Expr::Tag(name, span) => {
+                let ty = self.tag_type(name, *span, expected).unwrap_or(TypeRef {
                     id: TypeId::ERROR,
                     is_ref: false,
-                })
+                });
+                let hir = HirExpr {
+                    ty,
+                    span: *span,
+                    kind: HirExprKind::Tag { name: name.clone() },
+                };
+                (ty, hir)
             }
+            Expr::Number(_, _) | Expr::Str(_, _) | Expr::Char(_, _) => {
+                self.check_literal(expr, expected)
+            }
+            Expr::RefOf { value, span } => self.check_ref_of(fctx, value, *span),
+            Expr::Member { obj, field, span } => self.check_member_read(fctx, obj, field, *span),
             Expr::Call {
                 callee,
                 generic_args,
@@ -502,46 +1015,256 @@ impl Checker<'_> {
             Expr::BinOp { lhs, op, rhs, span } => self.check_binop_expr(fctx, lhs, *op, rhs, *span),
             Expr::IfValue { span, .. } => {
                 deferred(self.diags, *span, "`if` values", "M2");
-                TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                }
+                (
+                    TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    poison_expr(*span),
+                )
             }
             Expr::MatchValue { span, .. } => {
                 deferred(self.diags, *span, "`match` values", "M2");
-                TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                }
+                (
+                    TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    poison_expr(*span),
+                )
             }
-            Expr::StructLit { span, .. } => {
-                deferred(self.diags, *span, "struct literals", "M2");
-                TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                }
-            }
+            Expr::StructLit {
+                ty_name,
+                fields,
+                span,
+            } => self.check_struct_lit(fctx, ty_name, fields, *span),
             Expr::FString { span, .. } => {
                 deferred(self.diags, *span, "f-strings", "M3");
-                TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                }
+                (
+                    TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    poison_expr(*span),
+                )
             }
         }
     }
 
-    fn check_literal(&mut self, expr: &Expr, expected: Option<TypeId>) -> TypeRef {
-        let poison = TypeRef {
-            id: TypeId::ERROR,
+    /// Checks `Type { field = value, ... }`: every field against its declared
+    /// type, no missing or unknown fields, plus the `@init` hook when the
+    /// object declares one.
+    fn check_struct_lit(
+        &mut self,
+        fctx: &mut FuncCtx,
+        ty_name: &str,
+        fields: &[lilac_ast::StructField],
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        let Some(item) = self.module.items.get(ty_name).cloned() else {
+            self.diags.emit(
+                Diagnostic::error("E023", format!("unknown type `{ty_name}`")).label(
+                    span,
+                    true,
+                    "no such type in scope".to_owned(),
+                ),
+            );
+            return poison;
+        };
+        let ResKind::Object { members } = &item.kind else {
+            self.diags.emit(
+                Diagnostic::error("E010", format!("`{ty_name}` is not an object")).label(
+                    span,
+                    true,
+                    "only objects construct with `{ ... }`".to_owned(),
+                ),
+            );
+            return poison;
+        };
+        let obj_id = {
+            let id = self.types.intern_object(item.id);
+            self.types.set_object_name(item.id, ty_name);
+            id
+        };
+        let obj_ty = TypeRef {
+            id: obj_id,
             is_ref: false,
         };
-        match expr {
-            Expr::Number(_, span) => match expected {
-                Some(t) if is_bit(self.types, t) => TypeRef {
-                    id: t,
-                    is_ref: false,
+        let (hir_fields, seen, mut failed) =
+            self.check_struct_fields(fctx, obj_id, ty_name, members, fields);
+        let mut missing: Vec<&str> = members
+            .iter()
+            .filter(|(_, member)| matches!(member.kind, ResKind::Field))
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !seen.contains(*name))
+            .collect();
+        missing.sort_unstable();
+        if let Some(first) = missing.first() {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!("struct literal missing field `{first}` of `{ty_name}`"),
+                )
+                .label(span, true, "add the missing field".to_owned()),
+            );
+            failed = true;
+        }
+        let Ok(init) = self.check_init_hook(obj_id, members) else {
+            return poison;
+        };
+        if failed {
+            return poison;
+        }
+        (
+            obj_ty,
+            HirExpr {
+                ty: obj_ty,
+                span,
+                kind: HirExprKind::StructLit {
+                    fields: hir_fields,
+                    init,
                 },
+            },
+        )
+    }
+
+    /// Checks each struct-literal field against its declared type; returns
+    /// the HIR fields, the seen names, and whether anything failed.
+    fn check_struct_fields(
+        &mut self,
+        fctx: &mut FuncCtx,
+        obj_id: TypeId,
+        ty_name: &str,
+        members: &HashMap<String, ResItem>,
+        fields: &[lilac_ast::StructField],
+    ) -> (Vec<HirField>, HashSet<String>, bool) {
+        let mut seen = HashSet::new();
+        let mut hir_fields = Vec::with_capacity(fields.len());
+        let mut failed = false;
+        for field in fields {
+            if !seen.insert(field.name.clone()) {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E020",
+                        format!("duplicate field `{}` in struct literal", field.name),
+                    )
+                    .label(field.span, true, "redefined here".to_owned()),
+                );
+                failed = true;
+                continue;
+            }
+            let Ok(expected) = self.field_type(obj_id, &field.name, field.span) else {
+                failed = true;
+                continue;
+            };
+            if !matches!(
+                members.get(&field.name).map(|m| &m.kind),
+                Some(ResKind::Field)
+            ) {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E022",
+                        format!("`{}` is not a field of `{ty_name}`", field.name),
+                    )
+                    .label(
+                        field.span,
+                        true,
+                        "only fields initialize here".to_owned(),
+                    ),
+                );
+                failed = true;
+                continue;
+            }
+            let (got, value_hir) = self.check_expr(fctx, &field.value, Some(expected.id));
+            if !is_poison(got)
+                && self
+                    .expect_type(got, expected.id, field.span, field.value.span())
+                    .is_err()
+            {
+                failed = true;
+            }
+            hir_fields.push(HirField {
+                name: field.name.clone(),
+                value: value_hir,
+                span: field.span,
+            });
+        }
+        (hir_fields, seen, failed)
+    }
+
+    /// Validates the `@init` hook shape for a struct literal's object.
+    fn check_init_hook(
+        &mut self,
+        obj_id: TypeId,
+        members: &HashMap<String, ResItem>,
+    ) -> Result<Option<HirInit>, ErrorGuaranteed> {
+        let Some(hook) = members.get("@init") else {
+            return Ok(None);
+        };
+        let ResKind::Hook { .. } = &hook.kind else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", "`@init` must be a hook".to_owned()).label(
+                    hook.span,
+                    true,
+                    "declared here".to_owned(),
+                ),
+            ));
+        };
+        let Some(sig) = self.func_sig(hook.id) else {
+            lilac_error::bug!(hook.span, "missing signature for `@init` hook");
+        };
+        let shaped = sig.params.len() == 1
+            && sig.params[0].is_ref
+            && sig.params[0].id == obj_id
+            && sig.returns.is_empty();
+        if !shaped {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    "`@init` needs exactly one `ref Self` parameter and no returns",
+                )
+                .label(hook.span, true, "bad `@init` shape".to_owned()),
+            ));
+        }
+        Ok(Some(HirInit {
+            name: "@init".to_owned(),
+            def: hook.id,
+        }))
+    }
+
+    fn check_literal(&mut self, expr: &Expr, expected: Option<TypeId>) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(expr.span()),
+        );
+        match expr {
+            Expr::Number(bytes, span) => match expected {
+                Some(t) if is_bit(self.types, t) => {
+                    let ty = TypeRef {
+                        id: t,
+                        is_ref: false,
+                    };
+                    (
+                        ty,
+                        HirExpr {
+                            ty,
+                            span: *span,
+                            kind: HirExprKind::Number {
+                                bytes: bytes.clone(),
+                            },
+                        },
+                    )
+                }
                 _ => {
                     self.diags.emit(
                         Diagnostic::error("E024", "number literal needs an expected bit type")
@@ -550,14 +1273,36 @@ impl Checker<'_> {
                     poison
                 }
             },
-            Expr::Str(_, _) => TypeRef {
-                id: self.builtin_ty("@byte_buffer"),
-                is_ref: false,
-            },
-            Expr::Char(_, _) => TypeRef {
-                id: self.builtin_ty("@bit32"),
-                is_ref: false,
-            },
+            Expr::Str(text, span) => {
+                let ty = TypeRef {
+                    id: self.builtin_ty("@byte_buffer"),
+                    is_ref: false,
+                };
+                (
+                    ty,
+                    HirExpr {
+                        ty,
+                        span: *span,
+                        kind: HirExprKind::Str {
+                            value: text.clone(),
+                        },
+                    },
+                )
+            }
+            Expr::Char(scalar, span) => {
+                let ty = TypeRef {
+                    id: self.builtin_ty("@bit32"),
+                    is_ref: false,
+                };
+                (
+                    ty,
+                    HirExpr {
+                        ty,
+                        span: *span,
+                        kind: HirExprKind::Char { value: *scalar },
+                    },
+                )
+            }
             _ => {
                 lilac_error::bug!(expr.span(), "check_literal on non-literal");
             }
@@ -572,23 +1317,44 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         expected: Option<TypeId>,
-    ) -> TypeRef {
-        let poison = TypeRef {
-            id: TypeId::ERROR,
-            is_ref: false,
-        };
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
         match self.check_call(fctx, callee, generic_args, args, span, expected) {
-            Ok(outs) if outs.len() == 1 => outs[0],
-            Ok(_) => {
-                self.diags.emit(
-                    Diagnostic::error(
-                        "E022",
-                        "call in value position must return exactly one value",
-                    )
-                    .label(span, true, "one value expected here".to_owned()),
-                );
-                poison
+            Ok(CallOutcome::Call(call)) => {
+                if call.outs.len() != 1 {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E022",
+                            "call in value position must return exactly one value",
+                        )
+                        .label(
+                            span,
+                            true,
+                            "one value expected here".to_owned(),
+                        ),
+                    );
+                    return poison;
+                }
+                let ty = call.outs[0];
+                (
+                    ty,
+                    HirExpr {
+                        ty,
+                        span,
+                        kind: HirExprKind::Call {
+                            callee: call.callee,
+                            args: call.args,
+                        },
+                    },
+                )
             }
+            Ok(CallOutcome::Inline(hir, ty)) => (ty, hir),
             Err(_) => poison,
         }
     }
@@ -600,11 +1366,14 @@ impl Checker<'_> {
         op: BinOp,
         rhs: &Expr,
         span: Span,
-    ) -> TypeRef {
-        let poison = TypeRef {
-            id: TypeId::ERROR,
-            is_ref: false,
-        };
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
         if matches!(op, BinOp::And | BinOp::Or) {
             deferred(self.diags, span, "`and`/`or`", "M2");
             return poison;
@@ -613,16 +1382,30 @@ impl Checker<'_> {
             let Some(hook) = super::ops::binop_hook_name(op) else {
                 lilac_error::bug!(span, "equality handled above");
             };
-            let (left, right) = self.check_binop_sides(fctx, lhs, rhs);
+            let ((left, left_hir), (right, right_hir)) = self.check_binop_sides(fctx, lhs, rhs);
             if is_poison(left) || is_poison(right) {
                 return poison;
             }
             match super::ops::resolve_binop(self.sigs, hook, left.id, right.id) {
-                Ok(sig) => {
-                    return TypeRef {
+                Ok((def, sig)) => {
+                    let ty = TypeRef {
                         id: sig.returns[0].id,
                         is_ref: false,
                     };
+                    return (
+                        ty,
+                        HirExpr {
+                            ty,
+                            span,
+                            kind: HirExprKind::Call {
+                                callee: HirCallee::Hook {
+                                    name: hook.to_owned(),
+                                    def,
+                                },
+                                args: vec![left_hir, right_hir],
+                            },
+                        },
+                    );
                 }
                 Err(miss) => {
                     self.diags.emit(
@@ -647,15 +1430,45 @@ impl Checker<'_> {
                 }
             }
         }
-        let (left, right) = self.check_binop_sides(fctx, lhs, rhs);
+        let ((left, left_hir), (right, right_hir)) = self.check_binop_sides(fctx, lhs, rhs);
+        self.check_equality(left, left_hir, right, right_hir, span)
+    }
+
+    /// Checks `==` (identical base types, no conversions) and builds its HIR.
+    fn check_equality(
+        &mut self,
+        left: TypeRef,
+        left_hir: HirExpr,
+        right: TypeRef,
+        right_hir: HirExpr,
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
         if is_poison(left) || is_poison(right) {
             return poison;
         }
         if left.id == right.id {
-            return TypeRef {
+            let ty = TypeRef {
                 id: self.builtin_ty("@bit8"),
                 is_ref: false,
             };
+            return (
+                ty,
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::EqEq {
+                        lhs: Box::new(left_hir),
+                        rhs: Box::new(right_hir),
+                    },
+                },
+            );
         }
         self.diags.emit(
             Diagnostic::error(
@@ -667,12 +1480,12 @@ impl Checker<'_> {
                 ),
             )
             .label(
-                lhs.span(),
+                left_hir.span,
                 false,
                 format!("left side `{}` here", self.types.display(left.id)),
             )
             .label(
-                rhs.span(),
+                right_hir.span,
                 true,
                 format!("right side `{}` here", self.types.display(right.id)),
             ),
@@ -687,16 +1500,19 @@ impl Checker<'_> {
         fctx: &mut FuncCtx,
         lhs: &Expr,
         rhs: &Expr,
-    ) -> (TypeRef, TypeRef) {
-        let poison = TypeRef {
-            id: TypeId::ERROR,
-            is_ref: false,
-        };
+    ) -> ((TypeRef, HirExpr), (TypeRef, HirExpr)) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(lhs.span()),
+        );
         let left_lit = matches!(lhs, Expr::Number(..));
         let right_lit = matches!(rhs, Expr::Number(..));
         if left_lit && right_lit {
             let _ = self.check_expr(fctx, lhs, None);
-            return (poison, poison);
+            return (poison.clone(), poison);
         }
         let left = if left_lit {
             None
@@ -711,14 +1527,14 @@ impl Checker<'_> {
         let anchor = left
             .iter()
             .chain(right.iter())
-            .map(|ty| ty.id)
+            .map(|(ty, _)| ty.id)
             .find(|id| is_bit(self.types, *id));
         let left = match left {
-            Some(ty) => ty,
+            Some(found) => found,
             None => self.check_expr(fctx, lhs, anchor),
         };
         let right = match right {
-            Some(ty) => ty,
+            Some(found) => found,
             None => self.check_expr(fctx, rhs, anchor),
         };
         (left, right)
@@ -732,13 +1548,24 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         expected: Option<TypeId>,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
         if !generic_args.is_empty() {
             return Err(deferred(self.diags, span, "generic calls", "M4"));
         }
         match callee {
             Expr::Ident(name, name_span) => {
-                if fctx.locals.contains_key(name) {
+                if let Some(local_ty) = fctx.locals.get(name).copied() {
+                    if let lilac_ty::TypeKind::Func { params, returns } =
+                        self.types.kind(local_ty.id).clone()
+                    {
+                        let sig = FuncSig { params, returns };
+                        let hir_args = self.check_args(fctx, &sig, args, span)?;
+                        return Ok(CallOutcome::Call(CheckedCall {
+                            outs: sig.returns.clone(),
+                            callee: HirCallee::Local { name: name.clone() },
+                            args: hir_args,
+                        }));
+                    }
                     return Err(self.diags.emit(
                         Diagnostic::error("E022", format!("`{name}` is not callable")).label(
                             *name_span,
@@ -751,7 +1578,7 @@ impl Checker<'_> {
                     return self.check_named_call(fctx, name, &item, args, span);
                 }
                 if let Some(intrinsic) = lookup_intrinsic(name) {
-                    return self.check_intrinsic(fctx, intrinsic, args, span, expected);
+                    return self.check_intrinsic(fctx, name, intrinsic, args, span, expected);
                 }
                 Err(self.diags.emit(
                     Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
@@ -761,7 +1588,33 @@ impl Checker<'_> {
                     ),
                 ))
             }
-            Expr::Member { span, .. } => Err(deferred(self.diags, *span, "member calls", "M2")),
+            Expr::Member {
+                obj,
+                field,
+                span: member_span,
+            } => {
+                if let Expr::Ident(name, _) = obj.as_ref() {
+                    if let Some(type_item) = self.module.items.get(name).cloned() {
+                        let is_type = matches!(
+                            type_item.kind,
+                            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. }
+                        );
+                        if is_type {
+                            return self
+                                .check_static_call(fctx, name, &type_item, field, args, span);
+                        }
+                    }
+                }
+                let (recv_ty, recv_hir) = self.check_expr(fctx, obj, None);
+                if is_poison(recv_ty) {
+                    return Err(ErrorGuaranteed::new());
+                }
+                let recv = Receiver {
+                    ty: recv_ty,
+                    hir: recv_hir,
+                };
+                self.check_member_call(fctx, field, recv, args, span, *member_span)
+            }
             _ => {
                 let _ = self.check_expr(fctx, callee, None);
                 Err(self.diags.emit(
@@ -782,17 +1635,37 @@ impl Checker<'_> {
         item: &ResItem,
         args: &[Expr],
         span: Span,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
         match &item.kind {
             ResKind::Func { generic, .. } => {
                 if *generic {
                     return Err(deferred(self.diags, span, "generic calls", "M4"));
                 }
+                if let Some((ast_item, resolved, parent)) =
+                    find_item(self.program, self.module, item.id)
+                {
+                    if let ItemKind::Func(decl) = &ast_item.kind {
+                        if matches!(decl.body, Some(lilac_ast::FuncBody::Inline(_))) {
+                            let callee = InlineCallee {
+                                def: item.id,
+                                ast: ast_item,
+                                resolved,
+                                decl,
+                                parent,
+                            };
+                            return self.check_inline_call(fctx, callee, args, span);
+                        }
+                    }
+                }
                 let Some(sig) = self.func_sig(item.id) else {
                     lilac_error::bug!(span, "missing signature for called function");
                 };
-                self.check_args(fctx, &sig, args, span)?;
-                return Ok(sig.returns.clone());
+                let hir_args = self.check_args(fctx, &sig, args, span)?;
+                return Ok(CallOutcome::Call(CheckedCall {
+                    outs: sig.returns.clone(),
+                    callee: HirCallee::Item(item.id),
+                    args: hir_args,
+                }));
             }
             ResKind::Hook { generic, .. } => {
                 if *generic {
@@ -813,12 +1686,26 @@ impl Checker<'_> {
             }
         }
         let overloads = self.sigs.hooks.get(name).cloned().unwrap_or_default();
-        let arity_ok: Vec<FuncSig> = overloads
+        let call = self.check_hook_call(fctx, name, &overloads, args, span)?;
+        Ok(CallOutcome::Call(call))
+    }
+
+    /// Selects a hook overload (exact first, arity-filtered) and checks the
+    /// arguments against it.
+    fn check_hook_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        name: &str,
+        overloads: &[(DefId, FuncSig)],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CheckedCall, ErrorGuaranteed> {
+        let arity_ok: Vec<(DefId, FuncSig)> = overloads
             .iter()
             .filter(|(_, sig)| sig.params.len() == args.len())
-            .map(|(_, sig)| sig.clone())
+            .cloned()
             .collect();
-        let Some(first) = arity_ok.first().cloned() else {
+        let Some((first_def, first)) = arity_ok.first().cloned() else {
             return Err(self.diags.emit(
                 Diagnostic::error(
                     "E022",
@@ -828,8 +1715,15 @@ impl Checker<'_> {
             ));
         };
         if arity_ok.len() == 1 {
-            self.check_args(fctx, &first, args, span)?;
-            return Ok(first.returns.clone());
+            let hir_args = self.check_args(fctx, &first, args, span)?;
+            return Ok(CheckedCall {
+                outs: first.returns.clone(),
+                callee: HirCallee::Hook {
+                    name: name.to_owned(),
+                    def: first_def,
+                },
+                args: hir_args,
+            });
         }
         let mut probed: Vec<Option<TypeRef>> = Vec::with_capacity(args.len());
         for arg in args {
@@ -837,12 +1731,12 @@ impl Checker<'_> {
                 probed.push(None);
                 continue;
             }
-            let got = self.check_expr(fctx, arg, None);
+            let (got, _) = self.check_expr(fctx, arg, None);
             probed.push(if is_poison(got) { None } else { Some(got) });
         }
         let winner = arity_ok
             .iter()
-            .find(|sig| {
+            .find(|(_, sig)| {
                 sig.params
                     .iter()
                     .zip(probed.iter())
@@ -853,9 +1747,319 @@ impl Checker<'_> {
                     })
             })
             .cloned()
-            .unwrap_or(first);
-        self.check_args(fctx, &winner, args, span)?;
-        Ok(winner.returns.clone())
+            .unwrap_or((first_def, first));
+        let hir_args = self.check_args(fctx, &winner.1, args, span)?;
+        Ok(CheckedCall {
+            outs: winner.1.returns.clone(),
+            callee: HirCallee::Hook {
+                name: name.to_owned(),
+                def: winner.0,
+            },
+            args: hir_args,
+        })
+    }
+
+    /// Expands a call to an `=>` function by substituting the checked
+    /// arguments for its parameters (textual substitution: an argument used
+    /// twice evaluates twice). Recursive `=>` calls cannot inline.
+    fn check_inline_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        callee: InlineCallee<'_>,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let def = callee.def;
+        if self.in_progress.contains(&def) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", "cannot inline recursive `=>` call").label(
+                    span,
+                    true,
+                    "recursive inline calls never terminate".to_owned(),
+                ),
+            ));
+        }
+        if !self.checked.contains(&def) {
+            self.in_progress.insert(def);
+            self.check_func(callee.ast, &callee.resolved, callee.decl, callee.parent);
+            self.in_progress.remove(&def);
+        }
+        let Some((param_names, body_hir)) = self.inline_bodies.get(&def).cloned() else {
+            return Err(ErrorGuaranteed::new());
+        };
+        let Some(sig) = self.func_sig(def) else {
+            lilac_error::bug!(span, "missing signature for inlined function");
+        };
+        if sig.returns.len() != 1 {
+            return Err(ErrorGuaranteed::new());
+        }
+        let hir_args = self.check_args(fctx, &sig, args, span)?;
+        let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
+        let expanded = subst_ident(&body_hir, &map);
+        Ok(CallOutcome::Inline(expanded, sig.returns[0]))
+    }
+
+    /// Calls `recv.field(args)` on a value: injects `ref` receiver as `self`.
+    /// (Static `Type.field(args)` calls never reach here.)
+    fn check_member_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        field: &str,
+        recv: Receiver,
+        args: &[Expr],
+        span: Span,
+        member_span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let owner = self.types.display(recv.ty.id);
+        let lilac_ty::TypeKind::Object(def) = self.types.kind(recv.ty.id) else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
+                    .label(span, true, "methods need an object".to_owned()),
+            ));
+        };
+        let found = self.find_by_def(*def);
+        let Some(ResKind::Object { members }) = found else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
+                    .label(span, true, "methods need an object".to_owned()),
+            ));
+        };
+        let Some(member) = members.get(field).cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
+                    member_span,
+                    true,
+                    "unknown member (M4 refines this to E040)".to_owned(),
+                ),
+            ));
+        };
+        let (sig, callee) = self.resolve_method(field, &member, recv.ty, member_span)?;
+        self.check_method_args(fctx, &sig, callee, recv, args, span)
+    }
+
+    /// Resolves a member to a callable method: the first parameter must be
+    /// `ref Self` (missing members and non-functions stay errors here).
+    fn resolve_method(
+        &mut self,
+        field: &str,
+        member: &ResItem,
+        recv_ty: TypeRef,
+        member_span: Span,
+    ) -> Result<(FuncSig, HirCallee), ErrorGuaranteed> {
+        let (sig, callee) = match &member.kind {
+            ResKind::Func { .. } => {
+                let Some(sig) = self.func_sig(member.id) else {
+                    lilac_error::bug!(member.span, "missing signature for method");
+                };
+                (sig, HirCallee::Item(member.id))
+            }
+            ResKind::Hook { generic, .. } => {
+                if *generic {
+                    return Err(ErrorGuaranteed::new());
+                }
+                let Some(sig) = self.func_sig(member.id) else {
+                    lilac_error::bug!(member.span, "missing signature for member hook");
+                };
+                (
+                    sig,
+                    HirCallee::Hook {
+                        name: field.to_owned(),
+                        def: member.id,
+                    },
+                )
+            }
+            _ => {
+                return Err(self.diags.emit(
+                    Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                        member_span,
+                        true,
+                        "only functions can be called".to_owned(),
+                    ),
+                ));
+            }
+        };
+        let Some(first) = sig.params.first() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
+                    member_span,
+                    true,
+                    "first parameter must be `ref Self`".to_owned(),
+                ),
+            ));
+        };
+        if !(first.is_ref && first.id == recv_ty.id) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
+                    member_span,
+                    true,
+                    "first parameter must be `ref Self`".to_owned(),
+                ),
+            ));
+        }
+        Ok((sig, callee))
+    }
+
+    /// Checks method arguments with the `ref` receiver injected as `self`.
+    fn check_method_args(
+        &mut self,
+        fctx: &mut FuncCtx,
+        sig: &FuncSig,
+        callee: HirCallee,
+        recv: Receiver,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        if sig.params.len() != args.len() + 1 {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!(
+                        "wrong number of arguments: expected {}, found {}",
+                        sig.params.len() - 1,
+                        args.len(),
+                    ),
+                )
+                .label(span, true, "arity mismatch here".to_owned()),
+            ));
+        }
+        if !matches!(
+            recv.hir.kind,
+            HirExprKind::Ident { .. } | HirExprKind::Member { .. } | HirExprKind::Temp(_)
+        ) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E010", "cannot take `ref` of this expression").label(
+                    span,
+                    true,
+                    "method receivers must be places".to_owned(),
+                ),
+            ));
+        }
+        let self_ty = TypeRef {
+            id: recv.ty.id,
+            is_ref: true,
+        };
+        let mut hir_args = Vec::with_capacity(args.len() + 1);
+        hir_args.push(HirExpr {
+            ty: self_ty,
+            span: recv.hir.span,
+            kind: HirExprKind::RefOf {
+                value: Box::new(recv.hir),
+            },
+        });
+        let mut failed = false;
+        for (arg, param) in args.iter().zip(sig.params.iter().skip(1)) {
+            if let Ok(hir) = self.check_arg(fctx, arg, *param, span) {
+                hir_args.push(hir);
+            } else {
+                failed = true;
+                hir_args.push(poison_expr(arg.span()));
+            }
+        }
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok(CallOutcome::Call(CheckedCall {
+            outs: sig.returns.clone(),
+            callee,
+            args: hir_args,
+        }))
+    }
+
+    /// Calls `Type.field(args)`: no `self` injection, arguments as written.
+    fn check_static_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        type_name: &str,
+        type_item: &ResItem,
+        field: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let ResKind::Object { members } = &type_item.kind else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
+                    span,
+                    true,
+                    "only objects have static members".to_owned(),
+                ),
+            ));
+        };
+        let Some(member) = members.get(field).cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
+                    span,
+                    true,
+                    "unknown member (M4 refines this to E040)".to_owned(),
+                ),
+            ));
+        };
+        match &member.kind {
+            ResKind::Func { .. } => {
+                let Some(sig) = self.func_sig(member.id) else {
+                    lilac_error::bug!(member.span, "missing signature for static member");
+                };
+                let hir_args = self.check_args(fctx, &sig, args, span)?;
+                Ok(CallOutcome::Call(CheckedCall {
+                    outs: sig.returns.clone(),
+                    callee: HirCallee::Item(member.id),
+                    args: hir_args,
+                }))
+            }
+            ResKind::Hook { generic, .. } => {
+                if *generic {
+                    return Err(ErrorGuaranteed::new());
+                }
+                let Some(sig) = self.func_sig(member.id) else {
+                    lilac_error::bug!(member.span, "missing signature for static hook");
+                };
+                let hir_args = self.check_args(fctx, &sig, args, span)?;
+                Ok(CallOutcome::Call(CheckedCall {
+                    outs: sig.returns.clone(),
+                    callee: HirCallee::Hook {
+                        name: field.to_owned(),
+                        def: member.id,
+                    },
+                    args: hir_args,
+                }))
+            }
+            _ => Err(self.diags.emit(
+                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                    span,
+                    true,
+                    "only functions can be called".to_owned(),
+                ),
+            )),
+        }
+    }
+
+    fn check_arg(
+        &mut self,
+        fctx: &mut FuncCtx,
+        arg: &Expr,
+        param: TypeRef,
+        span: Span,
+    ) -> Result<HirExpr, ErrorGuaranteed> {
+        let (got, hir) = self.check_expr(fctx, arg, Some(param.id));
+        if is_poison(got) {
+            return Err(ErrorGuaranteed::new());
+        }
+        if param.is_ref && !got.is_ref {
+            let want = self.types.display_ref(param);
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: expected {want}, found {}",
+                        self.types.display_ref(got),
+                    ),
+                )
+                .label(span, false, format!("expected `{want}` here"))
+                .label(arg.span(), true, "needs an explicit `ref`".to_owned()),
+            );
+            return Err(ErrorGuaranteed::new());
+        }
+        self.expect_type(got, param.id, span, arg.span())?;
+        Ok(hir)
     }
 
     fn check_args(
@@ -864,7 +2068,7 @@ impl Checker<'_> {
         sig: &FuncSig,
         args: &[Expr],
         span: Span,
-    ) -> Result<(), ErrorGuaranteed> {
+    ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
         if args.len() != sig.params.len() {
             return Err(self.diags.emit(
                 Diagnostic::error(
@@ -878,41 +2082,20 @@ impl Checker<'_> {
                 .label(span, true, "arity mismatch here".to_owned()),
             ));
         }
+        let mut hir_args = Vec::with_capacity(args.len());
         let mut failed = false;
         for (arg, param) in args.iter().zip(sig.params.iter()) {
-            let got = self.check_expr(fctx, arg, Some(param.id));
-            if is_poison(got) {
+            if let Ok(hir) = self.check_arg(fctx, arg, *param, span) {
+                hir_args.push(hir);
+            } else {
                 failed = true;
-                continue;
-            }
-            if param.is_ref && !got.is_ref {
-                let want = self.types.display_ref(*param);
-                self.diags.emit(
-                    Diagnostic::error(
-                        "E010",
-                        format!(
-                            "mismatched types: expected {want}, found {}",
-                            self.types.display_ref(got),
-                        ),
-                    )
-                    .label(span, false, format!("expected `{want}` here"))
-                    .label(
-                        arg.span(),
-                        true,
-                        "needs an explicit `ref`".to_owned(),
-                    ),
-                );
-                failed = true;
-                continue;
-            }
-            if self.expect_type(got, param.id, span, arg.span()).is_err() {
-                failed = true;
+                hir_args.push(poison_expr(arg.span()));
             }
         }
         if failed {
             return Err(ErrorGuaranteed::new());
         }
-        Ok(())
+        Ok(hir_args)
     }
 
     fn builtin_ty(&mut self, name: &str) -> TypeId {
@@ -945,25 +2128,26 @@ impl Checker<'_> {
     }
 
     /// Unifies same-width bit operands (literals take the width from siblings
-    /// or the expected type); returns the unified width.
+    /// or the expected type); returns the unified width plus every argument's
+    /// HIR in order.
     fn unify_width(
         &mut self,
         fctx: &mut FuncCtx,
         args: &[Expr],
         expected: Option<TypeId>,
         span: Span,
-    ) -> Result<TypeId, ErrorGuaranteed> {
+    ) -> Result<(TypeId, Vec<HirExpr>), ErrorGuaranteed> {
         let mut width = match expected {
             Some(t) if is_bit(self.types, t) => Some(t),
             _ => None,
         };
-        let mut checked: Vec<Option<TypeRef>> = vec![None; args.len()];
+        let mut checked: Vec<Option<(TypeRef, HirExpr)>> = vec![None; args.len()];
         let mut failed = false;
         for (index, arg) in args.iter().enumerate() {
             if matches!(arg, Expr::Number(..)) {
                 continue;
             }
-            let got = self.check_expr(fctx, arg, None);
+            let (got, hir) = self.check_expr(fctx, arg, None);
             if is_poison(got) {
                 failed = true;
                 continue;
@@ -985,7 +2169,7 @@ impl Checker<'_> {
             if width.is_none() {
                 width = Some(got.id);
             }
-            checked[index] = Some(got);
+            checked[index] = Some((got, hir));
         }
         let Some(width) = width else {
             self.diags.emit(
@@ -997,8 +2181,9 @@ impl Checker<'_> {
             );
             return Err(ErrorGuaranteed::new());
         };
+        let mut hir_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            if let Some(got) = checked[index] {
+            if let Some((got, hir)) = checked[index].take() {
                 if got.id != width {
                     self.diags.emit(
                         Diagnostic::error(
@@ -1017,37 +2202,39 @@ impl Checker<'_> {
                     );
                     failed = true;
                 }
+                hir_args.push(hir);
             } else {
-                let got = self.check_expr(fctx, arg, Some(width));
+                let (got, hir) = self.check_expr(fctx, arg, Some(width));
                 if !is_poison(got) && got.id != width {
                     failed = true;
                 }
+                hir_args.push(hir);
             }
         }
         if failed {
             return Err(ErrorGuaranteed::new());
         }
-        Ok(width)
+        Ok((width, hir_args))
     }
 
     fn check_intrinsic(
         &mut self,
         fctx: &mut FuncCtx,
+        name: &str,
         intrinsic: Intrinsic,
         args: &[Expr],
         span: Span,
         expected: Option<TypeId>,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
-        let value = |id: TypeId| TypeRef { id, is_ref: false };
-        match intrinsic {
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let (outs, hir_args) = match intrinsic {
             Intrinsic::Arith | Intrinsic::Cmp | Intrinsic::Negate => {
-                self.arith_out(fctx, intrinsic, args, span, expected)
+                self.arith_out(fctx, intrinsic, args, span, expected)?
             }
             Intrinsic::AsInt | Intrinsic::AsFloat | Intrinsic::Truncate | Intrinsic::ExtendZero => {
-                self.converting_out(fctx, intrinsic, args, span, expected)
+                self.converting_out(fctx, intrinsic, args, span, expected)?
             }
             Intrinsic::LoadU8 | Intrinsic::StoreU8 | Intrinsic::Memcpy => {
-                self.mem_intrinsic(fctx, intrinsic, args, span)
+                self.mem_intrinsic(fctx, intrinsic, args, span)?
             }
             Intrinsic::ByteBufferPtr
             | Intrinsic::ByteBufferLen
@@ -1055,16 +2242,29 @@ impl Checker<'_> {
             | Intrinsic::FormatArgsNew
             | Intrinsic::FormatArgsPush
             | Intrinsic::FormatArgsCount
-            | Intrinsic::FormatArgsPiece => self.buffer_intrinsic(fctx, intrinsic, args, span),
+            | Intrinsic::FormatArgsPiece => self.buffer_intrinsic(fctx, intrinsic, args, span)?,
             Intrinsic::SizeOf => {
                 self.expect_arity(span, "@size_of", args, 1)?;
-                let _ = self.check_expr(fctx, &args[0], None);
-                Ok(vec![value(self.builtin_ty("@bitNative"))])
+                let (_, hir) = self.check_expr(fctx, &args[0], None);
+                (
+                    vec![TypeRef {
+                        id: self.builtin_ty("@bitNative"),
+                        is_ref: false,
+                    }],
+                    vec![hir],
+                )
             }
             Intrinsic::CompileError => {
-                Err(deferred(self.diags, span, "`@compile_error` folding", "M2"))
+                return Err(deferred(self.diags, span, "`@compile_error` folding", "M2"));
             }
-        }
+        };
+        Ok(CallOutcome::Call(CheckedCall {
+            outs,
+            callee: HirCallee::Intrinsic {
+                name: name.to_owned(),
+            },
+            args: hir_args,
+        }))
     }
 
     fn arith_out(
@@ -1074,12 +2274,12 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         expected: Option<TypeId>,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
         if intrinsic == Intrinsic::Negate {
             self.expect_arity(span, "@negate", args, 1)?;
         }
-        let width = self.unify_width(fctx, args, expected, span)?;
+        let (width, hir_args) = self.unify_width(fctx, args, expected, span)?;
         if args.is_empty() {
             let what = if intrinsic == Intrinsic::Cmp {
                 "comparison"
@@ -1095,9 +2295,9 @@ impl Checker<'_> {
             ));
         }
         if intrinsic == Intrinsic::Cmp {
-            return Ok(vec![value(self.builtin_ty("@bit8"))]);
+            return Ok((vec![value(self.builtin_ty("@bit8"))], hir_args));
         }
-        Ok(vec![value(width)])
+        Ok((vec![value(width)], hir_args))
     }
 
     fn converting_out(
@@ -1107,7 +2307,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         expected: Option<TypeId>,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
         let (name, want_buffer) = match intrinsic {
             Intrinsic::AsInt => ("@as_int", true),
@@ -1116,7 +2316,7 @@ impl Checker<'_> {
             _ => ("@extend_zero", false),
         };
         self.expect_arity(span, name, args, 1)?;
-        let got = self.check_expr(fctx, &args[0], None);
+        let (got, hir) = self.check_expr(fctx, &args[0], None);
         if !is_poison(got) {
             let ok = if want_buffer {
                 got.id == self.builtin_ty("@byte_buffer")
@@ -1143,7 +2343,7 @@ impl Checker<'_> {
             }
         }
         match expected {
-            Some(t) if is_bit(self.types, t) => Ok(vec![value(t)]),
+            Some(t) if is_bit(self.types, t) => Ok((vec![value(t)], vec![hir])),
             _ => {
                 Err(self.diags.emit(
                     Diagnostic::error("E024", format!("`{name}` needs an expected bit type"))
@@ -1159,28 +2359,28 @@ impl Checker<'_> {
         intrinsic: Intrinsic,
         args: &[Expr],
         span: Span,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
         match intrinsic {
             Intrinsic::LoadU8 => {
                 self.expect_arity(span, "@load_u8", args, 2)?;
-                self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
-                Ok(vec![value(self.builtin_ty("@bit8"))])
+                let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                Ok((vec![value(self.builtin_ty("@bit8"))], vec![h0, h1]))
             }
             Intrinsic::StoreU8 => {
                 self.expect_arity(span, "@store_u8", args, 3)?;
-                self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
-                self.check_fixed_arg(fctx, &args[2], "@bit8")?;
-                Ok(Vec::new())
+                let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                let h2 = self.check_fixed_arg(fctx, &args[2], "@bit8")?;
+                Ok((Vec::new(), vec![h0, h1, h2]))
             }
             _ => {
                 self.expect_arity(span, "@memcpy", args, 3)?;
-                self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                self.check_ref_bit8_arg(fctx, &args[1], span)?;
-                self.check_fixed_arg(fctx, &args[2], "@bitNative")?;
-                Ok(Vec::new())
+                let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
+                let h1 = self.check_ref_bit8_arg(fctx, &args[1], span)?;
+                let h2 = self.check_fixed_arg(fctx, &args[2], "@bitNative")?;
+                Ok((Vec::new(), vec![h0, h1, h2]))
             }
         }
     }
@@ -1191,35 +2391,38 @@ impl Checker<'_> {
         intrinsic: Intrinsic,
         args: &[Expr],
         span: Span,
-    ) -> Result<Vec<TypeRef>, ErrorGuaranteed> {
+    ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
         match intrinsic {
             Intrinsic::ByteBufferPtr => {
                 self.expect_arity(span, "@byte_buffer_ptr", args, 1)?;
-                self.check_fixed_arg(fctx, &args[0], "@byte_buffer")?;
-                Ok(vec![TypeRef {
-                    id: self.builtin_ty("@bit8"),
-                    is_ref: true,
-                }])
+                let h0 = self.check_fixed_arg(fctx, &args[0], "@byte_buffer")?;
+                Ok((
+                    vec![TypeRef {
+                        id: self.builtin_ty("@bit8"),
+                        is_ref: true,
+                    }],
+                    vec![h0],
+                ))
             }
             Intrinsic::ByteBufferLen => {
                 self.expect_arity(span, "@byte_buffer_len", args, 1)?;
-                self.check_fixed_arg(fctx, &args[0], "@byte_buffer")?;
-                Ok(vec![value(self.builtin_ty("@bitNative"))])
+                let h0 = self.check_fixed_arg(fctx, &args[0], "@byte_buffer")?;
+                Ok((vec![value(self.builtin_ty("@bitNative"))], vec![h0]))
             }
             Intrinsic::ByteBufferFrom => {
                 self.expect_arity(span, "@byte_buffer_from", args, 2)?;
-                self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
-                Ok(vec![value(self.builtin_ty("@byte_buffer"))])
+                let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                Ok((vec![value(self.builtin_ty("@byte_buffer"))], vec![h0, h1]))
             }
             Intrinsic::FormatArgsNew => {
                 self.expect_arity(span, "@format_args_new", args, 0)?;
-                Ok(vec![value(self.builtin_ty("@format_args"))])
+                Ok((vec![value(self.builtin_ty("@format_args"))], Vec::new()))
             }
             Intrinsic::FormatArgsPush => {
                 self.expect_arity(span, "@format_args_push", args, 2)?;
-                let got = self.check_expr(fctx, &args[0], None);
+                let (got, h0) = self.check_expr(fctx, &args[0], None);
                 if !is_poison(got) && (!got.is_ref || got.id != self.builtin_ty("@format_args")) {
                     self.diags.emit(
                         Diagnostic::error(
@@ -1235,19 +2438,19 @@ impl Checker<'_> {
                     );
                     return Err(ErrorGuaranteed::new());
                 }
-                self.check_fixed_arg(fctx, &args[1], "@byte_buffer")?;
-                Ok(Vec::new())
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@byte_buffer")?;
+                Ok((Vec::new(), vec![h0, h1]))
             }
             Intrinsic::FormatArgsCount => {
                 self.expect_arity(span, "@format_args_count", args, 1)?;
-                self.check_fixed_arg(fctx, &args[0], "@format_args")?;
-                Ok(vec![value(self.builtin_ty("@bitNative"))])
+                let h0 = self.check_fixed_arg(fctx, &args[0], "@format_args")?;
+                Ok((vec![value(self.builtin_ty("@bitNative"))], vec![h0]))
             }
             _ => {
                 self.expect_arity(span, "@format_args_piece", args, 2)?;
-                self.check_fixed_arg(fctx, &args[0], "@format_args")?;
-                self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
-                Ok(vec![value(self.builtin_ty("@byte_buffer"))])
+                let h0 = self.check_fixed_arg(fctx, &args[0], "@format_args")?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                Ok((vec![value(self.builtin_ty("@byte_buffer"))], vec![h0, h1]))
             }
         }
     }
@@ -1257,13 +2460,13 @@ impl Checker<'_> {
         fctx: &mut FuncCtx,
         arg: &Expr,
         span: Span,
-    ) -> Result<(), ErrorGuaranteed> {
-        let got = self.check_expr(fctx, arg, None);
+    ) -> Result<HirExpr, ErrorGuaranteed> {
+        let (got, hir) = self.check_expr(fctx, arg, None);
         if is_poison(got) {
             return Err(ErrorGuaranteed::new());
         }
         if got.is_ref && got.id == self.builtin_ty("@bit8") {
-            return Ok(());
+            return Ok(hir);
         }
         Err(self.diags.emit(
             Diagnostic::error("E010", "mismatched types: expected ref @bit8".to_owned())
@@ -1277,14 +2480,14 @@ impl Checker<'_> {
         fctx: &mut FuncCtx,
         arg: &Expr,
         want: &str,
-    ) -> Result<(), ErrorGuaranteed> {
+    ) -> Result<HirExpr, ErrorGuaranteed> {
         let want_id = self.builtin_ty(want);
-        let got = self.check_expr(fctx, arg, Some(want_id));
+        let (got, hir) = self.check_expr(fctx, arg, Some(want_id));
         if is_poison(got) {
             return Err(ErrorGuaranteed::new());
         }
         self.expect_type(got, want_id, arg.span(), arg.span())?;
-        Ok(())
+        Ok(hir)
     }
 
     fn ident_type(
@@ -1292,18 +2495,34 @@ impl Checker<'_> {
         fctx: &mut FuncCtx,
         name: &str,
         span: Span,
-    ) -> Result<TypeRef, ErrorGuaranteed> {
+    ) -> Result<(TypeRef, DefId), ErrorGuaranteed> {
         if let Some(ty) = fctx.locals.get(name) {
-            return Ok(*ty);
+            return Ok((*ty, DefId::ERROR));
         }
-        if let Some(item) = self.module.items.get(name) {
+        if let Some(item) = self.module.items.get(name).cloned() {
             let kind = item.kind.clone();
             return match kind {
-                ResKind::Func { .. } | ResKind::Hook { .. } => Err(self.diags.emit(
+                ResKind::Func { generic, .. } => {
+                    if generic {
+                        Err(deferred(self.diags, span, "generic functions", "M4"))
+                    } else {
+                        let Some(sig) = self.func_sig(item.id) else {
+                            lilac_error::bug!(span, "missing signature for function value");
+                        };
+                        let id = self
+                            .types
+                            .intern_func(sig.params.clone(), sig.returns.clone());
+                        Ok((TypeRef { id, is_ref: false }, item.id))
+                    }
+                }
+                ResKind::Hook { .. } => Err(self.diags.emit(
                     Diagnostic::error("E021", format!("cannot use function `{name}` as a value"))
-                        .label(span, true, "functions are not values in M1".to_owned()),
+                        .label(span, true, "hooks are not values".to_owned()),
                 )),
-                ResKind::Const => self.const_type(name, span),
+                ResKind::Const => {
+                    let ty = self.const_type(name, span)?;
+                    Ok((ty, item.id))
+                }
                 ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
                     Err(self.diags.emit(
                         Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
@@ -1314,7 +2533,7 @@ impl Checker<'_> {
                     Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                         span,
                         true,
-                        "fields need a receiver in M1".to_owned(),
+                        "fields need a receiver".to_owned(),
                     ),
                 )),
             };
@@ -1548,5 +2767,176 @@ mod tests {
             "foo: function (x: Nope) nothing {\n}\nmain: function () nothing {\n    foo(0x1)\n}\n",
         );
         assert!(has_code(&diags, "E023"), "{diags:?}");
+    }
+
+    fn method_src() -> &'static str {
+        "Object: object {\n    member: @bit32\n    get: function (instance: ref Object) result: @bit32 {\n        result = instance.member\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.get()\n}\n"
+    }
+
+    #[test]
+    fn method_call_checks() {
+        let diags = check_src(method_src());
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn unknown_member_is_e021_not_e040() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable_2: @bit8 = variable.data\n}\n",
+        );
+        assert!(has_code(&diags, "E021"), "{diags:?}");
+        assert!(!has_code(&diags, "E040"), "{diags:?}");
+    }
+
+    #[test]
+    fn calling_a_field_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable.member()\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn multilet_clean() {
+        let diags = check_src(
+            "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    condition: @bit32, result: @bit32 = get_multi()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn multilet_arity_mismatch_is_e022() {
+        let diags = check_src(
+            "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    a: @bit32, b: @bit32, c: @bit32 = get_multi()\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+        let msgs = messages(&diags);
+        assert!(
+            msgs.iter().any(|m| m.contains('3') && m.contains('2')),
+            "{msgs:?}"
+        );
+    }
+
+    #[test]
+    fn single_let_against_multi_return_is_e022() {
+        let diags = check_src(
+            "Object1: object {\n    value: @bit8\n}\nmain: function () nothing {\n    result: Object1 = get()\n}\nget: function () result: Object1, result_2: @bit32 {\n    result = Object1 {\n        value = 0x0\n    }\n    result_2 = 0x0\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn structlit_missing_field_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n    }\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+        let msgs = messages(&diags);
+        assert!(msgs.iter().any(|m| m.contains("member")), "{msgs:?}");
+    }
+
+    #[test]
+    fn structlit_unknown_field_is_e021() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        data = 0x1\n    }\n}\n",
+        );
+        assert!(has_code(&diags, "E021"), "{diags:?}");
+    }
+
+    #[test]
+    fn func_value_call_checks() {
+        let diags = check_src(
+            "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @iadd(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @iadd(value, 0x2)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn recursive_inline_is_e022() {
+        let diags = check_src(
+            "f: function (x: @bit32) @bit32 => f(x)\nmain: function () nothing {\n    y: @bit32 = f(0x1)\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+        let msgs = messages(&diags);
+        assert!(msgs.iter().any(|m| m.contains("recursive")), "{msgs:?}");
+    }
+
+    #[test]
+    fn static_call_checks() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @iadd(instance.member, num)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn method_without_self_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n    add: function (num: @bit32) result: @bit32 {\n        result = num\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.add(0x2)\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    use lilac_hir::{HirExprKind, HirProgram, HirStmt};
+
+    fn check_hir_src(src: &str) -> (HirProgram, Diags) {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let mut types = Types::new();
+        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags);
+        let hir = check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        (hir, diags)
+    }
+
+    #[test]
+    fn init_hook_called() {
+        let src = "Object: object {\n    member: @bit8\n    @init: function (instance: ref Object) nothing {\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n";
+        let (hir, diags) = check_hir_src(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[0] else {
+            panic!("expected let, got {:?}", main.body.stmts[0]);
+        };
+        let HirExprKind::StructLit { init, .. } = &value.kind else {
+            panic!("expected struct literal, got {:?}", value.kind);
+        };
+        assert!(init.is_some(), "expected @init call, got {init:?}");
+    }
+
+    #[test]
+    fn inline_substituted_nonrecursive() {
+        let src = "addOne: function (value: @bit32) @bit32 => @iadd(value, 0x1)\nmain: function () nothing {\n    variable: @bit32 = addOne(0x1)\n}\n";
+        let (hir, diags) = check_hir_src(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[0] else {
+            panic!("expected let, got {:?}", main.body.stmts[0]);
+        };
+        let HirExprKind::Call { callee, args } = &value.kind else {
+            panic!("expected inlined call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirCallee::Intrinsic { name } = callee else {
+            panic!("expected intrinsic call, got {callee:?}");
+        };
+        assert_eq!(name, "@iadd");
+        assert_eq!(args.len(), 2);
     }
 }

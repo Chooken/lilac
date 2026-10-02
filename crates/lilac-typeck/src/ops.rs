@@ -2,6 +2,7 @@
 
 use lilac_ast::BinOp;
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
@@ -71,13 +72,14 @@ pub(crate) struct BinopMiss {
 /// Resolves a binary-operator call: exact `(lhs, rhs)` overload first, then
 /// one directed conversion of the right side toward the left. Never converts
 /// the left side, never chains. Hook signatures with `ref` params or arity
-/// other than 2-in/1-out do not participate.
+/// other than 2-in/1-out do not participate. Returns the winning overload's
+/// identity with its signature.
 pub(crate) fn resolve_binop(
     sigs: &Sigs,
     hook: &str,
     lhs: TypeId,
     rhs: TypeId,
-) -> Result<FuncSig, BinopMiss> {
+) -> Result<(DefId, FuncSig), BinopMiss> {
     let miss = || BinopMiss {
         hook: hook.to_owned(),
         lhs,
@@ -90,22 +92,22 @@ pub(crate) fn resolve_binop(
             && !sig.params[0].is_ref
             && !sig.params[1].is_ref
     };
-    if let Some((_, sig)) = overloads
+    if let Some((def, sig)) = overloads
         .iter()
         .find(|(_, sig)| shaped(sig) && sig.params[0].id == lhs && sig.params[1].id == rhs)
     {
-        return Ok(sig.clone());
+        return Ok((*def, sig.clone()));
     }
     if sigs
         .conversions
         .iter()
         .any(|c| c.from == rhs && c.to == lhs)
     {
-        if let Some((_, sig)) = overloads
+        if let Some((def, sig)) = overloads
             .iter()
             .find(|(_, sig)| shaped(sig) && sig.params[0].id == lhs && sig.params[1].id == lhs)
         {
-            return Ok(sig.clone());
+            return Ok((*def, sig.clone()));
         }
     }
     Err(miss())
