@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use lilac_ast::{BinOp, Expr, Item, ItemKind, Program, Stmt, Type as AstType};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_hir::{
-    HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirField, HirFunc, HirInit, HirParam,
+    HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
     HirPattern, HirProgram, HirStmt, TempId,
 };
 use lilac_resolve::{DefId, Module, ResItem, ResKind};
@@ -33,6 +33,13 @@ enum CallOutcome {
     Inline(HirExpr, TypeRef),
     /// Recorded `@compile_error` (never E022, even in value position).
     CompilerError(HirExpr),
+}
+
+/// A multi-`let` call: out-slot types, value HIR, and call span.
+struct MultiCall {
+    outs: Vec<TypeRef>,
+    value_hir: HirExpr,
+    call_span: Span,
 }
 
 /// A method-call receiver: checked type plus its HIR.
@@ -79,6 +86,8 @@ pub fn check_bodies(
         checked: HashSet::new(),
         fields: HashMap::new(),
         hir: Vec::new(),
+        consts: Vec::new(),
+        drops: HashMap::new(),
         inline_bodies: HashMap::new(),
         in_progress: HashSet::new(),
         next_temp: 0,
@@ -90,7 +99,48 @@ pub fn check_bodies(
             checker.check_item(item, &resolved, None);
         }
     }
-    HirProgram { funcs: checker.hir }
+    let mut layouts = HashMap::new();
+    if !checker.diags.has_errors() {
+        for item in &program.items {
+            if let ItemKind::Object { members, .. } = &item.kind {
+                let mut fields = Vec::new();
+                for member in members {
+                    if let ItemKind::Field { ty } = &member.kind {
+                        let field_ty =
+                            resolve_type(ty, checker.types, checker.module, checker.diags);
+                        fields.push((member.name.clone(), Some(field_ty)));
+                    }
+                }
+                layouts.insert(item.name.clone(), fields);
+            } else if let ItemKind::Enum { variants, .. } = &item.kind {
+                let mut entries = Vec::new();
+                for variant in variants {
+                    let payload = variant
+                        .payload
+                        .as_ref()
+                        .map(|ty| resolve_type(ty, checker.types, checker.module, checker.diags));
+                    entries.push((variant.name.clone(), payload));
+                }
+                layouts.insert(item.name.clone(), entries);
+            } else if let ItemKind::Union { variants, .. } = &item.kind {
+                let mut entries = Vec::new();
+                for variant in variants {
+                    let payload = variant
+                        .payload
+                        .as_ref()
+                        .map(|ty| resolve_type(ty, checker.types, checker.module, checker.diags));
+                    entries.push((variant.name.clone(), payload));
+                }
+                layouts.insert(item.name.clone(), entries);
+            }
+        }
+    }
+    HirProgram {
+        funcs: checker.hir,
+        consts: checker.consts,
+        layouts,
+        drops: checker.drops,
+    }
 }
 
 struct Checker<'a> {
@@ -102,6 +152,10 @@ struct Checker<'a> {
     checked: HashSet<DefId>,
     fields: HashMap<(String, String), AstType>,
     hir: Vec<HirFunc>,
+    /// Checked module constants (inlined wherever used).
+    consts: Vec<HirConst>,
+    /// Drop hooks by type display name (mangled `@on_drop` callees).
+    drops: HashMap<String, String>,
     /// Checked `=>` bodies by function: parameter names plus the value HIR.
     /// Inline functions never reach `hir` (every call substitutes them).
     inline_bodies: HashMap<DefId, (Vec<String>, HirExpr)>,
@@ -208,6 +262,18 @@ fn fresh_local(fctx: &mut FuncCtx, base: &str) -> String {
 /// An AST item plus its resolution and enclosing object (if any).
 type ItemLookup<'a> = Option<(&'a Item, ResItem, Option<(String, DefId)>)>;
 
+/// Finds the enclosing object's name for a member definition, if any.
+fn find_parent_name(module: &Module, def: DefId) -> Option<String> {
+    for (item_name, item) in &module.items {
+        if let ResKind::Object { members } = &item.kind {
+            if members.values().any(|member| member.id == def) {
+                return Some(item_name.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Finds the AST item plus its resolution for a definition, tracking the
 /// enclosing object (if any) for implicit-`instance` binding.
 fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLookup<'a> {
@@ -242,6 +308,28 @@ fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLo
     rec(&program.items, &module.items, def, None)
 }
 
+/// Whether HIR contains a branch-join temp: control flow inside a value
+/// that must stay straight-line (module constants and `=>` bodies fold in
+/// M3, so they stay `E030` here).
+fn has_temp(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Temp(_) => true,
+        HirExprKind::Call { args, .. } => args.iter().any(has_temp),
+        HirExprKind::EqEq { lhs, rhs } => has_temp(lhs) || has_temp(rhs),
+        HirExprKind::Member { obj, .. } => has_temp(obj),
+        HirExprKind::RefOf { value } => has_temp(value),
+        HirExprKind::StructLit { fields, .. } => fields.iter().any(|f| has_temp(&f.value)),
+        HirExprKind::Variant { payload, .. } => payload.as_ref().is_some_and(|p| has_temp(p)),
+        HirExprKind::Ident { .. }
+        | HirExprKind::Tag { .. }
+        | HirExprKind::Number { .. }
+        | HirExprKind::Str { .. }
+        | HirExprKind::Char { .. }
+        | HirExprKind::CompileError { .. }
+        | HirExprKind::Poison => false,
+    }
+}
+
 /// Clones an HIR tree with `=>` parameters replaced by their call-site
 /// arguments (textual substitution is the documented `=>` semantic: an
 /// argument used twice evaluates twice).
@@ -268,7 +356,7 @@ fn subst_ident(expr: &HirExpr, map: &HashMap<String, HirExpr>) -> HirExpr {
         HirExprKind::RefOf { value } => HirExprKind::RefOf {
             value: Box::new(subst_ident(value, map)),
         },
-        HirExprKind::StructLit { fields, init } => HirExprKind::StructLit {
+        HirExprKind::StructLit { fields } => HirExprKind::StructLit {
             fields: fields
                 .iter()
                 .map(|field| HirField {
@@ -277,7 +365,6 @@ fn subst_ident(expr: &HirExpr, map: &HashMap<String, HirExpr>) -> HirExpr {
                     span: field.span,
                 })
                 .collect(),
-            init: init.clone(),
         },
         HirExprKind::Variant {
             def,
@@ -358,6 +445,44 @@ impl Checker<'_> {
             .label(expected_span, false, format!("expected `{exp}` here"))
             .label(found_span, true, format!("found `{got}` here")),
         )
+    }
+
+    /// Wraps a value in its `@conversion` call when the expected type was
+    /// reached by conversion (exact matches and poison pass through).
+    /// Must run wherever `expect_type` succeeds on a value that flows into
+    /// HIR; otherwise lowering passes wrong-width values to hooks.
+    fn convert_if_needed(&self, got: TypeRef, expected: TypeId, value_hir: HirExpr) -> HirExpr {
+        if is_poison(got) || expected == TypeId::ERROR || got.id == expected {
+            return value_hir;
+        }
+        let Some(binding) = self
+            .sigs
+            .conversions
+            .iter()
+            .find(|conversion| conversion.from == got.id && conversion.to == expected)
+        else {
+            return value_hir;
+        };
+        let (func, to) = (binding.func, binding.to);
+        if self.func_sig(func).is_none() {
+            return value_hir;
+        }
+        let qual = match find_parent_name(self.module, func) {
+            Some(parent) => format!("{parent}.@conversion"),
+            None => "@conversion".to_owned(),
+        };
+        let name = self.hook_name(&qual, func);
+        HirExpr {
+            ty: TypeRef {
+                id: to,
+                is_ref: false,
+            },
+            span: value_hir.span,
+            kind: HirExprKind::Call {
+                callee: HirCallee::Hook { name, def: func },
+                args: vec![value_hir],
+            },
+        }
     }
 
     /// Unifies an actual value against an expected type: exact first (with
@@ -446,14 +571,23 @@ impl Checker<'_> {
 
     /// Checks a test position (`if`/`loop` conditions, `match` scrutinees,
     /// `and`/`or` operands): bare numbers default to `@bit8`, any other
-    /// `@bitN` tests non-zero.
+    /// `@bitN` tests non-zero. References never test (deref explicitly).
     fn check_test(&mut self, fctx: &mut FuncCtx, expr: &Expr) -> (TypeRef, HirExpr) {
-        if matches!(expr, Expr::Number(..)) {
+        let (ty, hir) = if matches!(expr, Expr::Number(..)) {
             let bit8 = self.builtin_ty("@bit8");
             self.check_expr(fctx, expr, Some(bit8))
         } else {
             self.check_expr(fctx, expr, None)
+        };
+        if !is_poison(ty) && ty.is_ref {
+            self.diags
+                .emit(Diagnostic::error("E010", "cannot test a reference").label(
+                    expr.span(),
+                    true,
+                    "deref explicitly".to_owned(),
+                ));
         }
+        (ty, hir)
     }
 
     fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
@@ -473,6 +607,14 @@ impl Checker<'_> {
                             );
                         }
                     }
+                    if let Some(drop) = resolved_members.get("@on_drop") {
+                        if matches!(drop.kind, ResKind::Hook { .. })
+                            && self.func_sig(drop.id).is_some()
+                        {
+                            let name = self.hook_name(&format!("{}.@on_drop", item.name), drop.id);
+                            self.drops.insert(item.name.clone(), name);
+                        }
+                    }
                 }
             }
             ItemKind::Const { ty, value, .. } => {
@@ -481,8 +623,17 @@ impl Checker<'_> {
                 }
                 let declared = resolve_type(ty, self.types, self.module, self.diags);
                 let mut fctx = FuncCtx::new();
-                let (got, _) = self.check_expr(&mut fctx, value, Some(declared.id));
+                let (got, hir) = self.check_expr(&mut fctx, value, Some(declared.id));
                 let _ = self.expect_type(got, declared.id, ty.span, value.span());
+                let hir = self.convert_if_needed(got, declared.id, hir);
+                if has_temp(&hir) {
+                    let _ = deferred(self.diags, value.span(), "control flow in constants", "M3");
+                }
+                self.consts.push(HirConst {
+                    name: item.name.clone(),
+                    def: resolved.id,
+                    value: hir,
+                });
             }
             ItemKind::Enum { .. }
             | ItemKind::Union { .. }
@@ -569,13 +720,28 @@ impl Checker<'_> {
         let Some(sig) = self.func_sig(resolved.id) else {
             lilac_error::bug!(item.span, "missing signature for checked function");
         };
+        // Emitted (LIR) names: member functions qualify with their object,
+        // hooks mangle with their signature (overloads share the source name).
+        let hir_name = match &resolved.kind {
+            ResKind::Hook { .. } => {
+                let qual = match &parent {
+                    Some((parent_name, _)) => format!("{parent_name}.{}", item.name),
+                    None => item.name.clone(),
+                };
+                self.hook_name(&qual, resolved.id)
+            }
+            _ => match &parent {
+                Some((parent_name, _)) => format!("{parent_name}.{}", item.name),
+                None => item.name.clone(),
+            },
+        };
         let errors_before = self.diags.diagnostics().len();
         let (mut fctx, params, returns) = self.func_ctx(decl, &sig, parent);
         match &decl.body {
             None => {
                 self.hir.push(HirFunc {
                     def: resolved.id,
-                    name: item.name.clone(),
+                    name: hir_name.clone(),
                     params,
                     returns,
                     body: HirBlock {
@@ -591,7 +757,7 @@ impl Checker<'_> {
                 let body = self.check_block(&mut fctx, block);
                 self.hir.push(HirFunc {
                     def: resolved.id,
-                    name: item.name.clone(),
+                    name: hir_name.clone(),
                     params,
                     returns,
                     body,
@@ -613,6 +779,10 @@ impl Checker<'_> {
                 let (got, value) = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
                 let span = expr.span();
                 let _ = self.expect_type(got, sig.returns[0].id, span, span);
+                let value = self.convert_if_needed(got, sig.returns[0].id, value);
+                if has_temp(&value) {
+                    let _ = deferred(self.diags, span, "control flow in `=>` bodies", "M3");
+                }
                 if let Some((name, _, _)) = fctx.slots.first() {
                     fctx.assigned.insert(name.clone());
                 }
@@ -758,6 +928,7 @@ impl Checker<'_> {
                 if !is_poison(declared) && !is_poison(got) {
                     let _ = self.expect_type(got, declared.id, ty.span, value.span());
                 }
+                let hir = self.convert_if_needed(got, declared.id, hir);
                 fctx.locals.insert(name.clone(), declared);
                 push_stmt(
                     fctx,
@@ -848,6 +1019,7 @@ impl Checker<'_> {
         if !is_poison(got) {
             let _ = self.expect_type(got, base, target.span(), value.span());
         }
+        let value_hir = self.convert_if_needed(got, base, value_hir);
         if let Expr::Ident(name, _) = target {
             if fctx.slots.iter().any(|(slot, _, _)| slot == name) {
                 fctx.assigned.insert(name.clone());
@@ -1073,61 +1245,177 @@ impl Checker<'_> {
             push_poison(fctx);
             return;
         };
-        let (outs, value_hir) =
-            match self.check_call(fctx, callee, generic_args, args, *call_span, None) {
-                Ok(CallOutcome::Call(call)) => {
-                    let outs = call.outs.clone();
-                    let hir = HirExpr {
-                        ty: outs.first().copied().unwrap_or(TypeRef {
-                            id: TypeId::ERROR,
-                            is_ref: false,
-                        }),
-                        span: *call_span,
-                        kind: HirExprKind::Call {
-                            callee: call.callee,
-                            args: call.args,
-                        },
-                    };
-                    (outs, hir)
-                }
-                Ok(CallOutcome::Inline(hir, ty)) => (vec![ty], hir),
-                Ok(CallOutcome::CompilerError(_)) => (Vec::new(), poison_expr(*call_span)),
-                Err(_) => {
-                    push_poison(fctx);
-                    return;
-                }
-            };
-        if outs.len() != bindings.len() {
+        let Some(call) = self.check_multilet_call(fctx, callee, generic_args, args, *call_span)
+        else {
+            push_poison(fctx);
+            return;
+        };
+        if call.outs.len() != bindings.len() {
             self.diags.emit(
                 Diagnostic::error(
                     "E022",
                     format!(
                         "wrong number of values: expected {}, call returns {}",
                         bindings.len(),
-                        outs.len(),
+                        call.outs.len(),
                     ),
                 )
-                .label(*call_span, true, "arity mismatch here".to_owned()),
+                .label(call.call_span, true, "arity mismatch here".to_owned()),
             );
             push_poison(fctx);
             return;
         }
-        for ((binding, expected), got) in bindings.iter().zip(hir_bindings.iter()).zip(outs.iter())
+        for ((binding, expected), got) in bindings
+            .iter()
+            .zip(hir_bindings.iter())
+            .zip(call.outs.iter())
         {
             if !is_poison(expected.ty) && !is_poison(*got) {
                 let _ = self.expect_type(*got, expected.ty.id, binding.ty.span, value.span());
             }
+        }
+        let needs_wrap = call
+            .outs
+            .iter()
+            .zip(hir_bindings.iter())
+            .any(|(got, slot)| {
+                !is_poison(*got)
+                    && !is_poison(slot.ty)
+                    && got.id != slot.ty.id
+                    && self
+                        .sigs
+                        .conversions
+                        .iter()
+                        .any(|c| c.from == got.id && c.to == slot.ty.id)
+            });
+        if needs_wrap {
+            self.check_multilet_converted(fctx, bindings, &hir_bindings, &call, span);
+            return;
+        }
+        for (binding, expected) in bindings.iter().zip(hir_bindings.iter()) {
             fctx.locals.insert(binding.name.clone(), expected.ty);
         }
         push_stmt(
             fctx,
             HirStmt::MultiLet {
                 bindings: hir_bindings,
+                value: call.value_hir,
+                span,
+            },
+            span,
+        );
+    }
+
+    /// Checks a multi-`let` call: returns its out-slot types, value HIR,
+    /// and call span (`None` after diagnosing).
+    fn check_multilet_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        callee: &Expr,
+        generic_args: &[AstType],
+        args: &[Expr],
+        call_span: Span,
+    ) -> Option<MultiCall> {
+        match self.check_call(fctx, callee, generic_args, args, call_span, None) {
+            Ok(CallOutcome::Call(call)) => {
+                let outs = call.outs.clone();
+                let value_hir = HirExpr {
+                    ty: outs.first().copied().unwrap_or(TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    }),
+                    span: call_span,
+                    kind: HirExprKind::Call {
+                        callee: call.callee,
+                        args: call.args,
+                    },
+                };
+                Some(MultiCall {
+                    outs,
+                    value_hir,
+                    call_span,
+                })
+            }
+            Ok(CallOutcome::Inline(hir, ty)) => Some(MultiCall {
+                outs: vec![ty],
+                value_hir: hir,
+                call_span,
+            }),
+            Ok(CallOutcome::CompilerError(_)) => Some(MultiCall {
+                outs: Vec::new(),
+                value_hir: poison_expr(call_span),
+                call_span,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Desugars converting multi-`let`s into a hidden exact multi-`let`
+    /// plus one `let` per binding (each converting like a plain `let`).
+    fn check_multilet_converted(
+        &mut self,
+        fctx: &mut FuncCtx,
+        bindings: &[lilac_ast::LetBinding],
+        hir_bindings: &[HirParam],
+        call: &MultiCall,
+        span: Span,
+    ) {
+        let outs = &call.outs;
+        let value_hir = call.value_hir.clone();
+        let call_span = call.call_span;
+        let mut hidden_names = Vec::with_capacity(outs.len());
+        let mut hidden = Vec::with_capacity(outs.len());
+        for (index, out_ty) in outs.iter().enumerate() {
+            let name = fresh_local(fctx, &format!("m{index}"));
+            fctx.locals.insert(name.clone(), *out_ty);
+            hidden_names.push(name.clone());
+            hidden.push(HirParam {
+                name,
+                ty: *out_ty,
+                span: call_span,
+            });
+        }
+        push_stmt(
+            fctx,
+            HirStmt::MultiLet {
+                bindings: hidden,
                 value: value_hir,
                 span,
             },
             span,
         );
+        for ((binding, slot), (got, hidden)) in bindings
+            .iter()
+            .zip(hir_bindings.iter())
+            .zip(outs.iter().zip(hidden_names.iter()))
+        {
+            let ident = HirExpr {
+                ty: *got,
+                span: binding.span,
+                kind: HirExprKind::Ident {
+                    name: hidden.clone(),
+                    def: DefId::ERROR,
+                },
+            };
+            if !is_poison(slot.ty) && !is_poison(*got) {
+                let _ = self.expect_type(*got, slot.ty.id, binding.ty.span, binding.span);
+            }
+            let value = self.convert_if_needed(*got, slot.ty.id, ident);
+            fctx.locals.insert(binding.name.clone(), slot.ty);
+            push_stmt(
+                fctx,
+                HirStmt::Let {
+                    name: binding.name.clone(),
+                    ty: slot.ty,
+                    value,
+                    span: binding.span,
+                },
+                binding.span,
+            );
+        }
+        for name in &hidden_names {
+            fctx.locals.remove(name);
+        }
     }
 
     fn check_expr(
@@ -1210,8 +1498,8 @@ impl Checker<'_> {
     }
 
     /// Checks `Type { field = value, ... }`: every field against its declared
-    /// type, no missing or unknown fields, plus the `@init` hook when the
-    /// object declares one.
+    /// type, no missing or unknown fields. Struct literals initialize
+    /// fields directly and never call `@init` (factories serve `Type(params)`).
     fn check_struct_lit(
         &mut self,
         fctx: &mut FuncCtx,
@@ -1274,9 +1562,6 @@ impl Checker<'_> {
             );
             failed = true;
         }
-        let Ok(init) = self.check_init_hook(obj_id, members) else {
-            return poison;
-        };
         if failed {
             return poison;
         }
@@ -1285,10 +1570,7 @@ impl Checker<'_> {
             HirExpr {
                 ty: obj_ty,
                 span,
-                kind: HirExprKind::StructLit {
-                    fields: hir_fields,
-                    init,
-                },
+                kind: HirExprKind::StructLit { fields: hir_fields },
             },
         )
     }
@@ -1348,6 +1630,7 @@ impl Checker<'_> {
             {
                 failed = true;
             }
+            let value_hir = self.convert_if_needed(got, expected.id, value_hir);
             hir_fields.push(HirField {
                 name: field.name.clone(),
                 value: value_hir,
@@ -1355,46 +1638,6 @@ impl Checker<'_> {
             });
         }
         (hir_fields, seen, failed)
-    }
-
-    /// Validates the `@init` hook shape for a struct literal's object.
-    fn check_init_hook(
-        &mut self,
-        obj_id: TypeId,
-        members: &HashMap<String, ResItem>,
-    ) -> Result<Option<HirInit>, ErrorGuaranteed> {
-        let Some(hook) = members.get("@init") else {
-            return Ok(None);
-        };
-        let ResKind::Hook { .. } = &hook.kind else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E022", "`@init` must be a hook".to_owned()).label(
-                    hook.span,
-                    true,
-                    "declared here".to_owned(),
-                ),
-            ));
-        };
-        let Some(sig) = self.func_sig(hook.id) else {
-            lilac_error::bug!(hook.span, "missing signature for `@init` hook");
-        };
-        let shaped = sig.params.len() == 1
-            && sig.params[0].is_ref
-            && sig.params[0].id == obj_id
-            && sig.returns.is_empty();
-        if !shaped {
-            return Err(self.diags.emit(
-                Diagnostic::error(
-                    "E022",
-                    "`@init` needs exactly one `ref Self` parameter and no returns",
-                )
-                .label(hook.span, true, "bad `@init` shape".to_owned()),
-            ));
-        }
-        Ok(Some(HirInit {
-            name: "@init".to_owned(),
-            def: hook.id,
-        }))
     }
 
     fn check_literal(&mut self, expr: &Expr, expected: Option<TypeId>) -> (TypeRef, HirExpr) {
@@ -1556,16 +1799,15 @@ impl Checker<'_> {
                         id: sig.returns[0].id,
                         is_ref: false,
                     };
+                    let name = self.hook_name(hook, def);
+                    let right_hir = self.convert_if_needed(right, left.id, right_hir);
                     return (
                         ty,
                         HirExpr {
                             ty,
                             span,
                             kind: HirExprKind::Call {
-                                callee: HirCallee::Hook {
-                                    name: hook.to_owned(),
-                                    def,
-                                },
+                                callee: HirCallee::Hook { name, def },
                                 args: vec![left_hir, right_hir],
                             },
                         },
@@ -1840,7 +2082,7 @@ impl Checker<'_> {
                 }
             }
             ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
-                return Err(deferred(self.diags, span, "constructors (`@init`)", "M2"));
+                return self.check_factory_call(fctx, name, item, args, span);
             }
             ResKind::Const | ResKind::Field => {
                 return Err(self.diags.emit(
@@ -1855,6 +2097,66 @@ impl Checker<'_> {
         let overloads = self.sigs.hooks.get(name).cloned().unwrap_or_default();
         let call = self.check_hook_call(fctx, name, &overloads, args, span)?;
         Ok(CallOutcome::Call(call))
+    }
+
+    /// Calls `Type(args)`: routes to the `@init` factory hook, which takes
+    /// plain parameters and returns exactly the constructed type (SPEC §8).
+    fn check_factory_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        name: &str,
+        item: &ResItem,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let ResKind::Object { members } = &item.kind else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
+                    .label(span, true, "constructors need `@init`".to_owned()),
+            ));
+        };
+        let Some(hook) = members.get("@init").cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
+                    .label(span, true, "define `@init` or use `= { ... }`".to_owned()),
+            ));
+        };
+        let ResKind::Hook { .. } = &hook.kind else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", "`@init` must be a hook".to_owned()).label(
+                    hook.span,
+                    true,
+                    "declared here".to_owned(),
+                ),
+            ));
+        };
+        let Some(sig) = self.func_sig(hook.id) else {
+            lilac_error::bug!(hook.span, "missing signature for `@init` hook");
+        };
+        let obj_ty = {
+            let id = self.types.intern_object(item.id);
+            self.types.set_object_name(item.id, name);
+            id
+        };
+        if sig.returns.len() != 1 || sig.returns[0].id != obj_ty {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", "`@init` must return exactly its object type").label(
+                    hook.span,
+                    true,
+                    "bad `@init` shape".to_owned(),
+                ),
+            ));
+        }
+        let hir_args = self.check_args(fctx, &sig, args, span)?;
+        let hook_name = self.hook_name(&format!("{name}.@init"), hook.id);
+        Ok(CallOutcome::Call(CheckedCall {
+            outs: sig.returns.clone(),
+            callee: HirCallee::Hook {
+                name: hook_name,
+                def: hook.id,
+            },
+            args: hir_args,
+        }))
     }
 
     /// Selects a hook overload (exact first, arity-filtered) and checks the
@@ -1883,10 +2185,11 @@ impl Checker<'_> {
         };
         if arity_ok.len() == 1 {
             let hir_args = self.check_args(fctx, &first, args, span)?;
+            let name = self.hook_name(name, first_def);
             return Ok(CheckedCall {
                 outs: first.returns.clone(),
                 callee: HirCallee::Hook {
-                    name: name.to_owned(),
+                    name,
                     def: first_def,
                 },
                 args: hir_args,
@@ -1916,14 +2219,36 @@ impl Checker<'_> {
             .cloned()
             .unwrap_or((first_def, first));
         let hir_args = self.check_args(fctx, &winner.1, args, span)?;
+        let name = self.hook_name(name, winner.0);
         Ok(CheckedCall {
             outs: winner.1.returns.clone(),
             callee: HirCallee::Hook {
-                name: name.to_owned(),
+                name,
                 def: winner.0,
             },
             args: hir_args,
         })
+    }
+
+    /// Mangled LIR name for a hook overload: the qualified hook name plus
+    /// its signature (`@add:bit32:bit32`, `Parent.@init:ref_Object`).
+    /// Overloads that collide here were already rejected as `E020` dupes.
+    fn hook_name(&self, qual: &str, def: DefId) -> String {
+        let Some(sig) = self.func_sig(def) else {
+            lilac_error::bug!(Span::dummy(), "missing signature for hook name");
+        };
+        let mut name = qual.to_owned();
+        for param in sig.params.iter().chain(sig.returns.iter()) {
+            name.push(':');
+            name.push_str(
+                &self
+                    .types
+                    .display_ref(*param)
+                    .replace('@', "")
+                    .replace(' ', "_"),
+            );
+        }
+        name
     }
 
     /// Expands a call to an `=>` function by substituting the checked
@@ -2027,10 +2352,15 @@ impl Checker<'_> {
                 let Some(sig) = self.func_sig(member.id) else {
                     lilac_error::bug!(member.span, "missing signature for member hook");
                 };
+                let qual = match find_parent_name(self.module, member.id) {
+                    Some(parent) => format!("{parent}.{field}"),
+                    None => field.to_owned(),
+                };
+                let name = self.hook_name(&qual, member.id);
                 (
                     sig,
                     HirCallee::Hook {
-                        name: field.to_owned(),
+                        name,
                         def: member.id,
                     },
                 )
@@ -2101,18 +2431,24 @@ impl Checker<'_> {
                 ),
             ));
         }
-        let self_ty = TypeRef {
-            id: recv.ty.id,
-            is_ref: true,
-        };
+        // Ref receivers already hold the address: pass them directly instead
+        // of wrapping another `ref` (which would double-indirect).
         let mut hir_args = Vec::with_capacity(args.len() + 1);
-        hir_args.push(HirExpr {
-            ty: self_ty,
-            span: recv.hir.span,
-            kind: HirExprKind::RefOf {
-                value: Box::new(recv.hir),
-            },
-        });
+        if recv.ty.is_ref {
+            hir_args.push(recv.hir);
+        } else {
+            let self_ty = TypeRef {
+                id: recv.ty.id,
+                is_ref: true,
+            };
+            hir_args.push(HirExpr {
+                ty: self_ty,
+                span: recv.hir.span,
+                kind: HirExprKind::RefOf {
+                    value: Box::new(recv.hir),
+                },
+            });
+        }
         let mut failed = false;
         for (arg, param) in args.iter().zip(sig.params.iter().skip(1)) {
             if let Ok(hir) = self.check_arg(fctx, arg, *param, span) {
@@ -2179,11 +2515,12 @@ impl Checker<'_> {
                 let Some(sig) = self.func_sig(member.id) else {
                     lilac_error::bug!(member.span, "missing signature for static hook");
                 };
+                let name = self.hook_name(&format!("{type_name}.{field}"), member.id);
                 let hir_args = self.check_args(fctx, &sig, args, span)?;
                 Ok(CallOutcome::Call(CheckedCall {
                     outs: sig.returns.clone(),
                     callee: HirCallee::Hook {
-                        name: field.to_owned(),
+                        name,
                         def: member.id,
                     },
                     args: hir_args,
@@ -2226,7 +2563,7 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         self.expect_type(got, param.id, span, arg.span())?;
-        Ok(hir)
+        Ok(self.convert_if_needed(got, param.id, hir))
     }
 
     fn check_args(
@@ -2444,6 +2781,7 @@ impl Checker<'_> {
                     span,
                     kind: HirExprKind::CompileError {
                         msg: msg.clone(),
+                        msg_span: args[0].span(),
                         call_span: span,
                     },
                 };
@@ -2679,7 +3017,7 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         self.expect_type(got, want_id, arg.span(), arg.span())?;
-        Ok(hir)
+        Ok(self.convert_if_needed(got, want_id, hir))
     }
 
     fn ident_type(
@@ -3126,19 +3464,21 @@ impl Checker<'_> {
             span,
         );
         let saved = fctx.locals.insert(cap.name.clone(), declared);
+        let capture_ident = HirExpr {
+            ty: outs[pos],
+            span: cap.span,
+            kind: HirExprKind::Ident {
+                name: hidden_names[pos].clone(),
+                def: DefId::ERROR,
+            },
+        };
+        let capture_value = self.convert_if_needed(outs[pos], declared.id, capture_ident);
         push_stmt(
             fctx,
             HirStmt::Let {
                 name: cap.name.clone(),
                 ty: declared,
-                value: HirExpr {
-                    ty: outs[pos],
-                    span: cap.span,
-                    kind: HirExprKind::Ident {
-                        name: hidden_names[pos].clone(),
-                        def: DefId::ERROR,
-                    },
-                },
+                value: capture_value,
                 span: cap.span,
             },
             cap.span,
@@ -3459,6 +3799,7 @@ impl Checker<'_> {
             if !is_poison(got) {
                 let _ = self.expect_type(got, payload_ty.id, args[0].span(), args[0].span());
             }
+            let value_hir = self.convert_if_needed(got, payload_ty.id, value_hir);
             Ok(CallOutcome::Inline(
                 HirExpr {
                     ty,
@@ -3562,6 +3903,10 @@ impl Checker<'_> {
             );
             return poison();
         }
+        let _ = self.expect_type(then_ty, result_ty, span, then.span());
+        let _ = self.expect_type(els_ty, result_ty, span, els.span());
+        let then_hir = self.convert_if_needed(then_ty, result_ty, then_hir);
+        let els_hir = self.convert_if_needed(els_ty, result_ty, els_hir);
         let mut then_stmts = then_pre;
         then_stmts.push(assign_temp(temp, result_ty, then_hir));
         let mut els_stmts = els_pre;
@@ -3668,6 +4013,12 @@ impl Checker<'_> {
             None => {}
         }
         let mut body_stmts = arm_pre;
+        let arm_hir = if let Some(want) = expected {
+            let _ = self.expect_type(arm_ty, want, arm.span, arm.span);
+            self.convert_if_needed(arm_ty, want, arm_hir)
+        } else {
+            arm_hir
+        };
         body_stmts.push(assign_temp(
             temp,
             assign_ty.unwrap_or(TypeId::ERROR),
@@ -3730,6 +4081,12 @@ impl Checker<'_> {
         let (els_ty, els_hir, els_pre) = self.check_nested(fctx, els, els_expected);
         let Ok(result_ty) = self.match_result_ty(expected, first_ty, els_ty, failed, span) else {
             return poison();
+        };
+        let els_hir = if let Some(want) = expected {
+            let _ = self.expect_type(els_ty, want, span, els.span());
+            self.convert_if_needed(els_ty, want, els_hir)
+        } else {
+            els_hir
         };
         let mut els_stmts = els_pre;
         els_stmts.push(HirStmt::Assign {
@@ -4186,9 +4543,46 @@ mod tests {
     }
 
     #[test]
-    fn init_hook_called() {
-        let src = "Object: object {\n    member: @bit8\n    @init: function (instance: ref Object) nothing {\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n";
-        let (hir, diags) = check_hir_src(src);
+    fn factory_call_checks() {
+        // `Type(args)` routes to the `@init` factory hook (SPEC §8 RAII).
+        let diags = check_src(
+            "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object {\n            value = value\n        }\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn factory_missing_init_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    value: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn factory_self_param_is_e022() {
+        // Factories take plain parameters (Zig rejects `self` on `@init`).
+        let diags = check_src(
+            "Object: object {\n    value: @bit8\n    @init: function (self) result: Object {\n        result = Object {\n            value = 0x1\n        }\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn factory_wrong_return_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: @bit8 {\n        result = value\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn structlit_with_init_ignores_hook() {
+        // Struct literals initialize fields directly; `@init` only serves
+        // `Type(params)` factory calls.
+        let (hir, diags) = check_hir_src(
+            "Object: object {\n    member: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object {\n            member = value\n        }\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
+        );
         assert!(!diags.has_errors(), "{diags:?}");
         let main = hir
             .funcs
@@ -4198,10 +4592,43 @@ mod tests {
         let HirStmt::Let { value, .. } = &main.body.stmts[0] else {
             panic!("expected let, got {:?}", main.body.stmts[0]);
         };
-        let HirExprKind::StructLit { init, .. } = &value.kind else {
-            panic!("expected struct literal, got {:?}", value.kind);
+        assert!(
+            matches!(value.kind, lilac_hir::HirExprKind::StructLit { .. }),
+            "expected plain struct literal, got {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn on_drop_bad_shape_is_e022() {
+        let diags = check_src(
+            "Object: object {\n    member: @bit8\n    @on_drop: function (member: @bit8) nothing {\n    }\n}\nmain: function () nothing {\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn conversion_wraps_call() {
+        // A conversion mismatch becomes an explicit `@conversion` call in HIR.
+        let (hir, diags) = check_hir_src(
+            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[1] else {
+            panic!("expected let, got {:?}", main.body.stmts[1]);
         };
-        assert!(init.is_some(), "expected @init call, got {init:?}");
+        let lilac_hir::HirExprKind::Call { callee, .. } = &value.kind else {
+            panic!("expected conversion call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirCallee::Hook { name, .. } = callee else {
+            panic!("expected hook call, got {callee:?}");
+        };
+        assert!(name.contains("@conversion"), "{name}");
     }
 
     #[test]
@@ -4257,11 +4684,59 @@ mod tests {
     }
 
     #[test]
-    fn match_byte_arms_check() {
-        let diags = check_src(
-            "main: function () nothing {\n    match 0x0 {\n        0x0 => {\n        }\n        0x1 => {\n        }\n    }\n}\n",
+    fn loop_if_checks() {
+        let diags =
+            check_src("main: function () nothing {\n    loop if 0x0 {\n    } else {\n    }\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn if_value_branch_converts() {
+        // Branch values convert toward the expected type like `let` values.
+        let (hir, diags) = check_hir_src(
+            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 a else 0x0\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::If { then, .. } = &main.body.stmts[1] else {
+            panic!("expected join, got {:?}", main.body.stmts[1]);
+        };
+        let HirStmt::Assign { value, .. } = &then.stmts[0] else {
+            panic!("expected join assign, got {:?}", then.stmts[0]);
+        };
+        let lilac_hir::HirExprKind::Call { callee, .. } = &value.kind else {
+            panic!("expected conversion call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirCallee::Hook { name, .. } = callee else {
+            panic!("expected hook call, got {callee:?}");
+        };
+        assert!(name.contains("@conversion"), "{name}");
+    }
+
+    #[test]
+    fn if_value_branch_mismatch_is_e043() {
+        let diags = check_src(
+            "main: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 a else 0x0\n}\n",
+        );
+        assert!(has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn match_value_branch_converts() {
+        let (hir, diags) = check_hir_src(
+            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    variable: @bit8 = match 0x0 {\n        0x1 => a\n    } else 0x3\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        assert_eq!(main.body.stmts.len(), 3);
     }
 
     #[test]
@@ -4348,13 +4823,6 @@ mod tests {
     #[test]
     fn loop_break_checks() {
         let diags = check_src("main: function () nothing {\n    loop {\n        break\n    }\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-    }
-
-    #[test]
-    fn loop_if_checks() {
-        let diags =
-            check_src("main: function () nothing {\n    loop if 0x0 {\n    } else {\n    }\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
     }
 }

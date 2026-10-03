@@ -8,6 +8,13 @@ lilac-span = { path = "../lilac-span" }
 lilac-error = { path = "../lilac-error" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-ir = { path = "../lilac-ir" }
+lilac-resolve = { path = "../lilac-resolve" }
+lilac-ty = { path = "../lilac-ty" }
+
+[dev-dependencies]
+lilac-lex = { path = "../lilac-lex" }
+lilac-parse = { path = "../lilac-parse" }
+lilac-typeck = { path = "../lilac-typeck" }
 
 [lints]
 workspace = true

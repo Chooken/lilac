@@ -368,7 +368,10 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
             ResKind::Hook { .. } => {}
             _ => collect_func(&item.name, resolved, parent, ctx),
         },
-        ItemKind::Object { members, .. } => {
+        ItemKind::Object {
+            members,
+            generic_params,
+        } => {
             let ResKind::Object {
                 members: resolved_members,
             } = &resolved.kind
@@ -389,12 +392,89 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
                     }
                 }
             }
+            if generic_params.is_empty() {
+                for member in members {
+                    if let Some(resolved_member) = resolved_members.get(&member.name) {
+                        validate_raii_hook(member, resolved_member, &item.name, resolved.id, ctx);
+                    }
+                }
+            }
         }
         ItemKind::Enum { .. }
         | ItemKind::Union { .. }
         | ItemKind::Using { .. }
         | ItemKind::Const { .. }
         | ItemKind::Field { .. } => {}
+    }
+}
+
+/// Validates `@init`/`@on_drop` member-hook shapes at declaration (SPEC §8
+/// RAII): factories take plain parameters and return their object, drops
+/// take exactly one `ref Self` and return nothing. Generic parents skip
+/// validation (M4 owns generics).
+fn validate_raii_hook(
+    member: &Item,
+    resolved_member: &ResItem,
+    parent_name: &str,
+    parent_def: DefId,
+    ctx: &mut SigCtx,
+) {
+    if member.name != "@init" && member.name != "@on_drop" {
+        return;
+    }
+    let ResKind::Hook { generic: false, .. } = &resolved_member.kind else {
+        return;
+    };
+    let ItemKind::Func(decl) = &member.kind else {
+        return;
+    };
+    let Some(sig) = ctx.sigs.hooks.get(&member.name).and_then(|overloads| {
+        overloads
+            .iter()
+            .find(|(id, _)| *id == resolved_member.id)
+            .map(|(_, sig)| sig.clone())
+    }) else {
+        return;
+    };
+    if member.name == "@init" {
+        for param in &decl.params {
+            if param.ty.name == "self" {
+                ctx.diags.emit(
+                    Diagnostic::error("E022", "`@init` can't have `self` as a parameter").label(
+                        param.span,
+                        true,
+                        "factories take plain parameters".to_owned(),
+                    ),
+                );
+            }
+        }
+        let parent_id = ctx.types.intern_object(parent_def);
+        ctx.types.set_object_name(parent_def, parent_name);
+        if !(sig.returns.len() == 1 && sig.returns[0].id == parent_id && !sig.returns[0].is_ref) {
+            ctx.diags.emit(
+                Diagnostic::error("E022", "`@init` must return exactly its object type").label(
+                    member.span,
+                    true,
+                    "bad `@init` shape".to_owned(),
+                ),
+            );
+        }
+    } else if member.name == "@on_drop" {
+        let parent_id = ctx.types.intern_object(parent_def);
+        ctx.types.set_object_name(parent_def, parent_name);
+        let shaped = sig.params.len() == 1
+            && sig.params[0].is_ref
+            && sig.params[0].id == parent_id
+            && sig.returns.is_empty();
+        if !shaped {
+            ctx.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    "`@on_drop` needs exactly one `ref Self` parameter and no returns",
+                )
+                .label(member.span, true, "bad `@on_drop` shape".to_owned()),
+            );
+        }
     }
 }
 

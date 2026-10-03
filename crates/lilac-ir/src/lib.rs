@@ -224,6 +224,56 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
+    /// `copy value -> %o.name  // idx i` (field store).
+    StoreField {
+        /// Value operand.
+        value: LirOperand,
+        /// Object place (without sigil).
+        obj: String,
+        /// Field name.
+        name: String,
+        /// Field index (also rendered as a comment).
+        idx: u32,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `copy value -> ref %p` (store through a reference place).
+    Store {
+        /// Value operand.
+        src: LirOperand,
+        /// Reference place holding the address (without sigil).
+        dst: String,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = trunc|extend.zero &s` (width conversion).
+    Convert {
+        /// Conversion operator.
+        op: ConvertOp,
+        /// Source register (without sigil).
+        src: String,
+        /// Destination register (without sigil).
+        dst: String,
+        /// Result type.
+        ty: String,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = field.addr %o .name  // idx i` (field address).
+    FieldAddr {
+        /// Object place (without sigil).
+        obj: String,
+        /// Field name.
+        name: String,
+        /// Field index (also rendered as a comment).
+        idx: u32,
+        /// Destination register (without sigil).
+        dst: String,
+        /// Pointer type (`ref #t`).
+        ty: String,
+        /// Instruction span.
+        span: Span,
+    },
     /// `alloca #t %x : zeroed` (every place starts zeroed).
     Alloca {
         /// Place type.
@@ -263,6 +313,15 @@ pub enum LirInst {
         /// Call-site span.
         call_span: Span,
     },
+}
+
+/// Width-conversion operators.
+#[derive(Clone, Debug)]
+pub enum ConvertOp {
+    /// `trunc` (narrowing).
+    Trunc,
+    /// `extend.zero` (zero-extension).
+    ExtendZero,
 }
 
 /// A block terminator (exactly one per block).
@@ -421,17 +480,27 @@ fn print_inst(inst: &LirInst) -> String {
         LirInst::Call {
             func, ins, outs, ..
         } => {
-            let ins = ins
-                .iter()
-                .map(|place| format!("%{place}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let outs = outs
-                .iter()
-                .map(|place| format!("%{place}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("call {} (in {ins}) (out {outs})", print_callee(func))
+            let ins = if ins.is_empty() {
+                "(in)".to_owned()
+            } else {
+                let places = ins
+                    .iter()
+                    .map(|place| format!("%{place}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(in {places})")
+            };
+            let outs = if outs.is_empty() {
+                "(out)".to_owned()
+            } else {
+                let places = outs
+                    .iter()
+                    .map(|place| format!("%{place}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(out {places})")
+            };
+            format!("call {} {ins} {outs}", print_callee(func))
         }
         LirInst::Field {
             obj,
@@ -441,6 +510,36 @@ fn print_inst(inst: &LirInst) -> String {
             ty,
             ..
         } => format!("&{dst}: {ty} = field %{obj} .{name}  // idx {idx}"),
+        LirInst::StoreField {
+            value,
+            obj,
+            name,
+            idx,
+            ..
+        } => format!(
+            "copy {} -> %{obj}.{name}  // idx {idx}",
+            print_operand(value)
+        ),
+        LirInst::Store { src, dst, .. } => {
+            format!("copy {} -> ref %{dst}", print_operand(src))
+        }
+        LirInst::Convert {
+            op, src, dst, ty, ..
+        } => {
+            let op = match op {
+                ConvertOp::Trunc => "trunc",
+                ConvertOp::ExtendZero => "extend.zero",
+            };
+            format!("&{dst}: {ty} = {op} &{src}")
+        }
+        LirInst::FieldAddr {
+            obj,
+            name,
+            idx,
+            dst,
+            ty,
+            ..
+        } => format!("&{dst}: {ty} = field.addr %{obj} .{name}  // idx {idx}"),
         LirInst::Alloca { ty, place, .. } => format!("alloca {ty} %{place} : zeroed"),
         LirInst::Drop { place, .. } => format!("drop %{place}"),
         LirInst::Arith {
@@ -656,14 +755,7 @@ impl Verifier<'_> {
                 span,
             } => {
                 self.check_call_target(func, callee, ins.len(), outs.len(), *span, regs);
-                for place in ins.iter().chain(outs.iter()) {
-                    if !places.contains_key(place.as_str()) {
-                        self.error(format!("call through undeclared place `%{place}`"), *span);
-                    }
-                }
-                for place in outs {
-                    assigned.insert(place.as_str());
-                }
+                self.track_call_places(places, assigned, ins, outs, *span);
             }
             LirInst::Field {
                 obj,
@@ -713,6 +805,120 @@ impl Verifier<'_> {
             LirInst::CompileError { call_span, .. } => {
                 lilac_error::bug!(*call_span, "unfolded `@compile_error` reached verify");
             }
+            LirInst::StoreField { .. }
+            | LirInst::Store { .. }
+            | LirInst::Convert { .. }
+            | LirInst::FieldAddr { .. } => {
+                self.verify_store_ops(func, inst, places, regs);
+            }
+        }
+    }
+
+    /// Verifies stores and conversions (field stores, deref stores,
+    /// width conversions, field addresses).
+    fn verify_store_ops<'a>(
+        &mut self,
+        func: &LirFunc,
+        inst: &'a LirInst,
+        places: &HashMap<&str, &str>,
+        regs: &mut HashMap<&'a str, RegDef>,
+    ) {
+        match inst {
+            LirInst::StoreField {
+                value,
+                obj,
+                name,
+                idx,
+                span,
+            } => {
+                self.check_operand(value, regs, places, *span, func);
+                self.check_field_ref(obj, name, *idx, *span, places);
+            }
+            LirInst::Store { src, dst, span } => {
+                self.check_operand(src, regs, places, *span, func);
+                match places.get(dst.as_str()).copied() {
+                    Some(ty) if ty.starts_with("ref ") => {}
+                    _ => {
+                        self.error(format!("store through non-reference place `%{dst}`"), *span);
+                    }
+                }
+            }
+            LirInst::Convert {
+                src, dst, ty, span, ..
+            } => {
+                if !regs.contains_key(src.as_str()) {
+                    self.error(format!("use of undefined register `&{src}`"), *span);
+                }
+                self.check_type(ty, *span);
+                self.define_reg(regs, dst, false, *span, func);
+            }
+            LirInst::FieldAddr {
+                obj,
+                name,
+                idx,
+                dst,
+                ty,
+                span,
+            } => {
+                self.check_field_ref(obj, name, *idx, *span, places);
+                self.check_type(ty, *span);
+                self.define_reg(regs, dst, false, *span, func);
+            }
+            _ => {
+                lilac_error::bug!(Span::dummy(), "non-store instruction in store verifier");
+            }
+        }
+    }
+
+    /// Tracks call places (declared) and marks outputs assigned.
+    fn track_call_places<'a>(
+        &mut self,
+        places: &HashMap<&str, &str>,
+        assigned: &mut HashSet<&'a str>,
+        ins: &'a [String],
+        outs: &'a [String],
+        span: Span,
+    ) {
+        for place in ins.iter().chain(outs.iter()) {
+            if !places.contains_key(place.as_str()) {
+                self.error(format!("call through undeclared place `%{place}`"), span);
+            }
+        }
+        for place in outs {
+            assigned.insert(place.as_str());
+        }
+    }
+
+    /// Checks a field reference against its owner's layout (name and index).
+    fn check_field_ref(
+        &mut self,
+        obj: &str,
+        name: &str,
+        idx: u32,
+        span: Span,
+        places: &HashMap<&str, &str>,
+    ) {
+        let owner_ty = places.get(obj).copied().unwrap_or("#unknown");
+        let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
+        let Some(layout) = self.module.layouts.get(owner_ty) else {
+            self.error(
+                format!("field of `{obj}` with unknown layout `{owner_ty}`"),
+                span,
+            );
+            return;
+        };
+        let Some((field_name, _)) = layout.get(idx as usize) else {
+            self.error(
+                format!("field index `{idx}` out of bounds for `{owner_ty}`"),
+                span,
+            );
+            return;
+        };
+        if field_name != name {
+            self.error(
+                format!("field `.{name}` is not at index `{idx}` of `{owner_ty}`"),
+                span,
+            );
         }
     }
 
@@ -796,6 +1002,7 @@ impl Verifier<'_> {
 
     /// Checks a `field` against its owner's layout (name, index, and type).
     fn check_field_layout(&mut self, owner_ty: &str, name: &str, idx: u32, ty: &str, span: Span) {
+        let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
         let Some(layout) = self.module.layouts.get(owner_ty) else {
             self.error(format!("field with unknown layout `{owner_ty}`"), span);
             return;

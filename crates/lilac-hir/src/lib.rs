@@ -4,6 +4,8 @@
 //! with `out: Some(t)` end each branch by assigning the value temp; lowering
 //! turns them into labeled blocks mechanically.
 
+use std::collections::HashMap;
+
 use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::TypeRef;
@@ -13,6 +15,24 @@ use lilac_ty::TypeRef;
 pub struct HirProgram {
     /// Functions in source order.
     pub funcs: Vec<HirFunc>,
+    /// Module constants: name, identity, and checked value (inlined at use).
+    pub consts: Vec<HirConst>,
+    /// Type layouts: display name → `(member, payload)` in declaration
+    /// order (fields carry `Some`, payload-less variants `None`).
+    pub layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
+    /// Drop hooks: display name → mangled `@on_drop` callee.
+    pub drops: HashMap<String, String>,
+}
+
+/// One checked module constant (`name: Type = expr` or `=> expr`).
+#[derive(Clone, Debug)]
+pub struct HirConst {
+    /// Constant name.
+    pub name: String,
+    /// Stable identity.
+    pub def: DefId,
+    /// Checked value (inlined wherever the constant is used).
+    pub value: HirExpr,
 }
 
 /// One checked function body.
@@ -212,12 +232,10 @@ pub enum HirExprKind {
         /// Place expression.
         value: Box<HirExpr>,
     },
-    /// Checked struct literal (`@init` runs at lowering, in field order).
+    /// Checked struct literal (direct field init; never calls `@init`).
     StructLit {
         /// Checked fields in order.
         fields: Vec<HirField>,
-        /// `@init` hook to call with the constructed value, if declared.
-        init: Option<HirInit>,
     },
     /// Branch-join value temporary.
     Temp(TempId),
@@ -225,6 +243,8 @@ pub enum HirExprKind {
     CompileError {
         /// Error message.
         msg: String,
+        /// Message literal span.
+        msg_span: Span,
         /// Call-site span.
         call_span: Span,
     },
@@ -265,15 +285,6 @@ pub struct HirField {
     pub value: HirExpr,
     /// Whole-field span.
     pub span: Span,
-}
-
-/// An `@init` hook call appended to a struct literal.
-#[derive(Clone, Debug)]
-pub struct HirInit {
-    /// Hook name.
-    pub name: String,
-    /// Selected overload.
-    pub def: DefId,
 }
 
 /// One checked match arm.

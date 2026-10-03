@@ -102,7 +102,12 @@ dependencies = [
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
+ "lilac-lex",
+ "lilac-parse",
+ "lilac-resolve",
  "lilac-span",
+ "lilac-ty",
+ "lilac-typeck",
 ]
 
 [[package]]
