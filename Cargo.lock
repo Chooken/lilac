@@ -83,6 +83,7 @@ dependencies = [
 name = "lilac-ir"
 version = "0.2.0"
 dependencies = [
+ "lilac-error",
  "lilac-span",
 ]
 
