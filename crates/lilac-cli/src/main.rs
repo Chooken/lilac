@@ -5,7 +5,7 @@ use lilac_ir::LirModule;
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose]\n  lilac emit-ir <file> [--check] [--target=<triple>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change]\n  lilac emit-ir <file> [--check] [--target=<triple>]"
 }
 
 fn main() -> ExitCode {
@@ -39,7 +39,9 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
     let mut file: Option<String> = None;
     let mut check_only = false;
     let mut session = Session::new();
-    for arg in args {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
         if let Some(format) = arg.strip_prefix("--error-format=") {
             match format {
                 "human" => session.opts.error_format = ErrorFormat::Human,
@@ -53,6 +55,21 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             triple.clone_into(&mut session.target.triple);
         } else if *arg == "--verbose" {
             session.opts.verbose = true;
+        } else if *arg == "--allow" {
+            index += 1;
+            if args.get(index).map(String::as_str) == Some("operator-type-change") {
+                session.warn_on_operator_type_change = false;
+            } else {
+                eprintln!("unknown --allow value; want `--allow operator-type-change`");
+                return Err(ExitCode::from(2));
+            }
+        } else if let Some(allowed) = arg.strip_prefix("--allow=") {
+            if allowed == "operator-type-change" {
+                session.warn_on_operator_type_change = false;
+            } else {
+                eprintln!("unknown --allow={allowed}");
+                return Err(ExitCode::from(2));
+            }
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
         } else if arg.starts_with("--") {
@@ -64,6 +81,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             eprintln!("expected one file\n{}", usage());
             return Err(ExitCode::from(2));
         }
+        index += 1;
     }
     let Some(file) = file else {
         eprintln!("missing <file>\n{}", usage());

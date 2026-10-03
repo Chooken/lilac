@@ -137,7 +137,7 @@ mod tests {
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
         let mut types = Types::new();
-        let sigs = collect_sigs(&module, &program, &mut types, &mut diags);
+        let sigs = collect_sigs(&module, &program, &mut types, &mut diags, true);
         check_bodies(&program, &module, &sigs, &mut types, &mut diags);
         diags
     }
@@ -160,7 +160,7 @@ mod tests {
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
         let mut types = Types::new();
-        let sigs = collect_sigs(&module, &program, &mut types, &mut diags);
+        let sigs = collect_sigs(&module, &program, &mut types, &mut diags, true);
         sigs.conversions.len()
     }
 

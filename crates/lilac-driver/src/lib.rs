@@ -61,7 +61,6 @@ pub struct Opts {
     /// Output format.
     pub error_format: ErrorFormat,
 }
-
 /// Compilation session: source map + diagnostics + targets + options.
 ///
 /// Threaded explicitly through every pass (no globals, unlike the old Zig
@@ -78,13 +77,18 @@ pub struct Session {
     pub target: Target,
     /// Flags.
     pub opts: Opts,
+    /// Warns `W020` on operator shape changes (silenced by `--allow`).
+    pub warn_on_operator_type_change: bool,
 }
 
 impl Session {
     /// Default session (host == `x86_64` target, human errors).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            warn_on_operator_type_change: true,
+            ..Self::default()
+        }
     }
 
     /// Lexes, parses, resolves, and typechecks one source file (M2+ inserts
@@ -99,7 +103,13 @@ impl Session {
         let program = parser.parse_program(&mut self.diags)?;
         let module = lilac_resolve::collect(&program, &mut self.diags);
         let mut types = lilac_ty::Types::new();
-        let sigs = lilac_typeck::collect_sigs(&module, &program, &mut types, &mut self.diags);
+        let sigs = lilac_typeck::collect_sigs(
+            &module,
+            &program,
+            &mut types,
+            &mut self.diags,
+            self.warn_on_operator_type_change,
+        );
         lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
@@ -163,5 +173,26 @@ mod tests {
             "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
+    }
+
+    const MATRIX_ADD: &str = "Matrix: object {\n    value: @bit32\n}\n@add: function (lhs: Matrix, rhs: Matrix) result: @bit32 {\n    result = 0x0\n}\nmain: function () nothing {\n}\n";
+
+    #[test]
+    fn warnings_do_not_fail_check() {
+        let mut session = Session::new();
+        let result = session.compile_source("warn.lilac", MATRIX_ADD);
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        let rendered = session.render_diagnostics();
+        assert!(rendered.contains("warning[W020]"), "{rendered}");
+        assert!(!rendered.contains("error["), "{rendered}");
+    }
+
+    #[test]
+    fn allow_flag_silences_w020() {
+        let mut session = Session::new();
+        session.warn_on_operator_type_change = false;
+        let result = session.compile_source("warn.lilac", MATRIX_ADD);
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        assert_eq!(session.render_diagnostics(), "");
     }
 }

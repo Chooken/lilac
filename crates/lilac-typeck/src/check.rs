@@ -3933,7 +3933,7 @@ mod tests {
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags);
+        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
         check_bodies(&program, &module, &sigs, &mut types, &mut diags);
         diags
     }
@@ -4180,7 +4180,7 @@ mod tests {
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags);
+        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
         let hir = check_bodies(&program, &module, &sigs, &mut types, &mut diags);
         (hir, diags)
     }
