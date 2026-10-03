@@ -162,6 +162,15 @@ pub enum HirExprKind {
         /// Tag name.
         name: String,
     },
+    /// Enum/union variant construction (`.Some(0x1)`).
+    Variant {
+        /// Owning enum/union definition.
+        def: DefId,
+        /// Variant name.
+        variant: String,
+        /// Payload value (`None` for payload-less variants).
+        payload: Option<Box<HirExpr>>,
+    },
     /// Number literal (source bytes; width comes from checking).
     Number {
         /// Source bytes.

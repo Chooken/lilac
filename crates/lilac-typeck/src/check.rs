@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use lilac_ast::{BinOp, Expr, Item, ItemKind, Program, Stmt, Type as AstType};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_hir::{
-    HirBlock, HirCallee, HirExpr, HirExprKind, HirField, HirFunc, HirInit, HirParam, HirProgram,
-    HirStmt,
+    HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirField, HirFunc, HirInit, HirParam,
+    HirPattern, HirProgram, HirStmt, TempId,
 };
 use lilac_resolve::{DefId, Module, ResItem, ResKind};
 use lilac_span::Span;
@@ -24,18 +24,30 @@ struct CheckedCall {
     args: Vec<HirExpr>,
 }
 
-/// A call either stays a call or vanishes into an inlined `=>` body.
+/// A call either stays a call, vanishes into an inlined `=>` body, or is a
+/// recorded `@compile_error` (folding decides its liveness).
 enum CallOutcome {
     /// Ordinary call (emitted as HIR).
     Call(CheckedCall),
     /// Substituted `=>` body with its type.
     Inline(HirExpr, TypeRef),
+    /// Recorded `@compile_error` (never E022, even in value position).
+    CompilerError(HirExpr),
 }
 
 /// A method-call receiver: checked type plus its HIR.
 struct Receiver {
     ty: TypeRef,
     hir: HirExpr,
+}
+
+/// A capture condition call: out-slot types, value HIR, call span, and
+/// callee definition for slot names.
+struct CapturedCall {
+    outs: Vec<TypeRef>,
+    value_hir: HirExpr,
+    call_span: Span,
+    callee_def: Option<DefId>,
 }
 
 /// A callee known to have an `=>` body, with everything needed to check it.
@@ -69,6 +81,7 @@ pub fn check_bodies(
         hir: Vec::new(),
         inline_bodies: HashMap::new(),
         in_progress: HashSet::new(),
+        next_temp: 0,
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
@@ -94,12 +107,32 @@ struct Checker<'a> {
     inline_bodies: HashMap<DefId, (Vec<String>, HirExpr)>,
     /// Functions currently being checked (rejects recursive `=>` calls).
     in_progress: HashSet<DefId>,
+    /// Fresh value temporaries for desugared control flow.
+    next_temp: u32,
 }
 
 struct FuncCtx {
     locals: HashMap<String, TypeRef>,
     slots: Vec<(String, TypeRef, Span)>,
     assigned: HashSet<String>,
+    /// `loop` nesting depth (`break` outside any loop is `E022`).
+    loop_depth: u32,
+    /// HIR statement buffers; `blocks[0]` is the function body. Nested
+    /// blocks (match arms, desugared branches) push their own buffer so
+    /// expression preludes land in the block that runs them.
+    blocks: Vec<Vec<HirStmt>>,
+}
+
+impl FuncCtx {
+    fn new() -> Self {
+        Self {
+            locals: HashMap::new(),
+            slots: Vec::new(),
+            assigned: HashSet::new(),
+            loop_depth: 0,
+            blocks: vec![Vec::new()],
+        }
+    }
 }
 
 fn is_poison(ty: TypeRef) -> bool {
@@ -117,6 +150,59 @@ fn poison_expr(span: Span) -> HirExpr {
         span,
         kind: HirExprKind::Poison,
     }
+}
+
+/// Pushes one statement into the innermost open block.
+fn push_stmt(fctx: &mut FuncCtx, stmt: HirStmt, span: Span) {
+    match fctx.blocks.last_mut() {
+        Some(top) => top.push(stmt),
+        None => lilac_error::bug!(span, "statement with no enclosing block"),
+    }
+}
+
+/// Well-formed empty `if` for error paths (never lowered).
+fn empty_if(span: Span) -> HirStmt {
+    HirStmt::If {
+        cond: poison_expr(span),
+        then: HirBlock {
+            stmts: Vec::new(),
+            span,
+        },
+        els: HirBlock {
+            stmts: Vec::new(),
+            span,
+        },
+        out: None,
+        span,
+    }
+}
+
+/// Builds `temp = value` for desugared branch-joins.
+fn assign_temp(temp: TempId, result_ty: TypeId, value: HirExpr) -> HirStmt {
+    let span = value.span;
+    HirStmt::Assign {
+        target: HirExpr {
+            ty: TypeRef {
+                id: result_ty,
+                is_ref: false,
+            },
+            span,
+            kind: HirExprKind::Temp(temp),
+        },
+        value,
+        span,
+    }
+}
+
+/// Generates a fresh hidden local, distinct from every visible one.
+fn fresh_local(fctx: &mut FuncCtx, base: &str) -> String {
+    let mut name = format!("__{base}");
+    let mut counter = 0;
+    while fctx.locals.contains_key(&name) {
+        counter += 1;
+        name = format!("__{base}{counter}");
+    }
+    name
 }
 
 /// An AST item plus its resolution and enclosing object (if any).
@@ -192,6 +278,17 @@ fn subst_ident(expr: &HirExpr, map: &HashMap<String, HirExpr>) -> HirExpr {
                 })
                 .collect(),
             init: init.clone(),
+        },
+        HirExprKind::Variant {
+            def,
+            variant,
+            payload,
+        } => HirExprKind::Variant {
+            def: *def,
+            variant: variant.clone(),
+            payload: payload
+                .as_ref()
+                .map(|value| Box::new(subst_ident(value, map))),
         },
         HirExprKind::Tag { .. }
         | HirExprKind::Number { .. }
@@ -308,6 +405,57 @@ impl Checker<'_> {
         }
     }
 
+    /// Generates a fresh branch-join temporary.
+    fn fresh_temp(&mut self) -> TempId {
+        let temp = TempId(self.next_temp);
+        self.next_temp += 1;
+        temp
+    }
+
+    /// Checks a `{ ... }` block into its own buffer (nested expression
+    /// preludes land inside it, not in the enclosing block).
+    fn check_block(&mut self, fctx: &mut FuncCtx, block: &lilac_ast::Block) -> HirBlock {
+        fctx.blocks.push(Vec::new());
+        for stmt in &block.stmts {
+            self.check_stmt(fctx, stmt);
+        }
+        let Some(stmts) = fctx.blocks.pop() else {
+            lilac_error::bug!(block.span, "block stack underflow");
+        };
+        HirBlock {
+            stmts,
+            span: block.span,
+        }
+    }
+
+    /// Checks an expression whose value is placed inside a constructed
+    /// block (branch bodies, join assignments): returns its prelude with it.
+    fn check_nested(
+        &mut self,
+        fctx: &mut FuncCtx,
+        expr: &Expr,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr, Vec<HirStmt>) {
+        fctx.blocks.push(Vec::new());
+        let (ty, hir) = self.check_expr(fctx, expr, expected);
+        let Some(pre) = fctx.blocks.pop() else {
+            lilac_error::bug!(expr.span(), "block stack underflow");
+        };
+        (ty, hir, pre)
+    }
+
+    /// Checks a test position (`if`/`loop` conditions, `match` scrutinees,
+    /// `and`/`or` operands): bare numbers default to `@bit8`, any other
+    /// `@bitN` tests non-zero.
+    fn check_test(&mut self, fctx: &mut FuncCtx, expr: &Expr) -> (TypeRef, HirExpr) {
+        if matches!(expr, Expr::Number(..)) {
+            let bit8 = self.builtin_ty("@bit8");
+            self.check_expr(fctx, expr, Some(bit8))
+        } else {
+            self.check_expr(fctx, expr, None)
+        }
+    }
+
     fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
         match &item.kind {
             ItemKind::Func(decl) => self.check_func(item, resolved, decl, parent),
@@ -332,11 +480,7 @@ impl Checker<'_> {
                     return;
                 }
                 let declared = resolve_type(ty, self.types, self.module, self.diags);
-                let mut fctx = FuncCtx {
-                    locals: HashMap::new(),
-                    slots: Vec::new(),
-                    assigned: HashSet::new(),
-                };
+                let mut fctx = FuncCtx::new();
                 let (got, _) = self.check_expr(&mut fctx, value, Some(declared.id));
                 let _ = self.expect_type(got, declared.id, ty.span, value.span());
             }
@@ -369,11 +513,7 @@ impl Checker<'_> {
         sig: &FuncSig,
         parent: Option<(String, DefId)>,
     ) -> (FuncCtx, Vec<HirParam>, Vec<HirParam>) {
-        let mut fctx = FuncCtx {
-            locals: HashMap::new(),
-            slots: Vec::new(),
-            assigned: HashSet::new(),
-        };
+        let mut fctx = FuncCtx::new();
         if let Some((parent_name, parent_def)) = parent {
             let id = self.types.intern_object(parent_def);
             self.types.set_object_name(parent_def, parent_name.as_str());
@@ -448,19 +588,13 @@ impl Checker<'_> {
                 return;
             }
             Some(lilac_ast::FuncBody::Block(block)) => {
-                let mut stmts = Vec::with_capacity(block.stmts.len());
-                for stmt in &block.stmts {
-                    stmts.push(self.check_stmt(&mut fctx, stmt));
-                }
+                let body = self.check_block(&mut fctx, block);
                 self.hir.push(HirFunc {
                     def: resolved.id,
                     name: item.name.clone(),
                     params,
                     returns,
-                    body: HirBlock {
-                        stmts,
-                        span: block.span,
-                    },
+                    body,
                     span: item.span,
                 });
             }
@@ -606,7 +740,7 @@ impl Checker<'_> {
         None
     }
 
-    fn check_stmt(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) -> HirStmt {
+    fn check_stmt(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) {
         match stmt {
             Stmt::Let {
                 name,
@@ -625,12 +759,16 @@ impl Checker<'_> {
                     let _ = self.expect_type(got, declared.id, ty.span, value.span());
                 }
                 fctx.locals.insert(name.clone(), declared);
-                HirStmt::Let {
-                    name: name.clone(),
-                    ty: declared,
-                    value: hir,
-                    span: *span,
-                }
+                push_stmt(
+                    fctx,
+                    HirStmt::Let {
+                        name: name.clone(),
+                        ty: declared,
+                        value: hir,
+                        span: *span,
+                    },
+                    *span,
+                );
             }
             Stmt::MultiLet {
                 bindings,
@@ -643,73 +781,67 @@ impl Checker<'_> {
                 span,
             } => self.check_assign(fctx, target, value, *span),
             Stmt::ExprStmt(expr) => self.check_expr_stmt(fctx, expr),
-            Stmt::Return { span } => HirStmt::Return { span: *span },
-            Stmt::Break { span } => HirStmt::Break { span: *span },
-            Stmt::If { span, .. } => {
-                let _ = deferred(self.diags, *span, "`if` statements", "M2");
-                HirStmt::If {
-                    cond: poison_expr(*span),
-                    then: HirBlock {
-                        stmts: Vec::new(),
-                        span: *span,
-                    },
-                    els: HirBlock {
-                        stmts: Vec::new(),
-                        span: *span,
-                    },
-                    out: None,
-                    span: *span,
+            Stmt::Return { span } => push_stmt(fctx, HirStmt::Return { span: *span }, *span),
+            Stmt::Break { span } => {
+                if fctx.loop_depth == 0 {
+                    self.diags
+                        .emit(Diagnostic::error("E022", "break outside `loop`").label(
+                            *span,
+                            true,
+                            "break needs an enclosing loop".to_owned(),
+                        ));
                 }
+                push_stmt(fctx, HirStmt::Break { span: *span }, *span);
             }
-            Stmt::Loop { span, .. } => {
-                let _ = deferred(self.diags, *span, "`loop` statements", "M2");
-                HirStmt::Loop {
-                    body: HirBlock {
-                        stmts: Vec::new(),
-                        span: *span,
-                    },
-                    span: *span,
-                }
-            }
-            Stmt::Match { span, .. } => {
-                let _ = deferred(self.diags, *span, "`match` statements", "M2");
-                HirStmt::Match {
-                    scrutinee: poison_expr(*span),
-                    arms: Vec::new(),
-                    els: HirBlock {
-                        stmts: Vec::new(),
-                        span: *span,
-                    },
-                    out: None,
-                    span: *span,
-                }
-            }
+            Stmt::If {
+                cond,
+                capture,
+                then,
+                els,
+                span,
+            } => self.check_if(fctx, cond, capture.as_ref(), then, els.as_ref(), *span),
+            Stmt::Loop {
+                cond,
+                body,
+                els,
+                span,
+            } => self.check_loop(fctx, cond.as_ref(), body, els.as_ref(), *span),
+            Stmt::Match {
+                scrutinee,
+                arms,
+                els,
+                span,
+            } => self.check_match(fctx, scrutinee, arms, els.as_ref(), *span),
         }
     }
 
     /// Checks `target = value` (marks return slots assigned).
-    fn check_assign(
-        &mut self,
-        fctx: &mut FuncCtx,
-        target: &Expr,
-        value: &Expr,
-        span: Span,
-    ) -> HirStmt {
+    fn check_assign(&mut self, fctx: &mut FuncCtx, target: &Expr, value: &Expr, span: Span) {
         let Ok((target_ty, target_hir)) = self.place_type(fctx, target) else {
             let _ = self.check_expr(fctx, value, None);
-            return HirStmt::Assign {
-                target: poison_expr(target.span()),
-                value: poison_expr(value.span()),
+            push_stmt(
+                fctx,
+                HirStmt::Assign {
+                    target: poison_expr(target.span()),
+                    value: poison_expr(value.span()),
+                    span,
+                },
                 span,
-            };
+            );
+            return;
         };
         if is_poison(target_ty) {
             let (_, value_hir) = self.check_expr(fctx, value, None);
-            return HirStmt::Assign {
-                target: target_hir,
-                value: value_hir,
+            push_stmt(
+                fctx,
+                HirStmt::Assign {
+                    target: target_hir,
+                    value: value_hir,
+                    span,
+                },
                 span,
-            };
+            );
+            return;
         }
         let base = target_ty.id;
         let (got, value_hir) = self.check_expr(fctx, value, Some(base));
@@ -721,15 +853,19 @@ impl Checker<'_> {
                 fctx.assigned.insert(name.clone());
             }
         }
-        HirStmt::Assign {
-            target: target_hir,
-            value: value_hir,
+        push_stmt(
+            fctx,
+            HirStmt::Assign {
+                target: target_hir,
+                value: value_hir,
+                span,
+            },
             span,
-        }
+        );
     }
 
     /// Checks an effect statement (a call must return nothing).
-    fn check_expr_stmt(&mut self, fctx: &mut FuncCtx, expr: &Expr) -> HirStmt {
+    fn check_expr_stmt(&mut self, fctx: &mut FuncCtx, expr: &Expr) {
         if let Expr::Call {
             callee,
             generic_args,
@@ -756,17 +892,22 @@ impl Checker<'_> {
                             ),
                         );
                     }
-                    return HirStmt::ExprStmt(HirExpr {
-                        ty: TypeRef {
-                            id: TypeId::ERROR,
-                            is_ref: false,
-                        },
-                        span: *call_span,
-                        kind: HirExprKind::Call {
-                            callee: call.callee,
-                            args: call.args,
-                        },
-                    });
+                    push_stmt(
+                        fctx,
+                        HirStmt::ExprStmt(HirExpr {
+                            ty: TypeRef {
+                                id: TypeId::ERROR,
+                                is_ref: false,
+                            },
+                            span: *call_span,
+                            kind: HirExprKind::Call {
+                                callee: call.callee,
+                                args: call.args,
+                            },
+                        }),
+                        *call_span,
+                    );
+                    return;
                 }
                 Ok(CallOutcome::Inline(..)) => {
                     self.diags.emit(
@@ -781,12 +922,21 @@ impl Checker<'_> {
                         ),
                     );
                 }
+                Ok(CallOutcome::CompilerError(hir)) => {
+                    push_stmt(fctx, HirStmt::ExprStmt(hir), *call_span);
+                    return;
+                }
                 Err(_) => {}
             }
-            return HirStmt::ExprStmt(poison_expr(expr.span()));
+            push_stmt(
+                fctx,
+                HirStmt::ExprStmt(poison_expr(expr.span())),
+                expr.span(),
+            );
+            return;
         }
         let (_, hir) = self.check_expr(fctx, expr, None);
-        HirStmt::ExprStmt(hir)
+        push_stmt(fctx, HirStmt::ExprStmt(hir), expr.span());
     }
 
     /// Checks `ref place` (double references stay `E010`).
@@ -882,12 +1032,7 @@ impl Checker<'_> {
         bindings: &[lilac_ast::LetBinding],
         value: &Expr,
         span: Span,
-    ) -> HirStmt {
-        let poison_stmt = || HirStmt::MultiLet {
-            bindings: Vec::new(),
-            value: poison_expr(span),
-            span,
-        };
+    ) {
         let mut hir_bindings = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let ty = resolve_type(&binding.ty, self.types, self.module, self.diags);
@@ -897,6 +1042,17 @@ impl Checker<'_> {
                 span: binding.span,
             });
         }
+        let push_poison = |fctx: &mut FuncCtx| {
+            push_stmt(
+                fctx,
+                HirStmt::MultiLet {
+                    bindings: Vec::new(),
+                    value: poison_expr(span),
+                    span,
+                },
+                span,
+            );
+        };
         let Expr::Call {
             callee,
             generic_args,
@@ -914,7 +1070,8 @@ impl Checker<'_> {
                 )
                 .label(span, true, "not a call".to_owned()),
             );
-            return poison_stmt();
+            push_poison(fctx);
+            return;
         };
         let (outs, value_hir) =
             match self.check_call(fctx, callee, generic_args, args, *call_span, None) {
@@ -934,7 +1091,11 @@ impl Checker<'_> {
                     (outs, hir)
                 }
                 Ok(CallOutcome::Inline(hir, ty)) => (vec![ty], hir),
-                Err(_) => return poison_stmt(),
+                Ok(CallOutcome::CompilerError(_)) => (Vec::new(), poison_expr(*call_span)),
+                Err(_) => {
+                    push_poison(fctx);
+                    return;
+                }
             };
         if outs.len() != bindings.len() {
             self.diags.emit(
@@ -948,7 +1109,8 @@ impl Checker<'_> {
                 )
                 .label(*call_span, true, "arity mismatch here".to_owned()),
             );
-            return poison_stmt();
+            push_poison(fctx);
+            return;
         }
         for ((binding, expected), got) in bindings.iter().zip(hir_bindings.iter()).zip(outs.iter())
         {
@@ -957,11 +1119,15 @@ impl Checker<'_> {
             }
             fctx.locals.insert(binding.name.clone(), expected.ty);
         }
-        HirStmt::MultiLet {
-            bindings: hir_bindings,
-            value: value_hir,
+        push_stmt(
+            fctx,
+            HirStmt::MultiLet {
+                bindings: hir_bindings,
+                value: value_hir,
+                span,
+            },
             span,
-        }
+        );
     }
 
     fn check_expr(
@@ -1013,26 +1179,18 @@ impl Checker<'_> {
                 span,
             } => self.check_call_expr(fctx, callee, generic_args, args, *span, expected),
             Expr::BinOp { lhs, op, rhs, span } => self.check_binop_expr(fctx, lhs, *op, rhs, *span),
-            Expr::IfValue { span, .. } => {
-                deferred(self.diags, *span, "`if` values", "M2");
-                (
-                    TypeRef {
-                        id: TypeId::ERROR,
-                        is_ref: false,
-                    },
-                    poison_expr(*span),
-                )
-            }
-            Expr::MatchValue { span, .. } => {
-                deferred(self.diags, *span, "`match` values", "M2");
-                (
-                    TypeRef {
-                        id: TypeId::ERROR,
-                        is_ref: false,
-                    },
-                    poison_expr(*span),
-                )
-            }
+            Expr::IfValue {
+                cond,
+                then,
+                els,
+                span,
+            } => self.check_if_value(fctx, cond, then, els, *span, expected),
+            Expr::MatchValue {
+                scrutinee,
+                arms,
+                els,
+                span,
+            } => self.check_match_value(fctx, scrutinee, arms, els, *span, expected),
             Expr::StructLit {
                 ty_name,
                 fields,
@@ -1355,6 +1513,13 @@ impl Checker<'_> {
                 )
             }
             Ok(CallOutcome::Inline(hir, ty)) => (ty, hir),
+            Ok(CallOutcome::CompilerError(hir)) => {
+                let poison = TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                };
+                (poison, hir)
+            }
             Err(_) => poison,
         }
     }
@@ -1375,8 +1540,7 @@ impl Checker<'_> {
             poison_expr(span),
         );
         if matches!(op, BinOp::And | BinOp::Or) {
-            deferred(self.diags, span, "`and`/`or`", "M2");
-            return poison;
+            return self.check_logic_op(fctx, lhs, op, rhs, span);
         }
         if op != BinOp::EqEq {
             let Some(hook) = super::ops::binop_hook_name(op) else {
@@ -1614,6 +1778,9 @@ impl Checker<'_> {
                     hir: recv_hir,
                 };
                 self.check_member_call(fctx, field, recv, args, span, *member_span)
+            }
+            Expr::Tag(name, tag_span) => {
+                self.check_tag_call(fctx, name, args, span, expected, *tag_span)
             }
             _ => {
                 let _ = self.check_expr(fctx, callee, None);
@@ -2255,7 +2422,32 @@ impl Checker<'_> {
                 )
             }
             Intrinsic::CompileError => {
-                return Err(deferred(self.diags, span, "`@compile_error` folding", "M2"));
+                self.expect_arity(span, name, args, 1)?;
+                let Expr::Str(msg, _) = &args[0] else {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            "E010",
+                            "`@compile_error` needs a string literal message",
+                        )
+                        .label(
+                            args[0].span(),
+                            true,
+                            "message goes here".to_owned(),
+                        ),
+                    ));
+                };
+                let hir = HirExpr {
+                    ty: TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    span,
+                    kind: HirExprKind::CompileError {
+                        msg: msg.clone(),
+                        call_span: span,
+                    },
+                };
+                return Ok(CallOutcome::CompilerError(hir));
             }
         };
         Ok(CallOutcome::Call(CheckedCall {
@@ -2585,42 +2777,1136 @@ impl Checker<'_> {
                 is_ref: false,
             });
         }
-        let lilac_ty::TypeKind::Object(def) = self.types.kind(want) else {
+        let payload = self.check_tag_pattern(want, tag, span)?;
+        if payload.is_some() {
             return Err(self.diags.emit(
-                Diagnostic::error("E010", format!("tag `.{tag}` needs an enum type")).label(
-                    span,
-                    true,
-                    "expected a tag here".to_owned(),
-                ),
+                Diagnostic::error(
+                    "E022",
+                    format!("variant `.{tag}` needs a payload; write `.{tag}(...)`"),
+                )
+                .label(span, true, "payload missing here".to_owned()),
+            ));
+        }
+        Ok(TypeRef {
+            id: want,
+            is_ref: false,
+        })
+    }
+
+    /// Validates `.Tag` against an enum/union type: returns the variant's
+    /// payload type (`None` for payload-less variants).
+    fn check_tag_pattern(
+        &mut self,
+        scrut_ty: TypeId,
+        variant: &str,
+        span: Span,
+    ) -> Result<Option<TypeRef>, ErrorGuaranteed> {
+        let lilac_ty::TypeKind::Object(def) = self.types.kind(scrut_ty) else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!("tag `.{variant}` needs an enum or union type"),
+                )
+                .label(span, true, "expected a tag here".to_owned()),
             ));
         };
-        let found = self.find_by_def(*def);
-        match found {
-            Some(ResKind::Enum { variants }) => {
-                if variants.iter().any(|v| v.name == *tag) {
-                    Ok(TypeRef {
-                        id: want,
-                        is_ref: false,
-                    })
-                } else {
-                    Err(self.diags.emit(
-                        Diagnostic::error("E010", format!("no variant `.{tag}` here")).label(
+        let payload_ty =
+            match self.find_by_def(*def) {
+                Some(ResKind::Enum { variants }) => {
+                    let Some(found) = variants.iter().find(|v| v.name == variant) else {
+                        return Err(self.diags.emit(
+                            Diagnostic::error("E010", format!("no variant `.{variant}` here"))
+                                .label(span, true, "unknown tag for this enum".to_owned()),
+                        ));
+                    };
+                    found.payload.clone()
+                }
+                Some(ResKind::Union { members }) => {
+                    let Some(found) = members.iter().find(|m| m.name == variant) else {
+                        return Err(self.diags.emit(
+                            Diagnostic::error("E010", format!("no variant `.{variant}` here"))
+                                .label(span, true, "unknown tag for this union".to_owned()),
+                        ));
+                    };
+                    found.payload.clone()
+                }
+                _ => {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            "E010",
+                            format!("tag `.{variant}` needs an enum or union type"),
+                        )
+                        .label(
                             span,
                             true,
-                            "unknown tag for this enum".to_owned(),
+                            "expected a tag here".to_owned(),
                         ),
-                    ))
+                    ));
                 }
+            };
+        match payload_ty {
+            None => Ok(None),
+            Some(ty) => Ok(Some(resolve_type(&ty, self.types, self.module, self.diags))),
+        }
+    }
+    /// Checks a branch condition (`if`/`loop`): any `@bitN` tests non-zero.
+    fn check_cond(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: &Expr,
+        what: &str,
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let (cond_ty, cond_hir) = self.check_test(fctx, cond);
+        if !is_poison(cond_ty) && !is_bit(self.types, cond_ty.id) {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "`{what}` condition must be a bit container, found {}",
+                        self.types.display(cond_ty.id),
+                    ),
+                )
+                .label(span, true, "not a bit container".to_owned()),
+            );
+        }
+        (cond_ty, cond_hir)
+    }
+
+    /// Checks `if cond { } else { }`, with optional `-> capture` desugar.
+    fn check_if(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: &Expr,
+        capture: Option<&lilac_ast::Param>,
+        then: &lilac_ast::Block,
+        els: Option<&lilac_ast::Block>,
+        span: Span,
+    ) {
+        if let Some(cap) = capture {
+            self.check_if_capture(fctx, cond, cap, then, els, span);
+            return;
+        }
+        let (cond_ty, cond_hir) = self.check_test(fctx, cond);
+        if !is_poison(cond_ty) && !is_bit(self.types, cond_ty.id) {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "`if` condition must be a bit container, found {}",
+                        self.types.display(cond_ty.id),
+                    ),
+                )
+                .label(cond.span(), true, "not a bit container".to_owned()),
+            );
+        }
+        let then_hir = self.check_block(fctx, then);
+        let els_hir = els.map(|block| self.check_block(fctx, block));
+        let els_hir = els_hir.unwrap_or(HirBlock {
+            stmts: Vec::new(),
+            span,
+        });
+        push_stmt(
+            fctx,
+            HirStmt::If {
+                cond: cond_hir,
+                then: then_hir,
+                els: els_hir,
+                out: None,
+                span,
+            },
+            span,
+        );
+    }
+
+    /// Desugars `if CALL -> name: T { }` into a hidden multi-`let`, the
+    /// capture binding, and a plain `if` over the first out-slot.
+    fn check_if_capture(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: &Expr,
+        cap: &lilac_ast::Param,
+        then: &lilac_ast::Block,
+        els: Option<&lilac_ast::Block>,
+        span: Span,
+    ) {
+        let Some(call) = self.capture_call(fctx, cond, span) else {
+            return;
+        };
+        let outs = &call.outs;
+        if !is_poison(outs[0]) && !is_bit(self.types, outs[0].id) {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "`if` capture tests `{}`, needs a bit container",
+                        self.types.display(outs[0].id),
+                    ),
+                )
+                .label(call.call_span, true, "not a bit container".to_owned()),
+            );
+        }
+        let Some((cond_hir, hidden_names, saved)) = self.capture_bind(fctx, cap, call, span) else {
+            return;
+        };
+        let then_hir = self.check_block(fctx, then);
+        match saved {
+            Some(previous) => {
+                fctx.locals.insert(cap.name.clone(), previous);
             }
-            Some(ResKind::Union { .. }) => Err(deferred(self.diags, span, "union tags", "M2")),
-            _ => Err(self.diags.emit(
-                Diagnostic::error("E010", format!("tag `.{tag}` needs an enum type")).label(
+            None => {
+                fctx.locals.remove(&cap.name);
+            }
+        }
+        for name in &hidden_names {
+            fctx.locals.remove(name);
+        }
+        let els_hir = els.map(|block| self.check_block(fctx, block));
+        let els_hir = els_hir.unwrap_or(HirBlock {
+            stmts: Vec::new(),
+            span,
+        });
+        push_stmt(
+            fctx,
+            HirStmt::If {
+                cond: cond_hir,
+                then: then_hir,
+                els: els_hir,
+                out: None,
+                span,
+            },
+            span,
+        );
+    }
+
+    /// Checks the capture condition call: returns its out-slot types, value
+    /// HIR, call span, and callee definition (for slot names).
+    fn capture_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: &Expr,
+        span: Span,
+    ) -> Option<CapturedCall> {
+        let Expr::Call {
+            callee,
+            generic_args,
+            args,
+            span: call_span,
+        } = cond
+        else {
+            self.diags.emit(
+                Diagnostic::error("E022", "`if` capture needs a call condition").label(
                     span,
                     true,
-                    "expected a tag here".to_owned(),
+                    "write `if f() -> name: Type`".to_owned(),
                 ),
-            )),
+            );
+            push_stmt(fctx, empty_if(span), span);
+            return None;
+        };
+        let (outs, value_hir, callee_def) =
+            match self.check_call(fctx, callee, generic_args, args, *call_span, None) {
+                Ok(CallOutcome::Call(call)) => {
+                    let def = match &call.callee {
+                        HirCallee::Item(def) | HirCallee::Hook { def, .. } => Some(*def),
+                        HirCallee::Local { .. } | HirCallee::Intrinsic { .. } => None,
+                    };
+                    let hir = HirExpr {
+                        ty: call.outs.first().copied().unwrap_or(TypeRef {
+                            id: TypeId::ERROR,
+                            is_ref: false,
+                        }),
+                        span: *call_span,
+                        kind: HirExprKind::Call {
+                            callee: call.callee,
+                            args: call.args,
+                        },
+                    };
+                    (call.outs, hir, def)
+                }
+                Ok(CallOutcome::Inline(hir, ty)) => (vec![ty], hir, None),
+                Ok(CallOutcome::CompilerError(_)) | Err(_) => {
+                    self.diags.emit(
+                        Diagnostic::error("E022", "cannot capture from this call").label(
+                            *call_span,
+                            true,
+                            "capture needs a multi-return call".to_owned(),
+                        ),
+                    );
+                    push_stmt(fctx, empty_if(span), span);
+                    return None;
+                }
+            };
+        if outs.is_empty() {
+            self.diags.emit(
+                Diagnostic::error("E022", "cannot capture from a call with no returns").label(
+                    *call_span,
+                    true,
+                    "nothing to capture".to_owned(),
+                ),
+            );
+            push_stmt(fctx, empty_if(span), span);
+            return None;
         }
+        Some(CapturedCall {
+            outs,
+            value_hir,
+            call_span: *call_span,
+            callee_def,
+        })
+    }
+
+    /// Binds the capture: hidden multi-`let` for every out-slot plus the
+    /// named capture `let`. Returns the condition expression, hidden names,
+    /// and any shadowed local to restore.
+    fn capture_bind(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cap: &lilac_ast::Param,
+        call: CapturedCall,
+        span: Span,
+    ) -> Option<(HirExpr, Vec<String>, Option<TypeRef>)> {
+        let outs = call.outs;
+        let value_hir = call.value_hir;
+        let call_span = call.call_span;
+        let callee_def = call.callee_def;
+        if cap.name.is_empty() {
+            self.diags
+                .emit(Diagnostic::error("E022", "capture needs a name").label(
+                    cap.span,
+                    true,
+                    "write `-> name: Type`".to_owned(),
+                ));
+            push_stmt(fctx, empty_if(span), span);
+            return None;
+        }
+        let slot_names: Vec<String> = match callee_def
+            .and_then(|def| find_item(self.program, self.module, def))
+        {
+            Some((ast_item, _, _)) => match &ast_item.kind {
+                ItemKind::Func(decl) => decl.returns.iter().map(|slot| slot.name.clone()).collect(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let Some(pos) = slot_names.iter().position(|slot| slot == &cap.name) else {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!("no out-slot named `{}` to capture", cap.name),
+                )
+                .label(cap.span, true, "unknown slot".to_owned()),
+            );
+            push_stmt(fctx, empty_if(span), span);
+            return None;
+        };
+        let declared = resolve_type(&cap.ty, self.types, self.module, self.diags);
+        if !is_poison(outs[pos]) && !is_poison(declared) {
+            let _ = self.expect_type(outs[pos], declared.id, cap.span, call_span);
+        }
+        let mut hidden_names = Vec::with_capacity(outs.len());
+        let mut hidden = Vec::with_capacity(outs.len());
+        for (index, out_ty) in outs.iter().enumerate() {
+            let name = fresh_local(fctx, &format!("cap{index}"));
+            fctx.locals.insert(name.clone(), *out_ty);
+            hidden_names.push(name.clone());
+            hidden.push(HirParam {
+                name,
+                ty: *out_ty,
+                span: call_span,
+            });
+        }
+        push_stmt(
+            fctx,
+            HirStmt::MultiLet {
+                bindings: hidden,
+                value: value_hir,
+                span,
+            },
+            span,
+        );
+        let saved = fctx.locals.insert(cap.name.clone(), declared);
+        push_stmt(
+            fctx,
+            HirStmt::Let {
+                name: cap.name.clone(),
+                ty: declared,
+                value: HirExpr {
+                    ty: outs[pos],
+                    span: cap.span,
+                    kind: HirExprKind::Ident {
+                        name: hidden_names[pos].clone(),
+                        def: DefId::ERROR,
+                    },
+                },
+                span: cap.span,
+            },
+            cap.span,
+        );
+        let cond_hir = HirExpr {
+            ty: outs[0],
+            span: call_span,
+            kind: HirExprKind::Ident {
+                name: hidden_names[0].clone(),
+                def: DefId::ERROR,
+            },
+        };
+        Some((cond_hir, hidden_names, saved))
+    }
+    fn check_loop(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: Option<&Expr>,
+        body: &lilac_ast::Block,
+        els: Option<&lilac_ast::Block>,
+        span: Span,
+    ) {
+        fctx.loop_depth += 1;
+        let body_hir = self.check_block(fctx, body);
+        match cond {
+            None => {
+                push_stmt(
+                    fctx,
+                    HirStmt::Loop {
+                        body: body_hir,
+                        span,
+                    },
+                    span,
+                );
+                if let Some(els) = els {
+                    let els_hir = self.check_block(fctx, els);
+                    for stmt in els_hir.stmts {
+                        push_stmt(fctx, stmt, span);
+                    }
+                }
+            }
+            Some(cond) => {
+                let (_, cond_hir) = self.check_cond(fctx, cond, "loop", cond.span());
+                let els_hir = els.map(|block| self.check_block(fctx, block));
+                let mut els_stmts = els_hir.map_or(Vec::new(), |block| block.stmts);
+                els_stmts.push(HirStmt::Break { span });
+                push_stmt(
+                    fctx,
+                    HirStmt::Loop {
+                        body: HirBlock {
+                            stmts: vec![HirStmt::If {
+                                cond: cond_hir,
+                                then: body_hir,
+                                els: HirBlock {
+                                    stmts: els_stmts,
+                                    span,
+                                },
+                                out: None,
+                                span,
+                            }],
+                            span,
+                        },
+                        span,
+                    },
+                    span,
+                );
+            }
+        }
+        fctx.loop_depth -= 1;
+    }
+
+    /// Checks `match` statements (arms run blocks; no values produced).
+    fn check_match(
+        &mut self,
+        fctx: &mut FuncCtx,
+        scrutinee: &Expr,
+        arms: &[lilac_ast::MatchArm],
+        els: Option<&lilac_ast::Block>,
+        span: Span,
+    ) {
+        let (scrut_ty, scrut_hir) = self.check_test(fctx, scrutinee);
+        let mut hir_arms = Vec::with_capacity(arms.len());
+        for arm in arms {
+            hir_arms.push(self.check_match_arm(fctx, arm, scrut_ty.id));
+        }
+        let els_hir = els.map(|block| self.check_block(fctx, block));
+        let els_hir = els_hir.unwrap_or(HirBlock {
+            stmts: Vec::new(),
+            span,
+        });
+        push_stmt(
+            fctx,
+            HirStmt::Match {
+                scrutinee: scrut_hir,
+                arms: hir_arms,
+                els: els_hir,
+                out: None,
+                span,
+            },
+            span,
+        );
+    }
+
+    /// Checks one statement-match arm (captures bind payloads in the body).
+    fn check_match_arm(
+        &mut self,
+        fctx: &mut FuncCtx,
+        arm: &lilac_ast::MatchArm,
+        scrut_ty: TypeId,
+    ) -> HirArm {
+        let (pattern, capture) = self.check_arm_pattern(arm, scrut_ty);
+        let saved = capture.as_ref().map(|param| {
+            (
+                param.name.clone(),
+                fctx.locals.insert(param.name.clone(), param.ty),
+            )
+        });
+        let body = self.check_arm_body(fctx, &arm.body, arm.span);
+        match saved {
+            Some((name, Some(previous))) => {
+                fctx.locals.insert(name, previous);
+            }
+            Some((name, None)) => {
+                fctx.locals.remove(&name);
+            }
+            None => {}
+        }
+        HirArm {
+            pattern,
+            capture,
+            body,
+        }
+    }
+
+    /// Validates one arm pattern plus its capture; errors yield a poison
+    /// pattern so the body still checks for more diagnostics.
+    fn check_arm_pattern(
+        &mut self,
+        arm: &lilac_ast::MatchArm,
+        scrut_ty: TypeId,
+    ) -> (HirPattern, Option<HirParam>) {
+        let poison_tag = |name: &str| {
+            (
+                HirPattern::Tag {
+                    name: name.to_owned(),
+                },
+                None,
+            )
+        };
+        match &arm.pattern {
+            lilac_ast::MatchPattern::Tag(name) => {
+                let Ok(payload) = self.check_tag_pattern(scrut_ty, name, arm.span) else {
+                    return poison_tag(name);
+                };
+                let Some(cap) = &arm.capture else {
+                    return (HirPattern::Tag { name: name.clone() }, None);
+                };
+                let declared = resolve_type(&cap.ty, self.types, self.module, self.diags);
+                if let Some(payload_ty) = payload {
+                    if !is_poison(payload_ty)
+                        && !is_poison(declared)
+                        && payload_ty.id != declared.id
+                    {
+                        self.diags.emit(
+                            Diagnostic::error(
+                                "E010",
+                                format!(
+                                    "mismatched types: capture holds {}, declared {}",
+                                    self.types.display(payload_ty.id),
+                                    self.types.display(declared.id),
+                                ),
+                            )
+                            .label(
+                                cap.span,
+                                true,
+                                "capture type here".to_owned(),
+                            ),
+                        );
+                    }
+                } else {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E022",
+                            format!("variant `.{name}` carries no payload to capture"),
+                        )
+                        .label(
+                            cap.span,
+                            true,
+                            "payload-less variant".to_owned(),
+                        ),
+                    );
+                }
+                (
+                    HirPattern::Tag { name: name.clone() },
+                    Some(HirParam {
+                        name: cap.name.clone(),
+                        ty: declared,
+                        span: cap.span,
+                    }),
+                )
+            }
+            lilac_ast::MatchPattern::Const(bytes) => {
+                if scrut_ty != TypeId::ERROR && !is_bit(self.types, scrut_ty) {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E010",
+                            format!(
+                                "byte patterns need a bit container scrutinee, found {}",
+                                self.types.display(scrut_ty),
+                            ),
+                        )
+                        .label(
+                            arm.span,
+                            true,
+                            "not a bit container".to_owned(),
+                        ),
+                    );
+                }
+                if arm.capture.is_some() {
+                    self.diags.emit(
+                        Diagnostic::error("E022", "byte patterns capture nothing").label(
+                            arm.span,
+                            true,
+                            "captures need `.Tag` patterns".to_owned(),
+                        ),
+                    );
+                }
+                (
+                    HirPattern::Const {
+                        bytes: bytes.clone(),
+                    },
+                    None,
+                )
+            }
+        }
+    }
+
+    /// Checks a match-arm body (block or single `=>` statement).
+    fn check_arm_body(
+        &mut self,
+        fctx: &mut FuncCtx,
+        body: &lilac_ast::MatchArmBody,
+        span: Span,
+    ) -> HirBlock {
+        fctx.blocks.push(Vec::new());
+        match body {
+            lilac_ast::MatchArmBody::Block(block) => {
+                for stmt in &block.stmts {
+                    self.check_stmt(fctx, stmt);
+                }
+            }
+            lilac_ast::MatchArmBody::Inline(stmt) => self.check_stmt(fctx, stmt),
+        }
+        let Some(stmts) = fctx.blocks.pop() else {
+            lilac_error::bug!(span, "block stack underflow");
+        };
+        HirBlock { stmts, span }
+    }
+
+    /// Checks `.Some(0x1)` constructions: the expected type names the
+    /// enum/union, payloads check against the variant's payload type.
+    /// Construction desugars to a value (no call emitted).
+    fn check_tag_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+        tag_span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let poison = HirExpr {
+            ty: TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            span,
+            kind: HirExprKind::Poison,
+        };
+        let Some(want) = expected else {
+            self.diags.emit(
+                Diagnostic::error("E024", "tag construction needs an expected type").label(
+                    tag_span,
+                    true,
+                    "annotate the binding".to_owned(),
+                ),
+            );
+            return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
+        };
+        if want == TypeId::ERROR {
+            return Err(ErrorGuaranteed::new());
+        }
+        let Ok(payload) = self.check_tag_pattern(want, name, tag_span) else {
+            return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
+        };
+        let def = match self.types.kind(want) {
+            lilac_ty::TypeKind::Object(def) => *def,
+            _ => {
+                return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
+            }
+        };
+        let ty = TypeRef {
+            id: want,
+            is_ref: false,
+        };
+        if let Some(payload_ty) = payload {
+            if args.len() != 1 {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E022",
+                        format!("variant `.{name}` needs exactly one payload value"),
+                    )
+                    .label(span, true, "arity mismatch here".to_owned()),
+                );
+                return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
+            }
+            let (got, value_hir) = self.check_expr(fctx, &args[0], Some(payload_ty.id));
+            if !is_poison(got) {
+                let _ = self.expect_type(got, payload_ty.id, args[0].span(), args[0].span());
+            }
+            Ok(CallOutcome::Inline(
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Variant {
+                        def,
+                        variant: name.to_owned(),
+                        payload: Some(Box::new(value_hir)),
+                    },
+                },
+                ty,
+            ))
+        } else {
+            if !args.is_empty() {
+                self.diags.emit(
+                    Diagnostic::error("E022", format!("variant `.{name}` takes no payload")).label(
+                        span,
+                        true,
+                        "arity mismatch here".to_owned(),
+                    ),
+                );
+                return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
+            }
+            Ok(CallOutcome::Inline(
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Variant {
+                        def,
+                        variant: name.to_owned(),
+                        payload: None,
+                    },
+                },
+                ty,
+            ))
+        }
+    }
+
+    /// Desugars `if` values to a branch-join over a temp.
+    fn check_if_value(
+        &mut self,
+        fctx: &mut FuncCtx,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        let temp = self.fresh_temp();
+        let poison = || {
+            (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                HirExpr {
+                    ty: TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    span,
+                    kind: HirExprKind::Temp(temp),
+                },
+            )
+        };
+        let (_, cond_hir) = self.check_cond(fctx, cond, "if", cond.span());
+        let (then_ty, then_hir, then_pre) = self.check_nested(fctx, then, expected);
+        let els_expected = expected.or(if is_poison(then_ty) {
+            None
+        } else {
+            Some(then_ty.id)
+        });
+        let (els_ty, els_hir, els_pre) = self.check_nested(fctx, els, els_expected);
+        let result_ty = match expected {
+            Some(want) => want,
+            None => {
+                if !is_poison(then_ty) {
+                    then_ty.id
+                } else if !is_poison(els_ty) {
+                    els_ty.id
+                } else {
+                    return poison();
+                }
+            }
+        };
+        if expected.is_none()
+            && !is_poison(then_ty)
+            && !is_poison(els_ty)
+            && then_ty.id != els_ty.id
+        {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: `if` branches produce {} and {}",
+                        self.types.display(then_ty.id),
+                        self.types.display(els_ty.id),
+                    ),
+                )
+                .label(span, true, "branches disagree here".to_owned()),
+            );
+            return poison();
+        }
+        let mut then_stmts = then_pre;
+        then_stmts.push(assign_temp(temp, result_ty, then_hir));
+        let mut els_stmts = els_pre;
+        els_stmts.push(assign_temp(temp, result_ty, els_hir));
+        push_stmt(
+            fctx,
+            HirStmt::If {
+                cond: cond_hir,
+                then: HirBlock {
+                    stmts: then_stmts,
+                    span: then.span(),
+                },
+                els: HirBlock {
+                    stmts: els_stmts,
+                    span: els.span(),
+                },
+                out: Some(temp),
+                span,
+            },
+            span,
+        );
+        (
+            TypeRef {
+                id: result_ty,
+                is_ref: false,
+            },
+            HirExpr {
+                ty: TypeRef {
+                    id: result_ty,
+                    is_ref: false,
+                },
+                span,
+                kind: HirExprKind::Temp(temp),
+            },
+        )
+    }
+
+    /// Checks one match-value arm: validates the pattern, binds the capture,
+    /// and joins the arm value into the temp. Returns the arm plus its value
+    /// type and whether it failed.
+    fn check_value_arm(
+        &mut self,
+        fctx: &mut FuncCtx,
+        arm: &lilac_ast::MatchArm,
+        scrut_ty: TypeId,
+        expected: Option<TypeId>,
+        temp: TempId,
+        assign_ty: Option<TypeId>,
+    ) -> (HirArm, TypeRef, bool) {
+        let (pattern, capture) = self.check_arm_pattern(arm, scrut_ty);
+        let saved = capture.as_ref().map(|param| {
+            (
+                param.name.clone(),
+                fctx.locals.insert(param.name.clone(), param.ty),
+            )
+        });
+        let mut shape_failed = false;
+        let (arm_ty, arm_hir, arm_pre) = if let lilac_ast::MatchArmBody::Inline(stmt) = &arm.body {
+            if let Stmt::ExprStmt(value) = stmt.as_ref() {
+                self.check_nested(fctx, value, expected)
+            } else {
+                self.diags.emit(
+                    Diagnostic::error("E010", "match arm does not produce a value").label(
+                        arm.span,
+                        true,
+                        "no value here".to_owned(),
+                    ),
+                );
+                shape_failed = true;
+                (
+                    TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    poison_expr(arm.span),
+                    Vec::new(),
+                )
+            }
+        } else {
+            self.diags.emit(
+                Diagnostic::error("E010", "match arm block cannot produce a value").label(
+                    arm.span,
+                    true,
+                    "no value here".to_owned(),
+                ),
+            );
+            shape_failed = true;
+            (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                poison_expr(arm.span),
+                Vec::new(),
+            )
+        };
+        match saved {
+            Some((name, Some(previous))) => {
+                fctx.locals.insert(name, previous);
+            }
+            Some((name, None)) => {
+                fctx.locals.remove(&name);
+            }
+            None => {}
+        }
+        let mut body_stmts = arm_pre;
+        body_stmts.push(assign_temp(
+            temp,
+            assign_ty.unwrap_or(TypeId::ERROR),
+            arm_hir,
+        ));
+        let hir_arm = HirArm {
+            pattern,
+            capture,
+            body: HirBlock {
+                stmts: body_stmts,
+                span: arm.span,
+            },
+        };
+        (hir_arm, arm_ty, shape_failed)
+    }
+
+    /// Desugars `match` values to tag-test chains over a temp.
+    fn check_match_value(
+        &mut self,
+        fctx: &mut FuncCtx,
+        scrutinee: &Expr,
+        arms: &[lilac_ast::MatchArm],
+        els: &Expr,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        let temp = self.fresh_temp();
+        let poison = || {
+            (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                HirExpr {
+                    ty: TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    span,
+                    kind: HirExprKind::Temp(temp),
+                },
+            )
+        };
+        let (scrut_ty, scrut_hir) = self.check_test(fctx, scrutinee);
+        let mut hir_arms = Vec::with_capacity(arms.len());
+        let mut first_ty = None;
+        let mut failed = false;
+        for arm in arms {
+            let (hir_arm, arm_ty, arm_failed) =
+                self.check_value_arm(fctx, arm, scrut_ty.id, expected, temp, first_ty);
+            if arm_failed {
+                failed = true;
+            }
+            if first_ty.is_none() && !is_poison(arm_ty) {
+                first_ty = Some(arm_ty.id);
+            }
+            hir_arms.push(hir_arm);
+        }
+        let els_expected = expected.or(first_ty);
+        let (els_ty, els_hir, els_pre) = self.check_nested(fctx, els, els_expected);
+        let Ok(result_ty) = self.match_result_ty(expected, first_ty, els_ty, failed, span) else {
+            return poison();
+        };
+        let mut els_stmts = els_pre;
+        els_stmts.push(HirStmt::Assign {
+            target: HirExpr {
+                ty: TypeRef {
+                    id: result_ty,
+                    is_ref: false,
+                },
+                span: els.span(),
+                kind: HirExprKind::Temp(temp),
+            },
+            value: els_hir,
+            span: els.span(),
+        });
+        push_stmt(
+            fctx,
+            HirStmt::Match {
+                scrutinee: scrut_hir,
+                arms: hir_arms,
+                els: HirBlock {
+                    stmts: els_stmts,
+                    span: els.span(),
+                },
+                out: Some(temp),
+                span,
+            },
+            span,
+        );
+        (
+            TypeRef {
+                id: result_ty,
+                is_ref: false,
+            },
+            HirExpr {
+                ty: TypeRef {
+                    id: result_ty,
+                    is_ref: false,
+                },
+                span,
+                kind: HirExprKind::Temp(temp),
+            },
+        )
+    }
+
+    /// Resolves a match-value's result type: the expected type wins, else the
+    /// first clean arm type, else the `else` type. Disagreeing arms stay `E010`.
+    fn match_result_ty(
+        &mut self,
+        expected: Option<TypeId>,
+        first_ty: Option<TypeId>,
+        els_ty: TypeRef,
+        failed: bool,
+        span: Span,
+    ) -> Result<TypeId, ErrorGuaranteed> {
+        let result_ty = match expected {
+            Some(want) => want,
+            None => {
+                if let Some(first) = first_ty {
+                    first
+                } else if !is_poison(els_ty) {
+                    els_ty.id
+                } else {
+                    return Err(ErrorGuaranteed::new());
+                }
+            }
+        };
+        if expected.is_none() && !failed {
+            for ty in [first_ty, Some(els_ty.id)].into_iter().flatten() {
+                if ty != result_ty {
+                    self.diags.emit(
+                        Diagnostic::error("E010", "match arms produce different types").label(
+                            span,
+                            true,
+                            "arms disagree here".to_owned(),
+                        ),
+                    );
+                    return Err(ErrorGuaranteed::new());
+                }
+            }
+        }
+        Ok(result_ty)
+    }
+
+    /// Desugars `and`/`or` to short-circuit joins over a temp (never calls,
+    /// never conversions: both sides must be `@bit8`).
+    fn check_logic_op(
+        &mut self,
+        fctx: &mut FuncCtx,
+        lhs: &Expr,
+        op: BinOp,
+        rhs: &Expr,
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let bit8 = self.builtin_ty("@bit8");
+        let value_ty = TypeRef {
+            id: bit8,
+            is_ref: false,
+        };
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        let (left_ty, left_hir) = self.check_test(fctx, lhs);
+        if !is_poison(left_ty) && left_ty.id != bit8 {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: `{}` needs `@bit8`, found {}",
+                        if op == BinOp::And { "and" } else { "or" },
+                        self.types.display(left_ty.id),
+                    ),
+                )
+                .label(lhs.span(), true, "not `@bit8`".to_owned()),
+            );
+            return poison;
+        }
+        let (right_ty, right_hir, right_pre) = self.check_nested(fctx, rhs, Some(bit8));
+        if !is_poison(right_ty) && right_ty.id != bit8 {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: `{}` needs `@bit8`, found {}",
+                        if op == BinOp::And { "and" } else { "or" },
+                        self.types.display(right_ty.id),
+                    ),
+                )
+                .label(rhs.span(), true, "not `@bit8`".to_owned()),
+            );
+            return poison;
+        }
+        let temp = self.fresh_temp();
+        let bit = |bytes: &str| HirExpr {
+            ty: value_ty,
+            span,
+            kind: HirExprKind::Number {
+                bytes: bytes.to_owned(),
+            },
+        };
+        let (then_stmts, els_stmts) = if op == BinOp::And {
+            let mut then_stmts = right_pre;
+            then_stmts.push(assign_temp(temp, bit8, right_hir));
+            (then_stmts, vec![assign_temp(temp, bit8, bit("0x0"))])
+        } else {
+            let mut els_stmts = right_pre;
+            els_stmts.push(assign_temp(temp, bit8, right_hir));
+            (vec![assign_temp(temp, bit8, bit("0x1"))], els_stmts)
+        };
+        push_stmt(
+            fctx,
+            HirStmt::If {
+                cond: left_hir,
+                then: HirBlock {
+                    stmts: then_stmts,
+                    span: lhs.span(),
+                },
+                els: HirBlock {
+                    stmts: els_stmts,
+                    span: rhs.span(),
+                },
+                out: Some(temp),
+                span,
+            },
+            span,
+        );
+        (
+            value_ty,
+            HirExpr {
+                ty: value_ty,
+                span,
+                kind: HirExprKind::Temp(temp),
+            },
+        )
     }
 }
 
@@ -2746,10 +4032,11 @@ mod tests {
 
     #[test]
     fn union_tag_defers_with_e030() {
+        // Union tags validate in M2 (no longer deferred).
         let diags = check_src(
             "Maybe: union {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
         );
-        assert!(has_code(&diags, "E030"), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
@@ -2938,5 +4225,136 @@ mod tests {
         };
         assert_eq!(name, "@iadd");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn if_any_bit_width_ok() {
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit32 = 0x1\n    if x {\n    }\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn capture_binds_by_name() {
+        let diags = check_src(
+            "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    if get_multi() -> result: @bit32 {\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn unknown_capture_is_e022() {
+        let diags = check_src(
+            "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    if get_multi() -> nope: @bit32 {\n    }\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn stray_break_is_e022() {
+        let diags = check_src("main: function () nothing {\n    break\n}\n");
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn match_byte_arms_check() {
+        let diags = check_src(
+            "main: function () nothing {\n    match 0x0 {\n        0x0 => {\n        }\n        0x1 => {\n        }\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn match_tag_capture_payload() {
+        let diags = check_src(
+            "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None => return\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn match_capture_mismatch_is_e010() {
+        let diags = check_src(
+            "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit16 {\n        }\n        .None => return\n    }\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn capture_on_bare_tag_is_e022() {
+        let diags = check_src(
+            "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .None\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None -> x: @bit8 {\n        }\n    }\n}\n",
+        );
+        assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn match_value_unifies_branches() {
+        let diags = check_src(
+            "main: function () nothing {\n    variable: @bit32 = match 0x0 {\n        0x1 => 0x1\n    } else 0x3\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn and_short_circuits() {
+        let src = "main: function () nothing {\n    x: @bit8 = 0x0 and 0x1\n}\n";
+        let (hir, diags) = check_hir_src(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        assert_eq!(main.body.stmts.len(), 2);
+        let HirStmt::If { out, .. } = &main.body.stmts[0] else {
+            panic!("expected join, got {:?}", main.body.stmts[0]);
+        };
+        assert!(out.is_some());
+        let HirStmt::Let { value, .. } = &main.body.stmts[1] else {
+            panic!("expected let, got {:?}", main.body.stmts[1]);
+        };
+        assert!(
+            matches!(value.kind, lilac_hir::HirExprKind::Temp(_)),
+            "expected temp use, got {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn and_or_require_bit8() {
+        let diags = check_src(
+            "main: function () nothing {\n    y: @bit32 = 0x2\n    x: @bit8 = 0x1 and y\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn compile_error_recorded_silent() {
+        let diags = check_src(
+            "main: function () nothing {\n    if 0x1 {\n    } else {\n        @compile_error(\"dead\")\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn compile_error_value_position_silent() {
+        // Folding (Task 9) decides liveness; checking stays silent.
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit32 = @compile_error(\"boom\")\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn loop_break_checks() {
+        let diags = check_src("main: function () nothing {\n    loop {\n        break\n    }\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn loop_if_checks() {
+        let diags =
+            check_src("main: function () nothing {\n    loop if 0x0 {\n    } else {\n    }\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 }

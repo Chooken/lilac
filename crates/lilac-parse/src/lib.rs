@@ -1287,7 +1287,10 @@ impl Parser {
         let token = self.bump();
         match token.kind {
             TokenKind::Ident => {
-                if self.peek().kind == TokenKind::LBrace {
+                // Struct literals name a type (`Object { ... }`); a lowercase
+                // identifier before `{` (as in `if x {`) is an ordinary name.
+                let is_type_name = token.text.chars().next().is_some_and(char::is_uppercase);
+                if is_type_name && self.peek().kind == TokenKind::LBrace {
                     self.parse_struct_lit(diags, token)
                 } else {
                     Ok(Expr::Ident(token.text, token.span))
@@ -1783,5 +1786,29 @@ mod tests {
         assert_eq!(variants.len(), 2);
         assert!(variants[0].payload.is_some());
         assert!(variants[1].payload.is_none());
+    }
+
+    #[test]
+    fn lowercase_ident_brace_is_not_structlit() {
+        // `if x {` and `match number {` must not parse the trailing block
+        // as a struct literal (struct literals name a `Type`).
+        let src = "main: function () nothing {\n    x: @bit8 = 0x1\n    if x {\n    }\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        assert!(
+            matches!(block.stmts[1], Stmt::If { .. }),
+            "expected if statement, got {:?}",
+            block.stmts[1]
+        );
     }
 }
