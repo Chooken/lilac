@@ -6,6 +6,7 @@
 
 use lilac_ast::Program;
 use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
+use lilac_ir::LirModule;
 use lilac_lex::Lexer;
 use lilac_parse::Parser;
 use lilac_span::SourceMap;
@@ -91,9 +92,27 @@ impl Session {
         }
     }
 
-    /// Lexes, parses, resolves, and typechecks one source file (M2+ inserts
-    /// lowering after checking here).
+    /// Runs the full pipeline but returns the AST (`check` entry point;
+    /// diagnostics render separately).
     pub fn compile_source(&mut self, name: &str, src: &str) -> Result<Program, ErrorGuaranteed> {
+        let (program, _) = self.run_pipeline(name, src)?;
+        Ok(program)
+    }
+
+    /// Runs the full pipeline through IR verification, returning the folded
+    /// module (`check` runs this too but prints diagnostics only).
+    pub fn compile_lir(&mut self, name: &str, src: &str) -> Result<LirModule, ErrorGuaranteed> {
+        let (_, module) = self.run_pipeline(name, src)?;
+        Ok(module)
+    }
+
+    /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
+    /// `fold` → `verify`. Stops at the first failing pass.
+    fn run_pipeline(
+        &mut self,
+        name: &str,
+        src: &str,
+    ) -> Result<(Program, LirModule), ErrorGuaranteed> {
         let file = self.source_map.add_file(name, src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
         for error in lex_errors {
@@ -110,11 +129,18 @@ impl Session {
             &mut self.diags,
             self.warn_on_operator_type_change,
         );
-        lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut self.diags);
+        let hir = lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
-        Ok(program)
+        let triple = self.target.triple.clone();
+        let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
+        lilac_const::fold(&mut lir, &mut self.diags)?;
+        lilac_ir::verify(&lir, &mut self.diags)?;
+        if self.diags.has_errors() {
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok((program, lir))
     }
 
     /// Renders all recorded diagnostics to one string.
@@ -173,6 +199,29 @@ mod tests {
             "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
+    }
+
+    #[test]
+    fn pipeline_produces_lir() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "branch.lilac",
+                "main: function () nothing {\n    x: @bit32 = 0x0\n    if x {\n    }\n}\n",
+            )
+            .expect("branch source should lower");
+        assert!(module.to_text().contains("branch"), "{}", module.to_text());
+    }
+
+    #[test]
+    fn check_runs_through_verify() {
+        let mut session = Session::new();
+        let result = session.compile_source(
+            "ok.lilac",
+            "main: function () nothing {\n    x: @bit32 = 0x1\n    if x {\n    }\n}\n",
+        );
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        assert_eq!(session.render_diagnostics(), "");
     }
 
     const MATRIX_ADD: &str = "Matrix: object {\n    value: @bit32\n}\n@add: function (lhs: Matrix, rhs: Matrix) result: @bit32 {\n    result = 0x0\n}\nmain: function () nothing {\n}\n";

@@ -1,7 +1,6 @@
 //! The `lilac` binary: `check` / `emit-ir` (more subcommands land per milestone).
 
 use lilac_driver::{ErrorFormat, Session};
-use lilac_ir::LirModule;
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
@@ -129,13 +128,12 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let mut session = common.session;
-    if session.compile_source(&common.file, &src).is_err() {
+    let Ok(module) = session.compile_lir(&common.file, &src) else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
-    }
+    };
     eprint!("{}", session.render_diagnostics());
-    let module = LirModule::new(&session.target.triple);
-    let emitted = module.header_text();
+    let emitted = module.to_text();
     if common.check_only {
         let snapshot = std::path::Path::new(&common.file).with_extension("lir");
         let Ok(expected) = std::fs::read_to_string(&snapshot) else {
