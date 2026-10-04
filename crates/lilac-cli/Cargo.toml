@@ -12,6 +12,8 @@ lilac-error = { path = "../lilac-error" }
 lilac-span = { path = "../lilac-span" }
 lilac-driver = { path = "../lilac-driver" }
 lilac-ir = { path = "../lilac-ir" }
+lilac-codegen = { path = "../lilac-codegen" }
+lilac-codegen-llvm = { path = "../lilac-codegen-llvm" }
 
 [lints]
 workspace = true

@@ -81,6 +81,8 @@ version = "0.2.0"
 name = "lilac-cli"
 version = "0.2.0"
 dependencies = [
+ "lilac-codegen",
+ "lilac-codegen-llvm",
  "lilac-driver",
  "lilac-error",
  "lilac-ir",

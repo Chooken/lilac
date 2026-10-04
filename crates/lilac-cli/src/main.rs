@@ -1,10 +1,23 @@
-//! The `lilac` binary: `check` / `emit-ir` (more subcommands land per milestone).
+//! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` (more subcommands land
+//! per milestone).
 
+use lilac_codegen::Backend as _;
 use lilac_driver::{ErrorFormat, Opt, Session};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]"
+}
+
+/// Maps the driver's [`Opt`] onto the backend's [`lilac_codegen::OptLevel`].
+fn opt_level(opt: Opt) -> lilac_codegen::OptLevel {
+    match opt {
+        Opt::O0 => lilac_codegen::OptLevel::O0,
+        Opt::O1 => lilac_codegen::OptLevel::O1,
+        Opt::O2 => lilac_codegen::OptLevel::O2,
+        Opt::O3 => lilac_codegen::OptLevel::O3,
+        Opt::Os => lilac_codegen::OptLevel::Os,
+    }
 }
 
 fn main() -> ExitCode {
@@ -16,6 +29,7 @@ fn main() -> ExitCode {
     match args[0].as_str() {
         "check" => cmd_check(&args[1..]),
         "emit-ir" => cmd_emit_ir(&args[1..]),
+        "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
@@ -31,12 +45,14 @@ fn main() -> ExitCode {
 struct Common {
     file: String,
     check_only: bool,
+    target_set: bool,
     session: Session,
 }
 
 fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitCode> {
     let mut file: Option<String> = None;
     let mut check_only = false;
+    let mut target_set = false;
     let mut session = Session::new();
     let mut index = 0;
     while index < args.len() {
@@ -52,6 +68,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             }
         } else if let Some(triple) = arg.strip_prefix("--target=") {
             triple.clone_into(&mut session.target.triple);
+            target_set = true;
         } else if *arg == "--verbose" {
             session.opts.verbose = true;
         } else if *arg == "--allow" {
@@ -99,6 +116,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
     Ok(Common {
         file,
         check_only,
+        target_set,
         session,
     })
 }
@@ -166,12 +184,84 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn cmd_emit_llvm(args: &[String]) -> ExitCode {
+    let common = match parse_common(args, true) {
+        Ok(common) => common,
+        Err(code) => return code,
+    };
+    let src = match read_source(&common.file) {
+        Ok(src) => src,
+        Err(code) => return code,
+    };
+    let mut session = common.session;
+    // Unlike `check`/`emit-ir`, `emit-llvm` defaults to the real host so the IR
+    // data layout matches the machine it will run on. An explicit `--target=`
+    // still wins.
+    let triple = if common.target_set {
+        session.target.triple.clone()
+    } else {
+        session.host.triple.clone()
+    };
+    session.target.triple.clone_from(&triple);
+    let Ok(module) = session.compile_lir(&common.file, &src) else {
+        eprint!("{}", session.render_diagnostics());
+        return ExitCode::from(1);
+    };
+    eprint!("{}", session.render_diagnostics());
+    let backend = lilac_codegen_llvm::LlvmBackend::new(&triple, opt_level(session.optimize));
+    let emitted = match backend.emit_llvm(&module) {
+        Ok(emitted) => emitted,
+        Err(err) => {
+            eprintln!("internal error: LLVM codegen failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if common.check_only {
+        let snapshot = std::path::Path::new(&common.file).with_extension("ll");
+        let Ok(expected) = std::fs::read_to_string(&snapshot) else {
+            eprintln!(
+                "cannot read snapshot {}; run emit-llvm without --check to generate it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        };
+        if expected != emitted {
+            eprintln!(
+                "expected {} to match emit-llvm output; re-run without --check to refresh it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        }
+        return ExitCode::SUCCESS;
+    }
+    print!("{emitted}");
+    ExitCode::SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_common, Opt};
+    use super::{opt_level, parse_common, Opt};
+    use lilac_codegen::OptLevel;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn target_set_tracks_explicit_target() {
+        let with = parse_common(&args(&["--target=foo", "f.lilac"]), true).expect("valid args");
+        assert!(with.target_set);
+        let without = parse_common(&args(&["f.lilac"]), true).expect("valid args");
+        assert!(!without.target_set);
+    }
+
+    #[test]
+    fn opt_maps_to_codegen_level() {
+        assert_eq!(opt_level(Opt::O0), OptLevel::O0);
+        assert_eq!(opt_level(Opt::O1), OptLevel::O1);
+        assert_eq!(opt_level(Opt::O2), OptLevel::O2);
+        assert_eq!(opt_level(Opt::O3), OptLevel::O3);
+        assert_eq!(opt_level(Opt::Os), OptLevel::Os);
     }
 
     #[test]
