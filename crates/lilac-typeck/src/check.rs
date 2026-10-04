@@ -107,7 +107,7 @@ pub fn check_bodies(
                 for member in members {
                     if let ItemKind::Field { ty } = &member.kind {
                         let field_ty =
-                            resolve_type(ty, checker.types, checker.module, checker.diags);
+                            resolve_type(ty, checker.types, checker.module, checker.diags, &[]);
                         fields.push((member.name.clone(), Some(field_ty)));
                     }
                 }
@@ -115,10 +115,9 @@ pub fn check_bodies(
             } else if let ItemKind::Enum { variants, .. } = &item.kind {
                 let mut entries = Vec::new();
                 for variant in variants {
-                    let payload = variant
-                        .payload
-                        .as_ref()
-                        .map(|ty| resolve_type(ty, checker.types, checker.module, checker.diags));
+                    let payload = variant.payload.as_ref().map(|ty| {
+                        resolve_type(ty, checker.types, checker.module, checker.diags, &[])
+                    });
                     entries.push((variant.name.clone(), payload));
                 }
                 layouts.insert(item.name.clone(), entries);
@@ -704,7 +703,7 @@ impl Checker<'_> {
                 if !self.checked.insert(resolved.id) {
                     return;
                 }
-                let declared = resolve_type(ty, self.types, self.module, self.diags);
+                let declared = resolve_type(ty, self.types, self.module, self.diags, &[]);
                 let mut fctx = FuncCtx::new();
                 let (got, hir) = self.check_expr(&mut fctx, value, Some(declared.id));
                 let _ = self.expect_type(got, declared.id, ty.span, value.span());
@@ -962,7 +961,7 @@ impl Checker<'_> {
     ) -> Result<TypeRef, ErrorGuaranteed> {
         let name = self.types.display(obj);
         if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
-            Ok(resolve_type(&ty, self.types, self.module, self.diags))
+            Ok(resolve_type(&ty, self.types, self.module, self.diags, &[]))
         } else {
             Err(self.diags.emit(
                 Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
@@ -998,7 +997,7 @@ impl Checker<'_> {
                 value,
                 span,
             } => {
-                let declared = resolve_type(ty, self.types, self.module, self.diags);
+                let declared = resolve_type(ty, self.types, self.module, self.diags, &[]);
                 let expected = if is_poison(declared) {
                     None
                 } else {
@@ -1287,7 +1286,7 @@ impl Checker<'_> {
     ) {
         let mut hir_bindings = Vec::with_capacity(bindings.len());
         for binding in bindings {
-            let ty = resolve_type(&binding.ty, self.types, self.module, self.diags);
+            let ty = resolve_type(&binding.ty, self.types, self.module, self.diags, &[]);
             hir_bindings.push(HirParam {
                 name: binding.name.clone(),
                 ty,
@@ -3289,7 +3288,7 @@ impl Checker<'_> {
             _ => None,
         });
         match found {
-            Some(ty) => Ok(resolve_type(&ty, self.types, self.module, self.diags)),
+            Some(ty) => Ok(resolve_type(&ty, self.types, self.module, self.diags, &[])),
             None => Err(self.diags.emit(
                 Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                     span,
@@ -3374,7 +3373,13 @@ impl Checker<'_> {
             };
         match payload_ty {
             None => Ok(None),
-            Some(ty) => Ok(Some(resolve_type(&ty, self.types, self.module, self.diags))),
+            Some(ty) => Ok(Some(resolve_type(
+                &ty,
+                self.types,
+                self.module,
+                self.diags,
+                &[],
+            ))),
         }
     }
     /// Checks a branch condition (`if`/`loop`): any `@bitN` tests non-zero.
@@ -3628,7 +3633,7 @@ impl Checker<'_> {
             push_stmt(fctx, empty_if(span), span);
             return None;
         };
-        let declared = resolve_type(&cap.ty, self.types, self.module, self.diags);
+        let declared = resolve_type(&cap.ty, self.types, self.module, self.diags, &[]);
         if !is_poison(outs[pos]) && !is_poison(declared) {
             let _ = self.expect_type(outs[pos], declared.id, cap.span, call_span);
         }
@@ -3826,7 +3831,7 @@ impl Checker<'_> {
                 let Some(cap) = &arm.capture else {
                     return (HirPattern::Tag { name: name.clone() }, None);
                 };
-                let declared = resolve_type(&cap.ty, self.types, self.module, self.diags);
+                let declared = resolve_type(&cap.ty, self.types, self.module, self.diags, &[]);
                 if let Some(payload_ty) = payload {
                     if !is_poison(payload_ty)
                         && !is_poison(declared)

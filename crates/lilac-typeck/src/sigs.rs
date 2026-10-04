@@ -10,7 +10,7 @@ use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 /// Collected signatures for a module.
 #[derive(Clone, Debug, Default)]
 pub struct Sigs {
-    /// Function `DefId` → signature (generic bodies skipped; see M4).
+    /// Function `DefId` → signature (generic funcs stored as `Param` templates).
     pub funcs: HashMap<DefId, FuncSig>,
     /// Hook name → overload set in definition order.
     pub hooks: HashMap<String, Vec<(DefId, FuncSig)>>,
@@ -104,7 +104,9 @@ pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
 
 /// Resolves a syntactic type to a `TypeRef`.
 ///
-/// Unknown names report `E023`; generic arguments defer with `E030` (M4);
+/// A name bound in `params` (the enclosing declaration's generic parameters)
+/// resolves to `Param`; `Name[arg…]` resolves to an applied `Instance` after an
+/// `E044` arity check (no interning on mismatch); unknown names report `E023`;
 /// bare `unknown` (not behind `ref`) reports `E023`. Failures poison to
 /// `TypeId::ERROR` so collection continues.
 pub fn resolve_type(
@@ -112,33 +114,31 @@ pub fn resolve_type(
     types: &mut Types,
     module: &Module,
     diags: &mut Diags,
+    params: &[String],
 ) -> TypeRef {
     if let Some(func) = &ty.func {
-        let mut params = Vec::with_capacity(func.params.len());
+        let mut param_tys = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            params.push(resolve_type(&param.ty, types, module, diags));
+            param_tys.push(resolve_type(&param.ty, types, module, diags, params));
         }
-        let mut returns = Vec::with_capacity(func.returns.len());
+        let mut return_tys = Vec::with_capacity(func.returns.len());
         for slot in &func.returns {
-            returns.push(resolve_type(&slot.ty, types, module, diags));
+            return_tys.push(resolve_type(&slot.ty, types, module, diags, params));
         }
-        let id = types.intern_func(params, returns);
+        let id = types.intern_func(param_tys, return_tys);
         return TypeRef {
             id,
             is_ref: ty.is_ref,
         };
     }
     if !ty.generic_args.is_empty() {
-        diags.emit(
-            Diagnostic::error("E030", "generic instantiations lower in M4").label(
-                ty.span,
-                true,
-                "monomorphization is not implemented yet".to_owned(),
-            ),
-        );
+        return resolve_applied(ty, types, module, diags, params);
+    }
+    if let Some(index) = params.iter().position(|name| name == &ty.name) {
+        let id = types.intern_param(u32::try_from(index).unwrap_or(u32::MAX), &ty.name);
         return TypeRef {
-            id: TypeId::ERROR,
-            is_ref: false,
+            id,
+            is_ref: ty.is_ref,
         };
     }
     if let Some(id) = types.builtin(&ty.name) {
@@ -186,19 +186,126 @@ pub fn resolve_type(
     }
 }
 
+/// Resolves `Name[arg…]` to an applied `Instance`, enforcing `E044` arity.
+///
+/// Wrong arity reports `E044` and returns poison **without** interning, so a
+/// bogus application never enters the type table (design §3.2). Arguments
+/// resolve in the same `params` scope, so `GenObj[ref @bit8]` and
+/// `GenObj[GenObj[@bit32]]` work.
+fn resolve_applied(
+    ty: &AstType,
+    types: &mut Types,
+    module: &Module,
+    diags: &mut Diags,
+    params: &[String],
+) -> TypeRef {
+    let poison = TypeRef {
+        id: TypeId::ERROR,
+        is_ref: false,
+    };
+    let found = ty.generic_args.len();
+    let Some(item) = module.items.get(&ty.name) else {
+        if types.builtin(&ty.name).is_some() {
+            emit_arity_error(diags, ty, found, None);
+        } else {
+            diags.emit(
+                Diagnostic::error("E023", format!("unknown type `{}`", ty.name)).label(
+                    ty.span,
+                    true,
+                    "no such type in scope".to_owned(),
+                ),
+            );
+        }
+        return poison;
+    };
+    let decl_params: Vec<String> = match &item.kind {
+        ResKind::Object { generic_params, .. } => generic_params.clone(),
+        _ => Vec::new(),
+    };
+    if found != decl_params.len() {
+        emit_arity_error(diags, ty, found, Some((item.span, &decl_params)));
+        return poison;
+    }
+    let args = ty
+        .generic_args
+        .iter()
+        .map(|arg| resolve_type(arg, types, module, diags, params))
+        .collect();
+    types.set_object_name(item.id, &ty.name);
+    let id = types.intern_instance(item.id, args);
+    TypeRef {
+        id,
+        is_ref: ty.is_ref,
+    }
+}
+
+/// Emits `E044` with expected/found; the declaration's parameter list (when
+/// known) is labeled with its definition span.
+fn emit_arity_error(
+    diags: &mut Diags,
+    ty: &AstType,
+    found: usize,
+    decl: Option<(lilac_span::Span, &[String])>,
+) {
+    let expected = decl.map_or(0, |(_, names)| names.len());
+    let noun = if expected == 1 {
+        "argument"
+    } else {
+        "arguments"
+    };
+    let mut diag = Diagnostic::error(
+        "E044",
+        format!("wrong number of generic arguments for `{}`", ty.name),
+    )
+    .label(
+        ty.span,
+        true,
+        format!("expected {expected} generic {noun}, found {found}"),
+    );
+    match decl {
+        Some((span, names)) if !names.is_empty() => {
+            diag = diag.label(
+                span,
+                false,
+                format!("declared with `[{}]`", names.join(", ")),
+            );
+        }
+        _ => {
+            diag = diag.note(format!("`{}` is not generic", ty.name));
+        }
+    }
+    diags.emit(diag);
+}
+
 fn collect_param(
     param: &lilac_ast::Param,
-    parent: Option<(&str, DefId)>,
+    parent: Option<(&str, DefId, &[String])>,
+    params: &[String],
     ctx: &mut SigCtx,
 ) -> TypeRef {
-    if let Some((parent_name, parent_def)) = parent {
+    if let Some((parent_name, parent_def, parent_params)) = parent {
         if param.name.is_empty() && param.ty.name == "self" && param.ty.generic_args.is_empty() {
-            let id = ctx.types.intern_object(parent_def);
+            if parent_params.is_empty() {
+                let id = ctx.types.intern_object(parent_def);
+                ctx.types.set_object_name(parent_def, parent_name);
+                return TypeRef { id, is_ref: true };
+            }
+            let args = parent_params
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    let id = ctx
+                        .types
+                        .intern_param(u32::try_from(index).unwrap_or(u32::MAX), name);
+                    TypeRef { id, is_ref: false }
+                })
+                .collect();
+            let id = ctx.types.intern_instance(parent_def, args);
             ctx.types.set_object_name(parent_def, parent_name);
             return TypeRef { id, is_ref: true };
         }
     }
-    resolve_type(&param.ty, ctx.types, ctx.module, ctx.diags)
+    resolve_type(&param.ty, ctx.types, ctx.module, ctx.diags, params)
 }
 
 struct SigCtx<'a> {
@@ -209,20 +316,29 @@ struct SigCtx<'a> {
     warn_op_change: bool,
 }
 
-fn collect_func(name: &str, item: &ResItem, parent: Option<(&str, DefId)>, ctx: &mut SigCtx) {
-    let generic = match &item.kind {
-        ResKind::Func { generic, .. } => *generic,
-        _ => {
-            lilac_error::bug!(item.span, "collect_func on non-function item");
-        }
+/// Registers a function or member-method signature. Generic declarations are
+/// registered too: their slots hold `Param` placeholders until specialized.
+fn collect_func(
+    name: &str,
+    item: &ResItem,
+    parent: Option<(&str, DefId, &[String])>,
+    ctx: &mut SigCtx,
+) {
+    let ResKind::Func { generic_params, .. } = &item.kind else {
+        lilac_error::bug!(item.span, "collect_func on non-function item");
     };
-    if generic {
-        return;
-    }
-    register(name, item, parent, false, ctx);
+    register(name, item, parent, generic_params, false, ctx);
 }
 
-fn collect_hook_sig(name: &str, item: &ResItem, ctx: &mut SigCtx) {
+/// Registers a hook signature. Hooks that declare their own generic parameters
+/// are rejected with `E052`; hooks *inside* a generic body are allowed and
+/// inherit the parent's parameters as a template.
+fn collect_hook_sig(
+    name: &str,
+    item: &ResItem,
+    parent: Option<(&str, DefId, &[String])>,
+    ctx: &mut SigCtx,
+) {
     let generic = match &item.kind {
         ResKind::Hook { generic, .. } => *generic,
         _ => {
@@ -239,7 +355,7 @@ fn collect_hook_sig(name: &str, item: &ResItem, ctx: &mut SigCtx) {
         );
         return;
     }
-    register(name, item, None, true, ctx);
+    register(name, item, parent, &[], true, ctx);
 }
 
 /// Warns `W020` when a user hook changes an operator's shape: arithmetic
@@ -302,26 +418,38 @@ fn check_op_shape(
 fn register(
     name: &str,
     item: &ResItem,
-    parent: Option<(&str, DefId)>,
+    parent: Option<(&str, DefId, &[String])>,
+    own_params: &[String],
     is_hook: bool,
     ctx: &mut SigCtx,
 ) {
     let (ResKind::Func {
-        params, returns, ..
+        params: decl_params,
+        returns: decl_returns,
+        ..
     }
     | ResKind::Hook {
-        params, returns, ..
+        params: decl_params,
+        returns: decl_returns,
+        ..
     }) = &item.kind
     else {
         lilac_error::bug!(item.span, "register on non-function item");
     };
-    let mut sig_params = Vec::with_capacity(params.len());
-    for param in params {
-        sig_params.push(collect_param(param, parent, ctx));
+    // Membership scope: the parent object's parameters first (so `self` uses
+    // `Param(0..n)`), then this declaration's own parameters.
+    let mut scope: Vec<String> = Vec::with_capacity(own_params.len());
+    if let Some((_, _, obj_params)) = parent {
+        scope.extend(obj_params.iter().cloned());
     }
-    let mut sig_returns = Vec::with_capacity(returns.len());
-    for param in returns {
-        sig_returns.push(collect_param(param, parent, ctx));
+    scope.extend(own_params.iter().cloned());
+    let mut sig_params = Vec::with_capacity(decl_params.len());
+    for param in decl_params {
+        sig_params.push(collect_param(param, parent, &scope, ctx));
+    }
+    let mut sig_returns = Vec::with_capacity(decl_returns.len());
+    for param in decl_returns {
+        sig_returns.push(collect_param(param, parent, &scope, ctx));
     }
     let sig = FuncSig {
         params: sig_params,
@@ -362,7 +490,12 @@ fn register(
     }
 }
 
-fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, ctx: &mut SigCtx) {
+fn collect_item(
+    item: &Item,
+    resolved: &ResItem,
+    parent: Option<(&str, DefId, &[String])>,
+    ctx: &mut SigCtx,
+) {
     match &item.kind {
         ItemKind::Func(_) => match &resolved.kind {
             ResKind::Hook { .. } => {}
@@ -374,22 +507,18 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
         } => {
             let ResKind::Object {
                 members: resolved_members,
-                ..
+                generic_params: resolved_params,
             } = &resolved.kind
             else {
                 return;
             };
+            let member_parent = Some((item.name.as_str(), resolved.id, resolved_params.as_slice()));
             for member in members {
                 if let Some(resolved_member) = resolved_members.get(&member.name) {
                     if matches!(resolved_member.kind, ResKind::Hook { .. }) {
-                        collect_hook_sig(&member.name, resolved_member, ctx);
+                        collect_hook_sig(&member.name, resolved_member, member_parent, ctx);
                     } else {
-                        collect_item(
-                            member,
-                            resolved_member,
-                            Some((item.name.as_str(), resolved.id)),
-                            ctx,
-                        );
+                        collect_item(member, resolved_member, member_parent, ctx);
                     }
                 }
             }
@@ -478,10 +607,11 @@ fn validate_raii_hook(
     }
 }
 
-/// Collects every non-generic signature in definition order.
+/// Collects every signature in definition order.
 ///
-/// Generic hooks report `E052`; other generic items are skipped for M4.
-/// `warn_op_change` enables the `W020` operator-shape lint.
+/// Generic funcs/hooks are stored as templates (`Param` slots); hooks that
+/// declare their own generic parameters report `E052`. `warn_op_change`
+/// enables the `W020` operator-shape lint.
 pub fn collect_sigs(
     module: &Module,
     program: &Program,
@@ -511,7 +641,7 @@ pub fn collect_sigs(
         .collect();
     for (name, overloads) in &top_hooks {
         for overload in overloads {
-            collect_hook_sig(name, overload, &mut ctx);
+            collect_hook_sig(name, overload, None, &mut ctx);
         }
     }
     sigs
@@ -566,17 +696,108 @@ mod tests {
         }
     }
 
+    fn applied_type(name: &str, args: Vec<lilac_ast::Type>) -> lilac_ast::Type {
+        lilac_ast::Type {
+            name: name.to_owned(),
+            is_ref: false,
+            generic_args: args,
+            func: None,
+            span: Span::dummy(),
+        }
+    }
+
     #[test]
     fn unknown_type_is_e023() {
         let mut types = Types::new();
         let module = Module::default();
         let mut diags = Diags::new();
-        let resolved = resolve_type(&named_type("Nope"), &mut types, &module, &mut diags);
+        let resolved = resolve_type(&named_type("Nope"), &mut types, &module, &mut diags, &[]);
         assert_eq!(resolved.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 1);
-        let bare = resolve_type(&named_type("unknown"), &mut types, &module, &mut diags);
+        let bare = resolve_type(&named_type("unknown"), &mut types, &module, &mut diags, &[]);
         assert_eq!(bare.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 2);
+    }
+
+    #[test]
+    fn generic_type_arg_interns_instance() {
+        let (_, mut types, module, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
+        let ty = applied_type("GenObj", vec![named_type("@bit32")]);
+        let resolved = resolve_type(&ty, &mut types, &module, &mut diags, &[]);
+        assert!(!resolved.is_ref);
+        assert!(
+            matches!(types.kind(resolved.id), lilac_ty::TypeKind::Instance { .. }),
+            "expected an instance, got `{}`",
+            types.display(resolved.id)
+        );
+        assert_eq!(types.display(resolved.id), "GenObj[@bit32]");
+        assert_eq!(code_count(&diags, "E030"), 0);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn generic_arg_arity_is_e044() {
+        let (_, mut types, module, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
+        let ty = applied_type("GenObj", vec![named_type("@bit8"), named_type("@bit16")]);
+        let resolved = resolve_type(&ty, &mut types, &module, &mut diags, &[]);
+        assert_eq!(resolved.id, TypeId::ERROR);
+        assert_eq!(code_count(&diags, "E044"), 1);
+    }
+
+    #[test]
+    fn template_sig_uses_param() {
+        let mut types = Types::new();
+        let module = Module::default();
+        let mut diags = Diags::new();
+        let params = vec!["T".to_owned()];
+        let resolved = resolve_type(&named_type("T"), &mut types, &module, &mut diags, &params);
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(types.display(resolved.id), "T");
+        assert!(matches!(
+            types.kind(resolved.id),
+            lilac_ty::TypeKind::Param { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn generic_self_is_ref_instance() {
+        let (sigs, types, module, diags) = sigs_of(
+            "GenObj[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let object = module.items.get("GenObj").expect("has GenObj");
+        let lilac_resolve::ResKind::Object { members, .. } = &object.kind else {
+            panic!("expected object");
+        };
+        let get = members.get("get").expect("has get");
+        let sig = sigs.funcs.get(&get.id).expect("has get sig");
+        assert_eq!(sig.params.len(), 1);
+        assert!(sig.params[0].is_ref);
+        let lilac_ty::TypeKind::Instance { base, args } = types.kind(sig.params[0].id) else {
+            panic!(
+                "self should be an instance, got `{}`",
+                types.display(sig.params[0].id)
+            );
+        };
+        assert_eq!(*base, object.id);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(
+            types.kind(args[0].id),
+            lilac_ty::TypeKind::Param { index: 0, .. }
+        ));
+        assert!(matches!(
+            types.kind(sig.returns[0].id),
+            lilac_ty::TypeKind::Param { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn generic_object_hook_not_e052() {
+        let (_, _, _, diags) = sigs_of(
+            "GenObj[T]: object {\n    value: T\n    @on_drop: function (from: ref GenObj[T]) nothing {\n    }\n}\n",
+        );
+        assert_eq!(code_count(&diags, "E052"), 0);
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
@@ -613,18 +834,6 @@ mod tests {
         assert_eq!(sig.params.len(), 1);
         assert!(sig.params[0].is_ref);
         assert_eq!(types.display(sig.params[0].id), "Object");
-    }
-
-    #[test]
-    fn generic_args_on_types_defer_with_e030() {
-        let mut types = Types::new();
-        let module = Module::default();
-        let mut diags = Diags::new();
-        let mut ty = named_type("GenObj");
-        ty.generic_args.push(named_type("@bit32"));
-        let resolved = resolve_type(&ty, &mut types, &module, &mut diags);
-        assert_eq!(resolved.id, TypeId::ERROR);
-        assert_eq!(code_count(&diags, "E030"), 1);
     }
 
     #[test]
