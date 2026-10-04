@@ -80,8 +80,9 @@ churn):
 - **LitLiteral**: `0x…`/`0X…`/`0b…`/`0B…`. The bit representation is fully
   known. Typed by the expected bit type, or the unified width supplied by
   sibling operands (e.g. `@iadd(0x1, 0x2)`); no expected/unified bit width →
-  `E024` as today. Materialized by lower as a direct `const LIT:#bitN`. A value
-  wider than the target width → `E060`.
+  `E024` as today. Materialized by lower as a direct `const LIT:#bitN`. Once
+  typeck has fixed the target width, a value wider than it → `E060` (checked in
+  typeck, where the width is known, so the diagnosis precedes lowering).
 - **NumberLiteral**: every decimal form (`5`, `1.5`, `2e3`). Its type is always
   `@byte_buffer` holding the source bytes. It is **not** implicitly converted
   to a bit type: `a: @bit8 = 5` is `E010`; the spelling is
@@ -105,8 +106,12 @@ churn):
 - `"hi"` has type `@byte_buffer`. HIR keeps `HirExprKind::Str { value }`.
 - Lower interns a `data` const (`!cN: str = "…"`, UTF-8, `"`→`\22`,
   `\`→`\5C`) and builds the borrowed `{len, ptr}` view through the builtin
-  `@byte_buffer_from`: `&p: #ptr = const !cN` then
-  `call @byte_buffer_from (in &p) (in &len) (out %buf)`.
+  `@byte_buffer_from`: `&p: ref #bit8 = const !cN` then
+  `call @byte_buffer_from (in &p) (in &len) (out %buf)`. (The pointer type is
+  `ref #bit8`, not a new `#ptr` builtin; `#ptr` is not a `lilac-ir` type.)
+- A decimal NumberLiteral lowers the same way with a `numlit` data const
+  (`!cN: numlit = "5"`) instead of `str`; hex/bin LitLiterals stay a direct
+  `const LIT:#bitN`.
 - Data consts are deduplicated by payload so identical literals share one
   `!cN`; names are assigned in first-use order for deterministic snapshots.
 
@@ -140,11 +145,18 @@ __f: @format_args = @format_args_new()
   `call @format_args_push (in %ref_f) (in %piece) (out)`,
   `call @byte_buffer_from (in %p) (in %n) (out %buf)`,
   `@byte_buffer_ptr`, `@byte_buffer_len`, `@load_u8`, `@store_u8`, `@memcpy`.
-- A builtin signature table (arity + parameter/result types) verifies builtin
-  calls; width-parameterized forms (`@load_u8`, `@store_u8`) validate against
-  the destination/pointee types. Builtins have no `LirFunc` body.
+- A builtin signature table verifies builtin calls. Like the existing `Func`
+  check it validates arity (builtins have no `LirFunc` body); where a builtin's
+  `in`/`out` shape is fixed it also validates the operand/place types, and
+  width-parameterized forms (`@load_u8`, `@store_u8`) validate against the
+  destination/pointee types.
 - Data addressing reuses `const` with a data-symbol literal:
-  `&1: #ptr = const !c0`; the verifier resolves `!c0` against `module.data`.
+  `&1: ref #bit8 = const !c0`; the verifier resolves `!c0` against
+  `module.data` and checks the data kind (`str`/`numlit`) matches the const's
+  use.
+- The folder evaluates `@byte_buffer_from` with a constant data-symbol pointer
+  and length into a `Bytes` value, so a downstream fold-only `@as_int` sees the
+  literal's bytes.
 - Fold-only builtins (`@as_int`, `@as_float`, `@size_of`) are emitted like any
   builtin call but **must not survive folding**; the verifier rejects any that
   remain (same discipline as `branch.if`-on-constant).
@@ -231,8 +243,13 @@ __f: @format_args = @format_args_new()
   its owner (typeck: literals/f-strings; lower: data/builtin calls; const:
   fold/call-eval; ir: builtin table/verifier).
 - Consistency: §3.1's fold-only `@as_*` matches §3.5's "no fallback" and §4's
-  patch; §3.2/§3.3 reuse the M2 desugar pattern and one string path; §3.4's
+  patch; §3.2/§3.3 reuse the M2 desugar pattern and one string path; §3.2's
+  `ref #bit8` pointer avoids inventing a `#ptr` type the IR lacks; §3.4's
   builtin calls satisfy §1's "no new surviving shapes" and `IR_SPEC` §9.5.
+- Refinements applied during self-review: pointer type is `ref #bit8` (not
+  `#ptr`); LitLiteral range error is checked in typeck where width is fixed;
+  fold traces `@byte_buffer_from` on a data pointer so fold-only `@as_*` sees
+  bytes.
 - Scope: strictly M3; LLVM (M5), generics (M4), and stdlib `String`/streaming
   are explicitly out.
 - Ambiguity: literal classes, `@as_*` constancy, `E061`, and the typeck desugar
