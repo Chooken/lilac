@@ -44,6 +44,10 @@
    re-attributed to the call site with an instantiation chain (no separate
    symbolic "requirement collection" pass; see §4.1).
 7. **Arity-tagged name mangling** `__` for monomorphized symbols.
+8. **Both duck-typing forms.** Value-based `value.method()` (a value of type
+   `T`; a method with `self`) **and** static `T.method()` (a bare type parameter
+   as receiver; an associated, non-`self` object function) are supported and
+   proven at instantiation. This reuses the existing `check_static_call` path.
 
 ### 1.2 What is already in place (verified before design)
 
@@ -185,6 +189,14 @@ ids until substituted.
   instance. A method with its own generic parameters is supported by the same
   function-instantiation path (it is just an instantiated function whose `self`
   is already concrete); M4 requires no dedicated port for that case.
+- **Both duck-typing receiver forms.** (a) **Value-based**: `value.method(…)`
+  where `value: T` is a value of the parameter type — a method requirement,
+  checked by the existing member-call path with the substituted receiver type.
+  (b) **Static**: `T.method(…)` where `T` is a bare type parameter used as a
+  receiver — an associated-function requirement, checked by the existing
+  `check_static_call` path (concrete static calls are already tested by
+  `static_call_checks`). A builtin instantiation (`@bit32`) has no members, so
+  `@bit32.get()` fails like any missing member.
 - **In-body hooks.** A hook declared inside a generic body (e.g. `GenBox[T]`'s
   `@on_drop: function (from: ref GenBox[T])`) is, when the parent is
   instantiated, registered as a **concrete** entry in the existing
@@ -291,10 +303,14 @@ ids until substituted.
 - Tests (all as generated `*.lilac` + `*.lir` snapshots under `tests/ui/`):
   - `generic_function` (emits monomorphized `@gen_function__1__bit32`, no
     template), `generic_object`, `generic_object_functions` (generic `self`),
-    `generic_duck_typing`.
+    and two duck-typing **successes**: value-based (`value.get()` where
+    `value: T`) and static (`T.get()` with the object that defines the
+    associated function).
   - `FAILS_generic_duck_typing` short-form snapshot **and** a `--verbose`
     full obligation-tree snapshot; `FAILS_generic_arity` (`E044`);
-    `FAILS_generic_cyclic` (`E051`).
+    `FAILS_generic_cyclic` (`E051`). The legacy `generic_duck_typing.lilac`
+    form (static `T.get()` instantiated with `@bit32`, which has no member)
+    is a **failure** now, folded into the `FAILS_generic_duck_typing` shape.
   - No-cascade regression: one failed instantiation referenced from two call
     sites emits exactly one `E042`.
   - In-body hook: `GenBox[T]` with `@on_drop`, consumed at one instantiation →
@@ -305,11 +321,13 @@ ids until substituted.
 ## 6. Ports + exit criteria
 
 - Port `generic_function` (regenerate `.lilac-ir` → `tests/ui/*.lir`),
-  `generic_object`, `generic_object_functions`, `generic_duck_typing`, and
-  `FAILS_generic_duck_typing` to `tests/ui/`; add `FAILS_generic_arity`,
-  `FAILS_generic_cyclic`, the no-cascade case, and the `GenBox[T]` in-body-hook
-  case. **Not ported**: `generic_union` (the `union` keyword was removed in M2;
-  generic enums are deferred) and the f-string streaming handler (deferred).
+  `generic_object`, `generic_object_functions`, and `FAILS_generic_duck_typing`
+  to `tests/ui/`; replace the legacy `generic_duck_typing` with duck-typing
+  **success** tests (value-based and static-with-object); add
+  `FAILS_generic_arity`, `FAILS_generic_cyclic`, the no-cascade case, and the
+  `GenBox[T]` in-body-hook case. **Not ported**: `generic_union` (the `union`
+  keyword was removed in M2; generic enums are deferred) and the f-string
+  streaming handler (deferred).
   Add `crates/lilac-cli/tests/m4.rs` mirroring the `m2.rs`/`m3.rs` harness
   (`PORTS` + `check_ports_clean` + `lir_snapshots_stable` + `fails_with` and a
   `--verbose` snapshot test).
