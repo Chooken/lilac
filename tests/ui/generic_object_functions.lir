@@ -1,0 +1,31 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+type #GenObject__1__bit32 {
+    value: #bit32,
+}
+function @GenObject__1__bit32.get
+  in ref #GenObject__1__bit32 %instance
+  out #bit32 %result
+{
+  $entry:
+    &1: #bit32 = field %instance .value  // idx 0
+    copy &1 -> %result
+    return
+}
+function @main
+{
+  $entry:
+    alloca #GenObject__1__bit32 %variable : zeroed
+    alloca #GenObject__1__bit32 %tmp.1 : zeroed
+    alloca #bit32 %value : zeroed
+    alloca #bit32 %tmp.2 : zeroed
+    alloca ref #GenObject__1__bit32 %tmp.3 : zeroed
+    &1: #bit32 = const 0x0
+    copy &1 -> %tmp.1.value  // idx 0
+    copy %tmp.1 -> %variable
+    &2: ref #GenObject__1__bit32 = addr %variable
+    copy &2 -> %tmp.3
+    call @GenObject__1__bit32.get (in %tmp.3) (out %tmp.2)
+    copy %tmp.2 -> %value
+    return
+}

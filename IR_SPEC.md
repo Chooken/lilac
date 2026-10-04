@@ -84,6 +84,23 @@ Labels can be defined inside function blocks:
 ```
 Block parameters are not supported; values flow through `%places` and `&regs`.
 
+# Monomorphized names
+
+Verified IR is **concrete-only**: generic declarations and their type
+parameters never appear. Each reached `(declaration, type arguments)`
+instantiation is monomorphized to ordinary concrete items, and its symbols
+carry a deterministic, collision-free, arity-tagged mangle:
+
+`<Name>__<arity>__<arg1>__…`
+
+Each argument is mangled recursively; builtins drop the leading `@`, `ref X`
+becomes `ref_X`, and a nested instance is its own mangled form. Examples:
+`gen_function__1__bit32`, `GenObject__1__bit32` (with methods such as
+`GenObject__1__bit32.get`), and `GenObj__1__GenObj__1__bit32`. The arity tag
+keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
+Object `type` layouts and RAII `drop` targets are keyed by the same mangled
+name; no instruction carries a generic parameter type.
+
 # Instructions
 
 ## Memory
@@ -289,3 +306,5 @@ Same width rule as integer arithmetic.
 8. No `branch.if` on a constant, no fold-required marker (`@as_int`/`@as_float`/
    `@size_of`) or `compile.error` survivor. Violations are user-facing
    `Diagnostic`s with HIR spans, never backend crashes.
+9. Types are concrete only: no generic declaration and no type parameter
+   survives; every applied declaration is monomorphized to a mangle-named item.

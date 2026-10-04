@@ -1,0 +1,13 @@
+gen_function[T]: function () out: T {
+    out = T.other()
+}
+
+Object: object {
+    get: function () result: @bit32 {
+        result = 0x2
+    }
+}
+
+main: function () nothing {
+    variable: @bit32 = gen_function[@bit32]()
+}

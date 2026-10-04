@@ -1,0 +1,13 @@
+GenBox[T]: object {
+    value: T
+
+    @on_drop: function (from: ref GenBox[T]) nothing {
+        from.value = 0x0
+    }
+}
+
+main: function () nothing {
+    box: GenBox[@bit32] = GenBox {
+        value = 0x0
+    }
+}

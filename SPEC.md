@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.3-draft (M3 strings, literal classes, and const call-eval amendments). Status: draft, normative for the Rust rewrite.
+> Version: 0.4-draft (M4 duck-typed generics: explicit type arguments, E044, generic self, both receiver forms, in-body hooks). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -423,7 +423,17 @@ parse; rename them to `enum`.)
 
 ### Generics
 
-Generics provide compile-time templating for any declaration. The compiler ignores the generic parameter `T` until the declaration is instantiated, allowing duck-typing within generic functions.
+Generics provide compile-time templating for any declaration. The generic
+parameter `T` is a placeholder; the compiler ignores it until the declaration
+is instantiated, which is what allows duck-typing inside a generic body.
+
+Type arguments are **explicit**: v1 has no type-argument inference, so every
+generic reference spells its arguments (`gen_function[@bit32]`,
+`GenObject[@bit32]`). Applying a generic with the wrong number of arguments —
+too few, too many, or any argument on a non-generic declaration — is `E044`;
+the bogus application is never built. A generic value's type carries its
+arguments while its constructor names the bare declaration:
+`x: GenObject[@bit32] = GenObject { value = 0x0 }`.
 
 ```lilac
 GenObj[T]: object {
@@ -435,6 +445,20 @@ GenFunc[T]: function (value: T) nothing {
     value.call_something() 
 }
 ```
+
+Each concrete `(declaration, type arguments)` pair monomorphizes once to
+concrete items, and verified IR is concrete-only (no generic declarations and
+no surviving type parameter). A generic object method's `self` is the applied
+instance `ref GenObj[T…]`, so `self.value` resolves to the substituted field
+type. Duck-typed requirements are proven at instantiation in both receiver
+forms: **value-based** `value.method()` (a method with `self`, where
+`value: T`) and **static** `T.method()` (an associated function with no
+`self`), each resolved against the concrete argument type.
+
+A hook declared inside a generic body (for example an object's `@on_drop`)
+monomorphizes with its parent and registers once per concrete instantiation,
+so `GenBox[T]` can define `@on_drop` for each `GenBox[@bit32]`-style instance.
+A top-level hook may not be generic: a blanket `@add[T](T, T)` stays `E052`.
 
 ### Inline Declarations
 

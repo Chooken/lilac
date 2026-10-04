@@ -1,0 +1,7 @@
+set: function (r: ref @bit8) nothing {
+}
+
+main: function () nothing {
+    v: @bit8 = 0x1
+    set(v)
+}

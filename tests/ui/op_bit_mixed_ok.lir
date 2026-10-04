@@ -21,7 +21,8 @@ function @main
     copy &1 -> %a
     &2: #bit32 = const 0x2
     copy &2 -> %b
-    call @@add:bit8:bit32:bit32 (in %a, %b) (out %tmp.1)
+    &cf.1: #bit32 = const 0x0
+    copy &cf.1 -> %tmp.1
     copy %tmp.1 -> %c
     return
 }

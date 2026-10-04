@@ -1,0 +1,8 @@
+gen_function[T]: function () out: T {
+    out = T.other()
+}
+
+main: function () nothing {
+    first: @bit32 = gen_function[@bit32]()
+    second: @bit32 = gen_function[@bit32]()
+}

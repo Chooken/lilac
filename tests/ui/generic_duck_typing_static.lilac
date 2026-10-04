@@ -1,0 +1,13 @@
+Object: object {
+    get: function () result: @bit32 {
+        result = 0x2
+    }
+}
+
+gen[T]: function () out: @bit32 {
+    out = T.get()
+}
+
+main: function () nothing {
+    result: @bit32 = gen[Object]()
+}

@@ -1,0 +1,19 @@
+Object: object {
+    value: @bit32
+
+    get: function (self) result: Object {
+        result = self
+    }
+}
+
+gen[T]: function (value: T) out: T {
+    out = value.get()
+}
+
+main: function () nothing {
+    source: Object = Object {
+        value = 0x2
+    }
+
+    result: Object = gen[Object](source)
+}

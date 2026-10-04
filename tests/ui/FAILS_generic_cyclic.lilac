@@ -1,0 +1,11 @@
+Box[T]: object {
+    value: T
+}
+
+grow[T]: function () nothing {
+    grow[Box[T]]()
+}
+
+main: function () nothing {
+    grow[@bit32]()
+}
