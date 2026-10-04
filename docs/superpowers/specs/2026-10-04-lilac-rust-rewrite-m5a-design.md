@@ -103,9 +103,12 @@ crates/
   `x86_64|aarch64|x86` × `windows→pc-windows-msvc`, `linux→unknown-linux-gnu`,
   `macos→apple-darwin`, else `unknown-unknown-unknown`. `bit_native_width()` =
   64 for `x86_64`/`aarch64`, 32 otherwise (unchanged semantics, now derived from a
-  real triple). `Session::new()` sets `host = target = Target::host()`;
-  `--target=<triple>` overrides **`target` only** (host stays the build host).
-  This is the plan's "never assume host == target".
+  real triple). `Session::new()` sets `host = Target::host()` (the real build
+  host) but leaves `target = Target::default()` = the canonical
+  `x86_64-unknown-none`, so default `emit-ir` output stays host-independent and
+  committed snapshots remain portable; `--target=<triple>` overrides **`target`
+  only** (host stays the build host). This is the plan's "never assume
+  host == target".
 - **CLI flags** (shared by `check`/`emit-ir`): `-O0`, `-O1`, `-O2`, `-O3`, `-Os`,
   `--release`, `--cache-dir=<path>`. Each optimization flag simply assigns
   `session.optimize`; the **last one parsed wins**, and `--release` is exactly

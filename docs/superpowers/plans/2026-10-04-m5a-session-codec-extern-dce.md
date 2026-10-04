@@ -84,7 +84,7 @@ Expected: FAIL to compile — `Opt` and `Target::from_arch_os` don't exist.
 - `Opt::parse` returns `Some` only for the five flags; `Default` is `O0`.
 - `Target::from_arch_os`: triple = `"{arch}-{vendor-os}"` where `os` maps `windows→pc-windows-msvc`, `linux→unknown-linux-gnu`, `macos→apple-darwin`, anything else → `unknown-unknown-unknown`. `bit_native_width()` = `64` for `x86_64`/`aarch64`, else `32`.
 - `Target::host()` = `Self::from_arch_os(std::env::consts::ARCH, std::env::consts::OS)` (delete the hardcoded `x86_64-unknown-none`).
-- `Session` gains `optimize: Opt` and `cache_dir: Option<PathBuf>`; `Session::new()` sets `host = target = Target::host()` (keep `warn_on_operator_type_change: true`).
+- `Session` gains `optimize: Opt` and `cache_dir: Option<PathBuf>`; `Session::new()` sets `host = Target::host()` (real host) but `target = Target::default()` = canonical `x86_64-unknown-none` (keep `warn_on_operator_type_change: true`). `--target=` overrides `target` only. This keeps default `emit-ir` output host-independent so committed `.lir` snapshots stay portable.
 
 - [ ] **Step 4: Run the driver tests to verify they pass**
 
