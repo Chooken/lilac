@@ -1,10 +1,10 @@
 //! LLVM backend behind [`Backend`].
 //!
-//! Type/layout/data/place lowering and the value, memory, conversion, constant,
-//! and arithmetic instruction bodies live in the `lower` module. Calls, control
-//! flow, and terminators land in Task 4; the in-module builtin runtime lands in
-//! Task 5. This crate is the ONLY one allowed to link LLVM (enforced by CI grep
-//! gate).
+//! Type/layout/data/place lowering, the value, memory, conversion, constant,
+//! and arithmetic instruction bodies, calls (direct/indirect/builtin), and
+//! control flow and terminators live in the `lower` module. The in-module
+//! builtin runtime bodies land in Task 5. This crate is the ONLY one allowed to
+//! link LLVM (enforced by CI grep gate).
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -106,7 +106,7 @@ mod tests {
     use crate as lilac_codegen_llvm;
     use lilac_codegen::{Backend, OptLevel};
     use lilac_ir::{
-        ArithOp, ConvertOp, LirBlock, LirData, LirDataKind, LirFunc, LirInst, LirModule,
+        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
         LirOperand, LirTerm,
     };
     use lilac_span::Span;
@@ -267,6 +267,45 @@ mod tests {
             rhs: rhs.to_owned(),
             dst: dst.to_owned(),
             ty: ty.to_owned(),
+            span: span(),
+        });
+    }
+
+    fn func(
+        name: &str,
+        ins: &[(&str, &str)],
+        outs: &[(&str, &str)],
+        blocks: Vec<LirBlock>,
+    ) -> LirFunc {
+        LirFunc {
+            name: name.to_owned(),
+            ins: ins
+                .iter()
+                .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+                .collect(),
+            outs: outs
+                .iter()
+                .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+                .collect(),
+            is_extern: false,
+            blocks,
+        }
+    }
+
+    fn ret_block(label: &str, insts: Vec<LirInst>) -> LirBlock {
+        LirBlock {
+            label: label.to_owned(),
+            insts,
+            term: LirTerm::Return { span: span() },
+            span: span(),
+        }
+    }
+
+    fn call(insts: &mut Vec<LirInst>, func: LirCallee, ins: &[&str], outs: &[&str]) {
+        insts.push(LirInst::Call {
+            func,
+            ins: ins.iter().map(|place| (*place).to_owned()).collect(),
+            outs: outs.iter().map(|place| (*place).to_owned()).collect(),
             span: span(),
         });
     }
@@ -518,6 +557,268 @@ mod tests {
         let text = emit(&module);
         assert!(text.contains("load ptr, ptr %in0"), "{text}");
         assert!(text.contains("getelementptr inbounds %Pair, ptr"), "{text}");
+    }
+
+    /// A direct user call passes the address of every listed place (ins then
+    /// outs); the place ABI means the callee signature is all `ptr`.
+    #[test]
+    fn lowers_direct_call_with_place_pointers() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(func(
+            "g",
+            &[("a", "#bit32")],
+            &[("o", "#bit32")],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        let mut insts = Vec::new();
+        alloca(&mut insts, "a", "#bit32");
+        alloca(&mut insts, "o", "#bit32");
+        call(&mut insts, LirCallee::Func("g".to_owned()), &["a"], &["o"]);
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("call void @g(ptr %a, ptr %o)"), "{text}");
+    }
+
+    /// A call to a `nothing` function (no places) is `call void @g()` followed
+    /// by the block's single `ret void` — no phantom out argument.
+    #[test]
+    fn lowers_void_call_with_no_places() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module
+            .funcs
+            .push(func("g", &[], &[], vec![ret_block("entry", Vec::new())]));
+        let mut insts = Vec::new();
+        call(&mut insts, LirCallee::Func("g".to_owned()), &[], &[]);
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("call void @g()\n  ret void"), "{text}");
+    }
+
+    /// An indirect call through an `addr.func` register round-trips the
+    /// function pointer through its declared integer type (`ptrtoint` at the
+    /// address, `inttoptr` at the call) and passes the same place pointers.
+    #[test]
+    fn lowers_indirect_call_through_addr_func() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(func(
+            "addOne",
+            &[("v", "#bit32")],
+            &[("r", "#bit32")],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        let mut insts = Vec::new();
+        alloca(&mut insts, "add", "#bit64");
+        alloca(&mut insts, "value", "#bit32");
+        alloca(&mut insts, "out", "#bit32");
+        insts.push(LirInst::AddrFunc {
+            func: "addOne".to_owned(),
+            dst: "1".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "add");
+        insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("add".to_owned()),
+            dst: "3".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+        call(
+            &mut insts,
+            LirCallee::Reg("3".to_owned()),
+            &["value"],
+            &["out"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("ptrtoint (ptr @addOne to i64)"), "{text}");
+        assert!(text.contains("inttoptr i64"), "{text}");
+        assert!(text.contains("call void %"), "{text}");
+        assert!(text.contains("(ptr %value, ptr %out)"), "{text}");
+    }
+
+    /// Builtin calls use the value ABI: inputs are loaded, the declared runtime
+    /// symbol is called, and the single result is stored into the out place.
+    #[test]
+    fn lowers_builtin_call_with_value_abi() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        alloca(&mut insts, "bytes", "ref #bit8");
+        alloca(&mut insts, "len", "#bitNative");
+        alloca(&mut insts, "buf", "#byte_buffer");
+        call(
+            &mut insts,
+            LirCallee::Builtin("@byte_buffer_from".to_owned()),
+            &["bytes", "len"],
+            &["buf"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(
+            text.contains("declare { i64, ptr } @byte_buffer_from(ptr, i64)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("call { i64, ptr } @byte_buffer_from(ptr %"),
+            "{text}"
+        );
+        assert!(text.contains("store { i64, ptr } %"), "{text}");
+    }
+
+    /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`
+    /// with explicit then/else edges.
+    #[test]
+    fn lowers_branch_and_branch_if() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut entry = Vec::new();
+        alloca(&mut entry, "c", "#bit8");
+        entry.push(LirInst::CopyReg {
+            src: LirOperand::Place("c".to_owned()),
+            dst: "1".to_owned(),
+            ty: "#bit8".to_owned(),
+            span: span(),
+        });
+        let entry = LirBlock {
+            label: "entry".to_owned(),
+            insts: entry,
+            term: LirTerm::BranchIf {
+                cond: "1".to_owned(),
+                then: "then".to_owned(),
+                els: Some("els".to_owned()),
+                span: span(),
+            },
+            span: span(),
+        };
+        let then = LirBlock {
+            label: "then".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Branch {
+                target: "join".to_owned(),
+                span: span(),
+            },
+            span: span(),
+        };
+        let els = LirBlock {
+            label: "els".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Branch {
+                target: "join".to_owned(),
+                span: span(),
+            },
+            span: span(),
+        };
+        module.funcs.push(func(
+            "main",
+            &[],
+            &[],
+            vec![entry, then, els, ret_block("join", Vec::new())],
+        ));
+        let text = emit(&module);
+        assert!(text.contains("br i1"), "{text}");
+        assert!(text.contains(", label %then, label %els"), "{text}");
+        assert!(text.contains("br label %join"), "{text}");
+    }
+
+    /// `branch.if` with no `els` branches to the next block in layout order on
+    /// the false edge.
+    #[test]
+    fn lowers_branch_if_fallthrough() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut entry = Vec::new();
+        alloca(&mut entry, "c", "#bit8");
+        entry.push(LirInst::CopyReg {
+            src: LirOperand::Place("c".to_owned()),
+            dst: "1".to_owned(),
+            ty: "#bit8".to_owned(),
+            span: span(),
+        });
+        let entry = LirBlock {
+            label: "entry".to_owned(),
+            insts: entry,
+            term: LirTerm::BranchIf {
+                cond: "1".to_owned(),
+                then: "then".to_owned(),
+                els: None,
+                span: span(),
+            },
+            span: span(),
+        };
+        let then = LirBlock {
+            label: "then".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Branch {
+                target: "join".to_owned(),
+                span: span(),
+            },
+            span: span(),
+        };
+        module.funcs.push(func(
+            "main",
+            &[],
+            &[],
+            vec![entry, ret_block("join", Vec::new()), then],
+        ));
+        let text = emit(&module);
+        assert!(text.contains("br i1"), "{text}");
+        assert!(text.contains(", label %then, label %join"), "{text}");
+    }
+
+    /// `return` → `ret void`, `unreachable` → `unreachable`, `panic` → a
+    /// `@lilac_abort` call plus `unreachable`, and `drop` emits nothing.
+    #[test]
+    fn lowers_terminators_and_drop() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("boom".to_owned()),
+            span: span(),
+        });
+        module
+            .funcs
+            .push(func("ret", &[], &[], vec![ret_block("entry", Vec::new())]));
+        let unreachable = LirBlock {
+            label: "entry".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Unreachable { span: span() },
+            span: span(),
+        };
+        module.funcs.push(func("dead", &[], &[], vec![unreachable]));
+        let panic = LirBlock {
+            label: "entry".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Panic {
+                msg: "c0".to_owned(),
+                span: span(),
+            },
+            span: span(),
+        };
+        module.funcs.push(func("boom", &[], &[], vec![panic]));
+        let mut drop_insts = Vec::new();
+        alloca(&mut drop_insts, "p", "#bit32");
+        drop_insts.push(LirInst::Drop {
+            place: "p".to_owned(),
+            span: span(),
+        });
+        module.funcs.push(func(
+            "plain",
+            &[],
+            &[],
+            vec![ret_block("entry", drop_insts)],
+        ));
+        let text = emit(&module);
+        assert!(text.contains("ret void"), "{text}");
+        assert!(text.contains("declare void @lilac_abort()"), "{text}");
+        assert!(text.contains("call void @lilac_abort()"), "{text}");
+        assert!(text.contains("unreachable"), "{text}");
+        assert!(!text.contains("drop"), "drop must not lower:\n{text}");
     }
 
     /// The LIR verifier permits a `#format_args` data-symbol `const`, but a

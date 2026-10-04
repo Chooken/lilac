@@ -1,11 +1,12 @@
-//! LIR → LLVM lowering: types, layouts, data globals, places, and the value,
-//! memory, conversion, constant, and arithmetic instruction bodies.
+//! LIR → LLVM lowering: types, layouts, data globals, places, instructions, and
+//! terminators.
 //!
-//! M5b Tasks 1–3 cover the type map, named layouts, data globals, the pointer
-//! calling convention, zero-initialized `alloca` places, and every value /
-//! memory / conversion / constant / arithmetic instruction. Calls, indirect
-//! calls, `drop`, control flow, and the non-`return` terminators land in
-//! Task 4; the in-module builtin runtime lands in Task 5.
+//! M5b Tasks 1–4 cover the type map, named layouts, data globals, the pointer
+//! calling convention, zero-initialized `alloca` places, every value / memory /
+//! conversion / constant / arithmetic instruction, direct/indirect/builtin
+//! calls, `drop`, and control flow (`branch`, `branch.if`, `return`, `panic`,
+//! `unreachable`). Builtin calls declare their runtime symbol here; the
+//! in-module builtin runtime bodies land in Task 5.
 
 use std::collections::HashMap;
 
@@ -13,12 +14,21 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::{BasicTypeEnum, FloatType, IntType, PointerType, StructType};
-use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
+use inkwell::types::{
+    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType,
+    StructType,
+};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+    ValueKind,
+};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
 use lilac_error::bug;
-use lilac_ir::{ArithOp, ConvertOp, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
+use lilac_ir::{
+    builtin_sig, ArithOp, ConvertOp, LirCallee, LirDataKind, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm,
+};
 use lilac_span::Span;
 
 /// Turns a fallible inkwell builder call into an ICE.
@@ -75,10 +85,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Lowers layouts, data globals, and functions into the module, in that
-    /// fixed order.
+    /// fixed order. Every function is declared before any body is lowered so
+    /// calls and `addr.func` may reference functions defined later.
     pub(crate) fn run(&mut self) {
         self.define_layouts();
         self.define_data();
+        for func in &self.lir.funcs {
+            self.declare_func(func);
+        }
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
@@ -182,15 +196,22 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// Lowers one function: `define void @name(ptr %in0, …, ptr %out0, …)`, its
-    /// signature places bound to the incoming pointer arguments, then its
-    /// blocks.
-    fn lower_func(&self, func: &LirFunc) {
-        let param = self.ptr_type();
+    /// Declares one function as `define`-able `void @name(ptr %in0, …, ptr
+    /// %out0, …)` without lowering its body. Declaring every function up front
+    /// lets calls and `addr.func` reference functions defined later.
+    fn declare_func(&self, func: &LirFunc) -> FunctionValue<'ctx> {
         let arity = func.ins.len() + func.outs.len();
-        let param_types = vec![param.into(); arity];
+        let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
-        let function = self.module.add_function(&func.name, fn_type, None);
+        self.module.add_function(&func.name, fn_type, None)
+    }
+
+    /// Lowers one function body: its signature places are bound to the incoming
+    /// pointer arguments, then its blocks and terminators are emitted.
+    fn lower_func(&self, func: &LirFunc) {
+        let Some(function) = self.module.get_function(&func.name) else {
+            bug!(Span::dummy(), "function `@{}` was not declared", func.name);
+        };
 
         let params = function.get_params();
         let mut state = FnState {
@@ -229,7 +250,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
 
         let builder = self.context.create_builder();
-        for block in &func.blocks {
+        for (index, block) in func.blocks.iter().enumerate() {
             let Some(basic_block) = blocks.get(block.label.as_str()).copied() else {
                 bug!(Span::dummy(), "missing block `${}`", block.label);
             };
@@ -237,12 +258,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             for inst in &block.insts {
                 self.lower_inst(inst, &builder, &mut state);
             }
-            lower_term(&block.term, &builder, &blocks);
+            let next = func
+                .blocks
+                .get(index + 1)
+                .and_then(|next| blocks.get(next.label.as_str()).copied());
+            self.lower_term(&block.term, &builder, &blocks, &state, next);
         }
     }
 
-    /// Lowers the value/memory/conversion instructions M5b Task 3 owns. Calls,
-    /// drops, and terminators belong to Task 4; reaching one here is an ICE.
+    /// Lowers one instruction. `CompileError`/`FoldIntrinsic` are post-fold
+    /// markers; a survivor is an ICE.
     fn lower_inst(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
         match inst {
             LirInst::Alloca { ty, place, .. } => {
@@ -269,14 +294,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 let ptr = place_ptr(place, state);
                 state.regs.insert(dst.clone(), ptr.into());
             }
-            LirInst::AddrFunc { func, dst, .. } => {
-                let Some(function) = self.module.get_function(func) else {
-                    bug!(Span::dummy(), "address of unknown function `@{func}`");
-                };
-                state.regs.insert(
-                    dst.clone(),
-                    function.as_global_value().as_pointer_value().into(),
-                );
+            LirInst::AddrFunc { func, dst, ty, .. } => {
+                let value = self.addr_func_value(func, ty, builder);
+                state.regs.insert(dst.clone(), value);
             }
             LirInst::Field {
                 obj, idx, dst, ty, ..
@@ -332,12 +352,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 let value = self.arith(op, lhs, rhs, ty, builder, state);
                 state.regs.insert(dst.clone(), value);
             }
-            LirInst::Call { .. }
-            | LirInst::Drop { .. }
-            | LirInst::CompileError { .. }
-            | LirInst::FoldIntrinsic { .. } => bug!(
+            LirInst::Call {
+                func, ins, outs, ..
+            } => {
+                self.lower_call(func, ins, outs, builder, state);
+            }
+            LirInst::Drop { .. } => {}
+            LirInst::CompileError { .. } | LirInst::FoldIntrinsic { .. } => bug!(
                 Span::dummy(),
-                "instruction `{inst:?}` is not lowered until M5b Task 4"
+                "instruction `{inst:?}` is a post-fold marker and must not reach codegen"
             ),
         }
     }
@@ -358,6 +381,191 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         );
         state.places.insert(place.to_owned(), ptr);
         state.place_types.insert(place.to_owned(), ty.to_owned());
+    }
+
+    /// Materializes the address of `@name`, normalized to the instruction's
+    /// declared type: an integer bit type gets `ptrtoint` (the indirect-call
+    /// path `inttoptr`s it back); a pointer type keeps the function pointer.
+    fn addr_func_value(
+        &self,
+        name: &str,
+        ty: &str,
+        builder: &Builder<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let Some(function) = self.module.get_function(name) else {
+            bug!(Span::dummy(), "address of unknown function `@{name}`");
+        };
+        let ptr = function.as_global_value().as_pointer_value();
+        match self.lir_type(ty) {
+            BasicTypeEnum::IntType(int_ty) => {
+                checked(builder.build_ptr_to_int(ptr, int_ty, ""), "ptrtoint").into()
+            }
+            BasicTypeEnum::PointerType(_) => ptr.into(),
+            other => bug!(
+                Span::dummy(),
+                "`addr.func` type `{ty}` is `{}`, not an integer or pointer",
+                other.print_to_string()
+            ),
+        }
+    }
+
+    /// Lowers a `call` according to its target kind.
+    fn lower_call(
+        &self,
+        callee: &LirCallee,
+        ins: &[String],
+        outs: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        match callee {
+            LirCallee::Func(name) => self.lower_direct_call(name, ins, outs, builder, state),
+            LirCallee::Reg(reg) => self.lower_indirect_call(reg, ins, outs, builder, state),
+            LirCallee::Builtin(name) => self.lower_builtin_call(name, ins, outs, builder, state),
+        }
+    }
+
+    /// A direct user call: `call void @f(ptr %in…, ptr %out…)`.
+    fn lower_direct_call(
+        &self,
+        name: &str,
+        ins: &[String],
+        outs: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        let Some(function) = self.module.get_function(name) else {
+            bug!(Span::dummy(), "call to unknown function `@{name}`");
+        };
+        let args = place_args(ins, outs, state);
+        checked(builder.build_call(function, &args, ""), "direct call");
+    }
+
+    /// An indirect call: `%reg` holds the callee (a function pointer, or its
+    /// integer normalization which is `inttoptr`ed back). The `void(ptr…)`
+    /// type comes from the call's place count.
+    fn lower_indirect_call(
+        &self,
+        reg: &str,
+        ins: &[String],
+        outs: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        let Some(value) = state.regs.get(reg).copied() else {
+            bug!(Span::dummy(), "call through undefined register `&{reg}`");
+        };
+        let ptr = match value {
+            BasicValueEnum::PointerValue(ptr) => ptr,
+            BasicValueEnum::IntValue(int) => checked(
+                builder.build_int_to_ptr(int, self.ptr_type(), ""),
+                "inttoptr",
+            ),
+            other => bug!(
+                Span::dummy(),
+                "indirect callee `&{reg}` is a `{}`, not a pointer or integer",
+                other.get_type().print_to_string()
+            ),
+        };
+        let arity = ins.len() + outs.len();
+        let param_types = vec![self.ptr_type().into(); arity];
+        let fn_type = self.context.void_type().fn_type(&param_types, false);
+        let args = place_args(ins, outs, state);
+        checked(
+            builder.build_indirect_call(fn_type, ptr, &args, ""),
+            "indirect call",
+        );
+    }
+
+    /// A builtin call uses the value ABI: each input place is loaded, the
+    /// declared runtime symbol (from `builtin_sig`) is called, and the single
+    /// result is stored back into the out place. The runtime body is Task 5's
+    /// (and a real function already declared there is reused).
+    fn lower_builtin_call(
+        &self,
+        name: &str,
+        ins: &[String],
+        outs: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        let Some(sig) = builtin_sig(name) else {
+            bug!(Span::dummy(), "call to unknown builtin `{name}`");
+        };
+        let params: Vec<BasicMetadataTypeEnum<'ctx>> = ins
+            .iter()
+            .zip(&sig.ins)
+            .map(|(place, slot)| {
+                BasicMetadataTypeEnum::from(self.place_or_named_type(place, *slot, state))
+            })
+            .collect();
+        let fn_type = match outs.len() {
+            0 => self.context.void_type().fn_type(&params, false),
+            1 => {
+                let result =
+                    self.place_or_named_type(&outs[0], sig.outs.first().copied().flatten(), state);
+                result.fn_type(&params, false)
+            }
+            _ => bug!(
+                Span::dummy(),
+                "builtin `{name}` has {} out places, at most one is supported",
+                outs.len()
+            ),
+        };
+        let symbol = name.strip_prefix('@').unwrap_or(name);
+        let function = match self.module.get_function(symbol) {
+            Some(function) => function,
+            None => self.module.add_function(symbol, fn_type, None),
+        };
+        let args: Vec<BasicMetadataValueEnum<'ctx>> = ins
+            .iter()
+            .map(|place| self.load_place(place, builder, state).into())
+            .collect();
+        let call = checked(builder.build_call(function, &args, ""), "builtin call");
+        if let Some(out) = outs.first() {
+            let value = match call.try_as_basic_value() {
+                ValueKind::Basic(value) => value,
+                ValueKind::Instruction(_) => {
+                    bug!(Span::dummy(), "builtin `{name}` unexpectedly returned void")
+                }
+            };
+            checked(
+                builder.build_store(place_ptr(out, state), value),
+                "builtin result store",
+            );
+        }
+    }
+
+    /// The LLVM type of a builtin slot: the signature's declared type when
+    /// present, else the actual place's type (width-parameterized slot).
+    fn place_or_named_type(
+        &self,
+        place: &str,
+        named: Option<&str>,
+        state: &FnState<'ctx>,
+    ) -> BasicTypeEnum<'ctx> {
+        match named {
+            Some(ty) => self.lir_type(ty),
+            None => match state.place_types.get(place) {
+                Some(ty) => self.lir_type(ty),
+                None => bug!(Span::dummy(), "builtin argument `%{place}` is undeclared"),
+            },
+        }
+    }
+
+    /// Declares (once) `void @name(...)` with `fn_type`, reusing any existing
+    /// definition or declaration.
+    fn runtime_fn(&self, name: &str, fn_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
+        match self.module.get_function(name) {
+            Some(function) => function,
+            None => self.module.add_function(name, fn_type, None),
+        }
+    }
+
+    /// The `void @lilac_abort()` runtime symbol (its body is Task 5's).
+    fn abort_fn(&self) -> FunctionValue<'ctx> {
+        let fn_type = self.context.void_type().fn_type(&[], false);
+        self.runtime_fn("lilac_abort", fn_type)
     }
 
     /// Resolves an operand to an SSA value: a register's value, or a load of a
@@ -613,6 +821,57 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             other => bug!(Span::dummy(), "no float type for `#bit{other}`"),
         }
     }
+
+    /// Lowers a block terminator. `return` → `ret void`; `branch` → `br`;
+    /// `branch.if` → `br i1` (the false edge is the next block in layout order
+    /// when `els` is absent); `panic` → `@lilac_abort()` + `unreachable`;
+    /// `unreachable` → `unreachable`.
+    fn lower_term(
+        &self,
+        term: &LirTerm,
+        builder: &Builder<'ctx>,
+        blocks: &HashMap<&str, BasicBlock<'ctx>>,
+        state: &FnState<'ctx>,
+        next: Option<BasicBlock<'ctx>>,
+    ) {
+        match term {
+            LirTerm::Return { .. } => {
+                checked(builder.build_return(None), "return");
+            }
+            LirTerm::Unreachable { .. } => {
+                checked(builder.build_unreachable(), "unreachable");
+            }
+            LirTerm::Panic { .. } => {
+                let abort = self.abort_fn();
+                checked(builder.build_call(abort, &[], ""), "panic abort call");
+                checked(builder.build_unreachable(), "panic unreachable");
+            }
+            LirTerm::Branch { target, .. } => {
+                let block = block_at(blocks, target);
+                checked(builder.build_unconditional_branch(block), "branch");
+            }
+            LirTerm::BranchIf {
+                cond, then, els, ..
+            } => {
+                let then_block = block_at(blocks, then);
+                let else_block = match els {
+                    Some(els) => block_at(blocks, els),
+                    None => match next {
+                        Some(next) => next,
+                        None => bug!(
+                            Span::dummy(),
+                            "`branch.if` without `else` has no fall-through block"
+                        ),
+                    },
+                };
+                let condition = cond_value(cond, builder, state);
+                checked(
+                    builder.build_conditional_branch(condition, then_block, else_block),
+                    "branch.if",
+                );
+            }
+        }
+    }
 }
 
 /// Returns a place's pointer, raising an ICE if it was never declared.
@@ -620,6 +879,49 @@ fn place_ptr<'ctx>(name: &str, state: &FnState<'ctx>) -> PointerValue<'ctx> {
     match state.places.get(name).copied() {
         Some(ptr) => ptr,
         None => bug!(Span::dummy(), "use of undeclared place `%{name}`"),
+    }
+}
+
+/// The address of every listed place, inputs then outputs (pointer ABI).
+fn place_args<'ctx>(
+    ins: &[String],
+    outs: &[String],
+    state: &FnState<'ctx>,
+) -> Vec<BasicMetadataValueEnum<'ctx>> {
+    ins.iter()
+        .chain(outs.iter())
+        .map(|place| BasicMetadataValueEnum::from(place_ptr(place, state)))
+        .collect()
+}
+
+/// Reads a `branch.if` condition register as an `i1`: an `i1` is used
+/// directly, any wider bit container is tested against zero.
+fn cond_value<'ctx>(reg: &str, builder: &Builder<'ctx>, state: &FnState<'ctx>) -> IntValue<'ctx> {
+    let Some(value) = state.regs.get(reg).copied() else {
+        bug!(Span::dummy(), "branch on undefined register `&{reg}`");
+    };
+    match value {
+        BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => int,
+        BasicValueEnum::IntValue(int) => {
+            let zero = int.get_type().const_zero();
+            checked(
+                builder.build_int_compare(IntPredicate::NE, int, zero, ""),
+                "branch condition",
+            )
+        }
+        other => bug!(
+            Span::dummy(),
+            "branch condition `&{reg}` is a `{}`, not an integer",
+            other.get_type().print_to_string()
+        ),
+    }
+}
+
+/// Looks up a branch target, raising an ICE when it is unknown.
+fn block_at<'ctx>(blocks: &HashMap<&str, BasicBlock<'ctx>>, label: &str) -> BasicBlock<'ctx> {
+    match blocks.get(label) {
+        Some(block) => *block,
+        None => bug!(Span::dummy(), "branch to unknown block `${label}`"),
     }
 }
 
@@ -667,34 +969,4 @@ fn bit_as_float<'ctx>(
     builder: &Builder<'ctx>,
 ) -> FloatValue<'ctx> {
     checked(builder.build_bit_cast(value, float_ty, ""), "float bitcast").into_float_value()
-}
-
-/// Lowers a block terminator. `return` is final; the remaining shapes are
-/// verifiable placeholders until M5b Tasks 3–4 lower control flow and panics.
-fn lower_term(term: &LirTerm, builder: &Builder<'_>, blocks: &HashMap<&str, BasicBlock<'_>>) {
-    match term {
-        LirTerm::Return { .. } => {
-            checked(builder.build_return(None), "return");
-        }
-        LirTerm::Unreachable { .. } | LirTerm::Panic { .. } => {
-            checked(builder.build_unreachable(), "unreachable");
-        }
-        LirTerm::Branch { target, .. } => {
-            if let Some(block) = blocks.get(target.as_str()) {
-                checked(builder.build_unconditional_branch(*block), "branch");
-            } else {
-                bug!(Span::dummy(), "branch to unknown block `${target}`");
-            }
-        }
-        LirTerm::BranchIf { then, .. } => {
-            if let Some(block) = blocks.get(then.as_str()) {
-                checked(
-                    builder.build_unconditional_branch(*block),
-                    "branch.if placeholder",
-                );
-            } else {
-                bug!(Span::dummy(), "branch.if to unknown block `${then}`");
-            }
-        }
-    }
 }
