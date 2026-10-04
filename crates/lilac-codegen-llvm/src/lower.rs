@@ -108,6 +108,31 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
+        self.emit_entry_wrapper();
+    }
+
+    /// Appends the C entry point when the LIR defines `main`: `i32 @main()`
+    /// calls the renamed `lilac_main` and returns 0. A module without `main`
+    /// gets no wrapper.
+    fn emit_entry_wrapper(&self) {
+        if !self.lir.funcs.iter().any(|func| func.name == "main") {
+            return;
+        }
+        let Some(lilac_main) = self.module.get_function(symbol("main")) else {
+            bug!(Span::dummy(), "`main` was not declared");
+        };
+        let i32_ty = self.context.i32_type();
+        let main = self
+            .module
+            .add_function("main", i32_ty.fn_type(&[], false), None);
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(main, "entry");
+        builder.position_at_end(entry);
+        checked(builder.build_call(lilac_main, &[], ""), "main wrapper call");
+        checked(
+            builder.build_return(Some(&i32_ty.const_zero())),
+            "main wrapper return",
+        );
     }
 
     /// Emits the fixed in-module builtin runtime.
@@ -220,13 +245,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let arity = func.ins.len() + func.outs.len();
         let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
-        self.module.add_function(&func.name, fn_type, None);
+        self.module.add_function(symbol(&func.name), fn_type, None);
     }
 
     /// Lowers one function body: its signature places are bound to the incoming
     /// pointer arguments, then its blocks and terminators are emitted.
     fn lower_func(&self, func: &LirFunc) {
-        let Some(function) = self.module.get_function(&func.name) else {
+        let Some(function) = self.module.get_function(symbol(&func.name)) else {
             bug!(Span::dummy(), "function `@{}` was not declared", func.name);
         };
 
@@ -409,7 +434,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         ty: &str,
         builder: &Builder<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let Some(function) = self.module.get_function(name) else {
+        let Some(function) = self.module.get_function(symbol(name)) else {
             bug!(Span::dummy(), "address of unknown function `@{name}`");
         };
         let ptr = function.as_global_value().as_pointer_value();
@@ -451,7 +476,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) {
-        let Some(function) = self.module.get_function(name) else {
+        let Some(function) = self.module.get_function(symbol(name)) else {
             bug!(Span::dummy(), "call to unknown function `@{name}`");
         };
         let args = place_args(ins, outs, state);
@@ -893,6 +918,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 );
             }
         }
+    }
+}
+
+/// The LLVM symbol a LIR function emits under. LIR `main` is renamed
+/// `lilac_main` so the generated C `main` wrapper can take the real entry
+/// symbol; every other function keeps its name. Calls and `addr.func` are
+/// mapped through this too, so references to `main` stay consistent.
+pub(crate) fn symbol(name: &str) -> &str {
+    if name == "main" {
+        "lilac_main"
+    } else {
+        name
     }
 }
 

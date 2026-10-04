@@ -8,6 +8,7 @@
 
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
@@ -54,9 +55,26 @@ impl LlvmBackend {
         }
     }
 
-    /// Builds an empty module carrying the target triple and data layout.
-    /// Lowering populates it; [`Backend::emit_llvm`] verifies the result.
-    fn prepare_module<'ctx>(&self, context: &'ctx Context) -> Result<Module<'ctx>, String> {
+    /// The new-pass-manager pipeline string for the configured [`OptLevel`].
+    /// `O0` runs no passes; every other level builds LLVM's `default<O*>`
+    /// pipeline.
+    fn pass_pipeline(&self) -> Option<&'static str> {
+        match self.optimize {
+            OptLevel::O0 => None,
+            OptLevel::O1 => Some("default<O1>"),
+            OptLevel::O2 => Some("default<O2>"),
+            OptLevel::O3 => Some("default<O3>"),
+            OptLevel::Os => Some("default<Os>"),
+        }
+    }
+
+    /// Builds an empty module carrying the target triple and data layout, and
+    /// returns it with the target machine the pass pipeline needs. Lowering
+    /// populates the module; [`Backend::emit_llvm`] verifies and optimizes it.
+    fn prepare_module<'ctx>(
+        &self,
+        context: &'ctx Context,
+    ) -> Result<(Module<'ctx>, TargetMachine), String> {
         let module = context.create_module("lilac");
         let triple = TargetTriple::create(&self.triple);
         module.set_triple(&triple);
@@ -76,7 +94,7 @@ impl LlvmBackend {
             .ok_or_else(|| format!("failed to create target machine for `{}`", self.triple))?;
         module.set_data_layout(&machine.get_target_data().get_data_layout());
 
-        Ok(module)
+        Ok((module, machine))
     }
 }
 
@@ -91,13 +109,18 @@ impl Backend for LlvmBackend {
 
     fn emit_llvm(&self, lir: &LirModule) -> Result<String, String> {
         let context = Context::create();
-        let module = self.prepare_module(&context)?;
+        let (module, machine) = self.prepare_module(&context)?;
         let mut lower = lower::Lower::new(&context, module, lir, is_64_bit_triple(&self.triple));
         lower.run();
         let module = lower.into_module();
         module
             .verify()
             .map_err(|e| format!("module verification failed: {e}"))?;
+        if let Some(pipeline) = self.pass_pipeline() {
+            module
+                .run_passes(pipeline, &machine, PassBuilderOptions::create())
+                .map_err(|e| format!("optimization pipeline `{pipeline}` failed: {e}"))?;
+        }
         Ok(module.print_to_string().to_string())
     }
 }
@@ -985,5 +1008,108 @@ mod tests {
             text.contains("target triple = \"x86_64-pc-windows-msvc\""),
             "{text}"
         );
+    }
+
+    fn backend_with(optimize: OptLevel) -> lilac_codegen_llvm::LlvmBackend {
+        lilac_codegen_llvm::LlvmBackend::new("x86_64-pc-windows-msvc", optimize)
+    }
+
+    /// A LIR `main` is emitted as `lilac_main` and the module gains an `i32
+    /// @main()` wrapper that calls it and returns 0.
+    #[test]
+    fn emits_main_entry_wrapper() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
+        let text = emit(&module);
+        assert!(text.contains("define void @lilac_main()"), "{text}");
+        assert!(text.contains("define i32 @main()"), "{text}");
+        assert!(text.contains("call void @lilac_main()"), "{text}");
+        assert!(text.contains("ret i32 0"), "{text}");
+    }
+
+    /// A module with no `main` gets no `lilac_main` and no entry wrapper, yet
+    /// still verifies (Empty module has only the runtime).
+    #[test]
+    fn omits_entry_wrapper_without_main() {
+        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        assert!(!text.contains("lilac_main"), "{text}");
+        assert!(!text.contains("define i32 @main"), "{text}");
+    }
+
+    /// A `call` and an `addr.func` targeting LIR `main` are rewritten to the
+    /// renamed `lilac_main` symbol.
+    #[test]
+    fn renames_calls_and_addr_func_to_main() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        alloca(&mut insts, "fptr", "#bit64");
+        call(&mut insts, LirCallee::Func("main".to_owned()), &[], &[]);
+        insts.push(LirInst::AddrFunc {
+            func: "main".to_owned(),
+            dst: "1".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fptr");
+        module
+            .funcs
+            .push(func("h", &[], &[], vec![ret_block("entry", insts)]));
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
+        let text = emit(&module);
+        assert!(text.contains("call void @lilac_main()"), "{text}");
+        assert!(text.contains("ptrtoint (ptr @lilac_main to i64)"), "{text}");
+        assert!(!text.contains("call void @main()"), "{text}");
+        assert!(!text.contains("ptr @main to i64"), "{text}");
+    }
+
+    /// A function whose arithmetic is redundant under a loaded value: `-O0`
+    /// keeps the `add`/`mul`, `-O2` folds them away, so the two printouts
+    /// differ (the pass pipeline ran).
+    fn redundant_arith_module() -> LirModule {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        alloca(&mut insts, "a", "#bit32");
+        insts.push(LirInst::Const {
+            dst: "one".to_owned(),
+            lit: "1".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("one".to_owned()), "a");
+        insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("a".to_owned()),
+            dst: "ra".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("a".to_owned()),
+            dst: "rb".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        arith(&mut insts, ArithOp::IAdd, "ra", "rb", "sum", "#bit32");
+        arith(&mut insts, ArithOp::IMul, "sum", "ra", "prod", "#bit32");
+        copy_place(&mut insts, LirOperand::Reg("prod".to_owned()), "a");
+        module
+            .funcs
+            .push(func("f", &[], &[], vec![ret_block("entry", insts)]));
+        module
+    }
+
+    #[test]
+    fn o2_runs_pass_pipeline() {
+        let module = redundant_arith_module();
+        let o0 = backend_with(OptLevel::O0)
+            .emit_llvm(&module)
+            .expect("O0 emits");
+        let o2 = backend_with(OptLevel::O2)
+            .emit_llvm(&module)
+            .expect("O2 emits");
+        assert_ne!(o0, o2, "the -O2 pipeline must change the IR");
     }
 }
