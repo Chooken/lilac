@@ -43,6 +43,21 @@ pub enum TypeKind {
     Unknown,
     /// User-declared `object`.
     Object(DefId),
+    /// A declaration's generic parameter placeholder (`T` is index 0).
+    /// Appears only in templates, never in concrete output.
+    Param {
+        /// Position in the declaration's parameter list.
+        index: u32,
+        /// Source name, for diagnostics.
+        name: String,
+    },
+    /// An applied user type (`GenObject[@bit32]`).
+    Instance {
+        /// The generic declaration's `DefId`.
+        base: DefId,
+        /// Concrete or parameter arguments in order.
+        args: Vec<TypeRef>,
+    },
     /// `function (params) returns` value type.
     Func {
         /// Parameter types in order.
@@ -70,6 +85,8 @@ pub struct Types {
     objects: HashMap<DefId, TypeId>,
     object_names: HashMap<DefId, String>,
     funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>), TypeId>,
+    params: HashMap<(u32, String), TypeId>,
+    instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
 }
 
 impl Types {
@@ -116,6 +133,137 @@ impl Types {
         id
     }
 
+    /// Interns (or finds) a generic parameter placeholder (`T` -> index 0).
+    pub fn intern_param(&mut self, index: u32, name: &str) -> TypeId {
+        if let Some(&id) = self.params.get(&(index, name.to_owned())) {
+            return id;
+        }
+        let id = TypeId(next_id(self.kinds.len()));
+        self.kinds.push(TypeKind::Param {
+            index,
+            name: name.to_owned(),
+        });
+        self.params.insert((index, name.to_owned()), id);
+        id
+    }
+
+    /// Interns (or finds) an applied user type (`GenObject[@bit32]`).
+    /// Canonical: equal `(base, args)` always yields the same `TypeId`.
+    pub fn intern_instance(&mut self, base: DefId, args: Vec<TypeRef>) -> TypeId {
+        let key = (base, args);
+        if let Some(&id) = self.instances.get(&key) {
+            return id;
+        }
+        let id = TypeId(next_id(self.kinds.len()));
+        self.kinds.push(TypeKind::Instance {
+            base: key.0,
+            args: key.1.clone(),
+        });
+        self.instances.insert(key, id);
+        id
+    }
+
+    /// Rewrites `Param(i)` to `args[i]` throughout `ty`, recursively
+    /// re-interning nested `Instance`/`Func` types. The outer `ref` flag is
+    /// preserved (and never doubled).
+    pub fn substitute(&mut self, ty: TypeRef, args: &[TypeRef]) -> TypeRef {
+        match self.kind(ty.id).clone() {
+            TypeKind::Param { index, .. } => match args.get(index as usize) {
+                Some(&arg) => TypeRef {
+                    id: arg.id,
+                    is_ref: ty.is_ref || arg.is_ref,
+                },
+                None => ty,
+            },
+            TypeKind::Instance {
+                base,
+                args: inst_args,
+            } => {
+                let args = inst_args
+                    .iter()
+                    .map(|arg| self.substitute(*arg, args))
+                    .collect();
+                let id = self.intern_instance(base, args);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            TypeKind::Func { params, returns } => {
+                let params = params
+                    .iter()
+                    .map(|param| self.substitute(*param, args))
+                    .collect();
+                let returns = returns
+                    .iter()
+                    .map(|ret| self.substitute(*ret, args))
+                    .collect();
+                let id = self.intern_func(params, returns);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    /// Deterministic, collision-free, arity-tagged symbol name for IR.
+    /// Builtins drop their `@`; `ref X` becomes `ref_X`; an `Instance` is
+    /// `<Name>__<arity>__<arg>__…`.
+    pub fn mangle(&self, id: TypeId) -> String {
+        match self.kind(id) {
+            TypeKind::Bit8 => "bit8".to_owned(),
+            TypeKind::Bit16 => "bit16".to_owned(),
+            TypeKind::Bit32 => "bit32".to_owned(),
+            TypeKind::Bit64 => "bit64".to_owned(),
+            TypeKind::BitNative => "bitNative".to_owned(),
+            TypeKind::ByteBuffer => "byte_buffer".to_owned(),
+            TypeKind::FormatArgs => "format_args".to_owned(),
+            TypeKind::Unknown => "unknown".to_owned(),
+            TypeKind::Object(def) => self.object_name(*def),
+            TypeKind::Param { index, .. } => format!("param{index}"),
+            TypeKind::Instance { base, args } => {
+                let mut out = format!("{}__{}", self.object_name(*base), args.len());
+                for arg in args {
+                    out.push_str("__");
+                    out.push_str(&self.mangle_ref(*arg));
+                }
+                out
+            }
+            TypeKind::Func { params, returns } => {
+                let mut out = format!("function__{}", params.len());
+                for param in params {
+                    out.push_str("__");
+                    out.push_str(&self.mangle_ref(*param));
+                }
+                out.push_str("__returns__");
+                out.push_str(&returns.len().to_string());
+                for ret in returns {
+                    out.push_str("__");
+                    out.push_str(&self.mangle_ref(*ret));
+                }
+                out
+            }
+            TypeKind::Error => "error".to_owned(),
+        }
+    }
+
+    fn mangle_ref(&self, ty: TypeRef) -> String {
+        if ty.is_ref {
+            format!("ref_{}", self.mangle(ty.id))
+        } else {
+            self.mangle(ty.id)
+        }
+    }
+
+    fn object_name(&self, def: DefId) -> String {
+        self.object_names
+            .get(&def)
+            .cloned()
+            .unwrap_or_else(|| format!("object#{}", def.0))
+    }
+
     /// Interns (or finds) a `function (params) returns` type.
     pub fn intern_func(&mut self, params: Vec<TypeRef>, returns: Vec<TypeRef>) -> TypeId {
         let key = (params, returns);
@@ -156,11 +304,12 @@ impl Types {
             TypeKind::ByteBuffer => "@byte_buffer".to_owned(),
             TypeKind::FormatArgs => "@format_args".to_owned(),
             TypeKind::Unknown => "unknown".to_owned(),
-            TypeKind::Object(def) => self
-                .object_names
-                .get(def)
-                .cloned()
-                .unwrap_or_else(|| format!("object#{}", def.0)),
+            TypeKind::Object(def) => self.object_name(*def),
+            TypeKind::Param { name, .. } => name.clone(),
+            TypeKind::Instance { base, args } => {
+                let args: Vec<String> = args.iter().map(|a| self.display_ref(*a)).collect();
+                format!("{}[{}]", self.object_name(*base), args.join(", "))
+            }
             TypeKind::Func { params, returns } => {
                 let ps: Vec<String> = params.iter().map(|p| self.display_ref(*p)).collect();
                 let rs: Vec<String> = returns.iter().map(|r| self.display_ref(*r)).collect();
@@ -254,5 +403,132 @@ mod tests {
         let nullary = types.intern_func(Vec::new(), Vec::new());
         assert_ne!(one, nullary);
         assert_eq!(types.display(nullary), "function () -> nothing");
+    }
+
+    #[test]
+    fn param_interns_dedups_and_displays() {
+        let mut types = Types::new();
+        let first = types.intern_param(0, "T");
+        let again = types.intern_param(0, "T");
+        assert_eq!(first, again);
+        assert_eq!(types.display(first), "T");
+    }
+
+    #[test]
+    fn instance_interns_and_dedups() {
+        let mut types = Types::new();
+        let bit8 = types.builtin("@bit8").expect("has @bit8");
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let arg = TypeRef {
+            id: bit32,
+            is_ref: false,
+        };
+        let first = types.intern_instance(DefId(1), vec![arg]);
+        let again = types.intern_instance(DefId(1), vec![arg]);
+        assert_eq!(first, again);
+        let other = types.intern_instance(
+            DefId(1),
+            vec![TypeRef {
+                id: bit8,
+                is_ref: false,
+            }],
+        );
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn instance_mangle_is_arity_tagged() {
+        let mut types = Types::new();
+        types.set_object_name(DefId(1), "GenObj");
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let arg = TypeRef {
+            id: bit32,
+            is_ref: false,
+        };
+        let outer = types.intern_instance(DefId(1), vec![arg]);
+        assert_eq!(types.mangle(outer), "GenObj__1__bit32");
+        let nested = types.intern_instance(
+            DefId(1),
+            vec![TypeRef {
+                id: outer,
+                is_ref: false,
+            }],
+        );
+        assert_eq!(types.mangle(nested), "GenObj__1__GenObj__1__bit32");
+    }
+
+    #[test]
+    fn substitute_rewrites_params_and_nested_instances() {
+        let mut types = Types::new();
+        types.set_object_name(DefId(1), "GenObj");
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let bit32_arg = TypeRef {
+            id: bit32,
+            is_ref: false,
+        };
+        let param0 = types.intern_param(0, "T");
+        let param_arg = TypeRef {
+            id: param0,
+            is_ref: false,
+        };
+
+        assert_eq!(types.substitute(param_arg, &[bit32_arg]), bit32_arg);
+        assert_eq!(
+            types.substitute(
+                TypeRef {
+                    id: param0,
+                    is_ref: true
+                },
+                &[bit32_arg]
+            ),
+            TypeRef {
+                id: bit32,
+                is_ref: true
+            }
+        );
+
+        let generic = types.intern_instance(DefId(1), vec![param_arg]);
+        let concrete = types.intern_instance(DefId(1), vec![bit32_arg]);
+        assert_eq!(
+            types.substitute(
+                TypeRef {
+                    id: generic,
+                    is_ref: false
+                },
+                &[bit32_arg]
+            ),
+            TypeRef {
+                id: concrete,
+                is_ref: false
+            }
+        );
+
+        let template = types.intern_func(
+            vec![TypeRef {
+                id: param0,
+                is_ref: true,
+            }],
+            vec![param_arg],
+        );
+        let expected = types.intern_func(
+            vec![TypeRef {
+                id: bit32,
+                is_ref: true,
+            }],
+            vec![bit32_arg],
+        );
+        assert_eq!(
+            types.substitute(
+                TypeRef {
+                    id: template,
+                    is_ref: true
+                },
+                &[bit32_arg]
+            ),
+            TypeRef {
+                id: expected,
+                is_ref: true
+            }
+        );
     }
 }
