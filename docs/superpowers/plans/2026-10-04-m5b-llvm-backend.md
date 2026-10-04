@@ -125,7 +125,7 @@ Also assert an unknown type string is an ICE (test via `#[should_panic]` on the 
 
 - [ ] **Step 2: Run to verify it fails** — `cargo test -p lilac-codegen-llvm` → FAIL (no lowering).
 
-- [ ] **Step 3: Implement** the type map and place allocation per Global Constraints. Function params (`in`) and returns (`out`) become zeroed allocas; each `LirInst::Alloca` yields an alloca of its type followed by a zero store. Emit data globals (`!c: str|numlit`) as private `[N x i8]` constants in a fixed order.
+- [ ] **Step 3: Implement** the type map and place allocation per Global Constraints. Each function lowers to `define void @f(ptr %in0, …, ptr %out0, …)`: its `in` then `out` places are the incoming pointer arguments (all places passed by address). Each `LirInst::Alloca` yields an `alloca` of its type followed by a `store zeroinitializer`. Emit data globals (`!c: str|numlit`) as private `[N x i8]` constants in a fixed order.
 
 - [ ] **Step 4: Run to verify it passes; gates; commit**
 ```bash
@@ -173,8 +173,8 @@ git commit -am "M5b: lower LIR memory, arithmetic, conversion, and constant inst
 
 - [ ] **Step 1: Write the failing tests**
 
-- A direct call to a `nothing` function used as an effect statement lowers to `call void @g()` then the block's `ret` — exactly one terminator, no phantom out. (Review Focus 1)
-- An indirect call through an `addr.func` register lowers to a `ptr` call.
+- A call to `g` with one `in` and one `out` place passes the two place pointers (`call void @g(ptr %in, ptr %out)`); a call to a `nothing` function with no places lowers to `call void @g()` then the block's `ret` — exactly one terminator, no phantom out. (Review Focus 1)
+- An indirect call through an `addr.func` register lowers to a `ptr` call with the same pointer arguments.
 - `branch`/`branch.if` produce labeled blocks and `br`/`br i1`; `branch.if` with no `els` targets the fall-through.
 - `return` → `ret void`; `unreachable` → `unreachable`; `panic !c0` → a call to `@lilac_abort`; `drop %p` → no emitted instruction.
 

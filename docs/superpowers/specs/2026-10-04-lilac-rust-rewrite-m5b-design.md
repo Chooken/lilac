@@ -110,11 +110,16 @@ crates/
     (enum layouts already carry a leading `tag: #bit8` entry).
   - `#str`/`#numlit` never appear as value types in verified IR (they are `data`
     kinds); encountering one is an ICE.
-- **Places and registers.** Each `alloca #t %p : zeroed` becomes an `alloca` of
-  `t` plus a zero store (`store zeroinitializer`, i.e. observable zero-init).
-  `%p` names bind to the alloca pointer; `&r` names are SSA values produced by
-  the defining instruction. Function parameters (`in`) and returns (`out`) are
-  allocas seeded/read per the LIR place convention.
+- **Places, registers, and the calling convention.** Every LIR place is a
+  `ptr`. A local `alloca #t %p : zeroed` becomes an `alloca t` plus a zero store
+  (`store zeroinitializer` — observable zero-init). A function's `in`/`out`
+  places are the **incoming pointer arguments** of
+  `define void @f(ptr %in0, …, ptr %out0, …)`, in declaration order (all places
+  passed by address). `&r` names are SSA values from the defining instruction.
+  `addr %p` is the pointer `%p` itself; `copy … -> %p` stores; reading a place
+  loads. At a `call`, the caller passes the address of each listed `in` then
+  `out` place, in order. This pointer ABI applies uniformly to direct, indirect,
+  and `lilac_main` functions.
 - **Instructions** (all 17 variants): `CopyReg`/`CopyPlace` → `load`/`store` as
   needed; `Const` → integer/float/immediate or, for `lit` beginning `!`, a
   data-global address; `Load`/`Addr`/`AddrFunc` → load/GEP/function pointer;
