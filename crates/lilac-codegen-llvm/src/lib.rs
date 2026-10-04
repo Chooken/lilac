@@ -103,7 +103,10 @@ impl Backend for LlvmBackend {
 mod tests {
     use crate as lilac_codegen_llvm;
     use lilac_codegen::{Backend, OptLevel};
-    use lilac_ir::{LirBlock, LirData, LirDataKind, LirFunc, LirInst, LirModule, LirTerm};
+    use lilac_ir::{
+        ArithOp, ConvertOp, LirBlock, LirData, LirDataKind, LirFunc, LirInst, LirModule,
+        LirOperand, LirTerm,
+    };
     use lilac_span::Span;
 
     fn span() -> Span {
@@ -237,6 +240,282 @@ mod tests {
             .find("@c1 = private unnamed_addr constant [4 x i8]")
             .expect("c1 global");
         assert!(first < second, "{text}");
+    }
+
+    fn alloca(insts: &mut Vec<LirInst>, place: &str, ty: &str) {
+        insts.push(LirInst::Alloca {
+            ty: ty.to_owned(),
+            place: place.to_owned(),
+            span: span(),
+        });
+    }
+
+    fn copy_place(insts: &mut Vec<LirInst>, src: LirOperand, dst: &str) {
+        insts.push(LirInst::CopyPlace {
+            src,
+            dst: dst.to_owned(),
+            span: span(),
+        });
+    }
+
+    fn arith(insts: &mut Vec<LirInst>, op: ArithOp, lhs: &str, rhs: &str, dst: &str, ty: &str) {
+        insts.push(LirInst::Arith {
+            op,
+            lhs: lhs.to_owned(),
+            rhs: rhs.to_owned(),
+            dst: dst.to_owned(),
+            ty: ty.to_owned(),
+            span: span(),
+        });
+    }
+
+    /// One function exercising every Task-3 instruction family so the printed
+    /// IR shows each opcode. Arithmetic operands are loaded (not constants) so
+    /// LLVM's builder cannot fold the opcodes away.
+    #[allow(clippy::too_many_lines)]
+    fn inst_module() -> LirModule {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.layouts.insert(
+            "#Pair".to_owned(),
+            vec![
+                ("a".to_owned(), "#bit32".to_owned()),
+                ("b".to_owned(), "#bit8".to_owned()),
+            ],
+        );
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span: span(),
+        });
+
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("pair", "#Pair"),
+            ("x", "#bit32"),
+            ("x2", "#bit32"),
+            ("b", "#bit8"),
+            ("r", "ref #bit32"),
+            ("bbslot", "#byte_buffer"),
+            ("adslot", "ref #bit32"),
+            ("afslot", "#bit64"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+
+        insts.push(LirInst::Const {
+            dst: "c".to_owned(),
+            lit: "0x2a".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Const {
+            dst: "dec".to_owned(),
+            lit: "7".to_owned(),
+            ty: "#bit8".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Const {
+            dst: "bb".to_owned(),
+            lit: "!c0".to_owned(),
+            ty: "#byte_buffer".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Addr {
+            place: "x".to_owned(),
+            dst: "ad".to_owned(),
+            ty: "ref #bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::AddrFunc {
+            func: "f".to_owned(),
+            dst: "af".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+
+        copy_place(&mut insts, LirOperand::Reg("c".to_owned()), "x");
+        copy_place(&mut insts, LirOperand::Place("x".to_owned()), "x2");
+        copy_place(&mut insts, LirOperand::Reg("dec".to_owned()), "b");
+        copy_place(&mut insts, LirOperand::Reg("bb".to_owned()), "bbslot");
+        copy_place(&mut insts, LirOperand::Reg("ad".to_owned()), "adslot");
+        copy_place(&mut insts, LirOperand::Reg("af".to_owned()), "afslot");
+        insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("x".to_owned()),
+            dst: "cr".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Load {
+            src: "r".to_owned(),
+            dst: "ld".to_owned(),
+            ty: "ref #bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Field {
+            obj: "pair".to_owned(),
+            name: "a".to_owned(),
+            idx: 0,
+            dst: "fa".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::FieldAddr {
+            obj: "pair".to_owned(),
+            name: "a".to_owned(),
+            idx: 0,
+            dst: "fad".to_owned(),
+            ty: "ref #bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::StoreField {
+            value: LirOperand::Reg("c".to_owned()),
+            obj: "pair".to_owned(),
+            name: "a".to_owned(),
+            idx: 0,
+            span: span(),
+        });
+        insts.push(LirInst::Store {
+            src: LirOperand::Reg("c".to_owned()),
+            dst: "r".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Convert {
+            op: ConvertOp::Trunc,
+            src: "cr".to_owned(),
+            dst: "t".to_owned(),
+            ty: "#bit8".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Convert {
+            op: ConvertOp::ExtendZero,
+            src: "t".to_owned(),
+            dst: "z".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+
+        for (op, dst) in [
+            (ArithOp::IAdd, "ia"),
+            (ArithOp::ISub, "is"),
+            (ArithOp::IMul, "im"),
+            (ArithOp::IDiv, "id"),
+            (ArithOp::IMod, "ir"),
+        ] {
+            arith(&mut insts, op, "cr", "cr", dst, "#bit32");
+        }
+        for (op, dst) in [
+            (ArithOp::Eq, "eq"),
+            (ArithOp::ILt, "lt"),
+            (ArithOp::IGt, "gt"),
+        ] {
+            arith(&mut insts, op, "cr", "cr", dst, "#bit8");
+        }
+        for (op, dst) in [
+            (ArithOp::FAdd, "fa1"),
+            (ArithOp::FSub, "fs"),
+            (ArithOp::FMul, "fm"),
+            (ArithOp::FDiv, "fd"),
+            (ArithOp::FMod, "fr"),
+        ] {
+            arith(&mut insts, op, "cr", "cr", dst, "#bit32");
+        }
+        for (op, dst) in [(ArithOp::FLt, "fl"), (ArithOp::FGt, "fg")] {
+            arith(&mut insts, op, "cr", "cr", dst, "#bit8");
+        }
+
+        module.funcs.push(LirFunc {
+            name: "f".to_owned(),
+            ins: vec![("p".to_owned(), "ref #bit32".to_owned())],
+            outs: vec![("o".to_owned(), "#bit32".to_owned())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts,
+                term: LirTerm::Return { span: span() },
+                span: span(),
+            }],
+        });
+        module
+    }
+
+    #[test]
+    fn lowers_memory_arith_convert_and_const() {
+        let text = emit(&inst_module());
+        for needle in [
+            "store i32 42",
+            "i8 7",
+            "load i32, ptr %x",
+            "load ptr, ptr %r",
+            "ptr @f",
+            "@c0",
+            "i64 2",
+            "store ptr %x, ptr %adslot",
+            "getelementptr inbounds %Pair",
+            "trunc i32",
+            "zext i8",
+            "add i32",
+            "sub i32",
+            "mul i32",
+            "sdiv i32",
+            "srem i32",
+            "icmp eq i32",
+            "icmp slt i32",
+            "icmp sgt i32",
+            "fadd float",
+            "fsub float",
+            "fmul float",
+            "fdiv float",
+            "frem float",
+            "fcmp olt float",
+            "fcmp ogt float",
+        ] {
+            assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+        }
+    }
+
+    /// `field %instance` on an `in ref #Pair` place must load the reference
+    /// out of the place before the GEP (the pointer ABI passes the address of
+    /// the caller's reference slot).
+    #[test]
+    fn field_through_ref_loads_reference_first() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.layouts.insert(
+            "#Pair".to_owned(),
+            vec![
+                ("a".to_owned(), "#bit32".to_owned()),
+                ("b".to_owned(), "#bit8".to_owned()),
+            ],
+        );
+        let insts = vec![
+            LirInst::Field {
+                obj: "rp".to_owned(),
+                name: "a".to_owned(),
+                idx: 0,
+                dst: "v".to_owned(),
+                ty: "#bit32".to_owned(),
+                span: span(),
+            },
+            LirInst::CopyPlace {
+                src: LirOperand::Reg("v".to_owned()),
+                dst: "o".to_owned(),
+                span: span(),
+            },
+        ];
+        module.funcs.push(LirFunc {
+            name: "g".to_owned(),
+            ins: vec![("rp".to_owned(), "ref #Pair".to_owned())],
+            outs: vec![("o".to_owned(), "#bit32".to_owned())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts,
+                term: LirTerm::Return { span: span() },
+                span: span(),
+            }],
+        });
+        let text = emit(&module);
+        assert!(text.contains("load ptr, ptr %in0"), "{text}");
+        assert!(text.contains("getelementptr inbounds %Pair, ptr"), "{text}");
     }
 
     #[test]

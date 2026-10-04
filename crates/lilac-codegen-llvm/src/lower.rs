@@ -11,12 +11,12 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::{BasicTypeEnum, IntType, PointerType, StructType};
-use inkwell::values::PointerValue;
-use inkwell::AddressSpace;
+use inkwell::types::{BasicTypeEnum, FloatType, IntType, PointerType, StructType};
+use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
+use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
 use lilac_error::bug;
-use lilac_ir::{LirDataKind, LirFunc, LirInst, LirModule, LirTerm};
+use lilac_ir::{ArithOp, ConvertOp, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
 use lilac_span::Span;
 
 /// Turns a fallible inkwell builder call into an ICE.
@@ -25,6 +25,14 @@ fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
         Ok(value) => value,
         Err(err) => bug!(Span::dummy(), "failed to build {what}: {err}"),
     }
+}
+
+/// Per-function lowering state: every place's pointer and declared LIR type,
+/// plus the SSA value bound to each `&` register.
+struct FnState<'ctx> {
+    places: HashMap<String, PointerValue<'ctx>>,
+    place_types: HashMap<String, String>,
+    regs: HashMap<String, BasicValueEnum<'ctx>>,
 }
 
 /// One lowering context: an LLVM module plus the LIR being lowered into it.
@@ -183,18 +191,28 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let function = self.module.add_function(&func.name, fn_type, None);
 
         let params = function.get_params();
-        let mut places: HashMap<String, PointerValue<'ctx>> = HashMap::new();
-        for (index, (place, _)) in func.ins.iter().enumerate() {
+        let mut state = FnState {
+            places: HashMap::new(),
+            place_types: HashMap::new(),
+            regs: HashMap::new(),
+        };
+        for (index, (place, ty)) in func.ins.iter().enumerate() {
             if let Some(value) = params.get(index).copied() {
                 value.set_name(&format!("in{index}"));
-                places.insert(place.clone(), value.into_pointer_value());
+                state
+                    .places
+                    .insert(place.clone(), value.into_pointer_value());
+                state.place_types.insert(place.clone(), ty.clone());
             }
         }
-        for (index, (place, _)) in func.outs.iter().enumerate() {
+        for (index, (place, ty)) in func.outs.iter().enumerate() {
             let slot = func.ins.len() + index;
             if let Some(value) = params.get(slot).copied() {
                 value.set_name(&format!("out{index}"));
-                places.insert(place.clone(), value.into_pointer_value());
+                state
+                    .places
+                    .insert(place.clone(), value.into_pointer_value());
+                state.place_types.insert(place.clone(), ty.clone());
             }
         }
 
@@ -215,27 +233,431 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             };
             builder.position_at_end(basic_block);
             for inst in &block.insts {
-                self.lower_inst(inst, &builder, &mut places);
+                self.lower_inst(inst, &builder, &mut state);
             }
             lower_term(&block.term, &builder, &blocks);
         }
     }
 
-    /// Lowers the instructions M5b Task 2 owns; later tasks extend this match.
-    fn lower_inst(
-        &self,
-        inst: &LirInst,
-        builder: &Builder<'ctx>,
-        places: &mut HashMap<String, PointerValue<'ctx>>,
-    ) {
-        if let LirInst::Alloca { ty, place, .. } = inst {
-            let value_ty = self.lir_type(ty);
-            let ptr = checked(builder.build_alloca(value_ty, place), "alloca");
-            let zero = value_ty.const_zero();
-            checked(builder.build_store(ptr, zero), "zero-init store");
-            places.insert(place.clone(), ptr);
+    /// Lowers the value/memory/conversion instructions M5b Task 3 owns. Calls,
+    /// drops, and terminators belong to Task 4; reaching one here is an ICE.
+    fn lower_inst(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
+        match inst {
+            LirInst::Alloca { ty, place, .. } => {
+                self.lower_alloca(ty, place, builder, state);
+            }
+            LirInst::CopyReg { src, dst, ty, .. } => {
+                let value = self.operand(src, Some(ty), builder, state);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::CopyPlace { src, dst, .. } => {
+                let value = self.operand(src, None, builder, state);
+                let ptr = place_ptr(dst, state);
+                checked(builder.build_store(ptr, value), "copy store");
+            }
+            LirInst::Const { dst, lit, ty, .. } => {
+                let value = self.const_value(lit, ty);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::Load { src, dst, ty, .. } => {
+                let value = self.load_as(src, ty, builder, state);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::Addr { place, dst, .. } => {
+                let ptr = place_ptr(place, state);
+                state.regs.insert(dst.clone(), ptr.into());
+            }
+            LirInst::AddrFunc { func, dst, .. } => {
+                let Some(function) = self.module.get_function(func) else {
+                    bug!(Span::dummy(), "address of unknown function `@{func}`");
+                };
+                state.regs.insert(
+                    dst.clone(),
+                    function.as_global_value().as_pointer_value().into(),
+                );
+            }
+            LirInst::Field {
+                obj, idx, dst, ty, ..
+            } => {
+                let field = self.field_ptr(obj, *idx, builder, state);
+                let value = checked(
+                    builder.build_load(self.lir_type(ty), field, ""),
+                    "field load",
+                );
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::FieldAddr { obj, idx, dst, .. } => {
+                let field = self.field_ptr(obj, *idx, builder, state);
+                state.regs.insert(dst.clone(), field.into());
+            }
+            LirInst::StoreField {
+                value, obj, idx, ..
+            } => {
+                let field = self.field_ptr(obj, *idx, builder, state);
+                let stored = self.operand(value, None, builder, state);
+                checked(builder.build_store(field, stored), "field store");
+            }
+            LirInst::Store { src, dst, .. } => {
+                let reference = self.load_place(dst, builder, state).into_pointer_value();
+                let value = self.operand(src, None, builder, state);
+                checked(builder.build_store(reference, value), "store through ref");
+            }
+            LirInst::Convert {
+                op, src, dst, ty, ..
+            } => {
+                let source = reg_int(src, state);
+                let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
+                    bug!(Span::dummy(), "`convert` to non-integer type `{ty}`");
+                };
+                let value = match op {
+                    ConvertOp::Trunc => {
+                        checked(builder.build_int_truncate(source, result_ty, ""), "trunc")
+                    }
+                    ConvertOp::ExtendZero => {
+                        checked(builder.build_int_z_extend(source, result_ty, ""), "zext")
+                    }
+                };
+                state.regs.insert(dst.clone(), value.into());
+            }
+            LirInst::Arith {
+                op,
+                lhs,
+                rhs,
+                dst,
+                ty,
+                ..
+            } => {
+                let value = self.arith(op, lhs, rhs, ty, builder, state);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::Call { .. }
+            | LirInst::Drop { .. }
+            | LirInst::CompileError { .. }
+            | LirInst::FoldIntrinsic { .. } => bug!(
+                Span::dummy(),
+                "instruction `{inst:?}` is not lowered until M5b Task 4"
+            ),
         }
     }
+
+    /// Allocates a zeroed place of `ty` and binds it under `place`.
+    fn lower_alloca(
+        &self,
+        ty: &str,
+        place: &str,
+        builder: &Builder<'ctx>,
+        state: &mut FnState<'ctx>,
+    ) {
+        let value_ty = self.lir_type(ty);
+        let ptr = checked(builder.build_alloca(value_ty, place), "alloca");
+        checked(
+            builder.build_store(ptr, value_ty.const_zero()),
+            "zero-init store",
+        );
+        state.places.insert(place.to_owned(), ptr);
+        state.place_types.insert(place.to_owned(), ty.to_owned());
+    }
+
+    /// Resolves an operand to an SSA value: a register's value, or a load of a
+    /// place (using `ty` when the instruction names it, else the place's own
+    /// declared type).
+    fn operand(
+        &self,
+        operand: &LirOperand,
+        ty: Option<&str>,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match operand {
+            LirOperand::Reg(name) => match state.regs.get(name).copied() {
+                Some(value) => value,
+                None => bug!(Span::dummy(), "use of undefined register `&{name}`"),
+            },
+            LirOperand::Place(name) => match ty {
+                Some(ty) => self.load_as(name, ty, builder, state),
+                None => self.load_place(name, builder, state),
+            },
+        }
+    }
+
+    /// Loads the value stored in place `name`.
+    fn load_place(
+        &self,
+        name: &str,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let Some(ty) = state.place_types.get(name).cloned() else {
+            bug!(Span::dummy(), "load of undeclared place `%{name}`");
+        };
+        self.load_as(name, &ty, builder, state)
+    }
+
+    /// Loads place `name` as the given LIR type.
+    fn load_as(
+        &self,
+        name: &str,
+        ty: &str,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let ptr = place_ptr(name, state);
+        checked(builder.build_load(self.lir_type(ty), ptr, ""), "load")
+    }
+
+    /// GEPs to field `idx` of place `obj`, loading the object pointer first
+    /// when the place holds a `ref`.
+    fn field_ptr(
+        &self,
+        obj: &str,
+        idx: u32,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let Some(place_ty) = state.place_types.get(obj).cloned() else {
+            bug!(Span::dummy(), "field of undeclared place `%{obj}`");
+        };
+        let owner = place_ty.strip_prefix("ref ").unwrap_or(&place_ty);
+        let BasicTypeEnum::StructType(struct_ty) = self.lir_type(owner) else {
+            bug!(Span::dummy(), "field of non-struct place `%{obj}`");
+        };
+        let base = if place_ty.starts_with("ref ") {
+            let raw = place_ptr(obj, state);
+            checked(builder.build_load(self.ptr_type(), raw, ""), "load ref").into_pointer_value()
+        } else {
+            place_ptr(obj, state)
+        };
+        checked(
+            builder.build_struct_gep(struct_ty, base, idx, ""),
+            "field gep",
+        )
+    }
+
+    /// Materializes a `const` literal: a data-symbol address (or `#byte_buffer`
+    /// wrapper), or an integer/pointer immediate.
+    fn const_value(&self, lit: &str, ty: &str) -> BasicValueEnum<'ctx> {
+        if let Some(name) = lit.strip_prefix('!') {
+            return self.data_const(name, ty);
+        }
+        let value = parse_int(lit);
+        match self.lir_type(ty) {
+            BasicTypeEnum::IntType(int_ty) => int_ty.const_int(value, false).into(),
+            BasicTypeEnum::PointerType(ptr_ty) if value == 0 => ptr_ty.const_null().into(),
+            other => bug!(
+                Span::dummy(),
+                "const literal `{lit}` cannot be a `{}` value",
+                other.print_to_string()
+            ),
+        }
+    }
+
+    /// The value of a data-symbol `const`: `#byte_buffer` wraps `{len, ptr}`,
+    /// a reference type is the bare global address.
+    fn data_const(&self, name: &str, ty: &str) -> BasicValueEnum<'ctx> {
+        let Some(global) = self.module.get_global(name) else {
+            bug!(Span::dummy(), "const of undeclared data `!{name}`");
+        };
+        let ptr = global.as_pointer_value();
+        if ty == "#byte_buffer" {
+            let len = self.data_len(name);
+            let len_value = self.native.const_int(len, false);
+            self.context
+                .const_struct(&[len_value.into(), ptr.into()], false)
+                .into()
+        } else if ty.starts_with("ref ") || ty == "#ptr" {
+            ptr.into()
+        } else {
+            bug!(
+                Span::dummy(),
+                "data-symbol const of type `{ty}` is unsupported"
+            );
+        }
+    }
+
+    /// Byte length of a data global (no NUL terminator).
+    fn data_len(&self, name: &str) -> u64 {
+        match self.lir.data.iter().find(|datum| datum.name == name) {
+            Some(datum) => match &datum.kind {
+                LirDataKind::Str(text) | LirDataKind::NumLit(text) => {
+                    u64::try_from(text.len()).unwrap_or(u64::MAX)
+                }
+            },
+            None => bug!(Span::dummy(), "const of undeclared data `!{name}`"),
+        }
+    }
+
+    /// Lowers one arithmetic/comparison op. Integer ops work on bit containers
+    /// directly; float ops reinterpret the bit container as `float`/`double`,
+    /// apply the op, then reinterpret the result back.
+    fn arith(
+        &self,
+        op: &ArithOp,
+        lhs: &str,
+        rhs: &str,
+        ty: &str,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match op {
+            ArithOp::IAdd | ArithOp::ISub | ArithOp::IMul | ArithOp::IDiv | ArithOp::IMod => {
+                let left = reg_int(lhs, state);
+                let right = reg_int(rhs, state);
+                if !matches!(self.lir_type(ty), BasicTypeEnum::IntType(_)) {
+                    bug!(
+                        Span::dummy(),
+                        "`{op:?}` needs a bit-container type, found `{ty}`"
+                    );
+                }
+                let value = match op {
+                    ArithOp::IAdd => builder.build_int_add(left, right, ""),
+                    ArithOp::ISub => builder.build_int_sub(left, right, ""),
+                    ArithOp::IMul => builder.build_int_mul(left, right, ""),
+                    ArithOp::IDiv => builder.build_int_signed_div(left, right, ""),
+                    _ => builder.build_int_signed_rem(left, right, ""),
+                };
+                checked(value, "integer arith").into()
+            }
+            ArithOp::Eq | ArithOp::ILt | ArithOp::IGt => {
+                let left = reg_int(lhs, state);
+                let right = reg_int(rhs, state);
+                let predicate = match op {
+                    ArithOp::Eq => IntPredicate::EQ,
+                    ArithOp::ILt => IntPredicate::SLT,
+                    _ => IntPredicate::SGT,
+                };
+                let cmp = checked(
+                    builder.build_int_compare(predicate, left, right, ""),
+                    "icmp",
+                );
+                self.widen_bool(cmp, ty, builder)
+            }
+            ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod => {
+                let left = reg_int(lhs, state);
+                let right = reg_int(rhs, state);
+                let float_ty = self.float_type(left.get_type().get_bit_width());
+                let left_f = bit_as_float(left, float_ty, builder);
+                let right_f = bit_as_float(right, float_ty, builder);
+                let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
+                    bug!(
+                        Span::dummy(),
+                        "`{op:?}` needs a bit-container type, found `{ty}`"
+                    );
+                };
+                let value = match op {
+                    ArithOp::FAdd => builder.build_float_add(left_f, right_f, ""),
+                    ArithOp::FSub => builder.build_float_sub(left_f, right_f, ""),
+                    ArithOp::FMul => builder.build_float_mul(left_f, right_f, ""),
+                    ArithOp::FDiv => builder.build_float_div(left_f, right_f, ""),
+                    _ => builder.build_float_rem(left_f, right_f, ""),
+                };
+                let bits = checked(value, "float arith");
+                checked(
+                    builder.build_bit_cast(bits, result_ty, ""),
+                    "float result bitcast",
+                )
+            }
+            ArithOp::FLt | ArithOp::FGt => {
+                let left = reg_int(lhs, state);
+                let right = reg_int(rhs, state);
+                let float_ty = self.float_type(left.get_type().get_bit_width());
+                let left_f = bit_as_float(left, float_ty, builder);
+                let right_f = bit_as_float(right, float_ty, builder);
+                let predicate = if matches!(op, ArithOp::FLt) {
+                    FloatPredicate::OLT
+                } else {
+                    FloatPredicate::OGT
+                };
+                let cmp = checked(
+                    builder.build_float_compare(predicate, left_f, right_f, ""),
+                    "fcmp",
+                );
+                self.widen_bool(cmp, ty, builder)
+            }
+        }
+    }
+
+    /// Widens an `i1` comparison result to the declared bit-container type.
+    fn widen_bool(
+        &self,
+        cmp: IntValue<'ctx>,
+        ty: &str,
+        builder: &Builder<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
+            bug!(
+                Span::dummy(),
+                "comparison result needs a bit-container type, found `{ty}`"
+            );
+        };
+        if result_ty.get_bit_width() == 1 {
+            cmp.into()
+        } else {
+            checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool").into()
+        }
+    }
+
+    /// The float type for a bit width.
+    fn float_type(&self, bits: u32) -> FloatType<'ctx> {
+        match bits {
+            32 => self.context.f32_type(),
+            64 => self.context.f64_type(),
+            other => bug!(Span::dummy(), "no float type for `#bit{other}`"),
+        }
+    }
+}
+
+/// Returns a place's pointer, raising an ICE if it was never declared.
+fn place_ptr<'ctx>(name: &str, state: &FnState<'ctx>) -> PointerValue<'ctx> {
+    match state.places.get(name).copied() {
+        Some(ptr) => ptr,
+        None => bug!(Span::dummy(), "use of undeclared place `%{name}`"),
+    }
+}
+
+/// Reads a register as an integer value.
+fn reg_int<'ctx>(name: &str, state: &FnState<'ctx>) -> IntValue<'ctx> {
+    match state.regs.get(name).copied() {
+        Some(BasicValueEnum::IntValue(value)) => value,
+        Some(other) => bug!(
+            Span::dummy(),
+            "register `&{name}` is a `{}`, not an integer",
+            other.get_type().print_to_string()
+        ),
+        None => bug!(Span::dummy(), "use of undefined register `&{name}`"),
+    }
+}
+
+/// Parses an integer literal (`0x`/`0b`/decimal, `_` separators).
+fn parse_int(text: &str) -> u64 {
+    let digits = text.trim().replace('_', "");
+    let parsed = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = digits
+        .strip_prefix("0b")
+        .or_else(|| digits.strip_prefix("0B"))
+    {
+        u64::from_str_radix(bin, 2).ok()
+    } else if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        digits.parse::<u64>().ok()
+    } else {
+        None
+    };
+    match parsed {
+        Some(value) => value,
+        None => bug!(Span::dummy(), "invalid const literal `{text}`"),
+    }
+}
+
+/// Reinterprets a bit container as a float of `float_ty`.
+fn bit_as_float<'ctx>(
+    value: IntValue<'ctx>,
+    float_ty: FloatType<'ctx>,
+    builder: &Builder<'ctx>,
+) -> FloatValue<'ctx> {
+    checked(builder.build_bit_cast(value, float_ty, ""), "float bitcast").into_float_value()
 }
 
 /// Lowers a block terminator. `return` is final; the remaining shapes are
