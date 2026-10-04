@@ -16,13 +16,17 @@
 
 # Sections
 
-Data sections hold constant declarations. String and number literals lower to
-`@byte_buffer` consts before IR; f-strings lower to `@format_args` construction
-plus conversions/calls and introduce no new instruction shapes (see `SPEC.md`).
+Data sections hold constant declarations. String literals and the source bytes
+of decimal number literals lower to `data` consts (`!c: str = "..."` /
+`!c: numlit = "..."`); a string literal is then read as a data-backed buffer
+value with `const !c:#byte_buffer`, never `@byte_buffer_from` (which stays a
+builtin for user code). Hex/bin literals are `const` registers typed directly,
+not data. f-strings lower to `@format_args` construction plus conversions/calls
+and introduce no new instruction shapes (see `SPEC.md`).
 ```lilac-ir
 data {
-    !const_name "String",
-    !const_name "0.54",
+    !c0: str = "String",
+    !c1: numlit = "0.54",
 }
 ```
 
@@ -143,6 +147,25 @@ covers them yet.
 call &f (in %a) (out %b)
 ```
 
+### builtin calls
+* Callee is a `@`-builtin name (`call @byte_buffer_len (in %buf) (out %len)`)
+* Verified against the builtin signature table below; `@as_int`, `@as_float`,
+  `@size_of`, and `@compile_error` are fold-only markers, never builtin calls
+  (see `compile.error`)
+
+| builtin | in-args | out |
+| --- | --- | --- |
+| `@byte_buffer_from` | `ref #bit8`, `#bitNative` | `#byte_buffer` |
+| `@byte_buffer_ptr` | `#byte_buffer` | `ref #bit8` |
+| `@byte_buffer_len` | `#byte_buffer` | `#bitNative` |
+| `@format_args_new` | — | `#format_args` |
+| `@format_args_push` | `ref #format_args`, `#byte_buffer` | — |
+| `@format_args_count` | `#format_args` | `#bitNative` |
+| `@format_args_piece` | `#format_args`, `#bitNative` | `#byte_buffer` |
+| `@load_u8` | `ref #bit8`, `#bitNative` | `#bit8` |
+| `@store_u8` | `ref #bit8`, `#bitNative`, `#bit8` | — |
+| `@memcpy` | `ref #bit8`, `ref #bit8`, `#bitNative` | — |
+
 ### branch 
 * To: Label or register
 ```lilac-ir
@@ -193,9 +216,11 @@ call site. `compile.error` fires only if still live after constant folding
 diagnostic, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives folding is a live error, diagnosed during folding — never during
-verification (reaching the verifier is an internal error). Byte-buffer
-intrinsics (`@as_int`, `@as_float`) on constant operands are likewise
-folded to plain constants before verification and never reach the backend.
+verification (reaching the verifier is an internal error). The fold-required
+markers `@as_int`, `@as_float`, and `@size_of` are the same shape: the front-end
+emits a pre-fold node, the folder consumes it to a plain `const` (or `E060`), and
+a survivor reaching verification is an internal error, never a backend call.
+`@size_of` folding is best-effort in M3 (operand-type semantics not yet pinned).
 
 ## Casts
 
@@ -246,8 +271,10 @@ Same width rule as integer arithmetic.
 
 ## Literals (canonical text)
 * Ints: `0x1:#bit32`, `0b101:#bit8`; width suffix is required in canonical text.
-* Strings/numbers: `!c: str = "..."` / `!c: numlit = "10.5"` in `data`.
-* `@as_int/@as_float` on constant operands never appear in verified IR.
+* Strings/numbers: `!c: str = "..."` / `!c: numlit = "10.5"` in `data`; a string
+  literal is read with `&1: #byte_buffer = const !c` (data-backed buffer value).
+* Fold-required markers `@as_int`/`@as_float`/`@size_of` on constant operands
+  never appear in verified IR — they fold to `const`.
 
 ## Verification (`lilac-ir::verify`, runs before any backend)
 1. Header present with supported `lilac_ir` version; `target` resolves `@bitNative`.
@@ -257,6 +284,6 @@ Same width rule as integer arithmetic.
 5. `field .name` exists with index in bounds and matching type comment.
 6. Arithmetic/comparison widths match; `i.*`/`f.*` used on allowed widths only.
 7. `return` only when all `out` places are definitely assigned.
-8. No `branch.if` on a constant, no `@as_int/@as_float` on a constant literal,
-   no `compile.error`. Violations are user-facing `Diagnostic`s with HIR spans,
-   never backend crashes.
+8. No `branch.if` on a constant, no fold-required marker (`@as_int`/`@as_float`/
+   `@size_of`) or `compile.error` survivor. Violations are user-facing
+   `Diagnostic`s with HIR spans, never backend crashes.

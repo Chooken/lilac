@@ -1,0 +1,12 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+!c0: numlit = "5"
+function @main
+{
+  $entry:
+    alloca #bit32 %integer : zeroed
+    &1: #byte_buffer = const !c0
+    &2: #bit32 = const 0x5
+    copy &2 -> %integer
+    return
+}

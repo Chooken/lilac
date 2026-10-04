@@ -1,0 +1,4 @@
+main: function () nothing {
+    n: @bit32 = 0x1
+    msg: @format_args = $"a{n}b"
+}

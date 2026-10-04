@@ -1,0 +1,12 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+!c0: numlit = "5.25"
+function @main
+{
+  $entry:
+    alloca #bit64 %float : zeroed
+    &1: #byte_buffer = const !c0
+    &2: #bit64 = const 5.25
+    copy &2 -> %float
+    return
+}

@@ -1,0 +1,5 @@
+main: function () nothing {
+    s: @byte_buffer = "hello"
+    n: @bitNative = @byte_buffer_len(s)
+    p: ref @bit8 = @byte_buffer_ptr(s)
+}

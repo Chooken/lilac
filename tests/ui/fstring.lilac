@@ -1,0 +1,4 @@
+main: function () nothing {
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+}

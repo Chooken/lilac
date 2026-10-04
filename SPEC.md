@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.2-draft (rewrite baseline; M2 control-flow + folding amendments). Status: draft, normative for the Rust rewrite.
+> Version: 0.3-draft (M3 strings, literal classes, and const call-eval amendments). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -54,7 +54,15 @@ Lilac does not implement move semantics. Value assignment and parameter passing 
 Literals are compiler-known bytes; their meaning comes from use. There is no
 mirror object to declare.
 
-Number literals (`5`, `0xFF`) have type `@byte_buffer` holding the source bytes.
+Number literals split into two classes. Hex/bin literals (`0x…`, `0b…`) are
+`LitLiteral`s: their bits are fully known, so they take the expected (or
+unified) bit width and a value too wide for it is `E060`. Every decimal form
+(`5`, `10.5`, `0.54`) is a `NumberLiteral` typed `@byte_buffer` holding its
+source bytes, with no implicit conversion to a bit type — write `@as_int` /
+`@as_float` to read digits. Assigning a decimal literal directly to a bit type
+(`a: @bit8 = 5`) is therefore a failed conversion search (`E043`), not a
+mismatched-types error.
+
 `@as_int()` / `@as_float()` on a constant literal are folded at compile time;
 the runtime-parse form is only a semantic model, never emitted code.
 Out-of-range digits or values that do not fit the target width are compile errors.
@@ -63,9 +71,11 @@ Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
 the shared representation.
 
 String literals (`"hi"`) have type `@byte_buffer` backed by a `data` const, with
-no heap allocation: `data !str_N "hi"` plus a borrowed view over it. `String`
-itself is purely a standard library type — the compiler neither names it nor
-knows any layout for it. `s: String = "hi"` works through the ordinary
+no heap allocation: `data !cN: str = "hi"` plus `const !cN:#byte_buffer`, a
+data-backed buffer value. `@byte_buffer_from` stays a builtin for user code,
+but the literal path does not use it. `String` itself is purely a standard
+library type — the compiler neither names it nor knows any layout for it.
+`s: String = "hi"` works through the ordinary
 `@conversion(from: @byte_buffer) to: String` search (left-to-right, exact-first
 rules in §8); without that binding in scope it is a normal `E043` error.
 UTF-8 validation lives in user-land. Values backed by `data` consts are
@@ -182,9 +192,9 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@f_greater_than`** | `(lhs, rhs)` | Float greater-than (IEEE-754). Returns `@bit8`. |
 | **`@i_negate`** | `(value)` | Integer two's-complement negation. |
 | **`@f_negate`** | `(value)` | Float negation (IEEE-754 sign flip). |
-| **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Folded at compile time when the operand is constant; out-of-range input is a compile error. |
-| **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Folded at compile time when the operand is constant; invalid input is a compile error. |
-| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. |
+| **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Fold-required marker: consumed at compile time, never a runtime call; out-of-range or non-constant input is `E060`. |
+| **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Fold-required marker: consumed at compile time, never a runtime call; invalid or non-constant input is `E060`. |
+| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bitNative` byte offset. Returns `@bit8`. |
@@ -198,6 +208,14 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bitNative`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
+
+`@as_int`, `@as_float`, `@size_of`, and `@compile_error` are **fold-required
+markers**, not runtime builtin calls: the front-end emits a pre-fold node the
+constant folder must consume (or diagnose). A survivor reaching IR verification
+is an internal error, exactly like a live `@compile_error`. Builtin calls that
+do reach IR are checked against the builtin signature table; `@load_u8` takes
+two in-args (`ref #bit8`, `#bitNative`) and yields `#bit8`, while `@store_u8`
+takes three in-args (`ref #bit8`, `#bitNative`, `#bit8`) and yields nothing.
 
 ## 4. Functions & Control Flow
 
@@ -606,10 +624,11 @@ Binary literal:
 ```lilac-ir
 &1: #bit32 = const 0x1:#bit32
 ```
-String literal (`"hi"` with no heap allocation):
+String literal (`"hi"` with no heap allocation): a `data` const plus a
+data-backed buffer value (`const !cN:#byte_buffer`), never `@byte_buffer_from`:
 ```lilac-ir
-data { !str_7 "hi" }
-%tmp: @byte_buffer = @byte_buffer_from(addr !str_7, const 0x2)
+data { !c7: str = "hi" }
+&1: #byte_buffer = const !c7
 ```
 `String` construction from there is ordinary user-land conversion (`@conversion`
 search); f-strings additionally use `@format_args_*` per §2.
@@ -620,6 +639,6 @@ $entry:
   return
 ```
 Assignment and member access use `copy` / `field .name` as defined in `IR_SPEC.md`.
-`@as_int` / `@as_float` on constant literals, `branch.if` on constant conditions,
-and `compile.error` in dead branches never reach verified IR (see Compile-time
-folding above).
+`@as_int` / `@as_float` / `@size_of` (fold-required markers) on constant
+operands, `branch.if` on constant conditions, and `compile.error` in dead
+branches never reach verified IR (see Compile-time folding above).
