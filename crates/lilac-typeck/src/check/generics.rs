@@ -405,7 +405,23 @@ impl Checker<'_> {
                 self.types.set_object_name(obj_def, &object_name);
                 let object_id = self.types.intern_instance(obj_def, object_args);
                 let member = self.member_name(def);
-                return format!("{}.{member}", self.types.mangle(object_id));
+                let mut name = format!("{}.{member}", self.types.mangle(object_id));
+                // A method's own generic arguments (beyond the object's) are
+                // arity-tagged so distinct specializations never collide
+                //(`GenObject__1__bit32.get__1__bit64`, design §3.4).
+                let own = &args[count.min(args.len())..];
+                if !own.is_empty() {
+                    name.push_str("__");
+                    name.push_str(&own.len().to_string());
+                    for arg in own {
+                        name.push_str("__");
+                        if arg.is_ref {
+                            name.push_str("ref_");
+                        }
+                        name.push_str(&self.types.mangle(arg.id));
+                    }
+                }
+                return name;
             }
         }
         let mut name = format!("{}__{}", self.function_name(def), args.len());
@@ -710,6 +726,40 @@ mod tests {
             "Object: object {\n    get: function () result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get()\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[Object]()\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn static_method_on_instance_ok() {
+        // Static duck typing over a concrete generic instance: `T.get()`
+        // resolves against `GenObject[@bit32]` (Gap 2 coverage).
+        let (diags, hir, _) = check(
+            "GenObject[T]: object {\n    value: T\n    get: function () result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get()\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[GenObject[@bit32]]()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            names(&hir).contains(&"GenObject__1__bit32.get"),
+            "missing instance static method: {:?}",
+            names(&hir)
+        );
+    }
+
+    #[test]
+    fn method_own_generics_mangle_distinctly() {
+        // A method's own generic arguments must be part of its symbol, or two
+        // specializations collide (`GenObject__1__bit32.get` twice).
+        let (diags, hir, _) = check(
+            "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let names = names(&hir);
+        assert!(
+            names.contains(&"GenObject__1__bit32.get__1__bit32"),
+            "missing method-own-arg instance: {names:?}"
+        );
+        assert!(
+            names.contains(&"GenObject__1__bit32.get__1__bit64"),
+            "missing method-own-arg instance: {names:?}"
+        );
     }
 
     fn assert_no_param(types: &Types, hir: &HirProgram) {

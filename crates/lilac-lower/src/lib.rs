@@ -1824,6 +1824,16 @@ mod tests {
     }
 
     #[test]
+    fn lower_method_own_generics_distinct() {
+        let (text, diags) = lower_src(
+            "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("GenObject__1__bit32.get__1__bit32"), "{text}");
+        assert!(text.contains("GenObject__1__bit32.get__1__bit64"), "{text}");
+    }
+
+    #[test]
     fn lower_structlit_alloca_zeroed() {
         let (text, diags) = lower_src(
             "Object: object {\n    member: @bit32\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
