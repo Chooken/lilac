@@ -35,6 +35,8 @@ pub enum ResKind {
         is_extern: bool,
         /// Whether it declares generic parameters (bodies check in M4).
         generic: bool,
+        /// Declared generic parameter names, in declaration order.
+        generic_params: Vec<String>,
         /// Declared parameters (for signature collection).
         params: Vec<Param>,
         /// Declared return slots (for signature collection).
@@ -44,6 +46,8 @@ pub enum ResKind {
     Hook {
         /// Whether it declares generic parameters (rejected with `E052`).
         generic: bool,
+        /// Declared generic parameter names, in declaration order.
+        generic_params: Vec<String>,
         /// Declared parameters (for signature collection).
         params: Vec<Param>,
         /// Declared return slots (for signature collection).
@@ -53,6 +57,8 @@ pub enum ResKind {
     Object {
         /// Member name → definition.
         members: HashMap<String, ResItem>,
+        /// Declared generic parameter names, in declaration order.
+        generic_params: Vec<String>,
     },
     /// `name: enum { ... }` with variant names and payloads in order.
     Enum {
@@ -130,12 +136,14 @@ impl Collector<'_> {
         let id = self.fresh();
         let kind = match &item.kind {
             ItemKind::Func(decl) => {
-                let generic = !decl.generic_params.is_empty();
+                let generic_params = decl.generic_params.clone();
+                let generic = !generic_params.is_empty();
                 let params = decl.params.clone();
                 let returns = decl.returns.clone();
                 if item.name.starts_with('@') {
                     ResKind::Hook {
                         generic,
+                        generic_params,
                         params,
                         returns,
                     }
@@ -143,12 +151,16 @@ impl Collector<'_> {
                     ResKind::Func {
                         is_extern: decl.is_extern,
                         generic,
+                        generic_params,
                         params,
                         returns,
                     }
                 }
             }
-            ItemKind::Object { members, .. } => {
+            ItemKind::Object {
+                members,
+                generic_params,
+            } => {
                 let mut table = HashMap::new();
                 for member in members {
                     if let Some(resolved) = self.item(member) {
@@ -157,7 +169,10 @@ impl Collector<'_> {
                         self.insert_overload(&mut table, None, &member.name, resolved);
                     }
                 }
-                ResKind::Object { members: table }
+                ResKind::Object {
+                    members: table,
+                    generic_params: generic_params.clone(),
+                }
             }
             ItemKind::Enum { variants, .. } => ResKind::Enum {
                 variants: variants
@@ -292,7 +307,7 @@ mod tests {
         );
         assert!(!diags.has_errors());
         let object = module.items.get("Object").expect("has Object");
-        let ResKind::Object { members } = &object.kind else {
+        let ResKind::Object { members, .. } = &object.kind else {
             panic!("expected object, got {:?}", object.kind);
         };
         assert!(matches!(
@@ -355,5 +370,33 @@ mod tests {
         assert_eq!(variants[0].name, "Some");
         assert!(variants[0].payload.is_some());
         assert!(variants[1].payload.is_none());
+    }
+
+    #[test]
+    fn func_records_generic_params() {
+        let (module, diags) = resolve_src("gen[T, U]: function (a: T) r: U {\n    r = a\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let func = module.items.get("gen").expect("has gen");
+        let ResKind::Func {
+            generic,
+            generic_params,
+            ..
+        } = &func.kind
+        else {
+            panic!("expected func, got {:?}", func.kind);
+        };
+        assert!(generic);
+        assert_eq!(generic_params, &["T".to_owned(), "U".to_owned()]);
+    }
+
+    #[test]
+    fn object_records_generic_params() {
+        let (module, diags) = resolve_src("GenObj[T]: object {\n    value: T\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let object = module.items.get("GenObj").expect("has GenObj");
+        let ResKind::Object { generic_params, .. } = &object.kind else {
+            panic!("expected object, got {:?}", object.kind);
+        };
+        assert_eq!(generic_params, &["T".to_owned()]);
     }
 }

@@ -374,6 +374,7 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
         } => {
             let ResKind::Object {
                 members: resolved_members,
+                ..
             } = &resolved.kind
             else {
                 return;
@@ -604,7 +605,7 @@ mod tests {
         );
         assert!(!diags.has_errors());
         let object = module.items.get("Object").expect("has Object");
-        let lilac_resolve::ResKind::Object { members } = &object.kind else {
+        let lilac_resolve::ResKind::Object { members, .. } = &object.kind else {
             panic!("expected object");
         };
         let get = members.get("get").expect("has get");

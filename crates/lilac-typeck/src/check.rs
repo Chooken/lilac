@@ -301,7 +301,7 @@ type ItemLookup<'a> = Option<(&'a Item, ResItem, Option<(String, DefId)>)>;
 /// Finds the enclosing object's name for a member definition, if any.
 fn find_parent_name(module: &Module, def: DefId) -> Option<String> {
     for (item_name, item) in &module.items {
-        if let ResKind::Object { members } = &item.kind {
+        if let ResKind::Object { members, .. } = &item.kind {
             if members.values().any(|member| member.id == def) {
                 return Some(item_name.clone());
             }
@@ -330,6 +330,7 @@ fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLo
                 ItemKind::Object { members, .. },
                 ResKind::Object {
                     members: resolved_members,
+                    ..
                 },
             ) = (&ast.kind, &resolved.kind)
             {
@@ -677,6 +678,7 @@ impl Checker<'_> {
             ItemKind::Object { members, .. } => {
                 if let ResKind::Object {
                     members: resolved_members,
+                    ..
                 } = &resolved.kind
                 {
                     for member in members {
@@ -977,7 +979,7 @@ impl Checker<'_> {
             if item.id == def {
                 return Some(item.kind.clone());
             }
-            if let ResKind::Object { members } = &item.kind {
+            if let ResKind::Object { members, .. } = &item.kind {
                 for member in members.values() {
                     if member.id == def {
                         return Some(member.kind.clone());
@@ -1690,7 +1692,7 @@ impl Checker<'_> {
             );
             return poison;
         };
-        let ResKind::Object { members } = &item.kind else {
+        let ResKind::Object { members, .. } = &item.kind else {
             self.diags.emit(
                 Diagnostic::error("E010", format!("`{ty_name}` is not an object")).label(
                     span,
@@ -2315,7 +2317,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
-        let ResKind::Object { members } = &item.kind else {
+        let ResKind::Object { members, .. } = &item.kind else {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
                     .label(span, true, "constructors need `@init`".to_owned()),
@@ -2516,7 +2518,7 @@ impl Checker<'_> {
             ));
         };
         let found = self.find_by_def(*def);
-        let Some(ResKind::Object { members }) = found else {
+        let Some(ResKind::Object { members, .. }) = found else {
             return Err(self.diags.emit(
                 Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
                     .label(span, true, "methods need an object".to_owned()),
@@ -2684,7 +2686,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
-        let ResKind::Object { members } = &type_item.kind else {
+        let ResKind::Object { members, .. } = &type_item.kind else {
             return Err(self.diags.emit(
                 Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
                     span,
