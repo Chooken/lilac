@@ -315,6 +315,7 @@ impl Checker<'_> {
         // A missing-member failure is the most useful primary: point at the
         // actual use in the generic body and turn the instantiation into a
         // sourced note naming the pretty instance.
+        let mut instantiation_note = false;
         if let Some(index) = requirements
             .iter()
             .position(|requirement| lookup_miss(requirement).is_some())
@@ -330,6 +331,7 @@ impl Checker<'_> {
                 false,
                 format!("required by instantiation of {pretty} here"),
             );
+            instantiation_note = true;
             for (position, requirement) in requirements.iter().enumerate() {
                 if position == index {
                     continue;
@@ -355,8 +357,14 @@ impl Checker<'_> {
                 }
             }
         }
-        for frame in self.instantiation_frames() {
-            diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}{frame}"));
+        // A single active frame is already named by the pretty instantiation
+        // note; only multi-frame chains need the `in instantiation of` list
+        // (which the emitter elides past five unless `--verbose`).
+        let frames = self.instantiation_frames();
+        if !(instantiation_note && frames.len() <= 1) {
+            for frame in frames {
+                diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}{frame}"));
+            }
         }
         for requirement in &requirements {
             for note in &requirement.notes {
@@ -379,6 +387,11 @@ impl Checker<'_> {
     /// Renders a body-side type in the generic's own parameter form: a type that
     /// equals a current substitution argument prints as its parameter name
     /// (`T`), otherwise concretely (`@bit32`). `ref` wrappers are preserved.
+    ///
+    /// If two parameters share a concrete type, the first matching parameter
+    /// wins (`position` scans `current_params`/`current_args` in order); a
+    /// requirement expressed with an ambiguous shared argument is rare, and the
+    /// first-declared name is the least surprising choice.
     pub(super) fn display_ty_in_body(&self, ty: TypeRef) -> String {
         if let Some(index) = self.current_args.iter().position(|arg| arg.id == ty.id) {
             if let Some(name) = self.current_params.get(index) {
@@ -395,9 +408,11 @@ impl Checker<'_> {
     /// requires at a missing-member use site.
     ///
     /// `receiver` is the value receiver type for `value.member(...)` (`None` for
-    /// a bare-type `T.member(...)` receiver, which has no `self`). Each argument
-    /// is probe-checked with no expected type; diagnostics it emits are
-    /// discarded. The return type is the use-site expected type, or `?`.
+    /// a bare-type `T.member(...)` receiver, which has no `self`). Receiver,
+    /// argument, and return types all print in the generic's parameter form when
+    /// they come from a current instantiation argument. Each argument is
+    /// probe-checked with no expected type; diagnostics it emits are discarded.
+    /// The return type is the use-site expected type, or `?`.
     pub(super) fn required_signature_note(
         &mut self,
         fctx: &mut FuncCtx,
@@ -408,7 +423,7 @@ impl Checker<'_> {
     ) -> String {
         let mut params = Vec::new();
         if let Some(ty) = receiver {
-            params.push(format!("self: {}", self.types.display_ref(ty)));
+            params.push(format!("self: {}", self.display_ty_in_body(ty)));
         }
         for arg in args {
             let mark = self.diags.checkpoint();
@@ -421,7 +436,9 @@ impl Checker<'_> {
             }
         }
         let ret = match expected {
-            Some(id) if id != TypeId::ERROR => self.types.display(id),
+            Some(id) if id != TypeId::ERROR => {
+                self.display_ty_in_body(TypeRef { id, is_ref: false })
+            }
             _ => "?".to_owned(),
         };
         format!(
@@ -1064,12 +1081,18 @@ mod tests {
         let (line, _) = sm.line_col(primary.span).expect("primary span has a file");
         assert_eq!(line, 2, "primary must be the body use: {rendered}");
         assert!(
-            rendered.contains("fn other() -> @bit32"),
+            rendered.contains("fn other() -> T"),
             "missing inferred signature: {rendered}"
         );
         assert!(
             rendered.contains("required by instantiation of gen_function[@bit32]"),
             "missing pretty instantiation note: {rendered}"
+        );
+        // The single active frame is already named by the instantiation note,
+        // so the `in instantiation of` chain must not duplicate it.
+        assert!(
+            !rendered.contains("in instantiation of gen_function[@bit32]"),
+            "single-frame chain duplicated: {rendered}"
         );
         assert!(
             !rendered.contains("__1__"),
@@ -1079,29 +1102,44 @@ mod tests {
 
     #[test]
     fn value_receiver_shows_required_signature() {
-        // A value receiver of generic-param type gains `self: <receiver>`; the
-        // argument is probe-checked (a decimal literal is `@byte_buffer`).
-        let src = "gen[T]: function (value: T) out: @bit32 {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    v: @bit32 = gen[@bit32](0x1)\n}\n";
+        // A value receiver of generic-param type renders `self: T`; the argument
+        // is probe-checked (a decimal literal is `@byte_buffer`) and the return
+        // comes from the generic parameter.
+        let src = "gen[T]: function (value: T) out: T {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[@bit32](0x1)\n}\n";
         let (diags, _, _, sm) = run(src);
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: @bit32, @byte_buffer) -> @bit32"),
+            rendered.contains("fn other(self: T, @byte_buffer) -> T"),
             "missing value-receiver signature: {rendered}"
         );
     }
 
     #[test]
     fn generic_param_form_in_required_signature() {
-        // An argument whose type is a different generic parameter renders that
-        // parameter name (`U`), not its concrete substitution.
-        let src = "gen[T, U]: function (value: T, extra: U) out: @bit32 {\n    out = value.other(extra)\n}\n\nmain: function () nothing {\n    v: @bit32 = gen[@bit32, @bit64](0x1, 0x2)\n}\n";
+        // The receiver and an argument render their generic parameter names
+        // (`T`, `U`) while a genuinely concrete return stays concrete (`@bit8`).
+        let src = "gen[T, U]: function (value: T, extra: U) out: @bit8 {\n    out = value.other(extra)\n}\n\nmain: function () nothing {\n    x: @bit8 = gen[@bit32, @bit64](0x1, 0x2)\n}\n";
         let (diags, _, _, sm) = run(src);
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: @bit32, U) -> @bit32"),
+            rendered.contains("fn other(self: T, U) -> @bit8"),
             "missing generic-param signature: {rendered}"
+        );
+    }
+
+    #[test]
+    fn concrete_return_stays_concrete_in_required_signature() {
+        // A return type that is not one of the instantiation arguments (a user
+        // object) must render concretely, never as a generic parameter.
+        let src = "Widget: object {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("fn other(self: T, @byte_buffer) -> Widget"),
+            "concrete return not rendered concretely: {rendered}"
         );
     }
 

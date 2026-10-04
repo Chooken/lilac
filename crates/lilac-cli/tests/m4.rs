@@ -137,9 +137,8 @@ const DUCK_TYPING_SHORT: &str = concat!(
     "   |           ^^^^^^^^^\n",
     "   = missing method `other` on `@bit32`\n",
     "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:12:24 required by instantiation of gen_function[@bit32] here\n",
-    "note: in instantiation of gen_function[@bit32]\n",
     "note: based on this usage, the generic body requires a method matching:\n",
-    "      fn other() -> @bit32\n",
+    "      fn other() -> T\n",
 );
 
 #[test]
@@ -151,12 +150,14 @@ fn fails_generic_duck_typing_short_snapshot() {
 
 #[test]
 fn fails_generic_duck_typing_verbose_snapshot() {
-    // With a single instantiation frame the `--verbose` render is identical,
-    // but it must still carry the full obligation tree (def note + frame).
+    // With a single instantiation frame the `--verbose` render is identical;
+    // the frame is named by the sourced instantiation note, so no separate
+    // `in instantiation of` line is emitted.
     let (ok, stderr) = check("FAILS_generic_duck_typing.lilac", &["--verbose"]);
     assert!(!ok, "should fail");
     assert_eq!(stderr, DUCK_TYPING_SHORT);
-    assert!(stderr.contains("note: in instantiation of gen_function[@bit32]"));
+    assert!(stderr.contains("required by instantiation of gen_function[@bit32]"));
+    assert!(!stderr.contains("note: in instantiation of gen_function[@bit32]"));
 }
 
 /// A >5-frame instantiation chain (`level0` -> ... -> `level5`): the
@@ -177,7 +178,7 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "note: in instantiation of level4[@bit32]\n",
     "note: in instantiation of level5[@bit32]\n",
     "note: based on this usage, the generic body requires a method matching:\n",
-    "      fn missing(self: @bit32) -> @bit32\n",
+    "      fn missing(self: T) -> T\n",
 );
 
 #[test]
