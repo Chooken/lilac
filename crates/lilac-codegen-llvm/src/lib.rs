@@ -750,7 +750,7 @@ mod tests {
             "define i64 @byte_buffer_len({ i64, ptr } %buffer)",
             "define i8 @load_u8(ptr %data, i64 %index)",
             "define void @store_u8(ptr %data, i64 %index, i8 %value)",
-            "define void @memcpy(ptr %dest, ptr %src, i64 %len)",
+            "define void @lilac_memcpy(ptr %dest, ptr %src, i64 %len)",
             "define { i64, [16 x { i64, ptr }] } @format_args_new()",
             "define void @format_args_push(ptr %table, { i64, ptr } %piece)",
             "define i64 @format_args_count({ i64, [16 x { i64, ptr }] } %table)",
@@ -1027,6 +1027,52 @@ mod tests {
         assert!(text.contains("define i32 @main()"), "{text}");
         assert!(text.contains("call void @lilac_main()"), "{text}");
         assert!(text.contains("ret i32 0"), "{text}");
+    }
+
+    /// A `main` with an `in` place still gets a valid C entry wrapper: the
+    /// wrapper allocates a zeroed slot and passes its address (the pointer
+    /// ABI), so the call's argument count matches `lilac_main`'s signature.
+    #[test]
+    fn emits_main_wrapper_with_parameter_slots() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(func(
+            "main",
+            &[("n", "#bit32")],
+            &[],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        let text = emit(&module);
+        assert!(text.contains("define void @lilac_main(ptr %in0)"), "{text}");
+        assert!(text.contains("store i32 0, ptr %n"), "{text}");
+        assert!(text.contains("call void @lilac_main(ptr %n)"), "{text}");
+    }
+
+    /// A value place passed to a `ref` parameter is spilled into a pointer
+    /// slot: the callee expects the address of a reference slot (and loads the
+    /// pointer out of it), not the value's own address.
+    #[test]
+    fn coerces_value_argument_to_ref_parameter() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.layouts.insert(
+            "#Pair".to_owned(),
+            vec![("a".to_owned(), "#bit32".to_owned())],
+        );
+        module.funcs.push(func(
+            "hook",
+            &[("from", "ref #Pair")],
+            &[],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        let mut insts = Vec::new();
+        alloca(&mut insts, "p", "#Pair");
+        call(&mut insts, LirCallee::Func("hook".to_owned()), &["p"], &[]);
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("define void @hook(ptr %in0)"), "{text}");
+        assert!(text.contains("store ptr %p, ptr %ref.arg"), "{text}");
+        assert!(text.contains("call void @hook(ptr %ref.arg)"), "{text}");
     }
 
     /// A module with no `main` gets no `lilac_main` and no entry wrapper, yet

@@ -160,6 +160,11 @@ fn store_u8(lower: &Lower<'_, '_>) {
 }
 
 /// `@memcpy(ref i8, ref i8, iNative)`: `llvm.memcpy`.
+///
+/// The emitted symbol is `lilac_memcpy`, not `memcpy`: the in-module definition
+/// must not collide with the host C library's `memcpy` at link time (and the
+/// `llvm.memcpy` inside must lower to the C library, not recurse into itself).
+/// `lower::builtin_symbol` maps the LIR builtin name `@memcpy` here.
 fn memcpy(lower: &Lower<'_, '_>) {
     let native = lower.native_int();
     let ptr = lower.ptr_type();
@@ -169,7 +174,7 @@ fn memcpy(lower: &Lower<'_, '_>) {
         BasicMetadataTypeEnum::from(ptr),
         BasicMetadataTypeEnum::from(native),
     ];
-    let function = lower.runtime_fn("memcpy", void.fn_type(&params, false));
+    let function = lower.runtime_fn("lilac_memcpy", void.fn_type(&params, false));
     let builder = entry(lower, function);
     let dest = param(function, 0, "memcpy").into_pointer_value();
     let src = param(function, 1, "memcpy").into_pointer_value();

@@ -114,10 +114,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Appends the C entry point when the LIR defines `main`: `i32 @main()`
     /// calls the renamed `lilac_main` and returns 0. A module without `main`
     /// gets no wrapper.
+    ///
+    /// `lilac_main` uses the pointer ABI, so a `main` with `in`/`out` places
+    /// would take pointer arguments. The wrapper supplies a zero-initialized
+    /// stack slot for each (in declaration order, ins then outs) and passes its
+    /// address, so a parameterized `main` still verifies and runs.
     fn emit_entry_wrapper(&self) {
-        if !self.lir.funcs.iter().any(|func| func.name == "main") {
+        let Some(lir_main) = self.lir.funcs.iter().find(|func| func.name == "main") else {
             return;
-        }
+        };
         let Some(lilac_main) = self.module.get_function(symbol("main")) else {
             bug!(Span::dummy(), "`main` was not declared");
         };
@@ -128,7 +133,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let builder = self.context.create_builder();
         let entry = self.context.append_basic_block(main, "entry");
         builder.position_at_end(entry);
-        checked(builder.build_call(lilac_main, &[], ""), "main wrapper call");
+        let mut args = Vec::with_capacity(lir_main.ins.len() + lir_main.outs.len());
+        for (place, ty) in lir_main.ins.iter().chain(&lir_main.outs) {
+            let value_ty = self.lir_type(ty);
+            let slot = checked(builder.build_alloca(value_ty, place), "main arg alloca");
+            checked(
+                builder.build_store(slot, value_ty.const_zero()),
+                "main arg zero-init",
+            );
+            args.push(slot.into());
+        }
+        checked(
+            builder.build_call(lilac_main, &args, ""),
+            "main wrapper call",
+        );
         checked(
             builder.build_return(Some(&i32_ty.const_zero())),
             "main wrapper return",
@@ -479,8 +497,55 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let Some(function) = self.module.get_function(symbol(name)) else {
             bug!(Span::dummy(), "call to unknown function `@{name}`");
         };
-        let args = place_args(ins, outs, state);
+        let Some(callee) = self.lir.funcs.iter().find(|func| func.name == name) else {
+            bug!(Span::dummy(), "call to unknown function `@{name}`");
+        };
+        let args = self.direct_call_args(callee, ins, outs, builder, state);
         checked(builder.build_call(function, &args, ""), "direct call");
+    }
+
+    /// The address of every listed place (pointer ABI), inputs then outputs,
+    /// coercing a value place passed to a `ref` parameter.
+    ///
+    /// A `ref #T` parameter's incoming pointer is the address of a reference
+    /// *slot* (the callee loads the `#T` pointer out of it). When the caller
+    /// lists a plain `#T` place — as the RAII `@on_drop` call does — the
+    /// argument's own address is the reference, so it is spilled into a fresh
+    /// pointer slot before being passed.
+    fn direct_call_args(
+        &self,
+        callee: &LirFunc,
+        ins: &[String],
+        outs: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> Vec<BasicMetadataValueEnum<'ctx>> {
+        let params = callee
+            .ins
+            .iter()
+            .chain(&callee.outs)
+            .map(|(_, ty)| ty.as_str());
+        ins.iter()
+            .chain(outs.iter())
+            .zip(params)
+            .map(|(place, param_ty)| {
+                let ptr = place_ptr(place, state);
+                let arg_is_ref = state
+                    .place_types
+                    .get(place)
+                    .is_some_and(|ty| ty.starts_with("ref "));
+                if param_ty.starts_with("ref ") && !arg_is_ref {
+                    let slot = checked(
+                        builder.build_alloca(self.ptr_type(), "ref.arg"),
+                        "ref arg alloca",
+                    );
+                    checked(builder.build_store(slot, ptr), "ref arg store");
+                    BasicMetadataValueEnum::from(slot)
+                } else {
+                    BasicMetadataValueEnum::from(ptr)
+                }
+            })
+            .collect()
     }
 
     /// An indirect call: `%reg` holds the callee (a function pointer, or its
@@ -555,7 +620,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 outs.len()
             ),
         };
-        let symbol = name.strip_prefix('@').unwrap_or(name);
+        let symbol = builtin_symbol(name);
         let function = match self.module.get_function(symbol) {
             Some(function) => function,
             None => self.module.add_function(symbol, fn_type, None),
@@ -930,6 +995,16 @@ pub(crate) fn symbol(name: &str) -> &str {
         "lilac_main"
     } else {
         name
+    }
+}
+
+/// The LLVM symbol a `@`-prefixed LIR builtin emits under. `@memcpy` becomes
+/// `lilac_memcpy` so its in-module definition cannot collide with the host C
+/// library's `memcpy`; every other builtin drops the `@`.
+fn builtin_symbol(name: &str) -> &str {
+    match name {
+        "@memcpy" => "lilac_memcpy",
+        other => other.strip_prefix('@').unwrap_or(other),
     }
 }
 
