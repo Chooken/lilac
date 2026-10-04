@@ -25,6 +25,11 @@ pub struct Parser {
     file: FileId,
     eof: Token,
     failed: bool,
+    /// Whether `Ident { ... }` parses as a struct literal (Rust-style
+    /// brace restriction: `if`/`loop` heads and `match` scrutinees parse
+    /// with this off, so a trailing `{` opens a block; parentheses and
+    /// other complete subexpressions reset it on).
+    allow_struct_lit: bool,
 }
 
 impl Parser {
@@ -43,6 +48,7 @@ impl Parser {
                 file,
             ),
             failed: false,
+            allow_struct_lit: true,
         }
     }
 
@@ -94,6 +100,15 @@ impl Parser {
 
     fn err(diags: &mut lilac_error::Diags, span: Span, msg: &str) -> ErrorGuaranteed {
         diags.emit(Diagnostic::error(PARSE_ERROR_CODE, msg).label(span, true, String::new()))
+    }
+
+    /// Runs `f` with struct literals allowed or disallowed, restoring the
+    /// previous setting after (mirrors rustc's `with_res` for restrictions).
+    fn with_struct_lit<T>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = std::mem::replace(&mut self.allow_struct_lit, allowed);
+        let result = f(self);
+        self.allow_struct_lit = previous;
+        result
     }
 
     fn expect(
@@ -800,7 +815,7 @@ impl Parser {
 
     fn parse_if_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
-        let cond = self.parse_or(diags)?;
+        let cond = self.with_struct_lit(false, |p| p.parse_or(diags))?;
         let capture = if self.peek().kind == TokenKind::Arrow {
             self.bump();
             Some(self.parse_param(diags)?)
@@ -832,7 +847,7 @@ impl Parser {
         let keyword = self.bump();
         let cond = if self.peek().kind == TokenKind::KwIf {
             self.bump();
-            Some(self.parse_or(diags)?)
+            Some(self.with_struct_lit(false, |p| p.parse_or(diags))?)
         } else {
             None
         };
@@ -861,7 +876,7 @@ impl Parser {
         diags: &mut lilac_error::Diags,
     ) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
-        let scrutinee = self.parse_or(diags)?;
+        let scrutinee = self.with_struct_lit(false, |p| p.parse_or(diags))?;
         self.expect(diags, TokenKind::LBrace, "`{` to open match arms")?;
         let mut arms = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
@@ -958,7 +973,7 @@ impl Parser {
         diags: &mut lilac_error::Diags,
         keyword_span: Span,
     ) -> Result<Expr, ErrorGuaranteed> {
-        let scrutinee = self.parse_or(diags)?;
+        let scrutinee = self.with_struct_lit(false, |p| p.parse_or(diags))?;
         self.expect(diags, TokenKind::LBrace, "`{` to open match arms")?;
         let mut arms = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
@@ -1205,6 +1220,28 @@ impl Parser {
                 TokenKind::LParen => {
                     expr = self.finish_call(diags, expr, Vec::new())?;
                 }
+                TokenKind::LBrace => {
+                    // Struct suffix on a path (`Type { ... }`); a bare `{`
+                    // after anything else opens a block (handled by the
+                    // caller). Like rustc, case never decides: the brace
+                    // restriction flag does.
+                    let Expr::Ident(name, span) = &expr else {
+                        break;
+                    };
+                    if self.allow_struct_lit {
+                        expr = self.parse_struct_lit(diags, name.clone(), *span)?;
+                    } else if self.peek_at(1).kind == TokenKind::Ident
+                        && self.peek_at(2).kind == TokenKind::Eq
+                    {
+                        return Err(Self::err(
+                            diags,
+                            join_spans(*span, self.peek().span),
+                            "struct literal not allowed here; wrap it in parentheses",
+                        ));
+                    } else {
+                        break;
+                    }
+                }
                 TokenKind::LBracket => {
                     self.bump();
                     let mut generic_args = Vec::new();
@@ -1262,7 +1299,7 @@ impl Parser {
                     "unterminated call; add a closing `)`",
                 ));
             }
-            args.push(self.parse_expr(diags)?);
+            args.push(self.with_struct_lit(true, |p| p.parse_expr(diags))?);
             if self.peek().kind == TokenKind::Comma {
                 self.bump();
             } else if self.peek().kind != TokenKind::RParen {
@@ -1286,16 +1323,7 @@ impl Parser {
     fn parse_primary(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
         let token = self.bump();
         match token.kind {
-            TokenKind::Ident => {
-                // Struct literals name a type (`Object { ... }`); a lowercase
-                // identifier before `{` (as in `if x {`) is an ordinary name.
-                let is_type_name = token.text.chars().next().is_some_and(char::is_uppercase);
-                if is_type_name && self.peek().kind == TokenKind::LBrace {
-                    self.parse_struct_lit(diags, token)
-                } else {
-                    Ok(Expr::Ident(token.text, token.span))
-                }
-            }
+            TokenKind::Ident => Ok(Expr::Ident(token.text, token.span)),
             TokenKind::Number => Ok(Expr::Number(token.text, token.span)),
             TokenKind::StringLit => Ok(Expr::Str(token.text, token.span)),
             TokenKind::CharLit => Ok(Expr::Char(
@@ -1308,7 +1336,7 @@ impl Parser {
                 Ok(Expr::Ident(format!("@{}", ident.text), span))
             }
             TokenKind::LParen => {
-                let expr = self.parse_expr(diags)?;
+                let expr = self.with_struct_lit(true, |p| p.parse_expr(diags))?;
                 self.expect(diags, TokenKind::RParen, "`)` to close group")?;
                 Ok(expr)
             }
@@ -1336,7 +1364,8 @@ impl Parser {
     fn parse_struct_lit(
         &mut self,
         diags: &mut lilac_error::Diags,
-        ty_name: Token,
+        ty_name: String,
+        ty_span: Span,
     ) -> Result<Expr, ErrorGuaranteed> {
         self.bump();
         let mut fields = Vec::new();
@@ -1351,7 +1380,7 @@ impl Parser {
             }
             let name = self.expect(diags, TokenKind::Ident, "field name")?;
             self.expect(diags, TokenKind::Eq, "`=` after field name")?;
-            let value = self.parse_expr(diags)?;
+            let value = self.with_struct_lit(true, |p| p.parse_expr(diags))?;
             fields.push(StructField {
                 name: name.text,
                 span: join_spans(name.span, value.span()),
@@ -1363,9 +1392,9 @@ impl Parser {
         }
         let close = self.bump();
         Ok(Expr::StructLit {
-            ty_name: ty_name.text,
+            ty_name,
             fields,
-            span: join_spans(ty_name.span, close.span),
+            span: join_spans(ty_span, close.span),
         })
     }
 
@@ -1374,7 +1403,7 @@ impl Parser {
         diags: &mut lilac_error::Diags,
         keyword_span: Span,
     ) -> Result<Expr, ErrorGuaranteed> {
-        let cond = self.parse_or(diags)?;
+        let cond = self.with_struct_lit(false, |p| p.parse_or(diags))?;
         if self.peek().kind == TokenKind::LBrace {
             return Err(Self::err(
                 diags,
@@ -1408,7 +1437,9 @@ impl Parser {
                 }
                 TokenKind::LBrace => {
                     self.bump();
-                    parts.push(FStrPart::Hole(self.parse_expr(diags)?));
+                    parts.push(FStrPart::Hole(
+                        self.with_struct_lit(true, |p| p.parse_expr(diags))?,
+                    ));
                     self.expect(diags, TokenKind::RBrace, "`}` to close f-string hole")?;
                 }
                 TokenKind::FStrEnd => {
@@ -1809,6 +1840,110 @@ mod tests {
             matches!(block.stmts[1], Stmt::If { .. }),
             "expected if statement, got {:?}",
             block.stmts[1]
+        );
+    }
+
+    fn first_stmt(src: &str) -> (Option<Stmt>, Diags) {
+        let (program, diags, _) = parse(src);
+        let stmt = program.items.iter().find_map(|item| match &item.kind {
+            ItemKind::Func(decl) => decl.body.as_ref().and_then(|body| match body {
+                FuncBody::Block(block) => block.stmts.first().cloned(),
+                FuncBody::Inline(_) => None,
+            }),
+            _ => None,
+        });
+        (stmt, diags)
+    }
+
+    #[test]
+    fn if_head_rejects_struct_literal() {
+        // `if Foo {` is a condition plus a block, never a struct literal.
+        let (stmt, diags) = first_stmt("main: function () nothing {\n    if Foo {\n    }\n}\n");
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let Some(Stmt::If { cond, .. }) = stmt else {
+            panic!("expected if statement, got {stmt:?}");
+        };
+        assert!(
+            matches!(&cond, Expr::Ident(name, _) if name == "Foo"),
+            "got {cond:?}"
+        );
+    }
+
+    #[test]
+    fn parenthesized_struct_literal_in_head() {
+        // Parentheses reset the restriction: a struct literal works in `if`.
+        let (stmt, diags) =
+            first_stmt("main: function () nothing {\n    if (Foo { member = 0x1 }) {\n    }\n}\n");
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let Some(Stmt::If { cond, .. }) = stmt else {
+            panic!("expected if statement, got {stmt:?}");
+        };
+        assert!(
+            matches!(cond, Expr::StructLit { ref ty_name, .. } if ty_name == "Foo"),
+            "got {cond:?}"
+        );
+    }
+
+    #[test]
+    fn lowercase_struct_literal_in_let() {
+        // Case never decides: any identifier opens a struct literal outside
+        // head position (the checker rejects unknown type names later).
+        let (stmt, diags) = first_stmt(
+            "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    v: Object = foo { member = 0x1 }\n}\n",
+        );
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let Some(Stmt::Let { value, .. }) = stmt else {
+            panic!("expected let statement, got {stmt:?}");
+        };
+        assert!(
+            matches!(value, Expr::StructLit { ref ty_name, .. } if ty_name == "foo"),
+            "got {value:?}"
+        );
+    }
+
+    #[test]
+    fn struct_like_in_head_is_targeted_e001() {
+        // `if Foo { member = ... }` meant a struct literal: say so and
+        // suggest parentheses instead of failing downstream.
+        let (_, diags) =
+            first_stmt("main: function () nothing {\n    if Foo { member = 0x1 } {\n    }\n}\n");
+        assert!(diags.has_errors());
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E001"),
+            "{:?}",
+            diags.diagnostics()
+        );
+    }
+
+    #[test]
+    fn match_scrutinee_rejects_struct_literal() {
+        // `match Foo {` inspects `Foo`; the `{` opens the arm block.
+        let (stmt, diags) = first_stmt(
+            "main: function () nothing {\n    match Foo {\n        .One {\n        }\n    }\n}\n",
+        );
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let Some(Stmt::Match { scrutinee, .. }) = stmt else {
+            panic!("expected match statement, got {stmt:?}");
+        };
+        assert!(
+            matches!(&scrutinee, Expr::Ident(name, _) if name == "Foo"),
+            "got {scrutinee:?}"
         );
     }
 }
