@@ -393,6 +393,46 @@ fn is_bit(types: &Types, id: TypeId) -> bool {
     )
 }
 
+/// Width in bits of a bit container (callers guarantee `is_bit` first).
+fn bit_width(types: &Types, id: TypeId) -> u32 {
+    match types.kind(id) {
+        lilac_ty::TypeKind::Bit8 => 8,
+        lilac_ty::TypeKind::Bit16 => 16,
+        lilac_ty::TypeKind::Bit32 => 32,
+        lilac_ty::TypeKind::Bit64 | lilac_ty::TypeKind::BitNative => 64,
+        _ => lilac_error::bug!(Span::dummy(), "bit width of non-bit type"),
+    }
+}
+
+/// True for hex/bin literals (`0x`/`0X`/`0b`/`0B`), whose bits are fully
+/// known; decimals are `NumberLiteral`s typed as `@byte_buffer`.
+fn is_lit_literal(bytes: &str) -> bool {
+    bytes.starts_with("0x")
+        || bytes.starts_with("0X")
+        || bytes.starts_with("0b")
+        || bytes.starts_with("0B")
+}
+
+/// Parses a hex/bin literal (with `_` separators) into its value plus the
+/// number of significant bits; decimals return `None`.
+fn lit_value_bits(bytes: &str) -> Option<(u64, u32)> {
+    let digits = bytes.replace('_', "");
+    let (radix, rest) = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        (16, hex)
+    } else {
+        let bin = digits
+            .strip_prefix("0b")
+            .or_else(|| digits.strip_prefix("0B"))?;
+        (2, bin)
+    };
+    let value = u64::from_str_radix(rest, radix).ok()?;
+    let bits = 64 - value.leading_zeros();
+    Some((value, bits))
+}
+
 fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> ErrorGuaranteed {
     diags.emit(
         Diagnostic::error(
@@ -1628,39 +1668,8 @@ impl Checker<'_> {
     }
 
     fn check_literal(&mut self, expr: &Expr, expected: Option<TypeId>) -> (TypeRef, HirExpr) {
-        let poison = (
-            TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            },
-            poison_expr(expr.span()),
-        );
         match expr {
-            Expr::Number(bytes, span) => match expected {
-                Some(t) if is_bit(self.types, t) => {
-                    let ty = TypeRef {
-                        id: t,
-                        is_ref: false,
-                    };
-                    (
-                        ty,
-                        HirExpr {
-                            ty,
-                            span: *span,
-                            kind: HirExprKind::Number {
-                                bytes: bytes.clone(),
-                            },
-                        },
-                    )
-                }
-                _ => {
-                    self.diags.emit(
-                        Diagnostic::error("E024", "number literal needs an expected bit type")
-                            .label(*span, true, "annotate the binding".to_owned()),
-                    );
-                    poison
-                }
-            },
+            Expr::Number(bytes, span) => self.check_number_literal(bytes, *span, expected),
             Expr::Str(text, span) => {
                 let ty = TypeRef {
                     id: self.builtin_ty("@byte_buffer"),
@@ -1693,6 +1702,77 @@ impl Checker<'_> {
             }
             _ => {
                 lilac_error::bug!(expr.span(), "check_literal on non-literal");
+            }
+        }
+    }
+
+    fn check_number_literal(
+        &mut self,
+        bytes: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        let number = |id: TypeId| {
+            let ty = TypeRef { id, is_ref: false };
+            (
+                ty,
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Number {
+                        bytes: bytes.to_owned(),
+                    },
+                },
+            )
+        };
+        if !is_lit_literal(bytes) {
+            return number(self.builtin_ty("@byte_buffer"));
+        }
+        match expected {
+            Some(t) if is_bit(self.types, t) => {
+                if let Some((value, _)) = lit_value_bits(bytes) {
+                    let width = bit_width(self.types, t);
+                    let max = if width == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    };
+                    if value > max {
+                        self.diags.emit(
+                            Diagnostic::error(
+                                "E060",
+                                format!(
+                                    "value does not fit in {} (max 0x{max:x})",
+                                    self.types.display(t)
+                                ),
+                            )
+                            .label(
+                                span,
+                                true,
+                                "literal overflows".to_owned(),
+                            ),
+                        );
+                        return poison;
+                    }
+                }
+                number(t)
+            }
+            _ => {
+                self.diags.emit(
+                    Diagnostic::error("E024", "number literal needs an expected bit type").label(
+                        span,
+                        true,
+                        "annotate the binding".to_owned(),
+                    ),
+                );
+                poison
             }
         }
     }
@@ -2635,7 +2715,7 @@ impl Checker<'_> {
         let mut checked: Vec<Option<(TypeRef, HirExpr)>> = vec![None; args.len()];
         let mut failed = false;
         for (index, arg) in args.iter().enumerate() {
-            if matches!(arg, Expr::Number(..)) {
+            if matches!(arg, Expr::Number(bytes, _) if is_lit_literal(bytes)) {
                 continue;
             }
             let (got, hir) = self.check_expr(fctx, arg, None);
@@ -4365,10 +4445,35 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_literal_waits_for_m3() {
-        // M1 does not range-check literals; M3 `E060` tightens this.
-        let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
+    fn hex_literal_takes_expected_bit_type() {
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn decimal_literal_is_byte_buffer_not_bit() {
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = 5\n}\n");
+        assert!(has_code(&diags, "E043"), "{diags:?}");
+        let msgs = messages(&diags);
+        assert!(msgs.iter().any(|m| m.contains("@byte_buffer")), "{msgs:?}");
+    }
+
+    #[test]
+    fn as_int_of_decimal_checks() {
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = @as_int(5)\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn hex_literal_overflow_is_e060() {
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn decimal_in_arith_is_e010() {
+        let diags = check_src("main: function () nothing {\n    x: @bit32 = @iadd(5, 6)\n}\n");
+        assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
     #[test]
