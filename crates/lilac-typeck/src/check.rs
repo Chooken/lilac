@@ -118,6 +118,9 @@ pub fn check_bodies(
         current_params: Vec::new(),
         current_args: Vec::new(),
         instance_inline: HashMap::new(),
+        object_instances: HashMap::new(),
+        failed_objects: HashSet::new(),
+        layouts: HashMap::new(),
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
@@ -138,7 +141,7 @@ pub fn check_bodies(
         })
         .map(|(name, _)| name.clone())
         .collect();
-    let mut layouts = HashMap::new();
+    let mut layouts = std::mem::take(&mut checker.layouts);
     if !checker.diags.has_errors() {
         for item in &program.items {
             if generic_objects.contains(&item.name) {
@@ -208,6 +211,12 @@ struct Checker<'a> {
     current_args: Vec<TypeRef>,
     /// Specialized `=>` bodies by instance key (generic inline functions).
     instance_inline: HashMap<(DefId, Vec<TypeRef>), (Vec<String>, HirExpr)>,
+    /// Concrete object instances, keyed by `(base DefId, args)`.
+    object_instances: HashMap<(DefId, Vec<TypeRef>), TypeRef>,
+    /// Object instantiation keys that failed; a later reference stays silent.
+    failed_objects: HashSet<(DefId, Vec<TypeRef>)>,
+    /// Concrete per-instance object layouts, keyed by mangled instance name.
+    layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
 }
 
 struct FuncCtx {
@@ -809,12 +818,20 @@ impl Checker<'_> {
     fn resolve_ty(&mut self, ty: &AstType) -> TypeRef {
         let params = self.current_params.clone();
         let resolved = resolve_type(ty, self.types, self.module, self.diags, &params);
-        if self.current_args.is_empty() {
+        let resolved = if self.current_args.is_empty() {
             resolved
         } else {
             let args = self.current_args.clone();
             self.types.substitute(resolved, &args)
-        }
+        };
+        self.instantiate_ty(resolved, ty.span)
+    }
+
+    /// The concrete type bound to a generic parameter name in the current
+    /// specialization, if any (`T` -> its substituted argument).
+    fn generic_param_value(&self, name: &str) -> Option<TypeRef> {
+        let index = self.current_params.iter().position(|param| param == name)?;
+        self.current_args.get(index).copied()
     }
 
     /// Builds a function context (implicit `instance` for member functions,
@@ -826,11 +843,31 @@ impl Checker<'_> {
         parent: Option<(String, DefId)>,
     ) -> (FuncCtx, Vec<HirParam>, Vec<HirParam>) {
         let mut fctx = FuncCtx::new();
+        // An anonymous `self` parameter denotes the receiver; it is exposed as
+        // `instance` (the lowering's member receiver name) and aliased as
+        // `self` for source bodies.
+        let has_self = decl
+            .params
+            .first()
+            .is_some_and(|param| param.name.is_empty() && param.ty.name == "self");
         if let Some((parent_name, parent_def)) = parent {
-            let id = self.types.intern_object(parent_def);
+            let parent_id = self.types.intern_object(parent_def);
             self.types.set_object_name(parent_def, parent_name.as_str());
-            fctx.locals
-                .insert("instance".to_owned(), TypeRef { id, is_ref: true });
+            let receiver = if has_self {
+                sig.params.first().copied().unwrap_or(TypeRef {
+                    id: parent_id,
+                    is_ref: true,
+                })
+            } else {
+                TypeRef {
+                    id: parent_id,
+                    is_ref: true,
+                }
+            };
+            fctx.locals.insert("instance".to_owned(), receiver);
+            if has_self {
+                fctx.locals.insert("self".to_owned(), receiver);
+            }
         }
         for (param, ty) in decl.params.iter().zip(sig.params.iter()) {
             if !param.name.is_empty() {
@@ -843,7 +880,12 @@ impl Checker<'_> {
                 fctx.slots.push((slot.name.clone(), *ty, slot.span));
             }
         }
-        let params = Self::hir_slots(&decl.params, &sig.params);
+        let mut params = Self::hir_slots(&decl.params, &sig.params);
+        if has_self {
+            if let Some(first) = params.first_mut() {
+                "instance".clone_into(&mut first.name);
+            }
+        }
         let returns = Self::hir_slots(&decl.returns, &sig.returns);
         (fctx, params, returns)
     }
@@ -1003,11 +1045,16 @@ impl Checker<'_> {
         match target {
             Expr::Ident(name, span) => {
                 if let Some(ty) = fctx.locals.get(name) {
+                    let hir_name = if name == "self" && fctx.locals.contains_key("self") {
+                        "instance".to_owned()
+                    } else {
+                        name.clone()
+                    };
                     let place = HirExpr {
                         ty: *ty,
                         span: *span,
                         kind: HirExprKind::Ident {
-                            name: name.clone(),
+                            name: hir_name,
                             def: DefId::ERROR,
                         },
                     };
@@ -1064,6 +1111,23 @@ impl Checker<'_> {
         field: &str,
         span: Span,
     ) -> Result<TypeRef, ErrorGuaranteed> {
+        // A generic instance resolves its base object's field template under
+        // the object's parameter scope, then substitutes the instance's args.
+        if let lilac_ty::TypeKind::Instance { base, args } = self.types.kind(obj).clone() {
+            let name = self.object_name_of(base);
+            if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
+                let params = self.object_params(base);
+                let resolved = resolve_type(&ty, self.types, self.module, self.diags, &params);
+                return Ok(self.types.substitute(resolved, &args));
+            }
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
+                    span,
+                    true,
+                    "unknown member (M4 refines this to E040)".to_owned(),
+                ),
+            ));
+        }
         let name = self.types.display(obj);
         if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
             Ok(self.resolve_ty(&ty))
@@ -1617,11 +1681,16 @@ impl Checker<'_> {
                     },
                     DefId::ERROR,
                 ));
+                let hir_name = if name == "self" && fctx.locals.contains_key("self") {
+                    "instance".to_owned()
+                } else {
+                    name.clone()
+                };
                 let hir = HirExpr {
                     ty,
                     span: *span,
                     kind: HirExprKind::Ident {
-                        name: name.clone(),
+                        name: hir_name,
                         def,
                     },
                 };
@@ -1667,7 +1736,7 @@ impl Checker<'_> {
                 ty_name,
                 fields,
                 span,
-            } => self.check_struct_lit(fctx, ty_name, fields, *span),
+            } => self.check_struct_lit(fctx, ty_name, fields, *span, expected),
             Expr::FString { parts, span } => self.check_fstring(fctx, parts, *span),
         }
     }
@@ -1778,6 +1847,7 @@ impl Checker<'_> {
         ty_name: &str,
         fields: &[lilac_ast::StructField],
         span: Span,
+        expected: Option<TypeId>,
     ) -> (TypeRef, HirExpr) {
         let poison = (
             TypeRef {
@@ -1796,7 +1866,11 @@ impl Checker<'_> {
             );
             return poison;
         };
-        let ResKind::Object { members, .. } = &item.kind else {
+        let ResKind::Object {
+            members,
+            generic_params,
+        } = &item.kind
+        else {
             self.diags.emit(
                 Diagnostic::error("E010", format!("`{ty_name}` is not an object")).label(
                     span,
@@ -1806,15 +1880,40 @@ impl Checker<'_> {
             );
             return poison;
         };
-        let obj_id = {
+        let obj_ty = if generic_params.is_empty() {
             let id = self.types.intern_object(item.id);
             self.types.set_object_name(item.id, ty_name);
-            id
+            TypeRef { id, is_ref: false }
+        } else {
+            // A generic object literal takes its arguments from the expected
+            // type (`x: GenObject[@bit32] = GenObject { ... }`). Type arguments
+            // are always explicit, so an unannotated literal cannot be built.
+            let args = expected.and_then(|id| match self.types.kind(id) {
+                lilac_ty::TypeKind::Instance { base, args } if *base == item.id => {
+                    Some(args.clone())
+                }
+                _ => None,
+            });
+            let Some(args) = args else {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E023",
+                        format!("cannot infer generic arguments for `{ty_name}`"),
+                    )
+                    .label(
+                        span,
+                        true,
+                        "annotate the binding instead".to_owned(),
+                    ),
+                );
+                return poison;
+            };
+            match self.instantiate_object(item.id, &args, span) {
+                Ok(ty) => ty,
+                Err(_) => return poison,
+            }
         };
-        let obj_ty = TypeRef {
-            id: obj_id,
-            is_ref: false,
-        };
+        let obj_id = obj_ty.id;
         let (hir_fields, seen, mut failed) =
             self.check_struct_fields(fctx, obj_id, ty_name, members, fields);
         let mut missing: Vec<&str> = members
@@ -2315,6 +2414,14 @@ impl Checker<'_> {
                 span: member_span,
             } => {
                 if let Expr::Ident(name, _) = obj.as_ref() {
+                    // `T.method()`: a bare type parameter receiver within a
+                    // specialization is a static (associated) call (ruling R3),
+                    // and shadows an outer type of the same name.
+                    if let Some(result) =
+                        self.check_generic_param_static(fctx, name, field, generic_args, args, span)
+                    {
+                        return result;
+                    }
                     if let Some(type_item) = self.module.items.get(name).cloned() {
                         let is_type = matches!(
                             type_item.kind,
@@ -2655,6 +2762,22 @@ impl Checker<'_> {
         span: Span,
         member_span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
+        if let lilac_ty::TypeKind::Instance {
+            base,
+            args: inst_args,
+        } = self.types.kind(recv.ty.id).clone()
+        {
+            return self.check_instance_member_call(
+                fctx,
+                field,
+                recv,
+                base,
+                &inst_args,
+                args,
+                span,
+                member_span,
+            );
+        }
         let owner = self.types.display(recv.ty.id);
         let lilac_ty::TypeKind::Object(def) = self.types.kind(recv.ty.id) else {
             return Err(self.diags.emit(
@@ -2679,6 +2802,79 @@ impl Checker<'_> {
             ));
         };
         let (sig, callee) = self.resolve_method(field, &member, recv.ty, member_span)?;
+        self.check_method_args(fctx, &sig, callee, recv, args, span)
+    }
+
+    /// Calls `value.method(...)` where `value` is a concrete generic instance:
+    /// specializes the method per the instance's arguments and requires its
+    /// first parameter to be `ref <instance>` (value-based duck typing).
+    #[allow(clippy::too_many_arguments)]
+    fn check_instance_member_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        field: &str,
+        recv: Receiver,
+        base: DefId,
+        inst_args: &[TypeRef],
+        args: &[Expr],
+        span: Span,
+        member_span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let owner = self.types.display(recv.ty.id);
+        let Some(ResKind::Object { members, .. }) = self.find_by_def(base) else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
+                    .label(span, true, "methods need an object".to_owned()),
+            ));
+        };
+        let Some(member) = members.get(field).cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
+                    member_span,
+                    true,
+                    "unknown member (M4 refines this to E040)".to_owned(),
+                ),
+            ));
+        };
+        let ResKind::Func { generic_params, .. } = &member.kind else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                    member_span,
+                    true,
+                    "only functions can be called".to_owned(),
+                ),
+            ));
+        };
+        if !generic_params.is_empty() {
+            // A method-own generic parameter cannot be supplied through a
+            // value receiver (`value.method[@T]()`); report arity instead of
+            // leaking a `Param` into the specialized signature.
+            return Err(self.emit_generic_arity(member_span, field, generic_params.len(), 0));
+        }
+        let sig = self.instantiate_func(member.id, inst_args, member_span)?;
+        let Some(first) = sig.params.first() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
+                    member_span,
+                    true,
+                    "first parameter must be `ref Self`".to_owned(),
+                ),
+            ));
+        };
+        if !(first.is_ref && first.id == recv.ty.id) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
+                    member_span,
+                    true,
+                    "first parameter must be `ref Self`".to_owned(),
+                ),
+            ));
+        }
+        let name = self.instance_name(member.id, inst_args);
+        let callee = HirCallee::Hook {
+            name,
+            def: member.id,
+        };
         self.check_method_args(fctx, &sig, callee, recv, args, span)
     }
 
@@ -2909,6 +3105,153 @@ impl Checker<'_> {
                 ),
             )),
         }
+    }
+
+    /// Resolves a bare type-parameter receiver to its concrete type and routes
+    /// the call as a static (associated) call (`T.method()`, ruling R3).
+    /// Returns `None` when `name` is not a current generic parameter.
+    fn check_generic_param_static(
+        &mut self,
+        fctx: &mut FuncCtx,
+        name: &str,
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Result<CallOutcome, ErrorGuaranteed>> {
+        let concrete = self.generic_param_value(name)?;
+        Some(self.check_static_call_ty(fctx, concrete, field, generic_args, args, span))
+    }
+
+    /// Routes `T.method(...)` for a concrete receiver type: a plain object
+    /// uses the existing static path; a generic instance specializes the
+    /// associated function (static duck typing, ruling R3 / design §3.3).
+    #[allow(clippy::too_many_arguments)]
+    fn check_static_call_ty(
+        &mut self,
+        fctx: &mut FuncCtx,
+        ty: TypeRef,
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        match self.types.kind(ty.id).clone() {
+            lilac_ty::TypeKind::Object(def) => {
+                let name = self.object_name_of(def);
+                let Some(item) = self.res_item(def) else {
+                    return Err(ErrorGuaranteed::new());
+                };
+                self.check_static_call(fctx, &name, &item, field, generic_args, args, span)
+            }
+            lilac_ty::TypeKind::Instance {
+                base,
+                args: inst_args,
+            } => {
+                let name = self.object_name_of(base);
+                self.check_instance_static_call(
+                    fctx,
+                    &name,
+                    base,
+                    &inst_args,
+                    field,
+                    generic_args,
+                    args,
+                    span,
+                )
+            }
+            _ => {
+                let owner = self.types.display(ty.id);
+                Err(self.diags.emit(
+                    Diagnostic::error(
+                        "E010",
+                        format!("cannot call static member `{field}` on `{owner}`"),
+                    )
+                    .label(
+                        span,
+                        true,
+                        "static calls need an object type".to_owned(),
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// Calls `Instance.field(args)` where `Instance` is `base[inst_args]`: the
+    /// associated function is monomorphized per `(field DefId, args)`.
+    #[allow(clippy::too_many_arguments)]
+    fn check_instance_static_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        type_name: &str,
+        base: DefId,
+        inst_args: &[TypeRef],
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<CallOutcome, ErrorGuaranteed> {
+        let Some(ResKind::Object { members, .. }) = self.find_by_def(base) else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!("cannot call static member `{field}` on `{type_name}`"),
+                )
+                .label(span, true, "only objects have static members".to_owned()),
+            ));
+        };
+        let Some(member) = members.get(field).cloned() else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
+                    span,
+                    true,
+                    "unknown member (M4 refines this to E040)".to_owned(),
+                ),
+            ));
+        };
+        let ResKind::Func {
+            generic,
+            generic_params,
+            ..
+        } = &member.kind
+        else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                    span,
+                    true,
+                    "only functions can be called".to_owned(),
+                ),
+            ));
+        };
+        // A member's own generic arguments follow the object's in the shared
+        // substitution vector (`sigs::register` appends them), so indices line
+        // up with `substitute` (Task 3 convention).
+        let mut all_args = inst_args.to_vec();
+        if *generic {
+            if generic_args.len() != generic_params.len() {
+                return Err(self.emit_generic_arity(
+                    span,
+                    field,
+                    generic_params.len(),
+                    generic_args.len(),
+                ));
+            }
+            all_args.extend(self.resolve_generic_args(generic_args));
+        } else if !generic_args.is_empty() {
+            return Err(self.emit_generic_arity(span, field, 0, generic_args.len()));
+        }
+        let sig = self.instantiate_func(member.id, &all_args, span)?;
+        let name = self.instance_name(member.id, &all_args);
+        let callee = HirCallee::Hook {
+            name,
+            def: member.id,
+        };
+        let hir_args = self.check_args(fctx, &sig, args, span)?;
+        Ok(CallOutcome::Call(CheckedCall {
+            outs: sig.returns.clone(),
+            callee,
+            args: hir_args,
+        }))
     }
 
     fn check_arg(

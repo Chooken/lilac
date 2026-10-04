@@ -10,11 +10,13 @@ use std::collections::HashMap;
 use lilac_ast::{Expr, ItemKind, Type as AstType};
 use lilac_error::{Diagnostic, ErrorGuaranteed};
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc};
-use lilac_resolve::{DefId, ResKind};
+use lilac_resolve::{DefId, ResItem, ResKind};
 use lilac_span::Span;
-use lilac_ty::{FuncSig, TypeId, TypeRef};
+use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
-use super::{find_item, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx};
+use super::{
+    find_item, resolve_type, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
+};
 
 /// One monomorphized function instance (`(DefId, args)` identity).
 pub(super) struct FuncInstance {
@@ -37,6 +39,126 @@ const MAX_DEPTH: usize = 16;
 const MAX_DEPTH: usize = 4;
 
 impl Checker<'_> {
+    /// Walks a resolved type, instantiating every concrete `Instance` it
+    /// mentions (registering layouts) and returning an equivalent type.
+    pub(super) fn instantiate_ty(&mut self, ty: TypeRef, use_span: Span) -> TypeRef {
+        match self.types.kind(ty.id).clone() {
+            TypeKind::Instance { base, args } => {
+                let _ = self.instantiate_object(base, &args, use_span);
+                let args = args
+                    .iter()
+                    .map(|arg| self.instantiate_ty(*arg, use_span))
+                    .collect();
+                let id = self.types.intern_instance(base, args);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            TypeKind::Func { params, returns } => {
+                let params = params
+                    .iter()
+                    .map(|param| self.instantiate_ty(*param, use_span))
+                    .collect();
+                let returns = returns
+                    .iter()
+                    .map(|ret| self.instantiate_ty(*ret, use_span))
+                    .collect();
+                let id = self.types.intern_func(params, returns);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    /// Monomorphizes `base` at `args`, memoizing by `(base DefId, args)`.
+    ///
+    /// Registers a concrete field layout under the instance's mangled name and
+    /// eagerly specializes the object's functions whose own generic parameter
+    /// list is empty (methods and associated functions). Methods with their own
+    /// generic parameters specialize at their call site. Failed instances
+    /// poison silently on later references (design §3.3).
+    pub(super) fn instantiate_object(
+        &mut self,
+        base: DefId,
+        args: &[TypeRef],
+        use_span: Span,
+    ) -> Result<TypeRef, ErrorGuaranteed> {
+        let key = (base, args.to_vec());
+        if let Some(ty) = self.object_instances.get(&key) {
+            return Ok(*ty);
+        }
+        if self.failed_objects.contains(&key) {
+            return Err(ErrorGuaranteed::new());
+        }
+        let Some((item, resolved, _parent)) = find_item(self.program, self.module, base) else {
+            lilac_error::bug!(use_span, "instantiate_object on an unknown object");
+        };
+        let ItemKind::Object {
+            members,
+            generic_params,
+        } = &item.kind
+        else {
+            lilac_error::bug!(item.span, "instantiate_object on a non-object item");
+        };
+        let object_name = self.object_name_of(base);
+        self.types.set_object_name(base, &object_name);
+        let id = self.types.intern_instance(base, args.to_vec());
+        let instance_ty = TypeRef { id, is_ref: false };
+        self.object_instances.insert(key.clone(), instance_ty);
+
+        // Concrete layout: resolve each field template in the object's
+        // parameter scope, substitute the instance's arguments, then register
+        // any nested instances the field mentions.
+        let mut layout = Vec::new();
+        for member in members {
+            if let ItemKind::Field { ty } = &member.kind {
+                let template =
+                    resolve_type(ty, self.types, self.module, self.diags, generic_params);
+                let concrete = self.types.substitute(template, args);
+                let concrete = self.instantiate_ty(concrete, member.span);
+                layout.push((member.name.clone(), Some(concrete)));
+            }
+        }
+        let mangled = self.types.mangle(id);
+        self.layouts.insert(mangled, layout);
+
+        let resolved_members = match &resolved.kind {
+            ResKind::Object { members, .. } => members.clone(),
+            _ => std::collections::HashMap::new(),
+        };
+        let mut failed = false;
+        for member in members {
+            let ItemKind::Func(decl) = &member.kind else {
+                continue;
+            };
+            if !decl.generic_params.is_empty() {
+                continue;
+            }
+            let Some(member_resolved) = resolved_members.get(&member.name) else {
+                continue;
+            };
+            if !matches!(member_resolved.kind, ResKind::Func { .. }) {
+                continue;
+            }
+            if self
+                .instantiate_func(member_resolved.id, args, member.span)
+                .is_err()
+            {
+                failed = true;
+            }
+        }
+        if failed {
+            self.object_instances.remove(&key);
+            self.failed_objects.insert(key);
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok(instance_ty)
+    }
+
     /// Monomorphizes `def` at `args`, memoizing by `(DefId, args)`.
     ///
     /// A cached success is reused; a cached failure returns poison with no new
@@ -115,18 +237,13 @@ impl Checker<'_> {
         sig: &FuncSig,
         name: &str,
     ) -> Result<(), ErrorGuaranteed> {
-        let Some((item, resolved, parent)) = find_item(self.program, self.module, def) else {
+        let Some((item, _resolved, parent)) = find_item(self.program, self.module, def) else {
             lilac_error::bug!(Span::dummy(), "instantiated function has no AST item");
         };
         let ItemKind::Func(decl) = &item.kind else {
             lilac_error::bug!(item.span, "instantiated item is not a function");
         };
-        let scope = match &resolved.kind {
-            ResKind::Func { generic_params, .. } | ResKind::Hook { generic_params, .. } => {
-                generic_params.clone()
-            }
-            _ => Vec::new(),
-        };
+        let scope = self.func_scope(def);
         let saved_params = std::mem::replace(&mut self.current_params, scope);
         let saved_args = std::mem::replace(&mut self.current_args, args.to_vec());
         let errors_before = self.diags.checkpoint();
@@ -277,8 +394,20 @@ impl Checker<'_> {
             .any(|diagnostic| diagnostic.level == lilac_error::Level::Error)
     }
 
-    /// Mangled IR symbol for one instance: `<Name>__<arity>__<arg>…`.
-    fn instance_name(&self, def: DefId, args: &[TypeRef]) -> String {
+    /// Mangled IR symbol for one instance. Object members use the design's
+    /// `<object-instance-mangle>.<member>` form (`GenObject__1__bit32.get`);
+    /// free functions use `<Name>__<arity>__<arg>…` (design §3.4).
+    pub(super) fn instance_name(&mut self, def: DefId, args: &[TypeRef]) -> String {
+        if let Some((_name, obj_def, count)) = self.method_object(def) {
+            if count > 0 {
+                let object_args: Vec<TypeRef> = args.iter().take(count).copied().collect();
+                let object_name = self.object_name_of(obj_def);
+                self.types.set_object_name(obj_def, &object_name);
+                let object_id = self.types.intern_instance(obj_def, object_args);
+                let member = self.member_name(def);
+                return format!("{}.{member}", self.types.mangle(object_id));
+            }
+        }
         let mut name = format!("{}__{}", self.function_name(def), args.len());
         for arg in args {
             name.push_str("__");
@@ -288,6 +417,90 @@ impl Checker<'_> {
             name.push_str(&self.types.mangle(arg.id));
         }
         name
+    }
+
+    /// The source member name of a method/associated function.
+    fn member_name(&self, def: DefId) -> String {
+        for item in self.module.items.values() {
+            if let ResKind::Object { members, .. } = &item.kind {
+                for (member_name, member) in members {
+                    if member.id == def {
+                        return member_name.clone();
+                    }
+                }
+            }
+        }
+        self.function_name(def)
+    }
+
+    /// The generic-parameter scope of a function body: the enclosing object's
+    /// parameters first, then the function's own (Task 3 convention, so
+    /// `substitute` indices line up with the substitution vector).
+    fn func_scope(&self, def: DefId) -> Vec<String> {
+        let own = find_item(self.program, self.module, def)
+            .and_then(|(_, resolved, _)| match &resolved.kind {
+                ResKind::Func { generic_params, .. } | ResKind::Hook { generic_params, .. } => {
+                    Some(generic_params.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        match self.method_object(def) {
+            Some((_, obj_def, _)) => {
+                let mut scope = self.object_params(obj_def);
+                scope.extend(own);
+                scope
+            }
+            None => own,
+        }
+    }
+
+    /// The enclosing object of a method/associated function, if any:
+    /// `(object name, object DefId, object parameter count)`.
+    fn method_object(&self, def: DefId) -> Option<(String, DefId, usize)> {
+        let (_item, _resolved, parent) = find_item(self.program, self.module, def)?;
+        let (parent_name, parent_def) = parent?;
+        let count = self.object_params(parent_def).len();
+        Some((parent_name, parent_def, count))
+    }
+
+    /// Source name of an object definition by identity.
+    pub(super) fn object_name_of(&self, def: DefId) -> String {
+        for (name, item) in &self.module.items {
+            if item.id == def {
+                return name.clone();
+            }
+        }
+        format!("object#{}", def.0)
+    }
+
+    /// The declared generic parameter names of an object, in order.
+    pub(super) fn object_params(&self, def: DefId) -> Vec<String> {
+        for item in self.module.items.values() {
+            if item.id == def {
+                if let ResKind::Object { generic_params, .. } = &item.kind {
+                    return generic_params.clone();
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// A top-level or object-member `ResItem` by identity.
+    pub(super) fn res_item(&self, def: DefId) -> Option<ResItem> {
+        for item in self.module.items.values() {
+            if item.id == def {
+                return Some(item.clone());
+            }
+            if let ResKind::Object { members, .. } = &item.kind {
+                for member in members.values() {
+                    if member.id == def {
+                        return Some(member.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Source name of a function definition (qualified for object members).
@@ -308,9 +521,9 @@ impl Checker<'_> {
     }
 
     /// The active instantiation chain, elided after 5 frames.
-    fn instantiation_chain(&self) -> String {
-        let frames: Vec<String> = self
-            .active
+    fn instantiation_chain(&mut self) -> String {
+        let active = self.active.clone();
+        let frames: Vec<String> = active
             .iter()
             .map(|(def, args)| self.instance_name(*def, args))
             .collect();
@@ -446,6 +659,57 @@ mod tests {
             diags.diagnostics().iter().any(|d| d.code == "E022"),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn generic_object_layout() {
+        let (diags, hir, types) = check(
+            "GenObject[T]: object {\n    value: T\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let layout = hir
+            .layouts
+            .get("GenObject__1__bit32")
+            .expect("missing instance layout");
+        assert_eq!(layout.len(), 1, "{layout:?}");
+        assert_eq!(layout[0].0, "value");
+        let field = layout[0].1.expect("field carries a concrete type");
+        assert_eq!(types.display(field.id), "@bit32");
+        assert!(
+            !matches!(types.kind(field.id), TypeKind::Param { .. }),
+            "layout leaked a Param: `{}`",
+            types.display(field.id)
+        );
+    }
+
+    #[test]
+    fn generic_object_method() {
+        let (diags, hir, types) = check(
+            "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            names(&hir).contains(&"GenObject__1__bit32.get"),
+            "missing monomorphized method: {:?}",
+            names(&hir)
+        );
+        assert_no_param(&types, &hir);
+    }
+
+    #[test]
+    fn value_based_duck_typing_ok() {
+        let (diags, _, _) = check(
+            "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.get()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn static_method_on_object_ok() {
+        let (diags, _, _) = check(
+            "Object: object {\n    get: function () result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get()\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[Object]()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     fn assert_no_param(types: &Types, hir: &HirProgram) {

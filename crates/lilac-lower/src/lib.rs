@@ -88,6 +88,7 @@ fn lir_ty(types: &Types, ty: TypeRef) -> String {
         lilac_ty::TypeKind::Func { .. } => "#bit64".to_owned(),
         lilac_ty::TypeKind::Error => "#error".to_owned(),
         lilac_ty::TypeKind::Object(_) => format!("#{}", types.display(ty.id)),
+        lilac_ty::TypeKind::Instance { .. } => format!("#{}", types.mangle(ty.id)),
         _ => {
             let display = types.display(ty.id);
             if let Some(rest) = display.strip_prefix('@') {
@@ -1810,6 +1811,16 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("call @get_multi"), "{text}");
         assert!(text.contains("(out "), "{text}");
+    }
+
+    #[test]
+    fn lower_generic_object_instance() {
+        let (text, diags) = lower_src(
+            "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("#GenObject__1__bit32"), "{text}");
+        assert!(text.contains("GenObject__1__bit32.get"), "{text}");
     }
 
     #[test]
