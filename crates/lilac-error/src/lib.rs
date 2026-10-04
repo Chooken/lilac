@@ -328,9 +328,14 @@ impl Emitter for EmitterHuman {
             let _ = writeln!(out, "note: {note}");
         }
         if frames_elided > 0 {
+            let noun = if frames_elided == 1 {
+                "frame"
+            } else {
+                "frames"
+            };
             let _ = writeln!(
                 out,
-                "note: ... {frames_elided} more frames elided (use --verbose)"
+                "note: ... {frames_elided} more {noun} elided (use --verbose)"
             );
         }
         for help in &diagnostic.helps {

@@ -1,0 +1,27 @@
+level0[T]: function (x: T) out: T {
+    out = level1[T](x)
+}
+
+level1[T]: function (x: T) out: T {
+    out = level2[T](x)
+}
+
+level2[T]: function (x: T) out: T {
+    out = level3[T](x)
+}
+
+level3[T]: function (x: T) out: T {
+    out = level4[T](x)
+}
+
+level4[T]: function (x: T) out: T {
+    out = level5[T](x)
+}
+
+level5[T]: function (x: T) out: T {
+    out = x.missing()
+}
+
+main: function () nothing {
+    y: @bit32 = level0[@bit32](0x1)
+}

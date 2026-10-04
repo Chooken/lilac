@@ -37,14 +37,27 @@ fn check_ports_clean() {
 
 #[test]
 fn lir_snapshots_stable() {
-    for port in PORTS {
+    // Every `*.lir` snapshot under `tests/ui`, not just the M4 `PORTS`, so a
+    // stale non-generic snapshot (e.g. `op_bit_mixed_ok.lir`) is caught.
+    let mut snapshots: Vec<std::path::PathBuf> = std::fs::read_dir("../../tests/ui")
+        .expect("reads tests/ui")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lir"))
+        .collect();
+    snapshots.sort();
+    assert!(!snapshots.is_empty(), "no .lir snapshots found");
+    for snapshot in snapshots {
+        let source = snapshot.with_extension("lilac");
         let output = lilac()
-            .args(["emit-ir", "--check", &ui(port)])
+            .args(["emit-ir", "--check"])
+            .arg(&source)
             .output()
             .expect("runs lilac");
         assert!(
             output.status.success(),
-            "{port} stderr:\n{}",
+            "{} stderr:\n{}",
+            source.display(),
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -83,6 +96,20 @@ fn fails_generic_arity_is_e044() {
 #[test]
 fn fails_generic_cyclic_is_e051() {
     fails_with("FAILS_generic_cyclic.lilac", "E051");
+}
+
+#[test]
+fn fails_generic_static_bare_is_e044() {
+    // A bare generic-object receiver (`GenObj.ping()`) must not fall through to
+    // the unmonomorphized template (that was an ICE); it is a clean `E044`.
+    fails_with("FAILS_generic_static_bare.lilac", "E044");
+}
+
+#[test]
+fn fails_generic_object_cycle_is_e051() {
+    // A growing generic object layout terminates with `E051`, never a stack
+    // overflow.
+    fails_with("FAILS_generic_object_cycle.lilac", "E051");
 }
 
 #[test]
@@ -128,6 +155,42 @@ fn fails_generic_duck_typing_verbose_snapshot() {
     assert!(!ok, "should fail");
     assert_eq!(stderr, DUCK_TYPING_SHORT);
     assert!(stderr.contains("note: in instantiation of gen_function__1__bit32"));
+}
+
+/// A >5-frame instantiation chain (`level0` -> ... -> `level5`): the
+/// `--verbose` render prints every frame while the default elides the
+/// trailing ones.
+const DEEP_CHAIN_VERBOSE: &str = concat!(
+    "error[E042]: type `@bit32` does not satisfy `level5[T]` requirements\n",
+    "  --> ../../tests/ui/FAILS_generic_deep_chain.lilac:18:11\n",
+    "   |\n",
+    "18 |     out = level5[T](x)\n",
+    "   |           ^^^^^^^^^^^^\n",
+    "   = instantiated here\n",
+    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:21:1 required by `level5[T]` here\n",
+    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:22:11 missing method `missing` on `@bit32`\n",
+    "note: in instantiation of level0__1__bit32\n",
+    "note: in instantiation of level1__1__bit32\n",
+    "note: in instantiation of level2__1__bit32\n",
+    "note: in instantiation of level3__1__bit32\n",
+    "note: in instantiation of level4__1__bit32\n",
+    "note: in instantiation of level5__1__bit32\n",
+);
+
+#[test]
+fn fails_generic_deep_chain_verbose_snapshot() {
+    let (ok, verbose) = check("FAILS_generic_deep_chain.lilac", &["--verbose"]);
+    assert!(!ok, "should fail");
+    assert_eq!(verbose, DEEP_CHAIN_VERBOSE);
+    assert!(verbose.contains("level5__1__bit32"), "{verbose}");
+    assert!(!verbose.contains("elided"), "{verbose}");
+
+    let (_, short) = check("FAILS_generic_deep_chain.lilac", &[]);
+    assert_ne!(short, verbose, "verbose must differ from default:\n{short}");
+    assert!(
+        short.contains("1 more frame elided (use --verbose)"),
+        "{short}"
+    );
 }
 
 /// `E010` always prints both sides: the expected annotation label and the

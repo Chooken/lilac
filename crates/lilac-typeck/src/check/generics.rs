@@ -94,6 +94,21 @@ impl Checker<'_> {
         if self.failed_objects.contains(&key) {
             return Err(ErrorGuaranteed::new());
         }
+        // Growing layouts (`next: GenObj[GenObj[T]]`) never repeat a memo key,
+        // so bound the layout recursion like `instantiate_func` (design §3.3).
+        if self.active_objects.len() >= MAX_DEPTH {
+            self.failed_objects.insert(key);
+            let chain = self.object_instantiation_chain();
+            self.diags.emit(
+                Diagnostic::error(
+                    "E051",
+                    "generic instantiation is too deep (possible infinite recursion)",
+                )
+                .label(use_span, true, "instantiated here")
+                .note(format!("instantiation chain: {chain}")),
+            );
+            return Err(ErrorGuaranteed::new());
+        }
         let Some((item, resolved, _parent)) = find_item(self.program, self.module, base) else {
             lilac_error::bug!(use_span, "instantiate_object on an unknown object");
         };
@@ -109,6 +124,7 @@ impl Checker<'_> {
         let id = self.types.intern_instance(base, args.to_vec());
         let instance_ty = TypeRef { id, is_ref: false };
         self.object_instances.insert(key.clone(), instance_ty);
+        self.active_objects.push(key.clone());
 
         // Concrete layout: resolve each field template in the object's
         // parameter scope, substitute the instance's arguments, then register
@@ -169,14 +185,16 @@ impl Checker<'_> {
                 match self.instantiate_func(hook_def, args, use_span) {
                     Ok(_) => {
                         let hook = self.instance_name(hook_def, args);
-                        self.drops.insert(mangled, hook);
+                        self.drops.insert(mangled.clone(), hook);
                     }
                     Err(_) => failed = true,
                 }
             }
         }
+        self.active_objects.pop();
         if failed {
             self.object_instances.remove(&key);
+            self.layouts.remove(&mangled);
             self.failed_objects.insert(key);
             return Err(ErrorGuaranteed::new());
         }
@@ -652,6 +670,32 @@ impl Checker<'_> {
         }
     }
 
+    /// The active object-instantiation chain, one mangled instance name per
+    /// frame (innermost last).
+    fn object_instantiation_frames(&mut self) -> Vec<String> {
+        let active = self.active_objects.clone();
+        active
+            .iter()
+            .map(|(base, args)| {
+                let id = self.types.intern_instance(*base, args.clone());
+                self.types.mangle(id)
+            })
+            .collect()
+    }
+
+    /// The active object-instantiation chain as one `a -> b` string, elided in
+    /// the middle past 5 frames.
+    fn object_instantiation_chain(&mut self) -> String {
+        let frames = self.object_instantiation_frames();
+        if frames.len() > 5 {
+            let head = frames[..2].join(" -> ");
+            let tail = frames[frames.len() - 2..].join(" -> ");
+            format!("{head} -> ... -> {tail} ({} frames)", frames.len())
+        } else {
+            frames.join(" -> ")
+        }
+    }
+
     /// Ranked `help:` suggestions for the captured requirement failures:
     /// edit-distance did-you-mean over the owner's members plus a discovered
     /// `@conversion` (design §3.5).
@@ -695,7 +739,10 @@ impl Checker<'_> {
     /// Concrete members of the object named `owner`, resolving an instance
     /// mangle (`GenObject__1__bit32`) back to its base name.
     fn owner_members(&self, owner: &str) -> Vec<String> {
+        // The owner is either an IR mangle (`GenObject__1__bit32`) or the
+        // display form (`GenObject[@bit32]`); recover the base name from both.
         let base = owner.split("__").next().unwrap_or(owner);
+        let base = base.split('[').next().unwrap_or(base);
         let mut members: Vec<String> = Vec::new();
         for (name, item) in &self.module.items {
             if name == owner || name == base {
@@ -917,6 +964,20 @@ mod tests {
     }
 
     #[test]
+    fn generic_instance_miss_has_did_you_mean() {
+        // The lookup owner is an instance's display form
+        // (`GenObject[@bit32]`); did-you-mean must still find the base's
+        // members.
+        let src = "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.geet()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert!(
+            rendered.contains("`GenObject[@bit32]` has `get`, did you mean `get`?"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn generic_function_monomorphizes() {
         let (diags, hir, _) = check(
             "gen_function[T]: function (in: T) out: T {\n    out = in\n}\n\nmain: function () nothing {\n    out: @bit32 = gen_function[@bit32](0x1)\n}\n",
@@ -953,6 +1014,34 @@ mod tests {
             .filter(|d| d.code == "E051")
             .count();
         assert_eq!(count, 1, "{diags:?}");
+    }
+
+    #[test]
+    fn cyclic_growing_object_layout_is_e051() {
+        let (diags, _, _) = check(
+            "GenObj[T]: object {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
+        );
+        let count = diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E051")
+            .count();
+        assert_eq!(count, 1, "{diags:?}");
+    }
+
+    #[test]
+    fn bare_generic_object_static_is_e044() {
+        let (diags, _, _) = check(
+            "GenObj[T]: object {\n    value: T\n    ping: function () nothing {\n    }\n}\n\nmain: function () nothing {\n    GenObj.ping()\n}\n",
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E044"),
+            "{diags:?}"
+        );
+        assert!(
+            !diags.diagnostics().iter().any(|d| d.code == "E070"),
+            "{diags:?}"
+        );
     }
 
     #[test]

@@ -120,6 +120,7 @@ pub fn check_bodies(
         instance_inline: HashMap::new(),
         object_instances: HashMap::new(),
         failed_objects: HashSet::new(),
+        active_objects: Vec::new(),
         layouts: HashMap::new(),
         reported_failures: HashSet::new(),
     };
@@ -216,6 +217,8 @@ struct Checker<'a> {
     object_instances: HashMap<(DefId, Vec<TypeRef>), TypeRef>,
     /// Object instantiation keys that failed; a later reference stays silent.
     failed_objects: HashSet<(DefId, Vec<TypeRef>)>,
+    /// Object instantiation keys currently being laid out (the depth stack).
+    active_objects: Vec<(DefId, Vec<TypeRef>)>,
     /// Concrete per-instance object layouts, keyed by mangled instance name.
     layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
     /// `E042` reports already emitted, keyed by
@@ -3033,7 +3036,11 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
-        let ResKind::Object { members, .. } = &type_item.kind else {
+        let ResKind::Object {
+            members,
+            generic_params,
+        } = &type_item.kind
+        else {
             return Err(self.diags.emit(
                 Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
                     span,
@@ -3042,6 +3049,12 @@ impl Checker<'_> {
                 ),
             ));
         };
+        // A bare generic-object receiver (`GenObj.method()`) never has its
+        // members monomorphized, so the template signature must not reach HIR.
+        // Require explicit arguments: `GenObj[@bit32]` (via the instance path).
+        if !generic_params.is_empty() && generic_args.is_empty() {
+            return Err(self.emit_generic_arity(span, type_name, generic_params.len(), 0));
+        }
         let Some(member) = members.get(field).cloned() else {
             return Err(self.diags.emit(
                 Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(

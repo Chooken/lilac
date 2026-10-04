@@ -1,0 +1,10 @@
+GenObj[T]: object {
+    value: T
+
+    ping: function () nothing {
+    }
+}
+
+main: function () nothing {
+    GenObj.ping()
+}

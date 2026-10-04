@@ -1,0 +1,10 @@
+GenObj[T]: object {
+    next: GenObj[GenObj[T]]
+}
+
+consume[T]: function () nothing {
+}
+
+main: function () nothing {
+    consume[GenObj[@bit32]]()
+}
