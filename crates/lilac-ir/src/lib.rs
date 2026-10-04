@@ -773,6 +773,8 @@ impl Verifier<'_> {
                     Span::dummy(),
                 );
             }
+            let mut places: HashMap<&'a str, &'a str> = HashMap::new();
+            self.verify_signature(func, &mut places);
             return;
         }
         if func.blocks.is_empty() {
@@ -783,17 +785,7 @@ impl Verifier<'_> {
             return;
         }
         let mut places: HashMap<&'a str, &'a str> = HashMap::new();
-        for (place, ty) in func.ins.iter().chain(func.outs.iter()) {
-            if places.insert(place.as_str(), ty.as_str()).is_some() {
-                self.error(
-                    format!("duplicate place `%{place}` in `@{}`", func.name),
-                    Span::dummy(),
-                );
-            }
-            if !self.valid_type(ty) {
-                self.error(format!("unknown type `{ty}`"), Span::dummy());
-            }
-        }
+        self.verify_signature(func, &mut places);
         let mut assigned: HashSet<&str> = HashSet::new();
         for block in &func.blocks {
             self.verify_block(func, block, &mut places, &mut assigned);
@@ -804,6 +796,22 @@ impl Verifier<'_> {
                     format!("out place `%{place}` of `@{}` is never assigned", func.name),
                     Span::dummy(),
                 );
+            }
+        }
+    }
+
+    /// Validates the signature places shared by functions and externs: no
+    /// duplicate place names and every `in`/`out` type known.
+    fn verify_signature<'a>(&mut self, func: &'a LirFunc, places: &mut HashMap<&'a str, &'a str>) {
+        for (place, ty) in func.ins.iter().chain(func.outs.iter()) {
+            if places.insert(place.as_str(), ty.as_str()).is_some() {
+                self.error(
+                    format!("duplicate place `%{place}` in `@{}`", func.name),
+                    Span::dummy(),
+                );
+            }
+            if !self.valid_type(ty) {
+                self.error(format!("unknown type `{ty}`"), Span::dummy());
             }
         }
     }
@@ -1489,6 +1497,61 @@ mod tests {
     fn verifier_rejects_extern_with_block() {
         let mut module = canonical_module();
         module.funcs[0].is_extern = true;
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1);
+    }
+
+    /// A bodyless extern with a valid signature verifies.
+    fn extern_module() -> LirModule {
+        LirModule {
+            version: LILAC_IR_VERSION.to_owned(),
+            target: "x86_64-unknown-none".to_owned(),
+            data: Vec::new(),
+            funcs: vec![LirFunc {
+                name: "puts".to_owned(),
+                ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+                outs: Vec::new(),
+                is_extern: true,
+                blocks: Vec::new(),
+            }],
+            layouts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn verifier_accepts_clean_extern() {
+        let module = extern_module();
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+        assert_eq!(e070_count(&diags), 0);
+    }
+
+    #[test]
+    fn verifier_rejects_extern_duplicate_places() {
+        let mut module = extern_module();
+        module.funcs[0].outs = vec![("s".to_owned(), "#byte_buffer".to_owned())];
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1);
+    }
+
+    #[test]
+    fn verifier_rejects_extern_unknown_type() {
+        let mut module = extern_module();
+        module.funcs[0].ins[0].1 = "#nope".to_owned();
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1);
+    }
+
+    #[test]
+    fn verifier_rejects_non_extern_duplicate_places() {
+        let mut module = canonical_module();
+        module.funcs[0].ins = vec![
+            ("in".to_owned(), "#bit32".to_owned()),
+            ("in".to_owned(), "#bit64".to_owned()),
+        ];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);

@@ -192,4 +192,42 @@ mod tests {
         prune_unreachable(&mut module);
         assert_eq!(module.funcs.len(), before);
     }
+
+    #[test]
+    fn const_reference_retains_data() {
+        // main -> a (via `addr.func`); only a names `!c0`.
+        let mut module = module_with(&["main", "a"], &["c0"]);
+        prune_unreachable(&mut module);
+        assert!(
+            module.data.iter().any(|d| d.name == "c0"),
+            "a surviving Const must keep its data const"
+        );
+    }
+
+    #[test]
+    fn panic_message_retains_data() {
+        // main's terminator is the only referencer of `!c0`.
+        let mut module = module_with(&["main"], &["c0"]);
+        module.funcs[0].blocks[0].insts.clear();
+        module.funcs[0].blocks[0].term = LirTerm::Panic {
+            msg: "c0".to_owned(),
+            span: Span::dummy(),
+        };
+        prune_unreachable(&mut module);
+        assert!(
+            module.data.iter().any(|d| d.name == "c0"),
+            "a surviving Panic must keep its data const"
+        );
+    }
+
+    #[test]
+    fn data_referenced_only_by_dead_func_is_swept() {
+        // main -> a; b is dead and is the only referencer of `!c0`.
+        let mut module = module_with(&["main", "a", "b"], &["c0"]);
+        prune_unreachable(&mut module);
+        assert!(
+            module.data.is_empty(),
+            "data referenced only by a swept function must be swept too"
+        );
+    }
 }

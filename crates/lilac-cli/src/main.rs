@@ -76,6 +76,10 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         } else if *arg == "--release" {
             session.optimize = Opt::O2;
         } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
+            if dir.is_empty() {
+                eprintln!("--cache-dir= needs a path\n{}", usage());
+                return Err(ExitCode::from(2));
+            }
             session.cache_dir = Some(std::path::PathBuf::from(dir));
         } else if arg.starts_with('-') {
             eprintln!("unknown flag: {arg}\n{}", usage());
@@ -193,5 +197,27 @@ mod tests {
     #[test]
     fn unknown_flag_is_rejected() {
         assert!(parse_common(&args(&["f.lilac", "-O9"]), false).is_err());
+    }
+
+    #[test]
+    fn empty_cache_dir_is_rejected() {
+        assert!(parse_common(&args(&["f.lilac", "--cache-dir="]), false).is_err());
+    }
+
+    #[test]
+    fn release_then_opt_flag_last_wins() {
+        let common =
+            parse_common(&args(&["f.lilac", "--release", "-O0"]), false).expect("valid args");
+        assert_eq!(common.session.optimize, Opt::O0);
+    }
+
+    #[test]
+    fn target_flag_overrides_target_not_host() {
+        let common = parse_common(&args(&["f.lilac", "--target=foo"]), false).expect("valid args");
+        assert_eq!(common.session.target.triple, "foo");
+        assert_eq!(
+            common.session.host.triple,
+            lilac_driver::Target::host().triple
+        );
     }
 }

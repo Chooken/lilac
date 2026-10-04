@@ -975,7 +975,10 @@ impl Write for Fnv64 {
 mod tests {
     use super::*;
     use crate::tests::canonical_module;
-    use crate::{LirData, LirDataKind};
+    use crate::{
+        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst,
+        LirOperand, LirTerm,
+    };
     use lilac_span::Span;
 
     fn sample() -> LirModule {
@@ -1012,6 +1015,259 @@ mod tests {
         b.layouts.remove("#Extra");
         assert_eq!(a.content_hash(), b.content_hash());
         assert_eq!(a.content_hash(), a.content_hash());
+    }
+
+    /// Builds a module exercising every `LirInst` and `LirTerm` variant, both
+    /// `ConvertOp`s, all 15 `ArithOp`s, all three `LirCallee`s, both
+    /// `LirDataKind`s, and a layout.
+    #[allow(clippy::too_many_lines)]
+    fn all_variants_module() -> LirModule {
+        let span = Span::dummy();
+        let mut insts = vec![
+            LirInst::CopyReg {
+                src: LirOperand::Reg("r0".to_owned()),
+                dst: "r1".to_owned(),
+                ty: "#bit32".to_owned(),
+                span,
+            },
+            LirInst::CopyPlace {
+                src: LirOperand::Place("p0".to_owned()),
+                dst: "p1".to_owned(),
+                span,
+            },
+            LirInst::Const {
+                dst: "r2".to_owned(),
+                lit: "!d0".to_owned(),
+                ty: "#byte_buffer".to_owned(),
+                span,
+            },
+            LirInst::Load {
+                src: "p1".to_owned(),
+                dst: "r3".to_owned(),
+                ty: "#bit32".to_owned(),
+                span,
+            },
+            LirInst::Addr {
+                place: "p1".to_owned(),
+                dst: "r4".to_owned(),
+                ty: "ref #bit32".to_owned(),
+                span,
+            },
+            LirInst::AddrFunc {
+                func: "f1".to_owned(),
+                dst: "r5".to_owned(),
+                ty: "ref #bit32".to_owned(),
+                span,
+            },
+            LirInst::Call {
+                func: LirCallee::Reg("r0".to_owned()),
+                ins: vec!["p0".to_owned()],
+                outs: vec!["p1".to_owned()],
+                span,
+            },
+            LirInst::Call {
+                func: LirCallee::Func("f1".to_owned()),
+                ins: Vec::new(),
+                outs: vec!["p0".to_owned()],
+                span,
+            },
+            LirInst::Call {
+                func: LirCallee::Builtin("@format_args_new".to_owned()),
+                ins: Vec::new(),
+                outs: vec!["p0".to_owned()],
+                span,
+            },
+            LirInst::Field {
+                obj: "p1".to_owned(),
+                name: "x".to_owned(),
+                idx: 3,
+                dst: "r6".to_owned(),
+                ty: "#bit32".to_owned(),
+                span,
+            },
+            LirInst::StoreField {
+                value: LirOperand::Reg("r0".to_owned()),
+                obj: "p1".to_owned(),
+                name: "x".to_owned(),
+                idx: 3,
+                span,
+            },
+            LirInst::Store {
+                src: LirOperand::Place("p0".to_owned()),
+                dst: "p1".to_owned(),
+                span,
+            },
+            LirInst::Convert {
+                op: ConvertOp::Trunc,
+                src: "r0".to_owned(),
+                dst: "r7".to_owned(),
+                ty: "#bit8".to_owned(),
+                span,
+            },
+            LirInst::Convert {
+                op: ConvertOp::ExtendZero,
+                src: "r0".to_owned(),
+                dst: "r8".to_owned(),
+                ty: "#bit64".to_owned(),
+                span,
+            },
+            LirInst::FieldAddr {
+                obj: "p1".to_owned(),
+                name: "x".to_owned(),
+                idx: 3,
+                dst: "r9".to_owned(),
+                ty: "ref #bit32".to_owned(),
+                span,
+            },
+            LirInst::Alloca {
+                ty: "#bit32".to_owned(),
+                place: "p2".to_owned(),
+                span,
+            },
+            LirInst::Drop {
+                place: "p2".to_owned(),
+                span,
+            },
+        ];
+        for (i, op) in [
+            ArithOp::IAdd,
+            ArithOp::ISub,
+            ArithOp::IMul,
+            ArithOp::IDiv,
+            ArithOp::IMod,
+            ArithOp::FAdd,
+            ArithOp::FSub,
+            ArithOp::FMul,
+            ArithOp::FDiv,
+            ArithOp::FMod,
+            ArithOp::Eq,
+            ArithOp::ILt,
+            ArithOp::IGt,
+            ArithOp::FLt,
+            ArithOp::FGt,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insts.push(LirInst::Arith {
+                op,
+                lhs: "r0".to_owned(),
+                rhs: "r1".to_owned(),
+                dst: format!("a{i}"),
+                ty: "#bit32".to_owned(),
+                span,
+            });
+        }
+        insts.push(LirInst::CompileError {
+            msg: "boom".to_owned(),
+            msg_span: span,
+            call_span: span,
+        });
+        insts.push(LirInst::FoldIntrinsic {
+            name: "@as_int".to_owned(),
+            arg: LirOperand::Reg("r0".to_owned()),
+            dst: "r10".to_owned(),
+            ty: "#bit8".to_owned(),
+            span,
+        });
+
+        let blocks = vec![
+            LirBlock {
+                label: "entry".to_owned(),
+                insts,
+                term: LirTerm::Return { span },
+                span,
+            },
+            LirBlock {
+                label: "b1".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::Branch {
+                    target: "entry".to_owned(),
+                    span,
+                },
+                span,
+            },
+            LirBlock {
+                label: "b2".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::BranchIf {
+                    cond: "r1".to_owned(),
+                    then: "entry".to_owned(),
+                    els: Some("b1".to_owned()),
+                    span,
+                },
+                span,
+            },
+            LirBlock {
+                label: "b3".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::BranchIf {
+                    cond: "r1".to_owned(),
+                    then: "entry".to_owned(),
+                    els: None,
+                    span,
+                },
+                span,
+            },
+            LirBlock {
+                label: "b4".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::Panic {
+                    msg: "d0".to_owned(),
+                    span,
+                },
+                span,
+            },
+            LirBlock {
+                label: "b5".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::Unreachable { span },
+                span,
+            },
+        ];
+
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "d0".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span,
+        });
+        module.data.push(LirData {
+            name: "d1".to_owned(),
+            kind: LirDataKind::NumLit("10.5".to_owned()),
+            span,
+        });
+        module.funcs.push(LirFunc {
+            name: "all".to_owned(),
+            ins: vec![("p0".to_owned(), "#bit32".to_owned())],
+            outs: vec![("p1".to_owned(), "ref #bit32".to_owned())],
+            is_extern: false,
+            blocks,
+        });
+        module.layouts.insert(
+            "#Number".to_owned(),
+            vec![
+                ("tag".to_owned(), "#bit8".to_owned()),
+                ("val".to_owned(), "#bit32".to_owned()),
+            ],
+        );
+        module
+    }
+
+    #[test]
+    fn round_trips_every_variant_byte_identical() {
+        let module = all_variants_module();
+        let mut bytes = Vec::new();
+        module.encode(&mut bytes).expect("encodes");
+        let decoded = LirModule::decode(&mut &bytes[..]).expect("decodes");
+        assert_eq!(decoded.to_text(), module.to_text());
+        assert_eq!(decoded.content_hash(), module.content_hash());
+        let mut reencoded = Vec::new();
+        decoded.encode(&mut reencoded).expect("re-encodes");
+        assert_eq!(
+            reencoded, bytes,
+            "decode(encode(m)) must re-encode byte-identically"
+        );
     }
 
     #[test]

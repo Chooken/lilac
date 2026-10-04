@@ -117,7 +117,7 @@ pub struct Opts {
 ///
 /// Threaded explicitly through every pass (no globals, unlike the old Zig
 /// `Logger`); mirrors `rustc_session`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Session {
     /// File contents.
     pub source_map: SourceMap,
@@ -137,15 +137,29 @@ pub struct Session {
     pub warn_on_operator_type_change: bool,
 }
 
+impl Default for Session {
+    /// Session with the real build host, the canonical default target,
+    /// human errors, and operator-type-change warnings on. Kept identical to
+    /// [`Session::new`] so neither construction path surprises the other.
+    fn default() -> Self {
+        Self {
+            source_map: SourceMap::default(),
+            diags: Diags::default(),
+            host: Target::host(),
+            target: Target::default(),
+            opts: Opts::default(),
+            optimize: Opt::default(),
+            cache_dir: None,
+            warn_on_operator_type_change: true,
+        }
+    }
+}
+
 impl Session {
     /// Default session (real host, canonical default target, human errors).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            host: Target::host(),
-            warn_on_operator_type_change: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Runs the full pipeline but returns the AST (`check` entry point;
