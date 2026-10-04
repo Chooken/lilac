@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 inkwell = { version = "0.10", features = ["llvm18-1"] }
+lilac-error = { path = "../lilac-error" }
 lilac-ir = { path = "../lilac-ir" }
+lilac-span = { path = "../lilac-span" }
 lilac-codegen = { path = "../lilac-codegen" }
 
 [lints]

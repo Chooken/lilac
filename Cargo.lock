@@ -100,7 +100,9 @@ version = "0.2.0"
 dependencies = [
  "inkwell",
  "lilac-codegen",
+ "lilac-error",
  "lilac-ir",
+ "lilac-span",
 ]
 
 [[package]]
