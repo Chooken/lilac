@@ -7,7 +7,11 @@
 use std::collections::{HashMap, HashSet};
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
-use lilac_ir::{ArithOp, ConvertOp, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
+use lilac_ir::{
+    builtin_sig, ArithOp, ConvertOp, LirBlock, LirCallee, LirDataKind, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm,
+};
+use lilac_span::Span;
 
 /// Fuel cap per call-eval (`MAX_FOLD_STEPS`).
 pub const MAX_FOLD_STEPS: u64 = 100_000;
@@ -43,7 +47,28 @@ pub struct FoldValueError {
 /// (`@as_int`/`@as_float`/`@size_of`), and dead `@compile_error` removal.
 /// Still-live `@compile_error` sites report `E031`; unfoldable intrinsics
 /// report `E060`.
+///
+/// M3 adds bounded best-effort call-eval: a `call` whose `in` places are all
+/// constant is interpreted under [`MAX_FOLD_STEPS`]/[`MAX_CALL_DEPTH`]; a
+/// miss (unknown value, unsupported op, or exhausted fuel/depth) leaves the
+/// runtime call in place.
+///
+/// # Errors
+///
+/// Returns [`ErrorGuaranteed`] when a live `@compile_error` (`E031`) or a
+/// fold-required intrinsic value error (`E060`) was reported.
 pub fn fold(module: &mut LirModule, diags: &mut Diags) -> Result<(), ErrorGuaranteed> {
+    fold_with_fuel(module, diags, MAX_FOLD_STEPS, MAX_CALL_DEPTH)
+}
+
+/// Folding entry point with an injectable fuel/depth budget (tests exercise
+/// exhaustion with a tiny budget).
+fn fold_with_fuel(
+    module: &mut LirModule,
+    diags: &mut Diags,
+    fuel: u64,
+    depth: u32,
+) -> Result<(), ErrorGuaranteed> {
     let data: HashMap<String, Vec<u8>> = module
         .data
         .iter()
@@ -54,10 +79,15 @@ pub fn fold(module: &mut LirModule, diags: &mut Diags) -> Result<(), ErrorGuaran
             (data.name.clone(), payload)
         })
         .collect();
+    let funcs = module.funcs.clone();
     let mut folder = Folder {
         diags,
         data: &data,
+        funcs: &funcs,
         failed: false,
+        fuel,
+        max_depth: depth,
+        fresh: 0,
     };
     for func in &mut module.funcs {
         folder.fold_func(func);
@@ -72,7 +102,11 @@ pub fn fold(module: &mut LirModule, diags: &mut Diags) -> Result<(), ErrorGuaran
 struct Folder<'a> {
     diags: &'a mut Diags,
     data: &'a HashMap<String, Vec<u8>>,
+    funcs: &'a [LirFunc],
     failed: bool,
+    fuel: u64,
+    max_depth: u32,
+    fresh: u64,
 }
 
 /// Parses integer text (`0x`/`0X`, `0b`/`0B`, decimal, `_` separators and
@@ -126,12 +160,85 @@ fn is_truthy(value: &ConstValue) -> Option<bool> {
     }
 }
 
-/// Looks up an operand's tracked constant (`Unknown` for places or
-/// untracked registers).
+/// Whether a value is the uninformative top of the lattice.
+fn is_unknown(value: &ConstValue) -> bool {
+    matches!(value, ConstValue::Unknown)
+}
+
+/// Looks up an operand's tracked constant (`Unknown` for untracked
+/// registers or places).
 fn operand_const(consts: &HashMap<String, ConstValue>, operand: &LirOperand) -> ConstValue {
-    match operand {
-        LirOperand::Reg(reg) => consts.get(reg).cloned().unwrap_or(ConstValue::Unknown),
-        LirOperand::Place(_) => ConstValue::Unknown,
+    let name = match operand {
+        LirOperand::Reg(reg) | LirOperand::Place(reg) => reg,
+    };
+    consts.get(name).cloned().unwrap_or(ConstValue::Unknown)
+}
+
+/// Structural equality where `NaN` equals itself bit-for-bit (so the
+/// dataflow fixpoint always converges).
+fn values_equal(left: &ConstValue, right: &ConstValue) -> bool {
+    match (left, right) {
+        (ConstValue::Unknown, ConstValue::Unknown) => true,
+        (ConstValue::Int(left, left_width), ConstValue::Int(right, right_width)) => {
+            left == right && left_width == right_width
+        }
+        (ConstValue::Float(left, left_width), ConstValue::Float(right, right_width)) => {
+            left.to_bits() == right.to_bits() && left_width == right_width
+        }
+        (ConstValue::Bytes(left), ConstValue::Bytes(right)) => left == right,
+        (ConstValue::Bool(left), ConstValue::Bool(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Compares two tracked-constant maps with [`values_equal`].
+fn maps_equal(left: &HashMap<String, ConstValue>, right: &HashMap<String, ConstValue>) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(key, value)| {
+            right
+                .get(key)
+                .is_some_and(|other| values_equal(value, other))
+        })
+}
+
+/// Joins predecessor exit maps: a key survives only when every predecessor
+/// agrees on its value.
+fn join_maps(maps: &[&HashMap<String, ConstValue>]) -> HashMap<String, ConstValue> {
+    let Some(first) = maps.first() else {
+        return HashMap::new();
+    };
+    let mut joined = HashMap::new();
+    for (key, value) in *first {
+        if maps
+            .iter()
+            .all(|map| map.get(key).is_some_and(|other| values_equal(value, other)))
+        {
+            joined.insert(key.clone(), value.clone());
+        }
+    }
+    joined
+}
+
+/// Successor labels of a terminator.
+fn successors(term: &LirTerm) -> Vec<String> {
+    match term {
+        LirTerm::Branch { target, .. } => vec![target.clone()],
+        LirTerm::BranchIf { then, els, .. } => {
+            let mut labels = vec![then.clone()];
+            if let Some(els) = els {
+                labels.push(els.clone());
+            }
+            labels
+        }
+        LirTerm::Return { .. } | LirTerm::Panic { .. } | LirTerm::Unreachable { .. } => Vec::new(),
+    }
+}
+
+/// Hex literal for an integer constant (`None` for non-integer values).
+fn int_lit(value: &ConstValue) -> Option<String> {
+    match value {
+        ConstValue::Int(value, _) => Some(format!("0x{value:x}")),
+        _ => None,
     }
 }
 
@@ -217,6 +324,68 @@ fn eval_size_of(args: &[ConstValue]) -> Result<ConstValue, FoldValueError> {
     }
 }
 
+/// Evaluates a builtin over constant `ins` (`out_ty` supplies the result
+/// width). Only the pure, value-producing builtins are foldable here;
+/// pointer-producing (`@byte_buffer_ptr`) and mutating (`@store_u8`,
+/// `@memcpy`) builtins are left to the interpreter (a miss otherwise).
+///
+/// # Errors
+///
+/// Returns a [`FoldValueError`] when the operands are not the expected
+/// constants; callers treat that as a fold miss (not a user error).
+fn eval_builtin(
+    name: &str,
+    ins: &[ConstValue],
+    out_ty: &str,
+) -> Result<ConstValue, FoldValueError> {
+    match name {
+        "@byte_buffer_len" => match ins.first() {
+            Some(ConstValue::Bytes(bytes)) => Ok(ConstValue::Int(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                width_of(out_ty).unwrap_or(64),
+            )),
+            _ => Err(FoldValueError {
+                message: "`@byte_buffer_len` requires a constant `@byte_buffer`".to_owned(),
+            }),
+        },
+        "@byte_buffer_from" => match (ins.first(), ins.get(1)) {
+            (Some(ConstValue::Bytes(bytes)), Some(ConstValue::Int(len, _))) => {
+                let len = usize::try_from(*len).map_err(|_| FoldValueError {
+                    message: "`@byte_buffer_from` length is out of range".to_owned(),
+                })?;
+                bytes
+                    .get(..len)
+                    .map(|slice| ConstValue::Bytes(slice.to_vec()))
+                    .ok_or_else(|| FoldValueError {
+                        message: "`@byte_buffer_from` length exceeds the source bytes".to_owned(),
+                    })
+            }
+            _ => Err(FoldValueError {
+                message: "`@byte_buffer_from` requires a constant pointer and length".to_owned(),
+            }),
+        },
+        "@load_u8" => match (ins.first(), ins.get(1)) {
+            (Some(ConstValue::Bytes(bytes)), Some(ConstValue::Int(offset, _))) => {
+                let offset = usize::try_from(*offset).map_err(|_| FoldValueError {
+                    message: "`@load_u8` offset is out of range".to_owned(),
+                })?;
+                bytes
+                    .get(offset)
+                    .map(|byte| ConstValue::Int(u64::from(*byte), 8))
+                    .ok_or_else(|| FoldValueError {
+                        message: "`@load_u8` offset is out of bounds".to_owned(),
+                    })
+            }
+            _ => Err(FoldValueError {
+                message: "`@load_u8` requires a constant pointee and offset".to_owned(),
+            }),
+        },
+        _ => Err(FoldValueError {
+            message: format!("`{name}` is not a foldable builtin"),
+        }),
+    }
+}
+
 /// Evaluates arithmetic over constants (misses stay `Unknown`: a missed
 /// fold is performance only, never a correctness error).
 fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> ConstValue {
@@ -282,6 +451,23 @@ fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &str) -> ConstValue {
     }
 }
 
+/// The constants a `call` evaluated to, paired with the static out types
+/// needed to materialize them.
+struct FoldedCall {
+    values: Vec<ConstValue>,
+    out_types: Vec<Option<String>>,
+}
+
+/// A best-effort call-eval outcome: either a finalized call evaluation error
+/// (`E060`, fatal) or a reason to leave the runtime call in place.
+enum Eval {
+    /// Not enough information / unsupported / out of budget: leave the call.
+    Miss,
+    /// A fold-required intrinsic produced a value error (propagate as
+    /// `E060`).
+    ValueError(String),
+}
+
 impl Folder<'_> {
     /// Folds one instruction (arithmetic, conversions, and fold-required
     /// intrinsics over constants rewrite to `Const`) and tracks its
@@ -289,18 +475,10 @@ impl Folder<'_> {
     fn fold_inst(&mut self, inst: &mut LirInst, consts: &mut HashMap<String, ConstValue>) {
         match inst {
             LirInst::Const { dst, lit, ty, .. } => {
-                let value = match lit.strip_prefix('!') {
-                    Some(name) => match self.data.get(name) {
-                        Some(bytes) => ConstValue::Bytes(bytes.clone()),
-                        None => ConstValue::Unknown,
-                    },
-                    None => parse_lit(lit, ty),
-                };
-                consts.insert(dst.clone(), value);
+                consts.insert(dst.clone(), self.const_lit_value(lit, ty));
             }
-            LirInst::CopyReg { src, dst, .. } => {
-                let value = operand_const(consts, src);
-                consts.insert(dst.clone(), value);
+            LirInst::CopyReg { src, dst, .. } | LirInst::CopyPlace { src, dst, .. } => {
+                consts.insert(dst.clone(), operand_const(consts, src));
             }
             LirInst::Arith {
                 op,
@@ -313,12 +491,8 @@ impl Folder<'_> {
                 let left = consts.get(lhs).cloned().unwrap_or(ConstValue::Unknown);
                 let right = consts.get(rhs).cloned().unwrap_or(ConstValue::Unknown);
                 let folded = eval_arith(op, &left, &right, ty);
-                let replacement = match &folded {
-                    ConstValue::Int(value, _) => Some(format!("0x{value:x}")),
-                    _ => None,
-                };
                 let (dst_name, ty_name, span_val) = (dst.clone(), ty.clone(), *span);
-                if let Some(lit) = replacement {
+                if let Some(lit) = int_lit(&folded) {
                     *inst = LirInst::Const {
                         dst: dst_name.clone(),
                         lit,
@@ -337,12 +511,8 @@ impl Folder<'_> {
             } => {
                 let value = consts.get(src).cloned().unwrap_or(ConstValue::Unknown);
                 let folded = eval_convert(op, &value, ty);
-                let replacement = match &folded {
-                    ConstValue::Int(value, _) => Some(format!("0x{value:x}")),
-                    _ => None,
-                };
                 let (dst_name, ty_name, span_val) = (dst.clone(), ty.clone(), *span);
-                if let Some(lit) = replacement {
+                if let Some(lit) = int_lit(&folded) {
                     *inst = LirInst::Const {
                         dst: dst_name.clone(),
                         lit,
@@ -356,6 +526,19 @@ impl Folder<'_> {
                 self.fold_intrinsic(inst, consts);
             }
             _ => {}
+        }
+    }
+
+    /// Constant value of a `const` literal: a data symbol under a value type
+    /// is its bytes; a `ref`-typed data symbol is a pointer (not a value,
+    /// so statically `Unknown`); anything else is parsed text.
+    fn const_lit_value(&self, lit: &str, ty: &str) -> ConstValue {
+        match lit.strip_prefix('!') {
+            Some(name) => match self.data.get(name) {
+                Some(bytes) if !ty.starts_with("ref ") => ConstValue::Bytes(bytes.clone()),
+                _ => ConstValue::Unknown,
+            },
+            None => parse_lit(lit, ty),
         }
     }
 
@@ -417,38 +600,339 @@ impl Folder<'_> {
         }
     }
 
-    fn fold_func(&mut self, func: &mut LirFunc) {
-        let mut consts: Vec<HashMap<String, ConstValue>> = Vec::new();
-        for block in &mut func.blocks {
-            let mut map = HashMap::new();
-            for inst in &mut block.insts {
-                self.fold_inst(inst, &mut map);
+    /// Tracks an instruction's constants without rewriting it (used by the
+    /// per-block entry-map fixpoint).
+    fn track_inst(&self, inst: &LirInst, consts: &mut HashMap<String, ConstValue>) {
+        match inst {
+            LirInst::Const { dst, lit, ty, .. } => {
+                consts.insert(dst.clone(), self.const_lit_value(lit, ty));
             }
-            consts.push(map);
-        }
-        for (block, map) in func.blocks.iter_mut().zip(consts.iter()) {
-            if let LirTerm::BranchIf {
-                cond,
-                then,
-                els,
-                span,
-            } = &block.term
-            {
-                if let Some(live) = map.get(cond).and_then(|value| {
-                    is_truthy(value).map(|truthy| {
-                        if truthy {
-                            then.clone()
-                        } else {
-                            els.clone().unwrap_or_else(|| then.clone())
-                        }
-                    })
-                }) {
-                    block.term = LirTerm::Branch {
-                        target: live,
-                        span: *span,
-                    };
+            LirInst::CopyReg { src, dst, .. } | LirInst::CopyPlace { src, dst, .. } => {
+                consts.insert(dst.clone(), operand_const(consts, src));
+            }
+            LirInst::Arith {
+                op,
+                lhs,
+                rhs,
+                dst,
+                ty,
+                ..
+            } => {
+                let left = consts.get(lhs).cloned().unwrap_or(ConstValue::Unknown);
+                let right = consts.get(rhs).cloned().unwrap_or(ConstValue::Unknown);
+                consts.insert(dst.clone(), eval_arith(op, &left, &right, ty));
+            }
+            LirInst::Convert {
+                op, src, dst, ty, ..
+            } => {
+                let value = consts.get(src).cloned().unwrap_or(ConstValue::Unknown);
+                consts.insert(dst.clone(), eval_convert(op, &value, ty));
+            }
+            LirInst::Alloca { ty, place, .. } => {
+                if !ty.starts_with("ref ") {
+                    if let Some(width) = width_of(ty) {
+                        consts.insert(place.clone(), ConstValue::Int(0, width));
+                    }
                 }
             }
+            LirInst::FoldIntrinsic {
+                name, arg, dst, ty, ..
+            } => {
+                let value = operand_const(consts, arg);
+                let width = width_of(ty).unwrap_or(64);
+                let result = if matches!(value, ConstValue::Unknown) {
+                    ConstValue::Unknown
+                } else {
+                    eval_intrinsic(name, &[value], width).unwrap_or(ConstValue::Unknown)
+                };
+                consts.insert(dst.clone(), result);
+            }
+            LirInst::Call { outs, .. } => {
+                for place in outs {
+                    consts.insert(place.clone(), ConstValue::Unknown);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Computes each block's entry `Reg/Place -> ConstValue` map to a
+    /// fixpoint: the entry block starts empty and every other block joins
+    /// its predecessors' exits (disagreement drops the key to unknown).
+    fn compute_entry_consts(&self, func: &LirFunc) -> Vec<HashMap<String, ConstValue>> {
+        let count = func.blocks.len();
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (index, block) in func.blocks.iter().enumerate() {
+            for target in successors(&block.term) {
+                if let Some(succ) = func.blocks.iter().position(|block| block.label == target) {
+                    preds[succ].push(index);
+                }
+            }
+        }
+        let mut entries: Vec<HashMap<String, ConstValue>> = vec![HashMap::new(); count];
+        let mut exits: Vec<HashMap<String, ConstValue>> = vec![HashMap::new(); count];
+        let limit = count.saturating_mul(8).saturating_add(8);
+        for _ in 0..limit {
+            let mut changed = false;
+            for index in 0..count {
+                let entry = if index == 0 {
+                    HashMap::new()
+                } else {
+                    let incoming: Vec<&HashMap<String, ConstValue>> =
+                        preds[index].iter().map(|&pred| &exits[pred]).collect();
+                    join_maps(&incoming)
+                };
+                let mut exit = entry.clone();
+                for inst in &func.blocks[index].insts {
+                    self.track_inst(inst, &mut exit);
+                }
+                if !maps_equal(&entry, &entries[index]) || !maps_equal(&exit, &exits[index]) {
+                    changed = true;
+                    entries[index] = entry;
+                    exits[index] = exit;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        entries
+    }
+
+    /// Folds one block: rewrites constant arithmetic/conversions, expands
+    /// evaluated calls, and folds a constant `branch.if`.
+    fn fold_block(&mut self, block: &mut LirBlock, consts: &mut HashMap<String, ConstValue>) {
+        let mut insts = Vec::with_capacity(block.insts.len());
+        for inst in std::mem::take(&mut block.insts) {
+            match inst {
+                LirInst::Call {
+                    func,
+                    ins,
+                    outs,
+                    span,
+                } => self.fold_call(func, &ins, &outs, span, consts, &mut insts),
+                mut other => {
+                    self.fold_inst(&mut other, consts);
+                    insts.push(other);
+                }
+            }
+        }
+        block.insts = insts;
+        Self::fold_term(&mut block.term, consts);
+    }
+
+    /// Replaces a constant-condition `branch.if` with a `branch`.
+    fn fold_term(term: &mut LirTerm, consts: &HashMap<String, ConstValue>) {
+        if let LirTerm::BranchIf {
+            cond,
+            then,
+            els,
+            span,
+        } = term
+        {
+            let live = consts.get(cond).and_then(is_truthy).map(|truthy| {
+                if truthy {
+                    then.clone()
+                } else {
+                    els.clone().unwrap_or_else(|| then.clone())
+                }
+            });
+            if let Some(target) = live {
+                *term = LirTerm::Branch {
+                    target,
+                    span: *span,
+                };
+            }
+        }
+    }
+
+    /// Attempts to evaluate a `call` with all-constant `in` places. Success
+    /// materializes the out places as constants (removing the call); a miss
+    /// leaves the runtime call; a value error reports `E060` and also leaves
+    /// the call.
+    fn fold_call(
+        &mut self,
+        callee: LirCallee,
+        ins: &[String],
+        outs: &[String],
+        span: Span,
+        consts: &mut HashMap<String, ConstValue>,
+        insts: &mut Vec<LirInst>,
+    ) {
+        let args: Vec<ConstValue> = ins
+            .iter()
+            .map(|place| consts.get(place).cloned().unwrap_or(ConstValue::Unknown))
+            .collect();
+        let outcome = if args.iter().any(is_unknown) {
+            Ok(None)
+        } else {
+            self.try_eval_call(&callee, &args)
+        };
+        match outcome {
+            Ok(Some(folded)) => {
+                if let Some(materialized) =
+                    self.materialize_call(outs, &folded.values, &folded.out_types, span)
+                {
+                    for (place, value) in outs.iter().zip(&folded.values) {
+                        consts.insert(place.clone(), value.clone());
+                    }
+                    insts.extend(materialized);
+                } else {
+                    for (place, value) in outs.iter().zip(&folded.values) {
+                        consts.insert(place.clone(), value.clone());
+                    }
+                    insts.push(LirInst::Call {
+                        func: callee,
+                        ins: ins.to_vec(),
+                        outs: outs.to_vec(),
+                        span,
+                    });
+                }
+            }
+            Ok(None) | Err(Eval::Miss) => {
+                Self::miss_call(callee, ins, outs, span, consts, insts);
+            }
+            Err(Eval::ValueError(message)) => {
+                self.report_value_error(&message, span);
+                Self::miss_call(callee, ins, outs, span, consts, insts);
+            }
+        }
+    }
+
+    /// Leaves a runtime call and poisons its out places.
+    fn miss_call(
+        callee: LirCallee,
+        ins: &[String],
+        outs: &[String],
+        span: Span,
+        consts: &mut HashMap<String, ConstValue>,
+        insts: &mut Vec<LirInst>,
+    ) {
+        for place in outs {
+            consts.insert(place.clone(), ConstValue::Unknown);
+        }
+        insts.push(LirInst::Call {
+            func: callee,
+            ins: ins.to_vec(),
+            outs: outs.to_vec(),
+            span,
+        });
+    }
+
+    /// Attempts to evaluate a call to a pure function or foldable builtin.
+    /// `Ok(None)` is a miss (unknown/unsupported); `Err` is a fatal
+    /// fold-required value error.
+    fn try_eval_call(
+        &self,
+        callee: &LirCallee,
+        args: &[ConstValue],
+    ) -> Result<Option<FoldedCall>, Eval> {
+        match callee {
+            LirCallee::Func(name) => {
+                let out_types = self.func_out_types(name);
+                let values = self.eval_user_call(name, args)?;
+                Ok(Some(FoldedCall { values, out_types }))
+            }
+            LirCallee::Builtin(name) => {
+                let Some(sig) = builtin_sig(name) else {
+                    return Ok(None);
+                };
+                let out_types: Vec<Option<String>> =
+                    sig.outs.iter().map(|ty| ty.map(str::to_owned)).collect();
+                let out_ty = sig.outs.first().copied().flatten().unwrap_or("#bitNative");
+                match eval_builtin(name, args, out_ty) {
+                    Ok(value) => Ok(Some(FoldedCall {
+                        values: vec![value],
+                        out_types,
+                    })),
+                    Err(_) => Ok(None),
+                }
+            }
+            LirCallee::Reg(_) => Ok(None),
+        }
+    }
+
+    /// The out-place types of a named function (`None` when unknown).
+    fn func_out_types(&self, name: &str) -> Vec<Option<String>> {
+        self.funcs
+            .iter()
+            .find(|func| func.name == name)
+            .map(|func| func.outs.iter().map(|(_, ty)| Some(ty.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Interprets a user function under a fresh fuel budget.
+    fn eval_user_call(&self, name: &str, args: &[ConstValue]) -> Result<Vec<ConstValue>, Eval> {
+        let mut evaluator = Evaluator {
+            funcs: self.funcs,
+            data: self.data,
+            steps: self.fuel,
+            depth: 0,
+            max_depth: self.max_depth,
+        };
+        evaluator.run_func(name, args)
+    }
+
+    /// Emits `Const` + `CopyPlace` for every out value, or `None` when a
+    /// value/type cannot be materialized as a literal (leave the call).
+    fn materialize_call(
+        &mut self,
+        outs: &[String],
+        values: &[ConstValue],
+        out_types: &[Option<String>],
+        span: Span,
+    ) -> Option<Vec<LirInst>> {
+        if outs.len() != values.len() || values.len() != out_types.len() {
+            return None;
+        }
+        let mut materialized = Vec::with_capacity(outs.len() * 2);
+        for ((place, value), ty) in outs.iter().zip(values).zip(out_types) {
+            let Some(ty) = ty else {
+                return None;
+            };
+            let lit = match value {
+                ConstValue::Int(value, _) => format!("0x{value:x}"),
+                ConstValue::Float(value, _) => format!("{value:?}"),
+                ConstValue::Unknown | ConstValue::Bytes(_) | ConstValue::Bool(_) => return None,
+            };
+            let reg = self.fresh_reg();
+            materialized.push(LirInst::Const {
+                dst: reg.clone(),
+                lit,
+                ty: ty.clone(),
+                span,
+            });
+            materialized.push(LirInst::CopyPlace {
+                src: LirOperand::Reg(reg),
+                dst: place.clone(),
+                span,
+            });
+        }
+        Some(materialized)
+    }
+
+    /// Reports a fold-required value error (`E060`).
+    fn report_value_error(&mut self, message: &str, span: Span) {
+        self.failed = true;
+        self.diags
+            .emit(Diagnostic::error("E060", message.to_owned()).label(
+                span,
+                true,
+                "evaluated here".to_owned(),
+            ));
+    }
+
+    /// A fresh register name that cannot collide with lowered names.
+    fn fresh_reg(&mut self) -> String {
+        self.fresh += 1;
+        format!("cf.{}", self.fresh)
+    }
+
+    fn fold_func(&mut self, func: &mut LirFunc) {
+        let entries = self.compute_entry_consts(func);
+        for (index, block) in func.blocks.iter_mut().enumerate() {
+            let mut consts = entries.get(index).cloned().unwrap_or_default();
+            self.fold_block(block, &mut consts);
         }
         Self::prune_dead(func);
         self.check_live_errors(func);
@@ -508,6 +992,422 @@ impl Folder<'_> {
     }
 }
 
+/// A pointer into a frame-local byte buffer.
+#[derive(Clone, Copy)]
+struct Ptr {
+    buffer: usize,
+    offset: usize,
+}
+
+/// One interpreted call frame: register/place constants, pointers, and the
+/// mutable byte buffers backing those pointers. `buffer_of` keys a source
+/// name (place/register or `!data`) to its buffer so repeated pointer
+/// snapshots alias the same storage (and do not grow without bound).
+#[derive(Default)]
+struct Frame {
+    values: HashMap<String, ConstValue>,
+    pointers: HashMap<String, Ptr>,
+    buffer_of: HashMap<String, usize>,
+    buffers: Vec<Vec<u8>>,
+}
+
+/// Interprets pure user-function bodies over a `ConstValue` environment plus
+/// a const-bytes memory model (fuel- and depth-bounded).
+struct Evaluator<'a> {
+    funcs: &'a [LirFunc],
+    data: &'a HashMap<String, Vec<u8>>,
+    steps: u64,
+    depth: u32,
+    max_depth: u32,
+}
+
+impl Evaluator<'_> {
+    /// Interprets `name` with `args` bound to its `in` places, returning the
+    /// values of its `out` places under `Eval::Miss` on any unsupported op.
+    fn run_func(&mut self, name: &str, args: &[ConstValue]) -> Result<Vec<ConstValue>, Eval> {
+        if self.depth >= self.max_depth {
+            return Err(Eval::Miss);
+        }
+        let Some(func) = self.funcs.iter().find(|func| func.name == name) else {
+            return Err(Eval::Miss);
+        };
+        if func.ins.len() != args.len() {
+            return Err(Eval::Miss);
+        }
+        let mut frame = Frame::default();
+        for ((place, _), value) in func.ins.iter().zip(args) {
+            frame.values.insert(place.clone(), value.clone());
+        }
+        self.depth += 1;
+        let body = self.run_blocks(func, &mut frame);
+        self.depth -= 1;
+        body?;
+        let mut outs = Vec::with_capacity(func.outs.len());
+        for (place, _) in &func.outs {
+            outs.push(
+                frame
+                    .values
+                    .get(place)
+                    .cloned()
+                    .unwrap_or(ConstValue::Unknown),
+            );
+        }
+        Ok(outs)
+    }
+
+    /// Runs blocks from entry, following constant branches until `return`.
+    fn run_blocks(&mut self, func: &LirFunc, frame: &mut Frame) -> Result<(), Eval> {
+        let mut label = func.blocks.first().ok_or(Eval::Miss)?.label.clone();
+        loop {
+            let Some(block) = func.blocks.iter().find(|block| block.label == label) else {
+                return Err(Eval::Miss);
+            };
+            for inst in &block.insts {
+                self.step()?;
+                self.exec_inst(inst, frame)?;
+            }
+            match &block.term {
+                LirTerm::Return { .. } => return Ok(()),
+                LirTerm::Branch { target, .. } => label = target.clone(),
+                LirTerm::BranchIf {
+                    cond, then, els, ..
+                } => {
+                    let value = frame
+                        .values
+                        .get(cond)
+                        .cloned()
+                        .unwrap_or(ConstValue::Unknown);
+                    match is_truthy(&value) {
+                        Some(true) => label = then.clone(),
+                        Some(false) => label = els.clone().ok_or(Eval::Miss)?,
+                        None => return Err(Eval::Miss),
+                    }
+                }
+                LirTerm::Panic { .. } | LirTerm::Unreachable { .. } => return Err(Eval::Miss),
+            }
+        }
+    }
+
+    /// Decrements the fuel budget, missing when exhausted.
+    fn step(&mut self) -> Result<(), Eval> {
+        if self.steps == 0 {
+            return Err(Eval::Miss);
+        }
+        self.steps -= 1;
+        Ok(())
+    }
+
+    fn exec_inst(&mut self, inst: &LirInst, frame: &mut Frame) -> Result<(), Eval> {
+        match inst {
+            LirInst::Const { dst, lit, ty, .. } => {
+                bind_const(self.data, frame, dst, lit, ty);
+                Ok(())
+            }
+            LirInst::CopyReg { src, dst, .. } | LirInst::CopyPlace { src, dst, .. } => {
+                let value = operand_value(frame, src);
+                frame.values.insert(dst.clone(), value);
+                if let Some(pointer) = operand_ptr(frame, src) {
+                    frame.pointers.insert(dst.clone(), pointer);
+                }
+                Ok(())
+            }
+            LirInst::Arith {
+                op,
+                lhs,
+                rhs,
+                dst,
+                ty,
+                ..
+            } => {
+                let left = frame
+                    .values
+                    .get(lhs)
+                    .cloned()
+                    .unwrap_or(ConstValue::Unknown);
+                let right = frame
+                    .values
+                    .get(rhs)
+                    .cloned()
+                    .unwrap_or(ConstValue::Unknown);
+                frame
+                    .values
+                    .insert(dst.clone(), eval_arith(op, &left, &right, ty));
+                Ok(())
+            }
+            LirInst::Convert {
+                op, src, dst, ty, ..
+            } => {
+                let value = frame
+                    .values
+                    .get(src)
+                    .cloned()
+                    .unwrap_or(ConstValue::Unknown);
+                frame
+                    .values
+                    .insert(dst.clone(), eval_convert(op, &value, ty));
+                Ok(())
+            }
+            LirInst::Alloca { ty, place, .. } => {
+                if !ty.starts_with("ref ") {
+                    if let Some(width) = width_of(ty) {
+                        frame
+                            .values
+                            .insert(place.clone(), ConstValue::Int(0, width));
+                    }
+                }
+                Ok(())
+            }
+            LirInst::FoldIntrinsic {
+                name, arg, dst, ty, ..
+            } => Self::exec_fold(name, arg, dst, ty, frame),
+            LirInst::Call {
+                func, ins, outs, ..
+            } => self.exec_call(func, ins, outs, frame),
+            _ => Err(Eval::Miss),
+        }
+    }
+
+    /// Evaluates a fold-required intrinsic inside a call body; a known-bad
+    /// value is fatal (`E060`), an unknown one is a miss.
+    fn exec_fold(
+        name: &str,
+        arg: &LirOperand,
+        dst: &str,
+        ty: &str,
+        frame: &mut Frame,
+    ) -> Result<(), Eval> {
+        let value = operand_value(frame, arg);
+        if is_unknown(&value) {
+            return Err(Eval::Miss);
+        }
+        let width = width_of(ty).unwrap_or(64);
+        match eval_intrinsic(name, &[value], width) {
+            Ok(result) => {
+                frame.values.insert(dst.to_owned(), result);
+                Ok(())
+            }
+            Err(error) => Err(Eval::ValueError(error.message)),
+        }
+    }
+
+    fn exec_call(
+        &mut self,
+        callee: &LirCallee,
+        ins: &[String],
+        outs: &[String],
+        frame: &mut Frame,
+    ) -> Result<(), Eval> {
+        match callee {
+            LirCallee::Func(name) => {
+                let args: Vec<ConstValue> = ins
+                    .iter()
+                    .map(|place| {
+                        frame
+                            .values
+                            .get(place)
+                            .cloned()
+                            .unwrap_or(ConstValue::Unknown)
+                    })
+                    .collect();
+                if args.iter().any(is_unknown) {
+                    return Err(Eval::Miss);
+                }
+                let values = self.run_func(name, &args)?;
+                for (place, value) in outs.iter().zip(values) {
+                    frame.values.insert(place.clone(), value);
+                }
+                Ok(())
+            }
+            LirCallee::Builtin(name) => Self::exec_builtin(name, ins, outs, frame),
+            LirCallee::Reg(_) => Err(Eval::Miss),
+        }
+    }
+
+    /// Interprets a builtin over the frame's constants and const-bytes
+    /// memory; unknown/impure builtins are a miss.
+    fn exec_builtin(
+        name: &str,
+        ins: &[String],
+        outs: &[String],
+        frame: &mut Frame,
+    ) -> Result<(), Eval> {
+        match name {
+            "@byte_buffer_len" => {
+                let value = frame
+                    .values
+                    .get(&ins[0])
+                    .cloned()
+                    .unwrap_or(ConstValue::Unknown);
+                let result = eval_builtin(name, &[value], "#bitNative").map_err(|_| Eval::Miss)?;
+                bind_out(frame, outs, &[result]);
+                Ok(())
+            }
+            "@byte_buffer_ptr" => {
+                let buffer = if let Some(&buffer) = frame.buffer_of.get(&ins[0]) {
+                    buffer
+                } else {
+                    let Some(ConstValue::Bytes(bytes)) = frame.values.get(&ins[0]).cloned() else {
+                        return Err(Eval::Miss);
+                    };
+                    let buffer = frame.buffers.len();
+                    frame.buffers.push(bytes);
+                    frame.buffer_of.insert(ins[0].clone(), buffer);
+                    buffer
+                };
+                frame
+                    .pointers
+                    .insert(outs[0].clone(), Ptr { buffer, offset: 0 });
+                Ok(())
+            }
+            "@byte_buffer_from" => {
+                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let len = expect_int(frame, &ins[1])?;
+                let bytes = slice_from(frame, pointer)?;
+                let result = eval_builtin(
+                    name,
+                    &[ConstValue::Bytes(bytes), ConstValue::Int(len, 64)],
+                    "#byte_buffer",
+                )
+                .map_err(|_| Eval::Miss)?;
+                bind_out(frame, outs, &[result]);
+                Ok(())
+            }
+            "@load_u8" => {
+                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let offset =
+                    usize::try_from(expect_int(frame, &ins[1])?).map_err(|_| Eval::Miss)?;
+                let at = pointer.offset.checked_add(offset).ok_or(Eval::Miss)?;
+                let byte = *frame
+                    .buffers
+                    .get(pointer.buffer)
+                    .and_then(|buffer| buffer.get(at))
+                    .ok_or(Eval::Miss)?;
+                bind_out(frame, outs, &[ConstValue::Int(u64::from(byte), 8)]);
+                Ok(())
+            }
+            "@store_u8" => {
+                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let offset =
+                    usize::try_from(expect_int(frame, &ins[1])?).map_err(|_| Eval::Miss)?;
+                let value = u8::try_from(expect_int(frame, &ins[2])?).map_err(|_| Eval::Miss)?;
+                let at = pointer.offset.checked_add(offset).ok_or(Eval::Miss)?;
+                let buffer = frame.buffers.get_mut(pointer.buffer).ok_or(Eval::Miss)?;
+                *buffer.get_mut(at).ok_or(Eval::Miss)? = value;
+                Ok(())
+            }
+            "@memcpy" => {
+                let dst = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let src = *frame.pointers.get(&ins[1]).ok_or(Eval::Miss)?;
+                let len = usize::try_from(expect_int(frame, &ins[2])?).map_err(|_| Eval::Miss)?;
+                memcpy(frame, dst, src, len)
+            }
+            _ => Err(Eval::Miss),
+        }
+    }
+}
+
+/// Binds a `const` literal into a frame (data symbols become `Bytes`; a
+/// `ref`-typed data symbol becomes a pointer to a fresh buffer).
+fn bind_const(data: &HashMap<String, Vec<u8>>, frame: &mut Frame, dst: &str, lit: &str, ty: &str) {
+    if let Some(name) = lit.strip_prefix('!') {
+        if let Some(bytes) = data.get(name) {
+            if ty.starts_with("ref ") {
+                let key = format!("!{name}");
+                let buffer = if let Some(&buffer) = frame.buffer_of.get(&key) {
+                    buffer
+                } else {
+                    let buffer = frame.buffers.len();
+                    frame.buffers.push(bytes.clone());
+                    frame.buffer_of.insert(key, buffer);
+                    buffer
+                };
+                frame
+                    .pointers
+                    .insert(dst.to_owned(), Ptr { buffer, offset: 0 });
+            } else {
+                frame
+                    .values
+                    .insert(dst.to_owned(), ConstValue::Bytes(bytes.clone()));
+            }
+        } else {
+            frame.values.insert(dst.to_owned(), ConstValue::Unknown);
+        }
+    } else {
+        frame.values.insert(dst.to_owned(), parse_lit(lit, ty));
+    }
+}
+
+/// Binds a builtin's result to its out places.
+fn bind_out(frame: &mut Frame, outs: &[String], values: &[ConstValue]) {
+    for (place, value) in outs.iter().zip(values) {
+        frame.values.insert(place.clone(), value.clone());
+    }
+}
+
+/// An operand's tracked constant (`Unknown` when absent).
+fn operand_value(frame: &Frame, operand: &LirOperand) -> ConstValue {
+    let name = match operand {
+        LirOperand::Reg(name) | LirOperand::Place(name) => name,
+    };
+    frame
+        .values
+        .get(name)
+        .cloned()
+        .unwrap_or(ConstValue::Unknown)
+}
+
+/// An operand's tracked pointer (`None` when not a pointer).
+fn operand_ptr(frame: &Frame, operand: &LirOperand) -> Option<Ptr> {
+    let name = match operand {
+        LirOperand::Reg(name) | LirOperand::Place(name) => name,
+    };
+    frame.pointers.get(name).copied()
+}
+
+/// Reads an integer constant by place/register name, missing otherwise.
+fn expect_int(frame: &Frame, name: &str) -> Result<u64, Eval> {
+    match frame.values.get(name) {
+        Some(ConstValue::Int(value, _)) => Ok(*value),
+        _ => Err(Eval::Miss),
+    }
+}
+
+/// Copies a pointer's remaining (offset-adjusted) bytes out of the frame.
+fn slice_from(frame: &Frame, pointer: Ptr) -> Result<Vec<u8>, Eval> {
+    frame
+        .buffers
+        .get(pointer.buffer)
+        .and_then(|buffer| buffer.get(pointer.offset..))
+        .map(<[u8]>::to_vec)
+        .ok_or(Eval::Miss)
+}
+
+/// Copies `len` bytes between frame-local buffers (aliasing-safe).
+fn memcpy(frame: &mut Frame, dst: Ptr, src: Ptr, len: usize) -> Result<(), Eval> {
+    if dst.buffer == src.buffer {
+        let buffer = frame.buffers.get_mut(dst.buffer).ok_or(Eval::Miss)?;
+        let src_end = src.offset.checked_add(len).ok_or(Eval::Miss)?;
+        let dst_end = dst.offset.checked_add(len).ok_or(Eval::Miss)?;
+        if src_end > buffer.len() || dst_end > buffer.len() {
+            return Err(Eval::Miss);
+        }
+        buffer.copy_within(src.offset..src_end, dst.offset);
+    } else {
+        let chunk = {
+            let source = frame.buffers.get(src.buffer).ok_or(Eval::Miss)?;
+            let end = src.offset.checked_add(len).ok_or(Eval::Miss)?;
+            source.get(src.offset..end).ok_or(Eval::Miss)?.to_vec()
+        };
+        let destination = frame.buffers.get_mut(dst.buffer).ok_or(Eval::Miss)?;
+        let end = dst.offset.checked_add(len).ok_or(Eval::Miss)?;
+        destination
+            .get_mut(dst.offset..end)
+            .ok_or(Eval::Miss)?
+            .copy_from_slice(&chunk);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +1421,111 @@ mod tests {
         Span::dummy()
     }
 
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn reg(name: &str) -> LirOperand {
+        LirOperand::Reg(name.to_owned())
+    }
+
+    fn place(name: &str) -> LirOperand {
+        LirOperand::Place(name.to_owned())
+    }
+
+    fn alloca(ty: &str, name: &str) -> LirInst {
+        LirInst::Alloca {
+            ty: ty.to_owned(),
+            place: name.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn constant(dst: &str, lit: &str, ty: &str) -> LirInst {
+        LirInst::Const {
+            dst: dst.to_owned(),
+            lit: lit.to_owned(),
+            ty: ty.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn copy_place(src: LirOperand, dst: &str) -> LirInst {
+        LirInst::CopyPlace {
+            src,
+            dst: dst.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn copy_reg(src: LirOperand, dst: &str, ty: &str) -> LirInst {
+        LirInst::CopyReg {
+            src,
+            dst: dst.to_owned(),
+            ty: ty.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn arith(op: ArithOp, lhs: &str, rhs: &str, dst: &str, ty: &str) -> LirInst {
+        LirInst::Arith {
+            op,
+            lhs: lhs.to_owned(),
+            rhs: rhs.to_owned(),
+            dst: dst.to_owned(),
+            ty: ty.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn extend(src: &str, dst: &str, ty: &str) -> LirInst {
+        LirInst::Convert {
+            op: ConvertOp::ExtendZero,
+            src: src.to_owned(),
+            dst: dst.to_owned(),
+            ty: ty.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn call_func(name: &str, ins: &[&str], outs: &[&str]) -> LirInst {
+        LirInst::Call {
+            func: LirCallee::Func(name.to_owned()),
+            ins: strings(ins),
+            outs: strings(outs),
+            span: test_span(),
+        }
+    }
+
+    fn call_builtin(name: &str, ins: &[&str], outs: &[&str]) -> LirInst {
+        LirInst::Call {
+            func: LirCallee::Builtin(name.to_owned()),
+            ins: strings(ins),
+            outs: strings(outs),
+            span: test_span(),
+        }
+    }
+
+    fn branch(target: &str) -> LirTerm {
+        LirTerm::Branch {
+            target: target.to_owned(),
+            span: test_span(),
+        }
+    }
+
+    fn branch_if(cond: &str, then: &str, els: Option<&str>) -> LirTerm {
+        LirTerm::BranchIf {
+            cond: cond.to_owned(),
+            then: then.to_owned(),
+            els: els.map(str::to_owned),
+            span: test_span(),
+        }
+    }
+
+    fn ret() -> LirTerm {
+        LirTerm::Return { span: test_span() }
+    }
+
     fn arith_module() -> LirModule {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.funcs.push(LirFunc {
@@ -530,28 +1535,11 @@ mod tests {
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
-                    LirInst::Const {
-                        dst: "1".to_owned(),
-                        lit: "0x1".to_owned(),
-                        ty: "#bit32".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Const {
-                        dst: "2".to_owned(),
-                        lit: "0x2".to_owned(),
-                        ty: "#bit32".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Arith {
-                        op: ArithOp::IAdd,
-                        lhs: "1".to_owned(),
-                        rhs: "2".to_owned(),
-                        dst: "3".to_owned(),
-                        ty: "#bit32".to_owned(),
-                        span: test_span(),
-                    },
+                    constant("1", "0x1", "#bit32"),
+                    constant("2", "0x2", "#bit32"),
+                    arith(ArithOp::IAdd, "1", "2", "3", "#bit32"),
                 ],
-                term: LirTerm::Return { span: test_span() },
+                term: ret(),
                 span: test_span(),
             }],
         });
@@ -581,18 +1569,8 @@ mod tests {
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
-                    insts: vec![LirInst::Const {
-                        dst: "1".to_owned(),
-                        lit: cond_lit.to_owned(),
-                        ty: "#bit8".to_owned(),
-                        span: test_span(),
-                    }],
-                    term: LirTerm::BranchIf {
-                        cond: "1".to_owned(),
-                        then: "then".to_owned(),
-                        els: Some("els".to_owned()),
-                        span: test_span(),
-                    },
+                    insts: vec![constant("1", cond_lit, "#bit8")],
+                    term: branch_if("1", "then", Some("els")),
                     span: test_span(),
                 },
                 LirBlock {
@@ -602,13 +1580,13 @@ mod tests {
                         msg_span: test_span(),
                         call_span: test_span(),
                     }],
-                    term: LirTerm::Return { span: test_span() },
+                    term: ret(),
                     span: test_span(),
                 },
                 LirBlock {
                     label: "els".to_owned(),
                     insts: Vec::new(),
-                    term: LirTerm::Return { span: test_span() },
+                    term: ret(),
                     span: test_span(),
                 },
             ],
@@ -679,21 +1657,16 @@ mod tests {
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
-                    LirInst::Const {
-                        dst: "1".to_owned(),
-                        lit: "!c0".to_owned(),
-                        ty: "#byte_buffer".to_owned(),
-                        span: test_span(),
-                    },
+                    constant("1", "!c0", "#byte_buffer"),
                     LirInst::FoldIntrinsic {
                         name: name.to_owned(),
-                        arg: LirOperand::Reg("1".to_owned()),
+                        arg: reg("1"),
                         dst: "2".to_owned(),
                         ty: ty.to_owned(),
                         span: test_span(),
                     },
                 ],
-                term: LirTerm::Return { span: test_span() },
+                term: ret(),
                 span: test_span(),
             }],
         });
@@ -712,12 +1685,12 @@ mod tests {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::FoldIntrinsic {
                     name: "@as_int".to_owned(),
-                    arg: LirOperand::Reg("7".to_owned()),
+                    arg: reg("7"),
                     dst: "2".to_owned(),
                     ty: "#bit8".to_owned(),
                     span: test_span(),
                 }],
-                term: LirTerm::Return { span: test_span() },
+                term: ret(),
                 span: test_span(),
             }],
         });
@@ -780,21 +1753,16 @@ mod tests {
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
-                    LirInst::Const {
-                        dst: "1".to_owned(),
-                        lit: "0x0".to_owned(),
-                        ty: "#bit16".to_owned(),
-                        span: test_span(),
-                    },
+                    constant("1", "0x0", "#bit16"),
                     LirInst::FoldIntrinsic {
                         name: "@size_of".to_owned(),
-                        arg: LirOperand::Reg("1".to_owned()),
+                        arg: reg("1"),
                         dst: "2".to_owned(),
                         ty: "#bitNative".to_owned(),
                         span: test_span(),
                     },
                 ],
-                term: LirTerm::Return { span: test_span() },
+                term: ret(),
                 span: test_span(),
             }],
         });
@@ -803,5 +1771,138 @@ mod tests {
         let text = module.to_text();
         assert!(text.contains("const 0x2"), "{text}");
         assert!(!text.contains("@size_of"), "{text}");
+    }
+
+    /// A two-function module: `@parse` is a pure loop over `@load_u8` from
+    /// its `@byte_buffer` param accumulating a `#bitNative` sum. When
+    /// `set_arg`, `main` passes a `"AB"` data buffer; otherwise the arg
+    /// place is never assigned a constant.
+    ///
+    /// `"AB"` is `[0x41, 0x42]`, so the folded sum is `0x83`.
+    fn parser_module(set_arg: bool) -> LirModule {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("AB".to_owned()),
+            span: test_span(),
+        });
+        let parse = LirFunc {
+            name: "parse".to_owned(),
+            ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
+            outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            blocks: vec![
+                LirBlock {
+                    label: "entry".to_owned(),
+                    insts: vec![
+                        alloca("#bitNative", "i"),
+                        alloca("#bitNative", "acc"),
+                        alloca("#bitNative", "len"),
+                        constant("r0", "0x0", "#bitNative"),
+                        copy_place(reg("r0"), "i"),
+                        copy_place(reg("r0"), "acc"),
+                        call_builtin("@byte_buffer_len", &["buf"], &["len"]),
+                    ],
+                    term: branch("cond"),
+                    span: test_span(),
+                },
+                LirBlock {
+                    label: "cond".to_owned(),
+                    insts: vec![
+                        copy_reg(place("i"), "r1", "#bitNative"),
+                        copy_reg(place("len"), "r2", "#bitNative"),
+                        arith(ArithOp::ILt, "r1", "r2", "r3", "#bit8"),
+                    ],
+                    term: branch_if("r3", "body", Some("done")),
+                    span: test_span(),
+                },
+                LirBlock {
+                    label: "body".to_owned(),
+                    insts: vec![
+                        alloca("ref #bit8", "p"),
+                        alloca("#bit8", "c"),
+                        call_builtin("@byte_buffer_ptr", &["buf"], &["p"]),
+                        call_builtin("@load_u8", &["p", "i"], &["c"]),
+                        copy_reg(place("c"), "r4", "#bit8"),
+                        extend("r4", "r4b", "#bitNative"),
+                        copy_reg(place("acc"), "r5", "#bitNative"),
+                        arith(ArithOp::IAdd, "r5", "r4b", "r6", "#bitNative"),
+                        copy_place(reg("r6"), "acc"),
+                        copy_reg(place("i"), "r7", "#bitNative"),
+                        constant("r8", "0x1", "#bitNative"),
+                        arith(ArithOp::IAdd, "r7", "r8", "r9", "#bitNative"),
+                        copy_place(reg("r9"), "i"),
+                    ],
+                    term: branch("cond"),
+                    span: test_span(),
+                },
+                LirBlock {
+                    label: "done".to_owned(),
+                    insts: vec![
+                        copy_reg(place("acc"), "r10", "#bitNative"),
+                        copy_place(reg("r10"), "result"),
+                    ],
+                    term: ret(),
+                    span: test_span(),
+                },
+            ],
+        };
+        let mut main_insts = vec![alloca("#byte_buffer", "arg"), alloca("#bitNative", "res")];
+        if set_arg {
+            main_insts.push(constant("m0", "!c0", "#byte_buffer"));
+            main_insts.push(copy_place(reg("m0"), "arg"));
+        }
+        main_insts.push(call_func("parse", &["arg"], &["res"]));
+        let main = LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: main_insts,
+                term: ret(),
+                span: test_span(),
+            }],
+        };
+        module.funcs.push(main);
+        module.funcs.push(parse);
+        module
+    }
+
+    #[test]
+    fn block_wrapper_parser_folds() {
+        let mut module = parser_module(true);
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let text = module.to_text();
+        assert!(text.contains("0x83"), "{text}");
+        assert!(!text.contains("call @parse"), "{text}");
+    }
+
+    #[test]
+    fn call_eval_miss_stays_call() {
+        let mut module = parser_module(false);
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(
+            module.to_text().contains("call @parse"),
+            "{}",
+            module.to_text()
+        );
+    }
+
+    #[test]
+    fn fuel_exhaustion_stays_call() {
+        let mut module = parser_module(true);
+        let mut diags = Diags::new();
+        assert!(
+            fold_with_fuel(&mut module, &mut diags, 2, 16).is_ok(),
+            "{diags:?}"
+        );
+        assert!(
+            module.to_text().contains("call @parse"),
+            "{}",
+            module.to_text()
+        );
     }
 }
