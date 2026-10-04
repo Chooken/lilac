@@ -4,3 +4,4 @@ zig-out/
 target/
 .lilac-cache/
 .superpowers/
+.idea/

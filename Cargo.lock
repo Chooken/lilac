@@ -42,6 +42,7 @@ dependencies = [
 name = "lilac-const"
 version = "0.2.0"
 dependencies = [
+ "lilac-error",
  "lilac-ir",
  "lilac-span",
 ]

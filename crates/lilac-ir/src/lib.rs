@@ -308,6 +308,8 @@ pub enum LirInst {
     /// `@compile_error` site (folding removes it or reports `E031`;
     /// reaching `verify` is an internal error).
     CompileError {
+        /// Error message.
+        msg: String,
         /// Message literal span.
         msg_span: Span,
         /// Call-site span.

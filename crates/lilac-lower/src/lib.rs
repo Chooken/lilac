@@ -1113,13 +1113,14 @@ impl Lower<'_> {
                 Ok(LirOperand::Reg(reg))
             }
             HirExprKind::CompileError {
+                msg,
                 msg_span,
                 call_span,
-                ..
             } => {
                 emit(
                     fs,
                     LirInst::CompileError {
+                        msg: msg.clone(),
                         msg_span: *msg_span,
                         call_span: *call_span,
                     },
