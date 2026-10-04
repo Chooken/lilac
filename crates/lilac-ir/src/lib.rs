@@ -14,7 +14,9 @@ use std::fmt::Write as _;
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_span::Span;
 
+mod codec;
 mod dce;
+pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::prune_unreachable;
 
 /// IR version header; bump on any normative IR change.
@@ -1322,7 +1324,7 @@ mod tests {
         Span::dummy()
     }
 
-    fn canonical_module() -> LirModule {
+    pub(crate) fn canonical_module() -> LirModule {
         LirModule {
             version: LILAC_IR_VERSION.to_owned(),
             target: "x86_64-unknown-none".to_owned(),

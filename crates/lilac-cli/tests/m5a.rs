@@ -83,3 +83,31 @@ fn dce_removes_dead_after_fold() {
         module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn every_known_good_lir_round_trips() {
+    let mut sources: Vec<std::path::PathBuf> = std::fs::read_dir("../../tests/ui")
+        .expect("reads tests/ui")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "lir"))
+        .map(|p| p.with_extension("lilac"))
+        .collect();
+    sources.sort();
+    assert!(!sources.is_empty());
+    for source in sources {
+        let name = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("utf8")
+            .to_owned();
+        let src = std::fs::read_to_string(&source).expect("read source");
+        let mut session = lilac_driver::Session::new();
+        let module = session.compile_lir(&name, &src).expect("compiles");
+        let mut bytes = Vec::new();
+        module.encode(&mut bytes).expect("encodes");
+        let decoded = lilac_ir::LirModule::decode(&mut &bytes[..]).expect("decodes");
+        assert_eq!(decoded.to_text(), module.to_text(), "{name} round-trip");
+        assert_eq!(decoded.content_hash(), module.content_hash(), "{name} hash");
+    }
+}
