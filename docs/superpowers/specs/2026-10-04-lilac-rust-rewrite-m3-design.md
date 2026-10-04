@@ -85,7 +85,8 @@ churn):
   typeck, where the width is known, so the diagnosis precedes lowering).
 - **NumberLiteral**: every decimal form (`5`, `1.5`, `2e3`). Its type is always
   `@byte_buffer` holding the source bytes. It is **not** implicitly converted
-  to a bit type: `a: @bit8 = 5` is `E010`; the spelling is
+  to a bit type: `a: @bit8 = 5` is `E043` (a failed conversion search, matching
+  the frozen `SPEC.md`); the spelling is
   `a: @bit8 = @as_int(5)`. It may be consumed by anything expecting
   `@byte_buffer` (including `@as_int`/`@as_float` and conversion hooks).
 
@@ -105,13 +106,15 @@ churn):
 
 - `"hi"` has type `@byte_buffer`. HIR keeps `HirExprKind::Str { value }`.
 - Lower interns a `data` const (`!cN: str = "…"`, UTF-8, `"`→`\22`,
-  `\`→`\5C`) and builds the borrowed `{len, ptr}` view through the builtin
-  `@byte_buffer_from`: `&p: ref #bit8 = const !cN` then
-  `call @byte_buffer_from (in &p) (in &len) (out %buf)`. (The pointer type is
-  `ref #bit8`, not a new `#ptr` builtin; `#ptr` is not a `lilac-ir` type.)
+  `\`→`\5C`) and lowers the literal directly to a data-backed buffer value: a
+  single `const !cN:#byte_buffer` register (the `lilac-ir` verifier resolves the
+  symbol against `module.data`). The earlier illustrative
+  `@byte_buffer_from(addr !str_N, len)` sequence is superseded —
+  `@byte_buffer_from` remains a builtin for user code but is not used by
+  literal lowering.
 - A decimal NumberLiteral lowers the same way with a `numlit` data const
-  (`!cN: numlit = "5"`) instead of `str`; hex/bin LitLiterals stay a direct
-  `const LIT:#bitN`.
+  (`!cN: numlit = "5"`) plus `const !cN:#byte_buffer` instead of `str`; hex/bin
+  LitLiterals stay a direct `const LIT:#bitN`.
 - Data consts are deduplicated by payload so identical literals share one
   `!cN`; names are assigned in first-use order for deterministic snapshots.
 
@@ -149,7 +152,9 @@ __f: @format_args = @format_args_new()
   check it validates arity (builtins have no `LirFunc` body); where a builtin's
   `in`/`out` shape is fixed it also validates the operand/place types, and
   width-parameterized forms (`@load_u8`, `@store_u8`) validate against the
-  destination/pointee types.
+  destination/pointee types. The table gives `@load_u8` two in-operands
+  (`ref #bit8`, `#bitNative`; result `#bit8`) and `@store_u8` three
+  (`ref #bit8`, `#bitNative`, `#bit8`).
 - Data addressing reuses `const` with a data-symbol literal:
   `&1: ref #bit8 = const !c0`; the verifier resolves `!c0` against
   `module.data` and checks the data kind (`str`/`numlit`) matches the const's
@@ -157,9 +162,10 @@ __f: @format_args = @format_args_new()
 - The folder evaluates `@byte_buffer_from` with a constant data-symbol pointer
   and length into a `Bytes` value, so a downstream fold-only `@as_int` sees the
   literal's bytes.
-- Fold-only builtins (`@as_int`, `@as_float`, `@size_of`) are emitted like any
-  builtin call but **must not survive folding**; the verifier rejects any that
-  remain (same discipline as `branch.if`-on-constant).
+- Fold-required intrinsics (`@as_int`, `@as_float`, `@size_of`) are pre-fold
+  **markers** (like `@compile_error`), not builtin calls: the front-end emits a
+  marker node the folder must consume, and the verifier rejects any that
+  survive (same discipline as `branch.if`-on-constant).
 - No new surviving instruction shape is introduced. `@byte_buffer` and
   `@format_args` remain opaque builtin value types with no user-visible layout.
 
@@ -197,6 +203,27 @@ __f: @format_args = @format_args_new()
 - **Builtin calls + data addressing.** `IR_SPEC.md` gains a "Builtin calls"
   subsection (the forms in §3.4), the `const !cN` data-address form, and the
   rule that fold-only builtins never survive verification.
+
+### 4.1 Deviations from the original plan
+
+The M3 whole-branch review recorded these decisions where the shipped binding
+behavior differs from (or sharpens) the original task text. They are binding;
+the plan doc (`docs/superpowers/plans/2026-10-04-m3-strings-const.md`) is the
+historical argument and is left unchanged.
+
+- **R1 — literal lowering.** Literals lower directly to a `data` const plus
+  `const !cN:#byte_buffer` (a data-backed buffer value); the illustrative
+  `@byte_buffer_from(addr !str_N, len)` sequence is not emitted.
+  `@byte_buffer_from` remains a builtin for user code only.
+- **R2 — fold-only intrinsics are markers.** `@as_int`/`@as_float`/`@size_of`
+  are pre-fold **markers** like `@compile_error`, not builtin calls; the
+  verifier rejects any that survive folding.
+- **R6 — decimal-to-bit diagnostic.** `a: @bit8 = 5` is `E043` (failed
+  conversion search) and not `E010`, as an earlier draft/plan text said;
+  `SPEC.md` already froze `E043`.
+- **R8 — builtin offset arity.** The builtin table gives `@load_u8` two
+  in-operands (`ref #bit8`, `#bitNative`; result `#bit8`) and `@store_u8` three
+  (`ref #bit8`, `#bitNative`, `#bit8`).
 
 ## 5. Data flow / error handling / testing
 

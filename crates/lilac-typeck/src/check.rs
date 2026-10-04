@@ -459,24 +459,29 @@ fn is_lit_literal(bytes: &str) -> bool {
         || bytes.starts_with("0B")
 }
 
-/// Parses a hex/bin literal (with `_` separators) into its value plus the
-/// number of significant bits; decimals return `None`.
-fn lit_value_bits(bytes: &str) -> Option<(u64, u32)> {
+/// Number of significant bits of a hex/bin literal (with `_` separators),
+/// ignoring leading zeros; decimals (and malformed digits) return `None`.
+///
+/// Counting directly from the digit string keeps a literal wider than `u64`
+/// (e.g. `0x1_0000_0000_0000_0000`) faithful, so a `u64` parse overflow can no
+/// longer hide an out-of-range value from the `E060` check.
+fn lit_bits(bytes: &str) -> Option<u32> {
     let digits = bytes.replace('_', "");
-    let (radix, rest) = if let Some(hex) = digits
+    let (digit_bits, rest) = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        (16, hex)
+        (4u32, hex)
     } else {
         let bin = digits
             .strip_prefix("0b")
             .or_else(|| digits.strip_prefix("0B"))?;
-        (2, bin)
+        (1u32, bin)
     };
-    let value = u64::from_str_radix(rest, radix).ok()?;
-    let bits = 64 - value.leading_zeros();
-    Some((value, bits))
+    let rest = rest.trim_start_matches('0');
+    let lead = rest.chars().next()?.to_digit(16)?;
+    let len = u32::try_from(rest.len()).ok()?;
+    Some((len - 1) * digit_bits + (32 - lead.leading_zeros()))
 }
 
 fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> ErrorGuaranteed {
@@ -1871,14 +1876,14 @@ impl Checker<'_> {
         }
         match expected {
             Some(t) if is_bit(self.types, t) => {
-                if let Some((value, _)) = lit_value_bits(bytes) {
+                if let Some(bits) = lit_bits(bytes) {
                     let width = bit_width(self.types, t);
                     let max = if width == 64 {
                         u64::MAX
                     } else {
                         (1u64 << width) - 1
                     };
-                    if value > max {
+                    if bits > width {
                         self.diags.emit(
                             Diagnostic::error(
                                 "E060",
@@ -4601,6 +4606,13 @@ mod tests {
     #[test]
     fn hex_literal_overflow_is_e060() {
         let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn hex_literal_over_u64_is_e060() {
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit8 = 0x1_0000_0000_0000_0000\n}\n");
         assert!(has_code(&diags, "E060"), "{diags:?}");
     }
 

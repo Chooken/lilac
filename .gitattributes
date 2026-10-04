@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# IR snapshots are compared byte-for-byte by `emit-ir --check`; pin LF so a
+# Windows checkout (core.autocrlf=true) does not rewrite them to CRLF.
+*.lir text eol=lf
