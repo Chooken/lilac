@@ -1,13 +1,5 @@
 lilac_ir = "0.2"
 target = "x86_64-unknown-none"
-function @gen_function__1__bit32
-  in #bit32 %value
-  out #bit32 %out
-{
-  $entry:
-    copy %value -> %out
-    return
-}
 function @main
 {
   $entry:

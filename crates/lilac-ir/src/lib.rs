@@ -14,6 +14,9 @@ use std::fmt::Write as _;
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_span::Span;
 
+mod dce;
+pub use dce::prune_unreachable;
+
 /// IR version header; bump on any normative IR change.
 pub const LILAC_IR_VERSION: &str = "0.2";
 

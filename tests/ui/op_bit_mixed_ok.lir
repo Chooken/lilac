@@ -1,15 +1,5 @@
 lilac_ir = "0.2"
 target = "x86_64-unknown-none"
-function @@add:bit8:bit32:bit32
-  in #bit8 %lhs
-  in #bit32 %rhs
-  out #bit32 %result
-{
-  $entry:
-    &1: #bit32 = const 0x0
-    copy &1 -> %result
-    return
-}
 function @main
 {
   $entry:

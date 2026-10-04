@@ -65,3 +65,21 @@ fn extern_arity_mismatch_is_diagnosed() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("puts"), "{stderr}");
 }
+
+#[test]
+fn dce_removes_dead_after_fold() {
+    // An uncalled helper has no path from `main` and is swept.
+    let source = "dead: function () @bit32 => @as_int(1)\n\
+                  main: function () nothing {\n\
+                      x: @bit32 = @as_int(2)\n\
+                  }\n";
+    let mut session = lilac_driver::Session::new();
+    let module = session
+        .compile_lir("dce_probe.lilac", source)
+        .expect("compiles");
+    assert!(
+        module.funcs.iter().all(|f| f.name != "dead"),
+        "{:?}",
+        module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+}

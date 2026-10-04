@@ -10,11 +10,3 @@ function @main
     copy %tmp.1 -> %result
     return
 }
-function @get
-  out #bit32 %result
-{
-  $entry:
-    &1: #bit32 = const 0x1
-    copy &1 -> %result
-    return
-}

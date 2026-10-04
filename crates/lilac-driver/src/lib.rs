@@ -192,6 +192,7 @@ impl Session {
         let triple = self.target.triple.clone();
         let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
         lilac_const::fold(&mut lir, &mut self.diags)?;
+        lilac_ir::prune_unreachable(&mut lir);
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
