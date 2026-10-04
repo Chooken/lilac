@@ -394,7 +394,7 @@ Append to `crates/lilac-cli/tests/m5a.rs`:
 ```rust
 #[test]
 fn dce_removes_dead_after_fold() {
-    // A caller whose calls all fold away is itself unreachable and swept.
+    // An uncalled helper has no path from `main` and is swept.
     let source = "dead: function () @bit32 => @as_int(1)\n\
                   main: function () nothing {\n\
                       x: @bit32 = @as_int(2)\n\
@@ -486,7 +486,11 @@ fn hash_is_stable_and_layout_order_independent() {
 
 #[test]
 fn malformed_input_errors_without_panicking() {
-    assert!(matches!(LirModule::decode(&mut &b"garbage"[..]), Err(CodecError::Malformed(_))));
+    // At least 8 bytes so the magic is read and rejected (a short read is `Io`).
+    assert!(matches!(
+        LirModule::decode(&mut &b"XXXXXXXXgarbage"[..]),
+        Err(CodecError::Malformed(_))
+    ));
     let mut bytes = Vec::new();
     sample().encode(&mut bytes).expect("encodes");
     bytes.truncate(bytes.len() / 2);
