@@ -1022,6 +1022,7 @@ impl Checker<'_> {
                 name: hir_name,
                 params,
                 returns,
+                is_extern: true,
                 body: HirBlock {
                     stmts: Vec::new(),
                     span: item.span,
@@ -1033,6 +1034,7 @@ impl Checker<'_> {
                 name: hir_name,
                 params,
                 returns,
+                is_extern: false,
                 body,
                 span: item.span,
             }),

@@ -1,0 +1,5 @@
+puts: extern function (s: @byte_buffer) nothing
+
+main: function () nothing {
+    puts()
+}

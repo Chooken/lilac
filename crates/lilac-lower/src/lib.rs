@@ -387,6 +387,16 @@ impl Lower<'_> {
             fs.ptypes.insert(place.clone(), ty);
             fs.locals.insert(slot.name.clone(), (place, slot.ty));
         }
+        if func.is_extern {
+            self.module.funcs.push(LirFunc {
+                name: func.name.clone(),
+                ins: fs.ins,
+                outs: fs.outs,
+                is_extern: true,
+                blocks: Vec::new(),
+            });
+            return;
+        }
         self.lower_block(&mut fs, &func.body);
         if fs.open {
             self.emit_drops(&mut fs);
@@ -407,6 +417,7 @@ impl Lower<'_> {
             name: func.name.clone(),
             ins: fs.ins,
             outs: fs.outs,
+            is_extern: false,
             blocks: fs.blocks,
         });
     }
@@ -466,6 +477,22 @@ impl Lower<'_> {
         }
     }
 
+    /// Lowers an effect statement. A checked effect statement is a call
+    /// returning nothing, so it has no output places (its HIR type is `ERROR`
+    /// by design); intrinsics materialize through `eval` as before.
+    fn lower_expr_stmt(&mut self, fs: &mut FuncState, expr: &HirExpr) {
+        match &expr.kind {
+            HirExprKind::Call { callee, args }
+                if !matches!(callee, HirCallee::Intrinsic { .. }) =>
+            {
+                let _ = self.emit_call(fs, callee, args, &[], expr.span);
+            }
+            _ => {
+                let _ = self.eval(fs, expr);
+            }
+        }
+    }
+
     /// Lowers one statement (control flow splits blocks; terminators drop
     /// dead tails via the open flag).
     fn lower_stmt(&mut self, fs: &mut FuncState, stmt: &HirStmt) {
@@ -522,9 +549,7 @@ impl Lower<'_> {
                     self.lower_assign(fs, target, operand, value.ty, *span);
                 }
             }
-            HirStmt::ExprStmt(expr) => {
-                let _ = self.eval(fs, expr);
-            }
+            HirStmt::ExprStmt(expr) => self.lower_expr_stmt(fs, expr),
             HirStmt::Return { span } => {
                 self.emit_drops(fs);
                 end(fs, LirTerm::Return { span: *span });

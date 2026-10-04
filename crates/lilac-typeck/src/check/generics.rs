@@ -501,6 +501,7 @@ impl Checker<'_> {
                 name: name.to_owned(),
                 params,
                 returns,
+                is_extern: true,
                 body: HirBlock {
                     stmts: Vec::new(),
                     span: item.span,
@@ -512,6 +513,7 @@ impl Checker<'_> {
                 name: name.to_owned(),
                 params,
                 returns,
+                is_extern: false,
                 body,
                 span: item.span,
             }),

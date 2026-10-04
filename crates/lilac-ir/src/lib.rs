@@ -61,7 +61,9 @@ pub struct LirFunc {
     pub ins: Vec<(String, String)>,
     /// `(place, type)` outputs (print as `out #t %p`).
     pub outs: Vec<(String, String)>,
-    /// Blocks in layout order (non-empty: every function has a body).
+    /// Whether this is an `extern` (foreign) declaration with no body.
+    pub is_extern: bool,
+    /// Blocks in layout order (empty only for extern declarations).
     pub blocks: Vec<LirBlock>,
 }
 
@@ -616,12 +618,20 @@ fn print_term(term: &LirTerm) -> String {
 }
 
 fn print_func(func: &LirFunc) -> String {
-    let mut out = format!("function @{}\n", func.name);
+    let header = if func.is_extern {
+        format!("extern @{}\n", func.name)
+    } else {
+        format!("function @{}\n", func.name)
+    };
+    let mut out = header;
     for (place, ty) in &func.ins {
         let _ = writeln!(out, "  in {ty} %{place}");
     }
     for (place, ty) in &func.outs {
         let _ = writeln!(out, "  out {ty} %{place}");
+    }
+    if func.is_extern {
+        return out;
     }
     out.push_str("{\n");
     for block in &func.blocks {
@@ -751,6 +761,15 @@ impl Verifier<'_> {
     }
 
     fn verify_func<'a>(&mut self, func: &'a LirFunc) {
+        if func.is_extern {
+            if !func.blocks.is_empty() {
+                self.error(
+                    format!("extern `@{}` must have no body", func.name),
+                    Span::dummy(),
+                );
+            }
+            return;
+        }
         if func.blocks.is_empty() {
             self.error(
                 format!("function `@{}` has no blocks", func.name),
@@ -1309,6 +1328,7 @@ mod tests {
                 name: "gen_function__bit32".to_owned(),
                 ins: vec![("in".to_owned(), "#bit32".to_owned())],
                 outs: vec![("out".to_owned(), "#bit32".to_owned())],
+                is_extern: false,
                 blocks: vec![LirBlock {
                     label: "entry".to_owned(),
                     insts: vec![
@@ -1436,12 +1456,47 @@ mod tests {
     }
 
     #[test]
+    fn printer_emits_bodyless_extern() {
+        let module = LirModule {
+            version: LILAC_IR_VERSION.to_owned(),
+            target: "x86_64-unknown-none".to_owned(),
+            data: Vec::new(),
+            funcs: vec![LirFunc {
+                name: "puts".to_owned(),
+                ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+                outs: Vec::new(),
+                is_extern: true,
+                blocks: Vec::new(),
+            }],
+            layouts: HashMap::new(),
+        };
+        let text = module.to_text();
+        assert!(
+            text.contains("extern @puts\n  in #byte_buffer %s\n"),
+            "{text}"
+        );
+        assert!(!text.contains("{\n"), "extern must print no body: {text}");
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "clean extern verifies");
+    }
+
+    #[test]
+    fn verifier_rejects_extern_with_block() {
+        let mut module = canonical_module();
+        module.funcs[0].is_extern = true;
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1);
+    }
+
+    #[test]
     fn builtin_call_prints_and_verifies() {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.funcs.push(LirFunc {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1474,6 +1529,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1540,6 +1596,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::FoldIntrinsic {
@@ -1572,6 +1629,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Const {
@@ -1595,6 +1653,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Const {

@@ -1029,6 +1029,9 @@ impl Folder<'_> {
     }
 
     fn fold_func(&mut self, func: &mut LirFunc) {
+        if func.is_extern {
+            return;
+        }
         let entries = self.compute_entry_consts(func);
         for (index, block) in func.blocks.iter_mut().enumerate() {
             let mut consts = entries.get(index).cloned().unwrap_or_default();
@@ -1671,6 +1674,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1705,6 +1709,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
@@ -1793,6 +1798,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1820,6 +1826,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::FoldIntrinsic {
@@ -1933,6 +1940,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1973,6 +1981,7 @@ mod tests {
             name: "parse".to_owned(),
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
             outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            is_extern: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
@@ -2039,6 +2048,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: main_insts,
@@ -2104,6 +2114,7 @@ mod tests {
             name: "wipe".to_owned(),
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
             outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2130,6 +2141,7 @@ mod tests {
             name: "main".to_owned(),
             ins: Vec::new(),
             outs: Vec::new(),
+            is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![

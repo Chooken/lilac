@@ -1,0 +1,14 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+!c0: str = "hi"
+extern @puts
+  in #byte_buffer %s
+function @main
+{
+  $entry:
+    alloca #byte_buffer %tmp.1 : zeroed
+    &1: #byte_buffer = const !c0
+    copy &1 -> %tmp.1
+    call @puts (in %tmp.1) (out)
+    return
+}

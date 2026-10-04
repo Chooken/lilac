@@ -46,6 +46,8 @@ pub struct HirFunc {
     pub params: Vec<HirParam>,
     /// Named return slots.
     pub returns: Vec<HirParam>,
+    /// Whether this is an `extern` (foreign, C ABI) declaration with no body.
+    pub is_extern: bool,
     /// Checked body.
     pub body: HirBlock,
     /// Whole-item span.
@@ -375,6 +377,7 @@ mod tests {
             name: "main".to_owned(),
             params: Vec::new(),
             returns: Vec::new(),
+            is_extern: false,
             body: HirBlock {
                 stmts: vec![
                     HirStmt::Let {
