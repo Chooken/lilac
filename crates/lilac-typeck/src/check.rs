@@ -204,6 +204,52 @@ fn push_stmt(fctx: &mut FuncCtx, stmt: HirStmt, span: Span) {
     }
 }
 
+/// Emits `@format_args_push(ref __f, piece)` as a void effect statement.
+fn push_fstring_piece(
+    fctx: &mut FuncCtx,
+    fname: &str,
+    format_args: TypeRef,
+    piece: HirExpr,
+    span: Span,
+) {
+    push_stmt(
+        fctx,
+        HirStmt::ExprStmt(HirExpr {
+            ty: TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            span,
+            kind: HirExprKind::Call {
+                callee: HirCallee::Intrinsic {
+                    name: "@format_args_push".into(),
+                },
+                args: vec![
+                    HirExpr {
+                        ty: TypeRef {
+                            id: format_args.id,
+                            is_ref: true,
+                        },
+                        span,
+                        kind: HirExprKind::RefOf {
+                            value: Box::new(HirExpr {
+                                ty: format_args,
+                                span,
+                                kind: HirExprKind::Ident {
+                                    name: fname.to_owned(),
+                                    def: DefId::ERROR,
+                                },
+                            }),
+                        },
+                    },
+                    piece,
+                ],
+            },
+        }),
+        span,
+    );
+}
+
 /// Well-formed empty `if` for error paths (never lowered).
 fn empty_if(span: Span) -> HirStmt {
     HirStmt::If {
@@ -1511,15 +1557,103 @@ impl Checker<'_> {
                 fields,
                 span,
             } => self.check_struct_lit(fctx, ty_name, fields, *span),
-            Expr::FString { span, .. } => {
-                deferred(self.diags, *span, "f-strings", "M3");
-                (
-                    TypeRef {
-                        id: TypeId::ERROR,
-                        is_ref: false,
+            Expr::FString { parts, span } => self.check_fstring(fctx, parts, *span),
+        }
+    }
+
+    /// Desugars `$"..."` into `@format_args` construction: a hidden local `__f`
+    /// built with `@format_args_new`, then one `@format_args_push` per literal
+    /// chunk and hole (holes converted to `@byte_buffer`). The value is `__f`.
+    fn check_fstring(
+        &mut self,
+        fctx: &mut FuncCtx,
+        parts: &[lilac_ast::FStrPart],
+        span: Span,
+    ) -> (TypeRef, HirExpr) {
+        let format_args = TypeRef {
+            id: self.builtin_ty("@format_args"),
+            is_ref: false,
+        };
+        let byte_buffer = TypeRef {
+            id: self.builtin_ty("@byte_buffer"),
+            is_ref: false,
+        };
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        if parts.len() > 16 {
+            self.diags.emit(
+                Diagnostic::error("E061", "too many format pieces (max 16)".to_owned()).label(
+                    span,
+                    true,
+                    "too many pieces here".to_owned(),
+                ),
+            );
+            return poison;
+        }
+        let fname = fresh_local(fctx, "f");
+        fctx.locals.insert(fname.clone(), format_args);
+        push_stmt(
+            fctx,
+            HirStmt::Let {
+                name: fname.clone(),
+                ty: format_args,
+                value: HirExpr {
+                    ty: format_args,
+                    span,
+                    kind: HirExprKind::Call {
+                        callee: HirCallee::Intrinsic {
+                            name: "@format_args_new".into(),
+                        },
+                        args: Vec::new(),
                     },
-                    poison_expr(*span),
-                )
+                },
+                span,
+            },
+            span,
+        );
+        for part in parts {
+            let piece = self.check_fstring_piece(fctx, part, byte_buffer, span);
+            push_fstring_piece(fctx, &fname, format_args, piece, span);
+        }
+        (
+            format_args,
+            HirExpr {
+                ty: format_args,
+                span,
+                kind: HirExprKind::Ident {
+                    name: fname,
+                    def: DefId::ERROR,
+                },
+            },
+        )
+    }
+
+    /// Checks one f-string piece: literal chunks are `@byte_buffer` strings,
+    /// holes convert to `@byte_buffer` (a missing conversion is `E043`).
+    fn check_fstring_piece(
+        &mut self,
+        fctx: &mut FuncCtx,
+        part: &lilac_ast::FStrPart,
+        byte_buffer: TypeRef,
+        span: Span,
+    ) -> HirExpr {
+        match part {
+            lilac_ast::FStrPart::Lit(chunk) => HirExpr {
+                ty: byte_buffer,
+                span,
+                kind: HirExprKind::Str {
+                    value: chunk.clone(),
+                },
+            },
+            lilac_ast::FStrPart::Hole(expr) => {
+                let (got, hir) = self.check_expr(fctx, expr, None);
+                let _ = self.expect_type(got, byte_buffer.id, expr.span(), expr.span());
+                self.convert_if_needed(got, byte_buffer.id, hir)
             }
         }
     }
@@ -4897,5 +5031,72 @@ mod tests {
     fn loop_break_checks() {
         let diags = check_src("main: function () nothing {\n    loop {\n        break\n    }\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn fstring_desugars_to_format_args() {
+        let diags = check_src("main: function () nothing {\n    x: @format_args = $\"a\"\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn fstring_hole_missing_conversion_is_e043() {
+        let diags =
+            check_src("main: function () nothing {\n    name: @bit32 = 0x1\n    x: @format_args = $\"{name}\"\n}\n");
+        assert!(has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn fstring_piece_cap_is_e061() {
+        let mut holes = String::new();
+        for _ in 0..17 {
+            holes.push_str("{name}");
+        }
+        let src = format!(
+            "main: function () nothing {{\n    name: @byte_buffer = \"x\"\n    x: @format_args = $\"{holes}\"\n}}\n"
+        );
+        let diags = check_src(&src);
+        assert!(has_code(&diags, "E061"), "{diags:?}");
+    }
+
+    #[test]
+    fn fstring_desugar_emits_new_then_push() {
+        let (hir, diags) =
+            check_hir_src("main: function () nothing {\n    x: @format_args = $\"a{\"z\"}\"\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { name, value, .. } = &main.body.stmts[0] else {
+            panic!("expected let, got {:?}", main.body.stmts[0]);
+        };
+        assert_eq!(name, "__f");
+        assert!(
+            matches!(
+                value.kind,
+                lilac_hir::HirExprKind::Call {
+                    callee: lilac_hir::HirCallee::Intrinsic { ref name },
+                    ..
+                } if name == "@format_args_new"
+            ),
+            "expected @format_args_new, got {:?}",
+            value.kind
+        );
+        let HirStmt::ExprStmt(push) = &main.body.stmts[1] else {
+            panic!("expected push, got {:?}", main.body.stmts[1]);
+        };
+        assert!(
+            matches!(
+                push.kind,
+                lilac_hir::HirExprKind::Call {
+                    callee: lilac_hir::HirCallee::Intrinsic { ref name },
+                    ..
+                } if name == "@format_args_push"
+            ),
+            "expected @format_args_push, got {:?}",
+            push.kind
+        );
     }
 }
