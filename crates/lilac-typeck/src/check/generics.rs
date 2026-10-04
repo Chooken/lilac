@@ -14,7 +14,7 @@ use lilac_resolve::{DefId, ResKind};
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeRef};
 
-use super::{find_item, subst_ident, CallOutcome, CheckedCall, Checker, FuncCtx};
+use super::{find_item, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx};
 
 /// One monomorphized function instance (`(DefId, args)` identity).
 pub(super) struct FuncInstance {
@@ -130,69 +130,40 @@ impl Checker<'_> {
         let saved_params = std::mem::replace(&mut self.current_params, scope);
         let saved_args = std::mem::replace(&mut self.current_args, args.to_vec());
         let errors_before = self.diags.checkpoint();
-        let (mut fctx, params, returns) = self.func_ctx(decl, sig, parent);
-        match &decl.body {
-            None => {
-                self.hir.push(HirFunc {
-                    def,
-                    name: name.to_owned(),
-                    params,
-                    returns,
-                    body: HirBlock {
-                        stmts: Vec::new(),
-                        span: item.span,
-                    },
-                    span: item.span,
-                });
-            }
-            Some(lilac_ast::FuncBody::Block(block)) => {
-                let body = self.check_block(&mut fctx, block);
-                self.hir.push(HirFunc {
-                    def,
-                    name: name.to_owned(),
-                    params,
-                    returns,
-                    body,
-                    span: item.span,
-                });
-            }
-            Some(lilac_ast::FuncBody::Inline(expr)) => {
-                if sig.returns.len() == 1 {
-                    let (got, value) = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
-                    let span = expr.span();
-                    let _ = self.expect_type(got, sig.returns[0].id, span, span);
-                    let value = self.convert_if_needed(got, sig.returns[0].id, value);
-                    let param_names: Vec<String> =
-                        decl.params.iter().map(|param| param.name.clone()).collect();
-                    self.instance_inline
-                        .insert((def, args.to_vec()), (param_names, value));
-                } else {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            "E022",
-                            "inline `=>` bodies need exactly one return type",
-                        )
-                        .label(expr.span(), true, "here".to_owned()),
-                    );
-                }
-            }
+        let is_inline = matches!(decl.body, Some(lilac_ast::FuncBody::Inline(_)));
+        if is_inline {
+            // Guard recursive generic `=>` inlining (mirrors `check_inline_call`).
+            self.in_progress.insert(def);
         }
-        if self.diags.checkpoint() == errors_before {
-            for (slot_name, _, span) in &fctx.slots {
-                if !fctx.assigned.contains(slot_name) {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            "E027",
-                            format!("return slot `{slot_name}` is never assigned"),
-                        )
-                        .label(
-                            *span,
-                            true,
-                            "assign it before `return`".to_owned(),
-                        ),
-                    );
-                }
+        let (outcome, params, returns) = self.check_func_body(decl, sig, parent);
+        match outcome {
+            CheckedBody::Extern => self.hir.push(HirFunc {
+                def,
+                name: name.to_owned(),
+                params,
+                returns,
+                body: HirBlock {
+                    stmts: Vec::new(),
+                    span: item.span,
+                },
+                span: item.span,
+            }),
+            CheckedBody::Block(body) => self.hir.push(HirFunc {
+                def,
+                name: name.to_owned(),
+                params,
+                returns,
+                body,
+                span: item.span,
+            }),
+            CheckedBody::Inline { param_names, value } => {
+                self.instance_inline
+                    .insert((def, args.to_vec()), (param_names, value));
             }
+            CheckedBody::Rejected => {}
+        }
+        if is_inline {
+            self.in_progress.remove(&def);
         }
         self.current_params = saved_params;
         self.current_args = saved_args;
@@ -215,6 +186,17 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
+        if self.in_progress.contains(&def) {
+            // A generic `=>` body may not inline itself: the specialization is
+            // still being checked, so no inline body exists to expand.
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", "cannot inline recursive `=>` call").label(
+                    span,
+                    true,
+                    "recursive inline calls never terminate".to_owned(),
+                ),
+            ));
+        }
         let name = self.function_name(def);
         if generic_args.len() != generic_params.len() {
             return Err(self.emit_generic_arity(
@@ -430,6 +412,39 @@ mod tests {
             vec!["rec__1__bit32"],
             "expected exactly one cached instance, got {:?}",
             names(&hir)
+        );
+    }
+
+    #[test]
+    fn generic_inline_control_flow_defers() {
+        // A generic `=>` body with control flow must emit the M3 deferral, not
+        // cache a temp-bearing inline body (which would ICE in lowering).
+        let (diags, _, _) = check(
+            "pick[T]: function (x: T, c: @bit8) T => if c x else x\n\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E030"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn generic_inline_named_slot_ok() {
+        // The first return slot is assigned by the `=>` body, so no `E027`.
+        let (diags, _, _) = check(
+            "gen_inline[T]: function (x: T) out: T => x\n\nmain: function () nothing {\n    y: @bit32 = gen_inline[@bit32](0x1)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn recursive_generic_inline_is_e022() {
+        let (diags, _, _) = check(
+            "rec_inline[T]: function (x: T) T => rec_inline[T](x)\n\nmain: function () nothing {\n    y: @bit32 = rec_inline[@bit32](0x1)\n}\n",
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E022"),
+            "{diags:?}"
         );
     }
 

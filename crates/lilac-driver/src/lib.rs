@@ -237,6 +237,20 @@ mod tests {
     }
 
     #[test]
+    fn generic_inline_control_flow_defers_without_ice() {
+        // Regression: a generic `=>` body with control flow must defer (`E030`)
+        // instead of caching a temp-bearing inline body and panicking in
+        // lowering (`use of unassigned join temp`).
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "gen.lilac",
+            "pick[T]: function (x: T, c: @bit8) T => if c x else x\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
+        );
+        assert!(result.is_err());
+        assert!(session.render_diagnostics().contains("error[E030]"));
+    }
+
+    #[test]
     fn allow_flag_silences_w020() {
         let mut session = Session::new();
         session.warn_on_operator_type_change = false;

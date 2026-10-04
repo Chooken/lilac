@@ -27,6 +27,24 @@ struct CheckedCall {
     args: Vec<HirExpr>,
 }
 
+/// The checked shape of one function body, shared by concrete functions and
+/// monomorphized generic instances.
+enum CheckedBody {
+    /// No body (extern/declaration): an empty block, no slot sweep.
+    Extern,
+    /// A checked `{ ... }` block.
+    Block(HirBlock),
+    /// A checked `=>` body: parameter names plus the value (inlined at calls).
+    Inline {
+        /// Parameter names in order (for call-site substitution).
+        param_names: Vec<String>,
+        /// Checked body value.
+        value: HirExpr,
+    },
+    /// Rejected (bad shape or deferred control flow): nothing is cached.
+    Rejected,
+}
+
 /// A call either stays a call, vanishes into an inlined `=>` body, or is a
 /// recorded `@compile_error` (folding decides its liveness).
 enum CallOutcome {
@@ -843,6 +861,76 @@ impl Checker<'_> {
             .collect()
     }
 
+    /// Checks one function body against `sig` and returns its checked shape
+    /// plus the HIR parameter/return slots.
+    ///
+    /// Shared by concrete functions and monomorphized generic instances
+    /// (ruling R2), so the `=>` control-flow deferral and the return-slot
+    /// assignment/E027 sweep behave identically on both paths.
+    fn check_func_body(
+        &mut self,
+        decl: &lilac_ast::FuncDecl,
+        sig: &FuncSig,
+        parent: Option<(String, DefId)>,
+    ) -> (CheckedBody, Vec<HirParam>, Vec<HirParam>) {
+        let errors_before = self.diags.checkpoint();
+        let (mut fctx, params, returns) = self.func_ctx(decl, sig, parent);
+        let outcome = match &decl.body {
+            None => CheckedBody::Extern,
+            Some(lilac_ast::FuncBody::Block(block)) => {
+                CheckedBody::Block(self.check_block(&mut fctx, block))
+            }
+            Some(lilac_ast::FuncBody::Inline(expr)) => {
+                if sig.returns.len() == 1 {
+                    let (got, value) = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
+                    let span = expr.span();
+                    let _ = self.expect_type(got, sig.returns[0].id, span, span);
+                    let value = self.convert_if_needed(got, sig.returns[0].id, value);
+                    if has_temp(&value) {
+                        let _ = deferred(self.diags, span, "control flow in `=>` bodies", "M3");
+                        CheckedBody::Rejected
+                    } else {
+                        if let Some((name, _, _)) = fctx.slots.first() {
+                            fctx.assigned.insert(name.clone());
+                        }
+                        let param_names: Vec<String> =
+                            decl.params.iter().map(|param| param.name.clone()).collect();
+                        CheckedBody::Inline { param_names, value }
+                    }
+                } else {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E022",
+                            "inline `=>` bodies need exactly one return type",
+                        )
+                        .label(expr.span(), true, "here".to_owned()),
+                    );
+                    CheckedBody::Rejected
+                }
+            }
+        };
+        if matches!(outcome, CheckedBody::Block(_) | CheckedBody::Inline { .. })
+            && self.diags.checkpoint() == errors_before
+        {
+            for (name, _, span) in &fctx.slots {
+                if !fctx.assigned.contains(name) {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E027",
+                            format!("return slot `{name}` is never assigned"),
+                        )
+                        .label(
+                            *span,
+                            true,
+                            "assign it before `return`".to_owned(),
+                        ),
+                    );
+                }
+            }
+        }
+        (outcome, params, returns)
+    }
+
     fn check_func(
         &mut self,
         item: &Item,
@@ -878,78 +966,31 @@ impl Checker<'_> {
                 None => item.name.clone(),
             },
         };
-        let errors_before = self.diags.diagnostics().len();
-        let (mut fctx, params, returns) = self.func_ctx(decl, &sig, parent);
-        match &decl.body {
-            None => {
-                self.hir.push(HirFunc {
-                    def: resolved.id,
-                    name: hir_name.clone(),
-                    params,
-                    returns,
-                    body: HirBlock {
-                        stmts: Vec::new(),
-                        span: item.span,
-                    },
+        let (outcome, params, returns) = self.check_func_body(decl, &sig, parent);
+        match outcome {
+            CheckedBody::Extern => self.hir.push(HirFunc {
+                def: resolved.id,
+                name: hir_name,
+                params,
+                returns,
+                body: HirBlock {
+                    stmts: Vec::new(),
                     span: item.span,
-                });
-                self.in_progress.remove(&resolved.id);
-                return;
-            }
-            Some(lilac_ast::FuncBody::Block(block)) => {
-                let body = self.check_block(&mut fctx, block);
-                self.hir.push(HirFunc {
-                    def: resolved.id,
-                    name: hir_name.clone(),
-                    params,
-                    returns,
-                    body,
-                    span: item.span,
-                });
-            }
-            Some(lilac_ast::FuncBody::Inline(expr)) => {
-                if sig.returns.len() != 1 {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            "E022",
-                            "inline `=>` bodies need exactly one return type",
-                        )
-                        .label(expr.span(), true, "here".to_owned()),
-                    );
-                    self.in_progress.remove(&resolved.id);
-                    return;
-                }
-                let (got, value) = self.check_expr(&mut fctx, expr, Some(sig.returns[0].id));
-                let span = expr.span();
-                let _ = self.expect_type(got, sig.returns[0].id, span, span);
-                let value = self.convert_if_needed(got, sig.returns[0].id, value);
-                if has_temp(&value) {
-                    let _ = deferred(self.diags, span, "control flow in `=>` bodies", "M3");
-                }
-                if let Some((name, _, _)) = fctx.slots.first() {
-                    fctx.assigned.insert(name.clone());
-                }
-                let param_names: Vec<String> =
-                    decl.params.iter().map(|param| param.name.clone()).collect();
+                },
+                span: item.span,
+            }),
+            CheckedBody::Block(body) => self.hir.push(HirFunc {
+                def: resolved.id,
+                name: hir_name,
+                params,
+                returns,
+                body,
+                span: item.span,
+            }),
+            CheckedBody::Inline { param_names, value } => {
                 self.inline_bodies.insert(resolved.id, (param_names, value));
             }
-        }
-        if self.diags.diagnostics().len() == errors_before {
-            for (name, _, span) in &fctx.slots {
-                if !fctx.assigned.contains(name) {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            "E027",
-                            format!("return slot `{name}` is never assigned"),
-                        )
-                        .label(
-                            *span,
-                            true,
-                            "assign it before `return`".to_owned(),
-                        ),
-                    );
-                }
-            }
+            CheckedBody::Rejected => {}
         }
         self.in_progress.remove(&resolved.id);
     }

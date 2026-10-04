@@ -151,15 +151,7 @@ impl Diags {
 
     /// Records a diagnostic (deduped by code + message + primary spans).
     pub fn emit(&mut self, diagnostic: Diagnostic) -> ErrorGuaranteed {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        diagnostic.code.hash(&mut hasher);
-        diagnostic.msg.hash(&mut hasher);
-        for label in &diagnostic.labels {
-            if label.primary {
-                label.span.hash(&mut hasher);
-            }
-        }
-        if self.seen.insert(hasher.finish()) {
+        if self.seen.insert(dedup_key(&diagnostic)) {
             self.diagnostics.push(diagnostic);
         }
         ErrorGuaranteed::new()
@@ -195,8 +187,27 @@ impl Diags {
         if mark >= self.diagnostics.len() {
             return Vec::new();
         }
-        self.diagnostics.split_off(mark)
+        let taken = self.diagnostics.split_off(mark);
+        // Dropping the dedup hashes lets the same diagnostic be emitted again
+        // after a capture (a failing instance is otherwise swallowed).
+        for diagnostic in &taken {
+            self.seen.remove(&dedup_key(diagnostic));
+        }
+        taken
     }
+}
+
+/// Dedup identity of a diagnostic: code + message + primary label spans.
+fn dedup_key(diagnostic: &Diagnostic) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    diagnostic.code.hash(&mut hasher);
+    diagnostic.msg.hash(&mut hasher);
+    for label in &diagnostic.labels {
+        if label.primary {
+            label.span.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 impl Default for Diags {
@@ -404,6 +415,16 @@ mod tests {
         diags.emit(diagnostic);
         assert_eq!(diags.diagnostics().len(), 1);
         assert!(diags.has_errors());
+    }
+
+    #[test]
+    fn take_since_allows_reemission() {
+        let mut diags = Diags::new();
+        let diagnostic = Diagnostic::error("E001", "boom");
+        diags.emit(diagnostic.clone());
+        assert_eq!(diags.take_since(0).len(), 1);
+        diags.emit(diagnostic);
+        assert_eq!(diags.diagnostics().len(), 1);
     }
 
     #[test]
