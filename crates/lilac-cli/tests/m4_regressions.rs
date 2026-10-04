@@ -28,6 +28,31 @@ fn unused_generic_object_members_do_not_lower() {
 }
 
 #[test]
+fn e051_chain_notes_stay_human_readable() {
+    // The E051 instantiation chain must never leak mangled IR symbols
+    // (`grow__1__bit32`); it reads as the source form (`grow[@bit32]`).
+    for fixture in [
+        "FAILS_generic_cyclic.lilac",
+        "FAILS_generic_object_cycle.lilac",
+    ] {
+        let output = lilac()
+            .args(["check", &ui(fixture)])
+            .output()
+            .expect("runs lilac");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{fixture} should fail:\n{stderr}");
+        assert!(
+            stderr.contains("note: instantiation chain: "),
+            "{fixture}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("__1__"),
+            "mangled symbol leaked into {fixture} diagnostics:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn fails_fixtures_do_not_panic() {
     // Regression guard for the M4 crash classes (ICE on a bare generic-object
     // static call; stack overflow on a growing object layout): every

@@ -438,19 +438,21 @@ impl Lower<'_> {
             }
         }
         for (place, hook) in drops {
+            // The hook runs on live memory, so the destructor call comes first;
+            // the `drop` marker then records that the place is destroyed.
             emit(
                 fs,
-                LirInst::Drop {
-                    place: place.clone(),
+                LirInst::Call {
+                    func: LirCallee::Func(hook),
+                    ins: vec![place.clone()],
+                    outs: Vec::new(),
                     span: Span::dummy(),
                 },
             );
             emit(
                 fs,
-                LirInst::Call {
-                    func: LirCallee::Func(hook),
-                    ins: vec![place],
-                    outs: Vec::new(),
+                LirInst::Drop {
+                    place,
                     span: Span::dummy(),
                 },
             );
@@ -1856,6 +1858,11 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("drop %"), "{text}");
+        // The destructor runs on live memory, so its call precedes the marker
+        // that marks the place destroyed.
+        let call = text.find("call @Object.@on_drop").expect("on_drop call");
+        let drop = text.find("drop %variable").expect("drop marker");
+        assert!(call < drop, "@on_drop must precede drop:\n{text}");
     }
 
     #[test]
@@ -1866,6 +1873,13 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("drop %"), "{text}");
         assert!(text.contains("@GenBox__1__bit32.@on_drop"), "{text}");
+        // The destructor runs on live memory, so its call precedes the marker
+        // that marks the place destroyed.
+        let call = text
+            .find("call @GenBox__1__bit32.@on_drop")
+            .expect("on_drop call");
+        let drop = text.find("drop %box").expect("drop marker");
+        assert!(call < drop, "@on_drop must precede drop:\n{text}");
     }
 
     #[test]

@@ -286,7 +286,9 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `drop %x` (runs `@on_drop` where the type declares one).
+    /// `drop %x` marks a place destroyed. Where the type declares an
+    /// `@on_drop`, its destructor call precedes this marker (the hook runs on
+    /// live memory; `drop` records that the place is dead).
     Drop {
         /// Place (without sigil).
         place: String,

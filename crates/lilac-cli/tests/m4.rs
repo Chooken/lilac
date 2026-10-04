@@ -137,7 +137,7 @@ const DUCK_TYPING_SHORT: &str = concat!(
     "   = instantiated here\n",
     "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:1:1 required by `gen_function[T]` here\n",
     "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:2:11 missing method `other` on `@bit32`\n",
-    "note: in instantiation of gen_function__1__bit32\n",
+    "note: in instantiation of gen_function[@bit32]\n",
 );
 
 #[test]
@@ -154,7 +154,7 @@ fn fails_generic_duck_typing_verbose_snapshot() {
     let (ok, stderr) = check("FAILS_generic_duck_typing.lilac", &["--verbose"]);
     assert!(!ok, "should fail");
     assert_eq!(stderr, DUCK_TYPING_SHORT);
-    assert!(stderr.contains("note: in instantiation of gen_function__1__bit32"));
+    assert!(stderr.contains("note: in instantiation of gen_function[@bit32]"));
 }
 
 /// A >5-frame instantiation chain (`level0` -> ... -> `level5`): the
@@ -169,12 +169,12 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "   = instantiated here\n",
     "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:21:1 required by `level5[T]` here\n",
     "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:22:11 missing method `missing` on `@bit32`\n",
-    "note: in instantiation of level0__1__bit32\n",
-    "note: in instantiation of level1__1__bit32\n",
-    "note: in instantiation of level2__1__bit32\n",
-    "note: in instantiation of level3__1__bit32\n",
-    "note: in instantiation of level4__1__bit32\n",
-    "note: in instantiation of level5__1__bit32\n",
+    "note: in instantiation of level0[@bit32]\n",
+    "note: in instantiation of level1[@bit32]\n",
+    "note: in instantiation of level2[@bit32]\n",
+    "note: in instantiation of level3[@bit32]\n",
+    "note: in instantiation of level4[@bit32]\n",
+    "note: in instantiation of level5[@bit32]\n",
 );
 
 #[test]
@@ -182,7 +182,7 @@ fn fails_generic_deep_chain_verbose_snapshot() {
     let (ok, verbose) = check("FAILS_generic_deep_chain.lilac", &["--verbose"]);
     assert!(!ok, "should fail");
     assert_eq!(verbose, DEEP_CHAIN_VERBOSE);
-    assert!(verbose.contains("level5__1__bit32"), "{verbose}");
+    assert!(verbose.contains("level5[@bit32]"), "{verbose}");
     assert!(!verbose.contains("elided"), "{verbose}");
 
     let (_, short) = check("FAILS_generic_deep_chain.lilac", &[]);

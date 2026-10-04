@@ -101,6 +101,10 @@ keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
 Object `type` layouts and RAII `drop` targets are keyed by the same mangled
 name; no instruction carries a generic parameter type.
 
+A `drop %x` marker records that a place is destroyed; it does not itself run
+the destructor. Where the type declares an `@on_drop`, the `call @…@on_drop`
+that invokes it precedes the marker, so the hook observes live memory.
+
 # Instructions
 
 ## Memory

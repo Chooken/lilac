@@ -647,13 +647,37 @@ impl Checker<'_> {
         format!("func#{}", def.0)
     }
 
-    /// The active instantiation chain, one mangled instance name per frame
+    /// Human-readable function instance for diagnostics: `<source name>[@arg,
+    /// ...]` (e.g. `gen_function[@bit32]`). Mangling stays for IR symbols only.
+    fn function_instance_display(&self, def: DefId, args: &[TypeRef]) -> String {
+        let name = self.function_name(def);
+        if args.is_empty() {
+            return name;
+        }
+        let args = args
+            .iter()
+            .map(|arg| self.types.display_ref(*arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name}[{args}]")
+    }
+
+    /// Human-readable object instance for diagnostics: `<ObjectName>[@arg, ...]`
+    /// (e.g. `GenBox[@bit32]`). Mangling stays for IR symbols only.
+    fn object_instance_display(&mut self, base: DefId, args: &[TypeRef]) -> String {
+        let object_name = self.object_name_of(base);
+        self.types.set_object_name(base, &object_name);
+        let id = self.types.intern_instance(base, args.to_vec());
+        self.types.display(id)
+    }
+
+    /// The active instantiation chain, one human-readable instance per frame
     /// (innermost last).
     fn instantiation_frames(&mut self) -> Vec<String> {
         let active = self.active.clone();
         active
             .iter()
-            .map(|(def, args)| self.instance_name(*def, args))
+            .map(|(def, args)| self.function_instance_display(*def, args))
             .collect()
     }
 
@@ -670,16 +694,13 @@ impl Checker<'_> {
         }
     }
 
-    /// The active object-instantiation chain, one mangled instance name per
+    /// The active object-instantiation chain, one human-readable instance per
     /// frame (innermost last).
     fn object_instantiation_frames(&mut self) -> Vec<String> {
         let active = self.active_objects.clone();
         active
             .iter()
-            .map(|(base, args)| {
-                let id = self.types.intern_instance(*base, args.clone());
-                self.types.mangle(id)
-            })
+            .map(|(base, args)| self.object_instance_display(*base, args))
             .collect()
     }
 
@@ -1014,6 +1035,19 @@ mod tests {
             .filter(|d| d.code == "E051")
             .count();
         assert_eq!(count, 1, "{diags:?}");
+        let note = diags
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "E051")
+            .and_then(|d| d.notes.first())
+            .cloned()
+            .unwrap_or_default();
+        assert!(note.contains("grow[@bit32]"), "readable chain: {note}");
+        assert!(
+            note.contains("grow[Box[@bit32]]"),
+            "readable nested arg: {note}"
+        );
+        assert!(!note.contains("__1__"), "mangled symbol leaked: {note}");
     }
 
     #[test]
@@ -1027,6 +1061,19 @@ mod tests {
             .filter(|d| d.code == "E051")
             .count();
         assert_eq!(count, 1, "{diags:?}");
+        let note = diags
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "E051")
+            .and_then(|d| d.notes.first())
+            .cloned()
+            .unwrap_or_default();
+        assert!(note.contains("GenObj[@bit32]"), "readable chain: {note}");
+        assert!(
+            note.contains("GenObj[GenObj[@bit32]]"),
+            "readable nested arg: {note}"
+        );
+        assert!(!note.contains("__1__"), "mangled symbol leaked: {note}");
     }
 
     #[test]
