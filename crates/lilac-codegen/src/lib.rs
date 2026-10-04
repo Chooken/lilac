@@ -34,9 +34,10 @@ pub trait Backend {
 
     /// Emits textual LLVM IR for a verified module (M5b).
     ///
-    /// Backends that do not produce LLVM IR keep the default error.
+    /// Backends that do not produce LLVM IR keep the default error, which names
+    /// the backend so a `--backend=` mismatch is diagnosable.
     fn emit_llvm(&self, _module: &LirModule) -> Result<String, String> {
-        Err("backend does not support LLVM IR emission".to_owned())
+        Err(format!("backend `{}` cannot emit LLVM IR", self.name()))
     }
 
     /// Builds and runs a host executable (build scripts; post-v1).

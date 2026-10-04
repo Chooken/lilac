@@ -272,20 +272,51 @@ fn format_args_count(lower: &Lower<'_, '_>) {
 }
 
 /// `@format_args_piece(#format_args, iNative) -> #byte_buffer`: return `pieces[i]`.
+///
+/// An out-of-range `index` (`index >= count`) traps via `@lilac_abort` rather
+/// than loading past the fixed 16-slot table. `push` already keeps `count <= 16`
+/// by dropping pieces once full, so this guards the read side too.
 fn format_args_piece(lower: &Lower<'_, '_>) {
     let native = lower.native_int();
     let table_ty = lower.format_args_type();
     let buffer_ty = lower.byte_buffer_type();
+    let void = lower.context().void_type();
     let params = [
         BasicMetadataTypeEnum::from(table_ty),
         BasicMetadataTypeEnum::from(native),
     ];
     let function = lower.runtime_fn("format_args_piece", buffer_ty.fn_type(&params, false));
-    let builder = entry(lower, function);
+    let abort = lower.runtime_fn("lilac_abort", void.fn_type(&[], false));
+
+    let builder = lower.context().create_builder();
+    let entry_block = lower.context().append_basic_block(function, "entry");
+    let load_block = lower.context().append_basic_block(function, "load");
+    let trap_block = lower.context().append_basic_block(function, "trap");
+
+    builder.position_at_end(entry_block);
     let table = param(function, 0, "format_args_piece");
     let index = param(function, 1, "format_args_piece").into_int_value();
     table.set_name("table");
     index.set_name("index");
+    let count = checked(
+        builder.build_extract_value(table.into_struct_value(), 0, ""),
+        "count extract",
+    )
+    .into_int_value();
+    let in_bounds = checked(
+        builder.build_int_compare(IntPredicate::ULT, index, count, ""),
+        "bounds check",
+    );
+    checked(
+        builder.build_conditional_branch(in_bounds, load_block, trap_block),
+        "bounds branch",
+    );
+
+    builder.position_at_end(trap_block);
+    checked(builder.build_call(abort, &[], ""), "bounds abort call");
+    checked(builder.build_unreachable(), "bounds abort unreachable");
+
+    builder.position_at_end(load_block);
     let slot = checked(builder.build_alloca(table_ty, ""), "format_args spill");
     checked(builder.build_store(slot, table), "format_args spill store");
     let pieces = checked(

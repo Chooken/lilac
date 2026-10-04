@@ -45,26 +45,16 @@ impl LlvmBackend {
         }
     }
 
-    /// Maps the codegen [`OptLevel`] onto inkwell's optimization level.
-    fn optimization_level(&self) -> OptimizationLevel {
+    /// The codegen [`OptLevel`]'s optimization level and new-pass-manager
+    /// pipeline, together. `O0` runs no passes; every other level builds LLVM's
+    /// `default<O*>` pipeline.
+    fn optimize_settings(&self) -> (OptimizationLevel, Option<&'static str>) {
         match self.optimize {
-            OptLevel::O0 => OptimizationLevel::None,
-            OptLevel::O1 => OptimizationLevel::Less,
-            OptLevel::O2 | OptLevel::Os => OptimizationLevel::Default,
-            OptLevel::O3 => OptimizationLevel::Aggressive,
-        }
-    }
-
-    /// The new-pass-manager pipeline string for the configured [`OptLevel`].
-    /// `O0` runs no passes; every other level builds LLVM's `default<O*>`
-    /// pipeline.
-    fn pass_pipeline(&self) -> Option<&'static str> {
-        match self.optimize {
-            OptLevel::O0 => None,
-            OptLevel::O1 => Some("default<O1>"),
-            OptLevel::O2 => Some("default<O2>"),
-            OptLevel::O3 => Some("default<O3>"),
-            OptLevel::Os => Some("default<Os>"),
+            OptLevel::O0 => (OptimizationLevel::None, None),
+            OptLevel::O1 => (OptimizationLevel::Less, Some("default<O1>")),
+            OptLevel::O2 => (OptimizationLevel::Default, Some("default<O2>")),
+            OptLevel::O3 => (OptimizationLevel::Aggressive, Some("default<O3>")),
+            OptLevel::Os => (OptimizationLevel::Default, Some("default<Os>")),
         }
     }
 
@@ -79,15 +69,16 @@ impl LlvmBackend {
         let triple = TargetTriple::create(&self.triple);
         module.set_triple(&triple);
 
-        Target::initialize_native(&InitializationConfig::default())?;
+        Target::initialize_all(&InitializationConfig::default());
         let target = Target::from_triple(&triple)
             .map_err(|e| format!("unknown target triple `{}`: {e}", self.triple))?;
+        let (optimize, _) = self.optimize_settings();
         let machine: TargetMachine = target
             .create_target_machine(
                 &triple,
                 "generic",
                 "",
-                self.optimization_level(),
+                optimize,
                 RelocMode::Default,
                 CodeModel::Default,
             )
@@ -104,7 +95,7 @@ impl Backend for LlvmBackend {
     }
 
     fn codegen(&self, _module: &LirModule) -> Result<(), String> {
-        Err("LLVM codegen lands in M5; M0 stops at `emit-ir`".to_owned())
+        Err("LLVM object codegen is not implemented; `emit-llvm` emits textual IR".to_owned())
     }
 
     fn emit_llvm(&self, lir: &LirModule) -> Result<String, String> {
@@ -116,7 +107,7 @@ impl Backend for LlvmBackend {
         module
             .verify()
             .map_err(|e| format!("module verification failed: {e}"))?;
-        if let Some(pipeline) = self.pass_pipeline() {
+        if let Some(pipeline) = self.optimize_settings().1 {
             module
                 .run_passes(pipeline, &machine, PassBuilderOptions::create())
                 .map_err(|e| format!("optimization pipeline `{pipeline}` failed: {e}"))?;
@@ -781,6 +772,20 @@ mod tests {
         assert!(text.contains("call void @llvm.trap()"), "{text}");
     }
 
+    /// `@format_args_piece` traps (via `@lilac_abort`) when `index >= count`
+    /// instead of loading past the fixed 16-slot table.
+    #[test]
+    fn format_args_piece_bounds_check_aborts() {
+        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        let body = text
+            .split("\ndefine ")
+            .find(|segment| segment.starts_with("{ i64, ptr } @format_args_piece"))
+            .expect("format_args_piece definition");
+        assert!(body.contains("icmp ult i64"), "{body}");
+        assert!(body.contains("call void @lilac_abort()"), "{body}");
+        assert!(body.contains("unreachable"), "{body}");
+    }
+
     /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`
     /// with explicit then/else edges.
     #[test]
@@ -993,7 +998,22 @@ mod tests {
             }
         }
         let m = lilac_ir::LirModule::new("x86_64-pc-windows-msvc");
-        assert!(Noop.emit_llvm(&m).is_err());
+        let err = Noop.emit_llvm(&m).expect_err("noop cannot emit LLVM IR");
+        assert!(err.contains("noop"), "error must name the backend: {err}");
+    }
+
+    /// Every target is initialized, not just the host: emitting for a triple
+    /// that is not the build host's architecture must succeed. `aarch64-apple-
+    /// darwin` is deliberately neither `x86_64` nor Windows.
+    #[test]
+    fn emits_for_non_native_triple() {
+        let backend = lilac_codegen_llvm::LlvmBackend::new("aarch64-apple-darwin", OptLevel::O0);
+        let module = lilac_ir::LirModule::new("aarch64-apple-darwin");
+        let text = backend.emit_llvm(&module).expect("non-native target emits");
+        assert!(
+            text.contains("target triple = \"aarch64-apple-darwin\""),
+            "{text}"
+        );
     }
 
     #[test]

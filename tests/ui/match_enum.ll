@@ -86,25 +86,34 @@ entry:
 
 define { i64, ptr } @format_args_piece({ i64, [16 x { i64, ptr }] } %table, i64 %index) {
 entry:
-  %0 = alloca { i64, [16 x { i64, ptr }] }, align 8
-  store { i64, [16 x { i64, ptr }] } %table, ptr %0, align 8
-  %1 = getelementptr inbounds { i64, [16 x { i64, ptr }] }, ptr %0, i32 0, i32 1
-  %2 = mul i64 %index, 16
-  %3 = ptrtoint ptr %1 to i64
-  %4 = add i64 %3, %2
-  %5 = inttoptr i64 %4 to ptr
-  %6 = load { i64, ptr }, ptr %5, align 8
-  ret { i64, ptr } %6
-}
+  %0 = extractvalue { i64, [16 x { i64, ptr }] } %table, 0
+  %1 = icmp ult i64 %index, %0
+  br i1 %1, label %load, label %trap
 
-; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
-declare void @llvm.trap() #1
+load:                                             ; preds = %entry
+  %2 = alloca { i64, [16 x { i64, ptr }] }, align 8
+  store { i64, [16 x { i64, ptr }] } %table, ptr %2, align 8
+  %3 = getelementptr inbounds { i64, [16 x { i64, ptr }] }, ptr %2, i32 0, i32 1
+  %4 = mul i64 %index, 16
+  %5 = ptrtoint ptr %3 to i64
+  %6 = add i64 %5, %4
+  %7 = inttoptr i64 %6 to ptr
+  %8 = load { i64, ptr }, ptr %7, align 8
+  ret { i64, ptr } %8
+
+trap:                                             ; preds = %entry
+  call void @lilac_abort()
+  unreachable
+}
 
 define void @lilac_abort() {
 entry:
   call void @llvm.trap()
   unreachable
 }
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #1
 
 define void @lilac_main() {
 l.3:

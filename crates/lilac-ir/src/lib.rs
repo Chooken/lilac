@@ -717,10 +717,12 @@ struct Verifier<'a> {
     failed: bool,
 }
 
-/// One register definition: whether it holds a constant (folding order).
-#[derive(Clone, Copy)]
+/// One register definition: whether it holds a constant (folding order), and
+/// its declared type (so operand widths can be checked).
+#[derive(Clone)]
 struct RegDef {
     is_const: bool,
+    ty: String,
 }
 
 impl Verifier<'_> {
@@ -787,8 +789,10 @@ impl Verifier<'_> {
         let mut places: HashMap<&'a str, &'a str> = HashMap::new();
         self.verify_signature(func, &mut places);
         let mut assigned: HashSet<&str> = HashSet::new();
-        for block in &func.blocks {
-            self.verify_block(func, block, &mut places, &mut assigned);
+        let last = func.blocks.len().saturating_sub(1);
+        for (index, block) in func.blocks.iter().enumerate() {
+            let has_fallthrough = index < last;
+            self.verify_block(func, block, &mut places, &mut assigned, has_fallthrough);
         }
         for (place, _) in &func.outs {
             if !assigned.contains(place.as_str()) {
@@ -822,12 +826,13 @@ impl Verifier<'_> {
         block: &'a LirBlock,
         places: &mut HashMap<&'a str, &'a str>,
         assigned: &mut HashSet<&'a str>,
+        has_fallthrough: bool,
     ) {
         let mut regs: HashMap<&str, RegDef> = HashMap::new();
         for inst in &block.insts {
             self.verify_inst(func, inst, places, &mut regs, assigned);
         }
-        self.verify_term(func, &block.term, &regs);
+        self.verify_term(func, &block.term, &regs, has_fallthrough);
     }
 
     fn verify_inst<'a>(
@@ -842,7 +847,7 @@ impl Verifier<'_> {
             LirInst::CopyReg { src, dst, ty, span } => {
                 self.check_operand(src, regs, places, *span, func);
                 self.check_type(ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::CopyPlace { src, dst, span } => {
                 self.check_operand(src, regs, places, *span, func);
@@ -857,7 +862,7 @@ impl Verifier<'_> {
             LirInst::Const { dst, lit, ty, span } => {
                 self.check_const_lit(lit, ty, *span);
                 self.check_type(ty, *span);
-                self.define_reg(regs, dst, true, *span, func);
+                self.define_reg(regs, dst, ty, true, *span, func);
             }
             LirInst::Load { .. } | LirInst::Addr { .. } => {
                 self.verify_mem_op(func, inst, places, regs);
@@ -869,7 +874,7 @@ impl Verifier<'_> {
                 span,
             } => {
                 self.check_addr_func(target, ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::Call {
                 func: callee,
@@ -890,7 +895,7 @@ impl Verifier<'_> {
             } => {
                 let owner_ty = places.get(obj.as_str()).copied().unwrap_or("#unknown");
                 self.check_field_layout(owner_ty, name, *idx, ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::Alloca { ty, place, span } => {
                 self.check_type(ty, *span);
@@ -922,8 +927,8 @@ impl Verifier<'_> {
                         self.error(format!("use of undefined register `&{reg}`"), *span);
                     }
                 }
-                self.check_arith_width(op, ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.check_arith_width(op, ty, lhs, rhs, regs, *span);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::CompileError { call_span, .. } => {
                 lilac_error::bug!(*call_span, "unfolded `@compile_error` reached verify");
@@ -995,7 +1000,7 @@ impl Verifier<'_> {
                     self.error(format!("use of undefined register `&{src}`"), *span);
                 }
                 self.check_type(ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::FieldAddr {
                 obj,
@@ -1007,7 +1012,7 @@ impl Verifier<'_> {
             } => {
                 self.check_field_ref(obj, name, *idx, *span, places);
                 self.check_type(ty, *span);
-                self.define_reg(regs, dst, false, *span, func);
+                self.define_reg(regs, dst, ty, false, *span, func);
             }
             _ => {
                 lilac_error::bug!(Span::dummy(), "non-store instruction in store verifier");
@@ -1100,7 +1105,7 @@ impl Verifier<'_> {
             );
         }
         self.check_type(ty, *span);
-        self.define_reg(regs, dst, false, *span, func);
+        self.define_reg(regs, dst, ty, false, *span, func);
     }
 
     /// Checks a call target: register definedness for indirect calls,
@@ -1208,8 +1213,19 @@ impl Verifier<'_> {
         }
     }
 
-    /// Checks arithmetic result widths (`i.*` and `f.*` need bit containers).
-    fn check_arith_width(&mut self, op: &ArithOp, ty: &str, span: Span) {
+    /// Checks arithmetic widths. Every op needs a bit-container result; float
+    /// arithmetic/comparison additionally needs `#bit32`/`#bit64` operands,
+    /// because the backend reinterprets operand bits as an LLVM `float`/`double`
+    /// (and ICEs on narrower containers).
+    fn check_arith_width(
+        &mut self,
+        op: &ArithOp,
+        ty: &str,
+        lhs: &str,
+        rhs: &str,
+        regs: &HashMap<&str, RegDef>,
+        span: Span,
+    ) {
         if !matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bitNative") {
             self.error(
                 format!(
@@ -1218,6 +1234,34 @@ impl Verifier<'_> {
                 ),
                 span,
             );
+            return;
+        }
+        let is_float = matches!(
+            op,
+            ArithOp::FAdd
+                | ArithOp::FSub
+                | ArithOp::FMul
+                | ArithOp::FDiv
+                | ArithOp::FMod
+                | ArithOp::FLt
+                | ArithOp::FGt
+        );
+        if !is_float {
+            return;
+        }
+        for reg in [lhs, rhs] {
+            if let Some(def) = regs.get(reg) {
+                if !matches!(def.ty.as_str(), "#bit32" | "#bit64") {
+                    self.error(
+                        format!(
+                            "`{}` needs `#bit32` or `#bit64` operands, found `{}` in `&{reg}`",
+                            print_op(op),
+                            def.ty
+                        ),
+                        span,
+                    );
+                }
+            }
         }
     }
 
@@ -1259,11 +1303,21 @@ impl Verifier<'_> {
         &mut self,
         regs: &mut HashMap<&'a str, RegDef>,
         dst: &'a str,
+        ty: &str,
         is_const: bool,
         span: Span,
         func: &LirFunc,
     ) {
-        if regs.insert(dst, RegDef { is_const }).is_some() {
+        if regs
+            .insert(
+                dst,
+                RegDef {
+                    is_const,
+                    ty: ty.to_owned(),
+                },
+            )
+            .is_some()
+        {
             self.error(
                 format!("register `&{dst}` defined twice in `@{}`", func.name),
                 span,
@@ -1271,7 +1325,13 @@ impl Verifier<'_> {
         }
     }
 
-    fn verify_term(&mut self, func: &LirFunc, term: &LirTerm, regs: &HashMap<&str, RegDef>) {
+    fn verify_term(
+        &mut self,
+        func: &LirFunc,
+        term: &LirTerm,
+        regs: &HashMap<&str, RegDef>,
+        has_fallthrough: bool,
+    ) {
         let labels: HashSet<&str> = func
             .blocks
             .iter()
@@ -1311,6 +1371,15 @@ impl Verifier<'_> {
                             *span,
                         );
                     }
+                }
+                if els.is_none() && !has_fallthrough {
+                    self.error(
+                        format!(
+                            "`branch.if` without an `else` in `@{}` has no following block for its false edge",
+                            func.name
+                        ),
+                        *span,
+                    );
                 }
             }
             LirTerm::Panic { msg, span } => {
@@ -1457,6 +1526,118 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
+    }
+
+    /// An `else`-less `branch.if` uses the *next* block as its false edge, so a
+    /// final one has nowhere to fall through to and must be rejected.
+    #[test]
+    fn verify_rejects_final_branchif_without_else() {
+        let mut module = canonical_module();
+        module.funcs[0].blocks[0].term = LirTerm::BranchIf {
+            cond: "1".to_owned(),
+            then: "entry".to_owned(),
+            els: None,
+            span: test_span(),
+        };
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
+        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        assert!(msgs.iter().any(|m| m.contains("else")), "{msgs:?}");
+    }
+
+    /// The same terminator is fine when a following block supplies the false
+    /// edge.
+    #[test]
+    fn verify_accepts_branchif_fallthrough_with_next_block() {
+        let mut module = canonical_module();
+        module.funcs[0].blocks[0].term = LirTerm::BranchIf {
+            cond: "1".to_owned(),
+            then: "entry".to_owned(),
+            els: None,
+            span: test_span(),
+        };
+        module.funcs[0].blocks.push(LirBlock {
+            label: "next".to_owned(),
+            insts: Vec::new(),
+            term: LirTerm::Return { span: test_span() },
+            span: test_span(),
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(
+            verify(&module, &mut diags).is_ok(),
+            "{:?}",
+            diags.diagnostics()
+        );
+    }
+
+    /// Builds the canonical module with two extra operand registers of the
+    /// given types feeding one `op`.
+    fn module_with_arith(op: ArithOp, lhs_ty: &str, rhs_ty: &str, result_ty: &str) -> LirModule {
+        let mut module = canonical_module();
+        module.funcs[0].blocks[0].insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("in".to_owned()),
+            dst: "2".to_owned(),
+            ty: lhs_ty.to_owned(),
+            span: test_span(),
+        });
+        module.funcs[0].blocks[0].insts.push(LirInst::CopyReg {
+            src: LirOperand::Place("in".to_owned()),
+            dst: "3".to_owned(),
+            ty: rhs_ty.to_owned(),
+            span: test_span(),
+        });
+        module.funcs[0].blocks[0].insts.push(LirInst::Arith {
+            op,
+            lhs: "2".to_owned(),
+            rhs: "3".to_owned(),
+            dst: "4".to_owned(),
+            ty: result_ty.to_owned(),
+            span: test_span(),
+        });
+        module
+    }
+
+    #[test]
+    fn verify_rejects_float_arith_on_narrow_operands() {
+        for (op, lhs_ty) in [
+            (ArithOp::FAdd, "#bit8"),
+            (ArithOp::FLt, "#bit16"),
+            (ArithOp::FGt, "#bit8"),
+        ] {
+            let result_ty = if matches!(op, ArithOp::FLt | ArithOp::FGt) {
+                "#bit8"
+            } else {
+                lhs_ty
+            };
+            let module = module_with_arith(op, lhs_ty, "#bit32", result_ty);
+            let mut diags = lilac_error::Diags::new();
+            assert!(verify(&module, &mut diags).is_err(), "{lhs_ty}");
+            assert_eq!(e070_count(&diags), 1, "{lhs_ty}: {:?}", diags.diagnostics());
+        }
+    }
+
+    #[test]
+    fn verify_accepts_float_arith_on_supported_operands() {
+        for (op, ty) in [
+            (ArithOp::FAdd, "#bit32"),
+            (ArithOp::FDiv, "#bit64"),
+            (ArithOp::FLt, "#bit32"),
+            (ArithOp::FGt, "#bit64"),
+        ] {
+            let result_ty = if matches!(op, ArithOp::FLt | ArithOp::FGt) {
+                "#bit8"
+            } else {
+                ty
+            };
+            let module = module_with_arith(op, ty, ty, result_ty);
+            let mut diags = lilac_error::Diags::new();
+            assert!(
+                verify(&module, &mut diags).is_ok(),
+                "{ty}: {:?}",
+                diags.diagnostics()
+            );
+        }
     }
 
     #[test]
