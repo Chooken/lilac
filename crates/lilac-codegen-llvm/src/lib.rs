@@ -598,6 +598,44 @@ mod tests {
         assert!(text.contains("call void @g()\n  ret void"), "{text}");
     }
 
+    /// The caller is listed *before* its callee, so this passes only because
+    /// every function is declared up front: both the direct call and
+    /// `addr.func` resolve a function whose body is lowered later. `emit`
+    /// verifies the module.
+    #[test]
+    fn lowers_forward_referenced_callee() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        alloca(&mut insts, "x", "#bit32");
+        alloca(&mut insts, "y", "#bit32");
+        alloca(&mut insts, "fptr", "#bit64");
+        call(
+            &mut insts,
+            LirCallee::Func("later".to_owned()),
+            &["x"],
+            &["y"],
+        );
+        insts.push(LirInst::AddrFunc {
+            func: "later".to_owned(),
+            dst: "1".to_owned(),
+            ty: "#bit64".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fptr");
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        module.funcs.push(func(
+            "later",
+            &[("a", "#bit32")],
+            &[("o", "#bit32")],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        let text = emit(&module);
+        assert!(text.contains("call void @later(ptr %x, ptr %y)"), "{text}");
+        assert!(text.contains("ptrtoint (ptr @later to i64)"), "{text}");
+    }
+
     /// An indirect call through an `addr.func` register round-trips the
     /// function pointer through its declared integer type (`ptrtoint` at the
     /// address, `inttoptr` at the call) and passes the same place pointers.

@@ -199,11 +199,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Declares one function as `define`-able `void @name(ptr %in0, …, ptr
     /// %out0, …)` without lowering its body. Declaring every function up front
     /// lets calls and `addr.func` reference functions defined later.
-    fn declare_func(&self, func: &LirFunc) -> FunctionValue<'ctx> {
+    fn declare_func(&self, func: &LirFunc) {
         let arity = func.ins.len() + func.outs.len();
         let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
-        self.module.add_function(&func.name, fn_type, None)
+        self.module.add_function(&func.name, fn_type, None);
     }
 
     /// Lowers one function body: its signature places are bound to the incoming
