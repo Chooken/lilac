@@ -1,5 +1,8 @@
 lilac_ir = "0.2"
 target = "x86_64-unknown-none"
+type #Matrix {
+    value: #bit32,
+}
 function @@add:Matrix:Matrix:bit32
   in #Matrix %lhs
   in #Matrix %rhs

@@ -30,13 +30,16 @@ String const bytes are UTF-8. `"` escapes as `\22` and `\` as `\5C`.
 `{{` / `}}` from f-string source are already resolved to `{` / `}` before
 lowering, so they never appear as escapes here.
 
-Types are defined as like:
+Types are defined as like (members carry their field names in layout order;
+sections print sorted by type name for deterministic snapshots):
 
 ```lilac-ir
-type #type_name {
-    #bit32,
+type #Number {
+    tag: #bit8,
+    val: #bit32,
 }
 ```
+as produced by `tests/ui/match_enum.lir`.
 
 Builtin aggregates usable in `#` positions: `#byte_buffer` (`{len: #bitNative,
 ptr: #ptr}` view, borrows) and `#format_args` (fixed-capacity inline piece table,

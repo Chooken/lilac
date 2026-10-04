@@ -1,5 +1,8 @@
 lilac_ir = "0.2"
 target = "x86_64-unknown-none"
+type #Object {
+    member: #bit32,
+}
 function @Object.get
   in ref #Object %instance
   out #bit32 %result

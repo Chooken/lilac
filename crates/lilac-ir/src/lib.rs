@@ -388,13 +388,19 @@ impl LirModule {
         )
     }
 
-    /// Canonical module text: header, data consts, then functions.
+    /// Canonical module text: header, data consts, type sections (sorted
+    /// by name for deterministic snapshots), then functions.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = self.header_text();
         for data in &self.data {
             out.push_str(&print_data(data));
             out.push('\n');
+        }
+        let mut names: Vec<&str> = self.layouts.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        for name in names {
+            out.push_str(&print_layout(name, &self.layouts[name]));
         }
         for func in &self.funcs {
             out.push_str(&print_func(func));
@@ -427,6 +433,18 @@ fn print_data(data: &LirData) -> String {
         LirDataKind::NumLit(text) => ("numlit", escape_data(text)),
     };
     format!("!{}: {kind} = \"{value}\"", data.name)
+}
+
+/// Prints one type section (`type #Name` with `name: #ty` members in
+/// layout order; the section order itself is sorted in `to_text`).
+fn print_layout(name: &str, members: &[(String, String)]) -> String {
+    let mut out = format!("type {name} {{\n");
+    for (member, ty) in members {
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "    {member}: {ty},");
+    }
+    out.push_str("}\n");
+    out
 }
 
 fn print_operand(operand: &LirOperand) -> String {
@@ -1185,6 +1203,23 @@ mod tests {
         let text = canonical_module().to_text();
         let expected = "lilac_ir = \"0.2\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
         assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn printer_emits_type_sections() {
+        let mut module = canonical_module();
+        module.layouts.insert(
+            "#Number".to_owned(),
+            vec![
+                ("tag".to_owned(), "#bit8".to_owned()),
+                ("val".to_owned(), "#bit32".to_owned()),
+            ],
+        );
+        let text = module.to_text();
+        assert!(
+            text.contains("type #Number {\n    tag: #bit8,\n    val: #bit32,\n}\n"),
+            "{text}"
+        );
     }
 
     fn e070_count(diags: &lilac_error::Diags) -> usize {
