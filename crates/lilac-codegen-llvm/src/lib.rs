@@ -2,9 +2,9 @@
 //!
 //! Type/layout/data/place lowering, the value, memory, conversion, constant,
 //! and arithmetic instruction bodies, calls (direct/indirect/builtin), and
-//! control flow and terminators live in the `lower` module. The in-module
-//! builtin runtime bodies land in Task 5. This crate is the ONLY one allowed to
-//! link LLVM (enforced by CI grep gate).
+//! control flow and terminators live in the `lower` module. The fixed
+//! in-module builtin runtime is emitted by the `runtime` module. This crate is
+//! the ONLY one allowed to link LLVM (enforced by CI grep gate).
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -17,6 +17,7 @@ use lilac_codegen::{Backend, OptLevel};
 use lilac_ir::LirModule;
 
 mod lower;
+mod runtime;
 
 /// Whether `triple`'s architecture is 64-bit (drives `@bitNative`).
 fn is_64_bit_triple(triple: &str) -> bool {
@@ -701,14 +702,60 @@ mod tests {
             .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
         let text = emit(&module);
         assert!(
-            text.contains("declare { i64, ptr } @byte_buffer_from(ptr, i64)"),
+            text.contains("define { i64, ptr } @byte_buffer_from(ptr %data, i64 %len)"),
             "{text}"
+        );
+        assert!(
+            !text.contains("declare { i64, ptr } @byte_buffer_from"),
+            "runtime definition must be reused, not re-declared:\n{text}"
         );
         assert!(
             text.contains("call { i64, ptr } @byte_buffer_from(ptr %"),
             "{text}"
         );
         assert!(text.contains("store { i64, ptr } %"), "{text}");
+    }
+
+    /// Task 5 emits the whole runtime set once per module, in the fixed order
+    /// the spec pins, with the `IR_SPEC.md` value signatures.
+    #[test]
+    fn emits_each_runtime_builtin_once_with_value_signature() {
+        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        for needle in [
+            "define { i64, ptr } @byte_buffer_from(ptr %data, i64 %len)",
+            "define ptr @byte_buffer_ptr({ i64, ptr } %buffer)",
+            "define i64 @byte_buffer_len({ i64, ptr } %buffer)",
+            "define i8 @load_u8(ptr %data, i64 %index)",
+            "define void @store_u8(ptr %data, i64 %index, i8 %value)",
+            "define void @memcpy(ptr %dest, ptr %src, i64 %len)",
+            "define { i64, [16 x { i64, ptr }] } @format_args_new()",
+            "define void @format_args_push(ptr %table, { i64, ptr } %piece)",
+            "define i64 @format_args_count({ i64, [16 x { i64, ptr }] } %table)",
+            "define { i64, ptr } @format_args_piece({ i64, [16 x { i64, ptr }] } %table, i64 %index)",
+            "define void @lilac_abort()",
+        ] {
+            assert_eq!(
+                text.matches(needle).count(),
+                1,
+                "`{needle}` must be defined exactly once in:\n{text}"
+            );
+        }
+    }
+
+    /// `#format_args` is `{ iNative, [16 x { iNative, ptr }] }`, `new` returns a
+    /// zeroed table, and `push` appends only while `count < 16`.
+    #[test]
+    fn emits_format_args_layout_capacity_and_abort() {
+        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        assert!(text.contains("{ i64, [16 x { i64, ptr }] }"), "{text}");
+        assert!(
+            text.contains("ret { i64, [16 x { i64, ptr }] } zeroinitializer"),
+            "{text}"
+        );
+        assert!(text.contains("icmp ult i64"), "{text}");
+        assert!(text.contains("16"), "{text}");
+        assert!(text.contains("declare void @llvm.trap()"), "{text}");
+        assert!(text.contains("call void @llvm.trap()"), "{text}");
     }
 
     /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`
@@ -853,7 +900,7 @@ mod tests {
         ));
         let text = emit(&module);
         assert!(text.contains("ret void"), "{text}");
-        assert!(text.contains("declare void @lilac_abort()"), "{text}");
+        assert!(text.contains("define void @lilac_abort()"), "{text}");
         assert!(text.contains("call void @lilac_abort()"), "{text}");
         assert!(text.contains("unreachable"), "{text}");
         assert!(!text.contains("drop"), "drop must not lower:\n{text}");

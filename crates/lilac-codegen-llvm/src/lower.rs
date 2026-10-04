@@ -5,8 +5,8 @@
 //! calling convention, zero-initialized `alloca` places, every value / memory /
 //! conversion / constant / arithmetic instruction, direct/indirect/builtin
 //! calls, `drop`, and control flow (`branch`, `branch.if`, `return`, `panic`,
-//! `unreachable`). Builtin calls declare their runtime symbol here; the
-//! in-module builtin runtime bodies land in Task 5.
+//! `unreachable`). Builtin calls use the value ABI and reuse the runtime
+//! definitions the `runtime` module emits before any user function.
 
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ use lilac_ir::{
 use lilac_span::Span;
 
 /// Turns a fallible inkwell builder call into an ICE.
-fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
+pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
     match result {
         Ok(value) => value,
         Err(err) => bug!(Span::dummy(), "failed to build {what}: {err}"),
@@ -84,18 +84,35 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.module
     }
 
-    /// Lowers layouts, data globals, and functions into the module, in that
-    /// fixed order. Every function is declared before any body is lowered so
-    /// calls and `addr.func` may reference functions defined later.
+    /// The LLVM context this lowering is built in.
+    pub(crate) fn context(&self) -> &'ctx Context {
+        self.context
+    }
+
+    /// The target's `iNative` integer width.
+    pub(crate) fn native_int(&self) -> IntType<'ctx> {
+        self.native
+    }
+
+    /// Lowers layouts, data globals, the in-module runtime, and functions into
+    /// the module, in that fixed order. Every function is declared before any
+    /// body is lowered so calls and `addr.func` may reference functions defined
+    /// later, and the runtime is defined first so builtin calls reuse it.
     pub(crate) fn run(&mut self) {
         self.define_layouts();
         self.define_data();
+        self.emit_runtime();
         for func in &self.lir.funcs {
             self.declare_func(func);
         }
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
+    }
+
+    /// Emits the fixed in-module builtin runtime.
+    fn emit_runtime(&self) {
+        super::runtime::emit_runtime(self);
     }
 
     /// Maps a LIR type spelling to its LLVM type.
@@ -124,13 +141,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// `{len: iNative, ptr}`.
-    fn byte_buffer_type(&self) -> StructType<'ctx> {
+    pub(crate) fn byte_buffer_type(&self) -> StructType<'ctx> {
         self.context
             .struct_type(&[self.native.into(), self.ptr_type().into()], false)
     }
 
     /// `{count: iNative, pieces: [16 x {len: iNative, ptr}]}`.
-    fn format_args_type(&self) -> StructType<'ctx> {
+    pub(crate) fn format_args_type(&self) -> StructType<'ctx> {
         let piece = self
             .context
             .struct_type(&[self.native.into(), self.ptr_type().into()], false);
@@ -140,7 +157,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// The opaque `ptr` type used for every place under the pointer ABI.
-    fn ptr_type(&self) -> PointerType<'ctx> {
+    pub(crate) fn ptr_type(&self) -> PointerType<'ctx> {
         self.context.ptr_type(AddressSpace::default())
     }
 
@@ -479,8 +496,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// A builtin call uses the value ABI: each input place is loaded, the
     /// declared runtime symbol (from `builtin_sig`) is called, and the single
-    /// result is stored back into the out place. The runtime body is Task 5's
-    /// (and a real function already declared there is reused).
+    /// result is stored back into the out place. The `runtime` module has
+    /// already defined every builtin symbol, so the existing function is
+    /// reused rather than re-declared.
     fn lower_builtin_call(
         &self,
         name: &str,
@@ -555,7 +573,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Declares (once) `void @name(...)` with `fn_type`, reusing any existing
     /// definition or declaration.
-    fn runtime_fn(&self, name: &str, fn_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
+    pub(crate) fn runtime_fn(
+        &self,
+        name: &str,
+        fn_type: FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
         match self.module.get_function(name) {
             Some(function) => function,
             None => self.module.add_function(name, fn_type, None),
