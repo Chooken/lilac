@@ -136,7 +136,10 @@ const DUCK_TYPING_SHORT: &str = concat!(
     "2 |     out = T.other()\n",
     "   |           ^^^^^^^^^\n",
     "   = missing method `other` on `@bit32`\n",
-    "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:12:24 required by instantiation of gen_function[@bit32] here\n",
+    "  --> ../../tests/ui/FAILS_generic_duck_typing.lilac:12:24\n",
+    "   |\n",
+    "12 |     variable: @bit32 = gen_function[@bit32]()\n",
+    "   |                        ^^^^^^^^^^^^^^^^^^^^^^ required by instantiation of gen_function[@bit32] here\n",
     "note: based on this usage, the generic body requires a method matching:\n",
     "      fn other() -> T\n",
 );
@@ -170,7 +173,10 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "22 |     out = x.missing()\n",
     "   |           ^^^^^^^^^^^\n",
     "   = missing method `missing` on `@bit32`\n",
-    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:18:11 required by instantiation of level5[@bit32] here\n",
+    "  --> ../../tests/ui/FAILS_generic_deep_chain.lilac:18:11\n",
+    "   |\n",
+    "18 |     out = level5[T](x)\n",
+    "   |           ^^^^^^^^^^^^ required by instantiation of level5[@bit32] here\n",
     "note: in instantiation of level0[@bit32]\n",
     "note: in instantiation of level1[@bit32]\n",
     "note: in instantiation of level2[@bit32]\n",
@@ -206,7 +212,10 @@ const E010_BOTH_SIDES: &str = concat!(
     "6 |     set(v)\n",
     "   |         ^\n",
     "   = found `@bit8` here\n",
-    "note: ../../tests/ui/FAILS_ref_argument.lilac:6:5 expected `ref @bit8` here\n",
+    "  --> ../../tests/ui/FAILS_ref_argument.lilac:6:5\n",
+    "   |\n",
+    "6 |     set(v)\n",
+    "   |     ^^^^^^ expected `ref @bit8` here\n",
 );
 
 #[test]

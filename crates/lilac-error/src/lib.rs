@@ -304,9 +304,22 @@ impl Emitter for EmitterHuman {
             if is_primary || label.span.is_dummy() {
                 continue;
             }
+            // Every span-bearing secondary label renders as its own rustc-style
+            // snippet block; its message trails the carets (E060.md's shape).
             if let Some(file) = source_map.file(label.span.file) {
                 let (line, col) = file.line_col(label.span.lo.0 as usize);
-                let _ = writeln!(out, "note: {}:{line}:{col} {}", file.name, label.msg);
+                let _ = writeln!(out, "  --> {}:{line}:{col}", file.name);
+                let text = file.line_text(line);
+                let width = (label.span.len() as usize).clamp(1, text.len().max(1));
+                let pad = " ".repeat(col.saturating_sub(1));
+                out.push_str("   |\n");
+                let _ = writeln!(out, "{line} | {text}");
+                let carets = "^".repeat(width);
+                if label.msg.is_empty() {
+                    let _ = writeln!(out, "   | {pad}{carets}");
+                } else {
+                    let _ = writeln!(out, "   | {pad}{carets} {}", label.msg);
+                }
             }
         }
         let frame_count = diagnostic
@@ -454,6 +467,39 @@ mod tests {
         assert!(rendered.contains("error[E042]: unsatisfied requirements"));
         assert!(rendered.contains("--> main.lilac:1:8"));
         assert!(rendered.contains('^'));
+    }
+
+    #[test]
+    fn human_secondary_label_renders_as_snippet() {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file(
+            "main.lilac",
+            "out = T.other()\n    variable: @bit32 = gen_function[@bit32]()\n",
+        );
+        let primary = Span::new(6, 15, file);
+        let secondary = Span::new(39, 61, file);
+        let diagnostic = Diagnostic::error("E042", "unsatisfied requirements")
+            .label(primary, true, "missing method `other` on `@bit32`")
+            .label(
+                secondary,
+                false,
+                "required by instantiation of gen_function[@bit32] here",
+            );
+        let rendered = EmitterHuman::new().render(&diagnostic, &sm);
+        assert!(
+            rendered.contains("  --> main.lilac:2:24\n"),
+            "secondary lacks a snippet header: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "   |                        ^^^^^^^^^^^^^^^^^^^^^^ required by instantiation of gen_function[@bit32] here\n"
+            ),
+            "secondary message not on the caret line: {rendered}"
+        );
+        assert!(
+            !rendered.contains("note: main.lilac:2:24"),
+            "old flat note form survived: {rendered}"
+        );
     }
 
     #[test]
