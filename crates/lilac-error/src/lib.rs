@@ -216,6 +216,13 @@ impl Default for Diags {
     }
 }
 
+/// Stable prefix on instantiation-stack notes so [`EmitterHuman`] can elide
+/// them past [`EMITTER_MAX_FRAMES`] unless `verbose`.
+pub const CHAIN_FRAME_PREFIX: &str = "in instantiation of ";
+
+/// Chain frames shown before [`EmitterHuman`] elides the rest (non-`verbose`).
+const EMITTER_MAX_FRAMES: usize = 5;
+
 /// Renders a [`Diagnostic`] against a [`SourceMap`].
 pub trait Emitter {
     /// Renders one diagnostic to a string (no I/O performed).
@@ -227,7 +234,7 @@ pub trait Emitter {
 pub struct EmitterHuman {
     /// Reserved for color support (M6); currently always plain text.
     pub color: bool,
-    /// Reserved for full obligation trees (M4); currently no-op.
+    /// Show every instantiation-chain frame (default elides past 5).
     pub verbose: bool,
 }
 
@@ -277,8 +284,29 @@ impl Emitter for EmitterHuman {
                 let _ = writeln!(out, "note: {}:{line}:{col} {}", file.name, label.msg);
             }
         }
+        let frame_count = diagnostic
+            .notes
+            .iter()
+            .filter(|note| note.starts_with(CHAIN_FRAME_PREFIX))
+            .count();
+        let elide = !self.verbose && frame_count > EMITTER_MAX_FRAMES;
+        let mut frames_seen = 0usize;
+        let mut frames_elided = 0usize;
         for note in &diagnostic.notes {
+            if note.starts_with(CHAIN_FRAME_PREFIX) {
+                frames_seen += 1;
+                if elide && frames_seen > EMITTER_MAX_FRAMES {
+                    frames_elided += 1;
+                    continue;
+                }
+            }
             let _ = writeln!(out, "note: {note}");
+        }
+        if frames_elided > 0 {
+            let _ = writeln!(
+                out,
+                "note: ... {frames_elided} more frames elided (use --verbose)"
+            );
         }
         for help in &diagnostic.helps {
             let _ = writeln!(out, "help: {help}");
@@ -439,5 +467,32 @@ mod tests {
         assert!(diags.diagnostics().is_empty());
         assert!(diags.take_since(mark).is_empty());
         assert_eq!(diags.checkpoint(), 0);
+    }
+
+    #[test]
+    fn verbose_stack_full() {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("main.lilac", "x\n");
+        let mut diagnostic = Diagnostic::error("E042", "requirements").label(
+            Span::new(0, 1, file),
+            true,
+            "instantiated here",
+        );
+        for frame in 0..7 {
+            diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}frame{frame}"));
+        }
+
+        let short = EmitterHuman::new().render(&diagnostic, &sm);
+        assert!(short.contains("in instantiation of frame0"), "{short}");
+        assert!(!short.contains("in instantiation of frame6"), "{short}");
+        assert!(short.contains("more frames elided"), "{short}");
+
+        let full = EmitterHuman {
+            verbose: true,
+            ..EmitterHuman::new()
+        }
+        .render(&diagnostic, &sm);
+        assert!(full.contains("in instantiation of frame6"), "{full}");
+        assert!(!full.contains("elided"), "{full}");
     }
 }

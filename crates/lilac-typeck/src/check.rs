@@ -121,6 +121,7 @@ pub fn check_bodies(
         object_instances: HashMap::new(),
         failed_objects: HashSet::new(),
         layouts: HashMap::new(),
+        reported_failures: HashSet::new(),
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
@@ -217,6 +218,9 @@ struct Checker<'a> {
     failed_objects: HashSet<(DefId, Vec<TypeRef>)>,
     /// Concrete per-instance object layouts, keyed by mangled instance name.
     layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
+    /// `E042` reports already emitted, keyed by
+    /// `(generic DefId, args, call-site file, call-site byte)`.
+    reported_failures: HashSet<(DefId, Vec<TypeRef>, u32, u32)>,
 }
 
 struct FuncCtx {
@@ -3266,19 +3270,7 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         if param.is_ref && !got.is_ref {
-            let want = self.types.display_ref(param);
-            self.diags.emit(
-                Diagnostic::error(
-                    "E010",
-                    format!(
-                        "mismatched types: expected {want}, found {}",
-                        self.types.display_ref(got),
-                    ),
-                )
-                .label(span, false, format!("expected `{want}` here"))
-                .label(arg.span(), true, "needs an explicit `ref`".to_owned()),
-            );
-            return Err(ErrorGuaranteed::new());
+            return Err(self.mismatch(param, got, span, arg.span()));
         }
         self.expect_type(got, param.id, span, arg.span())?;
         Ok(self.convert_if_needed(got, param.id, hir))

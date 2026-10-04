@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use lilac_ast::{Expr, ItemKind, Type as AstType};
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_error::{Diagnostic, ErrorGuaranteed, CHAIN_FRAME_PREFIX};
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc};
 use lilac_resolve::{DefId, ResItem, ResKind};
 use lilac_span::Span;
@@ -217,13 +217,82 @@ impl Checker<'_> {
             },
         );
         self.active.push(key.clone());
+        let mark = self.diags.checkpoint();
         let result = self.specialize_func(def, args, &sig, &name);
-        self.active.pop();
         if result.is_err() {
             self.instances.remove(&key);
             self.failed.insert(key);
+            let guaranteed = self.instantiation_failure(def, args, use_span, mark);
+            self.active.pop();
+            return Err(guaranteed);
         }
+        self.active.pop();
         result.map(|()| sig)
+    }
+
+    /// Drains the diagnostics captured while specializing `def[args]` and
+    /// re-attributes the duck-typing requirement failures to `use_span` as a
+    /// single `E042`. Structural failures (deferrals, recursion guards) are
+    /// re-emitted unchanged; a failed instantiation with no requirement failure
+    /// reports nothing new (design §3.5).
+    pub(super) fn instantiation_failure(
+        &mut self,
+        def: DefId,
+        args: &[TypeRef],
+        use_span: Span,
+        mark: usize,
+    ) -> ErrorGuaranteed {
+        let captured = self.diags.take_since(mark);
+        let (requirements, structural): (Vec<Diagnostic>, Vec<Diagnostic>) =
+            captured.into_iter().partition(is_requirement_failure);
+        for diagnostic in structural {
+            self.diags.emit(diagnostic);
+        }
+        if requirements.is_empty() {
+            return ErrorGuaranteed::new();
+        }
+        let dedup = (def, args.to_vec(), use_span.file.0, use_span.lo.0);
+        if !self.reported_failures.insert(dedup) {
+            return ErrorGuaranteed::new();
+        }
+
+        let name = self.function_name(def);
+        let params = self.func_scope(def).join(", ");
+        let arg_list = args
+            .iter()
+            .map(|arg| self.types.display_ref(*arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut diagnostic = Diagnostic::error(
+            "E042",
+            format!("type `{arg_list}` does not satisfy `{name}[{params}]` requirements"),
+        )
+        .label(use_span, true, "instantiated here");
+
+        if let Some((item, _, _)) = find_item(self.program, self.module, def) {
+            diagnostic = diagnostic.label(
+                item.span,
+                false,
+                format!("required by `{name}[{params}]` here"),
+            );
+        }
+        for frame in self.instantiation_frames() {
+            diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}{frame}"));
+        }
+        for requirement in &requirements {
+            let label = requirement
+                .labels
+                .iter()
+                .find(|label| label.primary)
+                .or_else(|| requirement.labels.first());
+            if let Some(label) = label {
+                diagnostic = diagnostic.label(label.span, false, requirement_phrase(requirement));
+            }
+        }
+        for help in self.requirement_helps(&requirements) {
+            diagnostic = diagnostic.help(help);
+        }
+        self.diags.emit(diagnostic)
     }
 
     /// Checks a generic function's body under the substituted `sig` and emits
@@ -536,13 +605,20 @@ impl Checker<'_> {
         format!("func#{}", def.0)
     }
 
-    /// The active instantiation chain, elided after 5 frames.
-    fn instantiation_chain(&mut self) -> String {
+    /// The active instantiation chain, one mangled instance name per frame
+    /// (innermost last).
+    fn instantiation_frames(&mut self) -> Vec<String> {
         let active = self.active.clone();
-        let frames: Vec<String> = active
+        active
             .iter()
             .map(|(def, args)| self.instance_name(*def, args))
-            .collect();
+            .collect()
+    }
+
+    /// The active instantiation chain as one `a -> b` string, elided in the
+    /// middle past 5 frames.
+    fn instantiation_chain(&mut self) -> String {
+        let frames = self.instantiation_frames();
         if frames.len() > 5 {
             let head = frames[..2].join(" -> ");
             let tail = frames[frames.len() - 2..].join(" -> ");
@@ -551,6 +627,147 @@ impl Checker<'_> {
             frames.join(" -> ")
         }
     }
+
+    /// Ranked `help:` suggestions for the captured requirement failures:
+    /// edit-distance did-you-mean over the owner's members plus a discovered
+    /// `@conversion` (design §3.5).
+    fn requirement_helps(&self, requirements: &[Diagnostic]) -> Vec<String> {
+        let mut helps = Vec::new();
+        for requirement in requirements {
+            if let Some((field, owner)) = missing_member(requirement) {
+                let members = self.owner_members(&owner);
+                if let Some(best) = closest_member(&field, &members) {
+                    helps.push(format!("`{owner}` has `{best}`, did you mean `{best}`?"));
+                }
+            }
+            if requirement.code == "E043" {
+                if let Some((from, _to)) = conversion_pair(requirement) {
+                    if self
+                        .sigs
+                        .conversions
+                        .iter()
+                        .any(|conversion| self.types.display(conversion.from) == from)
+                    {
+                        helps.push(format!(
+                            "a `@conversion` from `{from}` exists; check its target"
+                        ));
+                    }
+                }
+            }
+            if requirement.code == "E022" {
+                if let Some((expected, found)) = arity_pair(requirement) {
+                    helps.push(format!(
+                        "the call takes {expected} arguments, but {found} were supplied"
+                    ));
+                }
+            }
+            if requirement.code == "E010" && requirement.msg.contains("expected ref ") {
+                helps.push("try passing a reference: `ref <value>`".to_owned());
+            }
+        }
+        helps
+    }
+
+    /// Concrete members of the object named `owner`, resolving an instance
+    /// mangle (`GenObject__1__bit32`) back to its base name.
+    fn owner_members(&self, owner: &str) -> Vec<String> {
+        let base = owner.split("__").next().unwrap_or(owner);
+        let mut members: Vec<String> = Vec::new();
+        for (name, item) in &self.module.items {
+            if name == owner || name == base {
+                if let ResKind::Object { members: table, .. } = &item.kind {
+                    members.extend(table.keys().cloned());
+                }
+            }
+        }
+        for (object, field) in self.fields.keys() {
+            if object == owner || object == base {
+                members.push(field.clone());
+            }
+        }
+        members.sort();
+        members.dedup();
+        members
+    }
+}
+
+/// Codes that describe a duck-typing requirement failure on a concrete type
+/// (member lookup, type compatibility, conversion, call arity). Structural
+/// failures (`E022` recursion guards, `E030` deferrals) are re-emitted, not
+/// folded.
+fn is_requirement_failure(diagnostic: &Diagnostic) -> bool {
+    matches!(diagnostic.code, "E010" | "E021" | "E040" | "E041" | "E043")
+        || (diagnostic.code == "E022" && diagnostic.msg.starts_with("wrong number of arguments"))
+}
+
+/// Human phrase for one captured body failure, e.g. a lookup miss becomes
+/// "missing method `other` on `@bit32`".
+fn requirement_phrase(diagnostic: &Diagnostic) -> String {
+    if let Some((field, owner)) = missing_member(diagnostic) {
+        return format!("missing method `{field}` on `{owner}`");
+    }
+    if diagnostic.code == "E022" {
+        return diagnostic.msg.clone();
+    }
+    match diagnostic.labels.iter().find(|label| label.primary) {
+        Some(label) => label.msg.clone(),
+        None => diagnostic.msg.clone(),
+    }
+}
+
+/// Extracts `(member, owner)` from a lookup-miss headline, if any.
+fn missing_member(diagnostic: &Diagnostic) -> Option<(String, String)> {
+    let rest = diagnostic
+        .msg
+        .strip_prefix("cannot call static member `")
+        .or_else(|| diagnostic.msg.strip_prefix("cannot call method `"))
+        .or_else(|| diagnostic.msg.strip_prefix("no member `"))?;
+    let (field, tail) = rest.split_once("` on `")?;
+    let owner = tail.strip_suffix('`')?;
+    Some((field.to_owned(), owner.to_owned()))
+}
+
+/// Extracts `(from, to)` from an `E043` conversion-miss headline.
+fn conversion_pair(diagnostic: &Diagnostic) -> Option<(String, String)> {
+    let rest = diagnostic.msg.strip_prefix("no conversion from ")?;
+    let (from, to) = rest.split_once(" to ")?;
+    Some((from.to_owned(), to.to_owned()))
+}
+
+/// Extracts `(expected, found)` counts from an arity `E022` headline.
+fn arity_pair(diagnostic: &Diagnostic) -> Option<(String, String)> {
+    let rest = diagnostic
+        .msg
+        .strip_prefix("wrong number of arguments: expected ")?;
+    let (expected, found) = rest.split_once(", found ")?;
+    Some((expected.to_owned(), found.to_owned()))
+}
+
+/// Closest member by edit distance within a small threshold, if any.
+fn closest_member(field: &str, members: &[String]) -> Option<String> {
+    members
+        .iter()
+        .map(|member| (levenshtein(field, member), member))
+        .filter(|(distance, member)| *distance <= 2 && member.as_str() != field)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, member)| member.clone())
+}
+
+/// Levenshtein edit distance between two strings (no new crates).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 #[cfg(test)]
@@ -562,7 +779,7 @@ mod tests {
     use lilac_span::SourceMap;
     use lilac_ty::{TypeKind, TypeRef, Types};
 
-    fn check(src: &str) -> (Diags, HirProgram, Types) {
+    fn run(src: &str) -> (Diags, HirProgram, Types, SourceMap) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -578,11 +795,50 @@ mod tests {
         let mut types = Types::new();
         let sigs = crate::collect_sigs(&module, &program, &mut types, &mut diags, true);
         let hir = crate::check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        (diags, hir, types, sm)
+    }
+
+    fn check(src: &str) -> (Diags, HirProgram, Types) {
+        let (diags, hir, types, _) = run(src);
         (diags, hir, types)
     }
 
     fn names(hir: &HirProgram) -> Vec<&str> {
         hir.funcs.iter().map(|func| func.name.as_str()).collect()
+    }
+
+    fn render_all(diags: &Diags, sm: &SourceMap) -> String {
+        use lilac_error::{Emitter, EmitterHuman};
+        diags
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| EmitterHuman::new().render(diagnostic, sm))
+            .collect()
+    }
+
+    #[test]
+    fn fails_generic_duck_typing_short() {
+        let src = "gen_function[T]: function () out: T {\n    out = T.other()\n}\n\nmain: function () nothing {\n    variable: @bit32 = gen_function[@bit32]()\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        let e042: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "E042")
+            .collect();
+        assert_eq!(e042.len(), 1, "{rendered}");
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(rendered.contains("instantiated here"), "{rendered}");
+        assert!(rendered.contains("missing method `other`"), "{rendered}");
+        assert!(!rendered.contains("error[E010]"), "{rendered}");
+    }
+
+    #[test]
+    fn no_cascade_one_error() {
+        let src = "gen_function[T]: function () out: T {\n    out = T.other()\n}\n\nmain: function () nothing {\n    a: @bit32 = gen_function[@bit32]()\n    b: @bit32 = gen_function[@bit32]()\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
     }
 
     #[test]

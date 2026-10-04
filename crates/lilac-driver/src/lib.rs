@@ -57,7 +57,7 @@ pub enum ErrorFormat {
 /// Per-compilation options.
 #[derive(Clone, Debug, Default)]
 pub struct Opts {
-    /// Full obligation trees (M4); currently no-op.
+    /// Show full instantiation stacks (default elides past 5 frames).
     pub verbose: bool,
     /// Output format.
     pub error_format: ErrorFormat,
@@ -146,10 +146,14 @@ impl Session {
     /// Renders all recorded diagnostics to one string.
     #[must_use]
     pub fn render_diagnostics(&self) -> String {
+        let human = EmitterHuman {
+            verbose: self.opts.verbose,
+            ..EmitterHuman::new()
+        };
         let mut out = String::new();
         for diagnostic in self.diags.diagnostics() {
             let text = match self.opts.error_format {
-                ErrorFormat::Human => EmitterHuman::new().render(diagnostic, &self.source_map),
+                ErrorFormat::Human => human.render(diagnostic, &self.source_map),
                 ErrorFormat::Json => EmitterJson.render(diagnostic, &self.source_map),
             };
             out.push_str(&text);
@@ -257,5 +261,19 @@ mod tests {
         let result = session.compile_source("warn.lilac", MATRIX_ADD);
         assert!(result.is_ok(), "{}", session.render_diagnostics());
         assert_eq!(session.render_diagnostics(), "");
+    }
+
+    #[test]
+    fn e010_shows_both_sides() {
+        let mut session = Session::new();
+        let result = session.compile_source(
+            "e010.lilac",
+            "set: function (r: ref @bit8) nothing {\n}\nmain: function () nothing {\n    v: @bit8 = 0x1\n    set(v)\n}\n",
+        );
+        assert!(result.is_err());
+        let rendered = session.render_diagnostics();
+        assert!(rendered.contains("error[E010]"), "{rendered}");
+        assert!(rendered.contains("expected `ref @bit8`"), "{rendered}");
+        assert!(rendered.contains("found `@bit8`"), "{rendered}");
     }
 }
