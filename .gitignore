@@ -5,3 +5,4 @@ target/
 .lilac-cache/
 .superpowers/
 .idea/
+.cargo/

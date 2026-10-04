@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+inkwell = { version = "0.10", features = ["llvm18-1"] }
 lilac-ir = { path = "../lilac-ir" }
 lilac-codegen = { path = "../lilac-codegen" }
 
