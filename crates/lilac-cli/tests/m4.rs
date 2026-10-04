@@ -178,7 +178,7 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "note: in instantiation of level4[@bit32]\n",
     "note: in instantiation of level5[@bit32]\n",
     "note: based on this usage, the generic body requires a method matching:\n",
-    "      fn missing(self: T) -> T\n",
+    "      fn missing(self: ref T) -> T\n",
 );
 
 #[test]

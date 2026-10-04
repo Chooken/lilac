@@ -1087,7 +1087,7 @@ impl Checker<'_> {
                         poison_expr(*span),
                     ));
                 }
-                match self.field_type(obj_ty.id, field, *span) {
+                match self.field_type(obj_ty.id, field, *span, None, false) {
                     Ok(ty) => Ok((
                         ty,
                         HirExpr {
@@ -1112,11 +1112,17 @@ impl Checker<'_> {
         }
     }
 
+    /// Resolves a field access. `expected` is the use-site expected type and
+    /// `annotate` controls whether a missing field on a generic-derived receiver
+    /// gains the inferred-requirement note (read sites only; writes leave it
+    /// unconstrained).
     fn field_type(
         &mut self,
         obj: TypeId,
         field: &str,
         span: Span,
+        expected: Option<TypeId>,
+        annotate: bool,
     ) -> Result<TypeRef, ErrorGuaranteed> {
         // A generic instance resolves its base object's field template under
         // the object's parameter scope, then substitutes the instance's args.
@@ -1127,25 +1133,47 @@ impl Checker<'_> {
                 let resolved = resolve_type(&ty, self.types, self.module, self.diags, &params);
                 return Ok(self.types.substitute(resolved, &args));
             }
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
-                    span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no field `{field}` on `{name}`"),
+            )
+            .label(span, true, "no such member".to_owned());
+            diagnostic = self.annotate_field_miss(diagnostic, obj, field, expected, annotate);
+            return Err(self.diags.emit(diagnostic));
         }
         let name = self.types.display(obj);
         if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
             Ok(self.resolve_ty(&ty))
         } else {
-            Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
-                    span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ))
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no field `{field}` on `{name}`"),
+            )
+            .label(span, true, "no such member".to_owned());
+            diagnostic = self.annotate_field_miss(diagnostic, obj, field, expected, annotate);
+            Err(self.diags.emit(diagnostic))
+        }
+    }
+
+    /// Adds the inferred-requirement field note to a missing-field diagnostic
+    /// when the receiver is generic-derived and this is an annotated read.
+    fn annotate_field_miss(
+        &self,
+        diagnostic: Diagnostic,
+        obj: TypeId,
+        field: &str,
+        expected: Option<TypeId>,
+        annotate: bool,
+    ) -> Diagnostic {
+        if annotate
+            && self.is_generic_derived(TypeRef {
+                id: obj,
+                is_ref: false,
+            })
+        {
+            diagnostic.note(self.required_field_note(field, expected))
+        } else {
+            diagnostic
         }
     }
 
@@ -1418,6 +1446,7 @@ impl Checker<'_> {
         obj: &Expr,
         field: &str,
         span: Span,
+        expected: Option<TypeId>,
     ) -> (TypeRef, HirExpr) {
         let (obj_ty, obj_hir) = self.check_expr(fctx, obj, None);
         if is_poison(obj_ty) {
@@ -1429,7 +1458,7 @@ impl Checker<'_> {
                 poison_expr(span),
             );
         }
-        match self.field_type(obj_ty.id, field, span) {
+        match self.field_type(obj_ty.id, field, span, expected, true) {
             Ok(ty) => (
                 ty,
                 HirExpr {
@@ -1719,7 +1748,9 @@ impl Checker<'_> {
                 self.check_literal(expr, expected)
             }
             Expr::RefOf { value, span } => self.check_ref_of(fctx, value, *span),
-            Expr::Member { obj, field, span } => self.check_member_read(fctx, obj, field, *span),
+            Expr::Member { obj, field, span } => {
+                self.check_member_read(fctx, obj, field, *span, expected)
+            }
             Expr::Call {
                 callee,
                 generic_args,
@@ -1978,7 +2009,7 @@ impl Checker<'_> {
                 failed = true;
                 continue;
             }
-            let Ok(expected) = self.field_type(obj_id, &field.name, field.span) else {
+            let Ok(expected) = self.field_type(obj_id, &field.name, field.span, None, false) else {
                 failed = true;
                 continue;
             };

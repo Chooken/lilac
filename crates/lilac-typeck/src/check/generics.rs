@@ -423,7 +423,13 @@ impl Checker<'_> {
     ) -> String {
         let mut params = Vec::new();
         if let Some(ty) = receiver {
-            params.push(format!("self: {}", self.display_ty_in_body(ty)));
+            // A method's first parameter is always `ref Self` (see
+            // `check_instance_member_call`); qualify the base type with `ref`.
+            let base = self.display_ty_in_body(TypeRef {
+                id: ty.id,
+                is_ref: false,
+            });
+            params.push(format!("self: ref {base}"));
         }
         for arg in args {
             let mark = self.diags.checkpoint();
@@ -444,6 +450,21 @@ impl Checker<'_> {
         format!(
             "based on this usage, the generic body requires a method matching:\n      fn {field}({}) -> {ret}",
             params.join(", ")
+        )
+    }
+
+    /// Builds the `note:` describing the field the generic body requires at a
+    /// missing-field use site. The field's type is the use-site expected type in
+    /// the generic's own parameter form, or `?` when unconstrained.
+    pub(super) fn required_field_note(&self, field: &str, expected: Option<TypeId>) -> String {
+        let ty = match expected {
+            Some(id) if id != TypeId::ERROR => {
+                self.display_ty_in_body(TypeRef { id, is_ref: false })
+            }
+            _ => "?".to_owned(),
+        };
+        format!(
+            "based on this usage, the generic body requires a field matching:\n      {field}: {ty}"
         )
     }
 
@@ -1110,7 +1131,7 @@ mod tests {
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: T, @byte_buffer) -> T"),
+            rendered.contains("fn other(self: ref T, @byte_buffer) -> T"),
             "missing value-receiver signature: {rendered}"
         );
     }
@@ -1124,7 +1145,7 @@ mod tests {
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: T, U) -> @bit8"),
+            rendered.contains("fn other(self: ref T, U) -> @bit8"),
             "missing generic-param signature: {rendered}"
         );
     }
@@ -1138,8 +1159,59 @@ mod tests {
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: T, @byte_buffer) -> Widget"),
+            rendered.contains("fn other(self: ref T, @byte_buffer) -> Widget"),
             "concrete return not rendered concretely: {rendered}"
+        );
+    }
+
+    #[test]
+    fn field_miss_shows_required_field_note() {
+        // A field read on a generic-derived value gets the field form of the
+        // inferred note, using the generic parameter for the expected type.
+        let src = "gen[T]: function (value: T) out: T {\n    out = value.data\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[@bit32](0x1)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("missing member `data` on `@bit32`"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "based on this usage, the generic body requires a field matching:\n      data: T"
+            ),
+            "missing field note: {rendered}"
+        );
+    }
+
+    #[test]
+    fn concrete_field_type_stays_concrete() {
+        // The field note's type comes from the use-site expected type; a user
+        // object stays concrete rather than becoming a generic parameter.
+        let src = "Widget: object {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.data\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("requires a field matching:\n      data: Widget"),
+            "concrete field type not rendered concretely: {rendered}"
+        );
+    }
+
+    #[test]
+    fn concrete_field_miss_has_no_inferred_note() {
+        // An ordinary field miss outside a generic instantiation keeps the
+        // plain `E021` shape with no inferred-requirement note.
+        let src = "Object: object {\n    value: @bit32\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit32 = o.data\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert!(
+            rendered.contains("no field `data` on `Object`"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("requires a field matching"),
+            "concrete field miss gained a note: {rendered}"
         );
     }
 
