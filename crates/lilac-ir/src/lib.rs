@@ -660,8 +660,14 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
             vec![Some("#format_args"), Some("#bitNative")],
             vec![Some("#byte_buffer")],
         ),
-        "@load_u8" => (vec![Some("ref #bit8")], vec![Some("#bit8")]),
-        "@store_u8" => (vec![Some("ref #bit8"), Some("#bit8")], vec![]),
+        "@load_u8" => (
+            vec![Some("ref #bit8"), Some("#bitNative")],
+            vec![Some("#bit8")],
+        ),
+        "@store_u8" => (
+            vec![Some("ref #bit8"), Some("#bitNative"), Some("#bit8")],
+            vec![],
+        ),
         "@memcpy" => (
             vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bitNative")],
             vec![],
@@ -1457,6 +1463,72 @@ mod tests {
         assert!(text.contains("call @format_args_new"), "{text}");
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+    }
+
+    #[test]
+    fn load_u8_and_store_u8_arity_includes_offset() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Alloca {
+                        ty: "ref #bit8".to_owned(),
+                        place: "p".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Alloca {
+                        ty: "#bitNative".to_owned(),
+                        place: "i".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Alloca {
+                        ty: "#bit8".to_owned(),
+                        place: "b".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Call {
+                        func: LirCallee::Builtin("@load_u8".into()),
+                        ins: vec!["p".to_owned(), "i".to_owned()],
+                        outs: vec!["b".to_owned()],
+                        span: test_span(),
+                    },
+                    LirInst::Call {
+                        func: LirCallee::Builtin("@store_u8".into()),
+                        ins: vec!["p".to_owned(), "i".to_owned(), "b".to_owned()],
+                        outs: Vec::new(),
+                        span: test_span(),
+                    },
+                ],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+
+        // The pre-fix offset-less shapes are rejected.
+        for (name, ins) in [
+            ("@load_u8", vec!["p".to_owned()]),
+            ("@store_u8", vec!["p".to_owned(), "b".to_owned()]),
+        ] {
+            let mut bad = module.clone();
+            let last = bad.funcs[0].blocks[0].insts.len() - 1;
+            bad.funcs[0].blocks[0].insts[last] = LirInst::Call {
+                func: LirCallee::Builtin(name.to_owned()),
+                ins,
+                outs: Vec::new(),
+                span: test_span(),
+            };
+            let mut diags = lilac_error::Diags::new();
+            assert!(
+                verify(&bad, &mut diags).is_err(),
+                "{name} accepted bad arity"
+            );
+        }
     }
 
     #[test]
