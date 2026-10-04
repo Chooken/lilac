@@ -220,7 +220,9 @@ verification (reaching the verifier is an internal error). The fold-required
 markers `@as_int`, `@as_float`, and `@size_of` are the same shape: the front-end
 emits a pre-fold node, the folder consumes it to a plain `const` (or `E060`), and
 a survivor reaching verification is an internal error, never a backend call.
-`@size_of` folding is best-effort in M3 (operand-type semantics not yet pinned).
+`@as_float` folds to the IEEE-754 bit pattern of its value at the target width
+(16/32/64) as an integer `const`, never a float literal. `@size_of` folding is
+best-effort in M3 (operand-type semantics not yet pinned).
 
 ## Casts
 

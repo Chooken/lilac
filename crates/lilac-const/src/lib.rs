@@ -309,7 +309,97 @@ fn eval_as_float(args: &[ConstValue], width: u32) -> Result<ConstValue, FoldValu
     let value = text.trim().parse::<f64>().map_err(|_| FoldValueError {
         message: format!("`{text}` is not a valid float literal"),
     })?;
-    Ok(ConstValue::Float(value, width))
+    let bits = match width {
+        64 => value.to_bits(),
+        32 => {
+            // Narrowing is intentional: `value` is first rounded to the
+            // nearest `f32` per IEEE-754, then its bits are taken.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            u64::from(narrowed.to_bits())
+        }
+        16 => u64::from(f64_to_f16_bits(value)),
+        _ => {
+            return Err(FoldValueError {
+                message: "`@as_float` needs a 16/32/64-bit target".to_owned(),
+            })
+        }
+    };
+    Ok(ConstValue::Int(bits, width))
+}
+
+/// IEEE-754 binary16 (half) encoding of `value`, round-to-nearest-even.
+///
+/// Handles zero, subnormals, normals, infinities, and `NaN` (quiet). Values
+/// too large for binary16 overflow to infinity; tiny values underflow to
+/// (signed) zero.
+fn f64_to_f16_bits(value: f64) -> u16 {
+    let bits = value.to_bits();
+    let sign = u16::try_from((bits >> 48) & 0x8000).unwrap_or(0);
+    let exponent = i32::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+
+    if exponent == 0x7ff {
+        // Infinity or NaN: keep the sign, force a quiet NaN.
+        return if mantissa == 0 {
+            sign | 0x7c00
+        } else {
+            sign | 0x7e00
+        };
+    }
+
+    let half_exp = exponent - 1023 + 15;
+    if half_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign;
+        }
+        // Subnormal: round the full significand down to a 10-bit mantissa.
+        // `value = sig * 2^(unbiased - 52)`, so `value * 2^24` shifts right
+        // by `28 - unbiased`.
+        let sig = mantissa | (1u64 << 52);
+        let unbiased = exponent - 1023;
+        let shift = u32::try_from(28 - unbiased).unwrap_or(0);
+        let rounded = round_to_even(sig, shift);
+        // `rounded == 0x400` naturally encodes the smallest normal.
+        return sign | u16::try_from(rounded).unwrap_or(0);
+    }
+
+    let mut half_mantissa = mantissa >> 42;
+    let remainder = mantissa & ((1u64 << 42) - 1);
+    let halfway = 1u64 << 41;
+    if remainder > halfway || (remainder == halfway && (half_mantissa & 1) == 1) {
+        half_mantissa += 1;
+        if half_mantissa == 0x400 {
+            let half_exp = half_exp + 1;
+            if half_exp >= 0x1f {
+                return sign | 0x7c00;
+            }
+            return sign | (u16::try_from(half_exp).unwrap_or(0) << 10);
+        }
+    }
+    sign | (u16::try_from(half_exp).unwrap_or(0) << 10) | u16::try_from(half_mantissa).unwrap_or(0)
+}
+
+/// Rounds `value >> shift` to nearest, ties to even.
+fn round_to_even(value: u64, shift: u32) -> u64 {
+    if shift == 0 {
+        return value;
+    }
+    if shift > 63 {
+        return 0;
+    }
+    let result = value >> shift;
+    let remainder = value & ((1u64 << shift) - 1);
+    let halfway = 1u64 << (shift - 1);
+    if remainder > halfway || (remainder == halfway && (result & 1) == 1) {
+        result + 1
+    } else {
+        result
+    }
 }
 
 /// Best-effort `@size_of`: its operand-type semantics are not pinned in
@@ -1788,8 +1878,52 @@ mod tests {
         let mut diags = Diags::new();
         assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
         let text = module.to_text();
-        assert!(text.contains("const 5.25"), "{text}");
+        assert!(text.contains("const 0x4015000000000000"), "{text}");
         assert!(!text.contains("@as_float"), "{text}");
+    }
+
+    #[test]
+    fn as_float_bits_at_32_and_16() {
+        let mut module = intrinsic_module("@as_float", "5.25", "#bit32");
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(
+            module.to_text().contains("const 0x40a80000"),
+            "{}",
+            module.to_text()
+        );
+
+        let mut module = intrinsic_module("@as_float", "5.25", "#bit16");
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(
+            module.to_text().contains("const 0x4540"),
+            "{}",
+            module.to_text()
+        );
+    }
+
+    #[test]
+    fn f16_encoding_rounds_to_nearest_even() {
+        assert_eq!(f64_to_f16_bits(1.0), 0x3c00);
+        assert_eq!(f64_to_f16_bits(-2.0), 0xc000);
+        assert_eq!(f64_to_f16_bits(0.0), 0x0000);
+        assert_eq!(f64_to_f16_bits(f64::INFINITY), 0x7c00);
+        assert_eq!(f64_to_f16_bits(65504.0), 0x7bff);
+        assert_eq!(f64_to_f16_bits(65536.0), 0x7c00);
+        // Smallest normal, a subnormal, and a subnormal tie-to-even case.
+        assert_eq!(f64_to_f16_bits(2f64.powi(-14)), 0x0400);
+        assert_eq!(f64_to_f16_bits(2f64.powi(-15)), 0x0200);
+        assert_eq!(f64_to_f16_bits(3.0 * 2f64.powi(-25)), 0x0002);
+        assert_eq!(f64_to_f16_bits(2f64.powi(-25)), 0x0000);
+    }
+
+    #[test]
+    fn as_float_bad_width_is_e060() {
+        let mut module = intrinsic_module("@as_float", "5.25", "#bit8");
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
+        assert_eq!(e060_count(&diags), 1, "{diags:?}");
     }
 
     #[test]

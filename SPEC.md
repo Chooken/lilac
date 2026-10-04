@@ -65,6 +65,7 @@ mismatched-types error.
 
 `@as_int()` / `@as_float()` on a constant literal are folded at compile time;
 the runtime-parse form is only a semantic model, never emitted code.
+`@as_float` folds to the IEEE-754 bit pattern at the target width (16/32/64).
 Out-of-range digits or values that do not fit the target width are compile errors.
 Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
 `@as_int` is a fold-time value error (`E060`), not a type error — the price of

@@ -6,7 +6,7 @@ function @main
   $entry:
     alloca #bit64 %float : zeroed
     &1: #byte_buffer = const !c0
-    &2: #bit64 = const 5.25
+    &2: #bit64 = const 0x4015000000000000
     copy &2 -> %float
     return
 }
