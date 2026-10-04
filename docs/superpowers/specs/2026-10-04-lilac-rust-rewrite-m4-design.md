@@ -87,7 +87,8 @@ crates/
                   #     + run the concrete checker; memo/poison/depth/cycle;
                   #     in-body hook registration; E04x rendering
   lilac-hir/      # unchanged shape; M4 fills it with concrete items only
-  lilac-lower/    # unchanged (sees concrete HIR only)
+  lilac-lower/    # essentially unchanged: sees concrete HIR; the only edit is
+                  #     naming a TypeKind::Instance via `mangle` in `lir_ty`
   lilac-const/    # unchanged
   lilac-ir/       # unchanged (verified IR is concrete-only)
   lilac-driver/   # unchanged pipeline
@@ -229,7 +230,9 @@ ids until substituted.
   `GenObj[GenObj[@bit32]]` vs `GenObj[GenObj][@bit32…]`. `layouts`/`drops` keys
   use the same mangled name.
 - **Pipeline unchanged**: `resolve → collect_sigs → check_bodies (now also
-  monomorphizes) → lower → const-fold → verify`. No new driver stage.
+  monomorphizes) → lower → const-fold → verify`. No new driver stage. The only
+  `lilac-lower` edit is `lir_ty` naming a `TypeKind::Instance` via `mangle`
+  (instead of `display`); exposed diagnostics keep the readable `[@bit32]` form.
 - **No `Param` in output.** Because verified IR is concrete-only, `lilac-ir`,
   the verifier, and every backend remain generic-agnostic.
 
