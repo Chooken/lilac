@@ -124,23 +124,33 @@ impl Checker<'_> {
             }
         }
         let mangled = self.types.mangle(id);
-        self.layouts.insert(mangled, layout);
+        self.layouts.insert(mangled.clone(), layout);
 
         let resolved_members = match &resolved.kind {
             ResKind::Object { members, .. } => members.clone(),
             _ => std::collections::HashMap::new(),
         };
         let mut failed = false;
+        let mut drop_hook = None;
         for member in members {
             let ItemKind::Func(decl) = &member.kind else {
                 continue;
             };
-            if !decl.generic_params.is_empty() {
-                continue;
-            }
             let Some(member_resolved) = resolved_members.get(&member.name) else {
                 continue;
             };
+            // In-body hooks are templates until the parent instance exists; the
+            // drop hook is specialized below so M2/M3 lowering can call it
+            // (design §3.3). Other hooks (conversion/operator) are out of scope.
+            if matches!(member_resolved.kind, ResKind::Hook { .. }) {
+                if member.name == "@on_drop" && decl.generic_params.is_empty() {
+                    drop_hook = Some(member_resolved.id);
+                }
+                continue;
+            }
+            if !decl.generic_params.is_empty() {
+                continue;
+            }
             if !matches!(member_resolved.kind, ResKind::Func { .. }) {
                 continue;
             }
@@ -149,6 +159,20 @@ impl Checker<'_> {
                 .is_err()
             {
                 failed = true;
+            }
+        }
+        if !failed {
+            if let Some(hook_def) = drop_hook {
+                // Register the concrete drop entry keyed by the instance's
+                // mangled name, pointing at its monomorphized `@on_drop`
+                // (`GenBox__1__bit32` -> `GenBox__1__bit32.@on_drop`).
+                match self.instantiate_func(hook_def, args, use_span) {
+                    Ok(_) => {
+                        let hook = self.instance_name(hook_def, args);
+                        self.drops.insert(mangled, hook);
+                    }
+                    Err(_) => failed = true,
+                }
             }
         }
         if failed {
@@ -1014,6 +1038,26 @@ mod tests {
         assert!(
             names(&hir).contains(&"GenObject__1__bit32.get"),
             "missing monomorphized method: {:?}",
+            names(&hir)
+        );
+        assert_no_param(&types, &hir);
+    }
+
+    #[test]
+    fn generic_box_on_drop_registers() {
+        let (diags, hir, types) = check(
+            "GenBox[T]: object {\n    value: T\n    @on_drop: function (from: ref GenBox[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n    box: GenBox[@bit32] = GenBox {\n        value = 0x0\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(
+            hir.drops.get("GenBox__1__bit32").map(String::as_str),
+            Some("GenBox__1__bit32.@on_drop"),
+            "drops: {:?}",
+            hir.drops
+        );
+        assert!(
+            names(&hir).contains(&"GenBox__1__bit32.@on_drop"),
+            "missing monomorphized on_drop: {:?}",
             names(&hir)
         );
         assert_no_param(&types, &hir);

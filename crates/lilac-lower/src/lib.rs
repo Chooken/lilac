@@ -426,8 +426,14 @@ impl Lower<'_> {
     fn emit_drops(&mut self, fs: &mut FuncState) {
         let mut drops = Vec::new();
         for (place, ty) in &fs.owned {
-            let display = self.types.display(ty.id);
-            if let Some(hook) = self.drops.get(&display).cloned() {
+            // Drop keys follow the layout key: instances use the arity-tagged
+            // mangled name (`GenBox__1__bit32`); concrete types use the display
+            // name (design §3.4).
+            let key = match self.types.kind(ty.id) {
+                lilac_ty::TypeKind::Instance { .. } => self.types.mangle(ty.id),
+                _ => self.types.display(ty.id),
+            };
+            if let Some(hook) = self.drops.get(&key).cloned() {
                 drops.push((place.clone(), hook));
             }
         }
@@ -1850,6 +1856,16 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("drop %"), "{text}");
+    }
+
+    #[test]
+    fn drop_emitted_for_instance() {
+        let (text, diags) = lower_src(
+            "GenBox[T]: object {\n    value: T\n    @on_drop: function (from: ref GenBox[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n    box: GenBox[@bit32] = GenBox {\n        value = 0x0\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("drop %"), "{text}");
+        assert!(text.contains("@GenBox__1__bit32.@on_drop"), "{text}");
     }
 
     #[test]
