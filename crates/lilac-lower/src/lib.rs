@@ -12,7 +12,8 @@ use lilac_hir::{
     HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirProgram, HirStmt, TempId,
 };
 use lilac_ir::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirFunc, LirInst, LirModule, LirOperand, LirTerm,
+    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm,
 };
 use lilac_resolve::{DefId, Module};
 use lilac_span::Span;
@@ -1029,16 +1030,19 @@ impl Lower<'_> {
             HirExprKind::Ident { name, def } => self.lower_ident(fs, name, *def, expr.span),
             HirExprKind::Tag { name } => Ok(self.lower_tag(fs, expr.ty, name, expr.span)),
             HirExprKind::Number { bytes } => Ok(self.lower_number(fs, expr.ty, bytes, expr.span)),
-            HirExprKind::Str { .. } => {
-                self.diags.emit(
-                    lilac_error::Diagnostic::error("E030", "string literals lower in M3").label(
-                        expr.span,
-                        true,
-                        "lands in a later milestone".to_owned(),
-                    ),
+            HirExprKind::Str { value } => {
+                let reg = fresh_reg(fs);
+                let name = self.intern_data(LirDataKind::Str(value.clone()), value);
+                emit(
+                    fs,
+                    LirInst::Const {
+                        dst: reg.clone(),
+                        lit: format!("!{name}"),
+                        ty: "#byte_buffer".to_owned(),
+                        span: expr.span,
+                    },
                 );
-                self.failed = true;
-                Err(ErrorGuaranteed::new())
+                Ok(LirOperand::Reg(reg))
             }
             HirExprKind::Char { value } => {
                 let reg = fresh_reg(fs);
@@ -1150,17 +1154,54 @@ impl Lower<'_> {
         bytes: &str,
         span: Span,
     ) -> LirOperand {
-        let reg = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Const {
-                dst: reg.clone(),
-                lit: bytes.to_owned(),
-                ty: lir_ty(self.types, ty),
-                span,
-            },
-        );
-        LirOperand::Reg(reg)
+        let lir = lir_ty(self.types, ty);
+        if lir == "#byte_buffer" {
+            let reg = fresh_reg(fs);
+            let name = self.intern_data(LirDataKind::NumLit(bytes.to_owned()), bytes);
+            emit(
+                fs,
+                LirInst::Const {
+                    dst: reg.clone(),
+                    lit: format!("!{name}"),
+                    ty: lir,
+                    span,
+                },
+            );
+            LirOperand::Reg(reg)
+        } else {
+            let reg = fresh_reg(fs);
+            emit(
+                fs,
+                LirInst::Const {
+                    dst: reg.clone(),
+                    lit: bytes.to_owned(),
+                    ty: lir,
+                    span,
+                },
+            );
+            LirOperand::Reg(reg)
+        }
+    }
+
+    /// Interns a data const, deduping by `(kind, payload)` and assigning
+    /// `c0`, `c1`, … in first-use order.
+    fn intern_data(&mut self, kind: LirDataKind, payload: &str) -> String {
+        let same = |existing: &LirData| {
+            std::mem::discriminant(&existing.kind) == std::mem::discriminant(&kind)
+                && match &existing.kind {
+                    LirDataKind::Str(value) | LirDataKind::NumLit(value) => value == payload,
+                }
+        };
+        if let Some(existing) = self.module.data.iter().find(|data| same(data)) {
+            return existing.name.clone();
+        }
+        let name = format!("c{}", self.module.data.len());
+        self.module.data.push(LirData {
+            name: name.clone(),
+            kind,
+            span: Span::dummy(),
+        });
+        name
     }
 
     /// Lowers a call in value position (intrinsics yield registers,
@@ -1364,6 +1405,16 @@ impl Lower<'_> {
             }
             "@truncate" => self.lower_convert(fs, args, result_ty, span, ConvertOp::Trunc),
             "@extend_zero" => self.lower_convert(fs, args, result_ty, span, ConvertOp::ExtendZero),
+            "@as_int" | "@as_float" | "@size_of" => {
+                self.lower_fold_intrinsic(fs, name, args, result_ty, span)
+            }
+            "@byte_buffer_from" | "@byte_buffer_ptr" | "@byte_buffer_len" | "@format_args_new"
+            | "@format_args_count" | "@format_args_piece" | "@load_u8" => {
+                self.lower_builtin_call(fs, name, args, result_ty, span, true)
+            }
+            "@store_u8" | "@memcpy" | "@format_args_push" => {
+                self.lower_builtin_call(fs, name, args, result_ty, span, false)
+            }
             _ => {
                 self.diags.emit(
                     lilac_error::Diagnostic::error("E030", format!("`{name}` lowers in M3")).label(
@@ -1375,6 +1426,86 @@ impl Lower<'_> {
                 self.failed = true;
                 Err(ErrorGuaranteed::new())
             }
+        }
+    }
+
+    /// Emits a pre-fold marker for `@as_int`/`@as_float`/`@size_of` with
+    /// the single argument evaluated to a register.
+    fn lower_fold_intrinsic(
+        &mut self,
+        fs: &mut FuncState,
+        name: &str,
+        args: &[HirExpr],
+        result_ty: TypeRef,
+        span: Span,
+    ) -> Result<String, ErrorGuaranteed> {
+        if args.len() != 1 {
+            lilac_error::bug!(span, "fold intrinsic without one operand");
+        }
+        let arg = self.eval_reg(fs, &args[0])?;
+        let dst = fresh_reg(fs);
+        emit(
+            fs,
+            LirInst::FoldIntrinsic {
+                name: name.to_owned(),
+                arg: LirOperand::Reg(arg),
+                dst: dst.clone(),
+                ty: lir_ty(self.types, result_ty),
+                span,
+            },
+        );
+        Ok(dst)
+    }
+
+    /// Emits a call to a compiler builtin. Single-result builtins copy the
+    /// temp out place into a fresh register; void builtins return a fresh
+    /// (unused) register for statement position.
+    fn lower_builtin_call(
+        &mut self,
+        fs: &mut FuncState,
+        name: &str,
+        args: &[HirExpr],
+        result_ty: TypeRef,
+        span: Span,
+        has_result: bool,
+    ) -> Result<String, ErrorGuaranteed> {
+        let mut ins = Vec::with_capacity(args.len());
+        for arg in args {
+            ins.push(self.eval_place(fs, arg)?);
+        }
+        if has_result {
+            let temp = self.fresh_tmp(fs, result_ty, span);
+            emit(
+                fs,
+                LirInst::Call {
+                    func: LirCallee::Builtin(name.to_owned()),
+                    ins,
+                    outs: vec![temp.clone()],
+                    span,
+                },
+            );
+            let reg = fresh_reg(fs);
+            emit(
+                fs,
+                LirInst::CopyReg {
+                    src: LirOperand::Place(temp),
+                    dst: reg.clone(),
+                    ty: lir_ty(self.types, result_ty),
+                    span,
+                },
+            );
+            Ok(reg)
+        } else {
+            emit(
+                fs,
+                LirInst::Call {
+                    func: LirCallee::Builtin(name.to_owned()),
+                    ins,
+                    outs: Vec::new(),
+                    span,
+                },
+            );
+            Ok(fresh_reg(fs))
         }
     }
 
@@ -1707,5 +1838,48 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(!text.contains("drop %"), "{text}");
+    }
+
+    #[test]
+    fn lower_str_emits_data_and_buffer() {
+        let (text, diags) =
+            lower_src("main: function () nothing {\n    s: @byte_buffer = \"hi\"\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("str = \"hi\""), "{text}");
+        assert!(text.contains("#byte_buffer"), "{text}");
+    }
+
+    #[test]
+    fn lower_decimal_emits_numlit_data() {
+        let (text, diags) =
+            lower_src("main: function () nothing {\n    x: @bit8 = @as_int(5)\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("numlit = \"5\""), "{text}");
+        assert!(text.contains("@as_int"), "{text}");
+    }
+
+    #[test]
+    fn lower_hex_stays_const() {
+        let (text, diags) = lower_src("main: function () nothing {\n    x: @bit8 = 0x1\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("#bit8 = const 0x1"), "{text}");
+        assert!(!text.contains("numlit ="), "{text}");
+    }
+
+    #[test]
+    fn lower_builtin_calls() {
+        let (text, diags) =
+            lower_src("main: function () nothing {\n    x: @format_args = @format_args_new()\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("call @format_args_new"), "{text}");
+    }
+
+    #[test]
+    fn identical_strings_share_one_const() {
+        let (text, diags) = lower_src(
+            "main: function () nothing {\n    a: @byte_buffer = \"hi\"\n    b: @byte_buffer = \"hi\"\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(text.matches("str = \"hi\"").count(), 1, "{text}");
     }
 }
