@@ -178,6 +178,25 @@ impl Diags {
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
+
+    /// Marks the current end of the diagnostic stream so a later pass can
+    /// capture everything emitted since (generic instantiation capture).
+    #[must_use]
+    pub fn checkpoint(&self) -> usize {
+        self.diagnostics.len()
+    }
+
+    /// Removes and returns every diagnostic emitted after `mark`.
+    ///
+    /// Used by instantiation to capture a specialized body's diagnostics and
+    /// re-attribute them to the call site; a stale `mark` past the end yields
+    /// an empty vector.
+    pub fn take_since(&mut self, mark: usize) -> Vec<Diagnostic> {
+        if mark >= self.diagnostics.len() {
+            return Vec::new();
+        }
+        self.diagnostics.split_off(mark)
+    }
 }
 
 impl Default for Diags {
@@ -385,5 +404,19 @@ mod tests {
         diags.emit(diagnostic);
         assert_eq!(diags.diagnostics().len(), 1);
         assert!(diags.has_errors());
+    }
+
+    #[test]
+    fn checkpoint_and_take_since_capture_a_tail() {
+        let mut diags = Diags::new();
+        let mark = diags.checkpoint();
+        diags.emit(Diagnostic::error("E001", "first"));
+        diags.emit(Diagnostic::error("E002", "second"));
+        assert_eq!(diags.checkpoint(), 2);
+        let taken = diags.take_since(mark);
+        assert_eq!(taken.len(), 2);
+        assert!(diags.diagnostics().is_empty());
+        assert!(diags.take_since(mark).is_empty());
+        assert_eq!(diags.checkpoint(), 0);
     }
 }

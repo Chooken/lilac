@@ -14,6 +14,9 @@ use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
 use super::{lookup_intrinsic, resolve_type, Intrinsic, Sigs};
 
+mod generics;
+use generics::FuncInstance;
+
 /// One checked call: overload selected, arguments checked.
 struct CheckedCall {
     /// Return-slot types.
@@ -91,6 +94,12 @@ pub fn check_bodies(
         inline_bodies: HashMap::new(),
         in_progress: HashSet::new(),
         next_temp: 0,
+        instances: HashMap::new(),
+        failed: HashSet::new(),
+        active: Vec::new(),
+        current_params: Vec::new(),
+        current_args: Vec::new(),
+        instance_inline: HashMap::new(),
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
@@ -99,9 +108,26 @@ pub fn check_bodies(
             checker.check_item(item, &resolved, None);
         }
     }
+    let generic_objects: HashSet<String> = checker
+        .module
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            matches!(
+                &item.kind,
+                ResKind::Object { generic_params, .. } if !generic_params.is_empty()
+            )
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
     let mut layouts = HashMap::new();
     if !checker.diags.has_errors() {
         for item in &program.items {
+            if generic_objects.contains(&item.name) {
+                // Generic object layouts are concrete per instance (M4 Task 5);
+                // resolving `T` here would leak a template into HIR.
+                continue;
+            }
             if let ItemKind::Object { members, .. } = &item.kind {
                 let mut fields = Vec::new();
                 for member in members {
@@ -152,6 +178,18 @@ struct Checker<'a> {
     in_progress: HashSet<DefId>,
     /// Fresh value temporaries for desugared control flow.
     next_temp: u32,
+    /// Monomorphized function instances, keyed by `(DefId, args)`.
+    instances: HashMap<(DefId, Vec<TypeRef>), FuncInstance>,
+    /// Instantiation keys that failed; a later reference stays silent.
+    failed: HashSet<(DefId, Vec<TypeRef>)>,
+    /// Instantiation keys currently being specialized (the depth stack).
+    active: Vec<(DefId, Vec<TypeRef>)>,
+    /// Generic parameter names of the body currently being checked.
+    current_params: Vec<String>,
+    /// Concrete arguments substituting `current_params` in the current body.
+    current_args: Vec<TypeRef>,
+    /// Specialized `=>` bodies by instance key (generic inline functions).
+    instance_inline: HashMap<(DefId, Vec<TypeRef>), (Vec<String>, HirExpr)>,
 }
 
 struct FuncCtx {
@@ -712,7 +750,7 @@ impl Checker<'_> {
                 if !self.checked.insert(resolved.id) {
                     return;
                 }
-                let declared = resolve_type(ty, self.types, self.module, self.diags, &[]);
+                let declared = self.resolve_ty(ty);
                 let mut fctx = FuncCtx::new();
                 let (got, hir) = self.check_expr(&mut fctx, value, Some(declared.id));
                 let _ = self.expect_type(got, declared.id, ty.span, value.span());
@@ -742,6 +780,23 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Resolves a syntactic type in the current body's environment.
+    ///
+    /// Generic parameter names of the enclosing declaration resolve to `Param`
+    /// and are then substituted with the current instance's concrete arguments
+    /// (ruling R3). Concrete bodies have an empty environment, so this behaves
+    /// exactly like `resolve_type(..., &[])`.
+    fn resolve_ty(&mut self, ty: &AstType) -> TypeRef {
+        let params = self.current_params.clone();
+        let resolved = resolve_type(ty, self.types, self.module, self.diags, &params);
+        if self.current_args.is_empty() {
+            resolved
+        } else {
+            let args = self.current_args.clone();
+            self.types.substitute(resolved, &args)
+        }
     }
 
     /// Builds a function context (implicit `instance` for member functions,
@@ -970,7 +1025,7 @@ impl Checker<'_> {
     ) -> Result<TypeRef, ErrorGuaranteed> {
         let name = self.types.display(obj);
         if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
-            Ok(resolve_type(&ty, self.types, self.module, self.diags, &[]))
+            Ok(self.resolve_ty(&ty))
         } else {
             Err(self.diags.emit(
                 Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
@@ -1006,7 +1061,7 @@ impl Checker<'_> {
                 value,
                 span,
             } => {
-                let declared = resolve_type(ty, self.types, self.module, self.diags, &[]);
+                let declared = self.resolve_ty(ty);
                 let expected = if is_poison(declared) {
                     None
                 } else {
@@ -1295,7 +1350,7 @@ impl Checker<'_> {
     ) {
         let mut hir_bindings = Vec::with_capacity(bindings.len());
         for binding in bindings {
-            let ty = resolve_type(&binding.ty, self.types, self.module, self.diags, &[]);
+            let ty = self.resolve_ty(&binding.ty);
             hir_bindings.push(HirParam {
                 name: binding.name.clone(),
                 ty,
@@ -2171,12 +2226,12 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
-        if !generic_args.is_empty() {
-            return Err(deferred(self.diags, span, "generic calls", "M4"));
-        }
         match callee {
             Expr::Ident(name, name_span) => {
                 if let Some(local_ty) = fctx.locals.get(name).copied() {
+                    if !generic_args.is_empty() {
+                        return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
+                    }
                     if let lilac_ty::TypeKind::Func { params, returns } =
                         self.types.kind(local_ty.id).clone()
                     {
@@ -2197,9 +2252,12 @@ impl Checker<'_> {
                     ));
                 }
                 if let Some(item) = self.module.items.get(name).cloned() {
-                    return self.check_named_call(fctx, name, &item, args, span);
+                    return self.check_named_call(fctx, name, &item, generic_args, args, span);
                 }
                 if let Some(intrinsic) = lookup_intrinsic(name) {
+                    if !generic_args.is_empty() {
+                        return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
+                    }
                     return self.check_intrinsic(fctx, name, intrinsic, args, span, expected);
                 }
                 Err(self.diags.emit(
@@ -2222,10 +2280,20 @@ impl Checker<'_> {
                             ResKind::Object { .. } | ResKind::Enum { .. }
                         );
                         if is_type {
-                            return self
-                                .check_static_call(fctx, name, &type_item, field, args, span);
+                            return self.check_static_call(
+                                fctx,
+                                name,
+                                &type_item,
+                                field,
+                                generic_args,
+                                args,
+                                span,
+                            );
                         }
                     }
+                }
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, field, 0, generic_args.len()));
                 }
                 let (recv_ty, recv_hir) = self.check_expr(fctx, obj, None);
                 if is_poison(recv_ty) {
@@ -2258,13 +2326,28 @@ impl Checker<'_> {
         fctx: &mut FuncCtx,
         name: &str,
         item: &ResItem,
+        generic_args: &[AstType],
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         match &item.kind {
-            ResKind::Func { generic, .. } => {
+            ResKind::Func {
+                generic,
+                generic_params,
+                ..
+            } => {
                 if *generic {
-                    return Err(deferred(self.diags, span, "generic calls", "M4"));
+                    return self.check_generic_func_call(
+                        fctx,
+                        item.id,
+                        generic_params,
+                        generic_args,
+                        args,
+                        span,
+                    );
+                }
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
                 }
                 if let Some((ast_item, resolved, parent)) =
                     find_item(self.program, self.module, item.id)
@@ -2296,8 +2379,14 @@ impl Checker<'_> {
                 if *generic {
                     return Err(ErrorGuaranteed::new());
                 }
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
+                }
             }
             ResKind::Object { .. } | ResKind::Enum { .. } => {
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
+                }
                 return self.check_factory_call(fctx, name, item, args, span);
             }
             ResKind::Const | ResKind::Field => {
@@ -2489,7 +2578,14 @@ impl Checker<'_> {
         }
         if !self.checked.contains(&def) {
             self.in_progress.insert(def);
+            // A concrete `=>` body may be lazily checked while a generic body is
+            // being specialized; clear the substitution environment so the
+            // concrete body resolves against its own (empty) scope.
+            let saved_params = std::mem::take(&mut self.current_params);
+            let saved_args = std::mem::take(&mut self.current_args);
             self.check_func(callee.ast, &callee.resolved, callee.decl, callee.parent);
+            self.current_params = saved_params;
+            self.current_args = saved_args;
             self.in_progress.remove(&def);
         }
         let Some((param_names, body_hir)) = self.inline_bodies.get(&def).cloned() else {
@@ -2685,12 +2781,14 @@ impl Checker<'_> {
     }
 
     /// Calls `Type.field(args)`: no `self` injection, arguments as written.
+    #[allow(clippy::too_many_arguments)]
     fn check_static_call(
         &mut self,
         fctx: &mut FuncCtx,
         type_name: &str,
         type_item: &ResItem,
         field: &str,
+        generic_args: &[AstType],
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
@@ -2713,7 +2811,24 @@ impl Checker<'_> {
             ));
         };
         match &member.kind {
-            ResKind::Func { .. } => {
+            ResKind::Func {
+                generic,
+                generic_params,
+                ..
+            } => {
+                if *generic {
+                    return self.check_generic_func_call(
+                        fctx,
+                        member.id,
+                        generic_params,
+                        generic_args,
+                        args,
+                        span,
+                    );
+                }
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, field, 0, generic_args.len()));
+                }
                 let Some(sig) = self.func_sig(member.id) else {
                     lilac_error::bug!(member.span, "missing signature for static member");
                 };
@@ -2727,6 +2842,9 @@ impl Checker<'_> {
             ResKind::Hook { generic, .. } => {
                 if *generic {
                     return Err(ErrorGuaranteed::new());
+                }
+                if !generic_args.is_empty() {
+                    return Err(self.emit_generic_arity(span, field, 0, generic_args.len()));
                 }
                 let Some(sig) = self.func_sig(member.id) else {
                     lilac_error::bug!(member.span, "missing signature for static hook");
@@ -3248,9 +3366,13 @@ impl Checker<'_> {
         if let Some(item) = self.module.items.get(name).cloned() {
             let kind = item.kind.clone();
             return match kind {
-                ResKind::Func { generic, .. } => {
+                ResKind::Func {
+                    generic,
+                    generic_params,
+                    ..
+                } => {
                     if generic {
-                        Err(deferred(self.diags, span, "generic functions", "M4"))
+                        Err(self.emit_generic_arity(span, name, generic_params.len(), 0))
                     } else {
                         let Some(sig) = self.func_sig(item.id) else {
                             lilac_error::bug!(span, "missing signature for function value");
@@ -3297,7 +3419,7 @@ impl Checker<'_> {
             _ => None,
         });
         match found {
-            Some(ty) => Ok(resolve_type(&ty, self.types, self.module, self.diags, &[])),
+            Some(ty) => Ok(self.resolve_ty(&ty)),
             None => Err(self.diags.emit(
                 Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                     span,
@@ -3382,13 +3504,7 @@ impl Checker<'_> {
             };
         match payload_ty {
             None => Ok(None),
-            Some(ty) => Ok(Some(resolve_type(
-                &ty,
-                self.types,
-                self.module,
-                self.diags,
-                &[],
-            ))),
+            Some(ty) => Ok(Some(self.resolve_ty(&ty))),
         }
     }
     /// Checks a branch condition (`if`/`loop`): any `@bitN` tests non-zero.
@@ -3642,7 +3758,7 @@ impl Checker<'_> {
             push_stmt(fctx, empty_if(span), span);
             return None;
         };
-        let declared = resolve_type(&cap.ty, self.types, self.module, self.diags, &[]);
+        let declared = self.resolve_ty(&cap.ty);
         if !is_poison(outs[pos]) && !is_poison(declared) {
             let _ = self.expect_type(outs[pos], declared.id, cap.span, call_span);
         }
@@ -3840,7 +3956,7 @@ impl Checker<'_> {
                 let Some(cap) = &arm.capture else {
                     return (HirPattern::Tag { name: name.clone() }, None);
                 };
-                let declared = resolve_type(&cap.ty, self.types, self.module, self.diags, &[]);
+                let declared = self.resolve_ty(&cap.ty);
                 if let Some(payload_ty) = payload {
                     if !is_poison(payload_ty)
                         && !is_poison(declared)
