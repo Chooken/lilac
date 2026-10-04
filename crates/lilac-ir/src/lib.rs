@@ -87,13 +87,16 @@ pub enum LirOperand {
     Place(String),
 }
 
-/// A call target: register (indirect) or function (direct).
+/// A call target: register (indirect), function (direct), or builtin.
 #[derive(Clone, Debug)]
 pub enum LirCallee {
     /// Indirect call through a register holding a function address.
     Reg(String),
     /// Direct call by function name (without sigil).
     Func(String),
+    /// Direct call to a compiler builtin (name keeps its `@` sigil,
+    /// e.g. `@format_args_new`).
+    Builtin(String),
 }
 
 /// Arithmetic/comparison operators (all explicitly typed at site).
@@ -315,6 +318,21 @@ pub enum LirInst {
         /// Call-site span.
         call_span: Span,
     },
+    /// Pre-fold marker for `@as_int`/`@as_float`/`@size_of` (name keeps the
+    /// `@`). Folding consumes it before verification; a survivor is an
+    /// internal error (reported as `E070`).
+    FoldIntrinsic {
+        /// Intrinsic name (`@as_int`, `@as_float`, or `@size_of`).
+        name: String,
+        /// Operand to fold (a register holding a constant).
+        arg: LirOperand,
+        /// Destination register (without sigil).
+        dst: String,
+        /// Result type.
+        ty: String,
+        /// Instruction span.
+        span: Span,
+    },
 }
 
 /// Width-conversion operators.
@@ -458,6 +476,7 @@ fn print_callee(callee: &LirCallee) -> String {
     match callee {
         LirCallee::Reg(reg) => format!("&{reg}"),
         LirCallee::Func(func) => format!("@{func}"),
+        LirCallee::Builtin(name) => name.clone(),
     }
 }
 
@@ -571,6 +590,11 @@ fn print_inst(inst: &LirInst) -> String {
             ..
         } => format!("&{dst}: {ty} = {} &{lhs}, &{rhs}", print_op(op)),
         LirInst::CompileError { .. } => "@compile_error(live)".to_owned(),
+        LirInst::FoldIntrinsic {
+            name, arg, dst, ty, ..
+        } => {
+            format!("&{dst}: {ty} = {name} {}", print_operand(arg))
+        }
     }
 }
 
@@ -607,6 +631,44 @@ fn print_func(func: &LirFunc) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+/// Signature of a compiler builtin: input/output type slots in `#`-spelling
+/// (`None` = a width-parameterized slot, checked by arity only).
+#[derive(Clone, Debug)]
+pub struct BuiltinSig {
+    /// Input place types.
+    pub ins: Vec<Option<&'static str>>,
+    /// Output place types.
+    pub outs: Vec<Option<&'static str>>,
+}
+
+/// Looks up a builtin's signature by its `@`-prefixed name.
+#[must_use]
+pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
+    let (ins, outs) = match name {
+        "@byte_buffer_from" => (
+            vec![Some("ref #bit8"), Some("#bitNative")],
+            vec![Some("#byte_buffer")],
+        ),
+        "@byte_buffer_ptr" => (vec![Some("#byte_buffer")], vec![Some("ref #bit8")]),
+        "@byte_buffer_len" => (vec![Some("#byte_buffer")], vec![Some("#bitNative")]),
+        "@format_args_new" => (vec![], vec![Some("#format_args")]),
+        "@format_args_push" => (vec![Some("ref #format_args"), Some("#byte_buffer")], vec![]),
+        "@format_args_count" => (vec![Some("#format_args")], vec![Some("#bitNative")]),
+        "@format_args_piece" => (
+            vec![Some("#format_args"), Some("#bitNative")],
+            vec![Some("#byte_buffer")],
+        ),
+        "@load_u8" => (vec![Some("ref #bit8")], vec![Some("#bit8")]),
+        "@store_u8" => (vec![Some("ref #bit8"), Some("#bit8")], vec![]),
+        "@memcpy" => (
+            vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bitNative")],
+            vec![],
+        ),
+        _ => return None,
+    };
+    Some(BuiltinSig { ins, outs })
 }
 
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.
@@ -752,7 +814,8 @@ impl Verifier<'_> {
                 }
                 assigned.insert(dst.as_str());
             }
-            LirInst::Const { dst, ty, span, .. } => {
+            LirInst::Const { dst, lit, ty, span } => {
+                self.check_const_lit(lit, ty, *span);
                 self.check_type(ty, *span);
                 self.define_reg(regs, dst, true, *span, func);
             }
@@ -774,7 +837,7 @@ impl Verifier<'_> {
                 outs,
                 span,
             } => {
-                self.check_call_target(func, callee, ins.len(), outs.len(), *span, regs);
+                self.check_call_target(callee, ins, outs, places, *span, regs);
                 self.track_call_places(places, assigned, ins, outs, *span);
             }
             LirInst::Field {
@@ -825,12 +888,34 @@ impl Verifier<'_> {
             LirInst::CompileError { call_span, .. } => {
                 lilac_error::bug!(*call_span, "unfolded `@compile_error` reached verify");
             }
+            LirInst::FoldIntrinsic { name, span, .. } => {
+                self.error(format!("unfolded `{name}` reached verify"), *span);
+            }
             LirInst::StoreField { .. }
             | LirInst::Store { .. }
             | LirInst::Convert { .. }
             | LirInst::FieldAddr { .. } => {
                 self.verify_store_ops(func, inst, places, regs);
             }
+        }
+    }
+
+    /// Checks a `const` literal: a `!`-prefixed literal is a data-symbol
+    /// reference and must name declared data under an allowed type.
+    fn check_const_lit(&mut self, lit: &str, ty: &str, span: Span) {
+        let Some(sym) = lit.strip_prefix('!') else {
+            return;
+        };
+        if !self.module.data.iter().any(|datum| datum.name == sym) {
+            self.error(format!("const of undeclared data `!{sym}`"), span);
+        }
+        if !matches!(ty, "#byte_buffer" | "#format_args" | "ref #bit8") {
+            self.error(
+                format!(
+                    "data-symbol const needs `#byte_buffer`, `#format_args`, or `ref #bit8`, found `{ty}`"
+                ),
+                span,
+            );
         }
     }
 
@@ -979,26 +1064,20 @@ impl Verifier<'_> {
     }
 
     /// Checks a call target: register definedness for indirect calls,
-    /// name and arity for direct calls.
+    /// name and arity for direct calls, signature for builtin calls.
     fn check_call_target(
         &mut self,
-        func: &LirFunc,
         callee: &LirCallee,
-        ins: usize,
-        outs: usize,
+        ins: &[String],
+        outs: &[String],
+        places: &HashMap<&str, &str>,
         span: Span,
         regs: &HashMap<&str, RegDef>,
     ) {
         match callee {
             LirCallee::Reg(reg) => {
                 if !regs.contains_key(reg.as_str()) {
-                    self.error(
-                        format!(
-                            "call through undefined register `&{reg}` in `@{}`",
-                            func.name
-                        ),
-                        span,
-                    );
+                    self.error(format!("call through undefined register `&{reg}`"), span);
                 }
             }
             LirCallee::Func(target) => {
@@ -1006,15 +1085,62 @@ impl Verifier<'_> {
                     self.error(format!("call to unknown function `@{target}`"), span);
                     return;
                 };
-                if ins != found.ins.len() || outs != found.outs.len() {
+                if ins.len() != found.ins.len() || outs.len() != found.outs.len() {
                     self.error(
                         format!(
-                            "call to `@{target}` takes {} in and {} out, found {ins} in and {outs} out",
+                            "call to `@{target}` takes {} in and {} out, found {} in and {} out",
                             found.ins.len(),
                             found.outs.len(),
+                            ins.len(),
+                            outs.len(),
                         ),
                         span,
                     );
+                }
+            }
+            LirCallee::Builtin(name) => {
+                let Some(sig) = builtin_sig(name) else {
+                    self.error(format!("call to unknown builtin `{name}`"), span);
+                    return;
+                };
+                if ins.len() != sig.ins.len() || outs.len() != sig.outs.len() {
+                    self.error(
+                        format!(
+                            "call to `{name}` takes {} in and {} out, found {} in and {} out",
+                            sig.ins.len(),
+                            sig.outs.len(),
+                            ins.len(),
+                            outs.len(),
+                        ),
+                        span,
+                    );
+                    return;
+                }
+                for (place, expected) in ins.iter().zip(&sig.ins) {
+                    if let Some(expected) = expected {
+                        let actual = places.get(place.as_str()).copied().unwrap_or("#unknown");
+                        if actual != *expected {
+                            self.error(
+                                format!(
+                                    "builtin `{name}` input `%{place}` is `{actual}`, expected `{expected}`"
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+                for (place, expected) in outs.iter().zip(&sig.outs) {
+                    if let Some(expected) = expected {
+                        let actual = places.get(place.as_str()).copied().unwrap_or("#unknown");
+                        if actual != *expected {
+                            self.error(
+                                format!(
+                                    "builtin `{name}` output `%{place}` is `{actual}`, expected `{expected}`"
+                                ),
+                                span,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1299,5 +1425,116 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
+    }
+
+    #[test]
+    fn builtin_call_prints_and_verifies() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Alloca {
+                        ty: "#format_args".to_owned(),
+                        place: "buf".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Call {
+                        func: LirCallee::Builtin("@format_args_new".into()),
+                        ins: Vec::new(),
+                        outs: vec!["buf".to_owned()],
+                        span: test_span(),
+                    },
+                ],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let text = module.to_text();
+        assert!(text.contains("call @format_args_new"), "{text}");
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+    }
+
+    #[test]
+    fn fold_intrinsic_prints() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![LirInst::FoldIntrinsic {
+                    name: "@as_int".to_owned(),
+                    arg: LirOperand::Reg("1".to_owned()),
+                    dst: "2".to_owned(),
+                    ty: "#bit8".to_owned(),
+                    span: test_span(),
+                }],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let text = module.to_text();
+        assert!(text.contains("@as_int"), "{text}");
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn data_symbol_const_verifies() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span: test_span(),
+        });
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![LirInst::Const {
+                    dst: "1".to_owned(),
+                    lit: "!c0".to_owned(),
+                    ty: "#byte_buffer".to_owned(),
+                    span: test_span(),
+                }],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+    }
+
+    #[test]
+    fn unknown_data_symbol_rejected() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![LirInst::Const {
+                    dst: "1".to_owned(),
+                    lit: "!c9".to_owned(),
+                    ty: "#byte_buffer".to_owned(),
+                    span: test_span(),
+                }],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1, "{diags:?}");
     }
 }
