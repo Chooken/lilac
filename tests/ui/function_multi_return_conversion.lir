@@ -31,10 +31,14 @@ function @main
     alloca #bit8 %condition : zeroed
     alloca #bit8 %tmp.3 : zeroed
     alloca #bit32 %return_val : zeroed
-    call @get_multi (in) (out %tmp.1, %tmp.2)
+    &cf.1: #bit32 = const 0x1
+    copy &cf.1 -> %tmp.1
+    &cf.2: #bit32 = const 0x2
+    copy &cf.2 -> %tmp.2
     copy %tmp.1 -> %__m0
     copy %tmp.2 -> %__m1
-    call @@conversion:bit32:bit8 (in %__m0) (out %tmp.3)
+    &cf.3: #bit8 = const 0x1
+    copy &cf.3 -> %tmp.3
     copy %tmp.3 -> %condition
     copy %__m1 -> %return_val
     return

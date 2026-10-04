@@ -18,7 +18,8 @@ function @main
     alloca #bit8 %tmp.1 : zeroed
     &1: #bit32 = const 0x1
     copy &1 -> %a
-    call @@conversion:bit32:bit8 (in %a) (out %tmp.1)
+    &cf.1: #bit8 = const 0x1
+    copy &cf.1 -> %tmp.1
     copy %tmp.1 -> %b
     return
 }

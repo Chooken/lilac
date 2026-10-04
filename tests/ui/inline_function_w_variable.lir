@@ -9,7 +9,7 @@ function @main
     copy &1 -> %variable
     &2: #bit32 = copy %variable
     &3: #bit32 = const 0x1
-    &4: #bit32 = i.add &2, &3
+    &4: #bit32 = const 0x3
     copy &4 -> %result
     return
 }

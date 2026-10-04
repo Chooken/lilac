@@ -15,12 +15,10 @@ function @main
     branch $l.3
   $l.3:
     &5: #bit8 = copy %t.1
-    branch.if &5, $l.4, $l.5
+    branch $l.4
   $l.4:
     &6: #bit32 = const 0x1
     copy &6 -> %conditional
-    branch $l.6
-  $l.5:
     branch $l.6
   $l.6:
     return

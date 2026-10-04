@@ -7,7 +7,10 @@ function @main
     alloca #bit32 %tmp.2 : zeroed
     alloca #bit32 %condition : zeroed
     alloca #bit32 %result : zeroed
-    call @get_multi (in) (out %tmp.1, %tmp.2)
+    &cf.1: #bit32 = const 0x1
+    copy &cf.1 -> %tmp.1
+    &cf.2: #bit32 = const 0x2
+    copy &cf.2 -> %tmp.2
     copy %tmp.1 -> %condition
     copy %tmp.2 -> %result
     return
