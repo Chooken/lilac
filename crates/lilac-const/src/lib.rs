@@ -861,7 +861,11 @@ impl Folder<'_> {
             .unwrap_or_default()
     }
 
-    /// Interprets a user function under a fresh fuel budget.
+    /// Interprets a user function under a fresh fuel budget. A body (or any
+    /// nested callee) that executes a buffer-mutating builtin makes the whole
+    /// evaluation a miss: frame-local stores are not reflected in the `Bytes`
+    /// values a callee can return, so folding across such a call would be
+    /// unsound.
     fn eval_user_call(&self, name: &str, args: &[ConstValue]) -> Result<Vec<ConstValue>, Eval> {
         let mut evaluator = Evaluator {
             funcs: self.funcs,
@@ -869,8 +873,14 @@ impl Folder<'_> {
             steps: self.fuel,
             depth: 0,
             max_depth: self.max_depth,
+            mutated: false,
         };
-        evaluator.run_func(name, args)
+        let result = evaluator.run_func(name, args);
+        if evaluator.mutated {
+            Err(Eval::Miss)
+        } else {
+            result
+        }
     }
 
     /// Emits `Const` + `CopyPlace` for every out value, or `None` when a
@@ -1019,6 +1029,8 @@ struct Evaluator<'a> {
     steps: u64,
     depth: u32,
     max_depth: u32,
+    /// Set when any interpreted frame executes `@store_u8`/`@memcpy`.
+    mutated: bool,
 }
 
 impl Evaluator<'_> {
@@ -1161,8 +1173,11 @@ impl Evaluator<'_> {
                 name, arg, dst, ty, ..
             } => Self::exec_fold(name, arg, dst, ty, frame),
             LirInst::Call {
-                func, ins, outs, ..
-            } => self.exec_call(func, ins, outs, frame),
+                func,
+                ins,
+                outs,
+                span,
+            } => self.exec_call(func, ins, outs, *span, frame),
             _ => Err(Eval::Miss),
         }
     }
@@ -1195,6 +1210,7 @@ impl Evaluator<'_> {
         callee: &LirCallee,
         ins: &[String],
         outs: &[String],
+        span: Span,
         frame: &mut Frame,
     ) -> Result<(), Eval> {
         match callee {
@@ -1218,24 +1234,29 @@ impl Evaluator<'_> {
                 }
                 Ok(())
             }
-            LirCallee::Builtin(name) => Self::exec_builtin(name, ins, outs, frame),
+            LirCallee::Builtin(name) => self.exec_builtin(name, ins, outs, span, frame),
             LirCallee::Reg(_) => Err(Eval::Miss),
         }
     }
 
     /// Interprets a builtin over the frame's constants and const-bytes
-    /// memory; unknown/impure builtins are a miss.
+    /// memory; unknown/impure builtins are a miss. Store builtins set
+    /// `mutated` so the enclosing call-eval is discarded (see
+    /// [`Folder::eval_user_call`]).
     fn exec_builtin(
+        &mut self,
         name: &str,
         ins: &[String],
         outs: &[String],
+        span: Span,
         frame: &mut Frame,
     ) -> Result<(), Eval> {
         match name {
             "@byte_buffer_len" => {
+                let arg = call_operand(ins, 0, name, span);
                 let value = frame
                     .values
-                    .get(&ins[0])
+                    .get(arg)
                     .cloned()
                     .unwrap_or(ConstValue::Unknown);
                 let result = eval_builtin(name, &[value], "#bitNative").map_err(|_| Eval::Miss)?;
@@ -1243,25 +1264,29 @@ impl Evaluator<'_> {
                 Ok(())
             }
             "@byte_buffer_ptr" => {
-                let buffer = if let Some(&buffer) = frame.buffer_of.get(&ins[0]) {
+                let arg = call_operand(ins, 0, name, span);
+                let result = call_result(outs, name, span);
+                let buffer = if let Some(&buffer) = frame.buffer_of.get(arg) {
                     buffer
                 } else {
-                    let Some(ConstValue::Bytes(bytes)) = frame.values.get(&ins[0]).cloned() else {
+                    let Some(ConstValue::Bytes(bytes)) = frame.values.get(arg).cloned() else {
                         return Err(Eval::Miss);
                     };
                     let buffer = frame.buffers.len();
                     frame.buffers.push(bytes);
-                    frame.buffer_of.insert(ins[0].clone(), buffer);
+                    frame.buffer_of.insert(arg.clone(), buffer);
                     buffer
                 };
                 frame
                     .pointers
-                    .insert(outs[0].clone(), Ptr { buffer, offset: 0 });
+                    .insert(result.clone(), Ptr { buffer, offset: 0 });
                 Ok(())
             }
             "@byte_buffer_from" => {
-                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
-                let len = expect_int(frame, &ins[1])?;
+                let pointer_arg = call_operand(ins, 0, name, span);
+                let len_arg = call_operand(ins, 1, name, span);
+                let pointer = *frame.pointers.get(pointer_arg).ok_or(Eval::Miss)?;
+                let len = expect_int(frame, len_arg)?;
                 let bytes = slice_from(frame, pointer)?;
                 let result = eval_builtin(
                     name,
@@ -1273,9 +1298,11 @@ impl Evaluator<'_> {
                 Ok(())
             }
             "@load_u8" => {
-                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let pointer_arg = call_operand(ins, 0, name, span);
+                let offset_arg = call_operand(ins, 1, name, span);
+                let pointer = *frame.pointers.get(pointer_arg).ok_or(Eval::Miss)?;
                 let offset =
-                    usize::try_from(expect_int(frame, &ins[1])?).map_err(|_| Eval::Miss)?;
+                    usize::try_from(expect_int(frame, offset_arg)?).map_err(|_| Eval::Miss)?;
                 let at = pointer.offset.checked_add(offset).ok_or(Eval::Miss)?;
                 let byte = *frame
                     .buffers
@@ -1286,24 +1313,46 @@ impl Evaluator<'_> {
                 Ok(())
             }
             "@store_u8" => {
-                let pointer = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
+                let pointer_arg = call_operand(ins, 0, name, span);
+                let offset_arg = call_operand(ins, 1, name, span);
+                let value_arg = call_operand(ins, 2, name, span);
+                let pointer = *frame.pointers.get(pointer_arg).ok_or(Eval::Miss)?;
                 let offset =
-                    usize::try_from(expect_int(frame, &ins[1])?).map_err(|_| Eval::Miss)?;
-                let value = u8::try_from(expect_int(frame, &ins[2])?).map_err(|_| Eval::Miss)?;
+                    usize::try_from(expect_int(frame, offset_arg)?).map_err(|_| Eval::Miss)?;
+                let value = u8::try_from(expect_int(frame, value_arg)?).map_err(|_| Eval::Miss)?;
                 let at = pointer.offset.checked_add(offset).ok_or(Eval::Miss)?;
                 let buffer = frame.buffers.get_mut(pointer.buffer).ok_or(Eval::Miss)?;
                 *buffer.get_mut(at).ok_or(Eval::Miss)? = value;
+                self.mutated = true;
                 Ok(())
             }
             "@memcpy" => {
-                let dst = *frame.pointers.get(&ins[0]).ok_or(Eval::Miss)?;
-                let src = *frame.pointers.get(&ins[1]).ok_or(Eval::Miss)?;
-                let len = usize::try_from(expect_int(frame, &ins[2])?).map_err(|_| Eval::Miss)?;
-                memcpy(frame, dst, src, len)
+                let dst_arg = call_operand(ins, 0, name, span);
+                let src_arg = call_operand(ins, 1, name, span);
+                let len_arg = call_operand(ins, 2, name, span);
+                let dst = *frame.pointers.get(dst_arg).ok_or(Eval::Miss)?;
+                let src = *frame.pointers.get(src_arg).ok_or(Eval::Miss)?;
+                let len = usize::try_from(expect_int(frame, len_arg)?).map_err(|_| Eval::Miss)?;
+                memcpy(frame, dst, src, len)?;
+                self.mutated = true;
+                Ok(())
             }
             _ => Err(Eval::Miss),
         }
     }
+}
+
+/// Fetches a call's `index`-th in-place (a broken arity is an internal
+/// invariant, so a missing slot is an ICE via `bug!`, never an index panic).
+fn call_operand<'a>(ins: &'a [String], index: usize, name: &str, span: Span) -> &'a String {
+    ins.get(index)
+        .unwrap_or_else(|| lilac_error::bug!(span, "`{name}` call is missing operand {index}"))
+}
+
+/// Fetches a single-result call's out place (see [`call_operand`]).
+fn call_result<'a>(outs: &'a [String], name: &str, span: Span) -> &'a String {
+    outs.first()
+        .unwrap_or_else(|| lilac_error::bug!(span, "`{name}` call is missing its result place"))
 }
 
 /// Binds a `const` literal into a frame (data symbols become `Bytes`; a
@@ -1904,5 +1953,74 @@ mod tests {
             "{}",
             module.to_text()
         );
+    }
+
+    /// A two-function module where `@wipe` mutates its `@byte_buffer` param
+    /// (store `0x0` at offset 0, then load it back as a `#bitNative` result).
+    /// A pre-fix folder would fold this to `const 0x0`; the mutation guard
+    /// must leave the runtime call.
+    fn mutating_module() -> LirModule {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("AB".to_owned()),
+            span: test_span(),
+        });
+        let wipe = LirFunc {
+            name: "wipe".to_owned(),
+            ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
+            outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    alloca("ref #bit8", "p"),
+                    alloca("#bitNative", "z"),
+                    alloca("#bit8", "v"),
+                    alloca("#bit8", "w"),
+                    constant("r0", "0x0", "#bitNative"),
+                    copy_place(reg("r0"), "z"),
+                    constant("r1", "0x0", "#bit8"),
+                    copy_place(reg("r1"), "v"),
+                    call_builtin("@byte_buffer_ptr", &["buf"], &["p"]),
+                    call_builtin("@store_u8", &["p", "z", "v"], &[]),
+                    call_builtin("@load_u8", &["p", "z"], &["w"]),
+                    copy_reg(place("w"), "r2", "#bit8"),
+                    extend("r2", "r3", "#bitNative"),
+                    copy_place(reg("r3"), "result"),
+                ],
+                term: ret(),
+                span: test_span(),
+            }],
+        };
+        let main = LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    alloca("#byte_buffer", "arg"),
+                    alloca("#bitNative", "res"),
+                    constant("m0", "!c0", "#byte_buffer"),
+                    copy_place(reg("m0"), "arg"),
+                    call_func("wipe", &["arg"], &["res"]),
+                ],
+                term: ret(),
+                span: test_span(),
+            }],
+        };
+        module.funcs.push(main);
+        module.funcs.push(wipe);
+        module
+    }
+
+    #[test]
+    fn store_in_callee_stays_call() {
+        let mut module = mutating_module();
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let text = module.to_text();
+        assert!(text.contains("call @wipe"), "{text}");
     }
 }
