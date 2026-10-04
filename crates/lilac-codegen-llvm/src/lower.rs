@@ -1,9 +1,11 @@
-//! LIR → LLVM lowering: types, layouts, data globals, and places.
+//! LIR → LLVM lowering: types, layouts, data globals, places, and the value,
+//! memory, conversion, constant, and arithmetic instruction bodies.
 //!
-//! Task 2 of M5b covers the type map, named layouts, data globals, the pointer
-//! calling convention, and zero-initialized `alloca` places. Instruction bodies
-//! (beyond `alloca`) and non-`return` terminators land in later M5b tasks; the
-//! placeholders here keep every emitted module verifiable meanwhile.
+//! M5b Tasks 1–3 cover the type map, named layouts, data globals, the pointer
+//! calling convention, zero-initialized `alloca` places, and every value /
+//! memory / conversion / constant / arithmetic instruction. Calls, indirect
+//! calls, `drop`, control flow, and the non-`return` terminators land in
+//! Task 4; the in-module builtin runtime lands in Task 5.
 
 use std::collections::HashMap;
 
@@ -467,9 +469,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         } else if ty.starts_with("ref ") || ty == "#ptr" {
             ptr.into()
         } else {
+            // The LIR verifier's `check_const_lit` accepts `#byte_buffer`,
+            // `#format_args`, and `ref #bit8` data-symbol consts. A `[N x i8]`
+            // global can only become a `#byte_buffer` wrapper or a bare
+            // reference; `#format_args` (a `{ iNative, [16 x …] }` piece table)
+            // has no meaningful lowering and no `lilac-lower` path emits one.
+            // This explicit, documented ICE pins the divergence
+            // (`format_args_data_const_is_ice`).
             bug!(
                 Span::dummy(),
-                "data-symbol const of type `{ty}` is unsupported"
+                "data-symbol const type `{ty}` is accepted by the LIR verifier but has no codegen lowering"
             );
         }
     }

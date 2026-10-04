@@ -1,8 +1,10 @@
 //! LLVM backend behind [`Backend`].
 //!
-//! Type/layout/data/place lowering lives in the `lower` module; instruction
-//! bodies and control flow land in later M5b tasks. This crate is the ONLY one
-//! allowed to link LLVM (enforced by CI grep gate).
+//! Type/layout/data/place lowering and the value, memory, conversion, constant,
+//! and arithmetic instruction bodies live in the `lower` module. Calls, control
+//! flow, and terminators land in Task 4; the in-module builtin runtime lands in
+//! Task 5. This crate is the ONLY one allowed to link LLVM (enforced by CI grep
+//! gate).
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -516,6 +518,38 @@ mod tests {
         let text = emit(&module);
         assert!(text.contains("load ptr, ptr %in0"), "{text}");
         assert!(text.contains("getelementptr inbounds %Pair, ptr"), "{text}");
+    }
+
+    /// The LIR verifier permits a `#format_args` data-symbol `const`, but a
+    /// byte global cannot become a piece-table value; codegen raises an
+    /// explicit ICE pinning the backend/verifier divergence.
+    #[test]
+    #[should_panic(expected = "no codegen lowering")]
+    fn format_args_data_const_is_ice() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span: span(),
+        });
+        module.funcs.push(LirFunc {
+            name: "f".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![LirInst::Const {
+                    dst: "x".to_owned(),
+                    lit: "!c0".to_owned(),
+                    ty: "#format_args".to_owned(),
+                    span: span(),
+                }],
+                term: LirTerm::Return { span: span() },
+                span: span(),
+            }],
+        });
+        let _ = emit(&module);
     }
 
     #[test]
