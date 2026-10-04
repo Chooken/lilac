@@ -9,7 +9,6 @@
 use lilac_ast::{
     BinOp, Block, EnumVariant, Expr, FStrPart, FuncBody, FuncDecl, FuncType, Item, ItemKind,
     LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, Program, Stmt, StructField, Type,
-    UnionVariant,
 };
 use lilac_error::{Diagnostic, ErrorGuaranteed};
 use lilac_lex::{Token, TokenKind};
@@ -210,77 +209,47 @@ impl Parser {
         kind_token: Token,
         in_object: bool,
     ) -> Result<Item, ErrorGuaranteed> {
-        match kind_token.kind {
-            TokenKind::KwEnum => {
-                let variants = self.parse_enum_variants(diags)?;
-                Ok(Item {
-                    span: join_spans(name_span, self.prev_span()),
-                    name,
-                    kind: ItemKind::Enum {
-                        variants,
-                        generic_params,
-                    },
-                })
+        if kind_token.kind == TokenKind::KwEnum {
+            let variants = self.parse_enum_variants(diags)?;
+            Ok(Item {
+                span: join_spans(name_span, self.prev_span()),
+                name,
+                kind: ItemKind::Enum {
+                    variants,
+                    generic_params,
+                },
+            })
+        } else {
+            let ty = self.parse_type_starting(diags, kind_token)?;
+            if self.peek().kind == TokenKind::FatArrow {
+                self.bump();
+                let value = self.parse_expr(diags)?;
+                return Self::const_item(diags, name, name_span, &generic_params, ty, value, true);
             }
-            TokenKind::KwUnion => {
-                let variants = self.parse_union_variants(diags)?;
-                Ok(Item {
-                    span: join_spans(name_span, self.prev_span()),
-                    name,
-                    kind: ItemKind::Union {
-                        variants,
-                        generic_params,
-                    },
-                })
+            if self.peek().kind == TokenKind::Eq {
+                self.bump();
+                let value = self.parse_expr(diags)?;
+                return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
-            _ => {
-                let ty = self.parse_type_starting(diags, kind_token)?;
-                if self.peek().kind == TokenKind::FatArrow {
-                    self.bump();
-                    let value = self.parse_expr(diags)?;
-                    return Self::const_item(
-                        diags,
-                        name,
-                        name_span,
-                        &generic_params,
-                        ty,
-                        value,
-                        true,
-                    );
-                }
-                if self.peek().kind == TokenKind::Eq {
-                    self.bump();
-                    let value = self.parse_expr(diags)?;
-                    return Self::const_item(
-                        diags,
-                        name,
-                        name_span,
-                        &generic_params,
-                        ty,
-                        value,
-                        false,
-                    );
-                }
-                if !in_object {
-                    return Err(Self::err(
-                        diags,
-                        self.peek().span,
-                        "expected `=` or `=>` after constant type",
-                    ));
-                }
-                if !generic_params.is_empty() {
-                    return Err(Self::err(
-                        diags,
-                        name_span,
-                        "fields take no generic parameters",
-                    ));
-                }
-                Ok(Item {
-                    span: join_spans(name_span, ty.span),
-                    name,
-                    kind: ItemKind::Field { ty },
-                })
+            if !in_object {
+                return Err(Self::err(
+                    diags,
+                    self.peek().span,
+                    "expected `=` or `=>` after constant type",
+                ));
             }
+            if !generic_params.is_empty() {
+                return Err(Self::err(
+                    diags,
+                    name_span,
+                    "fields take no generic parameters",
+                ));
+            }
+            Ok(Item {
+                span: join_spans(name_span, ty.span),
+                name,
+                kind: ItemKind::Field { ty },
+            })
         }
     }
 
@@ -297,7 +266,7 @@ impl Parser {
             return Err(Self::err(
                 diags,
                 name_span,
-                "only `object`, `function`, `enum`, and `union` declarations take generic parameters",
+                "only `object`, `function`, and `enum` declarations take generic parameters",
             ));
         }
         Ok(Item {
@@ -432,42 +401,6 @@ impl Parser {
             };
             let end = payload.as_ref().map_or(ident.span, |ty| ty.span);
             variants.push(EnumVariant {
-                name: ident.text,
-                payload,
-                span: join_spans(ident.span, end),
-            });
-            if self.peek().kind == TokenKind::Comma {
-                self.bump();
-            }
-        }
-        self.bump();
-        Ok(variants)
-    }
-
-    fn parse_union_variants(
-        &mut self,
-        diags: &mut lilac_error::Diags,
-    ) -> Result<Vec<UnionVariant>, ErrorGuaranteed> {
-        self.expect(diags, TokenKind::LBrace, "`{` to open union body")?;
-        let mut variants = Vec::new();
-        while self.peek().kind != TokenKind::RBrace {
-            if self.peek().kind == TokenKind::Eof {
-                let span = self.peek().span;
-                return Err(Self::err(
-                    diags,
-                    span,
-                    "unterminated union body; add a closing `}`",
-                ));
-            }
-            let ident = self.expect(diags, TokenKind::Ident, "union variant name")?;
-            let payload = if self.peek().kind == TokenKind::Colon {
-                self.bump();
-                Some(self.parse_type(diags)?)
-            } else {
-                None
-            };
-            let end = payload.as_ref().map_or(ident.span, |ty| ty.span);
-            variants.push(UnionVariant {
                 name: ident.text,
                 payload,
                 span: join_spans(ident.span, end),
@@ -1944,6 +1877,21 @@ mod tests {
         assert!(
             matches!(&scrutinee, Expr::Ident(name, _) if name == "Foo"),
             "got {scrutinee:?}"
+        );
+    }
+
+    #[test]
+    fn union_keyword_is_gone() {
+        // Hard removal: `union` lexes as an identifier, so a union
+        // declaration fails with a generic parse error.
+        let (_, diags) = first_stmt(
+            "Maybe: union {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n}\n",
+        );
+        assert!(diags.has_errors());
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E001"),
+            "{:?}",
+            diags.diagnostics()
         );
     }
 }

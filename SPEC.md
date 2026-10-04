@@ -277,10 +277,10 @@ the operand types (see §8), the idiomatic form `loop if val < 0x1` works identi
 
 ### Pattern Matching
 
-The **`match`** statement inspects union tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else {}` branch).
+The **`match`** statement inspects enum tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else {}` branch).
 
 ```lilac
-match union_val {
+match enum_val {
     .Some -> value: @bit16 {
         return
     }
@@ -291,7 +291,7 @@ match union_val {
 You can attach else to the end of a match to catch invalid matches:
 
 ```lilac
-match union_val {
+match enum_val {
     .None => return
 } else {
     return
@@ -376,48 +376,29 @@ they share each other's declarations.
 using Standard
 ```
 
-### Enums and Tagged Unions
+### Enums
 
-Enums and unions are syntactic sugar that desugar into standard objects with explicit memory layouts. The `=>` operator maps constructor branches to their resulting object state.
+Enums are the single tagged-data type: a closed set of named variants,
+each optionally carrying a payload. They lower to standard objects with
+an explicit discriminator tag plus payload slots. The `=>` operator maps
+constructor branches to their resulting object state.
 
 ```lilac
 Enum: enum { One, Two }
 ```
 
-Desugared object equivalent:
-
 ```lilac
-Enum: object {
-    value: @bit8
-    One: Enum => Enum { value = 0x0 }
-    Two: Enum => Enum { value = 0x1 }
-}
-```
-
-Unions are tagged by default. The compiler allocates memory equal to the size of the largest variant plus the tag enum.
-
-```lilac
-Union: union {
-    Some: @bit8
+OptionalBit32: enum {
+    Some: @bit32
     None
 }
 ```
 
-Desugared object equivalent:
-
-```lilac
-Union: object {
-    Tag: enum { Some, None }
-    tag: Tag
-    data: @bit8 // Sized to fit the largest member
-
-    Some: function (value: @bit8) Union => Union {
-        tag = .Some
-        data = value
-    }
-    None: Union => Union { tag = .None }
-}
-```
+Values construct from bare tags (`.None`) or tag calls with payloads
+(`.Some(0x1)`); `match` arms test tags with `.Tag` patterns and bind
+payloads via `-> name: Type`. (The old `union` keyword was removed:
+it spelled the same type. Legacy `union { ... }` declarations fail to
+parse; rename them to `enum`.)
 
 ## 7. Generics & Inline Declarations
 

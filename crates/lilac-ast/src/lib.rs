@@ -1,7 +1,7 @@
 //! Untyped AST plus a [`Visitor`] so new syntax touches one trait.
 //!
 //! Covers `SPEC.md` surface syntax: functions (multi-return, inline `=>`,
-//! generics), `object`/`enum`/`union`, `using`, `extern`, `ref` types, and the
+//! generics), `object`/`enum`, `using`, `extern`, `ref` types, and the
 //! statement/expression forms (`if` values lower later; `match` arms keep
 //! their `=>`-or-block bodies).
 
@@ -39,17 +39,11 @@ pub enum ItemKind {
         /// Generic parameters (`GenObj[T]`).
         generic_params: Vec<String>,
     },
-    /// `name: enum { One, Two }`.
+    /// `name: enum { One, Two }` (payload variants like `Some: @bit32`
+    /// make it the single tagged-data type).
     Enum {
         /// Variant names in order.
         variants: Vec<EnumVariant>,
-        /// Generic parameters.
-        generic_params: Vec<String>,
-    },
-    /// `name: union { Some: T, None }`.
-    Union {
-        /// Variants in order.
-        variants: Vec<UnionVariant>,
         /// Generic parameters.
         generic_params: Vec<String>,
     },
@@ -82,17 +76,6 @@ pub struct EnumVariant {
     /// Payload type (`None` for payload-less variants).
     pub payload: Option<Type>,
     /// Name span.
-    pub span: Span,
-}
-
-/// One union variant: `Some: @bit8` or bare `None`.
-#[derive(Clone, Debug)]
-pub struct UnionVariant {
-    /// Variant name.
-    pub name: String,
-    /// Payload type (`None` for payload-less variants).
-    pub payload: Option<Type>,
-    /// Whole-variant span.
     pub span: Span,
 }
 
@@ -273,7 +256,7 @@ pub struct MatchArm {
 /// A match arm pattern: `.Tag` or a byte literal.
 #[derive(Clone, Debug)]
 pub enum MatchPattern {
-    /// `.Some` tag (enum/union tag; type comes from the scrutinee).
+    /// `.Some` tag (enum tag; type comes from the scrutinee).
     Tag(String),
     /// `0x0` byte pattern (source bytes).
     Const(String),
@@ -293,7 +276,7 @@ pub enum MatchArmBody {
 pub enum Expr {
     /// `foo`, `T.get` base, hole contents.
     Ident(String, Span),
-    /// `.Some` tag literal (enum/union tag; type comes from context).
+    /// `.Some` tag literal (enum tag; type comes from context).
     Tag(String, Span),
     /// `5`, `0xFF` (source bytes; meaning comes from use).
     Number(String, Span),
@@ -512,10 +495,7 @@ pub fn walk_item<V: Visitor + ?Sized>(visitor: &mut V, item: &Item) {
                 visitor.visit_item(member);
             }
         }
-        ItemKind::Enum { .. }
-        | ItemKind::Union { .. }
-        | ItemKind::Using { .. }
-        | ItemKind::Field { .. } => {}
+        ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
         ItemKind::Const { value, .. } => visitor.visit_expr(value),
     }
 }

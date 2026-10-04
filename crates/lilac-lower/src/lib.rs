@@ -38,12 +38,10 @@ pub fn lower(
         failed: false,
     };
     for (name, members) in &hir.layouts {
-        let is_aggregate = module.items.get(name).is_some_and(|item| {
-            matches!(
-                item.kind,
-                lilac_resolve::ResKind::Enum { .. } | lilac_resolve::ResKind::Union { .. }
-            )
-        });
+        let is_aggregate = module
+            .items
+            .get(name)
+            .is_some_and(|item| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }));
         let mut layout = Vec::with_capacity(members.len() + 1);
         let mut variants = Vec::with_capacity(members.len());
         for (member, ty) in members {
@@ -821,7 +819,7 @@ impl Lower<'_> {
     }
 
     /// Emits one arm test: scrutinee value against the pattern, returning
-    /// the boolean register for `branch.if`. Enum/union scrutinees test
+    /// the boolean register for `branch.if`. Enum scrutinees test
     /// their discriminator tag field; bit containers test the value.
     fn emit_arm_test(
         &mut self,
@@ -1114,7 +1112,7 @@ impl Lower<'_> {
         }
     }
 
-    /// Builds a bare tag into an enum/union struct (discriminant only).
+    /// Builds a bare tag into an enum struct (discriminant only).
     fn lower_tag(&mut self, fs: &mut FuncState, ty: TypeRef, name: &str, span: Span) -> LirOperand {
         let owner_ty = lir_ty(self.types, ty);
         let tmp = self.fresh_tmp(fs, ty, span);
@@ -1575,7 +1573,7 @@ impl Lower<'_> {
         Ok(())
     }
 
-    /// Constructs an enum/union value: discriminant tag plus payload.
+    /// Constructs an enum value: discriminant tag plus payload.
     fn lower_variant(
         &mut self,
         fs: &mut FuncState,

@@ -35,8 +35,6 @@ pub enum TokenKind {
     KwFunction,
     /// `enum`.
     KwEnum,
-    /// `union`.
-    KwUnion,
     /// `extern`.
     KwExtern,
     /// `using`.
@@ -75,11 +73,11 @@ pub enum TokenKind {
     Eq,
     /// `==` (bit-equality, never overridden).
     EqEq,
-    /// `=>` (inline bodies, enum/union constructors).
+    /// `=>` (inline bodies, enum constructors).
     FatArrow,
     /// `->` (multi-return capture types).
     Arrow,
-    /// `.` (member access, union tags).
+    /// `.` (member access, enum tags).
     Dot,
     /// `{`.
     LBrace,
@@ -273,7 +271,6 @@ impl<'a> Lexer<'a> {
             "object" => TokenKind::KwObject,
             "function" => TokenKind::KwFunction,
             "enum" => TokenKind::KwEnum,
-            "union" => TokenKind::KwUnion,
             "extern" => TokenKind::KwExtern,
             "using" => TokenKind::KwUsing,
             "private" => TokenKind::KwPrivate,

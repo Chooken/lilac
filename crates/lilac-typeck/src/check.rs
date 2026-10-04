@@ -122,16 +122,6 @@ pub fn check_bodies(
                     entries.push((variant.name.clone(), payload));
                 }
                 layouts.insert(item.name.clone(), entries);
-            } else if let ItemKind::Union { variants, .. } = &item.kind {
-                let mut entries = Vec::new();
-                for variant in variants {
-                    let payload = variant
-                        .payload
-                        .as_ref()
-                        .map(|ty| resolve_type(ty, checker.types, checker.module, checker.diags));
-                    entries.push((variant.name.clone(), payload));
-                }
-                layouts.insert(item.name.clone(), entries);
             }
         }
     }
@@ -635,10 +625,7 @@ impl Checker<'_> {
                     value: hir,
                 });
             }
-            ItemKind::Enum { .. }
-            | ItemKind::Union { .. }
-            | ItemKind::Using { .. }
-            | ItemKind::Field { .. } => {}
+            ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
         }
     }
 
@@ -2003,7 +1990,7 @@ impl Checker<'_> {
                     if let Some(type_item) = self.module.items.get(name).cloned() {
                         let is_type = matches!(
                             type_item.kind,
-                            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. }
+                            ResKind::Object { .. } | ResKind::Enum { .. }
                         );
                         if is_type {
                             return self
@@ -2081,7 +2068,7 @@ impl Checker<'_> {
                     return Err(ErrorGuaranteed::new());
                 }
             }
-            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
+            ResKind::Object { .. } | ResKind::Enum { .. } => {
                 return self.check_factory_call(fctx, name, item, args, span);
             }
             ResKind::Const | ResKind::Field => {
@@ -3053,12 +3040,10 @@ impl Checker<'_> {
                     let ty = self.const_type(name, span)?;
                     Ok((ty, item.id))
                 }
-                ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
-                    Err(self.diags.emit(
-                        Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
-                            .label(span, true, "name a variable instead".to_owned()),
-                    ))
-                }
+                ResKind::Object { .. } | ResKind::Enum { .. } => Err(self.diags.emit(
+                    Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
+                        .label(span, true, "name a variable instead".to_owned()),
+                )),
                 ResKind::Field => Err(self.diags.emit(
                     Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                         span,
@@ -3131,7 +3116,7 @@ impl Checker<'_> {
         })
     }
 
-    /// Validates `.Tag` against an enum/union type: returns the variant's
+    /// Validates `.Tag` against an enum type: returns the variant's
     /// payload type (`None` for payload-less variants).
     fn check_tag_pattern(
         &mut self,
@@ -3141,11 +3126,11 @@ impl Checker<'_> {
     ) -> Result<Option<TypeRef>, ErrorGuaranteed> {
         let lilac_ty::TypeKind::Object(def) = self.types.kind(scrut_ty) else {
             return Err(self.diags.emit(
-                Diagnostic::error(
-                    "E010",
-                    format!("tag `.{variant}` needs an enum or union type"),
-                )
-                .label(span, true, "expected a tag here".to_owned()),
+                Diagnostic::error("E010", format!("tag `.{variant}` needs an enum type")).label(
+                    span,
+                    true,
+                    "expected a tag here".to_owned(),
+                ),
             ));
         };
         let payload_ty =
@@ -3159,26 +3144,10 @@ impl Checker<'_> {
                     };
                     found.payload.clone()
                 }
-                Some(ResKind::Union { members }) => {
-                    let Some(found) = members.iter().find(|m| m.name == variant) else {
-                        return Err(self.diags.emit(
-                            Diagnostic::error("E010", format!("no variant `.{variant}` here"))
-                                .label(span, true, "unknown tag for this union".to_owned()),
-                        ));
-                    };
-                    found.payload.clone()
-                }
                 _ => {
                     return Err(self.diags.emit(
-                        Diagnostic::error(
-                            "E010",
-                            format!("tag `.{variant}` needs an enum or union type"),
-                        )
-                        .label(
-                            span,
-                            true,
-                            "expected a tag here".to_owned(),
-                        ),
+                        Diagnostic::error("E010", format!("tag `.{variant}` needs an enum type"))
+                            .label(span, true, "expected a tag here".to_owned()),
                     ));
                 }
             };
@@ -3739,7 +3708,7 @@ impl Checker<'_> {
     }
 
     /// Checks `.Some(0x1)` constructions: the expected type names the
-    /// enum/union, payloads check against the variant's payload type.
+    /// enum, payloads check against the variant's payload type.
     /// Construction desugars to a value (no call emitted).
     fn check_tag_call(
         &mut self,
@@ -4388,10 +4357,9 @@ mod tests {
     }
 
     #[test]
-    fn union_tag_defers_with_e030() {
-        // Union tags validate in M2 (no longer deferred).
+    fn enum_tag_validates() {
         let diags = check_src(
-            "Maybe: union {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
+            "Maybe: enum {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }

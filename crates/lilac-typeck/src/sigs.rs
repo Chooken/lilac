@@ -162,7 +162,7 @@ pub fn resolve_type(
     }
     if let Some(item) = module.items.get(&ty.name) {
         match &item.kind {
-            ResKind::Object { .. } | ResKind::Enum { .. } | ResKind::Union { .. } => {
+            ResKind::Object { .. } | ResKind::Enum { .. } => {
                 let id = types.intern_object(item.id);
                 types.set_object_name(item.id, &ty.name);
                 return TypeRef {
@@ -401,7 +401,6 @@ fn collect_item(item: &Item, resolved: &ResItem, parent: Option<(&str, DefId)>, 
             }
         }
         ItemKind::Enum { .. }
-        | ItemKind::Union { .. }
         | ItemKind::Using { .. }
         | ItemKind::Const { .. }
         | ItemKind::Field { .. } => {}

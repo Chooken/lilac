@@ -31,11 +31,11 @@ const PORTS: &[&str] = &[
     "inline_variables.lilac",
     "main_function.lilac",
     "references_2.lilac",
-    "union_decl.lilac",
+    "enum_payload_decl.lilac",
     "match_enum.lilac",
-    "match_union_w_capture.lilac",
+    "match_enum_payload.lilac",
     "object_instance_function.lilac",
-    "union_use.lilac",
+    "enum_payload_use.lilac",
 ];
 
 const M1_PORTS: &[&str] = &[

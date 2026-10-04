@@ -177,14 +177,14 @@ pub enum HirExprKind {
         /// What it resolved to.
         def: DefId,
     },
-    /// `.Some` tag literal (checked against the expected enum/union).
+    /// `.Some` tag literal (checked against the expected enum).
     Tag {
         /// Tag name.
         name: String,
     },
-    /// Enum/union variant construction (`.Some(0x1)`).
+    /// Enum variant construction (`.Some(0x1)`).
     Variant {
-        /// Owning enum/union definition.
+        /// Owning enum definition.
         def: DefId,
         /// Variant name.
         variant: String,

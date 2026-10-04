@@ -59,11 +59,6 @@ pub enum ResKind {
         /// Variants in declaration order.
         variants: Vec<EnumMember>,
     },
-    /// `name: union { ... }` with variant names and payloads in order.
-    Union {
-        /// Variants in declaration order.
-        members: Vec<UnionMember>,
-    },
     /// `name: Type = expr` module constant.
     Const,
     /// `member: Type` bare object field.
@@ -73,15 +68,6 @@ pub enum ResKind {
 /// One enum variant: `One` or `Some: @bit32` (payload).
 #[derive(Clone, Debug)]
 pub struct EnumMember {
-    /// Variant name.
-    pub name: String,
-    /// Payload type (`None` for payload-less variants).
-    pub payload: Option<AstType>,
-}
-
-/// One union variant: `Some: @bit32` or bare `None`.
-#[derive(Clone, Debug)]
-pub struct UnionMember {
     /// Variant name.
     pub name: String,
     /// Payload type (`None` for payload-less variants).
@@ -177,15 +163,6 @@ impl Collector<'_> {
                 variants: variants
                     .iter()
                     .map(|v| EnumMember {
-                        name: v.name.clone(),
-                        payload: v.payload.clone(),
-                    })
-                    .collect(),
-            },
-            ItemKind::Union { variants, .. } => ResKind::Union {
-                members: variants
-                    .iter()
-                    .map(|v| UnionMember {
                         name: v.name.clone(),
                         payload: v.payload.clone(),
                     })
@@ -364,21 +341,6 @@ mod tests {
             "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n",
         );
         assert_eq!(e020_count(&diags), 1);
-    }
-
-    #[test]
-    fn union_members_collected() {
-        let (module, diags) =
-            resolve_src("OptionalBit32: union {\n    Some: @bit32\n    None\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let union = module.items.get("OptionalBit32").expect("has union");
-        let ResKind::Union { members } = &union.kind else {
-            panic!("expected union, got {:?}", union.kind);
-        };
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].name, "Some");
-        assert!(members[0].payload.is_some());
-        assert!(members[1].payload.is_none());
     }
 
     #[test]
