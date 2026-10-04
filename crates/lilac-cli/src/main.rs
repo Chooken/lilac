@@ -1,10 +1,10 @@
 //! The `lilac` binary: `check` / `emit-ir` (more subcommands land per milestone).
 
-use lilac_driver::{ErrorFormat, Session};
+use lilac_driver::{ErrorFormat, Opt, Session};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change]\n  lilac emit-ir <file> [--check] [--target=<triple>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]"
 }
 
 fn main() -> ExitCode {
@@ -71,7 +71,13 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             }
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
-        } else if arg.starts_with("--") {
+        } else if let Some(opt) = Opt::parse(arg) {
+            session.optimize = opt;
+        } else if *arg == "--release" {
+            session.optimize = Opt::O2;
+        } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
+            session.cache_dir = Some(std::path::PathBuf::from(dir));
+        } else if arg.starts_with('-') {
             eprintln!("unknown flag: {arg}\n{}", usage());
             return Err(ExitCode::from(2));
         } else if file.is_none() {
@@ -154,4 +160,38 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
     }
     print!("{emitted}");
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_common, Opt};
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn optimization_flags_last_wins() {
+        let common = parse_common(&args(&["f.lilac", "-O1", "-O3"]), false).expect("valid args");
+        assert_eq!(common.session.optimize, Opt::O3);
+    }
+
+    #[test]
+    fn release_is_o2_and_cache_dir_parses() {
+        let common = parse_common(
+            &args(&["f.lilac", "--release", "--cache-dir=out/cache"]),
+            false,
+        )
+        .expect("valid args");
+        assert_eq!(common.session.optimize, Opt::O2);
+        assert_eq!(
+            common.session.cache_dir,
+            Some(std::path::PathBuf::from("out/cache"))
+        );
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert!(parse_common(&args(&["f.lilac", "-O9"]), false).is_err());
+    }
 }

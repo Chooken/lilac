@@ -5,6 +5,7 @@
 //! `fn run(ctxt: &mut Ctxt, unit: &Unit) -> Result<(), ErrorGuaranteed>`.
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use lilac_ast::Program;
 use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
@@ -21,18 +22,28 @@ pub struct Target {
 }
 
 impl Target {
-    /// Native-host placeholder (real host detection lands in M4/M5).
+    /// Builds a target triple from a `std::env::consts` arch/os pair.
+    #[must_use]
+    pub fn from_arch_os(arch: &str, os: &str) -> Self {
+        let triple = match os {
+            "windows" => format!("{arch}-pc-windows-msvc"),
+            "linux" => format!("{arch}-unknown-linux-gnu"),
+            "macos" => format!("{arch}-apple-darwin"),
+            _ => "unknown-unknown-unknown".to_owned(),
+        };
+        Self { triple }
+    }
+
+    /// Native build host.
     #[must_use]
     pub fn host() -> Self {
-        Self {
-            triple: "x86_64-unknown-none".to_owned(),
-        }
+        Self::from_arch_os(std::env::consts::ARCH, std::env::consts::OS)
     }
 
     /// `@bitNative` width in bits.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {
-        if self.triple.starts_with("x86_64") {
+        if self.triple.starts_with("x86_64") || self.triple.starts_with("aarch64") {
             64
         } else {
             32
@@ -41,8 +52,15 @@ impl Target {
 }
 
 impl Default for Target {
+    /// Canonical bare-metal default target (`x86_64-unknown-none`).
+    ///
+    /// Deliberately independent of the host so default `emit-ir` output is
+    /// stable across build machines; `--target=` overrides it, `host` tracks
+    /// the real build host.
     fn default() -> Self {
-        Self::host()
+        Self {
+            triple: "x86_64-unknown-none".to_owned(),
+        }
     }
 }
 
@@ -54,6 +72,37 @@ pub enum ErrorFormat {
     Human,
     /// Newline-delimited JSON.
     Json,
+}
+
+/// Optimization level (`-O0`..`-O3`, `-Os`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Opt {
+    /// No optimization (default).
+    #[default]
+    O0,
+    /// Basic optimization.
+    O1,
+    /// Standard optimization (`--release`).
+    O2,
+    /// Aggressive optimization.
+    O3,
+    /// Optimize for size.
+    Os,
+}
+
+impl Opt {
+    /// Parses one of `-O0`/`-O1`/`-O2`/`-O3`/`-Os`; `None` otherwise.
+    #[must_use]
+    pub fn parse(flag: &str) -> Option<Self> {
+        match flag {
+            "-O0" => Some(Self::O0),
+            "-O1" => Some(Self::O1),
+            "-O2" => Some(Self::O2),
+            "-O3" => Some(Self::O3),
+            "-Os" => Some(Self::Os),
+            _ => None,
+        }
+    }
 }
 
 /// Per-compilation options.
@@ -80,15 +129,20 @@ pub struct Session {
     pub target: Target,
     /// Flags.
     pub opts: Opts,
+    /// Optimization level (read by the M5b LLVM pipeline; inert until then).
+    pub optimize: Opt,
+    /// Cache directory (reserved for the post-v1 content cache).
+    pub cache_dir: Option<PathBuf>,
     /// Warns `W020` on operator shape changes (silenced by `--allow`).
     pub warn_on_operator_type_change: bool,
 }
 
 impl Session {
-    /// Default session (host == `x86_64` target, human errors).
+    /// Default session (real host, canonical default target, human errors).
     #[must_use]
     pub fn new() -> Self {
         Self {
+            host: Target::host(),
             warn_on_operator_type_change: true,
             ..Self::default()
         }
@@ -285,5 +339,30 @@ mod tests {
         assert!(rendered.contains("error[E010]"), "{rendered}");
         assert!(rendered.contains("expected `ref @bit8`"), "{rendered}");
         assert!(rendered.contains("found `@bit8`"), "{rendered}");
+    }
+
+    #[test]
+    fn opt_parses_known_flags_only() {
+        assert_eq!(Opt::parse("-O0"), Some(Opt::O0));
+        assert_eq!(Opt::parse("-O2"), Some(Opt::O2));
+        assert_eq!(Opt::parse("-O3"), Some(Opt::O3));
+        assert_eq!(Opt::parse("-Os"), Some(Opt::Os));
+        assert_eq!(Opt::parse("--release"), None);
+        assert_eq!(Opt::default(), Opt::O0);
+    }
+
+    #[test]
+    fn target_maps_arch_and_os() {
+        let win = Target::from_arch_os("x86_64", "windows");
+        assert_eq!(win.triple, "x86_64-pc-windows-msvc");
+        assert_eq!(win.bit_native_width(), 64);
+
+        let linux32 = Target::from_arch_os("x86", "linux");
+        assert_eq!(linux32.triple, "x86-unknown-linux-gnu");
+        assert_eq!(linux32.bit_native_width(), 32);
+
+        let mac = Target::from_arch_os("aarch64", "macos");
+        assert_eq!(mac.triple, "aarch64-apple-darwin");
+        assert_eq!(mac.bit_native_width(), 64);
     }
 }
