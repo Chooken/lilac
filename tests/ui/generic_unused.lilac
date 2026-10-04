@@ -1,0 +1,12 @@
+GenPut[T]: object {
+    put: function (value: T) nothing {
+    }
+}
+
+GenDrop[T]: object {
+    @on_drop: function (from: ref GenDrop[T]) nothing {
+    }
+}
+
+main: function () nothing {
+}

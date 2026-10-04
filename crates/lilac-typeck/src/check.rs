@@ -677,9 +677,18 @@ impl Checker<'_> {
             ItemKind::Object { members, .. } => {
                 if let ResKind::Object {
                     members: resolved_members,
+                    generic_params,
                     ..
                 } = &resolved.kind
                 {
+                    if !generic_params.is_empty() {
+                        // A generic object body is a template: members (methods,
+                        // in-body hooks) carry `Param` slots and are specialized
+                        // per instantiation (M4 Tasks 4-5). Checking or emitting
+                        // them as concrete items would leak `Param` into HIR and
+                        // trip the verifier (`E070`), so skip the whole body.
+                        return;
+                    }
                     for member in members {
                         if let Some(member_resolved) = resolved_members.get(&member.name) {
                             self.check_item(
@@ -4492,6 +4501,39 @@ mod tests {
 
     fn has_code(diags: &Diags, code: &str) -> bool {
         diags.diagnostics().iter().any(|d| d.code == code)
+    }
+
+    fn check_hir(src: &str) -> (Diags, lilac_hir::HirProgram) {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let mut types = Types::new();
+        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
+        let hir = check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        (diags, hir)
+    }
+
+    #[test]
+    fn unused_generic_object_members_are_not_checked() {
+        // A generic object is a template: its non-generic members may carry
+        // `Param` slots and must not be emitted as concrete HIR (design §3.3 /
+        // §3.4). Otherwise lowering sees `#T` and the verifier raises `E070`.
+        let (diags, hir) = check_hir(
+            "GenPut[T]: object {\n    put: function (value: T) nothing {\n    }\n}\n\nGenDrop[T]: object {\n    @on_drop: function (from: ref GenDrop[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let names: Vec<&str> = hir.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["main"], "generic members leaked: {names:?}");
+        assert!(!hir.drops.contains_key("GenDrop"), "{:?}", hir.drops);
     }
 
     fn messages(diags: &Diags) -> Vec<String> {
