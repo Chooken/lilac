@@ -1128,7 +1128,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
                     span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ));
         }
@@ -1140,7 +1140,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no field `{field}` on `{name}`")).label(
                     span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ))
         }
@@ -2801,7 +2801,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
                     member_span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ));
         };
@@ -2836,7 +2836,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
                     member_span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ));
         };
@@ -3047,7 +3047,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
                     span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ));
         };
@@ -3209,7 +3209,7 @@ impl Checker<'_> {
                 Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
                     span,
                     true,
-                    "unknown member (M4 refines this to E040)".to_owned(),
+                    "no such member".to_owned(),
                 ),
             ));
         };

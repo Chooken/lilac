@@ -136,6 +136,10 @@ pub struct Diags {
     seen: HashSet<u64>,
     /// Maximum primary errors rendered; the rest are dropped with a note.
     pub max_errors: usize,
+    /// Error-level diagnostics currently in `diagnostics`.
+    error_count: usize,
+    /// Error-level diagnostics dropped because the cap was reached.
+    suppressed_errors: usize,
 }
 
 impl Diags {
@@ -146,12 +150,24 @@ impl Diags {
             diagnostics: Vec::new(),
             seen: HashSet::new(),
             max_errors: 10,
+            error_count: 0,
+            suppressed_errors: 0,
         }
     }
 
     /// Records a diagnostic (deduped by code + message + primary spans).
+    ///
+    /// Once [`Self::max_errors`] error-level diagnostics are live, further
+    /// errors are dropped and counted in [`Self::suppressed_errors`] instead.
     pub fn emit(&mut self, diagnostic: Diagnostic) -> ErrorGuaranteed {
+        if diagnostic.level == Level::Error && self.error_count >= self.max_errors {
+            self.suppressed_errors += 1;
+            return ErrorGuaranteed::new();
+        }
         if self.seen.insert(dedup_key(&diagnostic)) {
+            if diagnostic.level == Level::Error {
+                self.error_count += 1;
+            }
             self.diagnostics.push(diagnostic);
         }
         ErrorGuaranteed::new()
@@ -163,6 +179,12 @@ impl Diags {
         self.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.level == Level::Error)
+    }
+
+    /// Error-level diagnostics dropped by the [`Self::max_errors`] cap.
+    #[must_use]
+    pub fn suppressed_errors(&self) -> usize {
+        self.suppressed_errors
     }
 
     /// All recorded diagnostics in emission order.
@@ -192,6 +214,9 @@ impl Diags {
         // after a capture (a failing instance is otherwise swallowed).
         for diagnostic in &taken {
             self.seen.remove(&dedup_key(diagnostic));
+            if diagnostic.level == Level::Error {
+                self.error_count = self.error_count.saturating_sub(1);
+            }
         }
         taken
     }
@@ -494,5 +519,44 @@ mod tests {
         .render(&diagnostic, &sm);
         assert!(full.contains("in instantiation of frame6"), "{full}");
         assert!(!full.contains("elided"), "{full}");
+    }
+
+    #[test]
+    fn caps_primary_errors_at_max() {
+        let mut diags = Diags::new();
+        for index in 0..15 {
+            diags.emit(Diagnostic::error("E001", format!("distinct error {index}")));
+        }
+        let errors = diags
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.level == Level::Error)
+            .count();
+        assert_eq!(errors, diags.max_errors, "{:?}", diags.diagnostics());
+        assert_eq!(diags.suppressed_errors(), 5);
+        assert!(diags.has_errors());
+
+        // Warnings are never capped.
+        diags.emit(Diagnostic::warning("W001", "counted separately"));
+        assert_eq!(
+            diags
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.level == Level::Warning)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn take_since_frees_the_error_budget() {
+        let mut diags = Diags::new();
+        diags.max_errors = 1;
+        diags.emit(Diagnostic::error("E001", "captured"));
+        assert_eq!(diags.take_since(0).len(), 1);
+        // The drained error no longer occupies the budget.
+        diags.emit(Diagnostic::error("E002", "after capture"));
+        assert_eq!(diags.suppressed_errors(), 0);
+        assert_eq!(diags.diagnostics().len(), 1);
     }
 }

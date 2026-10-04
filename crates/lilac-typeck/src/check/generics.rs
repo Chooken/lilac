@@ -145,7 +145,7 @@ impl Checker<'_> {
                 continue;
             }
             if self
-                .instantiate_func(member_resolved.id, args, member.span)
+                .instantiate_func(member_resolved.id, args, use_span)
                 .is_err()
             {
                 failed = true;
@@ -701,10 +701,11 @@ fn is_requirement_failure(diagnostic: &Diagnostic) -> bool {
 }
 
 /// Human phrase for one captured body failure, e.g. a lookup miss becomes
-/// "missing method `other` on `@bit32`".
+/// "missing method `other` on `@bit32`" (fields become "missing member ...").
 fn requirement_phrase(diagnostic: &Diagnostic) -> String {
-    if let Some((field, owner)) = missing_member(diagnostic) {
-        return format!("missing method `{field}` on `{owner}`");
+    if let Some((is_method, field, owner)) = lookup_miss(diagnostic) {
+        let kind = if is_method { "method" } else { "member" };
+        return format!("missing {kind} `{field}` on `{owner}`");
     }
     if diagnostic.code == "E022" {
         return diagnostic.msg.clone();
@@ -717,14 +718,24 @@ fn requirement_phrase(diagnostic: &Diagnostic) -> String {
 
 /// Extracts `(member, owner)` from a lookup-miss headline, if any.
 fn missing_member(diagnostic: &Diagnostic) -> Option<(String, String)> {
-    let rest = diagnostic
-        .msg
-        .strip_prefix("cannot call static member `")
-        .or_else(|| diagnostic.msg.strip_prefix("cannot call method `"))
-        .or_else(|| diagnostic.msg.strip_prefix("no member `"))?;
+    lookup_miss(diagnostic).map(|(_, field, owner)| (field, owner))
+}
+
+/// Extracts `(is_method, member, owner)` from a lookup-miss headline.
+fn lookup_miss(diagnostic: &Diagnostic) -> Option<(bool, String, String)> {
+    let (is_method, rest) =
+        if let Some(rest) = diagnostic.msg.strip_prefix("cannot call static member `") {
+            (true, rest)
+        } else if let Some(rest) = diagnostic.msg.strip_prefix("cannot call method `") {
+            (true, rest)
+        } else if let Some(rest) = diagnostic.msg.strip_prefix("no member `") {
+            (true, rest)
+        } else {
+            (false, diagnostic.msg.strip_prefix("no field `")?)
+        };
     let (field, tail) = rest.split_once("` on `")?;
     let owner = tail.strip_suffix('`')?;
-    Some((field.to_owned(), owner.to_owned()))
+    Some((is_method, field.to_owned(), owner.to_owned()))
 }
 
 /// Extracts `(from, to)` from an `E043` conversion-miss headline.
@@ -839,6 +850,46 @@ mod tests {
         let (diags, _, _, sm) = run(src);
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+    }
+
+    #[test]
+    fn failing_object_method_reported_at_use_site() {
+        // The failing method's `E042` must point at the object's use site
+        // (`GenObject[@bit32]`), not at the method definition inside the object.
+        let src = "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let e042: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "E042")
+            .collect();
+        assert_eq!(e042.len(), 1, "{diags:?}");
+        let primary = e042[0]
+            .labels
+            .iter()
+            .find(|label| label.primary)
+            .expect("E042 has a primary label");
+        let (line, _) = sm.line_col(primary.span).expect("primary span has a file");
+        assert_eq!(line, 9, "primary should be the object use site: {diags:?}");
+        let rendered = render_all(&diags, &sm);
+        assert!(rendered.contains("instantiated here"), "{rendered}");
+        assert!(rendered.contains("missing method `other`"), "{rendered}");
+    }
+
+    #[test]
+    fn field_miss_has_clean_tone() {
+        // A field lookup miss inside a generic body must not leak the internal
+        // milestone label; it reads as a requirement phrase.
+        let src = "Object: object {\n    value: @bit32\n}\n\ngen[T]: function (v: T) out: @bit8 {\n    out = v.data\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit8 = gen[Object](o)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("missing member `data` on `Object`"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("M4"), "{rendered}");
+        assert!(!rendered.contains("E040"), "{rendered}");
     }
 
     #[test]

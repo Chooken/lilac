@@ -4,6 +4,8 @@
 //! changing the shape: each pass is
 //! `fn run(ctxt: &mut Ctxt, unit: &Unit) -> Result<(), ErrorGuaranteed>`.
 
+use std::fmt::Write as _;
+
 use lilac_ast::Program;
 use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
 use lilac_ir::LirModule;
@@ -157,6 +159,14 @@ impl Session {
                 ErrorFormat::Json => EmitterJson.render(diagnostic, &self.source_map),
             };
             out.push_str(&text);
+        }
+        if self.opts.error_format == ErrorFormat::Human && self.diags.suppressed_errors() > 0 {
+            let _ = writeln!(
+                out,
+                "error: {} more error(s) not shown (limit {})",
+                self.diags.suppressed_errors(),
+                self.diags.max_errors
+            );
         }
         out
     }
