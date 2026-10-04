@@ -15,7 +15,8 @@ use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    find_item, resolve_type, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
+    find_item, is_poison, resolve_type, subst_ident, CallOutcome, CheckedBody, CheckedCall,
+    Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -305,36 +306,128 @@ impl Checker<'_> {
             .map(|arg| self.types.display_ref(*arg))
             .collect::<Vec<_>>()
             .join(", ");
+        let pretty = self.function_instance_display(def, args);
         let mut diagnostic = Diagnostic::error(
             "E042",
             format!("type `{arg_list}` does not satisfy `{name}[{params}]` requirements"),
-        )
-        .label(use_span, true, "instantiated here");
+        );
 
-        if let Some((item, _, _)) = find_item(self.program, self.module, def) {
+        // A missing-member failure is the most useful primary: point at the
+        // actual use in the generic body and turn the instantiation into a
+        // sourced note naming the pretty instance.
+        if let Some(index) = requirements
+            .iter()
+            .position(|requirement| lookup_miss(requirement).is_some())
+        {
+            if let Some(label) = requirement_label(&requirements[index]) {
+                diagnostic =
+                    diagnostic.label(label.span, true, requirement_phrase(&requirements[index]));
+            } else {
+                diagnostic = diagnostic.label(use_span, true, "instantiated here");
+            }
             diagnostic = diagnostic.label(
-                item.span,
+                use_span,
                 false,
-                format!("required by `{name}[{params}]` here"),
+                format!("required by instantiation of {pretty} here"),
             );
+            for (position, requirement) in requirements.iter().enumerate() {
+                if position == index {
+                    continue;
+                }
+                if let Some(label) = requirement_label(requirement) {
+                    diagnostic =
+                        diagnostic.label(label.span, false, requirement_phrase(requirement));
+                }
+            }
+        } else {
+            diagnostic = diagnostic.label(use_span, true, "instantiated here");
+            if let Some((item, _, _)) = find_item(self.program, self.module, def) {
+                diagnostic = diagnostic.label(
+                    item.span,
+                    false,
+                    format!("required by `{name}[{params}]` here"),
+                );
+            }
+            for requirement in &requirements {
+                if let Some(label) = requirement_label(requirement) {
+                    diagnostic =
+                        diagnostic.label(label.span, false, requirement_phrase(requirement));
+                }
+            }
         }
         for frame in self.instantiation_frames() {
             diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}{frame}"));
         }
         for requirement in &requirements {
-            let label = requirement
-                .labels
-                .iter()
-                .find(|label| label.primary)
-                .or_else(|| requirement.labels.first());
-            if let Some(label) = label {
-                diagnostic = diagnostic.label(label.span, false, requirement_phrase(requirement));
+            for note in &requirement.notes {
+                diagnostic = diagnostic.note(note.clone());
             }
         }
         for help in self.requirement_helps(&requirements) {
             diagnostic = diagnostic.help(help);
         }
         self.diags.emit(diagnostic)
+    }
+
+    /// Whether `ty` is one of the current instantiation's substituted type
+    /// parameters. A missing member on such a receiver is a generic requirement
+    /// failure, so the required-signature note is meaningful.
+    pub(super) fn is_generic_derived(&self, ty: TypeRef) -> bool {
+        !self.active.is_empty() && self.current_args.iter().any(|arg| arg.id == ty.id)
+    }
+
+    /// Renders a body-side type in the generic's own parameter form: a type that
+    /// equals a current substitution argument prints as its parameter name
+    /// (`T`), otherwise concretely (`@bit32`). `ref` wrappers are preserved.
+    pub(super) fn display_ty_in_body(&self, ty: TypeRef) -> String {
+        if let Some(index) = self.current_args.iter().position(|arg| arg.id == ty.id) {
+            if let Some(name) = self.current_params.get(index) {
+                if ty.is_ref && !self.current_args[index].is_ref {
+                    return format!("ref {name}");
+                }
+                return name.clone();
+            }
+        }
+        self.types.display_ref(ty)
+    }
+
+    /// Builds the `note:` describing the method signature the generic body
+    /// requires at a missing-member use site.
+    ///
+    /// `receiver` is the value receiver type for `value.member(...)` (`None` for
+    /// a bare-type `T.member(...)` receiver, which has no `self`). Each argument
+    /// is probe-checked with no expected type; diagnostics it emits are
+    /// discarded. The return type is the use-site expected type, or `?`.
+    pub(super) fn required_signature_note(
+        &mut self,
+        fctx: &mut FuncCtx,
+        field: &str,
+        receiver: Option<TypeRef>,
+        args: &[Expr],
+        expected: Option<TypeId>,
+    ) -> String {
+        let mut params = Vec::new();
+        if let Some(ty) = receiver {
+            params.push(format!("self: {}", self.types.display_ref(ty)));
+        }
+        for arg in args {
+            let mark = self.diags.checkpoint();
+            let (ty, _) = self.check_expr(fctx, arg, None);
+            let _ = self.diags.take_since(mark);
+            if is_poison(ty) {
+                params.push("?".to_owned());
+            } else {
+                params.push(self.display_ty_in_body(ty));
+            }
+        }
+        let ret = match expected {
+            Some(id) if id != TypeId::ERROR => self.types.display(id),
+            _ => "?".to_owned(),
+        };
+        format!(
+            "based on this usage, the generic body requires a method matching:\n      fn {field}({}) -> {ret}",
+            params.join(", ")
+        )
     }
 
     /// Checks a generic function's body under the substituted `sig` and emits
@@ -808,6 +901,15 @@ fn requirement_phrase(diagnostic: &Diagnostic) -> String {
     }
 }
 
+/// The primary label of a captured requirement, or its first label.
+fn requirement_label(diagnostic: &Diagnostic) -> Option<&lilac_error::Label> {
+    diagnostic
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .or_else(|| diagnostic.labels.first())
+}
+
 /// Extracts `(member, owner)` from a lookup-miss headline, if any.
 fn missing_member(diagnostic: &Diagnostic) -> Option<(String, String)> {
     lookup_miss(diagnostic).map(|(_, field, owner)| (field, owner))
@@ -931,9 +1033,76 @@ mod tests {
             .collect();
         assert_eq!(e042.len(), 1, "{rendered}");
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
-        assert!(rendered.contains("instantiated here"), "{rendered}");
+        assert!(
+            rendered.contains("required by instantiation of gen_function[@bit32]"),
+            "{rendered}"
+        );
         assert!(rendered.contains("missing method `other`"), "{rendered}");
         assert!(!rendered.contains("error[E010]"), "{rendered}");
+    }
+
+    #[test]
+    fn generic_missing_member_shows_required_signature() {
+        // A bare-type receiver (`T.other()`) makes the captured body use the
+        // `E042` primary, and the inferred signature is a note using the
+        // use-site expected return type, with the pretty instance name in the
+        // instantiation note.
+        let src = "gen_function[T]: function () out: T {\n    out = T.other()\n}\n\nmain: function () nothing {\n    variable: @bit32 = gen_function[@bit32]()\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        let e042: Vec<_> = diags
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "E042")
+            .collect();
+        assert_eq!(e042.len(), 1, "{rendered}");
+        let primary = e042[0]
+            .labels
+            .iter()
+            .find(|label| label.primary)
+            .expect("E042 primary label");
+        let (line, _) = sm.line_col(primary.span).expect("primary span has a file");
+        assert_eq!(line, 2, "primary must be the body use: {rendered}");
+        assert!(
+            rendered.contains("fn other() -> @bit32"),
+            "missing inferred signature: {rendered}"
+        );
+        assert!(
+            rendered.contains("required by instantiation of gen_function[@bit32]"),
+            "missing pretty instantiation note: {rendered}"
+        );
+        assert!(
+            !rendered.contains("__1__"),
+            "mangled symbol leaked: {rendered}"
+        );
+    }
+
+    #[test]
+    fn value_receiver_shows_required_signature() {
+        // A value receiver of generic-param type gains `self: <receiver>`; the
+        // argument is probe-checked (a decimal literal is `@byte_buffer`).
+        let src = "gen[T]: function (value: T) out: @bit32 {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    v: @bit32 = gen[@bit32](0x1)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("fn other(self: @bit32, @byte_buffer) -> @bit32"),
+            "missing value-receiver signature: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generic_param_form_in_required_signature() {
+        // An argument whose type is a different generic parameter renders that
+        // parameter name (`U`), not its concrete substitution.
+        let src = "gen[T, U]: function (value: T, extra: U) out: @bit32 {\n    out = value.other(extra)\n}\n\nmain: function () nothing {\n    v: @bit32 = gen[@bit32, @bit64](0x1, 0x2)\n}\n";
+        let (diags, _, _, sm) = run(src);
+        let rendered = render_all(&diags, &sm);
+        assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("fn other(self: @bit32, U) -> @bit32"),
+            "missing generic-param signature: {rendered}"
+        );
     }
 
     #[test]
@@ -946,8 +1115,9 @@ mod tests {
 
     #[test]
     fn failing_object_method_reported_at_use_site() {
-        // The failing method's `E042` must point at the object's use site
-        // (`GenObject[@bit32]`), not at the method definition inside the object.
+        // A missing member inside a generic object method points the `E042`
+        // primary at the failing use in the method body; the instantiation note
+        // carries the pretty method instance rather than a mangled symbol.
         let src = "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n}\n";
         let (diags, _, _, sm) = run(src);
         let e042: Vec<_> = diags
@@ -962,10 +1132,14 @@ mod tests {
             .find(|label| label.primary)
             .expect("E042 has a primary label");
         let (line, _) = sm.line_col(primary.span).expect("primary span has a file");
-        assert_eq!(line, 9, "primary should be the object use site: {diags:?}");
+        assert_eq!(line, 4, "primary should be the body use: {diags:?}");
         let rendered = render_all(&diags, &sm);
-        assert!(rendered.contains("instantiated here"), "{rendered}");
+        assert!(
+            rendered.contains("required by instantiation of GenObject.get[@bit32]"),
+            "{rendered}"
+        );
         assert!(rendered.contains("missing method `other`"), "{rendered}");
+        assert!(!rendered.contains("__1__"), "{rendered}");
     }
 
     #[test]

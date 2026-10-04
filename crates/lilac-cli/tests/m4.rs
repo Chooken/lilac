@@ -125,19 +125,21 @@ fn no_cascade_single_e042() {
     );
 }
 
-/// The short-form `FAILS_generic_duck_typing` render: one use-site `E042`
-/// with the call-site primary label, the definition note, the captured
-/// missing-member label, and the elided single-frame instantiation chain.
+/// The short-form `FAILS_generic_duck_typing` render: one `E042` whose primary
+/// label is the failing use inside the generic body, with a sourced
+/// instantiation note (pretty instance name) and the inferred required method
+/// signature.
 const DUCK_TYPING_SHORT: &str = concat!(
     "error[E042]: type `@bit32` does not satisfy `gen_function[T]` requirements\n",
-    "  --> ../../tests/ui/FAILS_generic_duck_typing.lilac:12:24\n",
+    "  --> ../../tests/ui/FAILS_generic_duck_typing.lilac:2:11\n",
     "   |\n",
-    "12 |     variable: @bit32 = gen_function[@bit32]()\n",
-    "   |                        ^^^^^^^^^^^^^^^^^^^^^^\n",
-    "   = instantiated here\n",
-    "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:1:1 required by `gen_function[T]` here\n",
-    "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:2:11 missing method `other` on `@bit32`\n",
+    "2 |     out = T.other()\n",
+    "   |           ^^^^^^^^^\n",
+    "   = missing method `other` on `@bit32`\n",
+    "note: ../../tests/ui/FAILS_generic_duck_typing.lilac:12:24 required by instantiation of gen_function[@bit32] here\n",
     "note: in instantiation of gen_function[@bit32]\n",
+    "note: based on this usage, the generic body requires a method matching:\n",
+    "      fn other() -> @bit32\n",
 );
 
 #[test]
@@ -162,19 +164,20 @@ fn fails_generic_duck_typing_verbose_snapshot() {
 /// trailing ones.
 const DEEP_CHAIN_VERBOSE: &str = concat!(
     "error[E042]: type `@bit32` does not satisfy `level5[T]` requirements\n",
-    "  --> ../../tests/ui/FAILS_generic_deep_chain.lilac:18:11\n",
+    "  --> ../../tests/ui/FAILS_generic_deep_chain.lilac:22:11\n",
     "   |\n",
-    "18 |     out = level5[T](x)\n",
-    "   |           ^^^^^^^^^^^^\n",
-    "   = instantiated here\n",
-    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:21:1 required by `level5[T]` here\n",
-    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:22:11 missing method `missing` on `@bit32`\n",
+    "22 |     out = x.missing()\n",
+    "   |           ^^^^^^^^^^^\n",
+    "   = missing method `missing` on `@bit32`\n",
+    "note: ../../tests/ui/FAILS_generic_deep_chain.lilac:18:11 required by instantiation of level5[@bit32] here\n",
     "note: in instantiation of level0[@bit32]\n",
     "note: in instantiation of level1[@bit32]\n",
     "note: in instantiation of level2[@bit32]\n",
     "note: in instantiation of level3[@bit32]\n",
     "note: in instantiation of level4[@bit32]\n",
     "note: in instantiation of level5[@bit32]\n",
+    "note: based on this usage, the generic body requires a method matching:\n",
+    "      fn missing(self: @bit32) -> @bit32\n",
 );
 
 #[test]

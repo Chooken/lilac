@@ -2424,27 +2424,16 @@ impl Checker<'_> {
                     // `T.method()`: a bare type parameter receiver within a
                     // specialization is a static (associated) call (ruling R3),
                     // and shadows an outer type of the same name.
-                    if let Some(result) =
-                        self.check_generic_param_static(fctx, name, field, generic_args, args, span)
-                    {
+                    if let Some(result) = self.check_bare_static_call(
+                        fctx,
+                        name,
+                        field,
+                        generic_args,
+                        args,
+                        span,
+                        expected,
+                    ) {
                         return result;
-                    }
-                    if let Some(type_item) = self.module.items.get(name).cloned() {
-                        let is_type = matches!(
-                            type_item.kind,
-                            ResKind::Object { .. } | ResKind::Enum { .. }
-                        );
-                        if is_type {
-                            return self.check_static_call(
-                                fctx,
-                                name,
-                                &type_item,
-                                field,
-                                generic_args,
-                                args,
-                                span,
-                            );
-                        }
                     }
                 }
                 if !generic_args.is_empty() {
@@ -2458,7 +2447,7 @@ impl Checker<'_> {
                     ty: recv_ty,
                     hir: recv_hir,
                 };
-                self.check_member_call(fctx, field, recv, args, span, *member_span)
+                self.check_member_call(fctx, field, recv, args, span, *member_span, expected)
             }
             Expr::Tag(name, tag_span) => {
                 self.check_tag_call(fctx, name, args, span, expected, *tag_span)
@@ -2760,6 +2749,7 @@ impl Checker<'_> {
 
     /// Calls `recv.field(args)` on a value: injects `ref` receiver as `self`.
     /// (Static `Type.field(args)` calls never reach here.)
+    #[allow(clippy::too_many_arguments)]
     fn check_member_call(
         &mut self,
         fctx: &mut FuncCtx,
@@ -2768,6 +2758,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         member_span: Span,
+        expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         if let lilac_ty::TypeKind::Instance {
             base,
@@ -2783,14 +2774,19 @@ impl Checker<'_> {
                 args,
                 span,
                 member_span,
+                expected,
             );
         }
         let owner = self.types.display(recv.ty.id);
         let lilac_ty::TypeKind::Object(def) = self.types.kind(recv.ty.id) else {
-            return Err(self.diags.emit(
+            let mut diagnostic =
                 Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
-                    .label(span, true, "methods need an object".to_owned()),
-            ));
+                    .label(span, true, "methods need an object".to_owned());
+            if self.is_generic_derived(recv.ty) {
+                let note = self.required_signature_note(fctx, field, Some(recv.ty), args, expected);
+                diagnostic = diagnostic.note(note);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         let found = self.find_by_def(*def);
         let Some(ResKind::Object { members, .. }) = found else {
@@ -2800,13 +2796,16 @@ impl Checker<'_> {
             ));
         };
         let Some(member) = members.get(field).cloned() else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
-                    member_span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{owner}`"),
+            )
+            .label(member_span, true, "no such member".to_owned());
+            if self.is_generic_derived(recv.ty) {
+                let note = self.required_signature_note(fctx, field, Some(recv.ty), args, expected);
+                diagnostic = diagnostic.note(note);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         let (sig, callee) = self.resolve_method(field, &member, recv.ty, member_span)?;
         self.check_method_args(fctx, &sig, callee, recv, args, span)
@@ -2826,6 +2825,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
         member_span: Span,
+        expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         let owner = self.types.display(recv.ty.id);
         let Some(ResKind::Object { members, .. }) = self.find_by_def(base) else {
@@ -2835,13 +2835,16 @@ impl Checker<'_> {
             ));
         };
         let Some(member) = members.get(field).cloned() else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no member `{field}` on `{owner}`")).label(
-                    member_span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{owner}`"),
+            )
+            .label(member_span, true, "no such member".to_owned());
+            if self.is_generic_derived(recv.ty) {
+                let note = self.required_signature_note(fctx, field, Some(recv.ty), args, expected);
+                diagnostic = diagnostic.note(note);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         let ResKind::Func { generic_params, .. } = &member.kind else {
             return Err(self.diags.emit(
@@ -3035,6 +3038,7 @@ impl Checker<'_> {
         generic_args: &[AstType],
         args: &[Expr],
         span: Span,
+        expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         let ResKind::Object {
             members,
@@ -3056,13 +3060,22 @@ impl Checker<'_> {
             return Err(self.emit_generic_arity(span, type_name, generic_params.len(), 0));
         }
         let Some(member) = members.get(field).cloned() else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
-                    span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{type_name}`"),
+            )
+            .label(span, true, "no such member".to_owned());
+            let owner_id = self.types.intern_object(type_item.id);
+            self.types.set_object_name(type_item.id, type_name);
+            let owner_ty = TypeRef {
+                id: owner_id,
+                is_ref: false,
+            };
+            if self.is_generic_derived(owner_ty) {
+                let note = self.required_signature_note(fctx, field, None, args, expected);
+                diagnostic = diagnostic.note(note);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         match &member.kind {
             ResKind::Func {
@@ -3124,9 +3137,49 @@ impl Checker<'_> {
         }
     }
 
+    /// Handles `Name.member(...)` where `Name` is a bare type parameter
+    /// (`T.method()`, ruling R3) or a declared object/enum name. Returns `None`
+    /// when `name` is neither, so the caller falls through to a member call.
+    #[allow(clippy::too_many_arguments)]
+    fn check_bare_static_call(
+        &mut self,
+        fctx: &mut FuncCtx,
+        name: &str,
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Option<Result<CallOutcome, ErrorGuaranteed>> {
+        if let Some(result) =
+            self.check_generic_param_static(fctx, name, field, generic_args, args, span, expected)
+        {
+            return Some(result);
+        }
+        if let Some(type_item) = self.module.items.get(name).cloned() {
+            if matches!(
+                type_item.kind,
+                ResKind::Object { .. } | ResKind::Enum { .. }
+            ) {
+                return Some(self.check_static_call(
+                    fctx,
+                    name,
+                    &type_item,
+                    field,
+                    generic_args,
+                    args,
+                    span,
+                    expected,
+                ));
+            }
+        }
+        None
+    }
+
     /// Resolves a bare type-parameter receiver to its concrete type and routes
     /// the call as a static (associated) call (`T.method()`, ruling R3).
     /// Returns `None` when `name` is not a current generic parameter.
+    #[allow(clippy::too_many_arguments)]
     fn check_generic_param_static(
         &mut self,
         fctx: &mut FuncCtx,
@@ -3135,9 +3188,10 @@ impl Checker<'_> {
         generic_args: &[AstType],
         args: &[Expr],
         span: Span,
+        expected: Option<TypeId>,
     ) -> Option<Result<CallOutcome, ErrorGuaranteed>> {
         let concrete = self.generic_param_value(name)?;
-        Some(self.check_static_call_ty(fctx, concrete, field, generic_args, args, span))
+        Some(self.check_static_call_ty(fctx, concrete, field, generic_args, args, span, expected))
     }
 
     /// Routes `T.method(...)` for a concrete receiver type: a plain object
@@ -3152,6 +3206,7 @@ impl Checker<'_> {
         generic_args: &[AstType],
         args: &[Expr],
         span: Span,
+        expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
             lilac_ty::TypeKind::Object(def) => {
@@ -3159,7 +3214,16 @@ impl Checker<'_> {
                 let Some(item) = self.res_item(def) else {
                     return Err(ErrorGuaranteed::new());
                 };
-                self.check_static_call(fctx, &name, &item, field, generic_args, args, span)
+                self.check_static_call(
+                    fctx,
+                    &name,
+                    &item,
+                    field,
+                    generic_args,
+                    args,
+                    span,
+                    expected,
+                )
             }
             lilac_ty::TypeKind::Instance {
                 base,
@@ -3175,21 +3239,21 @@ impl Checker<'_> {
                     generic_args,
                     args,
                     span,
+                    expected,
                 )
             }
             _ => {
                 let owner = self.types.display(ty.id);
-                Err(self.diags.emit(
-                    Diagnostic::error(
-                        "E010",
-                        format!("cannot call static member `{field}` on `{owner}`"),
-                    )
-                    .label(
-                        span,
-                        true,
-                        "static calls need an object type".to_owned(),
-                    ),
-                ))
+                let mut diagnostic = Diagnostic::error(
+                    "E010",
+                    format!("cannot call static member `{field}` on `{owner}`"),
+                )
+                .label(span, true, "static calls need an object type".to_owned());
+                if self.is_generic_derived(ty) {
+                    let note = self.required_signature_note(fctx, field, None, args, expected);
+                    diagnostic = diagnostic.note(note);
+                }
+                Err(self.diags.emit(diagnostic))
             }
         }
     }
@@ -3207,6 +3271,7 @@ impl Checker<'_> {
         generic_args: &[AstType],
         args: &[Expr],
         span: Span,
+        expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         let Some(ResKind::Object { members, .. }) = self.find_by_def(base) else {
             return Err(self.diags.emit(
@@ -3218,13 +3283,21 @@ impl Checker<'_> {
             ));
         };
         let Some(member) = members.get(field).cloned() else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no member `{field}` on `{type_name}`")).label(
-                    span,
-                    true,
-                    "no such member".to_owned(),
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{type_name}`"),
+            )
+            .label(span, true, "no such member".to_owned());
+            let owner_id = self.types.intern_instance(base, inst_args.to_vec());
+            let owner_ty = TypeRef {
+                id: owner_id,
+                is_ref: false,
+            };
+            if self.is_generic_derived(owner_ty) {
+                let note = self.required_signature_note(fctx, field, None, args, expected);
+                diagnostic = diagnostic.note(note);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         let ResKind::Func {
             generic,
