@@ -1,0 +1,7 @@
+Number: enum {
+    One
+    Two
+    Three
+}
+
+main: function () nothing {}

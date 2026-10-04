@@ -1,0 +1,6 @@
+OptionalBit32: union {
+    Some: @bit32
+    None
+}
+
+main: function () nothing {}

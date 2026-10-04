@@ -1,0 +1,8 @@
+main: function () nothing {
+    
+    conditional: @bit32 = 0x0
+
+    if 0x0 or 0x1 {
+        conditional = 0x1
+    }
+}

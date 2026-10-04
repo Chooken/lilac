@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.2-draft (rewrite baseline). Status: draft, normative for the Rust rewrite.
+> Version: 0.2-draft (rewrite baseline; M2 control-flow + folding amendments). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -147,7 +147,9 @@ therefore the caller's explicit choice of sink, never hidden sugar behavior.
 
 Constant `if` conditions are folded before code generation: only the live branch
 is kept. `@compile_error(msg)` fires only if it is still live after folding, so
-a `@compile_error` inside a dead branch is silently dropped.
+a `@compile_error` inside a dead branch is silently dropped. The legacy
+camelCase spelling `@compilerError` is an alias for `@compile_error` and folds
+identically.
 
 Folding runs after `=>` (inline) functions are substituted, so a conversion
 helper written as `=>` that wraps `@as_int` / `@as_float` folds exactly like a
@@ -235,18 +237,22 @@ if condition {
 }
 ```
 
-If expressions can also return values:
+If expressions can also return values (a later milestone; the M2 compiler
+rejects value position with `E001`):
 
 ```lilac
 status: @bit8 = if 0x0 0x0 else 0x1
 ```
 
 Value capturing from multi-return functions:
-If the first return value is non-zero, subsequent values are captured into scope:
+A call condition may bind one of the callee's out-slots by name with
+`-> name: Type`. The call's first out-slot must be a bit container and is
+tested for non-zero; the named slot must match a declared out-slot (`E022`
+otherwise) and is scoped to the `then` block:
 
 ```lilac
-if multi_func -> secondary_val: @bit16 {
-    // secondary_val is scoped here
+if get_multi() -> result: @bit32 {
+    // result is scoped here
 }
 ```
 
@@ -292,11 +298,23 @@ match union_val {
 }
 ```
 
+Arm patterns are bare tags (`.Some`); a payload binds with `-> name: Type`,
+and a single statement arm shortens to `=>`. Match is statements-only in M2:
+using a `match` as a value is rejected with `E001`.
+
+```lilac
+match number {
+    .Some -> some: @bit32 {
+    }
+    .None => return
+}
+```
+
 ## 5. Variables, References & Immutability
 
 ### Variable Declaration
 
-Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@init` hook is defined.
+Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@init` hook is defined. Struct construction is always the `=`-form (`variable: Object = Object { member = 0x1 }`); the `:`-without-`=` spelling is rejected with `E001`.
 
 ```lilac
 counter: @bit32 = 0x0
@@ -472,6 +490,10 @@ List of operators:
 | **`lhs <= rhs`** | `@less_than_or_equal(lhs, rhs) output` |
 | **`lhs >= rhs`** | `@greater_than_or_equal(lhs, rhs) output` |
 | **`-value`** | `@negate(value) output` |
+
+Short-circuit `and` / `or` are builtin control flow, not overloadable hooks:
+they evaluate left to right over bit containers and never resolve an operator
+binding.
 
 #### Operator type-change lint (`W020`, on by default)
 

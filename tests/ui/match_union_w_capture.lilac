@@ -1,0 +1,17 @@
+OptionalBit32: enum {
+    Some: @bit32
+    None
+}
+
+main: function () nothing {
+
+    number: OptionalBit32 = .Some(0x1)
+
+    match number {
+        .Some -> some: @bit32 {
+
+        }
+
+        .None => return
+    }
+}

@@ -1,0 +1,18 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+function @main
+{
+  $entry:
+    alloca #OptionalBit32 %variable : zeroed
+    alloca #OptionalBit32 %tmp.1 : zeroed
+    alloca #OptionalBit32 %tmp.2 : zeroed
+    &1: #bit8 = const 0x0
+    copy &1 -> %tmp.1.tag  // idx 0
+    &2: #bit32 = const 0x0
+    copy &2 -> %tmp.1.Some  // idx 1
+    copy %tmp.1 -> %variable
+    &3: #bit8 = const 0x1
+    copy &3 -> %tmp.2.tag  // idx 0
+    copy %tmp.2 -> %variable
+    return
+}

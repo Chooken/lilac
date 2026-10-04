@@ -1,0 +1,12 @@
+@conversion: function (from: @bit32) to: @bit8 {
+    to = @truncate(from)
+}
+
+get_multi: function () condition: @bit32, result: @bit32 {
+    condition = 0x1
+    result = 0x2
+}
+
+main: function () nothing {
+    condition: @bit8, return_val: @bit32 = get_multi()
+}

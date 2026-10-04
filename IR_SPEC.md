@@ -109,6 +109,28 @@ copy &1 -> %b
 &1: #bit32 = const 0x1:#bit32
 ```
 
+### field / field stores / deref stores
+* `field` loads `obj.name` (with layout index comment); a field store prints
+  as `copy` into `%obj.name`; a store through a `ref` place prints as `copy`
+  into `ref %dst` and verifies `dst` is a reference place.
+```lilac-ir
+&1: #bit32 = field %instance .member  // idx 0
+copy &1 -> %tmp.1.member  // idx 0
+copy &2 -> ref %tmp.3
+```
+as produced by `tests/ui/object_instance_function.lir`.
+
+### conversions / field.addr
+* `trunc` narrows and `extend.zero` widens bit containers; `field.addr`
+  computes a field address like `field` but yields a register holding it.
+```lilac-ir
+&2: #bit8 = trunc &1
+```
+as produced by `tests/ui/conversion.lir`. `extend.zero` and `field.addr`
+print symmetrically (`&3: #bit32 = extend.zero &2`,
+`&4: #bit32 = field.addr %variable .member  // idx 0`); no UI snapshot
+covers them yet.
+
 ## Control Flow
 
 ### call 
@@ -142,7 +164,8 @@ otherwise they are kept as runtime calls.
 ```lilac-ir
 return
 ```
-`return` requires all `out` places definitely assigned on every path.
+`return` requires every `out` place assigned at least once in its function
+(textual rule, flow-insensitive).
 
 ### unreachable
 ```lilac-ir
@@ -159,13 +182,16 @@ panic !msg
 ### compile.error
 * Message: constant or variable
 ```lilac-ir
-compile.error [!, %]
+@compile_error(live)
 ```
-expects a type with bit64 length in first slot and ptr to start of string in second.
-`compile.error` fires only if still live after constant folding. A `compile.error`
-inside a branch eliminated by folding is dropped without diagnostic. Verified IR
-reaching a backend contains no `compile.error`; it is diagnosed during lowering.
-Byte-buffer intrinsics (`@as_int`, `@as_float`) on constant operands are likewise
+Lowering emits one `@compile_error(live)` marker per `@compile_error(msg)`
+call site. `compile.error` fires only if still live after constant folding
+(`E031`): a marker inside a branch eliminated by folding is dropped without
+diagnostic, so verified IR reaching a backend contains no marker
+(`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
+that survives folding is a live error, diagnosed during folding — never during
+verification (reaching the verifier is an internal error). Byte-buffer
+intrinsics (`@as_int`, `@as_float`) on constant operands are likewise
 folded to plain constants before verification and never reach the backend.
 
 ## Casts

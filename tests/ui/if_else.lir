@@ -1,0 +1,17 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+function @main
+{
+  $entry:
+    alloca #bit32 %conditional : zeroed
+    &1: #bit32 = const 0x0
+    copy &1 -> %conditional
+    &2: #bit8 = const 0x0
+    branch $l.2
+  $l.2:
+    &4: #bit32 = const 0x2
+    copy &4 -> %conditional
+    branch $l.3
+  $l.3:
+    return
+}

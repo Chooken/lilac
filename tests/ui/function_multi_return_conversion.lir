@@ -1,0 +1,41 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+function @@conversion:bit32:bit8
+  in #bit32 %from
+  out #bit8 %to
+{
+  $entry:
+    &1: #bit32 = copy %from
+    &2: #bit8 = trunc &1
+    copy &2 -> %to
+    return
+}
+function @get_multi
+  out #bit32 %condition
+  out #bit32 %result
+{
+  $entry:
+    &1: #bit32 = const 0x1
+    copy &1 -> %condition
+    &2: #bit32 = const 0x2
+    copy &2 -> %result
+    return
+}
+function @main
+{
+  $entry:
+    alloca #bit32 %tmp.1 : zeroed
+    alloca #bit32 %tmp.2 : zeroed
+    alloca #bit32 %__m0 : zeroed
+    alloca #bit32 %__m1 : zeroed
+    alloca #bit8 %condition : zeroed
+    alloca #bit8 %tmp.3 : zeroed
+    alloca #bit32 %return_val : zeroed
+    call @get_multi (in) (out %tmp.1, %tmp.2)
+    copy %tmp.1 -> %__m0
+    copy %tmp.2 -> %__m1
+    call @@conversion:bit32:bit8 (in %__m0) (out %tmp.3)
+    copy %tmp.3 -> %condition
+    copy %__m1 -> %return_val
+    return
+}

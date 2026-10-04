@@ -1,0 +1,5 @@
+addOne: function (value: @bit32) @bit32 => @iadd(value, 0x1)
+
+main: function () nothing {
+    variable: @bit32 = addOne(0x1)
+}

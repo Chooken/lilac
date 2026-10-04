@@ -1,0 +1,12 @@
+Number: enum {
+    One
+    Two
+    Three
+}
+
+main: function () nothing {
+
+    number: Number = .One
+    number = .Two
+    number = .Three
+}

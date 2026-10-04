@@ -139,6 +139,9 @@ struct FuncState {
     counts: HashMap<String, u32>,
     /// Join-temp places by identity.
     temps: HashMap<TempId, String>,
+    /// Entry-block allocas, hoisted past all branches so dead-block
+    /// pruning (fold) can never orphan a place's storage.
+    allocas: Vec<LirInst>,
     /// Owned places in declaration order (drops fire for these).
     owned: Vec<(String, TypeRef)>,
     /// Place names to LIR types (field layouts resolve through these).
@@ -168,6 +171,7 @@ impl FuncState {
             locals: HashMap::new(),
             counts: HashMap::new(),
             temps: HashMap::new(),
+            allocas: Vec::new(),
             owned: Vec::new(),
             ptypes: HashMap::new(),
             breaks: Vec::new(),
@@ -209,6 +213,12 @@ fn end(fs: &mut FuncState, term: LirTerm) {
 fn at_label(fs: &mut FuncState, label: String) {
     fs.label = label;
     fs.open = true;
+}
+
+/// Queues an entry-block allocation (flushed to the top of the first
+/// block at function finalization, ahead of every branch).
+fn emit_alloca(fs: &mut FuncState, ty: String, place: String, span: Span) {
+    fs.allocas.push(LirInst::Alloca { ty, place, span });
 }
 
 /// Binds a source name to a fresh place (shadowing gets `.N` suffixes,
@@ -361,7 +371,8 @@ impl Lower<'_> {
                 param.name.clone()
             };
             let ty = lir_ty(self.types, param.ty);
-            fs.ins.push((place.clone(), ty));
+            fs.ins.push((place.clone(), ty.clone()));
+            fs.ptypes.insert(place.clone(), ty);
             fs.locals.insert(param.name.clone(), (place, param.ty));
         }
         for slot in &func.returns {
@@ -372,7 +383,8 @@ impl Lower<'_> {
                 slot.name.clone()
             };
             let ty = lir_ty(self.types, slot.ty);
-            fs.outs.push((place.clone(), ty));
+            fs.outs.push((place.clone(), ty.clone()));
+            fs.ptypes.insert(place.clone(), ty);
             fs.locals.insert(slot.name.clone(), (place, slot.ty));
         }
         self.lower_block(&mut fs, &func.body);
@@ -384,6 +396,12 @@ impl Lower<'_> {
                     span: Span::dummy(),
                 },
             );
+        }
+        debug_assert!(!fs.blocks.is_empty(), "lowered function has no blocks");
+        if !fs.allocas.is_empty() {
+            let mut allocas = std::mem::take(&mut fs.allocas);
+            allocas.append(&mut fs.blocks[0].insts);
+            fs.blocks[0].insts = allocas;
         }
         self.module.funcs.push(LirFunc {
             name: func.name.clone(),
@@ -398,14 +416,7 @@ impl Lower<'_> {
     fn declare(&mut self, fs: &mut FuncState, base: &str, ty: TypeRef, span: Span) -> String {
         let place = bind_place(fs, base, ty);
         let lir = lir_ty(self.types, ty);
-        emit(
-            fs,
-            LirInst::Alloca {
-                ty: lir.clone(),
-                place: place.clone(),
-                span,
-            },
-        );
+        emit_alloca(fs, lir.clone(), place.clone(), span);
         fs.owned.push((place.clone(), ty));
         fs.ptypes.insert(place.clone(), lir);
         place
@@ -622,14 +633,7 @@ impl Lower<'_> {
         fs.tmps += 1;
         let place = format!("tmp.{}", fs.tmps);
         let lir = lir_ty(self.types, ty);
-        emit(
-            fs,
-            LirInst::Alloca {
-                ty: lir.clone(),
-                place: place.clone(),
-                span,
-            },
-        );
+        emit_alloca(fs, lir.clone(), place.clone(), span);
         fs.ptypes.insert(place.clone(), lir);
         place
     }
@@ -733,14 +737,7 @@ impl Lower<'_> {
         fs.tmps += 1;
         let place = format!("t.{}", fs.tmps);
         let lir = lir_ty(self.types, ty);
-        emit(
-            fs,
-            LirInst::Alloca {
-                ty: lir.clone(),
-                place: place.clone(),
-                span,
-            },
-        );
+        emit_alloca(fs, lir.clone(), place.clone(), span);
         fs.ptypes.insert(place.clone(), lir);
         fs.temps.insert(temp, place.clone());
         place
@@ -891,18 +888,19 @@ impl Lower<'_> {
                 },
             );
         }
+        let dst = fresh_reg(fs);
         emit(
             fs,
             LirInst::Arith {
                 op: ArithOp::Eq,
                 lhs: test_reg,
-                rhs: const_reg.clone(),
-                dst: const_reg.clone(),
+                rhs: const_reg,
+                dst: dst.clone(),
                 ty: "#bit8".to_owned(),
                 span,
             },
         );
-        const_reg
+        dst
     }
 
     /// Emits one arm capture: payload field load into a fresh place.
@@ -988,14 +986,7 @@ impl Lower<'_> {
             let parent = fs.member_parent.clone().unwrap_or_default();
             let place = "instance".to_owned();
             let ty = format!("ref #{parent}");
-            emit(
-                fs,
-                LirInst::Alloca {
-                    ty: ty.clone(),
-                    place: place.clone(),
-                    span,
-                },
-            );
+            emit_alloca(fs, ty.clone(), place.clone(), span);
             fs.ptypes.insert(place.clone(), ty);
             fs.locals.insert(
                 name.to_owned(),
@@ -1116,18 +1107,7 @@ impl Lower<'_> {
                 msg,
                 msg_span,
                 call_span,
-            } => {
-                emit(
-                    fs,
-                    LirInst::CompileError {
-                        msg: msg.clone(),
-                        msg_span: *msg_span,
-                        call_span: *call_span,
-                    },
-                );
-                let place = self.fresh_tmp(fs, expr.ty, expr.span);
-                Ok(LirOperand::Place(place))
-            }
+            } => Ok(self.lower_compile_error(fs, msg, *msg_span, *call_span, expr.span)),
             HirExprKind::Poison => {
                 lilac_error::bug!(expr.span, "lowering poisoned HIR");
             }
@@ -1441,7 +1421,7 @@ impl Lower<'_> {
         let layout = self
             .module
             .layouts
-            .get(&owner_ty)
+            .get(layout_key(&owner_ty))
             .cloned()
             .unwrap_or_default();
         let Some(idx) = layout.iter().position(|(name, _)| name == field) else {
@@ -1462,6 +1442,37 @@ impl Lower<'_> {
             },
         );
         Ok(())
+    }
+
+    /// Emits a `@compile_error` marker with a dummy `#bit8` result slot:
+    /// live sites never reach codegen (`fold` reports `E031` first); dead
+    /// ones prune away, leaving only an unused zeroed place behind.
+    fn lower_compile_error(
+        &mut self,
+        fs: &mut FuncState,
+        msg: &str,
+        msg_span: Span,
+        call_span: Span,
+        span: Span,
+    ) -> LirOperand {
+        emit(
+            fs,
+            LirInst::CompileError {
+                msg: msg.to_owned(),
+                msg_span,
+                call_span,
+            },
+        );
+        let bit8 = self.types.builtin("@bit8").unwrap_or(TypeId::ERROR);
+        let place = self.fresh_tmp(
+            fs,
+            TypeRef {
+                id: bit8,
+                is_ref: false,
+            },
+            span,
+        );
+        LirOperand::Place(place)
     }
 
     /// Takes a reference: plain places directly, nested members through a

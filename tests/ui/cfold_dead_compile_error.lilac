@@ -1,0 +1,9 @@
+main: function () nothing {
+    if 0x0 {
+        @compile_error("dead then")
+    }
+    if 0x1 {
+    } else {
+        @compilerError("dead else")
+    }
+}

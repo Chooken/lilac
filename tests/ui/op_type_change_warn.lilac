@@ -1,0 +1,8 @@
+Matrix: object {
+    value: @bit32
+}
+@add: function (lhs: Matrix, rhs: Matrix) result: @bit32 {
+    result = 0x0
+}
+main: function () nothing {
+}
