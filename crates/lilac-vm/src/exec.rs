@@ -29,12 +29,13 @@ use std::fmt;
 
 use crate::decode::{decode, Decoded};
 use crate::encode::{
-    arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_CALL,
-    OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA,
-    OP_COPY_BASE, OP_COPY_BYTES, OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST,
-    OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE,
-    OP_STORE_LAST, OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
+    builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE, OP_ADDRFIELD_LAST,
+    OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_BRANCH_IF_IMM, OP_CALL,
+    OP_CALL_ARITH_IMM, OP_CALL_ARITH_OUT, OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST,
+    OP_CALL_INDIRECT, OP_CALL_OUT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
+    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FADD_BASE, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC,
+    OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
+    OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand, Program, VM_POINTER_BYTES};
 
@@ -132,17 +133,35 @@ struct Frame {
     /// currently executing, which is `last_pc` once any instruction has run and
     /// the function entry otherwise.
     last_pc: Option<u32>,
+    /// A deferred output copy applied when this frame returns, for the fused
+    /// `call.out` superinstruction: `(caller slot offset, dst register, size)`.
+    ///
+    /// When the callee returns, the value it wrote into the caller's out place
+    /// is copied into `dst` of the caller frame, eliminating the separate
+    /// `copy` instruction that would otherwise read the out place.
+    out_copy: Option<(u32, u32, u32)>,
 }
+
+/// A pending caller-side output copy applied on return.
+type PendingOut = (u32, u32, u32);
 
 /// A bytecode interpreter over one [`Program`].
 pub struct Machine<'a> {
     program: &'a Program,
-    /// All frames' registers, grown on call.
+    /// All frames' registers. The vector is kept at its high-water length and
+    /// its live top is [`Machine::reg_top`]; registers are SSA (written before
+    /// read), so frames may reuse stale bits without re-zeroing.
     regs: Vec<u64>,
-    /// Globals followed by each live frame's zeroed slot region.
+    /// Globals followed by each live frame's slot region. Kept at high-water
+    /// length; the live top is [`Machine::slot_top`]. Call re-zeroes only the
+    /// callee's slot region (locals need `alloca` zero-init).
     arena: Vec<u8>,
     /// The call stack; the last frame is the running one.
     frames: Vec<Frame>,
+    /// Logical top of the live register region in [`Machine::regs`].
+    reg_top: u32,
+    /// Logical top of the live slot region in [`Machine::arena`].
+    slot_top: u32,
 }
 
 impl<'a> Machine<'a> {
@@ -180,18 +199,22 @@ impl<'a> Machine<'a> {
             0,
         );
         let regs = vec![0_u64; usize::try_from(entry_func.n_regs).unwrap_or(0)];
+        let slot_top = u32::try_from(arena.len()).unwrap_or(u32::MAX);
         let frames = vec![Frame {
             func: func_index,
             reg_base: 0,
             slot_base,
             pc: 0,
             last_pc: None,
+            out_copy: None,
         }];
         Ok(Self {
             program,
             regs,
             arena,
             frames,
+            reg_top: entry_func.n_regs,
+            slot_top,
         })
     }
 
@@ -218,20 +241,33 @@ impl<'a> Machine<'a> {
         let mut regs = core::mem::take(&mut self.regs);
         let mut arena = core::mem::take(&mut self.arena);
         let mut frames = core::mem::take(&mut self.frames);
-        let result = Self::run_impl(program, &mut regs, &mut arena, &mut frames);
+        let mut reg_top = self.reg_top;
+        let mut slot_top = self.slot_top;
+        let result = Self::run_impl(
+            program,
+            &mut regs,
+            &mut arena,
+            &mut frames,
+            &mut reg_top,
+            &mut slot_top,
+        );
         self.regs = regs;
         self.arena = arena;
         self.frames = frames;
+        self.reg_top = reg_top;
+        self.slot_top = slot_top;
         result
     }
 
     /// The inner dispatch loop over local register/arena/frame storage.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::needless_late_init)]
     fn run_impl(
         program: &Program,
         regs: &mut Vec<u64>,
         arena: &mut Vec<u8>,
         frames: &mut Vec<Frame>,
+        reg_top: &mut u32,
+        slot_top: &mut u32,
     ) -> Result<i32, VmError> {
         let Some(frame) = frames.last() else {
             return Ok(0);
@@ -264,21 +300,27 @@ impl<'a> Machine<'a> {
                         return Err(VmError::BadInstr(pc));
                     }
                     store_frame(frames, func_index, pc, pc + 1);
-                    match return_frame(regs, arena, frames) {
-                        Step::Returned => return Ok(0),
-                        Step::Advanced | Step::Panicked(_) => {
-                            let Some(frame) = frames.last() else {
-                                return Ok(0);
-                            };
-                            func_index = frame.func;
-                            pc = frame.pc;
-                            reg_base = frame.reg_base;
-                            slot_base = frame.slot_base;
-                            func = &program.funcs[func_index as usize];
-                            code = func.code.as_slice();
-                            continue;
-                        }
+                    let (step, pending) = return_frame(frames, reg_top, slot_top);
+                    if step == Step::Returned {
+                        return Ok(0);
                     }
+                    let Some(caller) = frames.last() else {
+                        return Ok(0);
+                    };
+                    // Apply a fused call's deferred output copy into the caller.
+                    if let Some((slot_off, dst, size)) = pending {
+                        let abs = caller.slot_base as usize + slot_off as usize;
+                        let value =
+                            read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?;
+                        set_reg_of(regs, caller.reg_base, dst, value);
+                    }
+                    func_index = caller.func;
+                    pc = caller.pc;
+                    reg_base = caller.reg_base;
+                    slot_base = caller.slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
+                    continue;
                 }
                 OP_UNREACHABLE => {
                     if wide {
@@ -314,6 +356,34 @@ impl<'a> Machine<'a> {
                     } else {
                         ops[1]
                     };
+                }
+                OP_BRANCH_IF_IMM => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let then = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
+                    let els = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
+                    let lo = *code.get(pc as usize + 3).ok_or(VmError::BadInstr(pc))?;
+                    let hi = *code.get(pc as usize + 4).ok_or(VmError::BadInstr(pc))?;
+                    let imm = u64::from(lo) | (u64::from(hi) << 32);
+                    let lhs = (w >> 8) & 0xFF;
+                    let lhs_slot = (w >> 16) & u32::from(WIDE_FLAG) != 0;
+                    let op_code = u8::try_from(w >> 24).unwrap_or(0);
+                    let size = if op_code >= OP_FADD_BASE {
+                        float_size(op_code & 1)
+                    } else {
+                        int_size(op_code & 3)
+                    };
+                    let left = if lhs_slot {
+                        let abs = slot_base as usize + lhs as usize;
+                        read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?
+                    } else {
+                        reg_of(regs, reg_base, lhs)
+                    };
+                    let Some(value) = eval_arith_code(op_code, left, imm) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    next = if value == 0 { els } else { then };
                 }
                 OP_CONST => {
                     let (dst, n) = read_ops1(code, pc, wide)?;
@@ -456,20 +526,227 @@ impl<'a> Machine<'a> {
                     if wide {
                         return Err(VmError::BadInstr(pc));
                     }
-                    let (site, ins, outs) =
-                        resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
-                            .ok_or(VmError::BadInstr(pc))?;
-                    store_frame(frames, func_index, pc, pc + 1);
-                    do_call(
-                        program, regs, arena, frames, site.func, ins, outs, reg_base, slot_base,
-                    )?;
-                    let Some(frame) = frames.last() else {
-                        return Ok(0);
+                    let index = (w >> 8) as usize;
+                    let Some(site) = func.call_sites.get(index) else {
+                        return Err(VmError::BadInstr(pc));
                     };
-                    func_index = frame.func;
-                    pc = frame.pc;
-                    reg_base = frame.reg_base;
-                    slot_base = frame.slot_base;
+                    let (Some(ins), Some(outs)) = (
+                        func.operands
+                            .get(site.ins.start as usize..site.ins.end as usize),
+                        func.operands
+                            .get(site.outs.start as usize..site.outs.end as usize),
+                    ) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    store_frame(frames, func_index, pc, pc + 1);
+                    let callee_index = site.func;
+                    let callee_reg_base = *reg_top;
+                    let callee_slot_base = *slot_top;
+                    do_call(
+                        program,
+                        regs,
+                        arena,
+                        frames,
+                        reg_top,
+                        slot_top,
+                        callee_index,
+                        ins,
+                        outs,
+                        reg_base,
+                        slot_base,
+                    )?;
+                    func_index = callee_index;
+                    pc = 0;
+                    reg_base = callee_reg_base;
+                    slot_base = callee_slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
+                    continue;
+                }
+                OP_CALL_ARITH_IMM => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let index = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))? as usize;
+                    let lo = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
+                    let hi = *code.get(pc as usize + 3).ok_or(VmError::BadInstr(pc))?;
+                    let imm = u64::from(lo) | (u64::from(hi) << 32);
+                    let lhs = (w >> 8) & 0xFF;
+                    let lhs_slot = (w >> 16) & u32::from(WIDE_FLAG) != 0;
+                    let op_code = u8::try_from(w >> 24).unwrap_or(0);
+                    let Some(site) = func.call_sites.get(index) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (Some(ins), Some(outs)) = (
+                        func.operands
+                            .get(site.ins.start as usize..site.ins.end as usize),
+                        func.operands
+                            .get(site.outs.start as usize..site.outs.end as usize),
+                    ) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let op_size = if op_code >= OP_FADD_BASE {
+                        float_size(op_code & 1)
+                    } else {
+                        int_size(op_code & 3)
+                    };
+                    let left = if lhs_slot {
+                        let abs = slot_base as usize + lhs as usize;
+                        read_abs(arena, abs, op_size).ok_or(VmError::BadRef(abs as u64))?
+                    } else {
+                        reg_of(regs, reg_base, lhs)
+                    };
+                    let Some(value) = eval_arith_code(op_code, left, imm) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let Some(Operand::Reg(dst_reg)) = ins.first().copied() else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    set_reg_of(regs, reg_base, dst_reg, value);
+                    store_frame(frames, func_index, pc, pc + 4);
+                    let callee_index = site.func;
+                    let callee_reg_base = *reg_top;
+                    let callee_slot_base = *slot_top;
+                    do_call(
+                        program,
+                        regs,
+                        arena,
+                        frames,
+                        reg_top,
+                        slot_top,
+                        callee_index,
+                        ins,
+                        outs,
+                        reg_base,
+                        slot_base,
+                    )?;
+                    func_index = callee_index;
+                    pc = 0;
+                    reg_base = callee_reg_base;
+                    slot_base = callee_slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
+                    continue;
+                }
+                OP_CALL_ARITH_OUT => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let index = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))? as usize;
+                    let packed = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
+                    let lo = *code.get(pc as usize + 3).ok_or(VmError::BadInstr(pc))?;
+                    let hi = *code.get(pc as usize + 4).ok_or(VmError::BadInstr(pc))?;
+                    let imm = u64::from(lo) | (u64::from(hi) << 32);
+                    let lhs = (w >> 8) & 0xFF;
+                    let lhs_slot = (w >> 16) & u32::from(WIDE_FLAG) != 0;
+                    let op_code = u8::try_from(w >> 24).unwrap_or(0);
+                    let Some(site) = func.call_sites.get(index) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (Some(ins), Some(outs)) = (
+                        func.operands
+                            .get(site.ins.start as usize..site.ins.end as usize),
+                        func.operands
+                            .get(site.outs.start as usize..site.outs.end as usize),
+                    ) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let op_size = if op_code >= OP_FADD_BASE {
+                        float_size(op_code & 1)
+                    } else {
+                        int_size(op_code & 3)
+                    };
+                    let left = if lhs_slot {
+                        let abs = slot_base as usize + lhs as usize;
+                        read_abs(arena, abs, op_size).ok_or(VmError::BadRef(abs as u64))?
+                    } else {
+                        reg_of(regs, reg_base, lhs)
+                    };
+                    let Some(value) = eval_arith_code(op_code, left, imm) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let Some(Operand::Reg(arg_reg)) = ins.first().copied() else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    set_reg_of(regs, reg_base, arg_reg, value);
+                    let Some(Operand::Slot(slot_off)) = outs.first().copied() else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let dst = packed & 0xFF;
+                    let out_size = (packed >> 8) & 0xFF;
+                    store_frame(frames, func_index, pc, pc + 5);
+                    let callee_index = site.func;
+                    let callee_reg_base = *reg_top;
+                    let callee_slot_base = *slot_top;
+                    do_call(
+                        program,
+                        regs,
+                        arena,
+                        frames,
+                        reg_top,
+                        slot_top,
+                        callee_index,
+                        ins,
+                        outs,
+                        reg_base,
+                        slot_base,
+                    )?;
+                    if let Some(callee_frame) = frames.last_mut() {
+                        callee_frame.out_copy = Some((slot_off, dst, out_size));
+                    }
+                    func_index = callee_index;
+                    pc = 0;
+                    reg_base = callee_reg_base;
+                    slot_base = callee_slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
+                    continue;
+                }
+                OP_CALL_OUT => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let index = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))? as usize;
+                    let Some(site) = func.call_sites.get(index) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (Some(ins), Some(outs)) = (
+                        func.operands
+                            .get(site.ins.start as usize..site.ins.end as usize),
+                        func.operands
+                            .get(site.outs.start as usize..site.outs.end as usize),
+                    ) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let Some(Operand::Slot(slot_off)) = outs.first().copied() else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let dst = (w >> 8) & 0xFF;
+                    let out_size = (w >> 16) & 0xFF;
+                    store_frame(frames, func_index, pc, pc + 2);
+                    let callee_index = site.func;
+                    let callee_reg_base = *reg_top;
+                    let callee_slot_base = *slot_top;
+                    do_call(
+                        program,
+                        regs,
+                        arena,
+                        frames,
+                        reg_top,
+                        slot_top,
+                        callee_index,
+                        ins,
+                        outs,
+                        reg_base,
+                        slot_base,
+                    )?;
+                    if let Some(callee_frame) = frames.last_mut() {
+                        callee_frame.out_copy = Some((slot_off, dst, out_size));
+                    }
+                    func_index = callee_index;
+                    pc = 0;
+                    reg_base = callee_reg_base;
+                    slot_base = callee_slot_base;
                     func = &program.funcs[func_index as usize];
                     code = func.code.as_slice();
                     continue;
@@ -479,8 +756,17 @@ impl<'a> Machine<'a> {
                     let index = *code
                         .get(pc as usize + n as usize)
                         .ok_or(VmError::BadInstr(pc))? as usize;
-                    let (_site, ins, outs) = resolve_call(&func.call_sites, &func.operands, index)
-                        .ok_or(VmError::BadInstr(pc))?;
+                    let Some(site) = func.call_sites.get(index) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (Some(ins), Some(outs)) = (
+                        func.operands
+                            .get(site.ins.start as usize..site.ins.end as usize),
+                        func.operands
+                            .get(site.outs.start as usize..site.outs.end as usize),
+                    ) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
                     let value = reg_of(regs, reg_base, callee);
                     if value & FUNC_TAG == 0 {
                         return Err(VmError::BadRef(value));
@@ -488,16 +774,16 @@ impl<'a> Machine<'a> {
                     let target =
                         u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
                     store_frame(frames, func_index, pc, pc + n + 1);
+                    let callee_reg_base = *reg_top;
+                    let callee_slot_base = *slot_top;
                     do_call(
-                        program, regs, arena, frames, target, ins, outs, reg_base, slot_base,
+                        program, regs, arena, frames, reg_top, slot_top, target, ins, outs,
+                        reg_base, slot_base,
                     )?;
-                    let Some(frame) = frames.last() else {
-                        return Ok(0);
-                    };
-                    func_index = frame.func;
-                    pc = frame.pc;
-                    reg_base = frame.reg_base;
-                    slot_base = frame.slot_base;
+                    func_index = target;
+                    pc = 0;
+                    reg_base = callee_reg_base;
+                    slot_base = callee_slot_base;
                     func = &program.funcs[func_index as usize];
                     code = func.code.as_slice();
                     continue;
@@ -547,26 +833,31 @@ impl<'a> Machine<'a> {
                     let flags = (w >> 24) & 0xFF;
                     let lhs_slot = flags & u32::from(WIDE_FLAG) != 0;
                     let op_code = u8::try_from(flags & 0x7F).unwrap_or(0);
-                    let Some((op, width)) = arith_from_opcode(op_code) else {
-                        return Err(VmError::BadInstr(pc));
+                    let size = if op_code >= OP_FADD_BASE {
+                        float_size(op_code & 1)
+                    } else {
+                        int_size(op_code & 3)
                     };
-                    let size = u32::from(width) / 8;
                     let left = if lhs_slot {
                         let abs = slot_base as usize + lhs as usize;
                         read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?
                     } else {
                         reg_of(regs, reg_base, lhs)
                     };
-                    let value = eval_arith(op, left, imm, size);
-                    set_reg_of(regs, reg_base, dst, value & mask(size));
+                    let Some(value) = eval_arith_code(op_code, left, imm) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    set_reg_of(regs, reg_base, dst, value);
                     next = pc + 3;
                 }
                 b => {
-                    let Some((op, width)) = arith_from_opcode(b) else {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let left = reg_of(regs, reg_base, ops[1]);
+                    let right = reg_of(regs, reg_base, ops[2]);
+                    let Some(value) = eval_arith_code(b, left, right) else {
                         return Err(VmError::BadInstr(pc));
                     };
-                    let (ops, n) = read_ops3(code, pc, wide)?;
-                    exec_arith(regs, op, reg_base, ops[0], ops[1], ops[2], width);
+                    set_reg_of(regs, reg_base, ops[0], value);
                     next = pc + n;
                 }
             }
@@ -855,6 +1146,76 @@ impl<'a> Machine<'a> {
             Decoded::Call { site, ins, outs } => {
                 self.call(site.func, ins, outs, reg_base, slot_base)?;
             }
+            Decoded::CallOut {
+                dst,
+                size,
+                site,
+                ins,
+                outs,
+            } => {
+                self.call(site.func, ins, outs, reg_base, slot_base)?;
+                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
+                    if let Some(callee_frame) = self.frames.last_mut() {
+                        callee_frame.out_copy = Some((slot_off, dst, size));
+                    }
+                }
+            }
+            Decoded::CallArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+            } => {
+                let size = u32::from(width) / 8;
+                let left = if lhs_slot {
+                    let abs = usize::try_from(slot_base).unwrap_or(0) + lhs as usize;
+                    self.read_abs(abs, size)
+                        .ok_or(VmError::BadRef(abs as u64))?
+                } else {
+                    self.reg(reg_base, lhs)
+                };
+                let value = eval_arith(op, left, imm, size);
+                let Some(Operand::Reg(dst_reg)) = ins.first().copied() else {
+                    return Err(VmError::BadInstr(pc));
+                };
+                self.set_reg(reg_base, dst_reg, value);
+                self.call(site.func, ins, outs, reg_base, slot_base)?;
+            }
+            Decoded::CallArithOut {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+                dst,
+                size: out_size,
+            } => {
+                let size = u32::from(width) / 8;
+                let left = if lhs_slot {
+                    let abs = usize::try_from(slot_base).unwrap_or(0) + lhs as usize;
+                    self.read_abs(abs, size)
+                        .ok_or(VmError::BadRef(abs as u64))?
+                } else {
+                    self.reg(reg_base, lhs)
+                };
+                let value = eval_arith(op, left, imm, size);
+                if let Some(Operand::Reg(arg_reg)) = ins.first().copied() {
+                    self.set_reg(reg_base, arg_reg, value);
+                }
+                self.call(site.func, ins, outs, reg_base, slot_base)?;
+                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
+                    if let Some(callee_frame) = self.frames.last_mut() {
+                        callee_frame.out_copy = Some((slot_off, dst, out_size));
+                    }
+                }
+            }
             Decoded::CallIndirect {
                 callee, ins, outs, ..
             } => {
@@ -889,6 +1250,29 @@ impl<'a> Machine<'a> {
             }
             Decoded::BranchIf { cond, then, els } => {
                 let value = self.reg(reg_base, cond);
+                let target = if value == 0 { els } else { then };
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.pc = target;
+                }
+            }
+            Decoded::BranchIfArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                then,
+                els,
+            } => {
+                let size = u32::from(width) / 8;
+                let left = if lhs_slot {
+                    let abs = usize::try_from(slot_base).unwrap_or(0) + lhs as usize;
+                    self.read_abs(abs, size)
+                        .ok_or(VmError::BadRef(abs as u64))?
+                } else {
+                    self.reg(reg_base, lhs)
+                };
+                let value = eval_arith(op, left, imm, size);
                 let target = if value == 0 { els } else { then };
                 if let Some(frame) = self.frames.last_mut() {
                     frame.pc = target;
@@ -1006,6 +1390,8 @@ impl<'a> Machine<'a> {
             &mut self.regs,
             &mut self.arena,
             &mut self.frames,
+            &mut self.reg_top,
+            &mut self.slot_top,
             target,
             ins,
             outs,
@@ -1014,17 +1400,26 @@ impl<'a> Machine<'a> {
         )
     }
 
-    /// Pops the running frame, reclaiming its register and slot regions.
+    /// Pops the running frame, restoring the logical region tops to the
+    /// caller's.
     ///
-    /// Outputs were written by reference, so there is nothing to copy back;
-    /// an output the callee never wrote leaves the caller's storage unchanged.
-    /// Because frames nest, the popped frame's regions are always the arena's
-    /// tail, so truncating back to its bases is safe and keeps the register
-    /// file and arena bounded by the *live depth* rather than by the total
-    /// number of calls (a sequential call loop would otherwise grow the arena
-    /// without bound).
+    /// Outputs were written by reference, so there is nothing to copy back; an
+    /// output the callee never wrote leaves the caller's storage unchanged. The
+    /// register file and arena are not truncated (they stay at high-water);
+    /// only the logical tops move, so calls reuse storage without churn.
     fn return_from_frame(&mut self) -> Step {
-        return_frame(&mut self.regs, &mut self.arena, &mut self.frames)
+        let (step, pending) = return_frame(&mut self.frames, &mut self.reg_top, &mut self.slot_top);
+        if let Some((slot_off, dst, size)) = pending {
+            let Some(caller) = self.frames.last() else {
+                return step;
+            };
+            let abs = usize::try_from(caller.slot_base).unwrap_or(0) + slot_off as usize;
+            if let Some(value) = read_abs(&self.arena, abs, size) {
+                let reg_base = caller.reg_base;
+                set_reg_of(&mut self.regs, reg_base, dst, value);
+            }
+        }
+        step
     }
 
     /// Copies an aggregate value between a register (used as a ref) and a slot.
@@ -1376,6 +1771,8 @@ fn do_call(
     regs: &mut Vec<u64>,
     arena: &mut Vec<u8>,
     frames: &mut Vec<Frame>,
+    reg_top: &mut u32,
+    slot_top: &mut u32,
     target: u32,
     ins: &[Operand],
     outs: &[Operand],
@@ -1392,13 +1789,27 @@ fn do_call(
     if frames.len() >= MAX_CALL_DEPTH as usize {
         return Err(VmError::StackOverflow);
     }
-    let reg_base = u32::try_from(regs.len()).unwrap_or(u32::MAX);
-    let slot_base = u32::try_from(arena.len()).unwrap_or(u32::MAX);
-    regs.resize(regs.len() + usize::try_from(callee.n_regs).unwrap_or(0), 0);
-    arena.resize(
-        arena.len() + usize::try_from(callee.slot_bytes).unwrap_or(0),
-        0,
-    );
+    // The callee frame begins at the current logical tops. Grow the backing
+    // vectors only when the high-water mark is not yet reached; registers are
+    // SSA and need no re-zeroing, so reuse their stale bits. The slot region
+    // must be re-zeroed because `alloca` locals start at zero.
+    let reg_base = *reg_top;
+    let slot_base = *slot_top;
+    let reg_end = reg_base
+        .checked_add(callee.n_regs)
+        .ok_or(VmError::BadRef(u64::from(reg_base)))?;
+    let slot_end = slot_base
+        .checked_add(callee.slot_bytes)
+        .ok_or(VmError::BadRef(u64::from(slot_base)))?;
+    if regs.len() < reg_end as usize {
+        regs.resize(reg_end as usize, 0);
+    }
+    if arena.len() < slot_end as usize {
+        arena.resize(slot_end as usize, 0);
+    }
+    arena[slot_base as usize..slot_end as usize].fill(0);
+    *reg_top = reg_end;
+    *slot_top = slot_end;
     for (index, operand) in ins.iter().enumerate() {
         let (Some(&dst_off), Some(&size)) =
             (callee.in_offsets.get(index), callee.in_sizes.get(index))
@@ -1440,21 +1851,31 @@ fn do_call(
         slot_base,
         pc: 0,
         last_pc: None,
+        out_copy: None,
     });
     Ok(())
 }
 
-/// Pops the running frame, reclaiming its register and slot regions.
-fn return_frame(regs: &mut Vec<u64>, arena: &mut Vec<u8>, frames: &mut Vec<Frame>) -> Step {
+/// Pops the running frame, restoring the logical region tops to the caller's.
+///
+/// The register file and arena are *not* truncated: they stay at their
+/// high-water length so a later call at the same depth reuses the same storage
+/// without reallocation or re-zeroing (registers are SSA; the callee re-zeroes
+/// its own slot region on entry).
+fn return_frame(
+    frames: &mut Vec<Frame>,
+    reg_top: &mut u32,
+    slot_top: &mut u32,
+) -> (Step, Option<PendingOut>) {
     let Some(frame) = frames.pop() else {
-        return Step::Returned;
+        return (Step::Returned, None);
     };
     if frames.is_empty() {
-        return Step::Returned;
+        return (Step::Returned, frame.out_copy);
     }
-    regs.truncate(frame.reg_base as usize);
-    arena.truncate(frame.slot_base as usize);
-    Step::Advanced
+    *reg_top = frame.reg_base;
+    *slot_top = frame.slot_base;
+    (Step::Advanced, frame.out_copy)
 }
 
 /// Executes a compiler leaf builtin.
@@ -1642,6 +2063,113 @@ fn sign_extend(value: u64, size: u32) -> i64 {
     let bits = size.min(8) * 8;
     let shift = 64 - bits;
     ((value << shift) as i64) >> shift
+}
+
+/// The byte size for an integer width-class index (`0..4`).
+const fn int_size(idx: u8) -> u32 {
+    match idx {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    }
+}
+
+/// The byte size for a float width-class index (`0..2`).
+const fn float_size(idx: u8) -> u32 {
+    if idx == 0 {
+        4
+    } else {
+        8
+    }
+}
+
+/// Evaluates a width-specialized arithmetic opcode directly from its opcode
+/// byte, returning the final (already masked) result.
+///
+/// This is the flattened dispatch (spec §3.3): one match, no intermediate
+/// `ArithOp` sub-match. `None` means the byte is not an arithmetic opcode.
+#[allow(clippy::inline_always, clippy::too_many_lines)]
+#[inline(always)]
+fn eval_arith_code(code: u8, left: u64, right: u64) -> Option<u64> {
+    let value = match code {
+        // Signed integer, widths 8/16/32/64.
+        0x40..=0x43 => {
+            let m = mask(int_size(code & 3));
+            left.wrapping_add(right) & m
+        }
+        0x44..=0x47 => {
+            let m = mask(int_size(code & 3));
+            left.wrapping_sub(right) & m
+        }
+        0x48..=0x4B => {
+            let m = mask(int_size(code & 3));
+            left.wrapping_mul(right) & m
+        }
+        0x4C..=0x4F => {
+            let size = int_size(code & 3);
+            let divisor = sign_extend(right, size);
+            if divisor == 0 {
+                0
+            } else {
+                sign_extend(left, size)
+                    .wrapping_div(divisor)
+                    .cast_unsigned()
+                    & mask(size)
+            }
+        }
+        0x50..=0x53 => {
+            let size = int_size(code & 3);
+            let divisor = sign_extend(right, size);
+            if divisor == 0 {
+                0
+            } else {
+                sign_extend(left, size)
+                    .wrapping_rem(divisor)
+                    .cast_unsigned()
+                    & mask(size)
+            }
+        }
+        0x54..=0x57 => {
+            let size = int_size(code & 3);
+            u64::from(sign_extend(left, size) < sign_extend(right, size))
+        }
+        0x58..=0x5B => {
+            let size = int_size(code & 3);
+            u64::from(sign_extend(left, size) > sign_extend(right, size))
+        }
+        // Unsigned/bit-equality, widths 8/16/32/64 (operands are masked).
+        0x20..=0x23 => {
+            let m = mask(int_size(code & 3));
+            (left & m).checked_div(right & m).unwrap_or(0)
+        }
+        0x24..=0x27 => {
+            let m = mask(int_size(code & 3));
+            (left & m).checked_rem(right & m).unwrap_or(0)
+        }
+        0x28..=0x2B => {
+            let m = mask(int_size(code & 3));
+            u64::from((left & m) == (right & m))
+        }
+        0x2C..=0x2F => {
+            let m = mask(int_size(code & 3));
+            u64::from((left & m) < (right & m))
+        }
+        0x30..=0x33 => {
+            let m = mask(int_size(code & 3));
+            u64::from((left & m) > (right & m))
+        }
+        // Float, widths 32/64.
+        0x60..=0x61 => eval_float_arith(ArithOp::FAdd, left, right, float_size(code & 1)),
+        0x62..=0x63 => eval_float_arith(ArithOp::FSub, left, right, float_size(code & 1)),
+        0x64..=0x65 => eval_float_arith(ArithOp::FMul, left, right, float_size(code & 1)),
+        0x66..=0x67 => eval_float_arith(ArithOp::FDiv, left, right, float_size(code & 1)),
+        0x68..=0x69 => eval_float_arith(ArithOp::FMod, left, right, float_size(code & 1)),
+        0x6A..=0x6B => eval_float_arith(ArithOp::FLt, left, right, float_size(code & 1)),
+        0x6C..=0x6D => eval_float_arith(ArithOp::FGt, left, right, float_size(code & 1)),
+        _ => return None,
+    };
+    Some(value)
 }
 
 /// Evaluates an integer arithmetic/comparison operator.

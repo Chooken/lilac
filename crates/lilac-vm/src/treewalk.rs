@@ -357,6 +357,77 @@ impl<'a> Interp<'a> {
                 Ok(None)
             }
             Decoded::Call { site, ins, outs } => self.call(site.func, ins, outs, regs, slot_base),
+            Decoded::CallOut {
+                dst,
+                size,
+                site,
+                ins,
+                outs,
+            } => {
+                let flow = self.call(site.func, ins, outs, regs, slot_base)?;
+                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
+                    let address = slot_base + u64::from(slot_off);
+                    let value = self.read_abs(address, *size);
+                    set_reg(regs, *dst, value);
+                }
+                Ok(flow)
+            }
+            Decoded::CallArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+            } => {
+                let size = u32::from(*width) / 8;
+                let left = if *lhs_slot {
+                    self.read_scalar(regs, slot_base, Operand::Slot(*lhs), size)
+                } else {
+                    get_reg(regs, *lhs)
+                };
+                let value = eval_arith(*op, left, *imm, size);
+                if let Some(Operand::Reg(dst_reg)) = ins.first().copied() {
+                    set_reg(regs, dst_reg, value);
+                } else {
+                    return Err("fused call without a register input".to_string());
+                }
+                self.call(site.func, ins, outs, regs, slot_base)
+            }
+            Decoded::CallArithOut {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+                dst,
+                size: out_size,
+            } => {
+                let size = u32::from(*width) / 8;
+                let left = if *lhs_slot {
+                    self.read_scalar(regs, slot_base, Operand::Slot(*lhs), size)
+                } else {
+                    get_reg(regs, *lhs)
+                };
+                let value = eval_arith(*op, left, *imm, size);
+                if let Some(Operand::Reg(arg_reg)) = ins.first().copied() {
+                    set_reg(regs, arg_reg, value);
+                } else {
+                    return Err("fused call without a register input".to_string());
+                }
+                let flow = self.call(site.func, ins, outs, regs, slot_base)?;
+                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
+                    let address = slot_base + u64::from(slot_off);
+                    let value = self.read_abs(address, *out_size);
+                    set_reg(regs, *dst, value);
+                }
+                Ok(flow)
+            }
             Decoded::CallIndirect {
                 callee,
                 site: _,
@@ -377,6 +448,24 @@ impl<'a> Interp<'a> {
             Decoded::Branch { target } => Ok(Some(Flow::Goto(*target))),
             Decoded::BranchIf { cond, then, els } => {
                 let value = get_reg(regs, *cond);
+                Ok(Some(Flow::Goto(if value == 0 { *els } else { *then })))
+            }
+            Decoded::BranchIfArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                then,
+                els,
+            } => {
+                let size = u32::from(*width) / 8;
+                let left = if *lhs_slot {
+                    self.read_scalar(regs, slot_base, Operand::Slot(*lhs), size)
+                } else {
+                    get_reg(regs, *lhs)
+                };
+                let value = eval_arith(*op, left, *imm, size);
                 Ok(Some(Flow::Goto(if value == 0 { *els } else { *then })))
             }
             Decoded::Return => Ok(Some(Flow::Return)),

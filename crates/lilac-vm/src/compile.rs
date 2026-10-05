@@ -994,6 +994,7 @@ impl FuncBuilder<'_, '_> {
     }
 
     /// Emits the whole function body.
+    #[allow(clippy::too_many_lines)]
     fn run(mut self) -> Result<Func, String> {
         let func = self.func;
         let ins = func
@@ -1055,11 +1056,20 @@ impl FuncBuilder<'_, '_> {
         // arithmetic that consumes both, then remap branch targets and line
         // pcs to the folded instruction indices.
         let (folded, arith_map) = fold_arith_imm(&self.compiler.types.infos, &self.code);
-        let (folded, call_map) = fold_call_inputs(&folded);
+        let (folded, call_map) =
+            fold_call_inputs(self.compiler.module, &self.compiler.types.infos, &folded);
+        let (folded, arith_call_map) =
+            fold_arith_call(self.compiler.module, &self.compiler.types.infos, &folded);
+        let (folded, call_out_map) =
+            fold_call_out(self.compiler.module, &self.compiler.types.infos, &folded);
+        let (folded, branch_map) = fold_branch_if_imm(&folded);
         let (folded, fall_map) = drop_fallthrough_branches(&folded);
         let composed: Vec<u32> = arith_map
             .iter()
             .map(|&m| remap(&call_map, m))
+            .map(|m| remap(&arith_call_map, m))
+            .map(|m| remap(&call_out_map, m))
+            .map(|m| remap(&branch_map, m))
             .map(|m| remap(&fall_map, m))
             .collect();
         for line in &mut self.lines {
@@ -1297,7 +1307,8 @@ fn reg_read_count(code: &[Instr]) -> HashMap<u32, u32> {
                 bump(*lhs);
                 bump(*rhs);
             }
-            Instr::ArithImm { lhs, lhs_slot, .. } => {
+            Instr::ArithImm { lhs, lhs_slot, .. }
+            | Instr::BranchIfArithImm { lhs, lhs_slot, .. } => {
                 if !lhs_slot {
                     bump(*lhs);
                 }
@@ -1330,7 +1341,11 @@ fn bump_operands(ins: &[Operand], bump: &mut impl FnMut(u32)) {
 /// becomes a call reading `&r` directly, removing the slot round-trip. This is
 /// safe only when the slot is written once, read once, and is never a call
 /// output (checked by the caller).
-fn fold_call_inputs(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+fn fold_call_inputs(
+    module: &LirModule,
+    types: &[TypeInfo],
+    code: &[Instr],
+) -> (Vec<Instr>, Vec<u32>) {
     let (reads, writes) = slot_access_counts(code);
     let mut is_out: HashSet<u32> = HashSet::new();
     for instr in code {
@@ -1364,7 +1379,7 @@ fn fold_call_inputs(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
                 Some(Instr::Copy {
                     dst: Operand::Slot(slot),
                     src: Operand::Reg(reg),
-                    ..
+                    ty,
                 }),
                 Some(call),
             ) if reads.get(slot).copied() == Some(1)
@@ -1372,7 +1387,11 @@ fn fold_call_inputs(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
                 && !is_out.contains(slot)
                 && !is_target.get(i + 1).copied().unwrap_or(true) =>
             {
-                forward_call(call, *slot, *reg)
+                // The staging copy's width must match the callee input it feeds,
+                // or forwarding the untruncated register would change the value.
+                types
+                    .get(*ty as usize)
+                    .and_then(|info| forward_call(module, call, *slot, *reg, info.size))
             }
             _ => None,
         };
@@ -1401,23 +1420,307 @@ fn fold_call_inputs(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
     (new_code, map)
 }
 
-/// Replaces a call's `Slot(slot)` input with `Reg(reg)`, if present.
-fn forward_call(call: &Instr, slot: u32, reg: u32) -> Option<Instr> {
-    let mut out = call.clone();
-    let (Instr::Call { ins, .. }
-    | Instr::CallIndirect { ins, .. }
-    | Instr::CallBuiltin { ins, .. }) = &mut out
-    else {
-        return None;
-    };
-    let mut found = false;
-    for operand in ins.iter_mut() {
-        if *operand == Operand::Slot(slot) {
-            *operand = Operand::Reg(reg);
-            found = true;
+/// Fuses `ArithImm` + direct `Call` (and an optional following output copy).
+///
+/// `&r = op lhs, imm; call @f (in &r) (out %s)` becomes `CallArithImm`; if a
+/// `&d = copy %s` follows, the whole triple becomes `CallArithOut`.
+#[allow(clippy::too_many_lines)]
+fn fold_arith_call(
+    module: &LirModule,
+    types: &[TypeInfo],
+    code: &[Instr],
+) -> (Vec<Instr>, Vec<u32>) {
+    let reads = reg_read_count(code);
+    let (slot_reads, _) = slot_access_counts(code);
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
         }
     }
-    found.then_some(out)
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        if let (
+            Some(Instr::ArithImm {
+                op,
+                dst,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+            }),
+            Some(Instr::Call { func, ins, outs }),
+        ) = (code.get(i), code.get(i + 1))
+        {
+            let call_ok = ins.as_slice() == [Operand::Reg(*dst)]
+                && read_once(&reads, *dst)
+                && !is_target.get(i + 1).copied().unwrap_or(true)
+                && *lhs <= NARROW_MAX;
+            if call_ok {
+                // Triple: a following `&d = copy %s` of the call's single output.
+                let triple = match code.get(i + 2) {
+                    Some(Instr::Copy {
+                        dst: Operand::Reg(copy_dst),
+                        src: Operand::Slot(copy_slot),
+                        ty,
+                    }) if outs.as_slice() == [*copy_slot]
+                        && slot_reads.get(copy_slot).copied() == Some(1)
+                        && !is_target.get(i + 2).copied().unwrap_or(true) =>
+                    {
+                        let copy_size = types.get(*ty as usize).map(|info| info.size);
+                        let out_size = module
+                            .funcs
+                            .get(*func as usize)
+                            .and_then(|f| f.outs.first())
+                            .and_then(|(_, out_ty)| type_size(module, out_ty, 0).ok());
+                        if copy_size.is_some() && copy_size == out_size {
+                            Some((*copy_dst, copy_size.unwrap_or(0)))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((copy_dst, size)) = triple {
+                    map[i] = start;
+                    map[i + 1] = start;
+                    map[i + 2] = start;
+                    new_code.push(Instr::CallArithOut {
+                        op: *op,
+                        lhs: *lhs,
+                        lhs_slot: *lhs_slot,
+                        imm: *imm,
+                        operand_ty: *operand_ty,
+                        func: *func,
+                        ins: ins.clone(),
+                        outs: outs.clone(),
+                        dst: copy_dst,
+                        size,
+                    });
+                    i += 3;
+                    continue;
+                }
+                map[i] = start;
+                map[i + 1] = start;
+                new_code.push(Instr::CallArithImm {
+                    op: *op,
+                    lhs: *lhs,
+                    lhs_slot: *lhs_slot,
+                    imm: *imm,
+                    operand_ty: *operand_ty,
+                    func: *func,
+                    ins: ins.clone(),
+                    outs: outs.clone(),
+                });
+                i += 2;
+                continue;
+            }
+        }
+        map[i] = start;
+        new_code.push(code[i].clone());
+        i += 1;
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// Fuses `Call` + `Copy` that reads the call's single output slot.
+///
+/// The callee still writes the caller's out place by reference; `return` then
+/// copies it into the destination register, removing the separate read.
+fn fold_call_out(module: &LirModule, types: &[TypeInfo], code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let (reads, _) = slot_access_counts(code);
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        if let (
+            Some(Instr::Call { func, ins, outs }),
+            Some(Instr::Copy {
+                dst: Operand::Reg(dst),
+                src: Operand::Slot(slot),
+                ty,
+            }),
+        ) = (code.get(i), code.get(i + 1))
+        {
+            let copy_size = types.get(*ty as usize).map(|info| info.size);
+            let out_size = module
+                .funcs
+                .get(*func as usize)
+                .and_then(|f| f.outs.first())
+                .and_then(|(_, out_ty)| type_size(module, out_ty, 0).ok());
+            if outs.as_slice() == [*slot]
+                && reads.get(slot).copied() == Some(1)
+                && !is_target.get(i + 1).copied().unwrap_or(true)
+                && copy_size.is_some()
+                && copy_size == out_size
+            {
+                let size = copy_size.unwrap_or(0);
+                map[i] = start;
+                map[i + 1] = start;
+                new_code.push(Instr::CallOut {
+                    func: *func,
+                    ins: ins.clone(),
+                    outs: outs.clone(),
+                    dst: *dst,
+                    size,
+                });
+                i += 2;
+                continue;
+            }
+        }
+        map[i] = start;
+        new_code.push(code[i].clone());
+        i += 1;
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// Fuses `ArithImm` + `BranchIf` whose condition is the compare's destination.
+///
+/// The comparison result register must be read only by the branch, so the
+/// fused instruction can branch on the computed value directly without
+/// materializing it.
+fn fold_branch_if_imm(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let reads = reg_read_count(code);
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        if let (
+            Some(Instr::ArithImm {
+                op,
+                dst,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+            }),
+            Some(Instr::BranchIf { cond, then, els }),
+        ) = (code.get(i), code.get(i + 1))
+        {
+            if cond == dst
+                && read_once(&reads, *dst)
+                && !is_target.get(i + 1).copied().unwrap_or(true)
+                && *lhs <= NARROW_MAX
+            {
+                map[i] = start;
+                map[i + 1] = start;
+                new_code.push(Instr::BranchIfArithImm {
+                    op: *op,
+                    lhs: *lhs,
+                    lhs_slot: *lhs_slot,
+                    imm: *imm,
+                    operand_ty: *operand_ty,
+                    then: *then,
+                    els: *els,
+                });
+                i += 2;
+                continue;
+            }
+        }
+        map[i] = start;
+        new_code.push(code[i].clone());
+        i += 1;
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// Replaces a *direct* call's `Slot(slot)` input with `Reg(reg)`, but only when
+/// the callee input's width at that position equals `copy_size`.
+///
+/// Indirect and builtin calls are left alone: their callee signature is not
+/// statically available here, so the width cannot be checked.
+fn forward_call(
+    module: &LirModule,
+    call: &Instr,
+    slot: u32,
+    reg: u32,
+    copy_size: u32,
+) -> Option<Instr> {
+    let mut out = call.clone();
+    let Instr::Call { func, ins, .. } = &mut out else {
+        return None;
+    };
+    let position = ins
+        .iter()
+        .position(|operand| *operand == Operand::Slot(slot))?;
+    let input_ty = module
+        .funcs
+        .get(*func as usize)?
+        .ins
+        .get(position)?
+        .1
+        .clone();
+    if type_size(module, &input_ty, 0).ok()? != copy_size {
+        return None;
+    }
+    ins[position] = Operand::Reg(reg);
+    Some(out)
 }
 
 /// Counts reads and writes of each frame slot across `code`.
@@ -1489,7 +1792,7 @@ fn drop_fallthrough_branches(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
     for instr in &mut new_code {
         match instr {
             Instr::Branch { target } => *target = remap(&map, *target),
-            Instr::BranchIf { then, els, .. } => {
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
                 *then = remap(&map, *then);
                 *els = remap(&map, *els);
             }

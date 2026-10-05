@@ -450,6 +450,72 @@ pub enum Instr {
         /// Output slot offsets.
         outs: Vec<u32>,
     },
+    /// Fused `ArithImm` feeding a direct call's single input register.
+    ///
+    /// Folds `&d = op lhs, imm` immediately followed by `call @f (in &d)`: the
+    /// computed value is written to the call input register, then the call runs.
+    CallArithImm {
+        /// Arithmetic operator.
+        op: ArithOp,
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Immediate right operand.
+        imm: u64,
+        /// Operand width type.
+        operand_ty: TypeId,
+        /// Callee function index.
+        func: u32,
+        /// Input operands (exactly one register, the arithmetic destination).
+        ins: Vec<Operand>,
+        /// Output slot offsets.
+        outs: Vec<u32>,
+    },
+    /// Fused `ArithImm` + direct call + output copy.
+    ///
+    /// Folds `&r = op lhs, imm`, `call @f (in &r) (out %s)`, and
+    /// `&d = copy %s` into one instruction: the argument is computed, the call
+    /// runs, and on return the out place is copied into `&d`.
+    CallArithOut {
+        /// Arithmetic operator.
+        op: ArithOp,
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Immediate right operand.
+        imm: u64,
+        /// Operand width type.
+        operand_ty: TypeId,
+        /// Callee function index.
+        func: u32,
+        /// Input operands (exactly one register, the arithmetic destination).
+        ins: Vec<Operand>,
+        /// Output slot offsets (exactly one).
+        outs: Vec<u32>,
+        /// Destination register for the returned output.
+        dst: u32,
+        /// Output byte size.
+        size: u32,
+    },
+    /// Direct call whose single output is copied into a register on return.
+    ///
+    /// Folds `call @f (out %s)` immediately followed by `&d = copy %s`: the
+    /// callee still writes the caller's out place by reference, and `return`
+    /// copies it into `&d`, eliminating the separate read.
+    CallOut {
+        /// Callee function index.
+        func: u32,
+        /// Input operands.
+        ins: Vec<Operand>,
+        /// Output slot offsets (exactly one).
+        outs: Vec<u32>,
+        /// Destination register for the returned output.
+        dst: u32,
+        /// Output byte size (bounds the copied value).
+        size: u32,
+    },
     /// Indirect call through a register holding a function id.
     CallIndirect {
         /// Register holding the callee.
@@ -467,6 +533,27 @@ pub enum Instr {
         ins: Vec<Operand>,
         /// Output slot offsets.
         outs: Vec<u32>,
+    },
+    /// Fused `if (op lhs, imm) { then } else { els }`.
+    ///
+    /// This is the sanctioned compare+branch superinstruction (spec §12): it
+    /// folds an [`Instr::ArithImm`] comparison whose result is read only by the
+    /// immediately following [`Instr::BranchIf`].
+    BranchIfArithImm {
+        /// Comparison operator.
+        op: ArithOp,
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Immediate right operand (already masked to the operand width).
+        imm: u64,
+        /// Operand width type.
+        operand_ty: TypeId,
+        /// Taken target for a non-zero comparison result.
+        then: u32,
+        /// Untaken target for a zero result.
+        els: u32,
     },
     /// Unconditional branch.
     Branch {
@@ -564,7 +651,8 @@ impl Func {
                 Decoded::Branch { target } => {
                     set.insert(target);
                 }
-                Decoded::BranchIf { then, els, .. } => {
+                Decoded::BranchIf { then, els, .. }
+                | Decoded::BranchIfArithImm { then, els, .. } => {
                     set.insert(then);
                     set.insert(els);
                 }
@@ -727,6 +815,7 @@ fn is_terminator(instr: &Decoded) -> bool {
             | Decoded::Unreachable
             | Decoded::Branch { .. }
             | Decoded::BranchIf { .. }
+            | Decoded::BranchIfArithImm { .. }
     )
 }
 
@@ -981,6 +1070,52 @@ fn verify_decoded(
         Decoded::Call { site, ins, outs } => {
             verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;
         }
+        Decoded::CallOut {
+            dst,
+            site,
+            ins,
+            outs,
+            ..
+        } => {
+            check_reg(*dst, n_regs)?;
+            verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;
+        }
+        Decoded::CallArithImm {
+            lhs,
+            lhs_slot,
+            width,
+            site,
+            ins,
+            outs,
+            ..
+        } => {
+            let size = u32::from(*width) / 8;
+            if *lhs_slot {
+                check_slot(*lhs, size, slot_bytes)?;
+            } else {
+                check_reg(*lhs, n_regs)?;
+            }
+            verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;
+        }
+        Decoded::CallArithOut {
+            lhs,
+            lhs_slot,
+            width,
+            site,
+            ins,
+            outs,
+            dst,
+            ..
+        } => {
+            let size = u32::from(*width) / 8;
+            if *lhs_slot {
+                check_slot(*lhs, size, slot_bytes)?;
+            } else {
+                check_reg(*lhs, n_regs)?;
+            }
+            check_reg(*dst, n_regs)?;
+            verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;
+        }
         Decoded::CallIndirect {
             callee, ins, outs, ..
         } => {
@@ -995,6 +1130,23 @@ fn verify_decoded(
         Decoded::Branch { target } => targets.push(*target),
         Decoded::BranchIf { cond, then, els } => {
             check_reg(*cond, n_regs)?;
+            targets.push(*then);
+            targets.push(*els);
+        }
+        Decoded::BranchIfArithImm {
+            lhs,
+            lhs_slot,
+            width,
+            then,
+            els,
+            ..
+        } => {
+            let size = u32::from(*width) / 8;
+            if *lhs_slot {
+                check_slot(*lhs, size, slot_bytes)?;
+            } else {
+                check_reg(*lhs, n_regs)?;
+            }
             targets.push(*then);
             targets.push(*els);
         }

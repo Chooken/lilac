@@ -9,11 +9,12 @@
 
 use crate::encode::{
     arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_CALL,
-    OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA,
-    OP_COPY_BASE, OP_COPY_BYTES, OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST,
-    OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE,
-    OP_STORE_LAST, OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_BRANCH_IF_IMM,
+    OP_CALL, OP_CALL_ARITH_IMM, OP_CALL_ARITH_OUT, OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST,
+    OP_CALL_INDIRECT, OP_CALL_OUT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
+    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
+    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
+    OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand};
 
@@ -375,6 +376,61 @@ pub enum Decoded<'a> {
         /// Output slot operands.
         outs: &'a [Operand],
     },
+    /// Fused arithmetic + direct call.
+    CallArithImm {
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Operator.
+        op: ArithOp,
+        /// Operand width in bits.
+        width: u8,
+        /// Immediate right operand.
+        imm: u64,
+        /// Resolved call site.
+        site: &'a CallSite,
+        /// Input operands.
+        ins: &'a [Operand],
+        /// Output slot operands.
+        outs: &'a [Operand],
+    },
+    /// Fused arithmetic + direct call + output copy.
+    CallArithOut {
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Operator.
+        op: ArithOp,
+        /// Operand width in bits.
+        width: u8,
+        /// Immediate right operand.
+        imm: u64,
+        /// Resolved call site.
+        site: &'a CallSite,
+        /// Input operands.
+        ins: &'a [Operand],
+        /// Output slot operands.
+        outs: &'a [Operand],
+        /// Destination register for the returned output.
+        dst: u32,
+        /// Output byte size.
+        size: u32,
+    },
+    /// Direct call whose single output is copied into a register on return.
+    CallOut {
+        /// Destination register for the returned output.
+        dst: u32,
+        /// Output byte size.
+        size: u32,
+        /// Resolved call site.
+        site: &'a CallSite,
+        /// Input operands.
+        ins: &'a [Operand],
+        /// Output slot operands.
+        outs: &'a [Operand],
+    },
     /// Indirect call through a register holding a function id.
     CallIndirect {
         /// Register holding the callee.
@@ -396,6 +452,23 @@ pub enum Decoded<'a> {
         ins: &'a [Operand],
         /// Output slot operands.
         outs: &'a [Operand],
+    },
+    /// Fused arithmetic comparison + conditional branch.
+    BranchIfArithImm {
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Comparison operator.
+        op: ArithOp,
+        /// Operand width in bits.
+        width: u8,
+        /// Immediate right operand.
+        imm: u64,
+        /// Taken target.
+        then: u32,
+        /// Untaken target.
+        els: u32,
     },
     /// Unconditional branch.
     Branch {
@@ -613,6 +686,34 @@ pub fn decode<'a>(
                 n,
             )
         }
+        OP_BRANCH_IF_IMM => {
+            if wide {
+                return Err(format!("wide flag on fused branch at pc {pc}"));
+            }
+            let bytes = w.to_le_bytes();
+            let lhs = u32::from(bytes[1]);
+            let lhs_slot = bytes[2] & WIDE_FLAG != 0;
+            let op_code = bytes[3];
+            let (op, width) = arith_from_opcode(op_code)
+                .ok_or_else(|| format!("unknown fused branch opcode 0x{op_code:02X} at pc {pc}"))?;
+            let then = word_at(code, pc + 1)?;
+            let els = word_at(code, pc + 2)?;
+            let lo = word_at(code, pc + 3)?;
+            let hi = word_at(code, pc + 4)?;
+            let imm = u64::from(lo) | (u64::from(hi) << 32);
+            (
+                Decoded::BranchIfArithImm {
+                    lhs,
+                    lhs_slot,
+                    op,
+                    width,
+                    imm,
+                    then,
+                    els,
+                },
+                5,
+            )
+        }
         OP_ARITH_IMM => {
             if wide {
                 return Err(format!("wide flag on fused arithmetic at pc {pc}"));
@@ -650,6 +751,90 @@ pub fn decode<'a>(
         OP_CALL => {
             let (site, ins, outs) = call_slice(call_sites, operands, (w >> 8) as usize)?;
             (Decoded::Call { site, ins, outs }, 1)
+        }
+        OP_CALL_ARITH_OUT => {
+            if wide {
+                return Err(format!("wide flag on call.arith.out at pc {pc}"));
+            }
+            let bytes = w.to_le_bytes();
+            let lhs = u32::from(bytes[1]);
+            let lhs_slot = bytes[2] & WIDE_FLAG != 0;
+            let op_code = bytes[3];
+            let (op, width) = arith_from_opcode(op_code).ok_or_else(|| {
+                format!("unknown call.arith.out opcode 0x{op_code:02X} at pc {pc}")
+            })?;
+            let index = word_at(code, pc + 1)? as usize;
+            let packed = word_at(code, pc + 2)?;
+            let dst = packed & 0xFF;
+            let out_size = (packed >> 8) & 0xFF;
+            let lo = word_at(code, pc + 3)?;
+            let hi = word_at(code, pc + 4)?;
+            let imm = u64::from(lo) | (u64::from(hi) << 32);
+            let (site, ins, outs) = call_slice(call_sites, operands, index)?;
+            (
+                Decoded::CallArithOut {
+                    lhs,
+                    lhs_slot,
+                    op,
+                    width,
+                    imm,
+                    site,
+                    ins,
+                    outs,
+                    dst,
+                    size: out_size,
+                },
+                5,
+            )
+        }
+        OP_CALL_OUT => {
+            if wide {
+                return Err(format!("wide flag on call.out at pc {pc}"));
+            }
+            let bytes = w.to_le_bytes();
+            let dst = u32::from(bytes[1]);
+            let out_size = u32::from(bytes[2]);
+            let index = word_at(code, pc + 1)? as usize;
+            let (site, ins, outs) = call_slice(call_sites, operands, index)?;
+            (
+                Decoded::CallOut {
+                    dst,
+                    size: out_size,
+                    site,
+                    ins,
+                    outs,
+                },
+                2,
+            )
+        }
+        OP_CALL_ARITH_IMM => {
+            if wide {
+                return Err(format!("wide flag on fused call at pc {pc}"));
+            }
+            let bytes = w.to_le_bytes();
+            let lhs = u32::from(bytes[1]);
+            let lhs_slot = bytes[2] & WIDE_FLAG != 0;
+            let op_code = bytes[3];
+            let (op, width) = arith_from_opcode(op_code)
+                .ok_or_else(|| format!("unknown fused call opcode 0x{op_code:02X} at pc {pc}"))?;
+            let index = word_at(code, pc + 1)? as usize;
+            let lo = word_at(code, pc + 2)?;
+            let hi = word_at(code, pc + 3)?;
+            let imm = u64::from(lo) | (u64::from(hi) << 32);
+            let (site, ins, outs) = call_slice(call_sites, operands, index)?;
+            (
+                Decoded::CallArithImm {
+                    lhs,
+                    lhs_slot,
+                    op,
+                    width,
+                    imm,
+                    site,
+                    ins,
+                    outs,
+                },
+                4,
+            )
         }
         OP_CALL_INDIRECT => {
             let (ops, n) = read_ops(code, pc, wide, 1)?;
@@ -822,6 +1007,10 @@ const fn operand_count(base: u8, is_arith: bool, is_convert: bool) -> Option<u8>
         OP_CONST | OP_CONST_DATA | OP_CALL_INDIRECT => Some(1),
         OP_ADDR | OP_ADDR_FUNC => Some(2),
         OP_ARITH_IMM
+        | OP_BRANCH_IF_IMM
+        | OP_CALL_ARITH_IMM
+        | OP_CALL_ARITH_OUT
+        | OP_CALL_OUT
         | OP_BRANCH_IF
         | OP_COPY_BASE..=OP_COPY_LAST
         | OP_COPY_BYTES

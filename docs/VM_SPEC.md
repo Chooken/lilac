@@ -79,12 +79,21 @@ region), and a call stack of frames.
 
 - **Registers.** A register is a raw `u64`. Indices are dense `u32` values
   assigned per function; LIR registers are block-local SSA, so the same name in
-  two blocks maps to distinct VM registers.
+  two blocks maps to distinct VM registers. Because they are SSA (written before
+  read), the register file is **not** re-zeroed per call: it is kept at its
+  high-water length and a frame's registers may reuse stale bits. A logical
+  `reg_top` tracks the live extent.
 - **Places.** A place is a byte offset within a frame's slot region. Slots are
   packed in declaration order (`ins`, then `outs`, then `alloca`s in program
-  order). The whole region is allocated and zeroed when the frame is entered, so
-  `alloca` and `drop` emit **no instructions**; universal zero-initialization is
-  the VM's default. `drop` is a marker whose destructor calls already precede it.
+  order). The whole region is zeroed when the frame is entered, so `alloca` and
+  `drop` emit **no instructions**; universal zero-initialization is the VM's
+  default. `drop` is a marker whose destructor calls already precede it.
+- **Frame reclamation.** The register file and arena are kept at high-water
+  length (a logical `slot_top` tracks the live extent). On `return`, the popped
+  frame's region is reclaimed by moving `reg_top`/`slot_top` back to the
+  caller's bases; the next call at the same depth reuses the same storage, so a
+  sequential call loop does not grow the arena without bound. Only the callee's
+  slot region is re-zeroed on entry (registers need no init).
 - **References.** A `ref` is a `u64` byte offset into the arena. The arena
   begins with `Program::globals`, so a data constant's `global_off` is directly a
   valid ref. Scalar loads/stores and `@memcpy` read and write little-endian
@@ -109,7 +118,8 @@ For a body loaded from an untrusted `.lbc`, a verifier failure is a **clean data
 error** (the runner/CLI prints it and exits 2), never a `bug!`/panic. Since the
 verifier does not do control-flow reachability, it also requires every non-extern
 function to have a non-empty `code` that **ends in a control-flow terminator**
-(`return`, `panic`, `unreachable`, `branch`, or `branch.if`); intermediate
+(`return`, `panic`, `unreachable`, `branch`, `branch.if`, or `branch.if.imm`);
+intermediate
 fall-through is legal. Together with in-range branch targets, this guarantees
 `pc` can never run off the end of a verified body. The register/slot bounds are
 checked *before* any frame allocation, so an untrusted artifact cannot request an
@@ -149,7 +159,13 @@ owner type at run time.
 | Variant | Canonical `.lbc` | Fields | Semantics |
 | --- | --- | --- | --- |
 | `Arith` | `&d: ty = op &l, &r : operand_ty` | `op`, `dst`, `lhs`, `rhs`, `operand_ty`, `ty` | Typed arithmetic/comparison (see below). |
+| `ArithImm` | `&d: ty = op.imm lhs, 0xImm : operand_ty` | `op`, `dst`, `lhs`, `lhs_slot`, `imm`, `operand_ty` | Fused `copy`+`const`+`arith`: `lhs` is a register or slot, `imm` the right operand. |
 | `Convert` | `&d: ty = trunc\|extend.zero &s` | `op`, `dst`, `src`, `ty` | Mask the source to `size(ty)` bytes. |
+
+`ArithImm` is a compiler superinstruction (spec §12): it folds a single-use
+`copy %place -> &r` and a `const k -> &j` into the arithmetic that consumes both
+(`&d = op %place, k`), cutting the instruction count directly. Its immediate is
+already masked to the operand width; `lhs` is a register or frame slot.
 
 **`operand_ty` vs `ty`.** `operand_ty` is the operands' declared type and `ty`
 is the result type. They differ for comparisons, whose LIR result is always
@@ -176,15 +192,25 @@ result width (`value & mask(size(ty))`).
 | Variant | Canonical `.lbc` | Semantics |
 | --- | --- | --- |
 | `Call` | `call @f (in ...) (out ...)` | Direct call by function index. |
+| `CallArithImm` | `call.arith.imm op lhs, 0xImm : ty -> @f (in ...) (out ...)` | Fused `ArithImm` feeding the call's single input register. |
+| `CallOut` | `call.out &d, size -> @f (in ...) (out ...)` | Direct call whose single output is copied into `&d` on return. |
 | `CallIndirect` | `call.indirect &c (in ...) (out ...)` | Call the function id (from `addr.func`) held in `&c`. |
 | `CallBuiltin` | `call.builtin @b (in ...) (out ...)` | Leaf builtin: `ptr_add`, `memcpy`, or `lilac_abort`. |
 
 Inputs are operands (`&reg` or `%slot`); outputs are slots (`%slot`). Calling a
 function pushes a frame, allocates `n_regs` registers and `slot_bytes` zeroed
-arena bytes, binds the callee's `ins` into its input slots, and jumps to its
-entry pc. `return` copies the callee's `outs` into the caller's recorded out
-slots and restores the caller. The injected `.lilac.*` runtime functions are
-ordinary functions called through `Call`.
+arena bytes (registers are SSA and not re-zeroed), binds the callee's `ins` into
+its input slots, and jumps to its entry pc.
+
+**Outputs are by reference (pointer ABI).** The callee's frame begins with an
+out-ref region: at `call`, the caller writes the absolute arena offset of each
+of its out places there, and the callee writes the caller's storage directly.
+`return` therefore copies **nothing** back — an output the callee never writes
+leaves the caller's storage unchanged. `CallArithImm` folds the argument
+computation into the call. `CallOut` records a deferred copy on the pushed
+frame; when the callee returns, the value at the caller's out place is copied
+into `&d`, removing the separate read. The injected `.lilac.*` runtime functions
+are ordinary functions called through `Call`.
 
 Leaf builtins and their arities:
 
@@ -198,6 +224,7 @@ Leaf builtins and their arities:
 | --- | --- | --- |
 | `Branch` | `branch $L<n>` | Unconditional jump to pc `n`. |
 | `BranchIf` | `branch.if &c, $L<t>, $L<e>` | Jump to `e` when `&c == 0`, otherwise to `t`. |
+| `BranchIfArithImm` | `branch.if.imm op lhs, 0xImm : ty, $L<t>, $L<e>` | Fused compare+branch: evaluate `op lhs, Imm` and branch on a non-zero result. |
 | `Return` | `return` | Copy outs to the caller's out slots and pop the frame; returning from the entry frame ends the program with exit 0. |
 | `Panic` | `panic !cN` | Print the bytes of data constant `!cN` to stderr as `panic: <msg>` and exit 101. |
 | `Unreachable` | `unreachable` | VM trap: reaching it is a clean runtime error (`unreachable terminator`), exit 1, never a `bug!`. |

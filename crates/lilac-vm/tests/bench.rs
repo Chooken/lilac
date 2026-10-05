@@ -34,14 +34,9 @@ const TRAP: i32 = 101;
 
 /// Absolute wall-time budget for the `fib` program's VM run, in nanoseconds.
 ///
-/// Task 9's target was `200_000`; the sanctioned levers (redundant-copy
-/// elimination, `const`/`arith` fusion, call-input forwarding, fall-through
-/// elimination) brought the release `fib` from ~879 µs to ~405-450 µs, but the
-/// interpreter's measured per-instruction floor (~5 ns) puts 200 µs out of
-/// reach for this design. The budget is therefore set to the achieved floor
-/// with headroom for machine variance rather than the unreachable target; see
-/// the Task 9 report.
-const FIB_BUDGET_NS: u128 = 600_000;
+/// Initially generous (Task 1 records the baseline); tightened as the M5c.1
+/// performance work lands. Task 9 sets the final `200_000`.
+const FIB_BUDGET_NS: u128 = 200_000;
 
 /// A small program suite: `(name, expected exit code, source)`.
 ///

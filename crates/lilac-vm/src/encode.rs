@@ -129,6 +129,30 @@ pub const OP_EXTEND_ZERO: u8 = 0x73;
 /// low bit of `flags` distinguishes a slot `lhs` from a register `lhs`.
 pub const OP_ARITH_IMM: u8 = 0x34;
 
+/// Fused arithmetic comparison + conditional branch.
+///
+/// Layout: `[op | lhs:8 | (slot:1 | op_code:7) | unused:8]`, then the `then`
+/// target, the `els` target, and the little-endian low/high words of the `u64`
+/// immediate (`u64`). `op_code` is a width-specialized comparison opcode.
+pub const OP_BRANCH_IF_IMM: u8 = 0x35;
+
+/// Fused `ArithImm` feeding a direct call's single input register.
+///
+/// Layout: `[op | lhs:8 | flags:8 | op_code:8]`, then the call-site index, then
+/// the little-endian low/high words of the `u64` immediate.
+pub const OP_CALL_ARITH_IMM: u8 = 0x36;
+
+/// Direct call whose single output is copied into a register on return.
+///
+/// Layout: `[op | dst:8 | size:8 | 0]`, then the call-site index.
+pub const OP_CALL_OUT: u8 = 0x37;
+
+/// Fused arithmetic + direct call + output copy.
+///
+/// Layout: `[op | lhs:8 | flags:8 | op_code:8]`, the call-site index,
+/// `[dst:8 | size:8]`, then the immediate's low/high words.
+pub const OP_CALL_ARITH_OUT: u8 = 0x38;
+
 /// Builds the compact word stream and its operand pools.
 ///
 /// Borrows the program type table so sizes/widths are computed at encode time.
@@ -273,6 +297,38 @@ impl<'a> CodeBuilder<'a> {
                 self.words.push(lo);
                 self.words.push(hi);
             }
+            Instr::BranchIfArithImm {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                then,
+                els,
+            } => {
+                let size = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, size)?;
+                if *lhs > NARROW_MAX || code >= WIDE_FLAG {
+                    return Err(format!(
+                        "fused branch operand does not fit the narrow form (lhs={lhs})"
+                    ));
+                }
+                let flags = if *lhs_slot { u32::from(WIDE_FLAG) } else { 0 };
+                self.words.push(
+                    u32::from(OP_BRANCH_IF_IMM)
+                        | (*lhs << 8)
+                        | (flags << 16)
+                        | (u32::from(code) << 24),
+                );
+                self.words.push(*then);
+                self.words.push(*els);
+                #[allow(clippy::cast_possible_truncation)]
+                let lo = (*imm & 0xFFFF_FFFF) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let hi = (*imm >> 32) as u32;
+                self.words.push(lo);
+                self.words.push(hi);
+            }
             Instr::Convert { op, dst, src, ty } => {
                 let size = self.type_size(*ty)?;
                 let code = convert_opcode(*op, size)?;
@@ -281,6 +337,93 @@ impl<'a> CodeBuilder<'a> {
             Instr::Call { func, ins, outs } => {
                 let index = self.push_call_site(*func, ins, outs)?;
                 self.emit_field(OP_CALL, index)?;
+            }
+            Instr::CallArithImm {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                func,
+                ins,
+                outs,
+            } => {
+                let size = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, size)?;
+                if *lhs > NARROW_MAX || code >= WIDE_FLAG {
+                    return Err(format!(
+                        "fused call operand does not fit the narrow form (lhs={lhs})"
+                    ));
+                }
+                let index = self.push_call_site(*func, ins, outs)?;
+                let flags = if *lhs_slot { u32::from(WIDE_FLAG) } else { 0 };
+                self.words.push(
+                    u32::from(OP_CALL_ARITH_IMM)
+                        | (*lhs << 8)
+                        | (flags << 16)
+                        | (u32::from(code) << 24),
+                );
+                self.words.push(index);
+                #[allow(clippy::cast_possible_truncation)]
+                let lo = (*imm & 0xFFFF_FFFF) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let hi = (*imm >> 32) as u32;
+                self.words.push(lo);
+                self.words.push(hi);
+            }
+            Instr::CallArithOut {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                func,
+                ins,
+                outs,
+                dst,
+                size,
+            } => {
+                let width = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, width)?;
+                if *lhs > NARROW_MAX || *dst > NARROW_MAX || *size > NARROW_MAX || code >= WIDE_FLAG
+                {
+                    return Err(format!(
+                        "fused call.arith.out operand does not fit the narrow form (lhs={lhs}, dst={dst})"
+                    ));
+                }
+                let index = self.push_call_site(*func, ins, outs)?;
+                let flags = if *lhs_slot { u32::from(WIDE_FLAG) } else { 0 };
+                self.words.push(
+                    u32::from(OP_CALL_ARITH_OUT)
+                        | (*lhs << 8)
+                        | (flags << 16)
+                        | (u32::from(code) << 24),
+                );
+                self.words.push(index);
+                self.words.push(*dst | (*size << 8));
+                #[allow(clippy::cast_possible_truncation)]
+                let lo = (*imm & 0xFFFF_FFFF) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let hi = (*imm >> 32) as u32;
+                self.words.push(lo);
+                self.words.push(hi);
+            }
+            Instr::CallOut {
+                func,
+                ins,
+                outs,
+                dst,
+                size,
+            } => {
+                if *dst > NARROW_MAX || *size > NARROW_MAX {
+                    return Err(format!(
+                        "fused call.out operand does not fit the narrow form (dst={dst}, size={size})"
+                    ));
+                }
+                let index = self.push_call_site(*func, ins, outs)?;
+                self.words
+                    .push(u32::from(OP_CALL_OUT) | (*dst << 8) | (*size << 16));
+                self.words.push(index);
             }
             Instr::CallIndirect { callee, ins, outs } => {
                 let index = self.push_call_site(0, ins, outs)?;
@@ -409,7 +552,7 @@ fn rewrite_targets(instr: &Instr, offsets: &[u32]) -> Result<Instr, String> {
         Instr::Branch { target } => {
             *target = word_offset(offsets, *target)?;
         }
-        Instr::BranchIf { then, els, .. } => {
+        Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
             *then = word_offset(offsets, *then)?;
             *els = word_offset(offsets, *els)?;
         }
@@ -645,6 +788,10 @@ pub fn opcode_mnemonic(op: u8) -> &'static str {
         0x1D => "builtin.memcpy",
         OP_CALL_BUILTIN_LAST => "builtin.lilac_abort",
         OP_ARITH_IMM => "arith.imm",
+        OP_BRANCH_IF_IMM => "branch.if.imm",
+        OP_CALL_ARITH_IMM => "call.arith.imm",
+        OP_CALL_OUT => "call.out",
+        OP_CALL_ARITH_OUT => "call.arith.out",
         _ => "unknown",
     }
 }
@@ -865,6 +1012,124 @@ mod tests {
                     outs: douts,
                 },
             ) => *func == site.func && ins.as_slice() == *di && outs_match(outs, douts),
+            (
+                Instr::CallArithImm {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    func,
+                    ins,
+                    outs,
+                },
+                Decoded::CallArithImm {
+                    lhs: dl,
+                    lhs_slot: ds,
+                    op: dop,
+                    width,
+                    imm: di,
+                    site,
+                    ins: din,
+                    outs: douts,
+                },
+            ) => {
+                op == dop
+                    && lhs == dl
+                    && lhs_slot == ds
+                    && imm == di
+                    && width_of(size_of(types, *operand_ty)) == *width
+                    && *func == site.func
+                    && ins.as_slice() == *din
+                    && outs_match(outs, douts)
+            }
+            (
+                Instr::CallOut {
+                    func,
+                    ins,
+                    outs,
+                    dst,
+                    size,
+                },
+                Decoded::CallOut {
+                    dst: dd,
+                    size: ds,
+                    site,
+                    ins: din,
+                    outs: douts,
+                },
+            ) => {
+                *func == site.func
+                    && ins.as_slice() == *din
+                    && outs_match(outs, douts)
+                    && dst == dd
+                    && size == ds
+            }
+            (
+                Instr::CallArithOut {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    func,
+                    ins,
+                    outs,
+                    dst,
+                    size,
+                },
+                Decoded::CallArithOut {
+                    lhs: dl,
+                    lhs_slot: ds,
+                    op: dop,
+                    width,
+                    imm: di,
+                    site,
+                    ins: din,
+                    outs: douts,
+                    dst: dd,
+                    size: dz,
+                },
+            ) => {
+                op == dop
+                    && lhs == dl
+                    && lhs_slot == ds
+                    && imm == di
+                    && width_of(size_of(types, *operand_ty)) == *width
+                    && *func == site.func
+                    && ins.as_slice() == *din
+                    && outs_match(outs, douts)
+                    && dst == dd
+                    && size == dz
+            }
+            (
+                Instr::BranchIfArithImm {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    then,
+                    els,
+                },
+                Decoded::BranchIfArithImm {
+                    lhs: dl,
+                    lhs_slot: ds,
+                    op: dop,
+                    width,
+                    imm: di,
+                    then: dt,
+                    els: de,
+                },
+            ) => {
+                op == dop
+                    && lhs == dl
+                    && lhs_slot == ds
+                    && imm == di
+                    && width_of(size_of(types, *operand_ty)) == *width
+                    && then == dt
+                    && els == de
+            }
             (
                 Instr::CallIndirect { callee, ins, outs },
                 Decoded::CallIndirect {
@@ -1300,6 +1565,46 @@ mod tests {
             lhs_slot: true,
             imm: 0x2,
             operand_ty: 3,
+        });
+        // Fused compare + branch.
+        instrs.push(Instr::BranchIfArithImm {
+            op: ArithOp::ILt,
+            lhs: 8,
+            lhs_slot: true,
+            imm: 0x2,
+            operand_ty: 3,
+            then: 4,
+            els: 5,
+        });
+        // Fused arith + direct call, and call with output copy.
+        instrs.push(Instr::CallArithImm {
+            op: ArithOp::ISub,
+            lhs: 8,
+            lhs_slot: true,
+            imm: 0x1,
+            operand_ty: 3,
+            func: 3,
+            ins: vec![Operand::Reg(1)],
+            outs: vec![16],
+        });
+        instrs.push(Instr::CallOut {
+            func: 3,
+            ins: vec![Operand::Reg(0)],
+            outs: vec![16],
+            dst: 1,
+            size: 8,
+        });
+        instrs.push(Instr::CallArithOut {
+            op: ArithOp::ISub,
+            lhs: 8,
+            lhs_slot: true,
+            imm: 0x1,
+            operand_ty: 3,
+            func: 3,
+            ins: vec![Operand::Reg(1)],
+            outs: vec![16],
+            dst: 2,
+            size: 8,
         });
         instrs
     }

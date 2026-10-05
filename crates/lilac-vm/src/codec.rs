@@ -440,6 +440,68 @@ impl Program {
                 operand_list(ins),
                 slot_list(outs)
             ),
+            Decoded::CallArithOut {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+                dst,
+                size,
+            } => {
+                let ty = self.type_for_size(u32::from(*width) / 8);
+                let lhs_text = if *lhs_slot {
+                    format!("%{lhs}")
+                } else {
+                    format!("&{lhs}")
+                };
+                format!(
+                    "call.arith.out {} {lhs_text}, 0x{imm:x} : {ty}, &{dst}, {size} -> @{} (in {}) (out {})",
+                    op.as_str(),
+                    self.func_name(site.func),
+                    operand_list(ins),
+                    slot_list(outs)
+                )
+            }
+            Decoded::CallOut {
+                dst,
+                size,
+                site,
+                ins,
+                outs,
+            } => format!(
+                "call.out &{dst}, {size} -> @{} (in {}) (out {})",
+                self.func_name(site.func),
+                operand_list(ins),
+                slot_list(outs)
+            ),
+            Decoded::CallArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                site,
+                ins,
+                outs,
+            } => {
+                let ty = self.type_for_size(u32::from(*width) / 8);
+                let lhs_text = if *lhs_slot {
+                    format!("%{lhs}")
+                } else {
+                    format!("&{lhs}")
+                };
+                format!(
+                    "call.arith.imm {} {lhs_text}, 0x{imm:x} : {ty} -> @{} (in {}) (out {})",
+                    op.as_str(),
+                    self.func_name(site.func),
+                    operand_list(ins),
+                    slot_list(outs)
+                )
+            }
             Decoded::CallIndirect {
                 callee, ins, outs, ..
             } => format!(
@@ -479,6 +541,28 @@ impl Program {
                 format!(
                     "&{dst}: {ty} = {}.imm {lhs_text}, 0x{imm:x} : {ty}",
                     op.as_str()
+                )
+            }
+            Decoded::BranchIfArithImm {
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+                then,
+                els,
+            } => {
+                let ty = self.type_for_size(u32::from(*width) / 8);
+                let lhs_text = if *lhs_slot {
+                    format!("%{lhs}")
+                } else {
+                    format!("&{lhs}")
+                };
+                format!(
+                    "branch.if.imm {} {lhs_text}, 0x{imm:x} : {ty}, {}, {}",
+                    op.as_str(),
+                    label(*then),
+                    label(*els)
                 )
             }
             arith => self.render_arith(arith),
@@ -618,7 +702,9 @@ impl Program {
 fn branch_targets(instr: &Decoded) -> Vec<u32> {
     match instr {
         Decoded::Branch { target } => vec![*target],
-        Decoded::BranchIf { then, els, .. } => vec![*then, *els],
+        Decoded::BranchIf { then, els, .. } | Decoded::BranchIfArithImm { then, els, .. } => {
+            vec![*then, *els]
+        }
         _ => Vec::new(),
     }
 }
@@ -644,8 +730,50 @@ enum ParsedInstr {
         then: String,
         els: String,
     },
+    /// A fused compare + conditional branch with two labels.
+    BranchIfArithImm {
+        op: ArithOp,
+        lhs: u32,
+        lhs_slot: bool,
+        imm: u64,
+        operand_ty: TypeId,
+        then: String,
+        els: String,
+    },
     /// A direct call to a named function.
     Call {
+        name: String,
+        ins: Vec<Operand>,
+        outs: Vec<u32>,
+    },
+    /// A fused arithmetic + direct call to a named function.
+    CallArithImm {
+        op: ArithOp,
+        lhs: u32,
+        lhs_slot: bool,
+        imm: u64,
+        operand_ty: TypeId,
+        name: String,
+        ins: Vec<Operand>,
+        outs: Vec<u32>,
+    },
+    /// A direct call whose output is copied to a register on return.
+    CallOut {
+        dst: u32,
+        size: u32,
+        name: String,
+        ins: Vec<Operand>,
+        outs: Vec<u32>,
+    },
+    /// A fused arithmetic + direct call + output copy to a named function.
+    CallArithOut {
+        op: ArithOp,
+        lhs: u32,
+        lhs_slot: bool,
+        imm: u64,
+        operand_ty: TypeId,
+        dst: u32,
+        size: u32,
         name: String,
         ins: Vec<Operand>,
         outs: Vec<u32>,
@@ -697,6 +825,7 @@ struct ParsedFunc {
 
 /// Parses one function block, returning the parsed body, the next line index,
 /// and any unresolved function-name references.
+#[allow(clippy::too_many_lines)]
 fn parse_func(
     lines: &[&str],
     start: usize,
@@ -760,8 +889,93 @@ fn parse_func(
                 branch_fixups.push((instr_index, BranchSlot::Then, then));
                 branch_fixups.push((instr_index, BranchSlot::Els, els));
             }
+            ParsedInstr::BranchIfArithImm {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                then,
+                els,
+            } => {
+                code.push(Instr::BranchIfArithImm {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    then: 0,
+                    els: 0,
+                });
+                branch_fixups.push((instr_index, BranchSlot::Then, then));
+                branch_fixups.push((instr_index, BranchSlot::Els, els));
+            }
             ParsedInstr::Call { name, ins, outs } => {
                 code.push(Instr::Call { func: 0, ins, outs });
+                func_refs.push(PendingFuncRef::Call(instr_index, name));
+            }
+            ParsedInstr::CallArithImm {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                name,
+                ins,
+                outs,
+            } => {
+                code.push(Instr::CallArithImm {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    func: 0,
+                    ins,
+                    outs,
+                });
+                func_refs.push(PendingFuncRef::Call(instr_index, name));
+            }
+            ParsedInstr::CallOut {
+                dst,
+                size,
+                name,
+                ins,
+                outs,
+            } => {
+                code.push(Instr::CallOut {
+                    func: 0,
+                    ins,
+                    outs,
+                    dst,
+                    size,
+                });
+                func_refs.push(PendingFuncRef::Call(instr_index, name));
+            }
+            ParsedInstr::CallArithOut {
+                op,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+                dst,
+                size,
+                name,
+                ins,
+                outs,
+            } => {
+                code.push(Instr::CallArithOut {
+                    op,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                    func: 0,
+                    ins,
+                    outs,
+                    dst,
+                    size,
+                });
                 func_refs.push(PendingFuncRef::Call(instr_index, name));
             }
             ParsedInstr::AddrFunc { dst, name } => {
@@ -800,8 +1014,14 @@ fn resolve_labels(
             .ok_or_else(|| format!("unknown label `${label}`"))?;
         match (&mut code[*index], slot) {
             (Instr::Branch { target }, BranchSlot::Target) => *target = pc,
-            (Instr::BranchIf { then, .. }, BranchSlot::Then) => *then = pc,
-            (Instr::BranchIf { els, .. }, BranchSlot::Els) => *els = pc,
+            (
+                Instr::BranchIf { then, .. } | Instr::BranchIfArithImm { then, .. },
+                BranchSlot::Then,
+            ) => *then = pc,
+            (
+                Instr::BranchIf { els, .. } | Instr::BranchIfArithImm { els, .. },
+                BranchSlot::Els,
+            ) => *els = pc,
             _ => return Err("internal: branch fixup mismatch".to_string()),
         }
     }
@@ -830,7 +1050,14 @@ fn resolve_func_refs(
                 .copied()
                 .ok_or_else(|| format!("unknown function `@{name}`"))?;
             match (&mut codes[func_index][instr_index], is_addr_func) {
-                (Instr::Call { func, .. }, false) | (Instr::AddrFunc { func, .. }, true) => {
+                (
+                    Instr::Call { func, .. }
+                    | Instr::CallArithImm { func, .. }
+                    | Instr::CallOut { func, .. }
+                    | Instr::CallArithOut { func, .. },
+                    false,
+                )
+                | (Instr::AddrFunc { func, .. }, true) => {
                     *func = target;
                 }
                 _ => return Err("internal: function reference mismatch".to_string()),
@@ -1043,10 +1270,14 @@ fn parse_instr(text: &str, type_ids: &HashMap<String, TypeId>) -> Result<ParsedI
         "store" => parse_store(rest, type_ids, false),
         "store.field" => parse_store(rest, type_ids, true),
         "call" => parse_call(rest),
+        "call.arith.imm" => parse_call_arith_imm(rest, type_ids),
+        "call.arith.out" => parse_call_arith_out(rest, type_ids),
+        "call.out" => parse_call_out(rest),
         "call.indirect" => parse_call_indirect(rest),
         "call.builtin" => parse_call_builtin(rest),
         "branch" => Ok(ParsedInstr::Branch(parse_label_ref(rest)?)),
         "branch.if" => parse_branch_if(rest),
+        "branch.if.imm" => parse_branch_if_imm(rest, type_ids),
         "return" => Ok(ParsedInstr::Ready(Instr::Return)),
         "panic" => Ok(ParsedInstr::Ready(Instr::Panic {
             data: parse_data_ref(rest)?,
@@ -1246,6 +1477,110 @@ fn parse_call(rest: &str) -> Result<ParsedInstr, String> {
     })
 }
 
+/// Parses a `call.arith.imm <op> <lhs>, 0xIMM : TY -> @name (in ...) (out ...)`.
+fn parse_call_arith_imm(
+    rest: &str,
+    type_ids: &HashMap<String, TypeId>,
+) -> Result<ParsedInstr, String> {
+    let (op_text, after_op) = split_head(rest.trim());
+    let op = ArithOp::parse(op_text).ok_or_else(|| format!("unknown opcode `{op_text}`"))?;
+    let (lhs_text, after_lhs) = after_op
+        .split_once(',')
+        .ok_or_else(|| "expected `lhs,`".to_string())?;
+    let (imm_ty, call_part) = after_lhs
+        .split_once(" -> ")
+        .ok_or_else(|| "expected ` -> @name`".to_string())?;
+    let (imm_text, ty_text) = imm_ty
+        .split_once(':')
+        .ok_or_else(|| "expected ` : type`".to_string())?;
+    let (name_text, args) = split_head(call_part.trim());
+    let name = name_text
+        .strip_prefix('@')
+        .ok_or_else(|| "expected `@name`".to_string())?;
+    let (ins, outs) = parse_call_args(args)?;
+    let (lhs, lhs_slot) = match parse_operand(lhs_text.trim())? {
+        Operand::Reg(reg) => (reg, false),
+        Operand::Slot(off) => (off, true),
+    };
+    Ok(ParsedInstr::CallArithImm {
+        op,
+        lhs,
+        lhs_slot,
+        imm: parse_hex_u64(imm_text.trim())?,
+        operand_ty: parse_type(ty_text.trim(), type_ids)?,
+        name: name.to_string(),
+        ins,
+        outs,
+    })
+}
+
+/// Parses a `call.arith.out op lhs, 0xIMM : TY, &dst, size -> @name ...`.
+fn parse_call_arith_out(
+    rest: &str,
+    type_ids: &HashMap<String, TypeId>,
+) -> Result<ParsedInstr, String> {
+    let (op_text, after_op) = split_head(rest.trim());
+    let op = ArithOp::parse(op_text).ok_or_else(|| format!("unknown opcode `{op_text}`"))?;
+    let (lhs_text, after_lhs) = after_op
+        .split_once(',')
+        .ok_or_else(|| "expected `lhs,`".to_string())?;
+    let (imm_ty, after_imm) = after_lhs
+        .split_once(", ")
+        .ok_or_else(|| "expected `&dst`".to_string())?;
+    let (dst_text, after_dst) = after_imm
+        .split_once(", ")
+        .ok_or_else(|| "expected `size`".to_string())?;
+    let (size_text, call_part) = after_dst
+        .split_once(" -> ")
+        .ok_or_else(|| "expected ` -> @name`".to_string())?;
+    let (imm_text, ty_text) = imm_ty
+        .split_once(':')
+        .ok_or_else(|| "expected ` : type`".to_string())?;
+    let (name_text, args) = split_head(call_part.trim());
+    let name = name_text
+        .strip_prefix('@')
+        .ok_or_else(|| "expected `@name`".to_string())?;
+    let (ins, outs) = parse_call_args(args)?;
+    let (lhs, lhs_slot) = match parse_operand(lhs_text.trim())? {
+        Operand::Reg(reg) => (reg, false),
+        Operand::Slot(off) => (off, true),
+    };
+    Ok(ParsedInstr::CallArithOut {
+        op,
+        lhs,
+        lhs_slot,
+        imm: parse_hex_u64(imm_text.trim())?,
+        operand_ty: parse_type(ty_text.trim(), type_ids)?,
+        dst: parse_reg(dst_text.trim())?,
+        size: parse_u32(Some(size_text.trim()), "size")?,
+        name: name.to_string(),
+        ins,
+        outs,
+    })
+}
+
+/// Parses a `call.out &dst, size -> @name (in ...) (out ...)` instruction.
+fn parse_call_out(rest: &str) -> Result<ParsedInstr, String> {
+    let (left, call_part) = rest
+        .split_once(" -> ")
+        .ok_or_else(|| "expected ` -> @name`".to_string())?;
+    let (dst_text, size_text) = left
+        .split_once(',')
+        .ok_or_else(|| "expected `&dst, size`".to_string())?;
+    let (name_text, args) = split_head(call_part.trim());
+    let name = name_text
+        .strip_prefix('@')
+        .ok_or_else(|| "expected `@name`".to_string())?;
+    let (ins, outs) = parse_call_args(args)?;
+    Ok(ParsedInstr::CallOut {
+        dst: parse_reg(dst_text.trim())?,
+        size: parse_u32(Some(size_text.trim()), "size")?,
+        name: name.to_string(),
+        ins,
+        outs,
+    })
+}
+
 /// Parses a `call.indirect` instruction.
 fn parse_call_indirect(rest: &str) -> Result<ParsedInstr, String> {
     let (callee_text, args) = split_head(rest);
@@ -1300,6 +1635,40 @@ fn parse_branch_if(rest: &str) -> Result<ParsedInstr, String> {
         .ok_or_else(|| "expected two branch labels".to_string())?;
     Ok(ParsedInstr::BranchIf {
         cond: parse_reg(cond_text.trim())?,
+        then: parse_label_ref(then_text)?,
+        els: parse_label_ref(els_text)?,
+    })
+}
+
+/// Parses a `branch.if.imm <op> <lhs>, 0xIMM : TY, $then, $els` instruction.
+fn parse_branch_if_imm(
+    rest: &str,
+    type_ids: &HashMap<String, TypeId>,
+) -> Result<ParsedInstr, String> {
+    let (op_text, after_op) = split_head(rest.trim());
+    let op = ArithOp::parse(op_text).ok_or_else(|| format!("unknown opcode `{op_text}`"))?;
+    let (lhs_text, after_lhs) = after_op
+        .split_once(',')
+        .ok_or_else(|| "expected `lhs,`".to_string())?;
+    let (imm_ty_text, labels) = after_lhs
+        .split_once(',')
+        .ok_or_else(|| "expected an immediate and type".to_string())?;
+    let (then_text, els_text) = labels
+        .split_once(',')
+        .ok_or_else(|| "expected two branch labels".to_string())?;
+    let (imm_text, ty_text) = imm_ty_text
+        .split_once(':')
+        .ok_or_else(|| "expected ` : type`".to_string())?;
+    let (lhs, lhs_slot) = match parse_operand(lhs_text.trim())? {
+        Operand::Reg(reg) => (reg, false),
+        Operand::Slot(off) => (off, true),
+    };
+    Ok(ParsedInstr::BranchIfArithImm {
+        op,
+        lhs,
+        lhs_slot,
+        imm: parse_hex_u64(imm_text.trim())?,
+        operand_ty: parse_type(ty_text.trim(), type_ids)?,
         then: parse_label_ref(then_text)?,
         els: parse_label_ref(els_text)?,
     })
@@ -2102,6 +2471,24 @@ mod tests {
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed, program);
         assert_eq!(parsed.to_text(), text);
+    }
+
+    /// Programs the compiler lowers to fused superinstructions
+    /// (`branch.if.imm`, `call.arith.imm`, `call.out`) disassemble and
+    /// re-parse to the identical word stream.
+    #[test]
+    fn text_round_trips_fused_opcodes() {
+        let sources = [
+            "fib: function (n: @bit_native) r: @bit_native {\n    if @i_less_than(n, 0x2) {\n        r = n\n    } else {\n        r = @i_add(fib(@i_sub(n, 0x1)), fib(@i_sub(n, 0x2)))\n    }\n}\nmain: function () nothing {\n    out: @bit_native = fib(0x12)\n}\n",
+            "f: function (a: @bit_native) r: @bit_native {\n    r = @i_add(a, 0x1)\n}\nmain: function () nothing {\n    x: @bit_native = f(0x1)\n    y: @bit_native = f(x)\n}\n",
+        ];
+        for src in sources {
+            let program = crate::compile::compile_src(src);
+            let text = program.to_text();
+            let parsed = Program::parse_text(&text).expect("parse");
+            assert_eq!(parsed, program, "text:\n{text}");
+            assert_eq!(parsed.to_text(), text);
+        }
     }
 
     /// A narrow type interned *first* must not be used to print a wider const:
