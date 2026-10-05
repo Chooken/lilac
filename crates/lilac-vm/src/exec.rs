@@ -21,8 +21,8 @@
 //! runtime bodies. Both `@lilac_abort` and `Panic` trap through
 //! `trap_message`: they print `panic: <message>` to stderr and yield
 //! [`Step::Panicked`], which [`Machine::run`] maps to `Ok(101)`. `Unreachable`
-//! remains an internal error (`lilac_error::bug!`): reaching it means a verified
-//! program executed code the compiler proved dead.
+//! and a `pc` running past the end of a body are clean runtime errors
+//! ([`VmError::Unreachable`], [`VmError::BadPc`]), never a `bug!`.
 
 use std::fmt;
 
@@ -52,6 +52,10 @@ pub enum VmError {
     ExternCall(String),
     /// A ref/place access fell outside the arena.
     BadRef(u64),
+    /// The program counter ran past the end of the current function's code.
+    BadPc(u32),
+    /// Execution reached an [`Instr::Unreachable`] terminator.
+    Unreachable,
     /// The call stack reached [`MAX_CALL_DEPTH`].
     StackOverflow,
 }
@@ -62,6 +66,8 @@ impl fmt::Display for VmError {
             Self::NoEntry(name) => write!(f, "no entry point `{name}`"),
             Self::ExternCall(name) => write!(f, "cannot call extern function `{name}`"),
             Self::BadRef(off) => write!(f, "invalid arena reference {off}"),
+            Self::BadPc(pc) => write!(f, "program counter {pc} out of range"),
+            Self::Unreachable => write!(f, "reached an `unreachable` terminator"),
             Self::StackOverflow => write!(f, "call stack overflow (limit {MAX_CALL_DEPTH})"),
         }
     }
@@ -195,8 +201,9 @@ impl<'a> Machine<'a> {
     /// # Errors
     ///
     /// Returns [`VmError::ExternCall`] for a call to a bodyless function,
-    /// [`VmError::StackOverflow`] past [`MAX_CALL_DEPTH`], and
-    /// [`VmError::BadRef`] for an out-of-range arena access.
+    /// [`VmError::StackOverflow`] past [`MAX_CALL_DEPTH`], [`VmError::BadRef`]
+    /// for an out-of-range arena access, and [`VmError::BadPc`] /
+    /// [`VmError::Unreachable`] for a malformed (unverified) body.
     #[allow(clippy::too_many_lines)]
     pub fn step(&mut self) -> Result<Step, VmError> {
         let Some(frame) = self.frames.last() else {
@@ -207,11 +214,10 @@ impl<'a> Machine<'a> {
         let program = self.program;
         let func = &program.funcs[func_index as usize];
         let Some(instr) = func.code.get(pc as usize) else {
-            lilac_error::bug!(
-                lilac_span::Span::dummy(),
-                "program counter {pc} out of range in `{}`",
-                func.name
-            );
+            // The verifier guarantees every non-extern body ends in a
+            // terminator and every branch target is in range, but a directly
+            // constructed (unverified) `Program` can still run off the end.
+            return Err(VmError::BadPc(pc));
         };
         // All instructions except branches fall through; branch arms overwrite.
         if let Some(frame) = self.frames.last_mut() {
@@ -394,11 +400,7 @@ impl<'a> Machine<'a> {
                     .map_or(&[][..], |entry| entry.bytes.as_slice());
                 return Ok(trap(message));
             }
-            Instr::Unreachable => lilac_error::bug!(
-                lilac_span::Span::dummy(),
-                "executed an `unreachable` terminator in `{}`",
-                func.name
-            ),
+            Instr::Unreachable => return Err(VmError::Unreachable),
         }
         Ok(Step::Advanced)
     }
@@ -1082,6 +1084,25 @@ mod tests {
         assert_eq!(machine.read_reg(0), Some(0x2a));
         assert_eq!(machine.pc(), 1);
         assert_eq!(machine.step().expect("step"), Step::Returned);
+    }
+
+    #[test]
+    fn running_past_end_is_clean_error() {
+        let program = isa::sample_program(vec![Instr::Const {
+            dst: 0,
+            imm: 1,
+            ty: 0,
+        }]);
+        let mut machine = Machine::new(&program).expect("entry");
+        assert_eq!(machine.step().expect("const"), Step::Advanced);
+        assert!(matches!(machine.step(), Err(VmError::BadPc(1))));
+    }
+
+    #[test]
+    fn unreachable_is_clean_error() {
+        let program = isa::sample_program(vec![Instr::Unreachable]);
+        let mut machine = Machine::new(&program).expect("entry");
+        assert!(matches!(machine.step(), Err(VmError::Unreachable)));
     }
 
     #[test]

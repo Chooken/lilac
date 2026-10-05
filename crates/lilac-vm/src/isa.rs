@@ -24,6 +24,20 @@ pub const VM_POINTER_BYTES: u32 = 8;
 /// arbitrarily large zero-fill.
 pub(crate) const MAX_GLOBALS_BYTES: u32 = 64 * 1024 * 1024;
 
+/// Maximum number of register-file slots a single function frame may declare.
+///
+/// The verifier rejects `n_regs` above this bound *before* the interpreter
+/// allocates a frame, so an untrusted `.lbc` cannot request an arbitrarily
+/// large register file.
+pub(crate) const MAX_REGS: u32 = 1 << 20;
+
+/// Maximum per-frame place-region size, in bytes.
+///
+/// Like [`MAX_GLOBALS_BYTES`], this bounds an allocation driven directly by an
+/// untrusted artifact: the verifier rejects `slot_bytes` above it before any
+/// frame is entered.
+pub(crate) const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
+
 /// Index into a [`Program`]'s type table.
 pub type TypeId = u32;
 
@@ -582,8 +596,47 @@ pub(crate) fn derive_globals(data: &[Data]) -> Result<Vec<u8>, String> {
     Ok(globals)
 }
 
+/// Whether an instruction ends a function's control flow.
+///
+/// A verified non-extern body must end in one of these so `pc` can never run
+/// off the end of `code`.
+fn is_terminator(instr: &Instr) -> bool {
+    matches!(
+        instr,
+        Instr::Return
+            | Instr::Panic { .. }
+            | Instr::Unreachable
+            | Instr::Branch { .. }
+            | Instr::BranchIf { .. }
+    )
+}
+
 /// Verifies one function.
 fn verify_func(program: &Program, func: &Func) -> Result<(), String> {
+    if func.n_regs > MAX_REGS {
+        return Err(format!(
+            "function `{}` declares {} registers (limit {MAX_REGS})",
+            func.name, func.n_regs
+        ));
+    }
+    if func.slot_bytes > MAX_FRAME_BYTES {
+        return Err(format!(
+            "function `{}` declares {} slot bytes (limit {MAX_FRAME_BYTES})",
+            func.name, func.slot_bytes
+        ));
+    }
+    if !func.is_extern {
+        match func.code.last() {
+            None => return Err(format!("function `{}` has an empty body", func.name)),
+            Some(last) if !is_terminator(last) => {
+                return Err(format!(
+                    "function `{}` does not end in a control-flow terminator",
+                    func.name
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     for &ty in func.ins.iter().chain(&func.outs) {
         check_type(program, ty)?;
     }
@@ -969,6 +1022,53 @@ mod tests {
     fn verifier_accepts_sample() {
         let program = sample_program(vec![Instr::Return]);
         assert!(verify(&program).is_ok());
+    }
+
+    #[test]
+    fn verifier_rejects_missing_terminator() {
+        let program = sample_program(vec![Instr::Const {
+            dst: 0,
+            imm: 1,
+            ty: 0,
+        }]);
+        let err = verify(&program).expect_err("missing terminator");
+        assert!(err.contains("does not end"), "{err}");
+    }
+
+    #[test]
+    fn verifier_rejects_empty_body() {
+        let program = sample_program(Vec::new());
+        let err = verify(&program).expect_err("empty body");
+        assert!(err.contains("empty body"), "{err}");
+    }
+
+    #[test]
+    fn verifier_allows_intermediate_fallthrough() {
+        let program = sample_program(vec![
+            Instr::Const {
+                dst: 0,
+                imm: 1,
+                ty: 0,
+            },
+            Instr::Unreachable,
+        ]);
+        assert!(verify(&program).is_ok());
+    }
+
+    #[test]
+    fn verifier_rejects_oversized_regs() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].n_regs = MAX_REGS + 1;
+        let err = verify(&program).expect_err("oversized regs");
+        assert!(err.contains("registers"), "{err}");
+    }
+
+    #[test]
+    fn verifier_rejects_oversized_frame() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].slot_bytes = MAX_FRAME_BYTES + 1;
+        let err = verify(&program).expect_err("oversized frame");
+        assert!(err.contains("slot bytes"), "{err}");
     }
 
     #[test]

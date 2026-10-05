@@ -69,6 +69,58 @@ fn rejects_non_vm_target() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A body whose last instruction is not a terminator fails verification (exit
+/// 2), never an interpreter `bug!`/panic (exit 101).
+#[test]
+fn rejects_non_terminated_body() {
+    let body = "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\n\
+                type !t0 = \"#bit_native\" size 8 ref 0\n\n\
+                func @main () -> () regs 1 slots 0\n\
+                \x20   0  &0: #bit_native = const 0x1\n";
+    let path = write_temp("nonterm", body);
+    let out = run_bin(&path, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(out.status.code(), Some(101));
+}
+
+/// An `unreachable` terminator is a clean runtime error (exit 1), not a panic.
+#[test]
+fn unreachable_body_exits_one() {
+    let body = "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\n\
+                func @main () -> () regs 1 slots 0\n\
+                \x20   0  unreachable\n";
+    let path = write_temp("unreachable", body);
+    let out = run_bin(&path, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(out.status.code(), Some(101));
+}
+
+/// A non-extern function with no code at all fails verification (exit 2).
+#[test]
+fn rejects_zero_length_body() {
+    let body = "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\n\
+                func @main () -> () regs 1 slots 0\n";
+    let path = write_temp("empty", body);
+    let out = run_bin(&path, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(out.status.code(), Some(101));
+}
+
 /// Debug flags enter the REPL; with no input it resumes to completion, so a
 /// non-interactive invocation still exits with the program's code.
 #[test]

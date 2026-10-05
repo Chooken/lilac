@@ -25,6 +25,9 @@ Selecting this target selects the bytecode backend:
 - `lilac emit-vm <file>` compiles to `lilacvm-unknown-none` and prints canonical
   `.lbc` text (`--check` compares against `<file>.lbc`).
 - `lilac run <file>` compiles, emits `.lbc` in memory, and executes it.
+- `lilac disasm <file.lbc>` reads an existing artifact, parses/verifies it, and
+  prints its canonical disassembly. An unreadable file or a parse/verify failure
+  is a clean data error (exit 2).
 - `lilac emit-llvm --target=lilacvm-unknown-none` is a usage error (exit 2);
   `emit-vm`/`run` with any non-VM target is likewise exit 2.
 
@@ -96,11 +99,21 @@ region), and a call stack of frames.
 - **Stack depth.** The call stack is capped at `MAX_CALL_DEPTH = 4096` frames;
   exceeding it is a clean `stack overflow` trap.
 
-The compiled program is re-verified by the VM's own verifier before it is
-serialized or run: version and target, unique type/function names, the globals
-arena matching the data constants, and every instruction's register/slot bounds,
-branch-target bounds, type/data/function indices, and call arity. A failure at
-this point is an internal error (`bug!`), since the input LIR already verified.
+The program is verified by the VM's own verifier before it is serialized or run:
+version and target, unique type/function names, the globals arena matching the
+data constants, per-function bounds (`n_regs <= MAX_REGS = 1048576`,
+`slot_bytes <= MAX_FRAME_BYTES = 67108864`), every instruction's register/slot
+bounds, branch-target bounds, type/data/function indices, and call arity.
+
+For a body loaded from an untrusted `.lbc`, a verifier failure is a **clean data
+error** (the runner/CLI prints it and exits 2), never a `bug!`/panic. Since the
+verifier does not do control-flow reachability, it also requires every non-extern
+function to have a non-empty `code` that **ends in a control-flow terminator**
+(`return`, `panic`, `unreachable`, `branch`, or `branch.if`); intermediate
+fall-through is legal. Together with in-range branch targets, this guarantees
+`pc` can never run off the end of a verified body. The register/slot bounds are
+checked *before* any frame allocation, so an untrusted artifact cannot request an
+arbitrarily large register file or frame.
 
 ## 3. Bytecode ISA
 
@@ -187,7 +200,7 @@ Leaf builtins and their arities:
 | `BranchIf` | `branch.if &c, $L<t>, $L<e>` | Jump to `e` when `&c == 0`, otherwise to `t`. |
 | `Return` | `return` | Copy outs to the caller's out slots and pop the frame; returning from the entry frame ends the program with exit 0. |
 | `Panic` | `panic !cN` | Print the bytes of data constant `!cN` to stderr as `panic: <msg>` and exit 101. |
-| `Unreachable` | `unreachable` | Internal trap: reaching it means verified-dead code ran (`bug!`), not a normal runtime error. |
+| `Unreachable` | `unreachable` | VM trap: reaching it is a clean runtime error (`unreachable terminator`), exit 1, never a `bug!`. |
 
 ## 4. `.lbc` text format
 
@@ -231,8 +244,9 @@ the text.
   references are written symbolically (`$L<pc>`, `@name`) and resolved by the
   parser.
 
-The runner rejects an unsupported `lbc` version or a non-VM `target` with a
-clear message and exit 2.
+The runner rejects an unsupported `lbc` version, a non-VM `target`, malformed
+text, an empty body, a body that does not end in a terminator, or any verifier
+bound violation with a clear message and exit 2.
 
 ### 4.1 Example
 
@@ -337,8 +351,9 @@ func @main () -> () regs 3 slots 42
   `panic: aborted` and exits 101. This is more informative than the LLVM
   backend's silent trap; the divergence is intentional.
 - **Runtime errors.** Other VM failures (`no entry point`, calling an `extern`,
-  an invalid arena reference, or stack overflow) print a message to stderr and
-  exit 1 under the runner/CLI.
+  an invalid arena reference, a `pc` out of range, reaching an `unreachable`
+  terminator, or stack overflow) print a message to stderr and exit 1 under the
+  runner/CLI.
 - **`extern`.** A call to an `extern` (bodyless) function is a clean runtime
   error (`cannot call extern function \`name\``), exit 1 — foreign C calls are a
   non-goal for the VM, matching the M5c design. Declaring an `extern` targeting

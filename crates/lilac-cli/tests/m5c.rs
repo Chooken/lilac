@@ -130,6 +130,34 @@ fn emit_llvm_rejects_vm_target() {
     assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
 }
 
+/// `lilac disasm` prints the committed artifact's canonical instruction text.
+#[test]
+fn disasm_prints_canonical_instructions() {
+    let out = run(["disasm", SNAPSHOT]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+    assert!(
+        out.stdout.contains("&0: #bit_native = const 0x1"),
+        "stdout:\n{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("return"), "stdout:\n{}", out.stdout);
+}
+
+/// A malformed or unreadable `.lbc` is a clean data error (exit 2).
+#[test]
+fn disasm_bad_file_exits_two() {
+    let bad = std::env::temp_dir().join(format!("lilac-m5c-bad-{}.lbc", std::process::id()));
+    std::fs::write(&bad, "not an artifact\n").expect("writes bad file");
+    let out = run(["disasm", bad.to_str().expect("utf8 path")]);
+    assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
+    let _ = std::fs::remove_file(&bad);
+
+    let missing =
+        std::env::temp_dir().join(format!("lilac-m5c-missing-{}.lbc", std::process::id()));
+    let out = run(["disasm", missing.to_str().expect("utf8 path")]);
+    assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
+}
+
 /// Writes a bodyless-`main` library to a per-test temporary file and returns
 /// its path. The stem keeps parallel tests from colliding.
 fn write_library(stem: &str) -> std::path::PathBuf {

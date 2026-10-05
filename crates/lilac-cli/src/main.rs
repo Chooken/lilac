@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -34,6 +34,7 @@ fn main() -> ExitCode {
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "emit-vm" => cmd_emit_vm(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "disasm" => cmd_disasm(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
@@ -554,6 +555,50 @@ fn cmd_run(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Disassembles a canonical `.lbc` artifact: `lilac disasm <file.lbc>`.
+///
+/// The file is read and parsed with [`lilac_vm::Program::parse_text`] (which
+/// verifies it), then its canonical text is printed. An unreadable file or a
+/// parse/verify failure is a clean usage/data error (exit 2), never a panic.
+fn cmd_disasm(args: &[String]) -> ExitCode {
+    let mut file: Option<&str> = None;
+    for arg in args {
+        if arg.starts_with('-') {
+            eprintln!("unknown flag for disasm: {arg}\n{}", usage());
+            return ExitCode::from(2);
+        } else if file.is_none() {
+            file = Some(arg);
+        } else {
+            eprintln!("expected one file\n{}", usage());
+            return ExitCode::from(2);
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("missing <file.lbc>\n{}", usage());
+        return ExitCode::from(2);
+    };
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("cannot read {file}: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let program = match lilac_vm::Program::parse_text(&text) {
+        Ok(program) => program,
+        Err(err) => {
+            eprintln!("{file}: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(err) = program.verify() {
+        eprintln!("{file}: {err}");
+        return ExitCode::from(2);
+    }
+    print!("{}", program.to_text());
+    ExitCode::SUCCESS
 }
 
 /// Builds a [`lilac_vm::Debugger`] over emitted `.lbc` text and drives its REPL
