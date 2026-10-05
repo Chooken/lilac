@@ -62,11 +62,14 @@ fn format_args_use_reaches_piece_runtime() {
     assert!(text.contains(".lilac.format_args_piece"), "{text}");
 }
 
-/// A non-const `@load_u8` reaches the `.lilac.load_u8` LIR body. This fixture is
-/// also host-compiled and run by the M5b harness, so the body lowers and links.
+/// A non-const `@load_u8`/`@store_u8` reaches the corresponding `.lilac.`
+/// LIR bodies. This fixture is also host-compiled and run by the M5b harness,
+/// so the bodies lower, link, and execute (the store targets writable local
+/// memory, not the read-only string constant).
 #[test]
-fn non_const_load_u8_reaches_runtime() {
+fn non_const_byte_access_reaches_runtime() {
     let text = emit_ir("load_u8.lilac");
     assert!(text.contains(".lilac.load_u8"), "{text}");
+    assert!(text.contains(".lilac.store_u8"), "{text}");
     assert!(text.contains(".lilac.byte_buffer_ptr"), "{text}");
 }

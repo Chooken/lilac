@@ -1,4 +1,4 @@
-# Lilac IR Specification (v2)
+# Lilac IR Specification (0.3)
 
 > Version: `lilac_ir = "0.3"`. Status: normative for the Rust rewrite.
 > `SPEC.md` is normative for language semantics; this file is normative for IR text,
@@ -224,8 +224,9 @@ ordinary LIR functions in the `.lilac.` namespace, built once by
 | `.lilac.format_args_count` | `#format_args` | `#bitNative` |
 | `.lilac.format_args_piece` | `#format_args`, `#bitNative` | `#byte_buffer` |
 
-These functions call back into the `@ptr_add` and `@lilac_abort` leaves; the
-driver injects the prelude after constant folding and dead-code pruning removes
+These functions call back into the `@ptr_add` and `@lilac_abort` leaves. The
+driver's pass order is `fold` → inject the prelude → `prune_unreachable`, so
+the runtime is present during pruning and dead-code elimination removes
 whatever a program does not reach.
 
 ### branch 

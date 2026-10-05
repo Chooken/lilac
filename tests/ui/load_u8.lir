@@ -10,6 +10,12 @@ function @main
     alloca #bit8 %c : zeroed
     alloca #bitNative %tmp.2 : zeroed
     alloca #bit8 %tmp.3 : zeroed
+    alloca #bit8 %cell : zeroed
+    alloca ref #bit8 %q : zeroed
+    alloca #bitNative %tmp.4 : zeroed
+    alloca #bit8 %d : zeroed
+    alloca #bitNative %tmp.5 : zeroed
+    alloca #bit8 %tmp.6 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %s
     call @.lilac.byte_buffer_ptr (in %s) (out %tmp.1)
@@ -20,6 +26,18 @@ function @main
     call @.lilac.load_u8 (in %p, %tmp.2) (out %tmp.3)
     &4: #bit8 = copy %tmp.3
     copy &4 -> %c
+    &5: #bit8 = const 0x0
+    copy &5 -> %cell
+    &6: ref #bit8 = addr %cell
+    copy &6 -> %q
+    &7: #bitNative = const 0x0
+    copy &7 -> %tmp.4
+    call @.lilac.store_u8 (in %q, %tmp.4, %c) (out)
+    &9: #bitNative = const 0x0
+    copy &9 -> %tmp.5
+    call @.lilac.load_u8 (in %q, %tmp.5) (out %tmp.6)
+    &10: #bit8 = copy %tmp.6
+    copy &10 -> %d
     return
 }
 function @.lilac.byte_buffer_ptr
@@ -41,5 +59,16 @@ function @.lilac.load_u8
     call @ptr_add (in %base, %index) (out %slot)
     &r: #bit8 = load %slot
     copy &r -> %out
+    return
+}
+function @.lilac.store_u8
+  in ref #bit8 %base
+  in #bitNative %index
+  in #bit8 %value
+{
+  $entry:
+    alloca ref #bit8 %slot : zeroed
+    call @ptr_add (in %base, %index) (out %slot)
+    copy %value -> ref %slot
     return
 }

@@ -15,18 +15,10 @@ use inkwell::targets::{
 use inkwell::OptimizationLevel;
 
 use lilac_codegen::{Backend, OptLevel};
-use lilac_ir::LirModule;
+use lilac_ir::{is_64_bit_triple, LirModule};
 
 mod lower;
 mod runtime;
-
-/// Whether `triple`'s architecture is 64-bit (drives `@bitNative`).
-fn is_64_bit_triple(triple: &str) -> bool {
-    triple
-        .split('-')
-        .next()
-        .is_some_and(|arch| arch.contains("64"))
-}
 
 /// LLVM backend for a fixed target triple and optimization level.
 #[derive(Debug)]

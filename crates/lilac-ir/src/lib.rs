@@ -656,8 +656,12 @@ fn print_func(func: &LirFunc) -> String {
     out
 }
 
-/// Signature of a compiler builtin: input/output type slots in `#`-spelling
-/// (`None` = a width-parameterized slot, checked by arity only).
+/// Signature of a compiler builtin: input/output type slots in `#`-spelling.
+///
+/// Every current leaf (`@ptr_add`, `@memcpy`, `@lilac_abort`) pins all of its
+/// slots, so no `None` appears today. `Option` is retained so a future
+/// width-parameterized leaf could skip a slot's type check; arity is always
+/// checked.
 #[derive(Clone, Debug)]
 pub struct BuiltinSig {
     /// Input place types.
@@ -715,6 +719,23 @@ pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)
         "#format_args" => Some(&FORMAT_ARGS_LAYOUT),
         _ => None,
     }
+}
+
+/// Whether `triple`'s architecture is 64-bit (fixes `@bitNative`'s width).
+///
+/// The rule is the architecture before the first `-`, treated as 64-bit iff it
+/// contains `"64"`. This is the single source of truth for both the driver,
+/// which bakes the `format_args` piece stride (`#byte_buffer`'s size) into the
+/// injected runtime, and the LLVM backend, which picks `@bitNative`'s LLVM
+/// width. They **must** agree: if the driver baked one width while codegen laid
+/// out the other, `format_args_push`/`piece` would index the piece table by the
+/// wrong stride and corrupt memory silently instead of failing to compile.
+#[must_use]
+pub fn is_64_bit_triple(triple: &str) -> bool {
+    triple
+        .split('-')
+        .next()
+        .is_some_and(|arch| arch.contains("64"))
 }
 
 /// Whether an IR type spelling is a reference (`ref X`).

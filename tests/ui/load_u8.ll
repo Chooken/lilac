@@ -45,6 +45,18 @@ entry:
   store i64 0, ptr %tmp.2, align 8
   %tmp.3 = alloca i8, align 1
   store i8 0, ptr %tmp.3, align 1
+  %cell = alloca i8, align 1
+  store i8 0, ptr %cell, align 1
+  %q = alloca ptr, align 8
+  store ptr null, ptr %q, align 8
+  %tmp.4 = alloca i64, align 8
+  store i64 0, ptr %tmp.4, align 8
+  %d = alloca i8, align 1
+  store i8 0, ptr %d, align 1
+  %tmp.5 = alloca i64, align 8
+  store i64 0, ptr %tmp.5, align 8
+  %tmp.6 = alloca i8, align 1
+  store i8 0, ptr %tmp.6, align 1
   store { i64, ptr } { i64 5, ptr @c0 }, ptr %s, align 8
   call void @.lilac.byte_buffer_ptr(ptr %s, ptr %tmp.1)
   %0 = load ptr, ptr %tmp.1, align 8
@@ -53,6 +65,14 @@ entry:
   call void @.lilac.load_u8(ptr %p, ptr %tmp.2, ptr %tmp.3)
   %1 = load i8, ptr %tmp.3, align 1
   store i8 %1, ptr %c, align 1
+  store i8 0, ptr %cell, align 1
+  store ptr %cell, ptr %q, align 8
+  store i64 0, ptr %tmp.4, align 8
+  call void @.lilac.store_u8(ptr %q, ptr %tmp.4, ptr %c)
+  store i64 0, ptr %tmp.5, align 8
+  call void @.lilac.load_u8(ptr %q, ptr %tmp.5, ptr %tmp.6)
+  %2 = load i8, ptr %tmp.6, align 1
+  store i8 %2, ptr %d, align 1
   ret void
 }
 
@@ -75,6 +95,20 @@ entry:
   %3 = load ptr, ptr %slot, align 8
   %4 = load i8, ptr %3, align 1
   store i8 %4, ptr %out0, align 1
+  ret void
+}
+
+define void @.lilac.store_u8(ptr %in0, ptr %in1, ptr %in2) {
+entry:
+  %slot = alloca ptr, align 8
+  store ptr null, ptr %slot, align 8
+  %0 = load ptr, ptr %in0, align 8
+  %1 = load i64, ptr %in1, align 8
+  %2 = call ptr @.lilac.ptr_add(ptr %0, i64 %1)
+  store ptr %2, ptr %slot, align 8
+  %3 = load ptr, ptr %slot, align 8
+  %4 = load i8, ptr %in2, align 1
+  store i8 %4, ptr %3, align 1
   ret void
 }
 

@@ -182,7 +182,17 @@ fn no_runtime_fixture_emits_no_runtime_text() {
         assert!(!text.contains(needle), "unexpected `{needle}` in:\n{text}");
     }
     // The backend always hand-writes the three leaf definitions
-    // (`@ptr_add`/`@memcpy`/`@lilac_abort`), but this program calls none.
+    // (`@ptr_add`/`@memcpy`/`@lilac_abort`); assert they are present even when
+    // the program calls none, so the "no runtime text" check above is anchored
+    // against something rather than only asserting absences.
+    for def in [
+        "define ptr @.lilac.ptr_add(ptr %base, i64 %offset)",
+        "define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len)",
+        "define void @.lilac.abort()",
+    ] {
+        assert!(text.contains(def), "missing `{def}` in:\n{text}");
+    }
+    // This program calls none of the leaves.
     for call in [
         "call ptr @.lilac.ptr_add",
         "call void @.lilac.memcpy",
@@ -227,6 +237,48 @@ fn fstring_runtime_compiles_and_runs_on_host() {
     );
 
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// On a 64-bit target that is neither `x86_64` nor `aarch64`, the driver bakes
+/// a `0x10` `format_args` piece stride and codegen lays `#byte_buffer` out as
+/// 16 bytes, so the two agree end to end. If this LLVM build lacks the target
+/// the assertion reports the skip and returns; the driver-level stride test
+/// still covers the shared width rule.
+#[test]
+fn riscv64_format_args_stride_matches_byte_buffer() {
+    let output = lilac()
+        .args([
+            "emit-llvm",
+            "--target=riscv64-unknown-none",
+            &ui("fstring.lilac"),
+        ])
+        .output()
+        .expect("runs lilac");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("unknown target triple") {
+            eprintln!("skipping riscv64 assertion; LLVM build lacks the target:\n{stderr}");
+            return;
+        }
+        panic!("riscv64 emit-llvm failed:\n{stderr}");
+    }
+    let text = String::from_utf8(output.stdout).expect("utf8 IR");
+
+    // `#byte_buffer` is `{ i64, ptr }`: an 8-byte length plus an 8-byte pointer.
+    assert!(text.contains("{ i64, ptr }"), "{text}");
+    // `fstring.lilac` reaches `format_args_push` (not `piece`, which DCE culls);
+    // its piece stride must equal `#byte_buffer`'s 16-byte size. The driver
+    // unit test covers both push and piece at the LIR level.
+    let name = ".lilac.format_args_push";
+    let body = text
+        .split("\ndefine ")
+        .find(|segment| segment.starts_with(&format!("void @{name}")))
+        .unwrap_or_else(|| panic!("missing `{name}` in:\n{text}"));
+    let mul = body
+        .lines()
+        .find(|line| line.contains("mul i64"))
+        .unwrap_or_else(|| panic!("no stride multiply in `{name}`:\n{body}"));
+    assert!(mul.trim_end().ends_with(", 16"), "{name}: {mul}\n{body}");
 }
 
 /// `generic_hook_drop.ll` shows both zero-initialization and the RAII

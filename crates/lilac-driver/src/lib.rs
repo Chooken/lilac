@@ -41,9 +41,13 @@ impl Target {
     }
 
     /// `@bitNative` width in bits.
+    ///
+    /// Delegates to [`lilac_ir::is_64_bit_triple`] so the width baked into the
+    /// injected `format_args` piece stride always matches the backend's
+    /// `#byte_buffer` layout. Do not re-derive the rule locally.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {
-        if self.triple.starts_with("x86_64") || self.triple.starts_with("aarch64") {
+        if lilac_ir::is_64_bit_triple(&self.triple) {
             64
         } else {
             32
@@ -430,5 +434,64 @@ mod tests {
         let mac = Target::from_arch_os("aarch64", "macos");
         assert_eq!(mac.triple, "aarch64-apple-darwin");
         assert_eq!(mac.bit_native_width(), 64);
+
+        // 64-bit arches that are neither `x86_64` nor `aarch64` must still be
+        // 64-bit; this is the driver half of the width rule the backend shares.
+        let riscv64 = Target {
+            triple: "riscv64-unknown-none".to_owned(),
+        };
+        assert_eq!(riscv64.bit_native_width(), 64);
+        let riscv32 = Target {
+            triple: "riscv32-unknown-none".to_owned(),
+        };
+        assert_eq!(riscv32.bit_native_width(), 32);
+    }
+
+    /// Returns the `stride` constant literal baked into a `format_args` runtime
+    /// function by [`lilac_ir::runtime::build_runtime`] (via the driver).
+    fn stride_lit(module: &LirModule, name: &str) -> String {
+        let func = module
+            .funcs
+            .iter()
+            .find(|func| func.name == name)
+            .unwrap_or_else(|| panic!("missing runtime function `{name}`"));
+        func.blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|inst| match inst {
+                lilac_ir::LirInst::Const { dst, lit, ty, .. }
+                    if dst == "stride" && ty == "#bitNative" =>
+                {
+                    Some(lit.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing stride const in `{name}`"))
+    }
+
+    /// The stride the driver bakes is `#byte_buffer`'s size, so it must track
+    /// the target's pointer width for every 64-bit arch, not just
+    /// `x86_64`/`aarch64`. Regression: `riscv64` previously baked `0x8` while
+    /// the backend laid `#byte_buffer` out as 16 bytes.
+    #[test]
+    fn format_args_stride_follows_target_width() {
+        for (triple, want) in [
+            ("riscv64-unknown-none", "0x10"),
+            ("riscv32-unknown-none", "0x8"),
+        ] {
+            let mut session = Session::new();
+            session.target = Target {
+                triple: triple.to_owned(),
+            };
+            let module = session
+                .compile_lir(
+                    "fs.lilac",
+                    "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bitNative = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
+                )
+                .unwrap_or_else(|_| panic!("{triple}: {}", session.render_diagnostics()));
+            for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
+                assert_eq!(stride_lit(&module, name), want, "{triple} in {name}");
+            }
+        }
     }
 }
