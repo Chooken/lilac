@@ -410,6 +410,26 @@ pub enum Instr {
         /// Result type.
         ty: TypeId,
     },
+    /// Fused `dst = op lhs, imm` where `lhs` is a register or a frame slot.
+    ///
+    /// This is the sanctioned superinstruction (spec §12): it lets the
+    /// LIR→bytecode compiler fold a redundant `copy %place -> &r` and a
+    /// `const` into the arithmetic that consumes both, cutting the instruction
+    /// count directly.
+    ArithImm {
+        /// Operator.
+        op: ArithOp,
+        /// Destination register.
+        dst: u32,
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Immediate right operand (already masked to the operand width).
+        imm: u64,
+        /// Operand width type.
+        operand_ty: TypeId,
+    },
     /// Width conversion.
     Convert {
         /// Operator.
@@ -942,6 +962,21 @@ fn verify_decoded(
         Decoded::Trunc { dst, src, .. } | Decoded::ExtendZero { dst, src } => {
             check_reg(*dst, n_regs)?;
             check_reg(*src, n_regs)?;
+        }
+        Decoded::ArithImm {
+            dst,
+            lhs,
+            lhs_slot,
+            width,
+            ..
+        } => {
+            check_reg(*dst, n_regs)?;
+            let size = u32::from(*width) / 8;
+            if *lhs_slot {
+                check_slot(*lhs, size, slot_bytes)?;
+            } else {
+                check_reg(*lhs, n_regs)?;
+            }
         }
         Decoded::Call { site, ins, outs } => {
             verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;

@@ -9,11 +9,11 @@
 
 use crate::encode::{
     arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_BRANCH, OP_BRANCH_IF, OP_CALL, OP_CALL_BUILTIN_BASE,
-    OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
-    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
-    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
-    OP_UNREACHABLE, WIDE_FLAG,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_CALL,
+    OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA,
+    OP_COPY_BASE, OP_COPY_BYTES, OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST,
+    OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE,
+    OP_STORE_LAST, OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand};
 
@@ -351,6 +351,21 @@ pub enum Decoded<'a> {
         /// Source register.
         src: u32,
     },
+    /// Fused arithmetic with an immediate right operand.
+    ArithImm {
+        /// Destination register.
+        dst: u32,
+        /// Left operand raw index (register index or slot offset).
+        lhs: u32,
+        /// Whether `lhs` is a slot offset (else a register index).
+        lhs_slot: bool,
+        /// Operator.
+        op: ArithOp,
+        /// Operand width in bits.
+        width: u8,
+        /// Immediate right operand.
+        imm: u64,
+    },
     /// Direct call by function index.
     Call {
         /// Resolved call site.
@@ -598,6 +613,34 @@ pub fn decode<'a>(
                 n,
             )
         }
+        OP_ARITH_IMM => {
+            if wide {
+                return Err(format!("wide flag on fused arithmetic at pc {pc}"));
+            }
+            let bytes = w.to_le_bytes();
+            let dst = u32::from(bytes[1]);
+            let lhs = u32::from(bytes[2]);
+            let flags = bytes[3];
+            let lhs_slot = flags & 0x80 != 0;
+            let op_code = flags & 0x7F;
+            let (op, width) = arith_from_opcode(op_code).ok_or_else(|| {
+                format!("unknown fused arithmetic opcode 0x{op_code:02X} at pc {pc}")
+            })?;
+            let lo = word_at(code, pc + 1)?;
+            let hi = word_at(code, pc + 2)?;
+            let imm = u64::from(lo) | (u64::from(hi) << 32);
+            (
+                Decoded::ArithImm {
+                    dst,
+                    lhs,
+                    lhs_slot,
+                    op,
+                    width,
+                    imm,
+                },
+                3,
+            )
+        }
         b if arith.is_some() => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
             let (op, width) =
@@ -778,7 +821,8 @@ const fn operand_count(base: u8, is_arith: bool, is_convert: bool) -> Option<u8>
         | OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST => Some(0),
         OP_CONST | OP_CONST_DATA | OP_CALL_INDIRECT => Some(1),
         OP_ADDR | OP_ADDR_FUNC => Some(2),
-        OP_BRANCH_IF
+        OP_ARITH_IMM
+        | OP_BRANCH_IF
         | OP_COPY_BASE..=OP_COPY_LAST
         | OP_COPY_BYTES
         | OP_LOAD

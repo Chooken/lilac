@@ -43,6 +43,7 @@ use std::collections::{HashMap, HashSet};
 use lilac_ir::{builtin_layout, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
 use lilac_span::{SourceMap, Span};
 
+use crate::encode::NARROW_MAX;
 use crate::isa::{
     verify, ArithOp, Builtin, ConvertOp, Data, Func, Instr, Line, Operand, Program, TypeId,
     TypeInfo, LBC_VERSION, VM_POINTER_BYTES, VM_TARGET,
@@ -1050,6 +1051,23 @@ impl FuncBuilder<'_, '_> {
             self.emit_term(&block.term, next, &mut pending)?;
         }
         self.resolve_targets(pending)?;
+        // Fold a redundant `copy %place -> &r` and a `const k -> &j` into the
+        // arithmetic that consumes both, then remap branch targets and line
+        // pcs to the folded instruction indices.
+        let (folded, arith_map) = fold_arith_imm(&self.compiler.types.infos, &self.code);
+        let (folded, call_map) = fold_call_inputs(&folded);
+        let (folded, fall_map) = drop_fallthrough_branches(&folded);
+        let composed: Vec<u32> = arith_map
+            .iter()
+            .map(|&m| remap(&call_map, m))
+            .map(|m| remap(&fall_map, m))
+            .collect();
+        for line in &mut self.lines {
+            line.pc = *composed
+                .get(line.pc as usize)
+                .ok_or_else(|| "source-line pc out of range".to_string())?;
+        }
+        self.code = folded;
         // The typed list still uses instruction-index branch targets and line
         // pcs; encode it into the executed word stream and remap both to word
         // offsets (M5c.1 makes `pc` a word index).
@@ -1081,6 +1099,404 @@ impl FuncBuilder<'_, '_> {
             place_names: std::mem::take(&mut self.places.names),
         })
     }
+}
+
+/// Folds `copy`/`const`/`arith` triples into [`Instr::ArithImm`].
+///
+/// Returns the folded instruction list and an `old index -> new index` map
+/// (length `code.len() + 1`) so branch targets and line pcs can be remapped.
+/// A fold is applied only when each folded temporary register is read exactly
+/// once (by the arithmetic), the consumed instructions are not branch targets,
+/// and the operands fit the narrow encoding.
+fn fold_arith_imm(types: &[TypeInfo], code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let reads = reg_read_count(code);
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        if let Some((fused, consumed)) = try_fuse(types, code, i, &reads, &is_target) {
+            for offset in 0..consumed {
+                map[i + offset] = start;
+            }
+            new_code.push(fused);
+            i += consumed;
+        } else {
+            map[i] = start;
+            new_code.push(code[i].clone());
+            i += 1;
+        }
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// Marks an instruction index as a branch target (ignoring out-of-range ones).
+fn mark_target(is_target: &mut [bool], target: u32) {
+    if let Some(slot) = is_target.get_mut(target as usize) {
+        *slot = true;
+    }
+}
+
+/// Remaps an old instruction index through `map`, falling back to `0`.
+fn remap(map: &[u32], index: u32) -> u32 {
+    map.get(index as usize).copied().unwrap_or(0)
+}
+
+/// Attempts to fuse the instructions starting at `i`, returning the fused
+/// instruction and how many source instructions it consumes.
+fn try_fuse(
+    types: &[TypeInfo],
+    code: &[Instr],
+    i: usize,
+    reads: &HashMap<u32, u32>,
+    is_target: &[bool],
+) -> Option<(Instr, usize)> {
+    // Shape A: `copy &r <- %s`, `const k -> &j`, `arith dst, &r, &j`.
+    if let (
+        Some(Instr::Copy {
+            dst: Operand::Reg(copy_dst),
+            src: Operand::Slot(slot),
+            ty: copy_ty,
+        }),
+        Some(Instr::Const {
+            dst: const_dst,
+            imm,
+            ..
+        }),
+        Some(Instr::Arith {
+            op,
+            dst,
+            lhs,
+            rhs,
+            operand_ty,
+            ..
+        }),
+    ) = (code.get(i), code.get(i + 1), code.get(i + 2))
+    {
+        if lhs == copy_dst
+            && rhs == const_dst
+            && read_once(reads, *copy_dst)
+            && read_once(reads, *const_dst)
+            && !is_target.get(i + 1).copied().unwrap_or(true)
+            && !is_target.get(i + 2).copied().unwrap_or(true)
+            && *copy_dst <= NARROW_MAX
+            && *slot <= NARROW_MAX
+            && *dst <= NARROW_MAX
+            && same_size(types, *copy_ty, *operand_ty)
+        {
+            return Some((
+                Instr::ArithImm {
+                    op: *op,
+                    dst: *dst,
+                    lhs: *slot,
+                    lhs_slot: true,
+                    imm: *imm,
+                    operand_ty: *operand_ty,
+                },
+                3,
+            ));
+        }
+    }
+    // Shape B: `const k -> &j`, `arith dst, &r, &j` (register left operand).
+    if let (
+        Some(Instr::Const {
+            dst: const_dst,
+            imm,
+            ..
+        }),
+        Some(Instr::Arith {
+            op,
+            dst,
+            lhs,
+            rhs,
+            operand_ty,
+            ..
+        }),
+    ) = (code.get(i), code.get(i + 1))
+    {
+        if rhs == const_dst
+            && read_once(reads, *const_dst)
+            && !is_target.get(i + 1).copied().unwrap_or(true)
+            && *lhs <= NARROW_MAX
+            && *dst <= NARROW_MAX
+        {
+            return Some((
+                Instr::ArithImm {
+                    op: *op,
+                    dst: *dst,
+                    lhs: *lhs,
+                    lhs_slot: false,
+                    imm: *imm,
+                    operand_ty: *operand_ty,
+                },
+                2,
+            ));
+        }
+    }
+    None
+}
+
+/// Whether a register is read exactly once across `code`.
+fn read_once(reads: &HashMap<u32, u32>, reg: u32) -> bool {
+    reads.get(&reg).copied() == Some(1)
+}
+
+/// Whether two types have the same packed byte size.
+fn same_size(types: &[TypeInfo], a: TypeId, b: TypeId) -> bool {
+    match (types.get(a as usize), types.get(b as usize)) {
+        (Some(a), Some(b)) => a.size == b.size,
+        _ => false,
+    }
+}
+
+/// Counts how many times each register is read across `code`.
+fn reg_read_count(code: &[Instr]) -> HashMap<u32, u32> {
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    let mut bump = |reg: u32| {
+        *counts.entry(reg).or_insert(0) += 1;
+    };
+    for instr in code {
+        match instr {
+            Instr::Copy {
+                src: Operand::Reg(reg),
+                ..
+            }
+            | Instr::Store {
+                src: Operand::Reg(reg),
+                ..
+            }
+            | Instr::StoreField {
+                src: Operand::Reg(reg),
+                ..
+            }
+            | Instr::Convert { src: reg, .. }
+            | Instr::BranchIf { cond: reg, .. } => bump(*reg),
+            Instr::Arith { lhs, rhs, .. } => {
+                bump(*lhs);
+                bump(*rhs);
+            }
+            Instr::ArithImm { lhs, lhs_slot, .. } => {
+                if !lhs_slot {
+                    bump(*lhs);
+                }
+            }
+            Instr::CallIndirect { callee, ins, .. } => {
+                bump(*callee);
+                bump_operands(ins, &mut bump);
+            }
+            Instr::Call { ins, .. } | Instr::CallBuiltin { ins, .. } => {
+                bump_operands(ins, &mut bump);
+            }
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// Counts register reads in an operand list.
+fn bump_operands(ins: &[Operand], bump: &mut impl FnMut(u32)) {
+    for operand in ins {
+        if let Operand::Reg(reg) = operand {
+            bump(*reg);
+        }
+    }
+}
+
+/// Forwards a single-use staging copy into the call that consumes it.
+///
+/// `%s = copy &r` immediately followed by a call whose inputs read `%s`
+/// becomes a call reading `&r` directly, removing the slot round-trip. This is
+/// safe only when the slot is written once, read once, and is never a call
+/// output (checked by the caller).
+fn fold_call_inputs(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let (reads, writes) = slot_access_counts(code);
+    let mut is_out: HashSet<u32> = HashSet::new();
+    for instr in code {
+        match instr {
+            Instr::Call { outs, .. }
+            | Instr::CallIndirect { outs, .. }
+            | Instr::CallBuiltin { outs, .. } => {
+                is_out.extend(outs.iter().copied());
+            }
+            _ => {}
+        }
+    }
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        let folded = match (code.get(i), code.get(i + 1)) {
+            (
+                Some(Instr::Copy {
+                    dst: Operand::Slot(slot),
+                    src: Operand::Reg(reg),
+                    ..
+                }),
+                Some(call),
+            ) if reads.get(slot).copied() == Some(1)
+                && writes.get(slot).copied() == Some(1)
+                && !is_out.contains(slot)
+                && !is_target.get(i + 1).copied().unwrap_or(true) =>
+            {
+                forward_call(call, *slot, *reg)
+            }
+            _ => None,
+        };
+        if let Some(call) = folded {
+            map[i] = start;
+            map[i + 1] = start;
+            new_code.push(call);
+            i += 2;
+        } else {
+            map[i] = start;
+            new_code.push(code[i].clone());
+            i += 1;
+        }
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// Replaces a call's `Slot(slot)` input with `Reg(reg)`, if present.
+fn forward_call(call: &Instr, slot: u32, reg: u32) -> Option<Instr> {
+    let mut out = call.clone();
+    let (Instr::Call { ins, .. }
+    | Instr::CallIndirect { ins, .. }
+    | Instr::CallBuiltin { ins, .. }) = &mut out
+    else {
+        return None;
+    };
+    let mut found = false;
+    for operand in ins.iter_mut() {
+        if *operand == Operand::Slot(slot) {
+            *operand = Operand::Reg(reg);
+            found = true;
+        }
+    }
+    found.then_some(out)
+}
+
+/// Counts reads and writes of each frame slot across `code`.
+///
+/// Register reads of a slot's value count as reads; a call output counts as a
+/// runtime write to its slot.
+fn slot_access_counts(code: &[Instr]) -> (HashMap<u32, u32>, HashMap<u32, u32>) {
+    let mut reads: HashMap<u32, u32> = HashMap::new();
+    let mut writes: HashMap<u32, u32> = HashMap::new();
+    for instr in code {
+        match instr {
+            Instr::Copy { dst, src, .. } => {
+                bump_slot(&mut reads, *src);
+                bump_slot(&mut writes, *dst);
+            }
+            Instr::CopyBytes { dst, src, .. } => {
+                bump_slot(&mut reads, Operand::Slot(*src));
+                bump_slot(&mut writes, Operand::Slot(*dst));
+            }
+            Instr::Load { src, .. } => bump_slot(&mut reads, Operand::Slot(*src)),
+            Instr::Store { src, dst, .. } => {
+                bump_slot(&mut reads, *src);
+                bump_slot(&mut reads, Operand::Slot(*dst));
+            }
+            Instr::Addr { place, .. } | Instr::AddrField { place, .. } => {
+                bump_slot(&mut reads, Operand::Slot(*place));
+            }
+            Instr::Field { place, .. } => bump_slot(&mut reads, Operand::Slot(*place)),
+            Instr::StoreField { src, place, .. } => {
+                bump_slot(&mut reads, *src);
+                bump_slot(&mut reads, Operand::Slot(*place));
+            }
+            Instr::Call { ins, outs, .. }
+            | Instr::CallIndirect { ins, outs, .. }
+            | Instr::CallBuiltin { ins, outs, .. } => {
+                for operand in ins {
+                    bump_slot(&mut reads, *operand);
+                }
+                for out in outs {
+                    bump_slot(&mut writes, Operand::Slot(*out));
+                }
+            }
+            _ => {}
+        }
+    }
+    (reads, writes)
+}
+
+/// Bumps a slot's counter if `operand` is a slot.
+fn bump_slot(counts: &mut HashMap<u32, u32>, operand: Operand) {
+    if let Operand::Slot(off) = operand {
+        *counts.entry(off).or_insert(0) += 1;
+    }
+}
+
+/// Removes `branch` instructions whose target is the immediately following
+/// instruction (an explicit fall-through), then remaps targets and line pcs.
+fn drop_fallthrough_branches(code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    for (i, instr) in code.iter().enumerate() {
+        let falls_through = matches!(instr, Instr::Branch { target } if *target as usize == i + 1);
+        map[i] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        if !falls_through {
+            new_code.push(instr.clone());
+        }
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
 }
 
 /// Program-wide compilation state.

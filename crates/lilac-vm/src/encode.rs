@@ -121,6 +121,14 @@ pub const OP_IGTU_BASE: u8 = 0x30;
 /// Width-free `ExtendZero`.
 pub const OP_EXTEND_ZERO: u8 = 0x73;
 
+/// Fused arithmetic with an immediate right operand.
+///
+/// Layout: `[op | dst:8 | lhs:8 | (slot:1 | op_code:7)]`, followed by the
+/// little-endian low and high words of the `u64` immediate. `op_code` is a
+/// width-specialized arithmetic opcode (as produced by [`arith_opcode`]); the
+/// low bit of `flags` distinguishes a slot `lhs` from a register `lhs`.
+pub const OP_ARITH_IMM: u8 = 0x34;
+
 /// Builds the compact word stream and its operand pools.
 ///
 /// Borrows the program type table so sizes/widths are computed at encode time.
@@ -238,6 +246,32 @@ impl<'a> CodeBuilder<'a> {
                 let size = self.type_size(*operand_ty)?;
                 let code = arith_opcode(*op, size)?;
                 self.emit_ops(code, &[*dst, *lhs, *rhs])?;
+            }
+            Instr::ArithImm {
+                op,
+                dst,
+                lhs,
+                lhs_slot,
+                imm,
+                operand_ty,
+            } => {
+                let size = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, size)?;
+                if *dst > NARROW_MAX || *lhs > NARROW_MAX || code >= WIDE_FLAG {
+                    return Err(format!(
+                        "fused arithmetic operand does not fit the narrow form (dst={dst}, lhs={lhs})"
+                    ));
+                }
+                let flags = if *lhs_slot { code | WIDE_FLAG } else { code };
+                self.words.push(
+                    u32::from(OP_ARITH_IMM) | (*dst << 8) | (*lhs << 16) | (u32::from(flags) << 24),
+                );
+                #[allow(clippy::cast_possible_truncation)]
+                let lo = (*imm & 0xFFFF_FFFF) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let hi = (*imm >> 32) as u32;
+                self.words.push(lo);
+                self.words.push(hi);
             }
             Instr::Convert { op, dst, src, ty } => {
                 let size = self.type_size(*ty)?;
@@ -610,6 +644,7 @@ pub fn opcode_mnemonic(op: u8) -> &'static str {
         OP_CALL_BUILTIN_BASE => "builtin.ptr_add",
         0x1D => "builtin.memcpy",
         OP_CALL_BUILTIN_LAST => "builtin.lilac_abort",
+        OP_ARITH_IMM => "arith.imm",
         _ => "unknown",
     }
 }
@@ -796,6 +831,31 @@ mod tests {
             ),
             (Instr::Convert { op, dst, src, ty }, _) => {
                 convert_equivalent(*op, size_of(types, *ty), *dst, *src, d)
+            }
+            (
+                Instr::ArithImm {
+                    op,
+                    dst,
+                    lhs,
+                    lhs_slot,
+                    imm,
+                    operand_ty,
+                },
+                Decoded::ArithImm {
+                    dst: dd,
+                    lhs: dl,
+                    lhs_slot: ds,
+                    op: dop,
+                    width,
+                    imm: di,
+                },
+            ) => {
+                op == dop
+                    && dst == dd
+                    && lhs == dl
+                    && lhs_slot == ds
+                    && imm == di
+                    && width_of(size_of(types, *operand_ty)) == *width
             }
             (
                 Instr::Call { func, ins, outs },
@@ -1214,6 +1274,32 @@ mod tests {
             dst: 1,
             src: 2,
             ty: 0,
+        });
+        // Fused arithmetic with a register and a slot left operand.
+        instrs.push(Instr::ArithImm {
+            op: ArithOp::IAdd,
+            dst: 1,
+            lhs: 2,
+            lhs_slot: false,
+            imm: 0x10,
+            operand_ty: 2,
+        });
+        instrs.push(Instr::ArithImm {
+            op: ArithOp::ISub,
+            dst: 1,
+            lhs: 8,
+            lhs_slot: true,
+            imm: 0x1,
+            operand_ty: 3,
+        });
+        // A signed comparison (the `fib` hot case) at 64-bit width.
+        instrs.push(Instr::ArithImm {
+            op: ArithOp::ILt,
+            dst: 4,
+            lhs: 16,
+            lhs_slot: true,
+            imm: 0x2,
+            operand_ty: 3,
         });
         instrs
     }

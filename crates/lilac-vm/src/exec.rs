@@ -9,9 +9,10 @@
 //!
 //! A `ref` is a `u64` byte offset into [`Machine`]'s arena. The arena starts
 //! with [`Program::globals`], so a data constant's `global_off` is directly a
-//! valid ref. Each frame's place region is appended (zeroed) on call and never
-//! reclaimed; the call-depth cap bounds total growth. Out-of-range accesses are
-//! reported as [`VmError::BadRef`], never a panic.
+//! valid ref. Each frame's place region is appended (zeroed) on call and
+//! reclaimed on return, so the arena and register file stay bounded by the live
+//! call depth. Out-of-range accesses are reported as [`VmError::BadRef`], never
+//! a panic.
 //!
 //! # Scope
 //!
@@ -29,11 +30,11 @@ use std::fmt;
 use crate::decode::{decode, Decoded};
 use crate::encode::{
     arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_BRANCH, OP_BRANCH_IF, OP_CALL, OP_CALL_BUILTIN_BASE,
-    OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
-    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
-    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
-    OP_UNREACHABLE, WIDE_FLAG,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_CALL,
+    OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA,
+    OP_COPY_BASE, OP_COPY_BYTES, OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST,
+    OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE,
+    OP_STORE_LAST, OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand, Program, VM_POINTER_BYTES};
 
@@ -210,18 +211,42 @@ impl<'a> Machine<'a> {
     /// overflow.
     #[allow(clippy::too_many_lines)]
     pub fn run(&mut self) -> Result<i32, VmError> {
+        // Take the register file, arena, and frame stack out of `self` so the
+        // dispatch loop can hold them as locals; `self` carries no aliasing
+        // writes on the hot path. They are restored before returning.
         let program = self.program;
-        let Some(frame) = self.frames.last() else {
+        let mut regs = core::mem::take(&mut self.regs);
+        let mut arena = core::mem::take(&mut self.arena);
+        let mut frames = core::mem::take(&mut self.frames);
+        let result = Self::run_impl(program, &mut regs, &mut arena, &mut frames);
+        self.regs = regs;
+        self.arena = arena;
+        self.frames = frames;
+        result
+    }
+
+    /// The inner dispatch loop over local register/arena/frame storage.
+    #[allow(clippy::too_many_lines)]
+    fn run_impl(
+        program: &Program,
+        regs: &mut Vec<u64>,
+        arena: &mut Vec<u8>,
+        frames: &mut Vec<Frame>,
+    ) -> Result<i32, VmError> {
+        let Some(frame) = frames.last() else {
             return Ok(0);
         };
         let mut func_index = frame.func;
         let mut pc = frame.pc;
         let mut reg_base = frame.reg_base;
         let mut slot_base = frame.slot_base;
+        // Hoisting the function and its code out of the loop avoids a bounds
+        // check and two dependent loads per instruction; call/return arms
+        // refresh them from the new `func_index`.
+        let mut func = &program.funcs[func_index as usize];
+        let mut code = func.code.as_slice();
 
         loop {
-            let func = &program.funcs[func_index as usize];
-            let code = &func.code;
             if pc as usize >= code.len() {
                 // The verifier guarantees every body ends in a terminator and
                 // every branch target is in range, but a directly constructed
@@ -238,17 +263,19 @@ impl<'a> Machine<'a> {
                     if wide {
                         return Err(VmError::BadInstr(pc));
                     }
-                    self.store_frame(func_index, pc, pc + 1);
-                    match self.return_from_frame() {
+                    store_frame(frames, func_index, pc, pc + 1);
+                    match return_frame(regs, arena, frames) {
                         Step::Returned => return Ok(0),
                         Step::Advanced | Step::Panicked(_) => {
-                            let Some(frame) = self.frames.last() else {
+                            let Some(frame) = frames.last() else {
                                 return Ok(0);
                             };
                             func_index = frame.func;
                             pc = frame.pc;
                             reg_base = frame.reg_base;
                             slot_base = frame.slot_base;
+                            func = &program.funcs[func_index as usize];
+                            code = func.code.as_slice();
                             continue;
                         }
                     }
@@ -257,7 +284,7 @@ impl<'a> Machine<'a> {
                     if wide {
                         return Err(VmError::BadInstr(pc));
                     }
-                    self.store_frame(func_index, pc, pc + 1);
+                    store_frame(frames, func_index, pc, pc + 1);
                     return Err(VmError::Unreachable);
                 }
                 OP_PANIC => {
@@ -270,7 +297,7 @@ impl<'a> Machine<'a> {
                         .data
                         .get((w >> 8) as usize)
                         .map_or(&[][..], |entry| entry.bytes.as_slice());
-                    self.store_frame(func_index, pc, pc + 1);
+                    store_frame(frames, func_index, pc, pc + 1);
                     let _ = trap(message);
                     return Ok(ABORT_CODE);
                 }
@@ -282,7 +309,7 @@ impl<'a> Machine<'a> {
                 }
                 OP_BRANCH_IF => {
                     let (ops, _) = read_ops3(code, pc, wide)?;
-                    next = if self.reg(reg_base, ops[0]) == 0 {
+                    next = if reg_of(regs, reg_base, ops[0]) == 0 {
                         ops[2]
                     } else {
                         ops[1]
@@ -297,7 +324,7 @@ impl<'a> Machine<'a> {
                         .get(pc as usize + n as usize + 1)
                         .ok_or(VmError::BadInstr(pc))?;
                     let imm = u64::from(lo) | (u64::from(hi) << 32);
-                    self.set_reg(reg_base, dst, imm);
+                    set_reg_of(regs, reg_base, dst, imm);
                     next = pc + n + 2;
                 }
                 OP_CONST_DATA => {
@@ -309,7 +336,7 @@ impl<'a> Machine<'a> {
                         .data
                         .get(data as usize)
                         .map_or(0, |entry| entry.global_off);
-                    self.set_reg(reg_base, dst, u64::from(off));
+                    set_reg_of(regs, reg_base, dst, u64::from(off));
                     next = pc + n + 1;
                 }
                 b @ (OP_COPY_BASE..=OP_COPY_LAST) => {
@@ -319,10 +346,10 @@ impl<'a> Machine<'a> {
                     let src = operate(ops[1], k & 1 != 0);
                     let size = ops[2];
                     if size <= VM_POINTER_BYTES {
-                        let value = self.read_scalar(reg_base, slot_base, src, size)?;
-                        self.write_scalar(reg_base, slot_base, dst, value, size)?;
+                        let value = read_scalar(regs, arena, reg_base, slot_base, src, size)?;
+                        write_scalar(regs, arena, reg_base, slot_base, dst, value, size)?;
                     } else {
-                        self.copy_aggregate(reg_base, slot_base, dst, src, size)?;
+                        copy_aggregate(regs, arena, reg_base, slot_base, dst, src, size)?;
                     }
                     next = pc + n;
                 }
@@ -330,53 +357,58 @@ impl<'a> Machine<'a> {
                     let (ops, n) = read_ops3(code, pc, wide)?;
                     let src_abs = slot_base as usize + ops[1] as usize;
                     let dst_abs = slot_base as usize + ops[0] as usize;
-                    self.copy_arena(src_abs, dst_abs, ops[2] as usize)?;
+                    copy_arena(arena, src_abs, dst_abs, ops[2] as usize)?;
                     next = pc + n;
                 }
                 OP_LOAD => {
                     let (ops, n) = read_ops3(code, pc, wide)?;
-                    let ref_off = self.slot_ref(slot_base, ops[1])?;
+                    let ref_off = slot_ref(arena, slot_base, ops[1])?;
                     if ops[2] <= VM_POINTER_BYTES {
                         let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
-                        let value = self.read_abs(abs, ops[2]).ok_or(VmError::BadRef(ref_off))?;
-                        self.set_reg(reg_base, ops[0], value);
+                        let value = read_abs(arena, abs, ops[2]).ok_or(VmError::BadRef(ref_off))?;
+                        set_reg_of(regs, reg_base, ops[0], value);
                     } else {
                         // An aggregate `Load` passes the pointer through.
-                        self.set_reg(reg_base, ops[0], ref_off);
+                        set_reg_of(regs, reg_base, ops[0], ref_off);
                     }
                     next = pc + n;
                 }
                 b @ (OP_STORE_BASE..=OP_STORE_LAST) => {
                     let (ops, n) = read_ops3(code, pc, wide)?;
                     let src = operate(ops[0], b == OP_STORE_LAST);
-                    let ref_off = self.slot_ref(slot_base, ops[1])?;
+                    let ref_off = slot_ref(arena, slot_base, ops[1])?;
                     let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
                     if ops[2] <= VM_POINTER_BYTES {
-                        let value = self.read_scalar(reg_base, slot_base, src, ops[2])?;
-                        self.write_abs(abs, value, ops[2])?;
+                        let value = read_scalar(regs, arena, reg_base, slot_base, src, ops[2])?;
+                        write_abs(arena, abs, value, ops[2])?;
                     } else {
-                        self.copy_operand_bytes(reg_base, slot_base, src, abs, ops[2])?;
+                        copy_operand_bytes(regs, arena, reg_base, slot_base, src, abs, ops[2])?;
                     }
                     next = pc + n;
                 }
                 OP_ADDR => {
                     let (ops, n) = read_ops2(code, pc, wide)?;
-                    self.set_reg(reg_base, ops[0], u64::from(slot_base) + u64::from(ops[1]));
+                    set_reg_of(
+                        regs,
+                        reg_base,
+                        ops[0],
+                        u64::from(slot_base) + u64::from(ops[1]),
+                    );
                     next = pc + n;
                 }
                 b @ (OP_ADDRFIELD_BASE..=OP_ADDRFIELD_LAST) => {
                     let (ops, n) = read_ops3(code, pc, wide)?;
-                    let base_off = self.field_base(slot_base, ops[1], b == OP_ADDRFIELD_LAST)?;
+                    let base_off = field_base(arena, slot_base, ops[1], b == OP_ADDRFIELD_LAST)?;
                     let addr = base_off
                         .checked_add(ops[2] as usize)
                         .ok_or(VmError::BadRef(base_off as u64))?;
                     let addr = u64::try_from(addr).map_err(|_| VmError::BadRef(base_off as u64))?;
-                    self.set_reg(reg_base, ops[0], addr);
+                    set_reg_of(regs, reg_base, ops[0], addr);
                     next = pc + n;
                 }
                 OP_ADDR_FUNC => {
                     let (ops, n) = read_ops2(code, pc, wide)?;
-                    self.set_reg(reg_base, ops[0], FUNC_TAG | u64::from(ops[1]));
+                    set_reg_of(regs, reg_base, ops[0], FUNC_TAG | u64::from(ops[1]));
                     next = pc + n;
                 }
                 b @ (OP_FIELD_BASE..=OP_FIELD_LAST) => {
@@ -384,21 +416,20 @@ impl<'a> Machine<'a> {
                     let size = *code
                         .get(pc as usize + n as usize)
                         .ok_or(VmError::BadInstr(pc))?;
-                    let base_off = self.field_base(slot_base, ops[1], b == OP_FIELD_LAST)?;
+                    let base_off = field_base(arena, slot_base, ops[1], b == OP_FIELD_LAST)?;
                     let addr = base_off
                         .checked_add(ops[2] as usize)
                         .ok_or(VmError::BadRef(base_off as u64))?;
                     if size <= VM_POINTER_BYTES {
-                        let value = self
-                            .read_abs(addr, size)
-                            .ok_or(VmError::BadRef(addr as u64))?;
-                        self.set_reg(reg_base, ops[0], value);
+                        let value =
+                            read_abs(arena, addr, size).ok_or(VmError::BadRef(addr as u64))?;
+                        set_reg_of(regs, reg_base, ops[0], value);
                     } else {
                         // The compiler emits `AddrField` for aggregate fields;
                         // this defensive fall-back yields the field ref.
                         let value =
                             u64::try_from(addr).map_err(|_| VmError::BadRef(addr as u64))?;
-                        self.set_reg(reg_base, ops[0], value);
+                        set_reg_of(regs, reg_base, ops[0], value);
                     }
                     next = pc + n + 1;
                 }
@@ -409,15 +440,15 @@ impl<'a> Machine<'a> {
                         .ok_or(VmError::BadInstr(pc))?;
                     let k = b - OP_STOREFIELD_BASE;
                     let src = operate(ops[0], k & 1 != 0);
-                    let base_off = self.field_base(slot_base, ops[1], k & 2 != 0)?;
+                    let base_off = field_base(arena, slot_base, ops[1], k & 2 != 0)?;
                     let addr = base_off
                         .checked_add(ops[2] as usize)
                         .ok_or(VmError::BadRef(base_off as u64))?;
                     if size <= VM_POINTER_BYTES {
-                        let value = self.read_scalar(reg_base, slot_base, src, size)?;
-                        self.write_abs(addr, value, size)?;
+                        let value = read_scalar(regs, arena, reg_base, slot_base, src, size)?;
+                        write_abs(arena, addr, value, size)?;
                     } else {
-                        self.copy_operand_bytes(reg_base, slot_base, src, addr, size)?;
+                        copy_operand_bytes(regs, arena, reg_base, slot_base, src, addr, size)?;
                     }
                     next = pc + n + 1;
                 }
@@ -428,15 +459,19 @@ impl<'a> Machine<'a> {
                     let (site, ins, outs) =
                         resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
                             .ok_or(VmError::BadInstr(pc))?;
-                    self.store_frame(func_index, pc, pc + 1);
-                    self.call(site.func, ins, outs, reg_base, slot_base)?;
-                    let Some(frame) = self.frames.last() else {
+                    store_frame(frames, func_index, pc, pc + 1);
+                    do_call(
+                        program, regs, arena, frames, site.func, ins, outs, reg_base, slot_base,
+                    )?;
+                    let Some(frame) = frames.last() else {
                         return Ok(0);
                     };
                     func_index = frame.func;
                     pc = frame.pc;
                     reg_base = frame.reg_base;
                     slot_base = frame.slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
                     continue;
                 }
                 OP_CALL_INDIRECT => {
@@ -446,21 +481,25 @@ impl<'a> Machine<'a> {
                         .ok_or(VmError::BadInstr(pc))? as usize;
                     let (_site, ins, outs) = resolve_call(&func.call_sites, &func.operands, index)
                         .ok_or(VmError::BadInstr(pc))?;
-                    let value = self.reg(reg_base, callee);
+                    let value = reg_of(regs, reg_base, callee);
                     if value & FUNC_TAG == 0 {
                         return Err(VmError::BadRef(value));
                     }
                     let target =
                         u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
-                    self.store_frame(func_index, pc, pc + n + 1);
-                    self.call(target, ins, outs, reg_base, slot_base)?;
-                    let Some(frame) = self.frames.last() else {
+                    store_frame(frames, func_index, pc, pc + n + 1);
+                    do_call(
+                        program, regs, arena, frames, target, ins, outs, reg_base, slot_base,
+                    )?;
+                    let Some(frame) = frames.last() else {
                         return Ok(0);
                     };
                     func_index = frame.func;
                     pc = frame.pc;
                     reg_base = frame.reg_base;
                     slot_base = frame.slot_base;
+                    func = &program.funcs[func_index as usize];
+                    code = func.code.as_slice();
                     continue;
                 }
                 b @ (OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST) => {
@@ -474,9 +513,9 @@ impl<'a> Machine<'a> {
                         resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
                             .ok_or(VmError::BadInstr(pc))?;
                     if let Step::Panicked(code) =
-                        self.call_builtin(builtin, ins, outs, reg_base, slot_base)?
+                        do_builtin(regs, arena, builtin, ins, outs, reg_base, slot_base)?
                     {
-                        self.store_frame(func_index, pc, pc + 1);
+                        store_frame(frames, func_index, pc, pc + 1);
                         return Ok(code);
                     }
                     next = pc + 1;
@@ -486,40 +525,52 @@ impl<'a> Machine<'a> {
                     let Some((_, width)) = convert_from_opcode(b) else {
                         return Err(VmError::BadInstr(pc));
                     };
-                    let value = self.reg(reg_base, ops[1]);
-                    self.set_reg(reg_base, ops[0], value & mask(u32::from(width) / 8));
+                    let value = reg_of(regs, reg_base, ops[1]);
+                    set_reg_of(regs, reg_base, ops[0], value & mask(u32::from(width) / 8));
                     next = pc + n;
                 }
                 OP_EXTEND_ZERO => {
                     let (ops, n) = read_ops2(code, pc, wide)?;
-                    self.set_reg(reg_base, ops[0], self.reg(reg_base, ops[1]));
+                    let value = reg_of(regs, reg_base, ops[1]);
+                    set_reg_of(regs, reg_base, ops[0], value);
                     next = pc + n;
+                }
+                OP_ARITH_IMM => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let lo = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
+                    let hi = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
+                    let imm = u64::from(lo) | (u64::from(hi) << 32);
+                    let dst = (w >> 8) & 0xFF;
+                    let lhs = (w >> 16) & 0xFF;
+                    let flags = (w >> 24) & 0xFF;
+                    let lhs_slot = flags & u32::from(WIDE_FLAG) != 0;
+                    let op_code = u8::try_from(flags & 0x7F).unwrap_or(0);
+                    let Some((op, width)) = arith_from_opcode(op_code) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let size = u32::from(width) / 8;
+                    let left = if lhs_slot {
+                        let abs = slot_base as usize + lhs as usize;
+                        read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?
+                    } else {
+                        reg_of(regs, reg_base, lhs)
+                    };
+                    let value = eval_arith(op, left, imm, size);
+                    set_reg_of(regs, reg_base, dst, value & mask(size));
+                    next = pc + 3;
                 }
                 b => {
                     let Some((op, width)) = arith_from_opcode(b) else {
                         return Err(VmError::BadInstr(pc));
                     };
                     let (ops, n) = read_ops3(code, pc, wide)?;
-                    self.exec_arith(op, reg_base, ops[0], ops[1], ops[2], width);
+                    exec_arith(regs, op, reg_base, ops[0], ops[1], ops[2], width);
                     next = pc + n;
                 }
             }
             pc = next;
-        }
-    }
-
-    /// Synchronizes the running frame's `pc`/`last_pc` with the loop's locals.
-    ///
-    /// The inner loop keeps these in locals and only calls this on
-    /// call/return/trap (spec §6.1). It is keyed on `func_index` so that a
-    /// frame pushed or popped in between is never written with another frame's
-    /// counters.
-    fn store_frame(&mut self, func_index: u32, pc: u32, next: u32) {
-        if let Some(frame) = self.frames.last_mut() {
-            if frame.func == func_index {
-                frame.pc = next;
-                frame.last_pc = Some(pc);
-            }
         }
     }
 
@@ -782,6 +833,25 @@ impl<'a> Machine<'a> {
                 // is a register move (matching M5c's no-op mask).
                 self.set_reg(reg_base, dst, self.reg(reg_base, src));
             }
+            Decoded::ArithImm {
+                dst,
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+            } => {
+                let size = u32::from(width) / 8;
+                let left = if lhs_slot {
+                    let abs = usize::try_from(slot_base).unwrap_or(0) + lhs as usize;
+                    self.read_abs(abs, size)
+                        .ok_or(VmError::BadRef(abs as u64))?
+                } else {
+                    self.reg(reg_base, lhs)
+                };
+                let value = eval_arith(op, left, imm, size);
+                self.set_reg(reg_base, dst, value & mask(size));
+            }
             Decoded::Call { site, ins, outs } => {
                 self.call(site.func, ins, outs, reg_base, slot_base)?;
             }
@@ -834,12 +904,9 @@ impl<'a> Machine<'a> {
     /// The result is masked to the operand width. For the comparison ops this
     /// is harmless (the result is `0`/`1`); for arithmetic the result type
     /// equals the operand type, matching M5c.
+    #[inline]
     fn exec_arith(&mut self, op: ArithOp, reg_base: u32, dst: u32, lhs: u32, rhs: u32, width: u8) {
-        let size = u32::from(width) / 8;
-        let left = self.reg(reg_base, lhs);
-        let right = self.reg(reg_base, rhs);
-        let value = eval_arith(op, left, right, size);
-        self.set_reg(reg_base, dst, value & mask(size));
+        exec_arith(&mut self.regs, op, reg_base, dst, lhs, rhs, width);
     }
 
     /// The current frame's program counter.
@@ -934,70 +1001,30 @@ impl<'a> Machine<'a> {
         caller_reg_base: u32,
         caller_slot_base: u32,
     ) -> Result<(), VmError> {
-        let program = self.program;
-        let callee = program
-            .funcs
-            .get(target as usize)
-            .ok_or(VmError::BadRef(u64::from(target)))?;
-        if callee.is_extern {
-            return Err(VmError::ExternCall(callee.name.clone()));
-        }
-        if self.frames.len() >= MAX_CALL_DEPTH as usize {
-            return Err(VmError::StackOverflow);
-        }
-        let reg_base = u32::try_from(self.regs.len()).unwrap_or(u32::MAX);
-        let slot_base = u32::try_from(self.arena.len()).unwrap_or(u32::MAX);
-        self.regs.resize(
-            self.regs.len() + usize::try_from(callee.n_regs).unwrap_or(0),
-            0,
-        );
-        self.arena.resize(
-            self.arena.len() + usize::try_from(callee.slot_bytes).unwrap_or(0),
-            0,
-        );
-        for (index, operand) in ins.iter().enumerate() {
-            let (Some(&dst_off), Some(&size)) =
-                (callee.in_offsets.get(index), callee.in_sizes.get(index))
-            else {
-                break;
-            };
-            let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst_off as usize;
-            self.move_to_slot(caller_reg_base, caller_slot_base, *operand, size, dst_abs)?;
-        }
-        // Fill the out-ref region: one u64 absolute arena offset per output.
-        for (index, operand) in outs.iter().enumerate() {
-            let abs = match operand {
-                Operand::Slot(off) => u64::from(caller_slot_base) + u64::from(*off),
-                Operand::Reg(reg) => self.reg(caller_reg_base, *reg),
-            };
-            let cell = u32::try_from(index)
-                .ok()
-                .and_then(|index| index.checked_mul(VM_POINTER_BYTES))
-                .and_then(|off| slot_base.checked_add(off))
-                .ok_or(VmError::BadRef(u64::from(slot_base)))?;
-            self.write_abs(usize::try_from(cell).unwrap_or(0), abs, VM_POINTER_BYTES)?;
-        }
-        self.frames.push(Frame {
-            func: target,
-            reg_base,
-            slot_base,
-            pc: 0,
-            last_pc: None,
-        });
-        Ok(())
+        do_call(
+            self.program,
+            &mut self.regs,
+            &mut self.arena,
+            &mut self.frames,
+            target,
+            ins,
+            outs,
+            caller_reg_base,
+            caller_slot_base,
+        )
     }
 
-    /// Pops the running frame.
+    /// Pops the running frame, reclaiming its register and slot regions.
     ///
     /// Outputs were written by reference, so there is nothing to copy back;
     /// an output the callee never wrote leaves the caller's storage unchanged.
+    /// Because frames nest, the popped frame's regions are always the arena's
+    /// tail, so truncating back to its bases is safe and keeps the register
+    /// file and arena bounded by the *live depth* rather than by the total
+    /// number of calls (a sequential call loop would otherwise grow the arena
+    /// without bound).
     fn return_from_frame(&mut self) -> Step {
-        if self.frames.len() <= 1 {
-            self.frames.pop();
-            return Step::Returned;
-        }
-        self.frames.pop();
-        Step::Advanced
+        return_frame(&mut self.regs, &mut self.arena, &mut self.frames)
     }
 
     /// Copies an aggregate value between a register (used as a ref) and a slot.
@@ -1009,36 +1036,20 @@ impl<'a> Machine<'a> {
         src: Operand,
         size: u32,
     ) -> Result<(), VmError> {
-        match (dst, src) {
-            (Operand::Slot(dst_off), Operand::Reg(src_reg)) => {
-                let ref_off = self.reg(reg_base, src_reg);
-                let src_abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
-                let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst_off as usize;
-                self.copy_arena(src_abs, dst_abs, size as usize)
-            }
-            (Operand::Reg(dst_reg), Operand::Slot(src_off)) => {
-                let addr = u64::from(slot_base) + u64::from(src_off);
-                self.set_reg(reg_base, dst_reg, addr);
-                Ok(())
-            }
-            (Operand::Slot(dst_off), Operand::Slot(src_off)) => {
-                let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst_off as usize;
-                let src_abs = usize::try_from(slot_base).unwrap_or(0) + src_off as usize;
-                self.copy_arena(src_abs, dst_abs, size as usize)
-            }
-            (Operand::Reg(dst_reg), Operand::Reg(src_reg)) => {
-                let value = self.reg(reg_base, src_reg);
-                self.set_reg(reg_base, dst_reg, value);
-                Ok(())
-            }
-        }
+        copy_aggregate(
+            &mut self.regs,
+            &mut self.arena,
+            reg_base,
+            slot_base,
+            dst,
+            src,
+            size,
+        )
     }
 
     /// Reads the pointer-sized ref stored in a frame slot.
     fn slot_ref(&self, slot_base: u32, place: u32) -> Result<u64, VmError> {
-        let abs = usize::try_from(slot_base).unwrap_or(0) + place as usize;
-        self.read_abs(abs, VM_POINTER_BYTES)
-            .ok_or(VmError::BadRef(abs as u64))
+        slot_ref(&self.arena, slot_base, place)
     }
 
     /// Resolves a field instruction's object base to an absolute arena offset.
@@ -1046,15 +1057,7 @@ impl<'a> Machine<'a> {
     /// With `indirect`, the object slot holds a ref that is dereferenced first;
     /// otherwise the frame slot itself is the aggregate base.
     fn field_base(&self, slot_base: u32, place: u32, indirect: bool) -> Result<usize, VmError> {
-        let slot_abs = usize::try_from(slot_base).unwrap_or(0) + place as usize;
-        if indirect {
-            let ref_off = self
-                .read_abs(slot_abs, VM_POINTER_BYTES)
-                .ok_or(VmError::BadRef(slot_abs as u64))?;
-            usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))
-        } else {
-            Ok(slot_abs)
-        }
+        field_base(&self.arena, slot_base, place, indirect)
     }
 
     /// Copies `size` aggregate bytes from an operand to an absolute arena offset.
@@ -1069,14 +1072,15 @@ impl<'a> Machine<'a> {
         dst_abs: usize,
         size: u32,
     ) -> Result<(), VmError> {
-        let src_abs = match operand {
-            Operand::Reg(reg) => {
-                let ref_off = self.reg(reg_base, reg);
-                usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?
-            }
-            Operand::Slot(off) => usize::try_from(slot_base).unwrap_or(0) + off as usize,
-        };
-        self.copy_arena(src_abs, dst_abs, size as usize)
+        copy_operand_bytes(
+            &self.regs,
+            &mut self.arena,
+            reg_base,
+            slot_base,
+            operand,
+            dst_abs,
+            size,
+        )
     }
 
     /// Executes a compiler leaf builtin.
@@ -1091,73 +1095,15 @@ impl<'a> Machine<'a> {
         reg_base: u32,
         slot_base: u32,
     ) -> Result<Step, VmError> {
-        match builtin {
-            Builtin::PtrAdd => {
-                let (base, offset) = match ins {
-                    [base, offset] => (*base, *offset),
-                    _ => {
-                        lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects two inputs")
-                    }
-                };
-                let base = self.read_scalar(reg_base, slot_base, base, VM_POINTER_BYTES)?;
-                let offset = self.read_scalar(reg_base, slot_base, offset, VM_POINTER_BYTES)?;
-                let Some(Operand::Slot(out)) = outs.first().copied() else {
-                    lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects one output");
-                };
-                self.write_scalar(
-                    reg_base,
-                    slot_base,
-                    Operand::Slot(out),
-                    base.wrapping_add(offset),
-                    VM_POINTER_BYTES,
-                )?;
-                Ok(Step::Advanced)
-            }
-            Builtin::Memcpy => {
-                let (dst, src, len) = match ins {
-                    [dst, src, len] => (*dst, *src, *len),
-                    _ => {
-                        lilac_error::bug!(lilac_span::Span::dummy(), "@memcpy expects three inputs")
-                    }
-                };
-                let dst = self.read_scalar(reg_base, slot_base, dst, VM_POINTER_BYTES)?;
-                let src = self.read_scalar(reg_base, slot_base, src, VM_POINTER_BYTES)?;
-                let len = self.read_scalar(reg_base, slot_base, len, VM_POINTER_BYTES)?;
-                let dst_abs = usize::try_from(dst).map_err(|_| VmError::BadRef(dst))?;
-                let src_abs = usize::try_from(src).map_err(|_| VmError::BadRef(src))?;
-                let len = usize::try_from(len).map_err(|_| VmError::BadRef(len))?;
-                self.copy_arena(src_abs, dst_abs, len)?;
-                Ok(Step::Advanced)
-            }
-            Builtin::Abort => Ok(trap(b"aborted")),
-        }
-    }
-
-    /// Copies a scalar or aggregate operand into an absolute slot offset.
-    fn move_to_slot(
-        &mut self,
-        reg_base: u32,
-        slot_base: u32,
-        operand: Operand,
-        size: u32,
-        dst_abs: usize,
-    ) -> Result<(), VmError> {
-        if size <= VM_POINTER_BYTES {
-            let value = self.read_scalar(reg_base, slot_base, operand, size)?;
-            self.write_abs(dst_abs, value, size)
-        } else {
-            match operand {
-                Operand::Reg(reg) => {
-                    let ref_off = self.reg(reg_base, reg);
-                    let src = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
-                    self.copy_arena(src, dst_abs, size as usize)
-                }
-                Operand::Slot(off) => {
-                    let src_abs = usize::try_from(slot_base).unwrap_or(0) + off as usize;
-                    self.copy_arena(src_abs, dst_abs, size as usize)
-                }
-            }
-        }
+        do_builtin(
+            &mut self.regs,
+            &mut self.arena,
+            builtin,
+            ins,
+            outs,
+            reg_base,
+            slot_base,
+        )
     }
 
     /// Reads an operand as its low `size` bytes.
@@ -1168,13 +1114,7 @@ impl<'a> Machine<'a> {
         operand: Operand,
         size: u32,
     ) -> Result<u64, VmError> {
-        match operand {
-            Operand::Reg(reg) => Ok(self.reg(reg_base, reg)),
-            Operand::Slot(off) => {
-                let abs = usize::try_from(slot_base).unwrap_or(0) + off as usize;
-                self.read_abs(abs, size).ok_or(VmError::BadRef(abs as u64))
-            }
-        }
+        read_scalar(&self.regs, &self.arena, reg_base, slot_base, operand, size)
     }
 
     /// Writes an operand's low `size` bytes.
@@ -1186,64 +1126,404 @@ impl<'a> Machine<'a> {
         value: u64,
         size: u32,
     ) -> Result<(), VmError> {
-        match dst {
-            Operand::Reg(reg) => {
-                self.set_reg(reg_base, reg, value & mask(size));
-                Ok(())
-            }
-            Operand::Slot(off) => {
-                let abs = usize::try_from(slot_base).unwrap_or(0) + off as usize;
-                self.write_abs(abs, value, size)
-            }
-        }
+        write_scalar(
+            &mut self.regs,
+            &mut self.arena,
+            reg_base,
+            slot_base,
+            dst,
+            value,
+            size,
+        )
     }
 
     /// Reads `size` little-endian bytes at an absolute arena offset.
     fn read_abs(&self, abs: usize, size: u32) -> Option<u64> {
-        let end = abs.checked_add(size as usize)?;
-        self.arena.get(abs..end).map(le_u64)
+        read_abs(&self.arena, abs, size)
     }
 
     /// Writes `size` little-endian bytes at an absolute arena offset.
     fn write_abs(&mut self, abs: usize, value: u64, size: u32) -> Result<(), VmError> {
-        let end = abs
-            .checked_add(size as usize)
-            .ok_or(VmError::BadRef(abs as u64))?;
-        let bytes = self
-            .arena
-            .get_mut(abs..end)
-            .ok_or(VmError::BadRef(abs as u64))?;
-        store_le(bytes, value);
-        Ok(())
+        write_abs(&mut self.arena, abs, value, size)
     }
 
     /// Copies `size` bytes within the arena (refs are byte offsets).
     fn copy_arena(&mut self, src: usize, dst: usize, size: usize) -> Result<(), VmError> {
-        let src_end = src.checked_add(size).ok_or(VmError::BadRef(src as u64))?;
-        let dst_end = dst.checked_add(size).ok_or(VmError::BadRef(dst as u64))?;
-        if src_end > self.arena.len() {
-            return Err(VmError::BadRef(src as u64));
-        }
-        if dst_end > self.arena.len() {
-            return Err(VmError::BadRef(dst as u64));
-        }
-        self.arena.copy_within(src..src_end, dst);
-        Ok(())
+        copy_arena(&mut self.arena, src, dst, size)
     }
 
     /// Reads a register of the given frame (zero when out of range).
+    #[inline]
     fn reg(&self, reg_base: u32, reg: u32) -> u64 {
-        let index = usize::try_from(reg_base).unwrap_or(0) + reg as usize;
-        self.regs.get(index).copied().unwrap_or(0)
+        reg_of(&self.regs, reg_base, reg)
     }
 
     /// Writes a register of the given frame (ignored when out of range).
+    #[inline]
     fn set_reg(&mut self, reg_base: u32, reg: u32, value: u64) {
-        let index = usize::try_from(reg_base).unwrap_or(0) + reg as usize;
-        if let Some(slot) = self.regs.get_mut(index) {
-            *slot = value;
+        set_reg_of(&mut self.regs, reg_base, reg, value);
+    }
+}
+
+/// Reads a register of a frame (zero when out of range).
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn reg_of(regs: &[u64], reg_base: u32, reg: u32) -> u64 {
+    regs.get(reg_base as usize + reg as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Writes a register of a frame (ignored when out of range).
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn set_reg_of(regs: &mut [u64], reg_base: u32, reg: u32, value: u64) {
+    if let Some(slot) = regs.get_mut(reg_base as usize + reg as usize) {
+        *slot = value;
+    }
+}
+
+/// Reads `size` little-endian bytes at an absolute arena offset.
+#[inline]
+fn read_abs(arena: &[u8], abs: usize, size: u32) -> Option<u64> {
+    let end = abs.checked_add(size as usize)?;
+    arena.get(abs..end).map(le_u64)
+}
+
+/// Writes `size` little-endian bytes at an absolute arena offset.
+#[inline]
+fn write_abs(arena: &mut [u8], abs: usize, value: u64, size: u32) -> Result<(), VmError> {
+    let end = abs
+        .checked_add(size as usize)
+        .ok_or(VmError::BadRef(abs as u64))?;
+    let bytes = arena.get_mut(abs..end).ok_or(VmError::BadRef(abs as u64))?;
+    store_le(bytes, value);
+    Ok(())
+}
+
+/// Copies `size` bytes within the arena (refs are byte offsets).
+fn copy_arena(arena: &mut [u8], src: usize, dst: usize, size: usize) -> Result<(), VmError> {
+    let src_end = src.checked_add(size).ok_or(VmError::BadRef(src as u64))?;
+    let dst_end = dst.checked_add(size).ok_or(VmError::BadRef(dst as u64))?;
+    if src_end > arena.len() {
+        return Err(VmError::BadRef(src as u64));
+    }
+    if dst_end > arena.len() {
+        return Err(VmError::BadRef(dst as u64));
+    }
+    arena.copy_within(src..src_end, dst);
+    Ok(())
+}
+
+/// Reads the pointer-sized ref stored in a frame slot.
+#[inline]
+fn slot_ref(arena: &[u8], slot_base: u32, place: u32) -> Result<u64, VmError> {
+    let abs = slot_base as usize + place as usize;
+    read_abs(arena, abs, VM_POINTER_BYTES).ok_or(VmError::BadRef(abs as u64))
+}
+
+/// Resolves a field instruction's object base to an absolute arena offset.
+fn field_base(arena: &[u8], slot_base: u32, place: u32, indirect: bool) -> Result<usize, VmError> {
+    let slot_abs = slot_base as usize + place as usize;
+    if indirect {
+        let ref_off =
+            read_abs(arena, slot_abs, VM_POINTER_BYTES).ok_or(VmError::BadRef(slot_abs as u64))?;
+        usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))
+    } else {
+        Ok(slot_abs)
+    }
+}
+
+/// Reads an operand as its low `size` bytes.
+#[inline]
+fn read_scalar(
+    regs: &[u64],
+    arena: &[u8],
+    reg_base: u32,
+    slot_base: u32,
+    operand: Operand,
+    size: u32,
+) -> Result<u64, VmError> {
+    match operand {
+        Operand::Reg(reg) => Ok(reg_of(regs, reg_base, reg)),
+        Operand::Slot(off) => {
+            let abs = slot_base as usize + off as usize;
+            read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))
         }
     }
+}
+
+/// Writes an operand's low `size` bytes.
+#[inline]
+fn write_scalar(
+    regs: &mut [u64],
+    arena: &mut [u8],
+    reg_base: u32,
+    slot_base: u32,
+    dst: Operand,
+    value: u64,
+    size: u32,
+) -> Result<(), VmError> {
+    match dst {
+        Operand::Reg(reg) => {
+            set_reg_of(regs, reg_base, reg, value & mask(size));
+            Ok(())
+        }
+        Operand::Slot(off) => {
+            let abs = slot_base as usize + off as usize;
+            write_abs(arena, abs, value, size)
+        }
+    }
+}
+
+/// Copies an aggregate value between a register (used as a ref) and a slot.
+fn copy_aggregate(
+    regs: &mut [u64],
+    arena: &mut [u8],
+    reg_base: u32,
+    slot_base: u32,
+    dst: Operand,
+    src: Operand,
+    size: u32,
+) -> Result<(), VmError> {
+    match (dst, src) {
+        (Operand::Slot(dst_off), Operand::Reg(src_reg)) => {
+            let ref_off = reg_of(regs, reg_base, src_reg);
+            let src_abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+            let dst_abs = slot_base as usize + dst_off as usize;
+            copy_arena(arena, src_abs, dst_abs, size as usize)
+        }
+        (Operand::Reg(dst_reg), Operand::Slot(src_off)) => {
+            let addr = u64::from(slot_base) + u64::from(src_off);
+            set_reg_of(regs, reg_base, dst_reg, addr);
+            Ok(())
+        }
+        (Operand::Slot(dst_off), Operand::Slot(src_off)) => {
+            let dst_abs = slot_base as usize + dst_off as usize;
+            let src_abs = slot_base as usize + src_off as usize;
+            copy_arena(arena, src_abs, dst_abs, size as usize)
+        }
+        (Operand::Reg(dst_reg), Operand::Reg(src_reg)) => {
+            let value = reg_of(regs, reg_base, src_reg);
+            set_reg_of(regs, reg_base, dst_reg, value);
+            Ok(())
+        }
+    }
+}
+
+/// Copies `size` aggregate bytes from an operand to an absolute arena offset.
+fn copy_operand_bytes(
+    regs: &[u64],
+    arena: &mut [u8],
+    reg_base: u32,
+    slot_base: u32,
+    operand: Operand,
+    dst_abs: usize,
+    size: u32,
+) -> Result<(), VmError> {
+    let src_abs = match operand {
+        Operand::Reg(reg) => {
+            let ref_off = reg_of(regs, reg_base, reg);
+            usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?
+        }
+        Operand::Slot(off) => slot_base as usize + off as usize,
+    };
+    copy_arena(arena, src_abs, dst_abs, size as usize)
+}
+
+/// Copies a scalar or aggregate operand into an absolute slot offset.
+fn move_to_slot(
+    regs: &[u64],
+    arena: &mut [u8],
+    reg_base: u32,
+    slot_base: u32,
+    operand: Operand,
+    size: u32,
+    dst_abs: usize,
+) -> Result<(), VmError> {
+    if size <= VM_POINTER_BYTES {
+        let value = read_scalar(regs, arena, reg_base, slot_base, operand, size)?;
+        write_abs(arena, dst_abs, value, size)
+    } else {
+        match operand {
+            Operand::Reg(reg) => {
+                let ref_off = reg_of(regs, reg_base, reg);
+                let src = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+                copy_arena(arena, src, dst_abs, size as usize)
+            }
+            Operand::Slot(off) => {
+                let src_abs = slot_base as usize + off as usize;
+                copy_arena(arena, src_abs, dst_abs, size as usize)
+            }
+        }
+    }
+}
+
+/// Synchronizes a frame's `pc`/`last_pc`, keyed on `func_index`.
+fn store_frame(frames: &mut [Frame], func_index: u32, pc: u32, next: u32) {
+    if let Some(frame) = frames.last_mut() {
+        if frame.func == func_index {
+            frame.pc = next;
+            frame.last_pc = Some(pc);
+        }
+    }
+}
+
+/// Pushes a callee frame, binding its inputs and out-ref region.
+#[allow(clippy::too_many_arguments)]
+fn do_call(
+    program: &Program,
+    regs: &mut Vec<u64>,
+    arena: &mut Vec<u8>,
+    frames: &mut Vec<Frame>,
+    target: u32,
+    ins: &[Operand],
+    outs: &[Operand],
+    caller_reg_base: u32,
+    caller_slot_base: u32,
+) -> Result<(), VmError> {
+    let callee = program
+        .funcs
+        .get(target as usize)
+        .ok_or(VmError::BadRef(u64::from(target)))?;
+    if callee.is_extern {
+        return Err(VmError::ExternCall(callee.name.clone()));
+    }
+    if frames.len() >= MAX_CALL_DEPTH as usize {
+        return Err(VmError::StackOverflow);
+    }
+    let reg_base = u32::try_from(regs.len()).unwrap_or(u32::MAX);
+    let slot_base = u32::try_from(arena.len()).unwrap_or(u32::MAX);
+    regs.resize(regs.len() + usize::try_from(callee.n_regs).unwrap_or(0), 0);
+    arena.resize(
+        arena.len() + usize::try_from(callee.slot_bytes).unwrap_or(0),
+        0,
+    );
+    for (index, operand) in ins.iter().enumerate() {
+        let (Some(&dst_off), Some(&size)) =
+            (callee.in_offsets.get(index), callee.in_sizes.get(index))
+        else {
+            break;
+        };
+        let dst_abs = slot_base as usize + dst_off as usize;
+        move_to_slot(
+            regs,
+            arena,
+            caller_reg_base,
+            caller_slot_base,
+            *operand,
+            size,
+            dst_abs,
+        )?;
+    }
+    // Fill the out-ref region: one u64 absolute arena offset per output.
+    for (index, operand) in outs.iter().enumerate() {
+        let abs = match operand {
+            Operand::Slot(off) => u64::from(caller_slot_base) + u64::from(*off),
+            Operand::Reg(reg) => reg_of(regs, caller_reg_base, *reg),
+        };
+        let cell = u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(VM_POINTER_BYTES))
+            .and_then(|off| slot_base.checked_add(off))
+            .ok_or(VmError::BadRef(u64::from(slot_base)))?;
+        write_abs(
+            arena,
+            usize::try_from(cell).unwrap_or(0),
+            abs,
+            VM_POINTER_BYTES,
+        )?;
+    }
+    frames.push(Frame {
+        func: target,
+        reg_base,
+        slot_base,
+        pc: 0,
+        last_pc: None,
+    });
+    Ok(())
+}
+
+/// Pops the running frame, reclaiming its register and slot regions.
+fn return_frame(regs: &mut Vec<u64>, arena: &mut Vec<u8>, frames: &mut Vec<Frame>) -> Step {
+    let Some(frame) = frames.pop() else {
+        return Step::Returned;
+    };
+    if frames.is_empty() {
+        return Step::Returned;
+    }
+    regs.truncate(frame.reg_base as usize);
+    arena.truncate(frame.slot_base as usize);
+    Step::Advanced
+}
+
+/// Executes a compiler leaf builtin.
+fn do_builtin(
+    regs: &mut [u64],
+    arena: &mut [u8],
+    builtin: Builtin,
+    ins: &[Operand],
+    outs: &[Operand],
+    reg_base: u32,
+    slot_base: u32,
+) -> Result<Step, VmError> {
+    match builtin {
+        Builtin::PtrAdd => {
+            let (base, offset) = match ins {
+                [base, offset] => (*base, *offset),
+                _ => lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects two inputs"),
+            };
+            let base = read_scalar(regs, arena, reg_base, slot_base, base, VM_POINTER_BYTES)?;
+            let offset = read_scalar(regs, arena, reg_base, slot_base, offset, VM_POINTER_BYTES)?;
+            let Some(Operand::Slot(out)) = outs.first().copied() else {
+                lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects one output");
+            };
+            write_scalar(
+                regs,
+                arena,
+                reg_base,
+                slot_base,
+                Operand::Slot(out),
+                base.wrapping_add(offset),
+                VM_POINTER_BYTES,
+            )?;
+            Ok(Step::Advanced)
+        }
+        Builtin::Memcpy => {
+            let (dst, src, len) = match ins {
+                [dst, src, len] => (*dst, *src, *len),
+                _ => lilac_error::bug!(lilac_span::Span::dummy(), "@memcpy expects three inputs"),
+            };
+            let dst = read_scalar(regs, arena, reg_base, slot_base, dst, VM_POINTER_BYTES)?;
+            let src = read_scalar(regs, arena, reg_base, slot_base, src, VM_POINTER_BYTES)?;
+            let len = read_scalar(regs, arena, reg_base, slot_base, len, VM_POINTER_BYTES)?;
+            let dst_abs = usize::try_from(dst).map_err(|_| VmError::BadRef(dst))?;
+            let src_abs = usize::try_from(src).map_err(|_| VmError::BadRef(src))?;
+            let len = usize::try_from(len).map_err(|_| VmError::BadRef(len))?;
+            copy_arena(arena, src_abs, dst_abs, len)?;
+            Ok(Step::Advanced)
+        }
+        Builtin::Abort => Ok(trap(b"aborted")),
+    }
+}
+
+/// Evaluates a width-specialized arithmetic/comparison instruction.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn exec_arith(
+    regs: &mut [u64],
+    op: ArithOp,
+    reg_base: u32,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    width: u8,
+) {
+    let size = u32::from(width) / 8;
+    let left = reg_of(regs, reg_base, lhs);
+    let right = reg_of(regs, reg_base, rhs);
+    let value = eval_arith(op, left, right, size);
+    set_reg_of(regs, reg_base, dst, value & mask(size));
 }
 
 /// The source line whose `pc` is the greatest not exceeding `pc`.
@@ -1281,8 +1561,7 @@ fn read_ops1(code: &[u32], pc: u32, wide: bool) -> Result<(u32, u32), VmError> {
         let ext0 = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
         Ok((ext0 & 0xFFFF, 2))
     } else {
-        let bytes = code[pc as usize].to_le_bytes();
-        Ok((u32::from(bytes[1]), 1))
+        Ok(((code[pc as usize] >> 8) & 0xFF, 1))
     }
 }
 
@@ -1293,8 +1572,8 @@ fn read_ops2(code: &[u32], pc: u32, wide: bool) -> Result<([u32; 2], u32), VmErr
         let ext0 = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
         Ok(([ext0 & 0xFFFF, (ext0 >> 16) & 0xFFFF], 2))
     } else {
-        let bytes = code[pc as usize].to_le_bytes();
-        Ok(([u32::from(bytes[1]), u32::from(bytes[2])], 1))
+        let w = code[pc as usize];
+        Ok(([(w >> 8) & 0xFF, (w >> 16) & 0xFF], 1))
     }
 }
 
@@ -1306,15 +1585,8 @@ fn read_ops3(code: &[u32], pc: u32, wide: bool) -> Result<([u32; 3], u32), VmErr
         let ext1 = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
         Ok(([ext0 & 0xFFFF, (ext0 >> 16) & 0xFFFF, ext1], 3))
     } else {
-        let bytes = code[pc as usize].to_le_bytes();
-        Ok((
-            [
-                u32::from(bytes[1]),
-                u32::from(bytes[2]),
-                u32::from(bytes[3]),
-            ],
-            1,
-        ))
+        let w = code[pc as usize];
+        Ok(([(w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF], 1))
     }
 }
 
@@ -1334,6 +1606,8 @@ fn resolve_call<'a>(
 }
 
 /// A bit mask covering `size` bytes.
+#[allow(clippy::inline_always)]
+#[inline(always)]
 fn mask(size: u32) -> u64 {
     if size >= 8 {
         u64::MAX
@@ -1346,19 +1620,17 @@ fn mask(size: u32) -> u64 {
 
 /// Reads up to eight little-endian bytes.
 fn le_u64(bytes: &[u8]) -> u64 {
-    let mut value = 0_u64;
-    for (index, &byte) in bytes.iter().take(8).enumerate() {
-        value |= u64::from(byte) << (index * 8);
-    }
-    value
+    let mut buf = [0_u8; 8];
+    let len = bytes.len().min(8);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    u64::from_le_bytes(buf)
 }
 
 /// Writes `value`'s low bytes little-endian.
-#[allow(clippy::cast_possible_truncation)]
 fn store_le(bytes: &mut [u8], value: u64) {
-    for (index, slot) in bytes.iter_mut().enumerate().take(8) {
-        *slot = (value >> (index * 8)) as u8;
-    }
+    let le = value.to_le_bytes();
+    let len = bytes.len().min(8);
+    bytes[..len].copy_from_slice(&le[..len]);
 }
 
 /// Sign-extends the low `size` bytes of `value` to `i64`.
@@ -1378,6 +1650,8 @@ fn sign_extend(value: u64, size: u32) -> i64 {
 /// division/remainder and signed comparisons sign-extend their operands at that
 /// width, matching the LLVM backend's operand-typed `sdiv`/`srem`/`icmp slt`.
 /// Division by zero yields zero.
+#[allow(clippy::inline_always)]
+#[inline(always)]
 fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
     let m = mask(size);
     match op {
@@ -1429,6 +1703,8 @@ fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
 /// interpreted as `f32` and `#bit64`/`#bit_native` as `f64`, matching the LLVM
 /// backend. Any other width falls back to `f64`.
 #[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::inline_always)]
+#[inline(always)]
 fn eval_float_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
     if size == 4 {
         let a = f32::from_bits(left as u32);
@@ -1458,6 +1734,8 @@ fn eval_float_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
 }
 
 /// Dispatches to the integer or floating-point evaluator for `op`.
+#[allow(clippy::inline_always)]
+#[inline(always)]
 fn eval_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
     if matches!(
         op,
@@ -2125,6 +2403,59 @@ mod tests {
         ]
     }
 
+    /// The fused `arith.imm` reads a register or a slot left operand and masks
+    /// the immediate to the operand width, matching `Arith` semantics.
+    #[test]
+    fn fused_arith_imm_reads_register_and_slot() {
+        let code = vec![
+            Instr::Const {
+                dst: 0,
+                imm: 10,
+                ty: 0,
+            },
+            // &1 = 10 + 5 (register left operand).
+            Instr::ArithImm {
+                op: isa::ArithOp::IAdd,
+                dst: 1,
+                lhs: 0,
+                lhs_slot: false,
+                imm: 5,
+                operand_ty: 0,
+            },
+            // &2 = (slot8 < 100) (slot left operand).
+            Instr::ArithImm {
+                op: isa::ArithOp::ILt,
+                dst: 2,
+                lhs: 8,
+                lhs_slot: true,
+                imm: 100,
+                operand_ty: 0,
+            },
+            // &3 = slot8 + 1.
+            Instr::ArithImm {
+                op: isa::ArithOp::IAdd,
+                dst: 3,
+                lhs: 8,
+                lhs_slot: true,
+                imm: 1,
+                operand_ty: 0,
+            },
+            Instr::Return,
+        ];
+        let mut program = arith_program(bit32_and_bit8(), code, 4);
+        program.funcs[0].slot_bytes = 16;
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.write_abs(8, 5, 4).expect("seed slot");
+        machine.step().expect("const");
+        machine.step().expect("fused add reg");
+        assert_eq!(machine.read_reg(1), Some(15), "register left operand");
+        machine.step().expect("fused cmp slot");
+        assert_eq!(machine.read_reg(2), Some(1), "slot left operand");
+        machine.step().expect("fused add slot");
+        assert_eq!(machine.read_reg(3), Some(6), "slot left operand add");
+    }
+
     /// A comparison's LIR result is `#bit8`, but `operand_ty` drives the
     /// operand interpretation: `0xffff_ffff < 0x1` is true as `i32` (`-1 < 1`)
     /// and false if the full 64-bit register is read as `i64`.
@@ -2354,7 +2685,10 @@ mod tests {
             while pc < func.code.len() {
                 let (instr, next) = decode(&func.code, pc, &func.call_sites, &func.operands)
                     .unwrap_or_else(|err| panic!("decode {name} at {pc}: {err}"));
-                if matches!(instr, Decoded::Const { imm: 0x10, .. }) {
+                if matches!(
+                    instr,
+                    Decoded::Const { imm: 0x10, .. } | Decoded::ArithImm { imm: 0x10, .. }
+                ) {
                     has_stride = true;
                 }
                 pc = next as usize;

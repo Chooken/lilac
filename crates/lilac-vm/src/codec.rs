@@ -462,6 +462,25 @@ impl Program {
             Decoded::Return => "return".to_string(),
             Decoded::Panic { data } => format!("panic !c{data}"),
             Decoded::Unreachable => "unreachable".to_string(),
+            Decoded::ArithImm {
+                dst,
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+            } => {
+                let ty = self.type_for_size(u32::from(*width) / 8);
+                let lhs_text = if *lhs_slot {
+                    format!("%{lhs}")
+                } else {
+                    format!("&{lhs}")
+                };
+                format!(
+                    "&{dst}: {ty} = {}.imm {lhs_text}, 0x{imm:x} : {ty}",
+                    op.as_str()
+                )
+            }
             arith => self.render_arith(arith),
         }
     }
@@ -1091,6 +1110,27 @@ fn parse_typed_definition(
             }))
         }
         other => {
+            if let Some(op) = other.strip_suffix(".imm").and_then(ArithOp::parse) {
+                let (lhs_text, rest) = args
+                    .split_once(',')
+                    .ok_or_else(|| "fused arith missing immediate".to_string())?;
+                let (imm_text, operand_ty_text) = rest
+                    .split_once(" : ")
+                    .ok_or_else(|| "fused arith missing operand type".to_string())?;
+                let (lhs, lhs_slot) = match parse_operand(lhs_text.trim())? {
+                    Operand::Reg(reg) => (reg, false),
+                    Operand::Slot(off) => (off, true),
+                };
+                let operand_ty = parse_type(operand_ty_text.trim(), type_ids)?;
+                return Ok(ParsedInstr::Ready(Instr::ArithImm {
+                    op,
+                    dst: as_reg(dst)?,
+                    lhs,
+                    lhs_slot,
+                    imm: parse_hex_u64(imm_text.trim())?,
+                    operand_ty,
+                }));
+            }
             if let Some(op) = ArithOp::parse(other) {
                 let (regs, operand_ty_text) = args
                     .split_once(" : ")
@@ -1989,6 +2029,76 @@ mod tests {
         let text = program.to_text();
         assert!(text.contains("#bit32 = i.cmp.lt"), "{text}");
         assert!(text.contains(" : #bit32"), "{text}");
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed, program);
+        assert_eq!(parsed.to_text(), text);
+    }
+
+    /// The fused `arith.imm` superinstruction (slot and register left operands)
+    /// disassembles and reparses to the same word stream.
+    #[test]
+    fn text_round_trips_arith_imm() {
+        let types = vec![
+            TypeInfo {
+                name: "#bit_native".to_string(),
+                size: 8,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+        ];
+        let (code, sites, ops) = words_of(
+            &types,
+            &[
+                Instr::ArithImm {
+                    op: ArithOp::ILt,
+                    dst: 0,
+                    lhs: 8,
+                    lhs_slot: true,
+                    imm: 0x2,
+                    operand_ty: 0,
+                },
+                Instr::ArithImm {
+                    op: ArithOp::IAdd,
+                    dst: 1,
+                    lhs: 0,
+                    lhs_slot: false,
+                    imm: 0x1,
+                    operand_ty: 0,
+                },
+                Instr::Return,
+            ],
+        );
+        let program = Program {
+            version: LBC_VERSION.to_string(),
+            target: crate::isa::VM_TARGET.to_string(),
+            types,
+            data: Vec::new(),
+            globals: Vec::new(),
+            funcs: vec![Func {
+                name: "main".to_string(),
+                is_extern: false,
+                ins: Vec::new(),
+                outs: Vec::new(),
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
+                n_regs: 2,
+                slot_bytes: 16,
+                code,
+                call_sites: sites,
+                operands: ops,
+                lines: Vec::new(),
+                place_names: Vec::new(),
+            }],
+        };
+        let text = program.to_text();
+        assert!(text.contains("= i.cmp.lt.imm %8, 0x2"), "{text}");
+        assert!(text.contains("= i.add.imm &0, 0x1"), "{text}");
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed, program);
         assert_eq!(parsed.to_text(), text);

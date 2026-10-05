@@ -199,7 +199,13 @@ impl<'a> Interp<'a> {
             }
             pc = next;
         }
-        Err(format!("block at pc {start} fell off the end"))
+        // A block may fall through into the next one when the compiler removed
+        // an explicit `branch` to the immediately following instruction.
+        if end < code_len {
+            Ok(Flow::Goto(end))
+        } else {
+            Err(format!("block at pc {start} fell off the end"))
+        }
     }
 
     /// Executes one decoded instruction, returning a control transfer for
@@ -330,6 +336,24 @@ impl<'a> Interp<'a> {
             Decoded::ExtendZero { dst, src } => {
                 let value = get_reg(regs, *src);
                 set_reg(regs, *dst, value);
+                Ok(None)
+            }
+            Decoded::ArithImm {
+                dst,
+                lhs,
+                lhs_slot,
+                op,
+                width,
+                imm,
+            } => {
+                let size = u32::from(*width) / 8;
+                let left = if *lhs_slot {
+                    self.read_scalar(regs, slot_base, Operand::Slot(*lhs), size)
+                } else {
+                    get_reg(regs, *lhs)
+                };
+                let value = eval_arith(*op, left, *imm, size);
+                set_reg(regs, *dst, value & mask(size));
                 Ok(None)
             }
             Decoded::Call { site, ins, outs } => self.call(site.func, ins, outs, regs, slot_base),
