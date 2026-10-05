@@ -1,14 +1,17 @@
 //! Compact `u32` encoder for the bytecode ISA.
 //!
 //! [`CodeBuilder`] lowers typed [`crate::isa::Instr`] values to the executed
-//! word stream. The layout is documented in `docs/superpowers/specs/
-//! 2026-10-05-lilac-vm-m5c1-performance-design.md` §3: word 0 is
+//! word stream. The layout follows the M5c.1 design §3: word 0 is
 //! `[op:8 | a:8 | b:8 | c:8]`, an operand `>= 256` escapes to the wide form
 //! (bit 7 of the opcode set, operands moved to extension words), immediate
-//! forms carry a 24-bit field in `w >> 8`, and calls append a [`CallSite`] to
-//! a pool addressed by a 24-bit index.
+//! forms carry a 24-bit field in `w >> 8`, and calls append a [`CallSite`] to a
+//! pool addressed by a 24-bit index.
+//!
+//! Type metadata is **precomputed**: `CodeBuilder` borrows the program type
+//! table and bakes each `TypeId` down to its byte size (or, for arithmetic, its
+//! width class) at encode time, so the interpreter never looks up a type.
 
-use crate::isa::{ArithOp, Builtin, CallSite, ConvertOp, Instr, Operand};
+use crate::isa::{ArithOp, Builtin, CallSite, ConvertOp, Instr, Operand, TypeInfo};
 
 /// Bit 7 of the opcode byte; set when an instruction uses the wide form.
 pub const WIDE_FLAG: u8 = 0x80;
@@ -19,7 +22,7 @@ pub const FIELD24_MAX: u32 = 0x00FF_FFFF;
 /// Highest value that fits in a narrow (one-byte) operand.
 pub const NARROW_MAX: u32 = 0xFF;
 
-// Core opcodes (base opcodes are all `< 128` so bit 7 is free).
+// Core opcodes (all `< 128` so bit 7 is free).
 /// `Return`.
 pub const OP_RETURN: u8 = 0x01;
 /// `Unreachable`.
@@ -30,9 +33,9 @@ pub const OP_PANIC: u8 = 0x03;
 pub const OP_BRANCH: u8 = 0x04;
 /// `BranchIf`.
 pub const OP_BRANCH_IF: u8 = 0x05;
-/// `Const` (two immediate words follow).
+/// `Const` (`[op][dst]` plus two immediate words).
 pub const OP_CONST: u8 = 0x06;
-/// `ConstData`.
+/// `ConstData` (`[op][dst]` plus a data-index word).
 pub const OP_CONST_DATA: u8 = 0x07;
 /// First `Copy` kind opcode (`Reg`→`Reg`); three more follow.
 pub const OP_COPY_BASE: u8 = 0x08;
@@ -70,18 +73,57 @@ pub const OP_CALL_INDIRECT: u8 = 0x1B;
 pub const OP_CALL_BUILTIN_BASE: u8 = 0x1C;
 /// Last `CallBuiltin` opcode (`@lilac_abort`).
 pub const OP_CALL_BUILTIN_LAST: u8 = 0x1E;
-/// First `Arith` opcode (`IAdd`); one per [`ArithOp`].
-pub const OP_ARITH_BASE: u8 = 0x20;
-/// Last `Arith` opcode (`FGt`).
-pub const OP_ARITH_LAST: u8 = 0x32;
-/// First `Convert` opcode (`Trunc`); one per [`ConvertOp`].
-pub const OP_CONVERT_BASE: u8 = 0x33;
-/// Last `Convert` opcode (`ExtendZero`).
-pub const OP_CONVERT_LAST: u8 = 0x34;
+
+// Width-specialized arithmetic/convert opcodes (one word each).
+/// Base of the `IAdd` width block (8/16/32/64).
+pub const OP_IADD_BASE: u8 = 0x40;
+/// Base of the `ISub` width block.
+pub const OP_ISUB_BASE: u8 = 0x44;
+/// Base of the `IMul` width block.
+pub const OP_IMUL_BASE: u8 = 0x48;
+/// Base of the signed `IDiv` width block.
+pub const OP_IDIV_BASE: u8 = 0x4C;
+/// Base of the signed `IMod` width block.
+pub const OP_IMOD_BASE: u8 = 0x50;
+/// Base of the signed `ILt` width block.
+pub const OP_ILT_BASE: u8 = 0x54;
+/// Base of the signed `IGt` width block.
+pub const OP_IGT_BASE: u8 = 0x58;
+/// Base of the `Trunc` width block.
+pub const OP_TRUNC_BASE: u8 = 0x5C;
+/// Base of the `FAdd` width block (32/64).
+pub const OP_FADD_BASE: u8 = 0x60;
+/// Base of the `FSub` width block.
+pub const OP_FSUB_BASE: u8 = 0x62;
+/// Base of the `FMul` width block.
+pub const OP_FMUL_BASE: u8 = 0x64;
+/// Base of the `FDiv` width block.
+pub const OP_FDIV_BASE: u8 = 0x66;
+/// Base of the `FMod` width block.
+pub const OP_FMOD_BASE: u8 = 0x68;
+/// Base of the `FLt` width block.
+pub const OP_FLT_BASE: u8 = 0x6A;
+/// Base of the `FGt` width block.
+pub const OP_FGT_BASE: u8 = 0x6C;
+/// Width-free `IDivU`.
+pub const OP_IDIVU: u8 = 0x6E;
+/// Width-free `IModU`.
+pub const OP_IMODU: u8 = 0x6F;
+/// Width-free `Eq`.
+pub const OP_EQ: u8 = 0x70;
+/// Width-free `ILtU`.
+pub const OP_ILTU: u8 = 0x71;
+/// Width-free `IGtU`.
+pub const OP_IGTU: u8 = 0x72;
+/// Width-free `ExtendZero`.
+pub const OP_EXTEND_ZERO: u8 = 0x73;
 
 /// Builds the compact word stream and its operand pools.
-#[derive(Clone, Debug, Default)]
-pub struct CodeBuilder {
+///
+/// Borrows the program type table so sizes/widths are computed at encode time.
+#[derive(Clone, Debug)]
+pub struct CodeBuilder<'a> {
+    types: &'a [TypeInfo],
     /// The executed instruction stream.
     pub words: Vec<u32>,
     /// Resolved call sites appended by `Call`/`CallIndirect`/`CallBuiltin`.
@@ -90,11 +132,12 @@ pub struct CodeBuilder {
     pub operands: Vec<Operand>,
 }
 
-impl CodeBuilder {
-    /// Creates an empty builder.
+impl<'a> CodeBuilder<'a> {
+    /// Creates an empty builder over the program's type table.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(types: &'a [TypeInfo]) -> Self {
         Self {
+            types,
             words: Vec::new(),
             call_sites: Vec::new(),
             operands: Vec::new(),
@@ -105,36 +148,42 @@ impl CodeBuilder {
     ///
     /// # Errors
     ///
-    /// Returns a message if a value does not fit its encoded field (a wide
-    /// `a`/`b` operand above `u16`, a 24-bit index above [`FIELD24_MAX`], or an
-    /// arithmetic type id above `u16`).
+    /// Returns a message if a type id is out of range, an arithmetic operand
+    /// size has no width class, a wide `a`/`b` operand exceeds `u16`, or a
+    /// 24-bit index exceeds [`FIELD24_MAX`].
     #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, instr: &Instr) -> Result<(), String> {
         match instr {
             Instr::Const { dst, imm, ty } => {
-                self.emit_ops(OP_CONST, &[*dst, *ty])?;
-                let bytes = imm.to_le_bytes();
+                let size = self.type_size(*ty)?;
+                self.emit_ops(OP_CONST, &[*dst])?;
+                let masked = *imm & mask_for_size(size);
+                let bytes = masked.to_le_bytes();
                 self.words
                     .push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 self.words
                     .push(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
             }
-            Instr::ConstData { dst, data, ty } => {
-                self.emit_ops(OP_CONST_DATA, &[*dst, *data, *ty])?;
+            Instr::ConstData { dst, data, .. } => {
+                self.emit_ops(OP_CONST_DATA, &[*dst])?;
+                self.words.push(*data);
             }
             Instr::Copy { dst, src, ty } => {
+                let size = self.type_size(*ty)?;
                 let op = OP_COPY_BASE + kind(*dst) * 2 + kind(*src);
-                self.emit_ops(op, &[operand_value(*dst), operand_value(*src), *ty])?;
+                self.emit_ops(op, &[operand_value(*dst), operand_value(*src), size])?;
             }
             Instr::CopyBytes { dst, src, size } => {
                 self.emit_ops(OP_COPY_BYTES, &[*dst, *src, *size])?;
             }
             Instr::Load { dst, src, ty } => {
-                self.emit_ops(OP_LOAD, &[*dst, *src, *ty])?;
+                let size = self.type_size(*ty)?;
+                self.emit_ops(OP_LOAD, &[*dst, *src, size])?;
             }
             Instr::Store { src, dst, ty } => {
+                let size = self.type_size(*ty)?;
                 let op = OP_STORE_BASE + kind(*src);
-                self.emit_ops(op, &[operand_value(*src), *dst, *ty])?;
+                self.emit_ops(op, &[operand_value(*src), *dst, size])?;
             }
             Instr::Addr { dst, place } => {
                 self.emit_ops(OP_ADDR, &[*dst, *place])?;
@@ -158,9 +207,10 @@ impl CodeBuilder {
                 ty,
                 indirect,
             } => {
+                let size = self.type_size(*ty)?;
                 let op = OP_FIELD_BASE + u8::from(*indirect);
                 self.emit_ops(op, &[*dst, *place, *off])?;
-                self.words.push(*ty);
+                self.words.push(size);
             }
             Instr::StoreField {
                 src,
@@ -169,9 +219,10 @@ impl CodeBuilder {
                 ty,
                 indirect,
             } => {
+                let size = self.type_size(*ty)?;
                 let op = OP_STOREFIELD_BASE + u8::from(*indirect) * 2 + kind(*src);
                 self.emit_ops(op, &[operand_value(*src), *place, *off])?;
-                self.words.push(*ty);
+                self.words.push(size);
             }
             Instr::Arith {
                 op,
@@ -179,17 +230,16 @@ impl CodeBuilder {
                 lhs,
                 rhs,
                 operand_ty,
-                ty,
+                ..
             } => {
-                self.emit_ops(arith_opcode(*op), &[*dst, *lhs, *rhs])?;
-                if *operand_ty > u32::from(u16::MAX) || *ty > u32::from(u16::MAX) {
-                    return Err("arithmetic type id exceeds the 16-bit word-1 field".to_string());
-                }
-                self.words
-                    .push((*operand_ty & 0xFFFF) | ((*ty & 0xFFFF) << 16));
+                let size = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, size)?;
+                self.emit_ops(code, &[*dst, *lhs, *rhs])?;
             }
             Instr::Convert { op, dst, src, ty } => {
-                self.emit_ops(convert_opcode(*op), &[*dst, *src, *ty])?;
+                let size = self.type_size(*ty)?;
+                let code = convert_opcode(*op, size)?;
+                self.emit_ops(code, &[*dst, *src])?;
             }
             Instr::Call { func, ins, outs } => {
                 let index = self.push_call_site(*func, ins, outs)?;
@@ -213,6 +263,14 @@ impl CodeBuilder {
             Instr::Unreachable => self.words.push(u32::from(OP_UNREACHABLE)),
         }
         Ok(())
+    }
+
+    /// Returns the byte size of `ty`, validating its id.
+    fn type_size(&self, ty: u32) -> Result<u32, String> {
+        self.types
+            .get(ty as usize)
+            .map(|info| info.size)
+            .ok_or_else(|| format!("type id {ty} out of range"))
     }
 
     /// Emits a word 0 carrying up to three operands, using the wide escape when
@@ -272,6 +330,15 @@ impl CodeBuilder {
     }
 }
 
+/// The `u64` mask for a value of `size` bytes (saturating at 8).
+const fn mask_for_size(size: u32) -> u64 {
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1_u64 << (size * 8)) - 1
+    }
+}
+
 /// Converts a `usize` pool length to a `u32`, naming the pool in any error.
 fn to_u32(value: usize, what: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{what} length {value} exceeds u32"))
@@ -292,74 +359,133 @@ const fn kind(operand: Operand) -> u8 {
     }
 }
 
-/// Maps an [`ArithOp`] to its flattened opcode.
-pub(crate) const fn arith_opcode(op: ArithOp) -> u8 {
-    OP_ARITH_BASE
-        + match op {
-            ArithOp::IAdd => 0x00,
-            ArithOp::ISub => 0x01,
-            ArithOp::IMul => 0x02,
-            ArithOp::IDiv => 0x03,
-            ArithOp::IDivU => 0x04,
-            ArithOp::IMod => 0x05,
-            ArithOp::IModU => 0x06,
-            ArithOp::FAdd => 0x07,
-            ArithOp::FSub => 0x08,
-            ArithOp::FMul => 0x09,
-            ArithOp::FDiv => 0x0A,
-            ArithOp::FMod => 0x0B,
-            ArithOp::Eq => 0x0C,
-            ArithOp::ILt => 0x0D,
-            ArithOp::ILtU => 0x0E,
-            ArithOp::IGt => 0x0F,
-            ArithOp::IGtU => 0x10,
-            ArithOp::FLt => 0x11,
-            ArithOp::FGt => 0x12,
+/// Maps an arithmetic operation and operand byte size to its opcode.
+///
+/// Width-free operations ignore `size`.
+pub(crate) fn arith_opcode(op: ArithOp, size: u32) -> Result<u8, String> {
+    let (base, per) = match op {
+        ArithOp::IAdd => (OP_IADD_BASE, 4),
+        ArithOp::ISub => (OP_ISUB_BASE, 4),
+        ArithOp::IMul => (OP_IMUL_BASE, 4),
+        ArithOp::IDiv => (OP_IDIV_BASE, 4),
+        ArithOp::IMod => (OP_IMOD_BASE, 4),
+        ArithOp::ILt => (OP_ILT_BASE, 4),
+        ArithOp::IGt => (OP_IGT_BASE, 4),
+        ArithOp::FAdd => (OP_FADD_BASE, 2),
+        ArithOp::FSub => (OP_FSUB_BASE, 2),
+        ArithOp::FMul => (OP_FMUL_BASE, 2),
+        ArithOp::FDiv => (OP_FDIV_BASE, 2),
+        ArithOp::FMod => (OP_FMOD_BASE, 2),
+        ArithOp::FLt => (OP_FLT_BASE, 2),
+        ArithOp::FGt => (OP_FGT_BASE, 2),
+        ArithOp::IDivU => return Ok(OP_IDIVU),
+        ArithOp::IModU => return Ok(OP_IMODU),
+        ArithOp::Eq => return Ok(OP_EQ),
+        ArithOp::ILtU => return Ok(OP_ILTU),
+        ArithOp::IGtU => return Ok(OP_IGTU),
+    };
+    let idx = width_index(size, per).ok_or_else(|| {
+        format!(
+            "operand size {size} has no {}-wide class for {op:?}",
+            if per == 4 { "int" } else { "float" }
+        )
+    })?;
+    Ok(base + idx)
+}
+
+/// Maps a conversion and result byte size to its opcode.
+pub(crate) fn convert_opcode(op: ConvertOp, size: u32) -> Result<u8, String> {
+    match op {
+        ConvertOp::Trunc => {
+            let idx = width_index(size, 4)
+                .ok_or_else(|| format!("trunc result size {size} has no width class"))?;
+            Ok(OP_TRUNC_BASE + idx)
         }
+        ConvertOp::ExtendZero => Ok(OP_EXTEND_ZERO),
+    }
 }
 
-/// Inverts [`arith_opcode`].
-pub(crate) const fn arith_from_opcode(op: u8) -> Option<ArithOp> {
-    Some(match op.wrapping_sub(OP_ARITH_BASE) {
-        0x00 => ArithOp::IAdd,
-        0x01 => ArithOp::ISub,
-        0x02 => ArithOp::IMul,
-        0x03 => ArithOp::IDiv,
-        0x04 => ArithOp::IDivU,
-        0x05 => ArithOp::IMod,
-        0x06 => ArithOp::IModU,
-        0x07 => ArithOp::FAdd,
-        0x08 => ArithOp::FSub,
-        0x09 => ArithOp::FMul,
-        0x0A => ArithOp::FDiv,
-        0x0B => ArithOp::FMod,
-        0x0C => ArithOp::Eq,
-        0x0D => ArithOp::ILt,
-        0x0E => ArithOp::ILtU,
-        0x0F => ArithOp::IGt,
-        0x10 => ArithOp::IGtU,
-        0x11 => ArithOp::FLt,
-        0x12 => ArithOp::FGt,
-        _ => return None,
-    })
+/// The width-class index for a byte size: `0..per`. Integer classes are
+/// `1/2/4/8` bytes; float classes are `4/8` bytes.
+const fn width_index(size: u32, per: u8) -> Option<u8> {
+    match (size, per) {
+        (1, 4) | (4, 2) => Some(0),
+        (2, 4) | (8, 2) => Some(1),
+        (4, 4) => Some(2),
+        (8, 4) => Some(3),
+        _ => None,
+    }
 }
 
-/// Maps a [`ConvertOp`] to its flattened opcode.
-pub(crate) const fn convert_opcode(op: ConvertOp) -> u8 {
-    OP_CONVERT_BASE
-        + match op {
-            ConvertOp::Trunc => 0,
-            ConvertOp::ExtendZero => 1,
+/// Decodes a width-specialized or width-free arithmetic opcode.
+///
+/// Returns `(op, width_bits)`; `width_bits` is `0` for width-free operations.
+pub(crate) const fn arith_from_opcode(base: u8) -> Option<(ArithOp, u8)> {
+    let (op, idx, per) = match base {
+        OP_IADD_BASE..=0x5B => {
+            let group = (base - OP_IADD_BASE) / 4;
+            let op = match group {
+                0 => ArithOp::IAdd,
+                1 => ArithOp::ISub,
+                2 => ArithOp::IMul,
+                3 => ArithOp::IDiv,
+                4 => ArithOp::IMod,
+                5 => ArithOp::ILt,
+                _ => ArithOp::IGt,
+            };
+            (op, (base - OP_IADD_BASE) % 4, 4)
         }
+        OP_FADD_BASE..=0x6D => {
+            let group = (base - OP_FADD_BASE) / 2;
+            let op = match group {
+                0 => ArithOp::FAdd,
+                1 => ArithOp::FSub,
+                2 => ArithOp::FMul,
+                3 => ArithOp::FDiv,
+                4 => ArithOp::FMod,
+                5 => ArithOp::FLt,
+                _ => ArithOp::FGt,
+            };
+            (op, (base - OP_FADD_BASE) % 2, 2)
+        }
+        OP_IDIVU => return Some((ArithOp::IDivU, 0)),
+        OP_IMODU => return Some((ArithOp::IModU, 0)),
+        OP_EQ => return Some((ArithOp::Eq, 0)),
+        OP_ILTU => return Some((ArithOp::ILtU, 0)),
+        OP_IGTU => return Some((ArithOp::IGtU, 0)),
+        _ => return None,
+    };
+    let width = if per == 4 {
+        match idx {
+            0 => 8,
+            1 => 16,
+            2 => 32,
+            _ => 64,
+        }
+    } else {
+        match idx {
+            0 => 32,
+            _ => 64,
+        }
+    };
+    Some((op, width))
 }
 
-/// Inverts [`convert_opcode`].
-pub(crate) const fn convert_from_opcode(op: u8) -> Option<ConvertOp> {
-    Some(match op.wrapping_sub(OP_CONVERT_BASE) {
-        0 => ConvertOp::Trunc,
-        1 => ConvertOp::ExtendZero,
-        _ => return None,
-    })
+/// Decodes a width-specialized or width-free convert opcode.
+pub(crate) const fn convert_from_opcode(base: u8) -> Option<(ConvertOp, u8)> {
+    match base {
+        OP_TRUNC_BASE..=0x5F => {
+            let width = match base - OP_TRUNC_BASE {
+                0 => 8,
+                1 => 16,
+                2 => 32,
+                _ => 64,
+            };
+            Some((ConvertOp::Trunc, width))
+        }
+        OP_EXTEND_ZERO => Some((ConvertOp::ExtendZero, 0)),
+        _ => None,
+    }
 }
 
 /// Maps a [`Builtin`] to its offset from [`OP_CALL_BUILTIN_BASE`].
@@ -384,7 +510,14 @@ pub(crate) const fn builtin_from_index(index: u8) -> Option<Builtin> {
 /// Encodes a mnemonic for a raw opcode byte (the wide flag is ignored).
 #[must_use]
 pub fn opcode_mnemonic(op: u8) -> &'static str {
-    match op & !WIDE_FLAG {
+    let base = op & !WIDE_FLAG;
+    if let Some((arith, _)) = arith_from_opcode(base) {
+        return arith.as_str();
+    }
+    if let Some((convert, _)) = convert_from_opcode(base) {
+        return convert.as_str();
+    }
+    match base {
         OP_RETURN => "return",
         OP_UNREACHABLE => "unreachable",
         OP_PANIC => "panic",
@@ -415,197 +548,440 @@ pub fn opcode_mnemonic(op: u8) -> &'static str {
         OP_CALL_BUILTIN_BASE => "builtin.ptr_add",
         0x1D => "builtin.memcpy",
         OP_CALL_BUILTIN_LAST => "builtin.lilac_abort",
-        OP_ARITH_BASE..=OP_ARITH_LAST => arith_mnemonic(op),
-        OP_CONVERT_BASE..=OP_CONVERT_LAST => convert_mnemonic(op),
         _ => "unknown",
-    }
-}
-
-/// Mnemonic for an arithmetic opcode byte.
-fn arith_mnemonic(op: u8) -> &'static str {
-    match arith_from_opcode(op & !WIDE_FLAG) {
-        Some(arith) => arith.as_str(),
-        None => "unknown",
-    }
-}
-
-/// Mnemonic for a convert opcode byte.
-fn convert_mnemonic(op: u8) -> &'static str {
-    match convert_from_opcode(op & !WIDE_FLAG) {
-        Some(convert) => convert.as_str(),
-        None => "unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{opcode_mnemonic, CodeBuilder};
+    use super::{mask_for_size, opcode_mnemonic, CodeBuilder, OP_IADD_BASE};
     use crate::decode::{decode, Decoded};
-    use crate::isa::{ArithOp, Builtin, ConvertOp, Instr, Operand, TypeId};
+    use crate::isa::{ArithOp, Builtin, ConvertOp, Instr, Operand, TypeInfo};
 
-    /// Rebuilds a typed instruction from a decoded view, allocating the call
-    /// operand lists. Test-only; the interpreter uses the borrowed view.
-    fn to_instr(d: &Decoded<'_>) -> Instr {
-        match *d {
-            Decoded::Const { dst, imm, ty } => Instr::Const { dst, imm, ty },
-            Decoded::ConstData { dst, data, ty } => Instr::ConstData { dst, data, ty },
-            Decoded::Copy { dst, src, ty } => Instr::Copy { dst, src, ty },
-            Decoded::CopyBytes { dst, src, size } => Instr::CopyBytes { dst, src, size },
-            Decoded::Load { dst, src, ty } => Instr::Load { dst, src, ty },
-            Decoded::Store { src, dst, ty } => Instr::Store { src, dst, ty },
-            Decoded::Addr { dst, place } => Instr::Addr { dst, place },
-            Decoded::AddrField {
-                dst,
-                place,
-                off,
-                indirect,
-            } => Instr::AddrField {
-                dst,
-                place,
-                off,
-                indirect,
-            },
-            Decoded::AddrFunc { dst, func } => Instr::AddrFunc { dst, func },
-            Decoded::Field {
-                dst,
-                place,
-                off,
-                ty,
-                indirect,
-            } => Instr::Field {
-                dst,
-                place,
-                off,
-                ty,
-                indirect,
-            },
-            Decoded::StoreField {
-                src,
-                place,
-                off,
-                ty,
-                indirect,
-            } => Instr::StoreField {
-                src,
-                place,
-                off,
-                ty,
-                indirect,
-            },
-            Decoded::Arith {
-                op,
-                dst,
-                lhs,
-                rhs,
-                operand_ty,
-                ty,
-            } => Instr::Arith {
-                op,
-                dst,
-                lhs,
-                rhs,
-                operand_ty,
-                ty,
-            },
-            Decoded::Convert { op, dst, src, ty } => Instr::Convert { op, dst, src, ty },
-            Decoded::Call { site, ins, outs } => Instr::Call {
-                func: site.func,
-                ins: ins.to_vec(),
-                outs: outs_to_u32(outs),
-            },
-            Decoded::CallIndirect {
-                callee,
-                site: _,
-                ins,
-                outs,
-            } => Instr::CallIndirect {
-                callee,
-                ins: ins.to_vec(),
-                outs: outs_to_u32(outs),
-            },
-            Decoded::CallBuiltin {
-                builtin, ins, outs, ..
-            } => Instr::CallBuiltin {
-                builtin,
-                ins: ins.to_vec(),
-                outs: outs_to_u32(outs),
-            },
-            Decoded::Branch { target } => Instr::Branch { target },
-            Decoded::BranchIf { cond, then, els } => Instr::BranchIf { cond, then, els },
-            Decoded::Return => Instr::Return,
-            Decoded::Panic { data } => Instr::Panic { data },
-            Decoded::Unreachable => Instr::Unreachable,
+    /// Type ids used by the samples: 0/1/2/3 are `#bit8/16/32/64`, 4/5 are
+    /// `#f32/f64`, and 6 is a pointer-sized ref.
+    fn test_types() -> Vec<TypeInfo> {
+        let mut types = Vec::new();
+        for (name, size) in [
+            ("#bit8", 1),
+            ("#bit16", 2),
+            ("#bit32", 4),
+            ("#bit64", 8),
+            ("#f32", 4),
+            ("#f64", 8),
+        ] {
+            types.push(TypeInfo {
+                name: name.to_string(),
+                size,
+                is_ref: false,
+            });
+        }
+        types.push(TypeInfo {
+            name: "ref #Thing".to_string(),
+            size: 8,
+            is_ref: true,
+        });
+        types
+    }
+
+    fn size_of(types: &[TypeInfo], ty: u32) -> u32 {
+        types[ty as usize].size
+    }
+
+    /// The bit width class for a byte size (`0` when unknown/width-free).
+    fn width_of(size: u32) -> u8 {
+        match size {
+            1 => 8,
+            2 => 16,
+            4 => 32,
+            8 => 64,
+            _ => 0,
         }
     }
 
-    fn outs_to_u32(outs: &[Operand]) -> Vec<u32> {
-        outs.iter()
-            .map(|o| match *o {
-                Operand::Slot(s) => s,
-                Operand::Reg(r) => r,
-            })
-            .collect()
+    fn outs_match(instr_outs: &[u32], decoded_outs: &[Operand]) -> bool {
+        instr_outs.len() == decoded_outs.len()
+            && instr_outs
+                .iter()
+                .zip(decoded_outs)
+                .all(|(out, decoded)| *decoded == Operand::Slot(*out))
     }
 
-    fn round_trip(instr: &Instr) {
-        let mut b = CodeBuilder::new();
+    /// Compares a typed instruction with its decoded view: op, operands, and
+    /// precomputed size/width (the typed side keeps `TypeId`s).
+    #[allow(clippy::too_many_lines)]
+    fn equivalent(types: &[TypeInfo], instr: &Instr, d: &Decoded<'_>) -> bool {
+        match (instr, d) {
+            (Instr::Const { dst, imm, ty }, Decoded::Const { dst: dd, imm: di }) => {
+                dst == dd && *imm & mask_for_size(size_of(types, *ty)) == *di
+            }
+            (Instr::ConstData { dst, data, .. }, Decoded::ConstData { dst: dd, data: dd2 }) => {
+                dst == dd && data == dd2
+            }
+            (
+                Instr::Copy { dst, src, ty },
+                Decoded::Copy {
+                    dst: dd,
+                    src: ds,
+                    size,
+                },
+            ) => dst == dd && src == ds && size_of(types, *ty) == *size,
+            (
+                Instr::CopyBytes { dst, src, size },
+                Decoded::CopyBytes {
+                    dst: dd,
+                    src: ds,
+                    size: dsize,
+                },
+            ) => dst == dd && src == ds && size == dsize,
+            (
+                Instr::Load { dst, src, ty },
+                Decoded::Load {
+                    dst: dd,
+                    src: ds,
+                    size,
+                },
+            ) => dst == dd && src == ds && size_of(types, *ty) == *size,
+            (
+                Instr::Store { src, dst, ty },
+                Decoded::Store {
+                    src: ds,
+                    dst: dd,
+                    size,
+                },
+            ) => src == ds && dst == dd && size_of(types, *ty) == *size,
+            (Instr::Addr { dst, place }, Decoded::Addr { dst: dd, place: dp }) => {
+                dst == dd && place == dp
+            }
+            (
+                Instr::AddrField {
+                    dst,
+                    place,
+                    off,
+                    indirect,
+                },
+                Decoded::AddrField {
+                    dst: dd,
+                    place: dp,
+                    off: doff,
+                    indirect: di,
+                },
+            ) => dst == dd && place == dp && off == doff && indirect == di,
+            (Instr::AddrFunc { dst, func }, Decoded::AddrFunc { dst: dd, func: df }) => {
+                dst == dd && func == df
+            }
+            (
+                Instr::Field {
+                    dst,
+                    place,
+                    off,
+                    ty,
+                    indirect,
+                },
+                Decoded::Field {
+                    dst: dd,
+                    place: dp,
+                    off: doff,
+                    size,
+                    indirect: di,
+                },
+            ) => {
+                dst == dd
+                    && place == dp
+                    && off == doff
+                    && size_of(types, *ty) == *size
+                    && indirect == di
+            }
+            (
+                Instr::StoreField {
+                    src,
+                    place,
+                    off,
+                    ty,
+                    indirect,
+                },
+                Decoded::StoreField {
+                    src: ds,
+                    place: dp,
+                    off: doff,
+                    size,
+                    indirect: di,
+                },
+            ) => {
+                src == ds
+                    && place == dp
+                    && off == doff
+                    && size_of(types, *ty) == *size
+                    && indirect == di
+            }
+            (
+                Instr::Arith {
+                    op,
+                    dst,
+                    lhs,
+                    rhs,
+                    operand_ty,
+                    ..
+                },
+                _,
+            ) => arith_equivalent(
+                *op,
+                width_of(size_of(types, *operand_ty)),
+                *dst,
+                *lhs,
+                *rhs,
+                d,
+            ),
+            (Instr::Convert { op, dst, src, ty }, _) => {
+                convert_equivalent(*op, size_of(types, *ty), *dst, *src, d)
+            }
+            (
+                Instr::Call { func, ins, outs },
+                Decoded::Call {
+                    site,
+                    ins: di,
+                    outs: douts,
+                },
+            ) => *func == site.func && ins.as_slice() == *di && outs_match(outs, douts),
+            (
+                Instr::CallIndirect { callee, ins, outs },
+                Decoded::CallIndirect {
+                    callee: dc,
+                    ins: di,
+                    outs: douts,
+                    ..
+                },
+            ) => callee == dc && ins.as_slice() == *di && outs_match(outs, douts),
+            (
+                Instr::CallBuiltin { builtin, ins, outs },
+                Decoded::CallBuiltin {
+                    builtin: db,
+                    ins: di,
+                    outs: douts,
+                    ..
+                },
+            ) => builtin == db && ins.as_slice() == *di && outs_match(outs, douts),
+            (Instr::Branch { target }, Decoded::Branch { target: dt }) => target == dt,
+            (
+                Instr::BranchIf { cond, then, els },
+                Decoded::BranchIf {
+                    cond: dc,
+                    then: dt,
+                    els: de,
+                },
+            ) => cond == dc && then == dt && els == de,
+            (Instr::Return, Decoded::Return) | (Instr::Unreachable, Decoded::Unreachable) => true,
+            (Instr::Panic { data }, Decoded::Panic { data: dd }) => data == dd,
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn arith_equivalent(
+        op: ArithOp,
+        width: u8,
+        dst: u32,
+        lhs: u32,
+        rhs: u32,
+        d: &Decoded<'_>,
+    ) -> bool {
+        use ArithOp::{
+            Eq, FAdd, FDiv, FGt, FLt, FMod, FMul, FSub, IAdd, IDiv, IDivU, IGt, IGtU, ILt, ILtU,
+            IMod, IModU, IMul, ISub,
+        };
+        match d {
+            Decoded::IAdd {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == IAdd && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::ISub {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == ISub && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::IMul {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == IMul && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::IDiv {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == IDiv && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::IMod {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == IMod && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::ILt {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == ILt && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::IGt {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == IGt && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FAdd {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FAdd && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FSub {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FSub && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FMul {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FMul && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FDiv {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FDiv && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FMod {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FMod && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FLt {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FLt && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::FGt {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+                width: dw,
+            } => op == FGt && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
+            Decoded::IDivU {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+            } => op == IDivU && dst == *dd && lhs == *dl && rhs == *dr,
+            Decoded::IModU {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+            } => op == IModU && dst == *dd && lhs == *dl && rhs == *dr,
+            Decoded::Eq {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+            } => op == Eq && dst == *dd && lhs == *dl && rhs == *dr,
+            Decoded::ILtU {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+            } => op == ILtU && dst == *dd && lhs == *dl && rhs == *dr,
+            Decoded::IGtU {
+                dst: dd,
+                lhs: dl,
+                rhs: dr,
+            } => op == IGtU && dst == *dd && lhs == *dl && rhs == *dr,
+            _ => false,
+        }
+    }
+
+    fn convert_equivalent(op: ConvertOp, size: u32, dst: u32, src: u32, d: &Decoded<'_>) -> bool {
+        match d {
+            Decoded::Trunc {
+                dst: dd,
+                src: ds,
+                width,
+            } => op == ConvertOp::Trunc && dst == *dd && src == *ds && width_of(size) == *width,
+            Decoded::ExtendZero { dst: dd, src: ds } => {
+                op == ConvertOp::ExtendZero && dst == *dd && src == *ds
+            }
+            _ => false,
+        }
+    }
+
+    fn round_trip(types: &[TypeInfo], instr: &Instr) {
+        let mut b = CodeBuilder::new(types);
         b.push(instr).expect("encode");
         let (decoded, next) = decode(&b.words, 0, &b.call_sites, &b.operands).expect("decode");
         assert_eq!(next as usize, b.words.len(), "next pc mismatch: {instr:?}");
-        assert_eq!(to_instr(&decoded), *instr, "round trip mismatch");
+        assert!(
+            equivalent(types, instr, &decoded),
+            "round trip mismatch: {instr:?} -> {decoded:?}"
+        );
     }
 
     /// One instance of every `Instr` variant, including all operand-kind,
-    /// indirect, arith-op, and builtin sub-variants.
+    /// indirect, arith-op/width, convert-op, and builtin sub-variants.
     #[allow(clippy::too_many_lines)]
     fn sample_instrs() -> Vec<Instr> {
-        let ty: TypeId = 0;
         let mut instrs = vec![
             Instr::Const {
                 dst: 3,
                 imm: 0x1122_3344_5566_7788,
-                ty,
+                ty: 0,
             },
             Instr::ConstData {
                 dst: 4,
                 data: 7,
-                ty,
+                ty: 6,
             },
             Instr::Copy {
                 dst: Operand::Reg(1),
                 src: Operand::Reg(2),
-                ty,
+                ty: 0,
             },
             Instr::Copy {
                 dst: Operand::Slot(8),
                 src: Operand::Reg(2),
-                ty,
+                ty: 0,
             },
             Instr::Copy {
                 dst: Operand::Reg(1),
                 src: Operand::Slot(8),
-                ty,
+                ty: 0,
             },
             Instr::Copy {
                 dst: Operand::Slot(8),
                 src: Operand::Slot(16),
-                ty,
+                ty: 0,
             },
             Instr::CopyBytes {
                 dst: 8,
                 src: 16,
                 size: 32,
             },
-            Instr::Load { dst: 1, src: 8, ty },
+            Instr::Load {
+                dst: 1,
+                src: 8,
+                ty: 0,
+            },
             Instr::Store {
                 src: Operand::Reg(1),
                 dst: 8,
-                ty,
+                ty: 0,
             },
             Instr::Store {
                 src: Operand::Slot(8),
                 dst: 16,
-                ty,
+                ty: 0,
             },
             Instr::Addr { dst: 1, place: 8 },
             Instr::AddrField {
@@ -625,42 +1001,42 @@ mod tests {
                 dst: 1,
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: false,
             },
             Instr::Field {
                 dst: 1,
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: true,
             },
             Instr::StoreField {
                 src: Operand::Reg(1),
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: false,
             },
             Instr::StoreField {
                 src: Operand::Slot(16),
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: false,
             },
             Instr::StoreField {
                 src: Operand::Reg(1),
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: true,
             },
             Instr::StoreField {
                 src: Operand::Slot(16),
                 place: 8,
                 off: 12,
-                ty,
+                ty: 0,
                 indirect: true,
             },
             Instr::Call {
@@ -698,109 +1074,165 @@ mod tests {
             Instr::Panic { data: 6 },
             Instr::Unreachable,
         ];
-        for op in arith_ops() {
-            instrs.push(Instr::Arith {
-                op,
-                dst: 1,
-                lhs: 2,
-                rhs: 3,
-                operand_ty: 4,
-                ty: 5,
-            });
-        }
-        for op in [ConvertOp::Trunc, ConvertOp::ExtendZero] {
-            instrs.push(Instr::Convert {
-                op,
-                dst: 1,
-                src: 2,
-                ty: 3,
-            });
-        }
-        instrs
-    }
-
-    fn arith_ops() -> Vec<ArithOp> {
-        vec![
+        // Width-specialized integer ops at each integer width.
+        for op in [
             ArithOp::IAdd,
             ArithOp::ISub,
             ArithOp::IMul,
             ArithOp::IDiv,
-            ArithOp::IDivU,
             ArithOp::IMod,
-            ArithOp::IModU,
+            ArithOp::ILt,
+            ArithOp::IGt,
+        ] {
+            for ty in [0_u32, 1, 2, 3] {
+                instrs.push(Instr::Arith {
+                    op,
+                    dst: 1,
+                    lhs: 2,
+                    rhs: 3,
+                    operand_ty: ty,
+                    ty,
+                });
+            }
+        }
+        // Float ops at each float width.
+        for op in [
             ArithOp::FAdd,
             ArithOp::FSub,
             ArithOp::FMul,
             ArithOp::FDiv,
             ArithOp::FMod,
-            ArithOp::Eq,
-            ArithOp::ILt,
-            ArithOp::ILtU,
-            ArithOp::IGt,
-            ArithOp::IGtU,
             ArithOp::FLt,
             ArithOp::FGt,
-        ]
+        ] {
+            for ty in [4_u32, 5] {
+                instrs.push(Instr::Arith {
+                    op,
+                    dst: 1,
+                    lhs: 2,
+                    rhs: 3,
+                    operand_ty: ty,
+                    ty,
+                });
+            }
+        }
+        // Width-free ops.
+        for op in [
+            ArithOp::IDivU,
+            ArithOp::IModU,
+            ArithOp::Eq,
+            ArithOp::ILtU,
+            ArithOp::IGtU,
+        ] {
+            instrs.push(Instr::Arith {
+                op,
+                dst: 1,
+                lhs: 2,
+                rhs: 3,
+                operand_ty: 2,
+                ty: 2,
+            });
+        }
+        // Trunc at each width, and the single width-free ExtendZero.
+        for ty in [0_u32, 1, 2, 3] {
+            instrs.push(Instr::Convert {
+                op: ConvertOp::Trunc,
+                dst: 1,
+                src: 2,
+                ty,
+            });
+        }
+        instrs.push(Instr::Convert {
+            op: ConvertOp::ExtendZero,
+            dst: 1,
+            src: 2,
+            ty: 0,
+        });
+        instrs
     }
 
     #[test]
     fn every_variant_round_trips() {
+        let types = test_types();
         for instr in sample_instrs() {
-            round_trip(&instr);
+            round_trip(&types, &instr);
         }
     }
 
     #[test]
     fn wide_operand_round_trips() {
-        let instr = Instr::Copy {
-            dst: Operand::Slot(300),
-            src: Operand::Reg(511),
-            ty: 0,
-        };
-        round_trip(&instr);
+        let types = test_types();
+        round_trip(
+            &types,
+            &Instr::Copy {
+                dst: Operand::Slot(300),
+                src: Operand::Reg(511),
+                ty: 0,
+            },
+        );
     }
 
     #[test]
     fn third_wide_operand_round_trips() {
-        let instr = Instr::Field {
-            dst: 700,
-            place: 1000,
-            off: 70_000,
-            ty: 900,
-            indirect: true,
-        };
-        round_trip(&instr);
+        let types = test_types();
+        round_trip(
+            &types,
+            &Instr::Field {
+                dst: 700,
+                place: 1000,
+                off: 70_000,
+                ty: 3,
+                indirect: true,
+            },
+        );
     }
 
     #[test]
-    fn arith_is_two_words() {
-        let mut b = CodeBuilder::new();
+    fn arith_is_one_word() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
         b.push(&Instr::Arith {
             op: ArithOp::IAdd,
             dst: 1,
             lhs: 2,
             rhs: 3,
-            operand_ty: 7,
-            ty: 9,
+            operand_ty: 2,
+            ty: 2,
         })
         .expect("encode");
-        assert_eq!(b.words.len(), 2);
-        assert_eq!(b.words[0] & 0xFF, u32::from(super::OP_ARITH_BASE));
+        assert_eq!(b.words.len(), 1);
+        assert_eq!(b.words[0] & 0xFF, u32::from(OP_IADD_BASE + 2));
         assert_eq!(b.words[0] >> 8 & 0xFF, 1);
         assert_eq!(b.words[0] >> 16 & 0xFF, 2);
         assert_eq!(b.words[0] >> 24 & 0xFF, 3);
-        assert_eq!(b.words[1] & 0xFFFF, 7);
-        assert_eq!(b.words[1] >> 16, 9);
+    }
+
+    #[test]
+    fn convert_is_one_word() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
+        b.push(&Instr::Convert {
+            op: ConvertOp::Trunc,
+            dst: 1,
+            src: 2,
+            ty: 3,
+        })
+        .expect("encode");
+        assert_eq!(b.words.len(), 1);
+        assert_eq!(b.words[0] & 0xFF, u32::from(super::OP_TRUNC_BASE + 3));
+        assert_eq!(b.words[0] >> 8 & 0xFF, 1);
+        assert_eq!(b.words[0] >> 16 & 0xFF, 2);
     }
 
     #[test]
     fn call_appends_to_pools() {
+        let types = test_types();
         let instr = Instr::Call {
             func: 3,
             ins: vec![Operand::Reg(0), Operand::Slot(8)],
             outs: vec![16, 24],
         };
-        let mut b = CodeBuilder::new();
+        let mut b = CodeBuilder::new(&types);
         b.push(&instr).expect("encode");
         assert_eq!(b.words.len(), 1);
         assert_eq!(b.call_sites.len(), 1);
@@ -808,18 +1240,35 @@ mod tests {
         assert_eq!(b.call_sites[0].func, 3);
         assert_eq!(b.call_sites[0].ins, 0..2);
         assert_eq!(b.call_sites[0].outs, 2..4);
-        round_trip(&instr);
+        round_trip(&types, &instr);
+    }
+
+    #[test]
+    fn const_masks_immediate_to_type_width() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
+        b.push(&Instr::Const {
+            dst: 1,
+            imm: 0x1122_3344_5566_7788,
+            ty: 0,
+        })
+        .expect("encode");
+        // word 0, imm low, imm high
+        assert_eq!(b.words.len(), 3);
+        assert_eq!(b.words[1], 0x88);
+        assert_eq!(b.words[2], 0);
     }
 
     #[test]
     fn wide_opcode_mnemonic_strips_flag() {
-        assert_eq!(opcode_mnemonic(super::OP_ARITH_BASE), "i.add");
-        assert_eq!(opcode_mnemonic(super::OP_ARITH_BASE | 0x80), "i.add");
+        assert_eq!(opcode_mnemonic(OP_IADD_BASE), "i.add");
+        assert_eq!(opcode_mnemonic(OP_IADD_BASE | 0x80), "i.add");
         assert_eq!(opcode_mnemonic(0x7F), "unknown");
     }
 
     #[test]
     fn rejects_unfittable_operand() {
+        let types = test_types();
         // `src` lands in the `b` slot of `Copy`, which the wide form stores
         // as a `u16`; a slot offset above that cannot be encoded.
         let instr = Instr::Copy {
@@ -827,7 +1276,20 @@ mod tests {
             src: Operand::Slot(70_000),
             ty: 0,
         };
-        let mut b = CodeBuilder::new();
+        let mut b = CodeBuilder::new(&types);
         assert!(b.push(&instr).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_type_id() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
+        assert!(b
+            .push(&Instr::Load {
+                dst: 1,
+                src: 2,
+                ty: 99,
+            })
+            .is_err());
     }
 }

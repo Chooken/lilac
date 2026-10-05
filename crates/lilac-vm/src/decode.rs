@@ -1,43 +1,43 @@
 //! Decoder for the compact `u32` bytecode stream.
 //!
 //! [`decode`] turns one word (plus any extension words) at `pc` back into a
-//! borrowed [`Decoded`] view of the typed [`crate::isa::Instr`]. Call variants
-//! borrow their [`CallSite`] and operand slices from the caller's pools instead
-//! of allocating, so the hot interpreter path never touches the heap.
+//! borrowed [`Decoded`] view. The view is flattened per operation: arithmetic
+//! and conversion carry their width in the variant (it was encoded in the
+//! opcode), so a consumer matches the operation once with no nested `ArithOp`
+//! or `ConvertOp` match. Call variants borrow their [`CallSite`] and operand
+//! slices instead of allocating.
 
 use crate::encode::{
     arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_BASE, OP_ARITH_LAST, OP_BRANCH, OP_BRANCH_IF,
-    OP_CALL, OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA,
-    OP_CONVERT_BASE, OP_CONVERT_LAST, OP_COPY_BASE, OP_COPY_BYTES, OP_COPY_LAST, OP_FIELD_BASE,
-    OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST,
-    OP_STORE_BASE, OP_STORE_LAST, OP_UNREACHABLE, WIDE_FLAG,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_BRANCH, OP_BRANCH_IF, OP_CALL, OP_CALL_BUILTIN_BASE,
+    OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
+    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
+    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
+    OP_UNREACHABLE, WIDE_FLAG,
 };
-use crate::isa::{ArithOp, Builtin, CallSite, ConvertOp, Operand, TypeId};
+use crate::isa::{ArithOp, Builtin, CallSite, Operand};
 
 /// A borrowed view of one decoded instruction.
 ///
-/// Mirrors [`crate::isa::Instr`] field for field, except the call variants
-/// borrow their operand lists and call site rather than owning `Vec`s.
+/// Arithmetic and conversion are flattened: each operation (and width class)
+/// is its own variant, so the interpreter matches the operation directly.
+/// Call variants borrow their operand lists and call site rather than owning
+/// `Vec`s; the whole view allocates nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decoded<'a> {
-    /// `dst: ty = const imm`.
+    /// `dst = const imm` (immediate pre-masked to the type's width).
     Const {
         /// Destination register.
         dst: u32,
-        /// Literal bits.
+        /// Masked literal bits.
         imm: u64,
-        /// Value type.
-        ty: TypeId,
     },
-    /// `dst: ty = const.data data`.
+    /// `dst = const.data data`.
     ConstData {
         /// Destination register.
         dst: u32,
         /// Data index.
         data: u32,
-        /// Value type.
-        ty: TypeId,
     },
     /// Scalar copy (kind encoded in the opcode).
     Copy {
@@ -45,8 +45,8 @@ pub enum Decoded<'a> {
         dst: Operand,
         /// Source operand.
         src: Operand,
-        /// Value type.
-        ty: TypeId,
+        /// Precomputed byte size.
+        size: u32,
     },
     /// Aggregate place-to-place byte copy.
     CopyBytes {
@@ -57,23 +57,23 @@ pub enum Decoded<'a> {
         /// Byte count.
         size: u32,
     },
-    /// Read `size(ty)` bytes through the reference held in `src`.
+    /// Read `size` bytes through the reference held in `src`.
     Load {
         /// Destination register.
         dst: u32,
         /// Slot holding the reference.
         src: u32,
-        /// Pointee type.
-        ty: TypeId,
+        /// Precomputed pointee size.
+        size: u32,
     },
-    /// Write `size(ty)` bytes through the reference held in `dst`.
+    /// Write `size` bytes through the reference held in `dst`.
     Store {
         /// Value operand.
         src: Operand,
         /// Slot holding the reference.
         dst: u32,
-        /// Value type.
-        ty: TypeId,
+        /// Precomputed value size.
+        size: u32,
     },
     /// `dst = addr place`.
     Addr {
@@ -108,8 +108,8 @@ pub enum Decoded<'a> {
         place: u32,
         /// Field byte offset.
         off: u32,
-        /// Field type.
-        ty: TypeId,
+        /// Precomputed field size.
+        size: u32,
         /// Whether `place` holds a ref to dereference first.
         indirect: bool,
     },
@@ -121,36 +121,225 @@ pub enum Decoded<'a> {
         place: u32,
         /// Field byte offset.
         off: u32,
-        /// Field type.
-        ty: TypeId,
+        /// Precomputed field size.
+        size: u32,
         /// Whether `place` holds a ref to dereference first.
         indirect: bool,
     },
-    /// Typed arithmetic/comparison.
-    Arith {
-        /// Operator.
-        op: ArithOp,
+    /// Width-specialized integer add.
+    IAdd {
         /// Destination register.
         dst: u32,
         /// Left register.
         lhs: u32,
         /// Right register.
         rhs: u32,
-        /// Operand width type.
-        operand_ty: TypeId,
-        /// Result type.
-        ty: TypeId,
+        /// Operand width in bits.
+        width: u8,
     },
-    /// Width conversion.
-    Convert {
-        /// Operator.
-        op: ConvertOp,
+    /// Width-specialized integer subtract.
+    ISub {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized integer multiply.
+    IMul {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized signed integer divide.
+    IDiv {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized signed integer modulo.
+    IMod {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized signed integer less-than.
+    ILt {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized signed integer greater-than.
+    IGt {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float add.
+    FAdd {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float subtract.
+    FSub {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float multiply.
+    FMul {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float divide.
+    FDiv {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float modulo.
+    FMod {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float less-than.
+    FLt {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-specialized float greater-than.
+    FGt {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width in bits.
+        width: u8,
+    },
+    /// Width-free unsigned integer divide.
+    IDivU {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+    },
+    /// Width-free unsigned integer modulo.
+    IModU {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+    },
+    /// Width-free bit-equality comparison.
+    Eq {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+    },
+    /// Width-free unsigned less-than.
+    ILtU {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+    },
+    /// Width-free unsigned greater-than.
+    IGtU {
+        /// Destination register.
+        dst: u32,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+    },
+    /// Width-specialized truncation.
+    Trunc {
         /// Destination register.
         dst: u32,
         /// Source register.
         src: u32,
-        /// Result type.
-        ty: TypeId,
+        /// Result width in bits.
+        width: u8,
+    },
+    /// Width-free zero-extension.
+    ExtendZero {
+        /// Destination register.
+        dst: u32,
+        /// Source register.
+        src: u32,
     },
     /// Direct call by function index.
     Call {
@@ -216,8 +405,8 @@ pub enum Decoded<'a> {
 /// # Errors
 ///
 /// Returns a human-readable message if `pc` is out of range, the opcode is
-/// unknown, the instruction is truncated, or a call site or operand range is
-/// out of range.
+/// unknown, the wide flag is set on a zero-operand opcode, the instruction is
+/// truncated, or a call site or operand range is out of range.
 #[allow(clippy::too_many_lines)]
 pub fn decode<'a>(
     code: &'a [u32],
@@ -255,40 +444,25 @@ pub fn decode<'a>(
             )
         }
         OP_CONST => {
-            let (ops, n) = read_ops(code, pc, wide, 2)?;
+            let (ops, n) = read_ops(code, pc, wide, 1)?;
             let lo = word_at(code, pc + n)?;
             let hi = word_at(code, pc + n + 1)?;
             let imm = u64::from(lo) | (u64::from(hi) << 32);
-            (
-                Decoded::Const {
-                    dst: ops[0],
-                    imm,
-                    ty: ops[1],
-                },
-                n + 2,
-            )
+            (Decoded::Const { dst: ops[0], imm }, n + 2)
         }
         OP_CONST_DATA => {
-            let (ops, n) = read_ops(code, pc, wide, 3)?;
-            (
-                Decoded::ConstData {
-                    dst: ops[0],
-                    data: ops[1],
-                    ty: ops[2],
-                },
-                n,
-            )
+            let (ops, n) = read_ops(code, pc, wide, 1)?;
+            let data = word_at(code, pc + n)?;
+            (Decoded::ConstData { dst: ops[0], data }, n + 1)
         }
         b @ (OP_COPY_BASE..=OP_COPY_LAST) => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
             let k = b - OP_COPY_BASE;
-            let dst = operate(ops[0], k & 2 != 0);
-            let src = operate(ops[1], k & 1 != 0);
             (
                 Decoded::Copy {
-                    dst,
-                    src,
-                    ty: ops[2],
+                    dst: operate(ops[0], k & 2 != 0),
+                    src: operate(ops[1], k & 1 != 0),
+                    size: ops[2],
                 },
                 n,
             )
@@ -310,19 +484,18 @@ pub fn decode<'a>(
                 Decoded::Load {
                     dst: ops[0],
                     src: ops[1],
-                    ty: ops[2],
+                    size: ops[2],
                 },
                 n,
             )
         }
         b @ (OP_STORE_BASE..=OP_STORE_LAST) => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let src = operate(ops[0], b == OP_STORE_LAST);
             (
                 Decoded::Store {
-                    src,
+                    src: operate(ops[0], b == OP_STORE_LAST),
                     dst: ops[1],
-                    ty: ops[2],
+                    size: ops[2],
                 },
                 n,
             )
@@ -361,13 +534,13 @@ pub fn decode<'a>(
         }
         b @ (OP_FIELD_BASE..=OP_FIELD_LAST) => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let ty = word_at(code, pc + n)?;
+            let size = word_at(code, pc + n)?;
             (
                 Decoded::Field {
                     dst: ops[0],
                     place: ops[1],
                     off: ops[2],
-                    ty,
+                    size,
                     indirect: b == OP_FIELD_LAST,
                 },
                 n + 1,
@@ -375,50 +548,47 @@ pub fn decode<'a>(
         }
         b @ (OP_STOREFIELD_BASE..=OP_STOREFIELD_LAST) => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let ty = word_at(code, pc + n)?;
+            let size = word_at(code, pc + n)?;
             let k = b - OP_STOREFIELD_BASE;
-            let src = operate(ops[0], k & 1 != 0);
             (
                 Decoded::StoreField {
-                    src,
+                    src: operate(ops[0], k & 1 != 0),
                     place: ops[1],
                     off: ops[2],
-                    ty,
+                    size,
                     indirect: k & 2 != 0,
                 },
                 n + 1,
             )
         }
-        b @ (OP_ARITH_BASE..=OP_ARITH_LAST) => {
-            let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let op = arith_from_opcode(b)
-                .ok_or_else(|| format!("unknown arithmetic opcode 0x{b:02X} at pc {pc}"))?;
-            let meta = word_at(code, pc + n)?;
-            (
-                Decoded::Arith {
-                    op,
-                    dst: ops[0],
-                    lhs: ops[1],
-                    rhs: ops[2],
-                    operand_ty: meta & 0xFFFF,
-                    ty: meta >> 16,
-                },
-                n + 1,
-            )
-        }
-        b @ (OP_CONVERT_BASE..=OP_CONVERT_LAST) => {
-            let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let op = convert_from_opcode(b)
+        b @ (OP_TRUNC_BASE..=0x5F) => {
+            let (ops, n) = read_ops(code, pc, wide, 2)?;
+            let (_, width) = convert_from_opcode(b)
                 .ok_or_else(|| format!("unknown convert opcode 0x{b:02X} at pc {pc}"))?;
             (
-                Decoded::Convert {
-                    op,
+                Decoded::Trunc {
                     dst: ops[0],
                     src: ops[1],
-                    ty: ops[2],
+                    width,
                 },
                 n,
             )
+        }
+        OP_EXTEND_ZERO => {
+            let (ops, n) = read_ops(code, pc, wide, 2)?;
+            (
+                Decoded::ExtendZero {
+                    dst: ops[0],
+                    src: ops[1],
+                },
+                n,
+            )
+        }
+        b if arith_from_opcode(b).is_some() => {
+            let (ops, n) = read_ops(code, pc, wide, 3)?;
+            let (op, width) = arith_from_opcode(b)
+                .ok_or_else(|| format!("unknown arithmetic opcode 0x{b:02X} at pc {pc}"))?;
+            (arith_variant(op, width, ops[0], ops[1], ops[2]), n)
         }
         OP_CALL => {
             let (site, ins, outs) = call_slice(call_sites, operands, (w >> 8) as usize)?;
@@ -458,31 +628,131 @@ pub fn decode<'a>(
     Ok((decoded, next))
 }
 
+/// Builds the flattened [`Decoded`] variant for an arithmetic operation.
+fn arith_variant<'a>(op: ArithOp, width: u8, dst: u32, lhs: u32, rhs: u32) -> Decoded<'a> {
+    match op {
+        ArithOp::IAdd => Decoded::IAdd {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::ISub => Decoded::ISub {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IMul => Decoded::IMul {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IDiv => Decoded::IDiv {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IMod => Decoded::IMod {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::ILt => Decoded::ILt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IGt => Decoded::IGt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FAdd => Decoded::FAdd {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FSub => Decoded::FSub {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FMul => Decoded::FMul {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FDiv => Decoded::FDiv {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FMod => Decoded::FMod {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FLt => Decoded::FLt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::FGt => Decoded::FGt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IDivU => Decoded::IDivU { dst, lhs, rhs },
+        ArithOp::IModU => Decoded::IModU { dst, lhs, rhs },
+        ArithOp::Eq => Decoded::Eq { dst, lhs, rhs },
+        ArithOp::ILtU => Decoded::ILtU { dst, lhs, rhs },
+        ArithOp::IGtU => Decoded::IGtU { dst, lhs, rhs },
+    }
+}
+
 /// The number of `a`/`b`/`c` operands a base opcode carries, or `None` if the
 /// opcode is unknown. The wide escape is only legal when this is non-zero.
 const fn operand_count(base: u8) -> Option<u8> {
-    Some(match base {
+    match base {
         OP_RETURN
         | OP_UNREACHABLE
         | OP_PANIC
         | OP_BRANCH
         | OP_CALL
-        | OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST => 0,
-        OP_CALL_INDIRECT => 1,
-        OP_CONST | OP_ADDR | OP_ADDR_FUNC => 2,
+        | OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST => Some(0),
+        OP_CONST | OP_CONST_DATA | OP_CALL_INDIRECT => Some(1),
+        OP_ADDR | OP_ADDR_FUNC => Some(2),
         OP_BRANCH_IF
-        | OP_CONST_DATA
         | OP_COPY_BASE..=OP_COPY_LAST
         | OP_COPY_BYTES
         | OP_LOAD
         | OP_STORE_BASE..=OP_STORE_LAST
         | OP_ADDRFIELD_BASE..=OP_ADDRFIELD_LAST
         | OP_FIELD_BASE..=OP_FIELD_LAST
-        | OP_STOREFIELD_BASE..=OP_STOREFIELD_LAST
-        | OP_ARITH_BASE..=OP_ARITH_LAST
-        | OP_CONVERT_BASE..=OP_CONVERT_LAST => 3,
-        _ => return None,
-    })
+        | OP_STOREFIELD_BASE..=OP_STOREFIELD_LAST => Some(3),
+        _ => {
+            if arith_from_opcode(base).is_some() {
+                Some(3)
+            } else if convert_from_opcode(base).is_some() {
+                Some(2)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Builds a register or slot [`Operand`] from a raw value and slot flag.
@@ -550,45 +820,66 @@ fn operand_range<'a>(
 #[cfg(test)]
 mod tests {
     use super::{decode, Decoded};
-    use crate::encode::CodeBuilder;
-    use crate::isa::{ArithOp, CallSite, Instr, Operand};
+    use crate::encode::{CodeBuilder, OP_EXTEND_ZERO, OP_RETURN, OP_TRUNC_BASE};
+    use crate::isa::{ArithOp, CallSite, ConvertOp, Instr, Operand, TypeInfo};
+
+    fn test_types() -> Vec<TypeInfo> {
+        vec![
+            TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit16".to_string(),
+                size: 2,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit32".to_string(),
+                size: 4,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit64".to_string(),
+                size: 8,
+                is_ref: false,
+            },
+        ]
+    }
 
     #[test]
     fn next_pc_advances_by_word_count() {
-        let mut b = CodeBuilder::new();
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
         b.push(&Instr::Arith {
             op: ArithOp::IAdd,
             dst: 1,
             lhs: 2,
             rhs: 3,
-            operand_ty: 4,
-            ty: 5,
+            operand_ty: 2,
+            ty: 2,
         })
         .expect("encode arith");
         b.push(&Instr::Return).expect("encode return");
-        assert_eq!(b.words.len(), 3);
+        assert_eq!(b.words.len(), 2);
         let (first, next) = decode(&b.words, 0, &[], &[]).expect("decode arith");
-        assert!(matches!(
-            first,
-            Decoded::Arith {
-                op: ArithOp::IAdd,
-                ..
-            }
-        ));
-        assert_eq!(next, 2);
-        let (second, next) = decode(&b.words, 2, &[], &[]).expect("decode return");
+        assert!(matches!(first, Decoded::IAdd { width: 32, .. }));
+        assert_eq!(next, 1);
+        let (second, next) = decode(&b.words, 1, &[], &[]).expect("decode return");
         assert!(matches!(second, Decoded::Return));
-        assert_eq!(next, 3);
+        assert_eq!(next, 2);
     }
 
     #[test]
     fn decodes_const_immediate() {
+        let types = test_types();
         let instr = Instr::Const {
             dst: 1,
             imm: 0xDEAD_BEEF_0102_0304,
-            ty: 2,
+            ty: 3,
         };
-        let mut b = CodeBuilder::new();
+        let mut b = CodeBuilder::new(&types);
         b.push(&instr).expect("encode");
         let (decoded, next) = decode(&b.words, 0, &[], &[]).expect("decode");
         assert_eq!(next as usize, b.words.len());
@@ -596,20 +887,20 @@ mod tests {
             decoded,
             Decoded::Const {
                 dst: 1,
-                imm: 0xDEAD_BEEF_0102_0304,
-                ty: 2
+                imm: 0xDEAD_BEEF_0102_0304
             }
         );
     }
 
     #[test]
     fn decodes_call_borrowing_pools() {
+        let types = test_types();
         let instr = Instr::Call {
             func: 3,
             ins: vec![Operand::Reg(0), Operand::Slot(8)],
             outs: vec![16],
         };
-        let mut b = CodeBuilder::new();
+        let mut b = CodeBuilder::new(&types);
         b.push(&instr).expect("encode");
         let (decoded, _) = decode(&b.words, 0, &b.call_sites, &b.operands).expect("decode");
         match decoded {
@@ -620,6 +911,40 @@ mod tests {
             }
             other => panic!("expected call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_convert_widths() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
+        b.push(&Instr::Convert {
+            op: ConvertOp::Trunc,
+            dst: 1,
+            src: 2,
+            ty: 3,
+        })
+        .expect("encode trunc");
+        b.push(&Instr::Convert {
+            op: ConvertOp::ExtendZero,
+            dst: 4,
+            src: 5,
+            ty: 0,
+        })
+        .expect("encode extend");
+        assert_eq!(b.words.len(), 2);
+        assert_eq!(b.words[0] & 0xFF, u32::from(OP_TRUNC_BASE + 3));
+        assert_eq!(b.words[1] & 0xFF, u32::from(OP_EXTEND_ZERO));
+        let (trunc, _) = decode(&b.words, 0, &[], &[]).expect("trunc");
+        assert_eq!(
+            trunc,
+            Decoded::Trunc {
+                dst: 1,
+                src: 2,
+                width: 64
+            }
+        );
+        let (extend, _) = decode(&b.words, 1, &[], &[]).expect("extend");
+        assert_eq!(extend, Decoded::ExtendZero { dst: 4, src: 5 });
     }
 
     #[test]
@@ -638,9 +963,7 @@ mod tests {
 
     #[test]
     fn rejects_wide_flag_on_zero_operand_opcode() {
-        let code = [u32::from(
-            crate::encode::OP_RETURN | crate::encode::WIDE_FLAG,
-        )];
+        let code = [u32::from(OP_RETURN | crate::encode::WIDE_FLAG)];
         let err = decode(&code, 0, &[], &[]).expect_err("wide return");
         assert!(err.contains("wide flag"), "{err}");
     }
@@ -663,7 +986,8 @@ mod tests {
 
     #[test]
     fn rejects_out_of_range_call_site() {
-        let mut b = CodeBuilder::new();
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
         b.push(&Instr::Call {
             func: 0,
             ins: Vec::new(),
@@ -690,5 +1014,30 @@ mod tests {
         )
         .expect_err("bad operand range");
         assert!(err.contains("operand range"), "{err}");
+    }
+
+    #[test]
+    fn decodes_width_free_arith_without_width() {
+        let types = test_types();
+        let mut b = CodeBuilder::new(&types);
+        b.push(&Instr::Arith {
+            op: ArithOp::Eq,
+            dst: 1,
+            lhs: 2,
+            rhs: 3,
+            operand_ty: 3,
+            ty: 0,
+        })
+        .expect("encode");
+        let (decoded, _) = decode(&b.words, 0, &[], &[]).expect("decode");
+        assert_eq!(
+            decoded,
+            Decoded::Eq {
+                dst: 1,
+                lhs: 2,
+                rhs: 3
+            }
+        );
+        assert_eq!(b.words[0] & 0xFF, u32::from(crate::encode::OP_EQ));
     }
 }
