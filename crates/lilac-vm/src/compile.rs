@@ -318,6 +318,7 @@ struct FuncBuilder<'a, 'm> {
     places: Places,
     block_pc: HashMap<String, u32>,
     regs: HashMap<String, u32>,
+    reg_types: HashMap<String, String>,
     next_reg: u32,
     code: Vec<Instr>,
     lines: Vec<Line>,
@@ -337,6 +338,14 @@ impl FuncBuilder<'_, '_> {
             .ok_or_else(|| format!("unknown register `&{name}`"))
     }
 
+    /// The declared type of an already-defined register.
+    fn reg_ty(&self, name: &str) -> Result<&str, String> {
+        self.reg_types
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("unknown register type for `&{name}`"))
+    }
+
     /// Defines `name` as a fresh register (or returns its existing index).
     fn def_reg(&mut self, name: &str) -> u32 {
         if let Some(&index) = self.regs.get(name) {
@@ -345,6 +354,13 @@ impl FuncBuilder<'_, '_> {
         let index = self.next_reg;
         self.next_reg = self.next_reg.saturating_add(1);
         self.regs.insert(name.to_owned(), index);
+        index
+    }
+
+    /// Defines `name` with its declared type `ty`.
+    fn def_reg_typed(&mut self, name: &str, ty: &str) -> u32 {
+        let index = self.def_reg(name);
+        self.reg_types.insert(name.to_owned(), ty.to_owned());
         index
     }
 
@@ -398,7 +414,7 @@ impl FuncBuilder<'_, '_> {
             LirInst::CopyReg { src, dst, ty, span } => {
                 let id = self.intern(ty)?;
                 if is_indirect(self.compiler.module, ty)? {
-                    let dst = self.def_reg(dst);
+                    let dst = self.def_reg_typed(dst, ty);
                     self.emit(
                         match src {
                             LirOperand::Place(place) => Instr::Addr {
@@ -414,7 +430,7 @@ impl FuncBuilder<'_, '_> {
                         *span,
                     )
                 } else {
-                    let dst = self.def_reg(dst);
+                    let dst = self.def_reg_typed(dst, ty);
                     let src = self.operand(src)?;
                     self.emit(
                         Instr::Copy {
@@ -457,7 +473,7 @@ impl FuncBuilder<'_, '_> {
                 }
             }
             LirInst::Const { dst, lit, ty, span } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, ty);
                 if let Some(name) = lit.strip_prefix('!') {
                     let raw = self.compiler.data_id(name)?;
                     let ty_id = self.intern(ty)?;
@@ -495,7 +511,7 @@ impl FuncBuilder<'_, '_> {
                 }
             }
             LirInst::Load { src, dst, ty, span } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, ty);
                 let src = self.slot(src)?;
                 let ty = self.intern(ty)?;
                 self.emit(Instr::Load { dst, src, ty }, *span)
@@ -503,14 +519,14 @@ impl FuncBuilder<'_, '_> {
             LirInst::Addr {
                 place, dst, span, ..
             } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, "#ptr");
                 let place = self.slot(place)?;
                 self.emit(Instr::Addr { dst, place }, *span)
             }
             LirInst::AddrFunc {
                 func, dst, span, ..
             } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, "#ptr");
                 let func = self.compiler.func_id(func)?;
                 self.emit(Instr::AddrFunc { dst, func }, *span)
             }
@@ -555,7 +571,7 @@ impl FuncBuilder<'_, '_> {
                 span,
                 ..
             } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, ty);
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
                 let indirect = is_ref_ty(self.places.ty(obj)?);
@@ -628,7 +644,7 @@ impl FuncBuilder<'_, '_> {
                 ty,
                 span,
             } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, ty);
                 let src = self.reg(src)?;
                 let ty = self.intern(ty)?;
                 self.emit(
@@ -648,7 +664,7 @@ impl FuncBuilder<'_, '_> {
                 span,
                 ..
             } => {
-                let dst = self.def_reg(dst);
+                let dst = self.def_reg_typed(dst, "#ptr");
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
                 let indirect = is_ref_ty(self.places.ty(obj)?);
@@ -670,7 +686,9 @@ impl FuncBuilder<'_, '_> {
                 ty,
                 span,
             } => {
-                let dst = self.def_reg(dst);
+                let operand_ty_name = self.reg_ty(lhs)?.to_owned();
+                let operand_ty = self.intern(&operand_ty_name)?;
+                let dst = self.def_reg_typed(dst, ty);
                 let lhs = self.reg(lhs)?;
                 let rhs = self.reg(rhs)?;
                 let ty = self.intern(ty)?;
@@ -680,6 +698,7 @@ impl FuncBuilder<'_, '_> {
                         dst,
                         lhs,
                         rhs,
+                        operand_ty,
                         ty,
                     },
                     *span,
@@ -788,6 +807,7 @@ impl FuncBuilder<'_, '_> {
         for index in 0..block_count {
             let block = &func.blocks[index];
             self.regs.clear();
+            self.reg_types.clear();
             for inst in &block.insts {
                 self.emit_inst(inst)?;
             }
@@ -937,6 +957,7 @@ impl<'a> Compiler<'a> {
             places,
             block_pc: HashMap::new(),
             regs: HashMap::new(),
+            reg_types: HashMap::new(),
             next_reg: 0,
             code: Vec::new(),
             lines: Vec::new(),

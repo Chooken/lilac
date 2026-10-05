@@ -208,7 +208,7 @@ enum Operand { Reg(u32), Slot(u32) }
 | `AddrFunc { dst: Reg, func: u32 }` | ref = function id |
 | `Field { dst: Reg, place: Slot, off: u32, ty, indirect: bool }` | scalar field read |
 | `StoreField { src: Operand, place: Slot, off: u32, ty, indirect: bool }` | scalar field write |
-| `Arith { op: ArithOp, dst: Reg, lhs: Reg, rhs: Reg, ty }` | typed arithmetic/comparison |
+| `Arith { op: ArithOp, dst: Reg, lhs: Reg, rhs: Reg, operand_ty, ty }` | typed arithmetic/comparison |
 | `Convert { op: ConvertOp, dst: Reg, src: Reg, ty }` | `trunc`/`extend.zero` |
 | `Call { func: u32, ins: Vec<Operand>, outs: Vec<Slot> }` | direct call |
 | `CallIndirect { callee: Reg, ins: Vec<Operand>, outs: Vec<Slot> }` | `addr.func` value |
@@ -218,6 +218,13 @@ enum Operand { Reg(u32), Slot(u32) }
 | `Return` | copy `outs` to the caller's out slots, pop frame |
 | `Panic { data: u32 }` | print `data` bytes to stderr, abort non-zero |
 | `Unreachable` | VM internal error / trap |
+
+`Arith.operand_ty` is the operands' width type (from the left register's
+declared type) and `ty` is the result type. They differ for comparisons, whose
+LIR result type is always `#bit8` regardless of operand width (`@i_less_than`
+on `@bit32` operands), so the interpreter must use `operand_ty` for width,
+signedness, and float format, exactly as the LLVM backend reads the operand
+register types (`lilac-codegen-llvm/src/lower.rs:891,909,934`).
 
 For the three field instructions, `indirect` is `true` when the object
 place's declared type is a `ref T` (the slot holds a ref to the struct): the

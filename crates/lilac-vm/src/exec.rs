@@ -224,13 +224,15 @@ impl<'a> Machine<'a> {
                 dst,
                 lhs,
                 rhs,
+                operand_ty,
                 ty,
             } => {
-                let size = type_size(program, *ty);
+                let operand_size = type_size(program, *operand_ty);
+                let result_size = type_size(program, *ty);
                 let left = self.reg(reg_base, *lhs);
                 let right = self.reg(reg_base, *rhs);
-                let value = eval_arith(*op, left, right, size);
-                self.set_reg(reg_base, *dst, value & mask(size));
+                let value = eval_arith(*op, left, right, operand_size);
+                self.set_reg(reg_base, *dst, value & mask(result_size));
             }
             Instr::Convert { op, dst, src, ty } => {
                 let size = type_size(program, *ty);
@@ -621,11 +623,10 @@ fn sign_extend(value: u64, size: u32) -> i64 {
 
 /// Evaluates an integer arithmetic/comparison operator.
 ///
-/// Signed division/remainder interpret their operands at the instruction's
-/// declared width; signed comparisons interpret the full 64-bit register (the
-/// ISA carries a single type per `Arith`, so a narrower signed-comparison
-/// operand width is not recoverable here). Division by zero yields zero.
-#[allow(clippy::cast_possible_wrap)]
+/// `size` is the operand width (from `Arith.operand_ty`): signed
+/// division/remainder and signed comparisons sign-extend their operands at that
+/// width, matching the LLVM backend's operand-typed `sdiv`/`srem`/`icmp slt`.
+/// Division by zero yields zero.
 fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
     let m = mask(size);
     match op {
@@ -657,9 +658,9 @@ fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
         }
         ArithOp::IModU => (left & m).checked_rem(right & m).unwrap_or(0),
         ArithOp::Eq => u64::from(left == right),
-        ArithOp::ILt => u64::from((left as i64) < (right as i64)),
+        ArithOp::ILt => u64::from(sign_extend(left, size) < sign_extend(right, size)),
         ArithOp::ILtU => u64::from(left < right),
-        ArithOp::IGt => u64::from((left as i64) > (right as i64)),
+        ArithOp::IGt => u64::from(sign_extend(left, size) > sign_extend(right, size)),
         ArithOp::IGtU => u64::from(left > right),
         ArithOp::FAdd
         | ArithOp::FSub
@@ -673,8 +674,9 @@ fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
 
 /// Evaluates a floating-point arithmetic/comparison operator over bit patterns.
 ///
-/// The operand width is taken from the instruction's type when it is 32 or 64
-/// bits; otherwise the operands are interpreted as `f64`.
+/// `size` is the operand width (from `Arith.operand_ty`): `#bit32` operands are
+/// interpreted as `f32` and `#bit64`/`#bit_native` as `f64`, matching the LLVM
+/// backend. Any other width falls back to `f64`.
 #[allow(clippy::cast_possible_truncation)]
 fn eval_float_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
     if size == 4 {
@@ -851,5 +853,112 @@ mod tests {
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].name, "main");
         assert_eq!(trace[0].pc, 0);
+    }
+
+    /// Builds a one-function `main` program with explicit types and code.
+    fn arith_program(types: Vec<isa::TypeInfo>, code: Vec<Instr>, n_regs: u32) -> isa::Program {
+        isa::Program {
+            version: isa::LBC_VERSION.to_string(),
+            target: isa::VM_TARGET.to_string(),
+            types,
+            data: Vec::new(),
+            globals: Vec::new(),
+            funcs: vec![isa::Func {
+                name: "main".to_string(),
+                is_extern: false,
+                ins: Vec::new(),
+                outs: Vec::new(),
+                n_regs,
+                slot_bytes: 0,
+                code,
+                lines: Vec::new(),
+                place_names: Vec::new(),
+            }],
+        }
+    }
+
+    fn bit32_and_bit8() -> Vec<isa::TypeInfo> {
+        vec![
+            isa::TypeInfo {
+                name: "#bit32".to_string(),
+                size: 4,
+                is_ref: false,
+            },
+            isa::TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+        ]
+    }
+
+    /// A comparison's LIR result is `#bit8`, but `operand_ty` drives the
+    /// operand interpretation: `0xffff_ffff < 0x1` is true as `i32` (`-1 < 1`)
+    /// and false if the full 64-bit register is read as `i64`.
+    #[test]
+    fn signed_32bit_comparison_uses_operand_width() {
+        let code = vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0xffff_ffff,
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 1,
+                imm: 0x1,
+                ty: 0,
+            },
+            Instr::Arith {
+                op: isa::ArithOp::ILt,
+                dst: 2,
+                lhs: 0,
+                rhs: 1,
+                operand_ty: 0,
+                ty: 1,
+            },
+            Instr::Return,
+        ];
+        let program = arith_program(bit32_and_bit8(), code, 3);
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("const lhs");
+        machine.step().expect("const rhs");
+        machine.step().expect("cmp");
+        assert_eq!(machine.read_reg(2), Some(1), "0xffff_ffff < 0x1 as i32");
+    }
+
+    /// `@f_less_than` on `#bit32` operands must reinterpret them as `f32`, not
+    /// `f64`: `-1.0f32 < 1.0f32` is true, while the same 32-bit patterns read
+    /// as `f64` are two subnormals where the first is larger.
+    #[test]
+    fn f32_comparison_uses_operand_width() {
+        let code = vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0xbf80_0000,
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 1,
+                imm: 0x3f80_0000,
+                ty: 0,
+            },
+            Instr::Arith {
+                op: isa::ArithOp::FLt,
+                dst: 2,
+                lhs: 0,
+                rhs: 1,
+                operand_ty: 0,
+                ty: 1,
+            },
+            Instr::Return,
+        ];
+        let program = arith_program(bit32_and_bit8(), code, 3);
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("const lhs");
+        machine.step().expect("const rhs");
+        machine.step().expect("cmp");
+        assert_eq!(machine.read_reg(2), Some(1), "-1.0f32 < 1.0f32");
     }
 }

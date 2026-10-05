@@ -368,6 +368,13 @@ pub enum Instr {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width type (from the left register's declared type).
+        ///
+        /// Comparisons have a `#bit8` LIR result regardless of operand width,
+        /// so the interpreter uses `operand_ty` for width, signedness, and
+        /// float format, exactly as the LLVM backend reads the operand register
+        /// types.
+        operand_ty: TypeId,
         /// Result type.
         ty: TypeId,
     },
@@ -721,9 +728,15 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             program, *src, *place, *off, *ty, *indirect, n_regs, slot_bytes,
         )?,
         Instr::Arith {
-            dst, lhs, rhs, ty, ..
+            dst,
+            lhs,
+            rhs,
+            operand_ty,
+            ty,
+            ..
         } => {
             check_type(program, *ty)?;
+            check_type(program, *operand_ty)?;
             check_reg(*dst, n_regs)?;
             check_reg(*lhs, n_regs)?;
             check_reg(*rhs, n_regs)?;

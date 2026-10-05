@@ -213,6 +213,7 @@ impl Program {
     }
 
     /// Renders one instruction with resolved operands.
+    #[allow(clippy::too_many_lines)]
     fn instr_text(&self, instr: &Instr) -> String {
         match instr {
             Instr::Const { dst, imm, ty } => {
@@ -279,11 +280,13 @@ impl Program {
                 dst,
                 lhs,
                 rhs,
+                operand_ty,
                 ty,
             } => format!(
-                "&{dst}: {} = {} &{lhs}, &{rhs}",
+                "&{dst}: {} = {} &{lhs}, &{rhs} : {}",
                 self.type_name(*ty),
-                op.as_str()
+                op.as_str(),
+                self.type_name(*operand_ty)
             ),
             Instr::Convert { op, dst, src, ty } => {
                 format!("&{dst}: {} = {} &{src}", self.type_name(*ty), op.as_str())
@@ -729,14 +732,19 @@ fn parse_definition(text: &str, type_ids: &HashMap<String, TypeId>) -> Result<Pa
     if let Some((dst_text, ty_text)) = lhs.split_once(": ") {
         let dst = parse_operand(dst_text.trim())?;
         let ty = parse_type(ty_text.trim(), type_ids)?;
-        parse_typed_definition(dst, ty, rhs)
+        parse_typed_definition(dst, ty, rhs, type_ids)
     } else {
         parse_addr_definition(lhs.trim(), rhs)
     }
 }
 
 /// Parses a typed definition (`&d: ty = op ...`).
-fn parse_typed_definition(dst: Operand, ty: TypeId, rhs: &str) -> Result<ParsedInstr, String> {
+fn parse_typed_definition(
+    dst: Operand,
+    ty: TypeId,
+    rhs: &str,
+    type_ids: &HashMap<String, TypeId>,
+) -> Result<ParsedInstr, String> {
     let (head, args) = split_head(rhs);
     match head {
         "const" => Ok(ParsedInstr::Ready(Instr::Const {
@@ -771,12 +779,17 @@ fn parse_typed_definition(dst: Operand, ty: TypeId, rhs: &str) -> Result<ParsedI
         }
         other => {
             if let Some(op) = ArithOp::parse(other) {
-                let (lhs, rhs) = parse_reg_pair(args)?;
+                let (regs, operand_ty_text) = args
+                    .split_once(" : ")
+                    .ok_or_else(|| "arith instruction missing operand type".to_string())?;
+                let (lhs, rhs) = parse_reg_pair(regs)?;
+                let operand_ty = parse_type(operand_ty_text.trim(), type_ids)?;
                 return Ok(ParsedInstr::Ready(Instr::Arith {
                     op,
                     dst: as_reg(dst)?,
                     lhs,
                     rhs,
+                    operand_ty,
                     ty,
                 }));
             }
@@ -1423,6 +1436,7 @@ mod tests {
                             dst: 2,
                             lhs: 0,
                             rhs: 1,
+                            operand_ty: 0,
                             ty: 0,
                         },
                         Instr::Call {
@@ -1463,5 +1477,66 @@ mod tests {
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed.to_text(), text);
         assert_eq!(parsed, program);
+    }
+
+    /// An `Arith` whose `operand_ty` (`#bit32`) differs from its result `ty`
+    /// (`#bit8`) must round-trip exactly, printing both.
+    #[test]
+    fn text_round_trips_arith_operand_width() {
+        let program = Program {
+            version: LBC_VERSION.to_string(),
+            target: crate::isa::VM_TARGET.to_string(),
+            types: vec![
+                TypeInfo {
+                    name: "#bit32".to_string(),
+                    size: 4,
+                    is_ref: false,
+                },
+                TypeInfo {
+                    name: "#bit8".to_string(),
+                    size: 1,
+                    is_ref: false,
+                },
+            ],
+            data: Vec::new(),
+            globals: Vec::new(),
+            funcs: vec![Func {
+                name: "main".to_string(),
+                is_extern: false,
+                ins: Vec::new(),
+                outs: Vec::new(),
+                n_regs: 3,
+                slot_bytes: 0,
+                code: vec![
+                    Instr::Const {
+                        dst: 0,
+                        imm: 0xffff_ffff,
+                        ty: 0,
+                    },
+                    Instr::Const {
+                        dst: 1,
+                        imm: 0x1,
+                        ty: 0,
+                    },
+                    Instr::Arith {
+                        op: ArithOp::ILt,
+                        dst: 2,
+                        lhs: 0,
+                        rhs: 1,
+                        operand_ty: 0,
+                        ty: 1,
+                    },
+                    Instr::Return,
+                ],
+                lines: Vec::new(),
+                place_names: Vec::new(),
+            }],
+        };
+        let text = program.to_text();
+        assert!(text.contains(": #bit8 = i.cmp.lt"), "{text}");
+        assert!(text.contains(" : #bit32"), "{text}");
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed, program);
+        assert_eq!(parsed.to_text(), text);
     }
 }
