@@ -119,10 +119,22 @@ word0 = [ op:8 | a:8 | b:8 | c:8 ]        // op = w & 0xFF; a = (w>>8)&0xFF, ...
   - `ext1 = c:u32` (only when a third wide operand exists)
 - **Immediates/pool indices:** a 24-bit field (`w >> 8`) for branch targets and
   constant-pool indices (up to 16M each), which is ample.
-- **Multi-word operations:** `Arith` is two words — word 0 holds
-  `[op][dst][lhs][rhs]`, word 1 holds `[operand_size:8][result_size:8][pad]` —
-  so widths are never looked up at runtime. `Const64` is two words for a 64-bit
-  immediate that is not pooled.
+- **Width-specialized arithmetic, one word.** Each `ArithOp`/`ConvertOp` is
+  encoded as one opcode per width class where the width matters (e.g.
+  `i.add.32`), so arithmetic is a **single word** `[op][dst][lhs][rhs]` and the
+  interpreter matches the opcode directly — no `ArithOp` sub-match and no second
+  type word. Width is chosen at encode time from the type table. Width is
+  encoded only where semantics require it: signed div/mod and signed compares
+  (sign extension), float ops (f32/f64), integer arithmetic result masking
+  (`IAdd`/`ISub`/`IMul`), and `Trunc`. Operations whose operands are
+  zero-extended to their declared width (`Eq`, unsigned compares, unsigned
+  div/mod, `ExtendZero`) need no width class.
+- **Precomputed sizes, not type ids.** Every instruction that today carries a
+  `TypeId` only to look up a size/width (`Copy`, `Load`, `Store`, `Field`,
+  `StoreField`, `Convert`, `Arith`, `Const`) encodes the **precomputed byte
+  size/width** instead. `CodeBuilder` takes the program type table so it can
+  compute them at encode time; the interpreter never looks up a type.
+  `Const64` remains two words for a 64-bit immediate that is not pooled.
 
 Operand **kind** (register vs slot vs immediate) is encoded in the opcode, so no
 per-operand tag bit is needed and operands stay a full byte.
@@ -135,10 +147,11 @@ Flattened, `< 128` base opcodes:
   `CopyBytes`, `Load`, `Store`, `Addr`, `AddrField`, `AddrFunc`, `Field`,
   `StoreField`, `Call`, `CallIndirect`, `CallBuiltin`, `Branch`, `BranchIf`,
   `Return`, `Panic`, `Unreachable`.
-- **Arith:** one opcode per `ArithOp` (`IAdd`, `ISub`, `IMul`, `IDiv`, `IDivU`,
-  `IMod`, `IModU`, `FAdd`, `FSub`, `FMul`, `FDiv`, `FMod`, `Eq`, `ILt`, `ILtU`,
-  `IGt`, `IGtU`, `FLt`, `FGt`).
-- **Convert:** `Trunc`, `ExtendZero`.
+- **Arith/Convert:** one opcode per `(operation, width class)` where the width
+  matters (see §3.1) — `IAdd`/`ISub`/`IMul`/`IDiv`/`IMod`/`ILt`/`IGt`/`Trunc` at
+  widths 8/16/32/64, `FAdd`/`FSub`/`FMul`/`FDiv`/`FMod`/`FLt`/`FGt` at 32/64 —
+  and a single width-free opcode for `IDivU`/`IModU`/`Eq`/`ILtU`/`IGtU`/
+  `ExtendZero`. One word each; the interpreter matches the opcode directly.
 
 The exact opcode table is enumerated in `docs/VM_SPEC.md` at implementation; the
 constraint is `< 128` base opcodes so the wide bit is available.
