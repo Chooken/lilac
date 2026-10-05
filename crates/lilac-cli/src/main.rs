@@ -3,10 +3,13 @@
 
 use lilac_codegen::Backend as _;
 use lilac_driver::{ErrorFormat, Opt, Session, Target};
+use lilac_error::ErrorGuaranteed;
+use lilac_ir::LirModule;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]"
 }
 
 /// Maps the driver's [`Opt`] onto the backend's [`lilac_codegen::OptLevel`].
@@ -46,6 +49,7 @@ struct Common {
     file: String,
     check_only: bool,
     target_set: bool,
+    dump_lir: Option<PathBuf>,
     session: Session,
 }
 
@@ -53,6 +57,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
     let mut file: Option<String> = None;
     let mut check_only = false;
     let mut target_set = false;
+    let mut dump_lir: Option<PathBuf> = None;
     let mut session = Session::new();
     let mut index = 0;
     while index < args.len() {
@@ -106,6 +111,12 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 return Err(ExitCode::from(2));
             }
             session.cache_dir = Some(std::path::PathBuf::from(dir));
+        } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
+            if dir.is_empty() {
+                eprintln!("--dump-lir= needs a path\n{}", usage());
+                return Err(ExitCode::from(2));
+            }
+            dump_lir = Some(PathBuf::from(dir));
         } else if arg.starts_with('-') {
             eprintln!("unknown flag: {arg}\n{}", usage());
             return Err(ExitCode::from(2));
@@ -125,8 +136,49 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         file,
         check_only,
         target_set,
+        dump_lir,
         session,
     })
+}
+
+/// Runs the pipeline, optionally writing one `.lir` file per pass boundary into
+/// `dump_dir` (`<stem>.<stage>.lir`). The driver does no I/O; this CLI helper
+/// owns it. Returns the compile result plus the first dump I/O error, if any —
+/// a dump failure never changes the compile result.
+fn compile_with_dumps(
+    session: &mut Session,
+    file: &str,
+    src: &str,
+    dump_dir: Option<&Path>,
+) -> (Result<LirModule, ErrorGuaranteed>, Option<String>) {
+    let Some(dir) = dump_dir else {
+        return (session.compile_lir(file, src), None);
+    };
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        return (
+            session.compile_lir(file, src),
+            Some(format!(
+                "cannot create LIR dump directory {}: {err}",
+                dir.display()
+            )),
+        );
+    }
+    let stem = Path::new(file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("module")
+        .to_owned();
+    let mut io_error: Option<String> = None;
+    let result = session.compile_lir_with_stages(file, src, &mut |stage, lir| {
+        if io_error.is_some() {
+            return;
+        }
+        let path = dir.join(format!("{stem}.{stage}.lir"));
+        if let Err(err) = std::fs::write(&path, lir.to_text()) {
+            io_error = Some(format!("cannot write LIR dump {}: {err}", path.display()));
+        }
+    });
+    (result, io_error)
 }
 
 fn read_source(path: &str) -> Result<String, ExitCode> {
@@ -146,11 +198,17 @@ fn cmd_check(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let mut session = common.session;
-    let code = match session.compile_source(&common.file, &src) {
+    let (result, dump_err) =
+        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+    let code = match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     };
     eprint!("{}", session.render_diagnostics());
+    if let Some(err) = &dump_err {
+        eprintln!("{err}");
+        return ExitCode::from(1);
+    }
     code
 }
 
@@ -164,14 +222,19 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let mut session = common.session;
-    let Ok(module) = session.compile_lir(&common.file, &src) else {
+    let (result, dump_err) =
+        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+    let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
     };
     eprint!("{}", session.render_diagnostics());
+    if let Some(err) = &dump_err {
+        eprintln!("{err}");
+    }
     let emitted = module.to_text();
     if common.check_only {
-        let snapshot = std::path::Path::new(&common.file).with_extension("lir");
+        let snapshot = Path::new(&common.file).with_extension("lir");
         let Ok(expected) = std::fs::read_to_string(&snapshot) else {
             eprintln!(
                 "cannot read snapshot {}; run emit-ir without --check to generate it",
@@ -186,10 +249,18 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
             );
             return ExitCode::from(1);
         }
-        return ExitCode::SUCCESS;
+        return if dump_err.is_some() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
     }
     print!("{emitted}");
-    ExitCode::SUCCESS
+    if dump_err.is_some() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn cmd_emit_llvm(args: &[String]) -> ExitCode {
@@ -212,11 +283,16 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
     };
     session.target = target;
     let triple = target.to_triple();
-    let Ok(module) = session.compile_lir(&common.file, &src) else {
+    let (result, dump_err) =
+        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+    let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
     };
     eprint!("{}", session.render_diagnostics());
+    if let Some(err) = &dump_err {
+        eprintln!("{err}");
+    }
     let backend = lilac_codegen_llvm::LlvmBackend::new(&triple, opt_level(session.optimize));
     let emitted = match backend.emit_llvm(&module) {
         Ok(emitted) => emitted,
@@ -226,7 +302,7 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
         }
     };
     if common.check_only {
-        let snapshot = std::path::Path::new(&common.file).with_extension("ll");
+        let snapshot = Path::new(&common.file).with_extension("ll");
         let Ok(expected) = std::fs::read_to_string(&snapshot) else {
             eprintln!(
                 "cannot read snapshot {}; run emit-llvm without --check to generate it",
@@ -241,15 +317,23 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
             );
             return ExitCode::from(1);
         }
-        return ExitCode::SUCCESS;
+        return if dump_err.is_some() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
     }
     print!("{emitted}");
-    ExitCode::SUCCESS
+    if dump_err.is_some() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{opt_level, parse_common, ExitCode, Opt};
+    use super::{compile_with_dumps, opt_level, parse_common, ExitCode, Opt, Session};
     use lilac_codegen::OptLevel;
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -331,5 +415,35 @@ mod tests {
             parse_common(&args(&["f.lilac", "--target=foo"]), false).err(),
             Some(ExitCode::from(2))
         );
+    }
+
+    #[test]
+    fn dump_lir_parses_and_rejects_empty() {
+        let with =
+            parse_common(&args(&["f.lilac", "--dump-lir=out/dumps"]), true).expect("valid args");
+        assert_eq!(with.dump_lir, Some(std::path::PathBuf::from("out/dumps")));
+        assert!(parse_common(&args(&["f.lilac", "--dump-lir="]), true).is_err());
+    }
+
+    #[test]
+    fn dump_lir_writes_every_stage() {
+        let dir = std::env::temp_dir().join(format!("lilac-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut session = Session::new();
+        let (result, dump_err) = compile_with_dumps(
+            &mut session,
+            "s.lilac",
+            "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+            Some(&dir),
+        );
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        assert!(dump_err.is_none(), "{dump_err:?}");
+        for stage in ["lower", "fold", "runtime", "final"] {
+            assert!(
+                dir.join(format!("s.{stage}.lir")).exists(),
+                "missing {stage}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

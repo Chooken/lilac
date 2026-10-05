@@ -117,23 +117,44 @@ impl Session {
     /// Runs the full pipeline but returns the AST (`check` entry point;
     /// diagnostics render separately).
     pub fn compile_source(&mut self, name: &str, src: &str) -> Result<Program, ErrorGuaranteed> {
-        let (program, _) = self.run_pipeline(name, src)?;
+        let (program, _) =
+            self.run_pipeline(name, src, &mut |_: &'static str, _: &LirModule| {})?;
         Ok(program)
     }
 
     /// Runs the full pipeline through IR verification, returning the folded
     /// module (`check` runs this too but prints diagnostics only).
     pub fn compile_lir(&mut self, name: &str, src: &str) -> Result<LirModule, ErrorGuaranteed> {
-        let (_, module) = self.run_pipeline(name, src)?;
+        let (_, module) = self.run_pipeline(name, src, &mut |_: &'static str, _: &LirModule| {})?;
+        Ok(module)
+    }
+
+    /// Like [`Session::compile_lir`], but invokes `on_stage` at every pipeline
+    /// boundary with the stage name and the module as it stands there. Stages,
+    /// in order: `lower` (after lowering, **before** const folding), `fold`
+    /// (after folding, before runtime injection), `runtime` (after the
+    /// `.lilac.*` prelude is injected, before DCE), `final` (after pruning and
+    /// verification — the returned module). Used for debugging; the driver does
+    /// no file I/O itself.
+    pub fn compile_lir_with_stages(
+        &mut self,
+        name: &str,
+        src: &str,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        let (_, module) = self.run_pipeline(name, src, on_stage)?;
         Ok(module)
     }
 
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
-    /// `fold` → `verify`. Stops at the first failing pass.
+    /// `fold` → inject runtime → `prune` → `verify`. Stops at the first failing
+    /// pass. `on_stage` fires at each reached boundary (see
+    /// [`Session::compile_lir_with_stages`]).
     fn run_pipeline(
         &mut self,
         name: &str,
         src: &str,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<(Program, LirModule), ErrorGuaranteed> {
         let file = self.source_map.add_file(name, src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -157,15 +178,19 @@ impl Session {
         }
         let triple = self.target.to_triple();
         let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
+        on_stage("lower", &lir);
         lilac_const::fold(&mut lir, &mut self.diags)?;
+        on_stage("fold", &lir);
         let ptr_width = self.target.bit_native_width() / 8;
         lir.funcs
             .extend(lilac_ir::runtime::build_runtime(ptr_width));
+        on_stage("runtime", &lir);
         lilac_ir::prune_unreachable(&mut lir);
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
+        on_stage("final", &lir);
         Ok((program, lir))
     }
 
@@ -424,5 +449,31 @@ mod tests {
                 assert_eq!(stride_lit(&module, name), want, "{triple} in {name}");
             }
         }
+    }
+
+    /// `compile_lir_with_stages` fires the hook at each boundary, in order, and
+    /// the `final` stage is exactly the returned module.
+    #[test]
+    fn stages_hook_fires_in_order() {
+        let mut session = Session::new();
+        let mut texts: Vec<(&'static str, String)> = Vec::new();
+        let module = session
+            .compile_lir_with_stages(
+                "s.lilac",
+                "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+                &mut |stage, lir| texts.push((stage, lir.to_text())),
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let names: Vec<&str> = texts.iter().map(|(stage, _)| *stage).collect();
+        assert_eq!(names, ["lower", "fold", "runtime", "final"]);
+        assert_ne!(
+            texts[0].1, texts[1].1,
+            "const folding must change the module"
+        );
+        assert_eq!(
+            texts[3].1,
+            module.to_text(),
+            "final stage is the returned module"
+        );
     }
 }
