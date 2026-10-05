@@ -204,3 +204,50 @@ fn used_hook_compile_error_is_e031() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E031]"), "stderr:\n{stderr}");
 }
+
+/// By default an unreachable `api` is swept from `export_entry.lilac`.
+#[test]
+fn unexported_function_is_pruned() {
+    let output = lilac()
+        .args(["emit-ir", &ui("export_entry.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf8 IR");
+    assert!(!text.contains("function @api"), "{text}");
+}
+
+/// `--export=api` roots `api`, so it survives reachability pruning.
+#[test]
+fn export_flag_roots_named_function() {
+    let output = lilac()
+        .args(["emit-ir", "--export=api", &ui("export_entry.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf8 IR");
+    assert!(text.contains("function @api"), "{text}");
+}
+
+/// `--export=` with no name is a usage error (exit 2).
+#[test]
+fn empty_export_is_rejected() {
+    let output = lilac()
+        .args(["check", "--export=", &ui("export_entry.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--export= needs a name"),
+        "stderr:\n{stderr}"
+    );
+}

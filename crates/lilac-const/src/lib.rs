@@ -1915,7 +1915,7 @@ mod tests {
         let mut diags = Diags::new();
         assert!(fold(&mut module, &mut diags).is_ok());
         assert!(!diags.has_errors(), "fold must not report E031: {diags:?}");
-        lilac_ir::prune_unreachable(&mut module);
+        lilac_ir::prune_unreachable(&mut module, &std::collections::HashSet::new());
         assert!(
             module.funcs.iter().all(|f| f.name != "dead"),
             "dead function must be pruned"

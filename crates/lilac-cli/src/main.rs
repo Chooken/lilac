@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -120,6 +120,12 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 return Err(ExitCode::from(2));
             }
             dump_lir = Some(PathBuf::from(dir));
+        } else if let Some(name) = arg.strip_prefix("--export=") {
+            if name.is_empty() {
+                eprintln!("--export= needs a name\n{}", usage());
+                return Err(ExitCode::from(2));
+            }
+            session.exports.insert(name.to_owned());
         } else if arg.starts_with('-') {
             eprintln!("unknown flag: {arg}\n{}", usage());
             return Err(ExitCode::from(2));

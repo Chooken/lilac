@@ -276,8 +276,8 @@ panic !msg
 Lowering emits one `@compile_error(live)` marker per `@compile_error(msg)`
 call site. `compile.error` fires only if still live after constant folding and
 global dead-code elimination (`E031`): a marker inside a branch eliminated by
-folding, or inside a function unreachable from `main`, is dropped without
-diagnostic, so verified IR reaching a backend contains no marker
+folding, or inside a function unreachable from `main` or an `--export` root, is
+dropped without diagnostic, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives is a live error, diagnosed after reachability pruning — never
 during verification (reaching the verifier is an internal error). The fold-required

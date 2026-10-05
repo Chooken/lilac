@@ -7,23 +7,31 @@
 //! conservative and infallible: with no `main` it leaves the module untouched.
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTerm};
 
-/// Removes functions unreachable from `main` and data consts nothing names.
+/// Removes functions unreachable from a root and data consts nothing names.
 ///
-/// Roots are every function named `main`. Reachability follows direct `call`
-/// and `addr.func` targets (an address-taken function survives even when it is
+/// Roots are every function named `main` plus every name in `extra_roots`
+/// (build-system export hints). Reachability follows direct `call` and
+/// `addr.func` targets (an address-taken function survives even when it is
 /// never called directly). Data consts survive only when a surviving
 /// instruction names them: a `Const` literal starting with `'!'`, or a `Panic`
 /// message. `layouts` is verifier-only and is left untouched. With no `main`
-/// the pass is a no-op.
-pub fn prune_unreachable(module: &mut LirModule) {
+/// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
+/// even when `main` is absent, so an exported entry point roots a library.
+pub fn prune_unreachable<S: BuildHasher>(module: &mut LirModule, extra_roots: &HashSet<String, S>) {
     let mut visited: HashSet<String> = HashSet::new();
     let mut worklist: Vec<String> = Vec::new();
     for func in &module.funcs {
         if func.name == "main" && visited.insert(func.name.clone()) {
             worklist.push(func.name.clone());
+        }
+    }
+    for root in extra_roots {
+        if visited.insert(root.clone()) {
+            worklist.push(root.clone());
         }
     }
     if worklist.is_empty() {
@@ -170,7 +178,7 @@ mod tests {
     fn sweeps_unreachable_funcs_and_data() {
         // main -> a; b is dead; !c0 is referenced only by b's Const.
         let mut module = module_with(&["main", "a", "b"], &["c0"]);
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["main", "a"]);
         assert!(module.data.iter().all(|d| d.name != "c0"));
@@ -180,7 +188,7 @@ mod tests {
     fn addr_func_target_survives() {
         // main takes `addr.func @only_indirect` but never `call`s it.
         let mut module = module_with(&["main", "only_indirect"], &[]);
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["main", "only_indirect"]);
     }
@@ -189,7 +197,7 @@ mod tests {
     fn no_main_is_a_noop() {
         let mut module = module_with(&["a", "b"], &[]);
         let before = module.funcs.len();
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         assert_eq!(module.funcs.len(), before);
     }
 
@@ -197,7 +205,7 @@ mod tests {
     fn const_reference_retains_data() {
         // main -> a (via `addr.func`); only a names `!c0`.
         let mut module = module_with(&["main", "a"], &["c0"]);
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         assert!(
             module.data.iter().any(|d| d.name == "c0"),
             "a surviving Const must keep its data const"
@@ -213,7 +221,7 @@ mod tests {
             msg: "c0".to_owned(),
             span: Span::dummy(),
         };
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         assert!(
             module.data.iter().any(|d| d.name == "c0"),
             "a surviving Panic must keep its data const"
@@ -224,10 +232,31 @@ mod tests {
     fn data_referenced_only_by_dead_func_is_swept() {
         // main -> a; b is dead and is the only referencer of `!c0`.
         let mut module = module_with(&["main", "a", "b"], &["c0"]);
-        prune_unreachable(&mut module);
+        prune_unreachable(&mut module, &HashSet::new());
         assert!(
             module.data.is_empty(),
             "data referenced only by a swept function must be swept too"
         );
+    }
+
+    #[test]
+    fn extra_root_survives_without_a_call() {
+        // main -> a; b and api are never called, but api is exported.
+        let mut module = module_with(&["main", "a", "b", "api"], &[]);
+        let roots = HashSet::from(["api".to_owned()]);
+        prune_unreachable(&mut module, &roots);
+        let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main", "a", "api"]);
+    }
+
+    #[test]
+    fn extra_root_prunes_without_main() {
+        // No `main`: `api` is exported and roots the module; `dead` is swept.
+        let mut module = module_with(&["api"], &[]);
+        module.funcs.push(func("dead", &[], &[]));
+        let roots = HashSet::from(["api".to_owned()]);
+        prune_unreachable(&mut module, &roots);
+        let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["api"]);
     }
 }

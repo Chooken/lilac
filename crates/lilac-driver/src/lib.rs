@@ -4,6 +4,7 @@
 //! changing the shape: each pass is
 //! `fn run(ctxt: &mut Ctxt, unit: &Unit) -> Result<(), ErrorGuaranteed>`.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -82,6 +83,9 @@ pub struct Session {
     pub cache_dir: Option<PathBuf>,
     /// Warns `W020` on operator shape changes (silenced by `--allow`).
     pub warn_on_operator_type_change: bool,
+    /// Extra reachability roots (`--export=<name>`): functions to keep alive
+    /// even when nothing calls them, so a library can expose entry points.
+    pub exports: HashSet<String>,
 }
 
 impl Default for Session {
@@ -98,6 +102,7 @@ impl Default for Session {
             optimize: OptimizeMode::default(),
             cache_dir: None,
             warn_on_operator_type_change: true,
+            exports: HashSet::new(),
         }
     }
 }
@@ -144,7 +149,8 @@ impl Session {
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
     /// `fold` → inject runtime → `prune` → check live `@compile_error` →
     /// `verify`. Stops at the first failing pass. The live-error check runs
-    /// after `prune` so errors in functions unreachable from `main` are silent.
+    /// after `prune` so errors in functions unreachable from `main` or an
+    /// `--export` root are silent.
     /// `on_stage` fires at each reached boundary (see
     /// [`Session::compile_lir_with_stages`]).
     fn run_pipeline(
@@ -182,7 +188,7 @@ impl Session {
         lir.funcs
             .extend(lilac_ir::runtime::build_runtime(ptr_width));
         on_stage("runtime", &lir);
-        lilac_ir::prune_unreachable(&mut lir);
+        lilac_ir::prune_unreachable(&mut lir, &self.exports);
         lilac_const::check_live_compile_errors(&lir, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
@@ -504,5 +510,40 @@ mod tests {
             "{}",
             session.render_diagnostics()
         );
+    }
+
+    /// An `--export`ed function roots the module: a `@compile_error` in a
+    /// function nothing calls still reports `E031`.
+    #[test]
+    fn exported_compile_error_is_e031() {
+        let mut session = Session::new();
+        session.exports.insert("api".to_owned());
+        let result = session.compile_lir(
+            "api.lilac",
+            "api: function () nothing {\n    @compile_error(\"api\")\n}\n\nmain: function () nothing {\n}\n",
+        );
+        assert!(result.is_err());
+        assert!(
+            session.render_diagnostics().contains("error[E031]"),
+            "{}",
+            session.render_diagnostics()
+        );
+    }
+
+    /// An `--export` root prunes unexported functions even with no `main`, so a
+    /// library keeps exactly its exported entry points.
+    #[test]
+    fn export_roots_without_main_prune_others() {
+        let mut session = Session::new();
+        session.exports.insert("api".to_owned());
+        let module = session
+            .compile_lir(
+                "lib.lilac",
+                "api: function () nothing {\n}\n\ndead: function () nothing {\n}\n",
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
+        assert!(names.contains(&"api"), "{names:?}");
+        assert!(!names.contains(&"dead"), "{names:?}");
     }
 }

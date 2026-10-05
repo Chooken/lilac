@@ -628,8 +628,11 @@ overloads, no calling-convention annotations in v1.
 ### export (reserved)
 
 The dual direction — foreign code calling into Lilac (thread entry points,
-callbacks) — needs exported symbols. `export` is reserved for this and
-unspecified in v1; nothing in the current spec requires it.
+callbacks) — needs exported symbols. The `export` keyword is reserved for this
+and unspecified in v1. Until it lands, `--export=<name>` on the CLI (repeatable)
+seeds the reachability roots alongside `main`, so a named function is kept alive
+even when nothing calls it; it does not change the ABI or emit a C-callable
+symbol.
 
 ### Async lives in the standard library
 
