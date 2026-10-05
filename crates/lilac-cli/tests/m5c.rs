@@ -1,0 +1,78 @@
+//! M5c UI tests: `emit-vm` compiles to the VM target and emits canonical `.lbc`
+//! text; the snapshot is byte-stable under `--check`, and a non-VM target is a
+//! usage error (exit 2).
+
+use std::process::{Command, ExitStatus};
+
+fn lilac() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_lilac"))
+}
+
+/// Captures one `lilac` invocation the way the M2/M4 tests do, decoding stdout
+/// as UTF-8 so it can be compared byte-for-byte against a `.lbc` snapshot.
+struct Run {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run<const N: usize>(args: [&str; N]) -> Run {
+    let output = lilac().args(args).output().expect("runs lilac");
+    Run {
+        status: output.status,
+        stdout: String::from_utf8(output.stdout).expect("utf8 stdout"),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+const SOURCE: &str = "../../tests/ui/vm_hello.lilac";
+const SNAPSHOT: &str = "../../tests/ui/vm_hello.lbc";
+
+#[test]
+fn emit_vm_matches_snapshot() {
+    let out = run(["emit-vm", SOURCE]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+    let expected = std::fs::read_to_string(SNAPSHOT).expect("snapshot");
+    assert_eq!(out.stdout, expected);
+}
+
+#[test]
+fn emit_vm_check_passes_on_committed_snapshot() {
+    let out = run(["emit-vm", "--check", SOURCE]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+}
+
+#[test]
+fn emit_vm_check_detects_drift() {
+    let dir = std::env::temp_dir().join(format!("lilac-m5c-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("creates scratch dir");
+    let source = dir.join("vm_hello.lilac");
+    std::fs::write(
+        &source,
+        "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+    )
+    .expect("writes source");
+    std::fs::write(dir.join("vm_hello.lbc"), "lbc = \"0.9\"\n").expect("writes stale snapshot");
+
+    let source = source.to_str().expect("utf8 path");
+    let out = run(["emit-vm", "--check", source]);
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{}", out.stderr);
+    assert!(
+        out.stderr.contains("match emit-vm output"),
+        "stderr:\n{}",
+        out.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn emit_vm_rejects_non_vm_target() {
+    let out = run(["emit-vm", SOURCE, "--target=x86_64-unknown-none"]);
+    assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
+    assert!(
+        out.stderr.contains("emit-vm requires a VM target"),
+        "stderr:\n{}",
+        out.stderr
+    );
+}

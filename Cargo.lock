@@ -87,6 +87,7 @@ dependencies = [
  "lilac-error",
  "lilac-ir",
  "lilac-span",
+ "lilac-vm",
 ]
 
 [[package]]
@@ -244,6 +245,7 @@ dependencies = [
 name = "lilac-vm"
 version = "0.2.0"
 dependencies = [
+ "lilac-codegen",
  "lilac-driver",
  "lilac-error",
  "lilac-ir",

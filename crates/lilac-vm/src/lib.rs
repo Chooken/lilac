@@ -5,10 +5,12 @@
 //! ([`codec`]), and (in later tasks) the LIR compiler, interpreter, debugger,
 //! and standalone runner. It never links LLVM.
 
+pub mod backend;
 pub mod codec;
 pub mod compile;
 pub mod exec;
 pub mod isa;
+pub use backend::{run_lbc, VmBackend};
 pub use compile::compile;
 pub use exec::{FrameInfo, Machine, Step, VmError};
 pub use isa::*;

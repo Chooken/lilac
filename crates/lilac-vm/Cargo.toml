@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+lilac-codegen = { path = "../lilac-codegen" }
 lilac-error = { path = "../lilac-error" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-span = { path = "../lilac-span" }

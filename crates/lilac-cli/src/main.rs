@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
+        "emit-vm" => cmd_emit_vm(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
@@ -322,6 +323,86 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
         if expected != emitted {
             eprintln!(
                 "expected {} to match emit-llvm output; re-run without --check to refresh it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        }
+        return if dump_err.is_some() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+    print!("{emitted}");
+    if dump_err.is_some() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Emits canonical `.lbc` text for the VM target, or checks it with `--check`.
+///
+/// Unlike `emit-ir`/`emit-llvm`, `emit-vm` defaults to the canonical VM target
+/// (`lilacvm-unknown-none`) when no `--target=` is given; an explicit non-VM
+/// target is a usage error (exit 2), matching `emit-llvm`'s refusal of a VM
+/// target.
+fn cmd_emit_vm(args: &[String]) -> ExitCode {
+    let common = match parse_common(args, true) {
+        Ok(common) => common,
+        Err(code) => return code,
+    };
+    let src = match read_source(&common.file) {
+        Ok(src) => src,
+        Err(code) => return code,
+    };
+    let mut session = common.session;
+    if common.target_set {
+        if !session.target.is_vm() {
+            eprintln!(
+                "emit-vm requires a VM target (got `{}`)",
+                session.target.to_triple()
+            );
+            return ExitCode::from(2);
+        }
+    } else {
+        session.target = match Target::parse(lilac_vm::VM_TARGET) {
+            Ok(target) => target,
+            Err(err) => {
+                eprintln!("internal error: cannot construct the VM target: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    }
+    let (result, dump_err) =
+        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+    let Ok(module) = result else {
+        eprint!("{}", session.render_diagnostics());
+        return ExitCode::from(1);
+    };
+    eprint!("{}", session.render_diagnostics());
+    if let Some(err) = &dump_err {
+        eprintln!("{err}");
+    }
+    let emitted = match lilac_vm::VmBackend.emit_bytecode(&module, &session.source_map) {
+        Ok(emitted) => emitted,
+        Err(err) => {
+            eprintln!("internal error: VM codegen failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if common.check_only {
+        let snapshot = Path::new(&common.file).with_extension("lbc");
+        let Ok(expected) = std::fs::read_to_string(&snapshot) else {
+            eprintln!(
+                "cannot read snapshot {}; run emit-vm without --check to generate it",
+                snapshot.display()
+            );
+            return ExitCode::from(1);
+        };
+        if expected != emitted {
+            eprintln!(
+                "expected {} to match emit-vm output; re-run without --check to refresh it",
                 snapshot.display()
             );
             return ExitCode::from(1);

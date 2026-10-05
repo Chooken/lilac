@@ -3,5 +3,7 @@
 
 # IR snapshots are compared byte-for-byte by `emit-ir`/`emit-llvm --check`; pin
 # LF so a Windows checkout (core.autocrlf=true) does not rewrite them to CRLF.
+# Bytecode snapshots are compared the same way by `emit-vm --check`.
 *.lir text eol=lf
 *.ll text eol=lf
+*.lbc text eol=lf
