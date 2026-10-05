@@ -2,7 +2,7 @@
 //! per milestone).
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{ErrorFormat, Opt, Session};
+use lilac_driver::{ErrorFormat, Opt, Session, Target};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
@@ -66,9 +66,17 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                     return Err(ExitCode::from(2));
                 }
             }
-        } else if let Some(triple) = arg.strip_prefix("--target=") {
-            triple.clone_into(&mut session.target.triple);
-            target_set = true;
+        } else if let Some(value) = arg.strip_prefix("--target=") {
+            match Target::parse(value) {
+                Ok(target) => {
+                    session.target = target;
+                    target_set = true;
+                }
+                Err(err) => {
+                    eprintln!("invalid --target={value}: {err}");
+                    return Err(ExitCode::from(2));
+                }
+            }
         } else if *arg == "--verbose" {
             session.opts.verbose = true;
         } else if *arg == "--allow" {
@@ -197,12 +205,13 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
     // Unlike `check`/`emit-ir`, `emit-llvm` defaults to the real host so the IR
     // data layout matches the machine it will run on. An explicit `--target=`
     // still wins.
-    let triple = if common.target_set {
-        session.target.triple.clone()
+    let target = if common.target_set {
+        session.target
     } else {
-        session.host.triple.clone()
+        session.host
     };
-    session.target.triple.clone_from(&triple);
+    session.target = target;
+    let triple = target.to_triple();
     let Ok(module) = session.compile_lir(&common.file, &src) else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
@@ -249,7 +258,8 @@ mod tests {
 
     #[test]
     fn target_set_tracks_explicit_target() {
-        let with = parse_common(&args(&["--target=foo", "f.lilac"]), true).expect("valid args");
+        let with = parse_common(&args(&["--target=x86_64-pc-windows-msvc", "f.lilac"]), true)
+            .expect("valid args");
         assert!(with.target_set);
         let without = parse_common(&args(&["f.lilac"]), true).expect("valid args");
         assert!(!without.target_set);
@@ -303,11 +313,20 @@ mod tests {
 
     #[test]
     fn target_flag_overrides_target_not_host() {
-        let common = parse_common(&args(&["f.lilac", "--target=foo"]), false).expect("valid args");
-        assert_eq!(common.session.target.triple, "foo");
+        let common = parse_common(
+            &args(&["f.lilac", "--target=x86_64-pc-windows-msvc"]),
+            false,
+        )
+        .expect("valid args");
+        assert_eq!(common.session.target.to_triple(), "x86_64-pc-windows-msvc");
         assert_eq!(
-            common.session.host.triple,
-            lilac_driver::Target::host().triple
+            common.session.host.to_triple(),
+            lilac_driver::Target::host().to_triple()
         );
+    }
+
+    #[test]
+    fn unknown_target_is_rejected() {
+        assert!(parse_common(&args(&["f.lilac", "--target=foo"]), false).is_err());
     }
 }

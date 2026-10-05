@@ -14,59 +14,7 @@ use lilac_lex::Lexer;
 use lilac_parse::Parser;
 use lilac_span::SourceMap;
 
-/// Compile target (fixes `@bit_native` width; host-vs-target split matters from M4).
-#[derive(Clone, Debug)]
-pub struct Target {
-    /// Target triple, e.g. `x86_64-unknown-none`.
-    pub triple: String,
-}
-
-impl Target {
-    /// Builds a target triple from a `std::env::consts` arch/os pair.
-    #[must_use]
-    pub fn from_arch_os(arch: &str, os: &str) -> Self {
-        let triple = match os {
-            "windows" => format!("{arch}-pc-windows-msvc"),
-            "linux" => format!("{arch}-unknown-linux-gnu"),
-            "macos" => format!("{arch}-apple-darwin"),
-            _ => "unknown-unknown-unknown".to_owned(),
-        };
-        Self { triple }
-    }
-
-    /// Native build host.
-    #[must_use]
-    pub fn host() -> Self {
-        Self::from_arch_os(std::env::consts::ARCH, std::env::consts::OS)
-    }
-
-    /// `@bit_native` width in bits.
-    ///
-    /// Delegates to [`lilac_ir::is_64_bit_triple`] so the width baked into the
-    /// injected `format_args` piece stride always matches the backend's
-    /// `#byte_buffer` layout. Do not re-derive the rule locally.
-    #[must_use]
-    pub fn bit_native_width(&self) -> u32 {
-        if lilac_ir::is_64_bit_triple(&self.triple) {
-            64
-        } else {
-            32
-        }
-    }
-}
-
-impl Default for Target {
-    /// Canonical bare-metal default target (`x86_64-unknown-none`).
-    ///
-    /// Deliberately independent of the host so default `emit-ir` output is
-    /// stable across build machines; `--target=` overrides it, `host` tracks
-    /// the real build host.
-    fn default() -> Self {
-        Self {
-            triple: "x86_64-unknown-none".to_owned(),
-        }
-    }
-}
+pub use lilac_target::Target;
 
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -207,7 +155,7 @@ impl Session {
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
-        let triple = self.target.triple.clone();
+        let triple = self.target.to_triple();
         let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
         lilac_const::fold(&mut lir, &mut self.diags)?;
         let ptr_width = self.target.bit_native_width() / 8;
@@ -422,29 +370,14 @@ mod tests {
     }
 
     #[test]
-    fn target_maps_arch_and_os() {
-        let win = Target::from_arch_os("x86_64", "windows");
-        assert_eq!(win.triple, "x86_64-pc-windows-msvc");
-        assert_eq!(win.bit_native_width(), 64);
-
-        let linux32 = Target::from_arch_os("x86", "linux");
-        assert_eq!(linux32.triple, "x86-unknown-linux-gnu");
-        assert_eq!(linux32.bit_native_width(), 32);
-
-        let mac = Target::from_arch_os("aarch64", "macos");
-        assert_eq!(mac.triple, "aarch64-apple-darwin");
-        assert_eq!(mac.bit_native_width(), 64);
-
-        // 64-bit arches that are neither `x86_64` nor `aarch64` must still be
-        // 64-bit; this is the driver half of the width rule the backend shares.
-        let riscv64 = Target {
-            triple: "riscv64-unknown-none".to_owned(),
-        };
-        assert_eq!(riscv64.bit_native_width(), 64);
-        let riscv32 = Target {
-            triple: "riscv32-unknown-none".to_owned(),
-        };
-        assert_eq!(riscv32.bit_native_width(), 32);
+    fn target_host_and_parse_round_trip() {
+        assert!(!Target::host().to_triple().is_empty());
+        assert_eq!(
+            Target::parse("x86_64-pc-windows-msvc")
+                .expect("valid")
+                .bit_native_width(),
+            64
+        );
     }
 
     /// Returns the `stride` constant literal baked into a `format_args` runtime
@@ -480,9 +413,7 @@ mod tests {
             ("riscv32-unknown-none", "0x8"),
         ] {
             let mut session = Session::new();
-            session.target = Target {
-                triple: triple.to_owned(),
-            };
+            session.target = Target::parse(triple).expect("valid triple");
             let module = session
                 .compile_lir(
                     "fs.lilac",

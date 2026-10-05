@@ -130,6 +130,7 @@ dependencies = [
  "lilac-parse",
  "lilac-resolve",
  "lilac-span",
+ "lilac-target",
  "lilac-ty",
  "lilac-typeck",
 ]
