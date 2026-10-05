@@ -17,6 +17,13 @@ pub const VM_TARGET: &str = "lilacvm-unknown-none";
 /// Pointer width in bytes on the VM (all VM pointers are 64-bit).
 pub const VM_POINTER_BYTES: u32 = 8;
 
+/// Maximum size of the globals arena, in bytes.
+///
+/// The verifier and text parser reject a data layout whose implied arena
+/// exceeds this bound, so an untrusted `global_off` cannot request an
+/// arbitrarily large zero-fill.
+pub(crate) const MAX_GLOBALS_BYTES: u32 = 64 * 1024 * 1024;
+
 /// Index into a [`Program`]'s type table.
 pub type TypeId = u32;
 
@@ -473,6 +480,10 @@ pub struct Program {
     /// Data constants.
     pub data: Vec<Data>,
     /// Concatenated data bytes; references index into this arena.
+    ///
+    /// Canonical form: this must equal the arena implied by the [`Data`]
+    /// offsets (each entry's bytes placed at its `global_off`, with any gaps
+    /// zero-filled). [`verify`] rejects any program that violates this.
     pub globals: Vec<u8>,
     /// Functions.
     pub funcs: Vec<Func>,
@@ -512,18 +523,41 @@ pub fn verify(program: &Program) -> Result<(), String> {
             return Err(format!("duplicate function name `{}`", func.name));
         }
     }
-    for (index, data) in program.data.iter().enumerate() {
-        let end = (data.global_off as usize)
-            .checked_add(data.bytes.len())
-            .ok_or_else(|| format!("data !c{index} offset overflow"))?;
-        if end > program.globals.len() {
-            return Err(format!("data !c{index} extends past the globals arena"));
-        }
+    if derive_globals(&program.data)? != program.globals {
+        return Err("globals arena does not match the data constants".to_string());
     }
     for func in &program.funcs {
         verify_func(program, func)?;
     }
     Ok(())
+}
+
+/// Reconstructs the globals arena implied by the data-constant offsets.
+///
+/// Each entry's bytes are placed at its `global_off`; gaps are zero-filled.
+/// All offset/extent arithmetic is validated with checked adds and against
+/// [`MAX_GLOBALS_BYTES`] *before* any allocation, so an untrusted offset can
+/// only produce an error, never an oversized zero-fill.
+pub(crate) fn derive_globals(data: &[Data]) -> Result<Vec<u8>, String> {
+    let mut end = 0_usize;
+    for (index, entry) in data.iter().enumerate() {
+        let start = entry.global_off as usize;
+        let stop = start
+            .checked_add(entry.bytes.len())
+            .ok_or_else(|| format!("data !c{index} offset overflow"))?;
+        end = end.max(stop);
+    }
+    if end > MAX_GLOBALS_BYTES as usize {
+        return Err(format!(
+            "globals arena of {end} bytes exceeds the {MAX_GLOBALS_BYTES}-byte limit"
+        ));
+    }
+    let mut globals = vec![0_u8; end];
+    for entry in data {
+        let start = entry.global_off as usize;
+        globals[start..start + entry.bytes.len()].copy_from_slice(&entry.bytes);
+    }
+    Ok(globals)
 }
 
 /// Verifies one function.
@@ -871,6 +905,33 @@ mod tests {
     #[test]
     fn verifier_accepts_sample() {
         let program = sample_program(vec![Instr::Return]);
+        assert!(verify(&program).is_ok());
+    }
+
+    #[test]
+    fn verifier_rejects_nonconforming_globals() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.data = vec![Data {
+            bytes: b"hi".to_vec(),
+            global_off: 0,
+        }];
+        program.globals = b"hi".to_vec();
+        assert!(verify(&program).is_ok());
+
+        // A trailing arena byte is not implied by the data.
+        program.globals.push(0);
+        assert!(verify(&program).is_err());
+
+        // A gap byte holding the wrong value is not implied by the data.
+        program.globals = b"xi".to_vec();
+        assert!(verify(&program).is_err());
+
+        // A zero gap before a data entry is implied.
+        program.globals = vec![0, b'h', b'i'];
+        program.data = vec![Data {
+            bytes: b"hi".to_vec(),
+            global_off: 1,
+        }];
         assert!(verify(&program).is_ok());
     }
 }

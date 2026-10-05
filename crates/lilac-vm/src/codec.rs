@@ -131,7 +131,7 @@ impl Program {
             version,
             target,
             types,
-            globals: derive_globals(&data),
+            globals: crate::isa::derive_globals(&data)?,
             data,
             funcs,
         };
@@ -490,21 +490,6 @@ fn resolve_func_refs(funcs: &mut [Func], func_refs: &[Vec<PendingFuncRef>]) -> R
         }
     }
     Ok(())
-}
-
-/// Reconstructs the globals arena from data-constant offsets.
-fn derive_globals(data: &[Data]) -> Vec<u8> {
-    let end = data
-        .iter()
-        .map(|entry| (entry.global_off as usize).saturating_add(entry.bytes.len()))
-        .max()
-        .unwrap_or(0);
-    let mut globals = vec![0_u8; end];
-    for entry in data {
-        let off = entry.global_off as usize;
-        globals[off..off + entry.bytes.len()].copy_from_slice(&entry.bytes);
-    }
-    globals
 }
 
 /// Parses a `key = "value"` header assignment.
@@ -1305,6 +1290,32 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_version() {
         let text = "lbc = \"9.9\"\ntarget = \"lilacvm-unknown-none\"\n";
+        assert!(Program::parse_text(text).is_err());
+    }
+
+    #[test]
+    fn text_round_trips_two_data_entries() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.data = vec![
+            Data {
+                bytes: b"hi".to_vec(),
+                global_off: 0,
+            },
+            Data {
+                bytes: b"5.25".to_vec(),
+                global_off: 2,
+            },
+        ];
+        program.globals = b"hi5.25".to_vec();
+        let text = program.to_text();
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed, program);
+    }
+
+    #[test]
+    fn parse_rejects_enormous_data_offset() {
+        let text =
+            "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\ndata !c0 = \"hi\" @ 0xffffffff\n";
         assert!(Program::parse_text(text).is_err());
     }
 
