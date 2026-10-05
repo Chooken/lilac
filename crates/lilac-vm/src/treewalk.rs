@@ -1,22 +1,25 @@
 //! Bench-only tree-walking baseline interpreter.
 //!
 //! This module is a deliberately **naive, correctness-first** interpreter over
-//! the same bytecode [`Program`] the optimized [`crate::Machine`] runs. It
+//! the same compact `u32` word stream the optimized [`crate::Machine`] runs. It
 //! exists only to give the benchmark a stable reference point: the VM must be
 //! at least 3× faster than this baseline on every suite entry. It is never
 //! compiled into a shipped build — the module is gated behind the
 //! `bench-baseline` feature.
 //!
-//! Where [`crate::Machine`] keeps registers in one dense `Vec`, views memory as
-//! a single contiguous byte arena, and dispatches over a flat instruction
-//! array, this baseline mirrors `lilac-const`'s tree-walking evaluator:
+//! Where [`crate::Machine`] keeps hot state in locals and dispatches over a flat
+//! instruction array inside one inner loop, this baseline walks the code **a
+//! block at a time**, re-deriving block bounds and decoding every instruction
+//! through [`decode`]. It recurses for calls and marshals arguments/results
+//! through owned `Vec<u8>` buffers, so it is still a tree-walker rather than a
+//! bytecode dispatch loop.
 //!
-//! * every frame's registers live in a fresh `HashMap`;
-//! * a `ref` is a byte address into a sparse `HashMap<u64, u8>` memory model
-//!   (no flat arena, so aggregate copies are per-byte map operations);
-//! * calls resolve by name, recurse instead of using a flat call stack, and
-//!   marshal arguments/results through owned `Vec<u8>` buffers;
-//! * the code is walked a block at a time, re-deriving block bounds on entry.
+//! Its execution representation, however, is the same reasonable one the VM
+//! uses (spec §8): per-frame registers live in a `Vec<u64>`, and memory is one
+//! contiguous byte arena (globals followed by each frame's zeroed slot region)
+//! with `ref`s as byte offsets. Earlier revisions used a per-frame `HashMap` and
+//! a sparse `HashMap<u64, u8>` memory model, which made the baseline
+//! pathologically slow and the ≥3× gate trivial; this is the fair reference.
 //!
 //! The semantics match [`crate::Machine`] exactly (including the indirect
 //! object-base flag, little-endian access, and the `Arith.operand_ty` width
@@ -84,10 +87,9 @@ struct Interp<'a> {
     program: &'a Program,
     /// Functions by name (recursive resolution is a map lookup on every call).
     funcs: HashMap<&'a str, u32>,
-    /// Sparse little-endian memory: address to byte, absent bytes read as zero.
-    memory: HashMap<u64, u8>,
-    /// Next never-used memory address (frames bump this, never reclaim).
-    bump: u64,
+    /// One contiguous little-endian arena: globals followed by each frame's
+    /// zeroed slot region. A `ref` is a byte offset into it.
+    memory: Vec<u8>,
 }
 
 impl<'a> Interp<'a> {
@@ -103,16 +105,13 @@ impl<'a> Interp<'a> {
                     .map(|index| (func.name.as_str(), index))
             })
             .collect();
-        let mut memory = HashMap::new();
-        for (offset, &byte) in program.globals.iter().enumerate() {
-            memory.insert(offset as u64, byte);
-        }
-        let bump = program.globals.len() as u64;
+        // The arena starts with the globals, so a data constant's `global_off`
+        // is directly a valid ref (matching the VM).
+        let memory = program.globals.clone();
         Self {
             program,
             funcs,
             memory,
-            bump,
         }
     }
 
@@ -124,10 +123,13 @@ impl<'a> Interp<'a> {
             .ok_or_else(|| format!("no entry point `{name}`"))
     }
 
-    /// Reserves `size` fresh, zero-initialised bytes and returns their base.
+    /// Appends `size` fresh, zero-initialised bytes to the arena and returns
+    /// their base offset.
     fn alloc(&mut self, size: u64) -> u64 {
-        let base = self.bump;
-        self.bump += size;
+        let base = self.memory.len() as u64;
+        let owned = usize::try_from(size).unwrap_or(usize::MAX);
+        let end = self.memory.len().saturating_add(owned);
+        self.memory.resize(end, 0);
         base
     }
 
@@ -158,7 +160,7 @@ impl<'a> Interp<'a> {
             self.write_bytes(slot_base + u64::from(off), arg);
         }
 
-        let mut regs: HashMap<u32, u64> = HashMap::new();
+        let mut regs = vec![0_u64; usize::try_from(func.n_regs).unwrap_or(0)];
         let labels: Vec<u32> = func.labels().into_iter().collect();
         let code_len = u32::try_from(func.code.len()).map_err(|_| "function too large")?;
         let mut pc = 0_u32;
@@ -180,7 +182,7 @@ impl<'a> Interp<'a> {
         start: u32,
         labels: &[u32],
         code_len: u32,
-        regs: &mut HashMap<u32, u64>,
+        regs: &mut [u64],
         slot_base: u64,
     ) -> Result<Flow, String> {
         let end = labels
@@ -206,22 +208,22 @@ impl<'a> Interp<'a> {
     fn exec_instr(
         &mut self,
         instr: &Decoded<'a>,
-        regs: &mut HashMap<u32, u64>,
+        regs: &mut [u64],
         slot_base: u64,
         caller: &'a Func,
     ) -> Result<Option<Flow>, String> {
         let program = self.program;
         if let Some((op, dst, lhs, rhs, width)) = arith_parts(instr) {
             let size = u32::from(width) / 8;
-            let left = regs.get(&lhs).copied().unwrap_or(0);
-            let right = regs.get(&rhs).copied().unwrap_or(0);
+            let left = get_reg(regs, lhs);
+            let right = get_reg(regs, rhs);
             let value = eval_arith(op, left, right, size);
-            regs.insert(dst, value & mask(size));
+            set_reg(regs, dst, value & mask(size));
             return Ok(None);
         }
         match instr {
             Decoded::Const { dst, imm } => {
-                regs.insert(*dst, *imm);
+                set_reg(regs, *dst, *imm);
                 Ok(None)
             }
             Decoded::ConstData { dst, data } => {
@@ -229,7 +231,7 @@ impl<'a> Interp<'a> {
                     .data
                     .get(*data as usize)
                     .map_or(0, |entry| u64::from(entry.global_off));
-                regs.insert(*dst, off);
+                set_reg(regs, *dst, off);
                 Ok(None)
             }
             Decoded::Copy { dst, src, size } => {
@@ -255,7 +257,7 @@ impl<'a> Interp<'a> {
                 } else {
                     ref_off
                 };
-                regs.insert(*dst, value);
+                set_reg(regs, *dst, value);
                 Ok(None)
             }
             Decoded::Store { src, dst, size } => {
@@ -269,7 +271,7 @@ impl<'a> Interp<'a> {
                 Ok(None)
             }
             Decoded::Addr { dst, place } => {
-                regs.insert(*dst, slot_base + u64::from(*place));
+                set_reg(regs, *dst, slot_base + u64::from(*place));
                 Ok(None)
             }
             Decoded::AddrField {
@@ -279,11 +281,11 @@ impl<'a> Interp<'a> {
                 indirect,
             } => {
                 let base = self.field_base(slot_base, *place, *indirect);
-                regs.insert(*dst, base + u64::from(*off));
+                set_reg(regs, *dst, base + u64::from(*off));
                 Ok(None)
             }
             Decoded::AddrFunc { dst, func } => {
-                regs.insert(*dst, FUNC_TAG | u64::from(*func));
+                set_reg(regs, *dst, FUNC_TAG | u64::from(*func));
                 Ok(None)
             }
             Decoded::Field {
@@ -300,7 +302,7 @@ impl<'a> Interp<'a> {
                 } else {
                     address
                 };
-                regs.insert(*dst, value);
+                set_reg(regs, *dst, value);
                 Ok(None)
             }
             Decoded::StoreField {
@@ -321,13 +323,13 @@ impl<'a> Interp<'a> {
                 Ok(None)
             }
             Decoded::Trunc { dst, src, width } => {
-                let value = regs.get(src).copied().unwrap_or(0);
-                regs.insert(*dst, value & mask(u32::from(*width) / 8));
+                let value = get_reg(regs, *src);
+                set_reg(regs, *dst, value & mask(u32::from(*width) / 8));
                 Ok(None)
             }
             Decoded::ExtendZero { dst, src } => {
-                let value = regs.get(src).copied().unwrap_or(0);
-                regs.insert(*dst, value);
+                let value = get_reg(regs, *src);
+                set_reg(regs, *dst, value);
                 Ok(None)
             }
             Decoded::Call { site, ins, outs } => self.call(site.func, ins, outs, regs, slot_base),
@@ -337,7 +339,7 @@ impl<'a> Interp<'a> {
                 ins,
                 outs,
             } => {
-                let value = regs.get(callee).copied().unwrap_or(0);
+                let value = get_reg(regs, *callee);
                 if value & FUNC_TAG == 0 {
                     return Err(format!("invalid function reference {value}"));
                 }
@@ -350,7 +352,7 @@ impl<'a> Interp<'a> {
             } => self.call_builtin(*builtin, ins, outs, regs, slot_base),
             Decoded::Branch { target } => Ok(Some(Flow::Goto(*target))),
             Decoded::BranchIf { cond, then, els } => {
-                let value = regs.get(cond).copied().unwrap_or(0);
+                let value = get_reg(regs, *cond);
                 Ok(Some(Flow::Goto(if value == 0 { *els } else { *then })))
             }
             Decoded::Return => Ok(Some(Flow::Return)),
@@ -366,6 +368,8 @@ impl<'a> Interp<'a> {
                 "executed an `unreachable` terminator in `{}`",
                 caller.name
             )),
+            // Every arithmetic/comparison variant is handled by `arith_parts`
+            // above; this arm only satisfies exhaustiveness.
             _ => Err("unexpected decoded instruction".to_string()),
         }
     }
@@ -376,7 +380,7 @@ impl<'a> Interp<'a> {
         target: u32,
         ins: &[Operand],
         outs: &[Operand],
-        regs: &HashMap<u32, u64>,
+        regs: &[u64],
         slot_base: u64,
     ) -> Result<Option<Flow>, String> {
         let program = self.program;
@@ -397,7 +401,7 @@ impl<'a> Interp<'a> {
         for operand in outs {
             let addr = match operand {
                 Operand::Slot(off) => slot_base + u64::from(*off),
-                Operand::Reg(reg) => regs.get(reg).copied().unwrap_or(0),
+                Operand::Reg(reg) => get_reg(regs, *reg),
             };
             out_refs.push(addr);
         }
@@ -413,7 +417,7 @@ impl<'a> Interp<'a> {
         builtin: Builtin,
         ins: &[Operand],
         outs: &[Operand],
-        regs: &HashMap<u32, u64>,
+        regs: &[u64],
         slot_base: u64,
     ) -> Result<Option<Flow>, String> {
         match builtin {
@@ -454,14 +458,14 @@ impl<'a> Interp<'a> {
     /// Copies an aggregate operand's bytes to an absolute address.
     fn copy_operand_bytes(
         &mut self,
-        regs: &HashMap<u32, u64>,
+        regs: &[u64],
         slot_base: u64,
         operand: Operand,
         dst_abs: u64,
         size: u32,
     ) {
         let src_abs = match operand {
-            Operand::Reg(reg) => regs.get(&reg).copied().unwrap_or(0),
+            Operand::Reg(reg) => get_reg(regs, reg),
             Operand::Slot(off) => slot_base + u64::from(off),
         };
         let bytes = self.read_bytes(src_abs, size);
@@ -471,7 +475,7 @@ impl<'a> Interp<'a> {
     /// Copies an aggregate value for a `Copy` instruction.
     fn copy_aggregate(
         &mut self,
-        regs: &mut HashMap<u32, u64>,
+        regs: &mut [u64],
         slot_base: u64,
         dst: Operand,
         src: Operand,
@@ -479,35 +483,29 @@ impl<'a> Interp<'a> {
     ) {
         match (dst, src) {
             (Operand::Slot(dst_off), Operand::Reg(src_reg)) => {
-                let src_abs = regs.get(&src_reg).copied().unwrap_or(0);
+                let src_abs = get_reg(regs, src_reg);
                 let bytes = self.read_bytes(src_abs, size);
                 self.write_bytes(slot_base + u64::from(dst_off), &bytes);
             }
             (Operand::Reg(dst_reg), Operand::Slot(src_off)) => {
-                regs.insert(dst_reg, slot_base + u64::from(src_off));
+                set_reg(regs, dst_reg, slot_base + u64::from(src_off));
             }
             (Operand::Slot(dst_off), Operand::Slot(src_off)) => {
                 let bytes = self.read_bytes(slot_base + u64::from(src_off), size);
                 self.write_bytes(slot_base + u64::from(dst_off), &bytes);
             }
             (Operand::Reg(dst_reg), Operand::Reg(src_reg)) => {
-                let value = regs.get(&src_reg).copied().unwrap_or(0);
-                regs.insert(dst_reg, value);
+                let value = get_reg(regs, src_reg);
+                set_reg(regs, dst_reg, value);
             }
         }
     }
 
     /// Reads an operand as a fresh byte buffer.
-    fn operand_bytes(
-        &self,
-        regs: &HashMap<u32, u64>,
-        slot_base: u64,
-        operand: Operand,
-        size: u32,
-    ) -> Vec<u8> {
+    fn operand_bytes(&self, regs: &[u64], slot_base: u64, operand: Operand, size: u32) -> Vec<u8> {
         match operand {
             Operand::Reg(reg) => {
-                let value = regs.get(&reg).copied().unwrap_or(0);
+                let value = get_reg(regs, reg);
                 if size <= VM_POINTER_BYTES {
                     low_bytes(value, size)
                 } else {
@@ -534,15 +532,9 @@ impl<'a> Interp<'a> {
     }
 
     /// Reads an operand as its low `size` bytes.
-    fn read_scalar(
-        &self,
-        regs: &HashMap<u32, u64>,
-        slot_base: u64,
-        operand: Operand,
-        size: u32,
-    ) -> u64 {
+    fn read_scalar(&self, regs: &[u64], slot_base: u64, operand: Operand, size: u32) -> u64 {
         match operand {
-            Operand::Reg(reg) => regs.get(&reg).copied().unwrap_or(0),
+            Operand::Reg(reg) => get_reg(regs, reg),
             Operand::Slot(off) => self.read_abs(slot_base + u64::from(off), size),
         }
     }
@@ -550,16 +542,14 @@ impl<'a> Interp<'a> {
     /// Writes an operand's low `size` bytes.
     fn write_scalar(
         &mut self,
-        regs: &mut HashMap<u32, u64>,
+        regs: &mut [u64],
         slot_base: u64,
         dst: Operand,
         value: u64,
         size: u32,
     ) {
         match dst {
-            Operand::Reg(reg) => {
-                regs.insert(reg, value & mask(size));
-            }
+            Operand::Reg(reg) => set_reg(regs, reg, value & mask(size)),
             Operand::Slot(off) => {
                 self.write_abs(slot_base + u64::from(off), value, size);
             }
@@ -568,28 +558,39 @@ impl<'a> Interp<'a> {
 
     /// Reads `size` little-endian bytes at an absolute address (absent is 0).
     fn read_abs(&self, address: u64, size: u32) -> u64 {
+        let start = address as usize;
         let mut value = 0_u64;
         for index in 0..size.min(8) {
-            let byte = self.memory.get(&(address + u64::from(index))).copied();
-            value |= u64::from(byte.unwrap_or(0)) << (index * 8);
+            let byte = self
+                .memory
+                .get(start + index as usize)
+                .copied()
+                .unwrap_or(0);
+            value |= u64::from(byte) << (index * 8);
         }
         value
     }
 
     /// Writes `size` little-endian bytes at an absolute address.
     fn write_abs(&mut self, address: u64, value: u64, size: u32) {
-        for index in 0..size.min(8) {
-            self.memory
-                .insert(address + u64::from(index), (value >> (index * 8)) as u8);
+        let len = size.min(8);
+        let start = address as usize;
+        let end = start.saturating_add(len as usize);
+        if end > self.memory.len() {
+            self.memory.resize(end, 0);
+        }
+        for index in 0..len {
+            self.memory[start + index as usize] = (value >> (index * 8)) as u8;
         }
     }
 
     /// Reads `size` raw bytes at an absolute address.
     fn read_bytes(&self, address: u64, size: u32) -> Vec<u8> {
+        let start = address as usize;
         (0..size)
             .map(|index| {
                 self.memory
-                    .get(&(address + u64::from(index)))
+                    .get(start + index as usize)
                     .copied()
                     .unwrap_or(0)
             })
@@ -598,9 +599,24 @@ impl<'a> Interp<'a> {
 
     /// Writes raw `bytes` at an absolute address.
     fn write_bytes(&mut self, address: u64, bytes: &[u8]) {
-        for (index, &byte) in bytes.iter().enumerate() {
-            self.memory.insert(address + index as u64, byte);
+        let start = address as usize;
+        let end = start.saturating_add(bytes.len());
+        if end > self.memory.len() {
+            self.memory.resize(end, 0);
         }
+        self.memory[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+}
+
+/// Reads a register of a frame (zero when out of range).
+fn get_reg(regs: &[u64], reg: u32) -> u64 {
+    regs.get(reg as usize).copied().unwrap_or(0)
+}
+
+/// Writes a register of a frame (ignored when out of range).
+fn set_reg(regs: &mut [u64], reg: u32, value: u64) {
+    if let Some(slot) = regs.get_mut(reg as usize) {
+        *slot = value;
     }
 }
 
