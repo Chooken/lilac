@@ -85,7 +85,7 @@
 ```text
 crates/
   lilac-target/     # + Arch::LilacVm ("lilacvm"), is_64_bit=true, Target::is_vm
-  lilac-codegen/    # + Backend::emit_bytecode(&self,&LirModule)->Result<String,String>
+  lilac-codegen/    # + Backend::emit_bytecode(&self,&LirModule,&SourceMap)->Result<String,String>
   lilac-vm/         # NEW: isa, compile, exec, codec(text), disasm, debug, bin
   lilac-cli/        # + emit-vm / run / disasm; --target=lilacvm-... selects VM
   lilac-ir/         # unchanged (no new IR, no codec bump)
@@ -109,12 +109,16 @@ lilac-target, lilac-span, lilac-error}`; `lilac-cli → lilac-vm`;
 
 - Add to `Backend`:
   ```rust
-  fn emit_bytecode(&self, _module: &LirModule) -> Result<String, String> {
+  fn emit_bytecode(&self, _module: &LirModule, _source_map: &SourceMap)
+      -> Result<String, String>
+  {
       Err(format!("backend `{}` cannot emit bytecode", self.name()))
   }
   ```
-  mirroring `emit_llvm` (the `.lbc` artifact is text). Default error keeps a
-  `--backend=` mismatch diagnosable.
+  mirroring `emit_llvm` (the `.lbc` artifact is text). It takes the session
+  `SourceMap` so the VM can build the `.lbc` line table. Default error keeps a
+  `--backend=` mismatch diagnosable. `lilac-codegen` gains a `lilac-span`
+  dependency (for the `SourceMap` type only).
 
 ### 3.3 `lilac-vm` crate
 
@@ -157,10 +161,13 @@ lilac-target, lilac-span, lilac-error}`; `lilac-cli → lilac-vm`;
 pub struct Program {
     pub version: String,          // LBC_VERSION
     pub target: String,           // "lilacvm-unknown-none"
+    pub types: Vec<TypeInfo>,     // TypeId table (name, size, is_ref)
     pub data: Vec<Data>,          // string/number constants
     pub globals: Vec<u8>,         // concatenated data bytes (ref targets)
     pub funcs: Vec<Func>,
 }
+
+pub struct TypeInfo { pub name: String, pub size: u32, pub is_ref: bool }
 
 pub struct Func {
     pub name: String,
@@ -171,6 +178,7 @@ pub struct Func {
     pub slot_bytes: u32,          // per-frame place region (zeroed at entry)
     pub code: Vec<Instr>,
     pub lines: Vec<Line>,         // pc -> (file, line, col), sorted by pc
+    pub place_names: Vec<(String, u32)>, // original `%place` name -> slot off (debugger)
 }
 
 pub struct Data { pub bytes: Vec<u8>, pub global_off: u32 }
