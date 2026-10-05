@@ -27,6 +27,7 @@ fn run<const N: usize>(args: [&str; N]) -> Run {
 
 const SOURCE: &str = "../../tests/ui/vm_hello.lilac";
 const SNAPSHOT: &str = "../../tests/ui/vm_hello.lbc";
+const EXTERN_SOURCE: &str = "../../tests/ui/vm_extern.lilac";
 
 #[test]
 fn emit_vm_matches_snapshot() {
@@ -75,4 +76,23 @@ fn emit_vm_rejects_non_vm_target() {
         "stderr:\n{}",
         out.stderr
     );
+}
+
+#[test]
+fn run_executes_and_exits_zero() {
+    let out = run(["run", SOURCE]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+}
+
+#[test]
+fn run_reports_extern_error() {
+    let out = run(["run", EXTERN_SOURCE]);
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{}", out.stderr);
+    assert!(out.stderr.contains("extern"), "stderr:\n{}", out.stderr);
+}
+
+#[test]
+fn emit_llvm_rejects_vm_target() {
+    let out = run(["emit-llvm", SOURCE, "--target=lilacvm-unknown-none"]);
+    assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
 }
