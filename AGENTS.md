@@ -15,6 +15,19 @@
   `unsafe` internally via those crates; the workspace `unsafe_code = "forbid"`
   lint stays in force for our own code.
 
+## Runtime and symbols
+
+- The builtin runtime (byte buffers, `@load_u8`/`@store_u8`, format-args
+  tables) is written once as ordinary LIR in `lilac-ir::runtime` and shared by
+  all backends. Backends hand-write only the three leaf intrinsics
+  (`@ptr_add`, `@memcpy`, `@lilac_abort`).
+- Compiler-generated symbols use the reserved `.lilac.` namespace
+  (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
+  identifiers cannot contain `.`, so the namespace is collision-proof; the IR
+  verifier also rejects duplicate function names.
+- `inkwell` is still confined to `lilac-codegen-llvm` (see above); the runtime
+  move does not add LLVM dependencies elsewhere.
+
 ## Gates
 
 Run before committing:

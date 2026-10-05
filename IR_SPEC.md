@@ -1,6 +1,6 @@
 # Lilac IR Specification (v2)
 
-> Version: `lilac_ir = "0.2"`. Status: normative for the Rust rewrite.
+> Version: `lilac_ir = "0.3"`. Status: normative for the Rust rewrite.
 > `SPEC.md` is normative for language semantics; this file is normative for IR text,
 > verification, and backend contract. Plan-only material lives in `RUST_REWRITE_PLAN.md`.
 
@@ -19,10 +19,11 @@
 Data sections hold constant declarations. String literals and the source bytes
 of decimal number literals lower to `data` consts (`!c: str = "..."` /
 `!c: numlit = "..."`); a string literal is then read as a data-backed buffer
-value with `const !c:#byte_buffer`, never `@byte_buffer_from` (which stays a
-builtin for user code). Hex/bin literals are `const` registers typed directly,
-not data. f-strings lower to `@format_args` construction plus conversions/calls
-and introduce no new instruction shapes (see `SPEC.md`).
+value with `const !c:#byte_buffer`, never a call to the
+`.lilac.byte_buffer_from` runtime function. Hex/bin literals are `const`
+registers typed directly, not data. f-strings lower to `@format_args`
+construction plus conversions/calls and introduce no new instruction shapes
+(see `SPEC.md`).
 ```lilac-ir
 data {
     !c0: str = "String",
@@ -45,13 +46,23 @@ type #Number {
 ```
 as produced by `tests/ui/match_enum.lir`.
 
-Builtin aggregates usable in `#` positions: `#byte_buffer` (`{len: #bitNative,
-ptr: #ptr}` view, borrows) and `#format_args` (fixed-capacity inline piece table,
-at most 16 pieces). Both are plain values with no hidden behavior.
+Builtin aggregates usable in `#` positions are `#byte_buffer` and
+`#format_args`. Both are plain values with no hidden behavior, and their field
+layouts are fixed by the IR rather than declared in a `type` section:
+
+```lilac-ir
+#byte_buffer { len: #bitNative, data: ref #bit8 }
+#format_args { count: #bitNative, p0: #byte_buffer, …, p15: #byte_buffer }
+```
+
+`#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
+LIR has no array type, so the table is spelled out as sixteen named fields.
+The verifier resolves `field`/`field.addr` against these layouts
+(`lilac_ir::builtin_layout`); the backend builds matching structs.
 
 Functions can be declared as:
 ```lilac-ir
-lilac_ir = "0.2"
+lilac_ir = "0.3"
 target = "x86_64-unknown-none"
 function @func_name
     in #type %param_1,
@@ -99,9 +110,20 @@ becomes `ref..X`, and a nested instance is its own mangled form. Examples:
 `GenObject.1..bit32.get`), and `GenObj.1.GenObj.1..bit32`. The arity tag
 keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
 `.` is reserved: Lilac identifiers are `[A-Za-z_][A-Za-z0-9_]*`, so no user
-name contains it and every generated segment is unambiguous.
+name contains it and every generated segment is unambiguous. Builtin type
+mangles gain a leading `.` (`.bit8`, `.byte_buffer`).
 Object `type` layouts and RAII `drop` targets are keyed by the same mangled
 name; no instruction carries a generic parameter type.
+
+## Reserved names and compiler symbols
+
+Every compiler-generated function or runtime symbol lives in the `.lilac.`
+namespace: the LIR runtime (`.lilac.byte_buffer_from`, `.lilac.load_u8`,
+`.lilac.format_args_push`, …), the entry point (`.lilac.main`), and the
+backend's three leaf intrinsics (`.lilac.ptr_add`, `.lilac.memcpy`,
+`.lilac.abort`). LLVM 18 prints `.`-leading and dotted names unquoted. The
+verifier rejects two functions with the same name (`E070`), so a residual
+mangle collision or a user/prelude clash cannot reach a backend.
 
 A `drop %x` marker records that a place is destroyed; it does not itself run
 the destructor. Where the type declares an `@on_drop`, the `call @…@on_drop`
@@ -131,8 +153,11 @@ load ref %ptr -> &3
 ```
 
 ### copy / const
-* `copy` moves between places and regs of the same type; `const` defines a typed
-  register from a literal.
+* `copy` moves between places and regs. Operands must share a type, except that
+  two references are compatible under opaque pointers: `copy %a -> %b` with
+  `ref X` -> `ref Y` is a pointer copy. A reference/value mix (`ref X` vs a
+  value) and two distinct value types are rejected.
+* `const` defines a typed register from a literal.
 ```lilac-ir
 copy %a -> %b
 copy &1 -> %b
@@ -171,23 +196,37 @@ call &f (in %a) (out %b)
 ```
 
 ### builtin calls
-* Callee is a `@`-builtin name (`call @byte_buffer_len (in %buf) (out %len)`)
-* Verified against the builtin signature table below; `@as_int`, `@as_float`,
-  `@size_of`, and `@compile_error` are fold-only markers, never builtin calls
-  (see `compile.error`)
+* Callee is a `@`-builtin **leaf** name (`call @ptr_add (in %base, %off) (out %s)`)
+* Only three target-specific leaves remain builtins, verified against the
+  signature table below. They lower to the `.lilac.*` backend symbols shown.
+  `@as_int`, `@as_float`, `@size_of`, and `@compile_error` are fold-only
+  markers, never builtin calls (see `compile.error`)
 
-| builtin | in-args | out |
+| builtin | in-args | out | LLVM lowering |
+| --- | --- | --- | --- |
+| `@ptr_add` | `ref #bit8`, `#bitNative` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
+| `@memcpy` | `ref #bit8`, `ref #bit8`, `#bitNative` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
+| `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`) |
+
+The byte-buffer and format-args operations are **not** builtins: they are
+ordinary LIR functions in the `.lilac.` namespace, built once by
+`lilac_ir::runtime` and emitted through the normal function path.
+
+| runtime function | in-args | out |
 | --- | --- | --- |
-| `@byte_buffer_from` | `ref #bit8`, `#bitNative` | `#byte_buffer` |
-| `@byte_buffer_ptr` | `#byte_buffer` | `ref #bit8` |
-| `@byte_buffer_len` | `#byte_buffer` | `#bitNative` |
-| `@format_args_new` | — | `#format_args` |
-| `@format_args_push` | `ref #format_args`, `#byte_buffer` | — |
-| `@format_args_count` | `#format_args` | `#bitNative` |
-| `@format_args_piece` | `#format_args`, `#bitNative` | `#byte_buffer` |
-| `@load_u8` | `ref #bit8`, `#bitNative` | `#bit8` |
-| `@store_u8` | `ref #bit8`, `#bitNative`, `#bit8` | — |
-| `@memcpy` | `ref #bit8`, `ref #bit8`, `#bitNative` | — |
+| `.lilac.byte_buffer_from` | `ref #bit8`, `#bitNative` | `#byte_buffer` |
+| `.lilac.byte_buffer_ptr` | `#byte_buffer` | `ref #bit8` |
+| `.lilac.byte_buffer_len` | `#byte_buffer` | `#bitNative` |
+| `.lilac.load_u8` | `ref #bit8`, `#bitNative` | `#bit8` |
+| `.lilac.store_u8` | `ref #bit8`, `#bitNative`, `#bit8` | — |
+| `.lilac.format_args_new` | — | `#format_args` |
+| `.lilac.format_args_push` | `ref #format_args`, `#byte_buffer` | — |
+| `.lilac.format_args_count` | `#format_args` | `#bitNative` |
+| `.lilac.format_args_piece` | `#format_args`, `#bitNative` | `#byte_buffer` |
+
+These functions call back into the `@ptr_add` and `@lilac_abort` leaves; the
+driver injects the prelude after constant folding and dead-code pruning removes
+whatever a program does not reach.
 
 ### branch 
 * To: Label or register

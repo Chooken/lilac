@@ -211,7 +211,8 @@ impl Types {
     /// Deterministic, collision-free, arity-tagged symbol name for IR.
     /// User identifiers cannot contain `.`, so it is the reserved separator:
     /// builtins gain a leading `.`; `ref X` becomes `ref..X`; an `Instance` is
-    /// `<Name>.<arity>..<arg>..…`.
+    /// `<Name>.<arity>.<arg>…`. A builtin argument already starts with `.`, so
+    /// a builtin argument such as `@bit32` reads as `..bit32`.
     pub fn mangle(&self, id: TypeId) -> String {
         match self.kind(id) {
             TypeKind::Bit8 => ".bit8".to_owned(),

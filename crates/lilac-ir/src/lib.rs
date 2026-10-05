@@ -22,7 +22,7 @@ pub use dce::prune_unreachable;
 pub use runtime::build_runtime;
 
 /// IR version header; bump on any normative IR change.
-pub const LILAC_IR_VERSION: &str = "0.2";
+pub const LILAC_IR_VERSION: &str = "0.3";
 
 /// An IR module: versioned header plus data, functions, and layouts.
 #[derive(Clone, Debug)]
@@ -103,8 +103,9 @@ pub enum LirCallee {
     Reg(String),
     /// Direct call by function name (without sigil).
     Func(String),
-    /// Direct call to a compiler builtin (name keeps its `@` sigil,
-    /// e.g. `@format_args_new`).
+    /// Direct call to a compiler builtin leaf (name keeps its `@` sigil,
+    /// e.g. `@ptr_add`). The runtime's other operations are `.lilac.*` LIR
+    /// functions, not builtins.
     Builtin(String),
 }
 
@@ -1521,7 +1522,7 @@ mod tests {
     #[test]
     fn printer_emits_canonical() {
         let text = canonical_module().to_text();
-        let expected = "lilac_ir = \"0.2\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
+        let expected = "lilac_ir = \"0.3\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
         assert_eq!(text, expected);
     }
 
@@ -1572,9 +1573,9 @@ mod tests {
         assert_eq!(e070_count(&diags), 1);
     }
 
-    /// `copy` moves values of the same type (`IR_SPEC.md`); a place-to-place
-    /// copy whose operand types differ (e.g. `ref #Object` into `#Object`) is
-    /// ill-typed and must be rejected, not silently pointer-copied.
+    /// `copy` permits `ref X` <-> `ref Y` under opaque pointers, but a
+    /// reference/value mix (`IR_SPEC.md`; e.g. `ref #Object` into `#Object`)
+    /// is ill-typed and must be rejected, not silently pointer-copied.
     #[test]
     fn verify_rejects_copy_place_type_mismatch() {
         let mut module = LirModule::new("x86_64-unknown-none");

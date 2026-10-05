@@ -18,7 +18,10 @@ use crate::{
 };
 
 /// Wire-format version; bump on any normative codec change.
-pub const LIR_CODEC_VERSION: u32 = 1;
+///
+/// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
+/// unsigned `format_args` bounds checks.
+pub const LIR_CODEC_VERSION: u32 = 2;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -1020,7 +1023,7 @@ mod tests {
     }
 
     /// Builds a module exercising every `LirInst` and `LirTerm` variant, both
-    /// `ConvertOp`s, all 15 `ArithOp`s, all three `LirCallee`s, both
+    /// `ConvertOp`s, all 16 `ArithOp`s, all three `LirCallee`s, both
     /// `LirDataKind`s, and a layout.
     #[allow(clippy::too_many_lines)]
     fn all_variants_module() -> LirModule {
@@ -1074,9 +1077,9 @@ mod tests {
                 span,
             },
             LirInst::Call {
-                func: LirCallee::Builtin("@format_args_new".to_owned()),
+                func: LirCallee::Builtin("@lilac_abort".to_owned()),
                 ins: Vec::new(),
-                outs: vec!["p0".to_owned()],
+                outs: Vec::new(),
                 span,
             },
             LirInst::Field {

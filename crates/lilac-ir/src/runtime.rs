@@ -1,4 +1,4 @@
-﻿//! Builds the seven runtime functions as ordinary LIR.
+//! Builds the nine runtime functions as ordinary LIR.
 //!
 //! The functions are not injected here; the driver appends `build_runtime` to
 //! a module between constant folding and dead-code pruning, where DCE keeps

@@ -89,7 +89,7 @@ fn emit_ir_prints_version_header() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("lilac_ir = \"0.2\""),
+        stdout.contains("lilac_ir = \"0.3\""),
         "stdout was:\n{stdout}"
     );
     assert!(stdout.contains("target = "), "stdout was:\n{stdout}");

@@ -157,6 +157,78 @@ fn compiles_and_runs_on_host() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+/// The LIR runtime is culled when unused: `emit-llvm` for a program that
+/// reaches none of it contains no runtime bodies and no runtime calls (only
+/// the backend's always-present leaf definitions remain).
+#[test]
+fn no_runtime_fixture_emits_no_runtime_text() {
+    let output = lilac()
+        .args(["emit-llvm", &ui("int_addition.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "emit-llvm failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf8 IR");
+    // The nine-function LIR runtime is culled entirely when unreached.
+    for needle in [
+        ".lilac.byte_buffer",
+        ".lilac.format_args",
+        ".lilac.load_u8",
+        ".lilac.store_u8",
+    ] {
+        assert!(!text.contains(needle), "unexpected `{needle}` in:\n{text}");
+    }
+    // The backend always hand-writes the three leaf definitions
+    // (`@ptr_add`/`@memcpy`/`@lilac_abort`), but this program calls none.
+    for call in [
+        "call ptr @.lilac.ptr_add",
+        "call void @.lilac.memcpy",
+        "call void @.lilac.abort",
+    ] {
+        assert!(!text.contains(call), "unexpected `{call}` in:\n{text}");
+    }
+}
+
+/// `fstring.lilac` reaches the format-args runtime; its `emit-llvm` compiles
+/// with the toolchain clang and runs to exit 0 on the host.
+#[test]
+fn fstring_runtime_compiles_and_runs_on_host() {
+    let clang = clang();
+    let scratch = std::env::temp_dir().join(format!("lilac-task6-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("creates scratch dir");
+
+    let source = Path::new(&ui("fstring.lilac")).to_path_buf();
+    let ll = scratch.join("fstring.ll");
+    emit_host_ir(&source, "-O0", &ll);
+    let text = std::fs::read_to_string(&ll).expect("reads IR");
+    assert!(text.contains(".lilac.format_args_push"), "{text}");
+
+    let exe = scratch.join("fstring.exe");
+    let link = Command::new(&clang)
+        .arg(&ll)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("runs clang");
+    assert!(
+        link.status.success(),
+        "fstring failed to link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("runs executable");
+    assert!(
+        run.status.success(),
+        "fstring exited with {:?}",
+        run.status.code()
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// `generic_hook_drop.ll` shows both zero-initialization and the RAII
 /// `@on_drop` call the drop marker is paired with.
 #[test]
