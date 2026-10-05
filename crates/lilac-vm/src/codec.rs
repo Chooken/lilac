@@ -239,9 +239,15 @@ impl Program {
                 self.type_name(*ty)
             ),
             Instr::Addr { dst, place } => format!("&{dst} = addr %{place}"),
-            Instr::AddrField { dst, place, off } => {
-                format!("&{dst} = addr.field %{place} + {off}")
-            }
+            Instr::AddrField {
+                dst,
+                place,
+                off,
+                indirect,
+            } => format!(
+                "&{dst} = addr.field %{place} + {off}{}",
+                indirect_text(*indirect)
+            ),
             Instr::AddrFunc { dst, func } => {
                 format!("&{dst} = addr.func @{}", self.func_name(*func))
             }
@@ -250,15 +256,22 @@ impl Program {
                 place,
                 off,
                 ty,
-            } => format!("&{dst}: {} = field %{place} + {off}", self.type_name(*ty)),
+                indirect,
+            } => format!(
+                "&{dst}: {} = field %{place} + {off}{}",
+                self.type_name(*ty),
+                indirect_text(*indirect)
+            ),
             Instr::StoreField {
                 src,
                 place,
                 off,
                 ty,
+                indirect,
             } => format!(
-                "store.field {} -> %{place} + {off} : {}",
+                "store.field {} -> %{place} + {off}{} : {}",
                 operand_text(*src),
+                indirect_text(*indirect),
                 self.type_name(*ty)
             ),
             Instr::Arith {
@@ -747,12 +760,13 @@ fn parse_typed_definition(dst: Operand, ty: TypeId, rhs: &str) -> Result<ParsedI
             ty,
         })),
         "field" => {
-            let (place, off) = parse_place_off(args)?;
+            let (place, off, indirect) = parse_place_off(args)?;
             Ok(ParsedInstr::Ready(Instr::Field {
                 dst: as_reg(dst)?,
                 place,
                 off,
                 ty,
+                indirect,
             }))
         }
         other => {
@@ -789,8 +803,13 @@ fn parse_addr_definition(lhs: &str, rhs: &str) -> Result<ParsedInstr, String> {
             place: parse_slot(args.trim())?,
         })),
         "addr.field" => {
-            let (place, off) = parse_place_off(args)?;
-            Ok(ParsedInstr::Ready(Instr::AddrField { dst, place, off }))
+            let (place, off, indirect) = parse_place_off(args)?;
+            Ok(ParsedInstr::Ready(Instr::AddrField {
+                dst,
+                place,
+                off,
+                indirect,
+            }))
         }
         "addr.func" => Ok(ParsedInstr::AddrFunc {
             dst,
@@ -815,12 +834,13 @@ fn parse_store(
         .ok_or_else(|| "expected ` -> `".to_string())?;
     let src = parse_operand(src_text.trim())?;
     if is_field {
-        let (place, off) = parse_place_off(dst_text)?;
+        let (place, off, indirect) = parse_place_off(dst_text)?;
         Ok(ParsedInstr::Ready(Instr::StoreField {
             src,
             place,
             off,
             ty,
+            indirect,
         }))
     } else {
         Ok(ParsedInstr::Ready(Instr::Store {
@@ -942,7 +962,7 @@ fn parse_slot_list(text: &str) -> Result<Vec<u32>, String> {
 }
 
 /// Parses a `%slot + offset` suffix.
-fn parse_place_off(text: &str) -> Result<(u32, u32), String> {
+fn parse_place_off(text: &str) -> Result<(u32, u32, bool), String> {
     let mut tokens = text.split_whitespace();
     let place = parse_slot(
         tokens
@@ -953,10 +973,15 @@ fn parse_place_off(text: &str) -> Result<(u32, u32), String> {
         return Err("expected `+`".to_string());
     }
     let off = parse_u32(tokens.next(), "offset")?;
+    let indirect = match tokens.next() {
+        Some("direct") => false,
+        Some("indirect") => true,
+        _ => return Err("expected `direct` or `indirect`".to_string()),
+    };
     if tokens.next().is_some() {
-        return Err("trailing tokens after offset".to_string());
+        return Err("trailing tokens after field base".to_string());
     }
-    Ok((place, off))
+    Ok((place, off, indirect))
 }
 
 /// Parses a pair of comma-separated registers.
@@ -1098,6 +1123,15 @@ fn expect_next_index(declared: u32, len: usize, what: &str) -> Result<(), String
         Err(format!(
             "{what} index {declared} out of order (expected {expected})"
         ))
+    }
+}
+
+/// Renders a field instruction's base-selection token.
+fn indirect_text(indirect: bool) -> &'static str {
+    if indirect {
+        " indirect"
+    } else {
+        " direct"
     }
 }
 
@@ -1317,6 +1351,37 @@ mod tests {
         let text =
             "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\ndata !c0 = \"hi\" @ 0xffffffff\n";
         assert!(Program::parse_text(text).is_err());
+    }
+
+    /// A program with both `indirect` and direct field instructions must
+    /// survive `parse_text(to_text(p)) == p` unchanged.
+    #[test]
+    fn text_round_trips_field_indirection() {
+        let program = crate::compile::compile_src(
+            "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
+        );
+        let saw_indirect = program.funcs.iter().flat_map(|f| &f.code).any(|i| {
+            matches!(
+                i,
+                Instr::Field { indirect: true, .. }
+                    | Instr::AddrField { indirect: true, .. }
+                    | Instr::StoreField { indirect: true, .. }
+            )
+        });
+        let saw_direct = program.funcs.iter().flat_map(|f| &f.code).any(|i| {
+            matches!(
+                i,
+                Instr::Field {
+                    indirect: false,
+                    ..
+                }
+            )
+        });
+        assert!(saw_indirect && saw_direct, "test program lacks both flags");
+        let text = program.to_text();
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed, program);
+        assert_eq!(parsed.to_text(), text);
     }
 
     #[test]

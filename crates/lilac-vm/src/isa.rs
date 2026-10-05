@@ -306,6 +306,9 @@ pub enum Instr {
         place: u32,
     },
     /// `dst = addr.field slot + off`.
+    ///
+    /// `indirect` selects the base: when `true`, the slot holds a ref that is
+    /// dereferenced first; when `false`, the slot itself is the aggregate base.
     AddrField {
         /// Destination register.
         dst: u32,
@@ -313,6 +316,8 @@ pub enum Instr {
         place: u32,
         /// Field byte offset.
         off: u32,
+        /// Whether `place` holds a ref to dereference before adding `off`.
+        indirect: bool,
     },
     /// `dst = addr.func func`.
     AddrFunc {
@@ -322,6 +327,9 @@ pub enum Instr {
         func: u32,
     },
     /// Scalar field read.
+    ///
+    /// `indirect` selects the base: when `true`, the slot holds a ref that is
+    /// dereferenced first; when `false`, the slot itself is the aggregate base.
     Field {
         /// Destination register.
         dst: u32,
@@ -331,8 +339,13 @@ pub enum Instr {
         off: u32,
         /// Field type.
         ty: TypeId,
+        /// Whether `place` holds a ref to dereference before adding `off`.
+        indirect: bool,
     },
     /// Scalar field write.
+    ///
+    /// `indirect` selects the base: when `true`, the slot holds a ref that is
+    /// dereferenced first; when `false`, the slot itself is the aggregate base.
     StoreField {
         /// Value operand.
         src: Operand,
@@ -342,6 +355,8 @@ pub enum Instr {
         off: u32,
         /// Field type.
         ty: TypeId,
+        /// Whether `place` holds a ref to dereference before adding `off`.
+        indirect: bool,
     },
     /// Typed arithmetic/comparison.
     Arith {
@@ -673,7 +688,9 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             check_reg(*dst, n_regs)?;
             check_slot(*place, 1, slot_bytes)?;
         }
-        Instr::AddrField { dst, place, off } => {
+        Instr::AddrField {
+            dst, place, off, ..
+        } => {
             check_reg(*dst, n_regs)?;
             check_slot(*place, *off, slot_bytes)?;
         }
@@ -686,12 +703,14 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             place,
             off,
             ty,
+            ..
         } => verify_field_read(program, *dst, *place, *off, *ty, n_regs, slot_bytes)?,
         Instr::StoreField {
             src,
             place,
             off,
             ty,
+            ..
         } => verify_field_write(program, *src, *place, *off, *ty, n_regs, slot_bytes)?,
         Instr::Arith {
             dst, lhs, rhs, ty, ..

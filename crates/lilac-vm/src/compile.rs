@@ -30,13 +30,13 @@
 //!
 //! # Field access through references
 //!
-//! `Field`/`AddrField`/`StoreField` pass the object place and a precomputed
-//! packed `off` straight through. When the object place's type is itself a
-//! `ref`, the interpreter must dereference the place's ref before applying
-//! `off` (exactly as the LLVM backend's `field_ptr` does). Every such case in
-//! the current runtime/lowering corpus is an *input* place, so an interpreter
-//! can recover the place's type from `Func::ins`/`outs` paired with the
-//! leading `Func::place_names` entries.
+//! `Field`/`AddrField`/`StoreField` carry an `indirect` flag set from the
+//! object place's type: `true` when the place is a `ref T` (the interpreter
+//! dereferences the slot's stored ref to get the field base before applying
+//! `off`), `false` when the slot itself is the aggregate (as the LLVM backend's
+//! `field_ptr` does). This makes the dereference explicit for every object
+//! place, including ref-typed locals, so the interpreter never needs the
+//! owner's type at run time.
 
 use std::collections::HashMap;
 
@@ -558,8 +558,17 @@ impl FuncBuilder<'_, '_> {
                 let dst = self.def_reg(dst);
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
+                let indirect = is_ref_ty(self.places.ty(obj)?);
                 if is_indirect(self.compiler.module, ty)? {
-                    self.emit(Instr::AddrField { dst, place, off }, *span)
+                    self.emit(
+                        Instr::AddrField {
+                            dst,
+                            place,
+                            off,
+                            indirect,
+                        },
+                        *span,
+                    )
                 } else {
                     let ty = self.intern(ty)?;
                     self.emit(
@@ -568,6 +577,7 @@ impl FuncBuilder<'_, '_> {
                             place,
                             off,
                             ty,
+                            indirect,
                         },
                         *span,
                     )
@@ -582,6 +592,7 @@ impl FuncBuilder<'_, '_> {
             } => {
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
+                let indirect = is_ref_ty(self.places.ty(obj)?);
                 let field_ty = field_type(self.compiler.module, self.places.ty(obj)?, *idx)?;
                 let src = self.operand(value)?;
                 let ty = self.intern(&field_ty)?;
@@ -591,6 +602,7 @@ impl FuncBuilder<'_, '_> {
                         place,
                         off,
                         ty,
+                        indirect,
                     },
                     *span,
                 )
@@ -639,7 +651,16 @@ impl FuncBuilder<'_, '_> {
                 let dst = self.def_reg(dst);
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
-                self.emit(Instr::AddrField { dst, place, off }, *span)
+                let indirect = is_ref_ty(self.places.ty(obj)?);
+                self.emit(
+                    Instr::AddrField {
+                        dst,
+                        place,
+                        off,
+                        indirect,
+                    },
+                    *span,
+                )
             }
             LirInst::Arith {
                 op,
@@ -975,5 +996,64 @@ mod tests {
         let program = compile_src("main: function () nothing {\n    s: @byte_buffer = \"hi\"\n}\n");
         assert!(!program.data.is_empty());
         assert!(program.globals.len() >= 2);
+    }
+
+    /// `format_args_push` fields a `ref #format_args` (indirect); the
+    /// `format_args_*` by-value bodies field a direct `#format_args`.
+    const FORMAT_ARGS_SRC: &str = "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n";
+
+    fn field_flags(program: &crate::isa::Program) -> (bool, bool) {
+        let mut saw_indirect = false;
+        let mut saw_direct = false;
+        for func in &program.funcs {
+            for instr in &func.code {
+                match instr {
+                    Instr::Field { indirect, .. }
+                    | Instr::AddrField { indirect, .. }
+                    | Instr::StoreField { indirect, .. } => {
+                        if *indirect {
+                            saw_indirect = true;
+                        } else {
+                            saw_direct = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (saw_indirect, saw_direct)
+    }
+
+    #[test]
+    fn field_indirection_tracks_object_refness() {
+        let program = compile_src(FORMAT_ARGS_SRC);
+        let (saw_indirect, saw_direct) = field_flags(&program);
+        assert!(saw_indirect, "expected a ref-object field access");
+        assert!(saw_direct, "expected a direct-object field access");
+
+        // `format_args_push`'s object (`%table`) is a `ref #format_args`.
+        let push = program
+            .funcs
+            .iter()
+            .find(|f| f.name == ".lilac.format_args_push")
+            .expect("push");
+        assert!(push.code.iter().any(|i| matches!(
+            i,
+            Instr::Field { indirect: true, .. } | Instr::StoreField { indirect: true, .. }
+        )));
+
+        // `format_args_count`'s object (`%table`) is a direct `#format_args`.
+        let count = program
+            .funcs
+            .iter()
+            .find(|f| f.name == ".lilac.format_args_count")
+            .expect("count");
+        assert!(count.code.iter().any(|i| matches!(
+            i,
+            Instr::Field {
+                indirect: false,
+                ..
+            }
+        )));
     }
 }
