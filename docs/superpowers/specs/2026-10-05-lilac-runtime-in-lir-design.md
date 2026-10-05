@@ -56,13 +56,13 @@ place ABI (every place by address; `define void @f(ptr …)`):
 
 | function | signature (pointer ABI) |
 |---|---|
-| `.lilac.byte_buffer_from` | `in ref #bit8 %data`, `in #bitNative %len`, `out #byte_buffer %out` |
+| `.lilac.byte_buffer_from` | `in ref #bit8 %data`, `in #bit_native %len`, `out #byte_buffer %out` |
 | `.lilac.byte_buffer_ptr` | `in #byte_buffer %buffer`, `out ref #bit8 %out` |
-| `.lilac.byte_buffer_len` | `in #byte_buffer %buffer`, `out #bitNative %out` |
+| `.lilac.byte_buffer_len` | `in #byte_buffer %buffer`, `out #bit_native %out` |
 | `.lilac.format_args_new` | `out #format_args %out` |
 | `.lilac.format_args_push` | `in ref #format_args %table`, `in #byte_buffer %piece` |
-| `.lilac.format_args_count` | `in #format_args %table`, `out #bitNative %out` |
-| `.lilac.format_args_piece` | `in #format_args %table`, `in #bitNative %index`, `out #byte_buffer %out` |
+| `.lilac.format_args_count` | `in #format_args %table`, `out #bit_native %out` |
+| `.lilac.format_args_piece` | `in #format_args %table`, `in #bit_native %index`, `out #byte_buffer %out` |
 
 They are built by a new `lilac_ir::runtime` module (a builder, not text) and
 appended to the module by the driver (see §7). Bodies use `alloca`, `field`,
@@ -74,8 +74,8 @@ Only three operations stay backend-defined, as `LirCallee::Builtin`:
 
 | builtin | signature | LLVM lowering |
 |---|---|---|
-| `@ptr_add` | `(ref #bit8, #bitNative) -> ref #bit8` | `ptrtoint` + `add` + `inttoptr` (safe; no GEP) |
-| `@memcpy` | `(ref #bit8, ref #bit8, #bitNative)` | `llvm.memcpy` |
+| `@ptr_add` | `(ref #bit8, #bit_native) -> ref #bit8` | `ptrtoint` + `add` + `inttoptr` (safe; no GEP) |
+| `@memcpy` | `(ref #bit8, ref #bit8, #bit_native)` | `llvm.memcpy` |
 | `@lilac_abort` | `() -> ()` | `llvm.trap` + `unreachable` |
 
 `@ptr_add` is the one new primitive. `@load_u8`/`@store_u8` become LIR (a
@@ -97,8 +97,8 @@ signature for the verifier).
 printing two type sections into every `.lir` snapshot.
 
 ```
-#byte_buffer { len: #bitNative, data: ref #bit8 }
-#format_args { count: #bitNative, p0: #byte_buffer, …, p15: #byte_buffer }
+#byte_buffer { len: #bit_native, data: ref #bit8 }
+#format_args { count: #bit_native, p0: #byte_buffer, …, p15: #byte_buffer }
 ```
 
 LIR has no array type, so the fixed 16-piece table is sixteen named fields.

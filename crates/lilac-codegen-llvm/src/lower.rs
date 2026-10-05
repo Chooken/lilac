@@ -603,9 +603,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// A builtin call uses the value ABI: each input place is loaded, the
     /// declared runtime symbol (from `builtin_sig`) is called, and the single
-    /// result is stored back into the out place. The `runtime` module has
-    /// already defined every builtin symbol, so the existing function is
-    /// reused rather than re-declared.
+    /// result is stored back into the out place. The use-scan in
+    /// `used_builtins` guarantees the runtime module has already defined the
+    /// leaf this call names, so the existing function is reused rather than
+    /// re-declared.
     fn lower_builtin_call(
         &self,
         name: &str,
@@ -638,9 +639,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             ),
         };
         let symbol = builtin_symbol(name);
-        let function = match self.module.get_function(symbol) {
-            Some(function) => function,
-            None => self.module.add_function(symbol, fn_type, None),
+        // The use-scan in `used_builtins` has the runtime emit every leaf this
+        // module calls, so the symbol must already exist. A miss is scan/emit
+        // drift — an ICE, never a quiet external declaration.
+        let Some(function) = self.module.get_function(symbol) else {
+            bug!(
+                Span::dummy(),
+                "builtin `{name}` symbol `{symbol}` was not emitted by the use-scan; expected `{}`",
+                fn_type.print_to_string()
+            );
         };
         let args: Vec<BasicMetadataValueEnum<'ctx>> = ins
             .iter()

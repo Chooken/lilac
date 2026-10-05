@@ -181,6 +181,8 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@i_mul`** / **`@f_mul`** | `(lhs, rhs)` | Integer multiplication. |
 | **`@i_div`** / **`@f_div`** | `(lhs, rhs)` | Integer division. |
 | **`@i_mod`** / **`@f_mod`** | `(lhs, rhs)` | Integer modulo. |
+| **`@i_div_u`** | `(lhs, rhs)` | Unsigned integer division. |
+| **`@i_mod_u`** | `(lhs, rhs)` | Unsigned integer modulo. |
 | **`@f_add`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation. |
 | **`@f_sub`** | `(lhs, rhs)` | Floating-point subtraction using IEEE-754 bit interpretation. |
 | **`@f_mul`** | `(lhs, rhs)` | Floating-point multiplication using IEEE-754 bit interpretation. |
@@ -188,6 +190,8 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@f_mod`** | `(lhs, rhs)` | Floating-point modulo using IEEE-754 bit interpretation. |
 | **`@i_less_than`** | `(lhs, rhs)` | Integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
 | **`@i_greater_than`** | `(lhs, rhs)` | Integer greater-than (two's-complement). Returns `@bit8`. |
+| **`@i_less_than_u`** | `(lhs, rhs)` | Unsigned integer less-than. Returns `@bit8` (`0x0` false, otherwise true). |
+| **`@i_greater_than_u`** | `(lhs, rhs)` | Unsigned integer greater-than. Returns `@bit8`. |
 | **`@f_less_than`** | `(lhs, rhs)` | Float less-than (IEEE-754). Returns `@bit8`. |
 | **`@f_greater_than`** | `(lhs, rhs)` | Float greater-than (IEEE-754). Returns `@bit8`. |
 | **`@i_negate`** | `(value)` | Integer two's-complement negation. |

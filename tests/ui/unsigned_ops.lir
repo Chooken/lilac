@@ -1,0 +1,68 @@
+lilac_ir = "0.3"
+target = "x86_64-unknown-none"
+function @main
+  in #bit32 %a
+  in #bit32 %b
+  in #bit_native %w
+{
+  $entry:
+    alloca #bit32 %one : zeroed
+    alloca #bit32 %divisor : zeroed
+    alloca #bit32 %quotient : zeroed
+    alloca #bit32 %remainder : zeroed
+    alloca #bit_native %native_one : zeroed
+    alloca #bit_native %wide_divisor : zeroed
+    alloca #bit_native %wide_quotient : zeroed
+    alloca #bit_native %wide_remainder : zeroed
+    &1: #bit32 = const 0x1
+    copy &1 -> %one
+    &2: #bit32 = copy %b
+    &3: #bit32 = copy %one
+    &4: #bit32 = i.add &2, &3
+    copy &4 -> %divisor
+    &5: #bit32 = copy %a
+    &6: #bit32 = copy %divisor
+    &7: #bit32 = i.div.u &5, &6
+    copy &7 -> %quotient
+    &8: #bit32 = copy %a
+    &9: #bit32 = copy %divisor
+    &10: #bit32 = i.mod.u &8, &9
+    copy &10 -> %remainder
+    &11: #bit32 = copy %a
+    &12: #bit32 = copy %divisor
+    &13: #bit8 = i.cmp.lt.u &11, &12
+    branch.if &13, $l.1, $l.2
+  $l.1:
+    &14: #bit32 = const 0x1
+    copy &14 -> %quotient
+    branch $l.3
+  $l.2:
+    branch $l.3
+  $l.3:
+    &15: #bit32 = copy %a
+    &16: #bit32 = copy %divisor
+    &17: #bit8 = i.cmp.gt.u &15, &16
+    branch.if &17, $l.4, $l.5
+  $l.4:
+    &18: #bit32 = const 0x1
+    copy &18 -> %remainder
+    branch $l.6
+  $l.5:
+    branch $l.6
+  $l.6:
+    &19: #bit_native = const 0x1
+    copy &19 -> %native_one
+    &20: #bit_native = copy %w
+    &21: #bit_native = copy %native_one
+    &22: #bit_native = i.add &20, &21
+    copy &22 -> %wide_divisor
+    &23: #bit_native = copy %w
+    &24: #bit_native = copy %wide_divisor
+    &25: #bit_native = i.div.u &23, &24
+    copy &25 -> %wide_quotient
+    &26: #bit_native = copy %w
+    &27: #bit_native = copy %wide_divisor
+    &28: #bit_native = i.mod.u &26, &27
+    copy &28 -> %wide_remainder
+    return
+}

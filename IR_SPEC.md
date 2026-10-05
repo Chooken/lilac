@@ -318,12 +318,16 @@ field %obj .name -> &1  // idx 2, #bit32
 ## Comparisons
 * ```cmp.eql #type, &a, &b -> &r```
 * ```i.cmp.gt &a, &b -> &r``` / ```i.cmp.lt &a, &b -> &r```
+* ```i.cmp.gt.u &a, &b -> &r``` / ```i.cmp.lt.u &a, &b -> &r``` (`icmp ugt`/`icmp ult`)
 * ```f.cmp.gt &a, &b -> &r``` / ```f.cmp.lt &a, &b -> &r```
 Result is `@bit8` (`0x0` false, otherwise true). Widths of inputs must match;
-`i.*` vs `f.*` selects two's-complement vs IEEE-754 interpretation.
+`i.*` vs `f.*` selects two's-complement vs IEEE-754 interpretation. The
+unsigned `i.cmp.lt.u` entered with the runtime-in-LIR work; `i.cmp.gt.u`
+completes the unsigned comparison set.
 
 ## Integer Arithmetic
 * ```i.add &a, &b -> &r``` / ```i.sub``` / ```i.mul``` / ```i.div``` / ```i.mod```
+* ```i.div.u &a, &b -> &r``` / ```i.mod.u &a, &b -> &r``` (`udiv`/`urem`)
 All operands share one `#bit8/16/32/64/Native` width, carried on the result reg.
 
 ## Float Arithmetic
