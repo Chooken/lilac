@@ -32,7 +32,8 @@
 
 use std::collections::HashMap;
 
-use crate::isa::{ArithOp, Builtin, Func, Instr, Operand, Program, TypeId, VM_POINTER_BYTES};
+use crate::decode::{decode, Decoded};
+use crate::isa::{ArithOp, Builtin, Func, Operand, Program, TypeId, VM_POINTER_BYTES};
 
 /// High-bit tag distinguishing a function address from an arena ref.
 ///
@@ -189,34 +190,41 @@ impl<'a> Interp<'a> {
             .unwrap_or(code_len);
         let mut pc = start;
         while pc < end {
-            let instr = func
-                .code
-                .get(pc as usize)
-                .ok_or_else(|| format!("program counter {pc} out of range"))?;
-            if let Some(flow) = self.exec_instr(instr, regs, slot_base, func)? {
+            let (instr, next) = decode(&func.code, pc as usize, &func.call_sites, &func.operands)
+                .map_err(|err| format!("decode at pc {pc}: {err}"))?;
+            if let Some(flow) = self.exec_instr(&instr, regs, slot_base, func)? {
                 return Ok(flow);
             }
-            pc += 1;
+            pc = next;
         }
         Err(format!("block at pc {start} fell off the end"))
     }
 
-    /// Executes one instruction, returning a control transfer for terminators.
+    /// Executes one decoded instruction, returning a control transfer for
+    /// terminators.
     #[allow(clippy::too_many_lines)]
     fn exec_instr(
         &mut self,
-        instr: &Instr,
+        instr: &Decoded<'a>,
         regs: &mut HashMap<u32, u64>,
         slot_base: u64,
         caller: &'a Func,
     ) -> Result<Option<Flow>, String> {
         let program = self.program;
+        if let Some((op, dst, lhs, rhs, width)) = arith_parts(instr) {
+            let size = u32::from(width) / 8;
+            let left = regs.get(&lhs).copied().unwrap_or(0);
+            let right = regs.get(&rhs).copied().unwrap_or(0);
+            let value = eval_arith(op, left, right, size);
+            regs.insert(dst, value & mask(size));
+            return Ok(None);
+        }
         match instr {
-            Instr::Const { dst, imm, ty } => {
-                regs.insert(*dst, imm & mask(type_size(program, *ty)));
+            Decoded::Const { dst, imm } => {
+                regs.insert(*dst, *imm);
                 Ok(None)
             }
-            Instr::ConstData { dst, data, .. } => {
+            Decoded::ConstData { dst, data } => {
                 let off = program
                     .data
                     .get(*data as usize)
@@ -224,50 +232,47 @@ impl<'a> Interp<'a> {
                 regs.insert(*dst, off);
                 Ok(None)
             }
-            Instr::Copy { dst, src, ty } => {
-                let size = type_size(program, *ty);
-                if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(regs, slot_base, *src, size);
-                    self.write_scalar(regs, slot_base, *dst, value, size);
+            Decoded::Copy { dst, src, size } => {
+                if *size <= VM_POINTER_BYTES {
+                    let value = self.read_scalar(regs, slot_base, *src, *size);
+                    self.write_scalar(regs, slot_base, *dst, value, *size);
                 } else {
-                    self.copy_aggregate(regs, slot_base, *dst, *src, size);
+                    self.copy_aggregate(regs, slot_base, *dst, *src, *size);
                 }
                 Ok(None)
             }
-            Instr::CopyBytes { dst, src, size } => {
+            Decoded::CopyBytes { dst, src, size } => {
                 let src_abs = slot_base + u64::from(*src);
                 let dst_abs = slot_base + u64::from(*dst);
                 let bytes = self.read_bytes(src_abs, *size);
                 self.write_bytes(dst_abs, &bytes);
                 Ok(None)
             }
-            Instr::Load { dst, src, ty } => {
-                let size = type_size(program, *ty);
+            Decoded::Load { dst, src, size } => {
                 let ref_off = self.slot_ref(slot_base, *src);
-                let value = if size <= VM_POINTER_BYTES {
-                    self.read_abs(ref_off, size)
+                let value = if *size <= VM_POINTER_BYTES {
+                    self.read_abs(ref_off, *size)
                 } else {
                     ref_off
                 };
                 regs.insert(*dst, value);
                 Ok(None)
             }
-            Instr::Store { src, dst, ty } => {
-                let size = type_size(program, *ty);
+            Decoded::Store { src, dst, size } => {
                 let ref_off = self.slot_ref(slot_base, *dst);
-                if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(regs, slot_base, *src, size);
-                    self.write_abs(ref_off, value, size);
+                if *size <= VM_POINTER_BYTES {
+                    let value = self.read_scalar(regs, slot_base, *src, *size);
+                    self.write_abs(ref_off, value, *size);
                 } else {
-                    self.copy_operand_bytes(regs, slot_base, *src, ref_off, size);
+                    self.copy_operand_bytes(regs, slot_base, *src, ref_off, *size);
                 }
                 Ok(None)
             }
-            Instr::Addr { dst, place } => {
+            Decoded::Addr { dst, place } => {
                 regs.insert(*dst, slot_base + u64::from(*place));
                 Ok(None)
             }
-            Instr::AddrField {
+            Decoded::AddrField {
                 dst,
                 place,
                 off,
@@ -277,69 +282,61 @@ impl<'a> Interp<'a> {
                 regs.insert(*dst, base + u64::from(*off));
                 Ok(None)
             }
-            Instr::AddrFunc { dst, func } => {
+            Decoded::AddrFunc { dst, func } => {
                 regs.insert(*dst, FUNC_TAG | u64::from(*func));
                 Ok(None)
             }
-            Instr::Field {
+            Decoded::Field {
                 dst,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => {
-                let size = type_size(program, *ty);
                 let base = self.field_base(slot_base, *place, *indirect);
                 let address = base + u64::from(*off);
-                let value = if size <= VM_POINTER_BYTES {
-                    self.read_abs(address, size)
+                let value = if *size <= VM_POINTER_BYTES {
+                    self.read_abs(address, *size)
                 } else {
                     address
                 };
                 regs.insert(*dst, value);
                 Ok(None)
             }
-            Instr::StoreField {
+            Decoded::StoreField {
                 src,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => {
-                let size = type_size(program, *ty);
                 let base = self.field_base(slot_base, *place, *indirect);
                 let address = base + u64::from(*off);
-                if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(regs, slot_base, *src, size);
-                    self.write_abs(address, value, size);
+                if *size <= VM_POINTER_BYTES {
+                    let value = self.read_scalar(regs, slot_base, *src, *size);
+                    self.write_abs(address, value, *size);
                 } else {
-                    self.copy_operand_bytes(regs, slot_base, *src, address, size);
+                    self.copy_operand_bytes(regs, slot_base, *src, address, *size);
                 }
                 Ok(None)
             }
-            Instr::Arith {
-                op,
-                dst,
-                lhs,
-                rhs,
-                operand_ty,
-                ty,
-            } => {
-                let operand_size = type_size(program, *operand_ty);
-                let result_size = type_size(program, *ty);
-                let left = regs.get(lhs).copied().unwrap_or(0);
-                let right = regs.get(rhs).copied().unwrap_or(0);
-                let value = eval_arith(*op, left, right, operand_size);
-                regs.insert(*dst, value & mask(result_size));
-                Ok(None)
-            }
-            Instr::Convert { dst, src, ty, .. } => {
+            Decoded::Trunc { dst, src, width } => {
                 let value = regs.get(src).copied().unwrap_or(0);
-                regs.insert(*dst, value & mask(type_size(program, *ty)));
+                regs.insert(*dst, value & mask(u32::from(*width) / 8));
                 Ok(None)
             }
-            Instr::Call { func, ins, outs } => self.call(*func, ins, outs, regs, slot_base),
-            Instr::CallIndirect { callee, ins, outs } => {
+            Decoded::ExtendZero { dst, src } => {
+                let value = regs.get(src).copied().unwrap_or(0);
+                regs.insert(*dst, value);
+                Ok(None)
+            }
+            Decoded::Call { site, ins, outs } => self.call(site.func, ins, outs, regs, slot_base),
+            Decoded::CallIndirect {
+                callee,
+                site: _,
+                ins,
+                outs,
+            } => {
                 let value = regs.get(callee).copied().unwrap_or(0);
                 if value & FUNC_TAG == 0 {
                     return Err(format!("invalid function reference {value}"));
@@ -348,16 +345,16 @@ impl<'a> Interp<'a> {
                     .map_err(|_| format!("invalid function reference {value}"))?;
                 self.call(target, ins, outs, regs, slot_base)
             }
-            Instr::CallBuiltin { builtin, ins, outs } => {
-                self.call_builtin(*builtin, ins, outs, regs, slot_base)
-            }
-            Instr::Branch { target } => Ok(Some(Flow::Goto(*target))),
-            Instr::BranchIf { cond, then, els } => {
+            Decoded::CallBuiltin {
+                builtin, ins, outs, ..
+            } => self.call_builtin(*builtin, ins, outs, regs, slot_base),
+            Decoded::Branch { target } => Ok(Some(Flow::Goto(*target))),
+            Decoded::BranchIf { cond, then, els } => {
                 let value = regs.get(cond).copied().unwrap_or(0);
                 Ok(Some(Flow::Goto(if value == 0 { *els } else { *then })))
             }
-            Instr::Return => Ok(Some(Flow::Return)),
-            Instr::Panic { data } => {
+            Decoded::Return => Ok(Some(Flow::Return)),
+            Decoded::Panic { data } => {
                 let message = program
                     .data
                     .get(*data as usize)
@@ -365,10 +362,11 @@ impl<'a> Interp<'a> {
                 eprintln!("panic: {}", String::from_utf8_lossy(message));
                 Ok(Some(Flow::Panicked(ABORT_CODE)))
             }
-            Instr::Unreachable => Err(format!(
+            Decoded::Unreachable => Err(format!(
                 "executed an `unreachable` terminator in `{}`",
                 caller.name
             )),
+            _ => Err("unexpected decoded instruction".to_string()),
         }
     }
 
@@ -377,7 +375,7 @@ impl<'a> Interp<'a> {
         &mut self,
         target: u32,
         ins: &[Operand],
-        outs: &[u32],
+        outs: &[Operand],
         regs: &HashMap<u32, u64>,
         slot_base: u64,
     ) -> Result<Option<Flow>, String> {
@@ -407,7 +405,7 @@ impl<'a> Interp<'a> {
         &mut self,
         builtin: Builtin,
         ins: &[Operand],
-        outs: &[u32],
+        outs: &[Operand],
         regs: &HashMap<u32, u64>,
         slot_base: u64,
     ) -> Result<Option<Flow>, String> {
@@ -419,11 +417,12 @@ impl<'a> Interp<'a> {
                 };
                 let base = self.read_scalar(regs, slot_base, base, VM_POINTER_BYTES);
                 let offset = self.read_scalar(regs, slot_base, offset, VM_POINTER_BYTES);
-                let out = outs
-                    .first()
-                    .ok_or_else(|| "@ptr_add expects one output".to_string())?;
+                let out = match outs.first() {
+                    Some(Operand::Slot(out)) => *out,
+                    _ => return Err("@ptr_add expects one output".to_string()),
+                };
                 self.write_abs(
-                    slot_base + u64::from(*out),
+                    slot_base + u64::from(out),
                     base.wrapping_add(offset),
                     VM_POINTER_BYTES,
                 );
@@ -513,9 +512,11 @@ impl<'a> Interp<'a> {
     }
 
     /// Writes a call's returned byte buffers into the caller's output slots.
-    fn write_out_slots(&mut self, slot_base: u64, outs: &[u32], values: &[Vec<u8>]) {
-        for (off, bytes) in outs.iter().zip(values) {
-            self.write_bytes(slot_base + u64::from(*off), bytes);
+    fn write_out_slots(&mut self, slot_base: u64, outs: &[Operand], values: &[Vec<u8>]) {
+        for (operand, bytes) in outs.iter().zip(values) {
+            if let Operand::Slot(off) = operand {
+                self.write_bytes(slot_base + u64::from(*off), bytes);
+            }
         }
     }
 
@@ -636,6 +637,130 @@ fn sign_extend(value: u64, size: u32) -> i64 {
     let bits = size.min(8) * 8;
     let shift = 64 - bits;
     ((value << shift) as i64) >> shift
+}
+
+/// Extracts `(op, dst, lhs, rhs, width_bits)` from a decoded arithmetic
+/// instruction, or `None` for any other instruction.
+#[allow(clippy::too_many_lines)]
+fn arith_parts(instr: &Decoded) -> Option<(ArithOp, u32, u32, u32, u8)> {
+    let (op, dst, lhs, rhs, width) = match instr {
+        Decoded::IAdd {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IAdd, *dst, *lhs, *rhs, *width),
+        Decoded::ISub {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::ISub, *dst, *lhs, *rhs, *width),
+        Decoded::IMul {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IMul, *dst, *lhs, *rhs, *width),
+        Decoded::IDiv {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IDiv, *dst, *lhs, *rhs, *width),
+        Decoded::IMod {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IMod, *dst, *lhs, *rhs, *width),
+        Decoded::ILt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::ILt, *dst, *lhs, *rhs, *width),
+        Decoded::IGt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IGt, *dst, *lhs, *rhs, *width),
+        Decoded::IDivU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IDivU, *dst, *lhs, *rhs, *width),
+        Decoded::IModU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IModU, *dst, *lhs, *rhs, *width),
+        Decoded::Eq {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::Eq, *dst, *lhs, *rhs, *width),
+        Decoded::ILtU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::ILtU, *dst, *lhs, *rhs, *width),
+        Decoded::IGtU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::IGtU, *dst, *lhs, *rhs, *width),
+        Decoded::FAdd {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FAdd, *dst, *lhs, *rhs, *width),
+        Decoded::FSub {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FSub, *dst, *lhs, *rhs, *width),
+        Decoded::FMul {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FMul, *dst, *lhs, *rhs, *width),
+        Decoded::FDiv {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FDiv, *dst, *lhs, *rhs, *width),
+        Decoded::FMod {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FMod, *dst, *lhs, *rhs, *width),
+        Decoded::FLt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FLt, *dst, *lhs, *rhs, *width),
+        Decoded::FGt {
+            dst,
+            lhs,
+            rhs,
+            width,
+        } => (ArithOp::FGt, *dst, *lhs, *rhs, *width),
+        _ => return None,
+    };
+    Some((op, dst, lhs, rhs, width))
 }
 
 /// Evaluates an integer arithmetic/comparison operator.

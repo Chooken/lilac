@@ -14,6 +14,7 @@
 
 use std::io::{BufRead, Write};
 
+use crate::decode::decode;
 use crate::exec::{Machine, Step, VmError};
 use crate::isa::{Func, Line};
 
@@ -364,15 +365,26 @@ impl<'a> Debugger<'a> {
             .parse::<usize>()
             .unwrap_or_else(|_| self.machine.pc() as usize);
         let start = pc.saturating_sub(3);
-        let end = pc.saturating_add(4).min(func.code.len());
+        let end = pc.saturating_add(4);
         let _ = writeln!(output, "disasm of {} (pc {pc}):", func.name);
-        for index in start..end {
-            let marker = if index == pc { "=>" } else { "  " };
-            let _ = writeln!(
-                output,
-                "{marker} {index}  {}",
-                program.disasm_instr(&func.code[index])
-            );
+        // Decode boundaries only, so a window never starts mid-instruction.
+        let mut word_pc = 0_usize;
+        while word_pc < func.code.len() {
+            let Ok(text) = program.disasm_at(func, word_pc) else {
+                break;
+            };
+            if word_pc >= start && word_pc < end {
+                let marker = if word_pc == pc { "=>" } else { "  " };
+                let _ = writeln!(output, "{marker} {word_pc}  {text}");
+            }
+            let next = match decode(&func.code, word_pc, &func.call_sites, &func.operands) {
+                Ok((_, next)) => next as usize,
+                Err(_) => break,
+            };
+            if next <= word_pc {
+                break;
+            }
+            word_pc = next;
         }
     }
 
@@ -660,14 +672,9 @@ mod tests {
             },
             Instr::Return,
         ]);
-        program.funcs.push(isa::Func {
-            name: "f".to_string(),
-            is_extern: false,
-            ins: vec![0],
-            outs: Vec::new(),
-            n_regs: 4,
-            slot_bytes: 8,
-            code: vec![
+        let (fcode, fcall, fops) = isa::words_of(
+            &program.types,
+            &[
                 Instr::Copy {
                     dst: Operand::Reg(1),
                     src: Operand::Slot(0),
@@ -712,6 +719,17 @@ mod tests {
                 Instr::Return,
                 Instr::Return,
             ],
+        );
+        program.funcs.push(isa::Func {
+            name: "f".to_string(),
+            is_extern: false,
+            ins: vec![0],
+            outs: Vec::new(),
+            n_regs: 4,
+            slot_bytes: 8,
+            code: fcode,
+            call_sites: fcall,
+            operands: fops,
             lines: vec![isa::Line {
                 pc: 0,
                 file: "t.lilac".to_string(),
@@ -737,11 +755,11 @@ mod tests {
         )
         .expect("repl");
         let text = String::from_utf8(out).expect("utf8");
-        // One `stepi` runs the entry instruction (pc 0) and no more: the
-        // disassembly marker sits on pc 1, not pc 2, and the value written by
-        // pc 0 is live.
-        assert!(text.contains("=> 1"), "transcript:\n{text}");
-        assert!(!text.contains("=> 2"), "transcript:\n{text}");
+        // One `stepi` runs the entry instruction (word 0, a three-word `const`)
+        // and no more: the disassembly marker sits on word pc 3, not the
+        // following word, and the value written by pc 0 is live.
+        assert!(text.contains("=> 3"), "transcript:\n{text}");
+        assert!(!text.contains("=> 6"), "transcript:\n{text}");
         assert!(text.contains("&0 = 1 (0x1)"), "transcript:\n{text}");
     }
 

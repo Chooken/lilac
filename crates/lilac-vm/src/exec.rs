@@ -26,7 +26,8 @@
 
 use std::fmt;
 
-use crate::isa::{ArithOp, Builtin, ConvertOp, Instr, Operand, Program, TypeId, VM_POINTER_BYTES};
+use crate::decode::{decode, Decoded};
+use crate::isa::{ArithOp, Builtin, Operand, Program, TypeId, VM_POINTER_BYTES};
 
 /// Maximum number of live frames before a call traps with
 /// [`VmError::StackOverflow`].
@@ -54,7 +55,10 @@ pub enum VmError {
     BadRef(u64),
     /// The program counter ran past the end of the current function's code.
     BadPc(u32),
-    /// Execution reached an [`Instr::Unreachable`] terminator.
+    /// A malformed word stream was reached during execution (unverified
+    /// program).
+    BadInstr(u32),
+    /// Execution reached an `unreachable` terminator.
     Unreachable,
     /// The call stack reached [`MAX_CALL_DEPTH`].
     StackOverflow,
@@ -67,6 +71,7 @@ impl fmt::Display for VmError {
             Self::ExternCall(name) => write!(f, "cannot call extern function `{name}`"),
             Self::BadRef(off) => write!(f, "invalid arena reference {off}"),
             Self::BadPc(pc) => write!(f, "program counter {pc} out of range"),
+            Self::BadInstr(pc) => write!(f, "malformed instruction at program counter {pc}"),
             Self::Unreachable => write!(f, "reached an `unreachable` terminator"),
             Self::StackOverflow => write!(f, "call stack overflow (limit {MAX_CALL_DEPTH})"),
         }
@@ -111,13 +116,17 @@ struct Frame {
     pc: u32,
     /// Program counter of the instruction most recently executed in this frame.
     ///
-    /// `pc` is incremented before an instruction runs (and overwritten to a
+    /// `pc` is advanced before an instruction runs (and overwritten to a
     /// branch target for a taken branch), so it points at the *next*
     /// instruction. Diagnostics such as [`Machine::current_line`] and
     /// [`Machine::backtrace`] instead report the instruction the frame is
     /// currently executing, which is `last_pc` once any instruction has run and
     /// the function entry otherwise.
     last_pc: Option<u32>,
+    /// Range of this frame's output slots within the **caller's** operand pool
+    /// (empty for the entry frame). Recorded at `call` so `return` need not
+    /// re-decode the caller's call instruction.
+    outs: core::ops::Range<u32>,
 }
 
 /// A bytecode interpreter over one [`Program`].
@@ -172,6 +181,7 @@ impl<'a> Machine<'a> {
             slot_base,
             pc: 0,
             last_pc: None,
+            outs: 0..0,
         }];
         Ok(Self {
             program,
@@ -213,196 +223,306 @@ impl<'a> Machine<'a> {
             (frame.func, frame.pc, frame.reg_base, frame.slot_base);
         let program = self.program;
         let func = &program.funcs[func_index as usize];
-        let Some(instr) = func.code.get(pc as usize) else {
+        if pc as usize >= func.code.len() {
             // The verifier guarantees every non-extern body ends in a
             // terminator and every branch target is in range, but a directly
             // constructed (unverified) `Program` can still run off the end.
             return Err(VmError::BadPc(pc));
-        };
+        }
+        let (instr, next) = decode(&func.code, pc as usize, &func.call_sites, &func.operands)
+            .map_err(|_| VmError::BadInstr(pc))?;
         // All instructions except branches fall through; branch arms overwrite.
         if let Some(frame) = self.frames.last_mut() {
-            frame.pc = pc + 1;
+            frame.pc = next;
             frame.last_pc = Some(pc);
         }
         match instr {
-            Instr::Const { dst, imm, ty } => {
-                let value = imm & mask(type_size(program, *ty));
-                self.set_reg(reg_base, *dst, value);
-            }
-            Instr::ConstData { dst, data, .. } => {
+            Decoded::Const { dst, imm } => self.set_reg(reg_base, dst, imm),
+            Decoded::ConstData { dst, data } => {
                 let off = program
                     .data
-                    .get(*data as usize)
+                    .get(data as usize)
                     .map_or(0, |entry| entry.global_off);
-                self.set_reg(reg_base, *dst, u64::from(off));
+                self.set_reg(reg_base, dst, u64::from(off));
             }
-            Instr::Copy { dst, src, ty } => {
-                let size = type_size(program, *ty);
+            Decoded::Copy { dst, src, size } => {
                 if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(reg_base, slot_base, *src, size)?;
-                    self.write_scalar(reg_base, slot_base, *dst, value, size)?;
+                    let value = self.read_scalar(reg_base, slot_base, src, size)?;
+                    self.write_scalar(reg_base, slot_base, dst, value, size)?;
                 } else {
-                    self.copy_aggregate(reg_base, slot_base, *dst, *src, size)?;
+                    self.copy_aggregate(reg_base, slot_base, dst, src, size)?;
                 }
             }
-            Instr::CopyBytes { dst, src, size } => {
-                let src_abs = usize::try_from(slot_base).unwrap_or(0) + *src as usize;
-                let dst_abs = usize::try_from(slot_base).unwrap_or(0) + *dst as usize;
-                self.copy_arena(src_abs, dst_abs, *size as usize)?;
+            Decoded::CopyBytes { dst, src, size } => {
+                let src_abs = usize::try_from(slot_base).unwrap_or(0) + src as usize;
+                let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst as usize;
+                self.copy_arena(src_abs, dst_abs, size as usize)?;
             }
-            Instr::Arith {
-                op,
-                dst,
-                lhs,
-                rhs,
-                operand_ty,
-                ty,
-            } => {
-                let operand_size = type_size(program, *operand_ty);
-                let result_size = type_size(program, *ty);
-                let left = self.reg(reg_base, *lhs);
-                let right = self.reg(reg_base, *rhs);
-                let value = eval_arith(*op, left, right, operand_size);
-                self.set_reg(reg_base, *dst, value & mask(result_size));
-            }
-            Instr::Convert { op, dst, src, ty } => {
-                let size = type_size(program, *ty);
-                let value = self.reg(reg_base, *src);
-                let result = match op {
-                    ConvertOp::Trunc | ConvertOp::ExtendZero => value & mask(size),
-                };
-                self.set_reg(reg_base, *dst, result);
-            }
-            Instr::Branch { target } => {
-                if let Some(frame) = self.frames.last_mut() {
-                    frame.pc = *target;
-                }
-            }
-            Instr::BranchIf { cond, then, els } => {
-                let value = self.reg(reg_base, *cond);
-                let target = if value == 0 { *els } else { *then };
-                if let Some(frame) = self.frames.last_mut() {
-                    frame.pc = target;
-                }
-            }
-            Instr::Load { dst, src, ty } => {
-                let size = type_size(program, *ty);
-                let ref_off = self.slot_ref(slot_base, *src)?;
+            Decoded::Load { dst, src, size } => {
+                let ref_off = self.slot_ref(slot_base, src)?;
                 if size <= VM_POINTER_BYTES {
                     let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
                     let value = self.read_abs(abs, size).ok_or(VmError::BadRef(ref_off))?;
-                    self.set_reg(reg_base, *dst, value);
+                    self.set_reg(reg_base, dst, value);
                 } else {
                     // An aggregate register holds a ref, not the bytes, so a
                     // `Load` of an indirect value passes the pointer through.
-                    self.set_reg(reg_base, *dst, ref_off);
+                    self.set_reg(reg_base, dst, ref_off);
                 }
             }
-            Instr::Store { src, dst, ty } => {
-                let size = type_size(program, *ty);
-                let ref_off = self.slot_ref(slot_base, *dst)?;
+            Decoded::Store { src, dst, size } => {
+                let ref_off = self.slot_ref(slot_base, dst)?;
                 let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
                 if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(reg_base, slot_base, *src, size)?;
+                    let value = self.read_scalar(reg_base, slot_base, src, size)?;
                     self.write_abs(abs, value, size)?;
                 } else {
-                    self.copy_operand_bytes(reg_base, slot_base, *src, abs, size)?;
+                    self.copy_operand_bytes(reg_base, slot_base, src, abs, size)?;
                 }
             }
-            Instr::Addr { dst, place } => {
-                let addr = u64::from(slot_base) + u64::from(*place);
-                self.set_reg(reg_base, *dst, addr);
+            Decoded::Addr { dst, place } => {
+                let addr = u64::from(slot_base) + u64::from(place);
+                self.set_reg(reg_base, dst, addr);
             }
-            Instr::AddrField {
+            Decoded::AddrField {
                 dst,
                 place,
                 off,
                 indirect,
             } => {
-                let base = self.field_base(slot_base, *place, *indirect)?;
+                let base = self.field_base(slot_base, place, indirect)?;
                 let addr = base
-                    .checked_add(*off as usize)
+                    .checked_add(off as usize)
                     .ok_or(VmError::BadRef(base as u64))?;
                 let addr = u64::try_from(addr).map_err(|_| VmError::BadRef(base as u64))?;
-                self.set_reg(reg_base, *dst, addr);
+                self.set_reg(reg_base, dst, addr);
             }
-            Instr::AddrFunc { dst, func } => {
-                self.set_reg(reg_base, *dst, FUNC_TAG | u64::from(*func));
+            Decoded::AddrFunc { dst, func: target } => {
+                self.set_reg(reg_base, dst, FUNC_TAG | u64::from(target));
             }
-            Instr::Field {
+            Decoded::Field {
                 dst,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => {
-                let size = type_size(program, *ty);
-                let base = self.field_base(slot_base, *place, *indirect)?;
+                let base = self.field_base(slot_base, place, indirect)?;
                 let addr = base
-                    .checked_add(*off as usize)
+                    .checked_add(off as usize)
                     .ok_or(VmError::BadRef(base as u64))?;
                 if size <= VM_POINTER_BYTES {
                     let value = self
                         .read_abs(addr, size)
                         .ok_or(VmError::BadRef(addr as u64))?;
-                    self.set_reg(reg_base, *dst, value);
+                    self.set_reg(reg_base, dst, value);
                 } else {
                     // The compiler emits `AddrField` for aggregate fields; this
                     // is a defensive fall-back that yields the field ref.
                     let value = u64::try_from(addr).map_err(|_| VmError::BadRef(addr as u64))?;
-                    self.set_reg(reg_base, *dst, value);
+                    self.set_reg(reg_base, dst, value);
                 }
             }
-            Instr::StoreField {
+            Decoded::StoreField {
                 src,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => {
-                let size = type_size(program, *ty);
-                let base = self.field_base(slot_base, *place, *indirect)?;
+                let base = self.field_base(slot_base, place, indirect)?;
                 let addr = base
-                    .checked_add(*off as usize)
+                    .checked_add(off as usize)
                     .ok_or(VmError::BadRef(base as u64))?;
                 if size <= VM_POINTER_BYTES {
-                    let value = self.read_scalar(reg_base, slot_base, *src, size)?;
+                    let value = self.read_scalar(reg_base, slot_base, src, size)?;
                     self.write_abs(addr, value, size)?;
                 } else {
-                    self.copy_operand_bytes(reg_base, slot_base, *src, addr, size)?;
+                    self.copy_operand_bytes(reg_base, slot_base, src, addr, size)?;
                 }
             }
-            Instr::Call {
-                func: target, ins, ..
-            } => {
-                self.call(*target, ins, reg_base, slot_base)?;
+            Decoded::IAdd {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IAdd, reg_base, dst, lhs, rhs, width),
+            Decoded::ISub {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::ISub, reg_base, dst, lhs, rhs, width),
+            Decoded::IMul {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IMul, reg_base, dst, lhs, rhs, width),
+            Decoded::IDiv {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IDiv, reg_base, dst, lhs, rhs, width),
+            Decoded::IMod {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IMod, reg_base, dst, lhs, rhs, width),
+            Decoded::ILt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::ILt, reg_base, dst, lhs, rhs, width),
+            Decoded::IGt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IGt, reg_base, dst, lhs, rhs, width),
+            Decoded::IDivU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IDivU, reg_base, dst, lhs, rhs, width),
+            Decoded::IModU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IModU, reg_base, dst, lhs, rhs, width),
+            Decoded::Eq {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::Eq, reg_base, dst, lhs, rhs, width),
+            Decoded::ILtU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::ILtU, reg_base, dst, lhs, rhs, width),
+            Decoded::IGtU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::IGtU, reg_base, dst, lhs, rhs, width),
+            Decoded::FAdd {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FAdd, reg_base, dst, lhs, rhs, width),
+            Decoded::FSub {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FSub, reg_base, dst, lhs, rhs, width),
+            Decoded::FMul {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FMul, reg_base, dst, lhs, rhs, width),
+            Decoded::FDiv {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FDiv, reg_base, dst, lhs, rhs, width),
+            Decoded::FMod {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FMod, reg_base, dst, lhs, rhs, width),
+            Decoded::FLt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FLt, reg_base, dst, lhs, rhs, width),
+            Decoded::FGt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => self.exec_arith(ArithOp::FGt, reg_base, dst, lhs, rhs, width),
+            Decoded::Trunc { dst, src, width } => {
+                let value = self.reg(reg_base, src);
+                self.set_reg(reg_base, dst, value & mask(u32::from(width) / 8));
             }
-            Instr::CallIndirect { callee, ins, .. } => {
-                let value = self.reg(reg_base, *callee);
+            Decoded::ExtendZero { dst, src } => {
+                // Zero-extension is already reflected in the register's low
+                // bits; the result width is at least the source width, so this
+                // is a register move (matching M5c's no-op mask).
+                self.set_reg(reg_base, dst, self.reg(reg_base, src));
+            }
+            Decoded::Call { site, ins, .. } => {
+                self.call(site.func, ins, site.outs.clone(), reg_base, slot_base)?;
+            }
+            Decoded::CallIndirect {
+                callee, site, ins, ..
+            } => {
+                let value = self.reg(reg_base, callee);
                 if value & FUNC_TAG == 0 {
                     return Err(VmError::BadRef(value));
                 }
                 let target =
                     u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
-                self.call(target, ins, reg_base, slot_base)?;
+                self.call(target, ins, site.outs.clone(), reg_base, slot_base)?;
             }
-            Instr::CallBuiltin { builtin, ins, outs } => {
-                return self.call_builtin(*builtin, ins, outs, reg_base, slot_base);
+            Decoded::CallBuiltin {
+                builtin, ins, outs, ..
+            } => {
+                return self.call_builtin(builtin, ins, outs, reg_base, slot_base);
             }
-            Instr::Return => return self.return_from_frame(program),
-            Instr::Panic { data } => {
+            Decoded::Return => return self.return_from_frame(program),
+            Decoded::Panic { data } => {
                 // The referenced data constant's bytes are the panic message.
                 // The verifier's `check_data` guarantees the index is in range;
                 // the empty fallback only guards an unverified program.
                 let message = program
                     .data
-                    .get(*data as usize)
+                    .get(data as usize)
                     .map_or(&[][..], |entry| entry.bytes.as_slice());
                 return Ok(trap(message));
             }
-            Instr::Unreachable => return Err(VmError::Unreachable),
+            Decoded::Branch { target } => {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.pc = target;
+                }
+            }
+            Decoded::BranchIf { cond, then, els } => {
+                let value = self.reg(reg_base, cond);
+                let target = if value == 0 { els } else { then };
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.pc = target;
+                }
+            }
+            Decoded::Unreachable => return Err(VmError::Unreachable),
         }
         Ok(Step::Advanced)
+    }
+
+    /// Evaluates a width-specialized arithmetic/comparison instruction.
+    ///
+    /// The result is masked to the operand width. For the comparison ops this
+    /// is harmless (the result is `0`/`1`); for arithmetic the result type
+    /// equals the operand type, matching M5c.
+    fn exec_arith(&mut self, op: ArithOp, reg_base: u32, dst: u32, lhs: u32, rhs: u32, width: u8) {
+        let size = u32::from(width) / 8;
+        let left = self.reg(reg_base, lhs);
+        let right = self.reg(reg_base, rhs);
+        let value = eval_arith(op, left, right, size);
+        self.set_reg(reg_base, dst, value & mask(size));
     }
 
     /// The current frame's program counter.
@@ -482,10 +602,15 @@ impl<'a> Machine<'a> {
     }
 
     /// Pushes a callee frame, binding its inputs from `ins`.
+    ///
+    /// `outs` is the callee-side range into the caller's operand pool for the
+    /// call's output slots; it is recorded on the frame so `return` can place
+    /// the results without re-decoding the caller.
     fn call(
         &mut self,
         target: u32,
         ins: &[Operand],
+        outs: core::ops::Range<u32>,
         caller_reg_base: u32,
         caller_slot_base: u32,
     ) -> Result<(), VmError> {
@@ -526,6 +651,7 @@ impl<'a> Machine<'a> {
             slot_base,
             pc: 0,
             last_pc: None,
+            outs,
         });
         Ok(())
     }
@@ -549,24 +675,27 @@ impl<'a> Machine<'a> {
         };
         let caller_func = &program.funcs[caller.func as usize];
         let caller_slot_base = caller.slot_base;
-        let call_pc = caller.pc.saturating_sub(1);
-        let out_slots: &[u32] = match caller_func.code.get(call_pc as usize) {
-            Some(Instr::Call { outs, .. } | Instr::CallIndirect { outs, .. }) => outs,
-            _ => lilac_error::bug!(
-                lilac_span::Span::dummy(),
-                "return from `{}` without a call at pc {call_pc}",
-                caller_func.name
-            ),
-        };
-        for (index, &ty) in exiting_func.outs.iter().enumerate() {
-            let Some(&dst_off) = out_slots.get(index) else {
-                break;
-            };
-            let size = type_size(program, ty);
-            let src = usize::try_from(exiting.slot_base).unwrap_or(0) + out_offset as usize;
-            let dst = usize::try_from(caller_slot_base).unwrap_or(0) + dst_off as usize;
+        // The call-site output slots were recorded on the callee frame at
+        // `call`, so no caller instruction is re-decoded here.
+        let out_slots = caller_func
+            .operands
+            .get(exiting.outs.start as usize..exiting.outs.end as usize);
+        let mut copies: Vec<(usize, usize, u32)> = Vec::new();
+        let mut running = out_offset;
+        if let Some(out_slots) = out_slots {
+            for (index, &ty) in exiting_func.outs.iter().enumerate() {
+                let Some(Operand::Slot(dst_off)) = out_slots.get(index) else {
+                    break;
+                };
+                let size = type_size(program, ty);
+                let src = usize::try_from(exiting.slot_base).unwrap_or(0) + running as usize;
+                let dst = usize::try_from(caller_slot_base).unwrap_or(0) + *dst_off as usize;
+                copies.push((src, dst, size));
+                running = running.saturating_add(size);
+            }
+        }
+        for (src, dst, size) in copies {
             self.copy_arena(src, dst, size as usize)?;
-            out_offset = out_offset.saturating_add(size);
         }
         Ok(Step::Advanced)
     }
@@ -658,7 +787,7 @@ impl<'a> Machine<'a> {
         &mut self,
         builtin: Builtin,
         ins: &[Operand],
-        outs: &[u32],
+        outs: &[Operand],
         reg_base: u32,
         slot_base: u32,
     ) -> Result<Step, VmError> {
@@ -672,7 +801,7 @@ impl<'a> Machine<'a> {
                 };
                 let base = self.read_scalar(reg_base, slot_base, base, VM_POINTER_BYTES)?;
                 let offset = self.read_scalar(reg_base, slot_base, offset, VM_POINTER_BYTES)?;
-                let Some(&out) = outs.first() else {
+                let Some(Operand::Slot(out)) = outs.first().copied() else {
                     lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects one output");
                 };
                 self.write_scalar(
@@ -987,6 +1116,7 @@ fn eval_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
 mod tests {
     use super::{trap_message, Machine, Step, VmError};
     use crate::compile::compile_src;
+    use crate::decode::{decode, Decoded};
     use crate::isa::{self, Instr};
 
     fn run_src(src: &str) -> Result<i32, VmError> {
@@ -1082,7 +1212,7 @@ mod tests {
         let mut machine = Machine::new(&program).expect("entry");
         assert_eq!(machine.step().expect("step"), Step::Advanced);
         assert_eq!(machine.read_reg(0), Some(0x2a));
-        assert_eq!(machine.pc(), 1);
+        assert_eq!(machine.pc(), 3, "a `const` is three words");
         assert_eq!(machine.step().expect("step"), Step::Returned);
     }
 
@@ -1095,7 +1225,7 @@ mod tests {
         }]);
         let mut machine = Machine::new(&program).expect("entry");
         assert_eq!(machine.step().expect("const"), Step::Advanced);
-        assert!(matches!(machine.step(), Err(VmError::BadPc(1))));
+        assert!(matches!(machine.step(), Err(VmError::BadPc(3))));
     }
 
     #[test]
@@ -1128,7 +1258,11 @@ mod tests {
         let mut machine = Machine::new(&program).expect("entry");
         machine.step().expect("const");
         machine.step().expect("branch");
-        assert_eq!(machine.pc(), 2);
+        assert_eq!(
+            machine.pc(),
+            4,
+            "else target is the second `const`'s word pc"
+        );
         machine.step().expect("const");
         assert_eq!(machine.read_reg(0), Some(0xaa));
     }
@@ -1151,6 +1285,8 @@ mod tests {
             n_regs: 0,
             slot_bytes: 0,
             code: Vec::new(),
+            call_sites: Vec::new(),
+            operands: Vec::new(),
             lines: Vec::new(),
             place_names: Vec::new(),
         });
@@ -1233,13 +1369,13 @@ mod tests {
                 col: 1,
             },
             isa::Line {
-                pc: 1,
+                pc: 3,
                 file: "t.lilac".to_string(),
                 line: 3,
                 col: 1,
             },
             isa::Line {
-                pc: 2,
+                pc: 6,
                 file: "t.lilac".to_string(),
                 line: 4,
                 col: 1,
@@ -1251,9 +1387,9 @@ mod tests {
         assert_eq!(
             machine.current_line().map(|l| l.line),
             Some(2),
-            "after executing pc 0, still on line 2"
+            "after executing word 0, still on line 2"
         );
-        assert_eq!(machine.pc(), 1);
+        assert_eq!(machine.pc(), 3);
         machine.step().expect("const");
         assert_eq!(machine.current_line().map(|l| l.line), Some(3));
     }
@@ -1285,6 +1421,7 @@ mod tests {
                 col: 1,
             },
         ];
+        let (fcode, fcall, fops) = isa::words_of(&program.types, &[Instr::Return]);
         program.funcs.push(isa::Func {
             name: "f".to_string(),
             is_extern: false,
@@ -1292,7 +1429,9 @@ mod tests {
             outs: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
-            code: vec![Instr::Return],
+            code: fcode,
+            call_sites: fcall,
+            operands: fops,
             lines: vec![isa::Line {
                 pc: 0,
                 file: "t.lilac".to_string(),
@@ -1313,7 +1452,9 @@ mod tests {
     }
 
     /// Builds a one-function `main` program with explicit types and code.
+    #[allow(clippy::needless_pass_by_value)]
     fn arith_program(types: Vec<isa::TypeInfo>, code: Vec<Instr>, n_regs: u32) -> isa::Program {
+        let (words, call_sites, operands) = isa::words_of(&types, &code);
         isa::Program {
             version: isa::LBC_VERSION.to_string(),
             target: isa::VM_TARGET.to_string(),
@@ -1327,7 +1468,9 @@ mod tests {
                 outs: Vec::new(),
                 n_regs,
                 slot_bytes: 0,
-                code,
+                code: words,
+                call_sites,
+                operands,
                 lines: Vec::new(),
                 place_names: Vec::new(),
             }],
@@ -1573,13 +1716,16 @@ mod tests {
                 .iter()
                 .find(|f| f.name == name)
                 .unwrap_or_else(|| panic!("runtime function {name}"));
-            let has_stride = func.code.iter().any(|instr| {
-                matches!(
-                    instr,
-                    Instr::Const { imm: 0x10, ty, .. }
-                        if program.types[*ty as usize].name == "#bit_native"
-                )
-            });
+            let mut pc = 0_usize;
+            let mut has_stride = false;
+            while pc < func.code.len() {
+                let (instr, next) = decode(&func.code, pc, &func.call_sites, &func.operands)
+                    .unwrap_or_else(|err| panic!("decode {name} at {pc}: {err}"));
+                if matches!(instr, Decoded::Const { imm: 0x10, .. }) {
+                    has_stride = true;
+                }
+                pc = next as usize;
+            }
             assert!(has_stride, "{name} must embed the 16-byte piece stride");
         }
     }
@@ -1615,6 +1761,7 @@ mod tests {
             },
             Instr::Return,
         ]);
+        let (hcode, hcall, hops) = isa::words_of(&program.types, &[Instr::Return]);
         program.funcs.push(isa::Func {
             name: "helper".to_string(),
             is_extern: false,
@@ -1622,7 +1769,9 @@ mod tests {
             outs: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
-            code: vec![Instr::Return],
+            code: hcode,
+            call_sites: hcall,
+            operands: hops,
             lines: Vec::new(),
             place_names: Vec::new(),
         });

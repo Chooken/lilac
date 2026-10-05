@@ -787,6 +787,8 @@ impl FuncBuilder<'_, '_> {
                 n_regs: 0,
                 slot_bytes: self.places.total,
                 code: Vec::new(),
+                call_sites: Vec::new(),
+                operands: Vec::new(),
                 lines: Vec::new(),
                 place_names: std::mem::take(&mut self.places.names),
             });
@@ -814,6 +816,19 @@ impl FuncBuilder<'_, '_> {
             let next = func.blocks.get(index + 1).map(|b| b.label.as_str());
             self.emit_term(&block.term, next)?;
         }
+        // The typed list still uses instruction-index branch targets and line
+        // pcs; encode it into the executed word stream and remap both to word
+        // offsets (M5c.1 makes `pc` a word index).
+        let (words, call_sites, operands, offsets) = {
+            let (builder, offsets) =
+                crate::encode::encode_instrs(&self.compiler.types.infos, &self.code)?;
+            (builder.words, builder.call_sites, builder.operands, offsets)
+        };
+        for line in &mut self.lines {
+            line.pc = *offsets
+                .get(line.pc as usize)
+                .ok_or_else(|| "source-line pc out of range".to_string())?;
+        }
         Ok(Func {
             name: func.name.clone(),
             is_extern: false,
@@ -821,7 +836,9 @@ impl FuncBuilder<'_, '_> {
             outs,
             n_regs: self.next_reg,
             slot_bytes: self.places.total,
-            code: self.code,
+            code: words,
+            call_sites,
+            operands,
             lines: self.lines,
             place_names: std::mem::take(&mut self.places.names),
         })
@@ -984,19 +1001,39 @@ pub(crate) fn compile_src(src: &str) -> Program {
 #[cfg(test)]
 mod tests {
     use super::compile_src;
-    use crate::isa::Instr;
+    use crate::decode::{decode, Decoded};
+    use crate::isa::{Func, Program};
+
+    /// Decodes a function's whole word stream for structural assertions.
+    fn decoded(func: &Func) -> Vec<Decoded<'_>> {
+        let mut out = Vec::new();
+        let mut pc = 0_usize;
+        while pc < func.code.len() {
+            let (instr, next) = decode(&func.code, pc, &func.call_sites, &func.operands)
+                .unwrap_or_else(|err| panic!("decode at {pc}: {err}"));
+            out.push(instr);
+            pc = next as usize;
+        }
+        out
+    }
+
+    fn func<'a>(program: &'a Program, name: &str) -> &'a Func {
+        program
+            .funcs
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("function {name}"))
+    }
 
     #[test]
     fn compiles_arith_into_registers() {
         let program = compile_src(
             "main: function (a: @bit_native, b: @bit_native) nothing {\n    x: @bit_native = @i_add(a, b)\n}\n",
         );
-        let main = program
-            .funcs
+        let main = func(&program, "main");
+        assert!(decoded(main)
             .iter()
-            .find(|f| f.name == "main")
-            .expect("main");
-        assert!(main.code.iter().any(|i| matches!(i, Instr::Arith { .. })));
+            .any(|i| matches!(i, Decoded::IAdd { .. })));
         assert!(main.n_regs >= 3);
     }
 
@@ -1027,12 +1064,12 @@ mod tests {
         let mut saw_indirect = false;
         let mut saw_direct = false;
         for func in &program.funcs {
-            for instr in &func.code {
+            for instr in decoded(func) {
                 match instr {
-                    Instr::Field { indirect, .. }
-                    | Instr::AddrField { indirect, .. }
-                    | Instr::StoreField { indirect, .. } => {
-                        if *indirect {
+                    Decoded::Field { indirect, .. }
+                    | Decoded::AddrField { indirect, .. }
+                    | Decoded::StoreField { indirect, .. } => {
+                        if indirect {
                             saw_indirect = true;
                         } else {
                             saw_direct = true;
@@ -1053,25 +1090,17 @@ mod tests {
         assert!(saw_direct, "expected a direct-object field access");
 
         // `format_args_push`'s object (`%table`) is a `ref #format_args`.
-        let push = program
-            .funcs
-            .iter()
-            .find(|f| f.name == ".lilac.format_args_push")
-            .expect("push");
-        assert!(push.code.iter().any(|i| matches!(
+        let push = func(&program, ".lilac.format_args_push");
+        assert!(decoded(push).iter().any(|i| matches!(
             i,
-            Instr::Field { indirect: true, .. } | Instr::StoreField { indirect: true, .. }
+            Decoded::Field { indirect: true, .. } | Decoded::StoreField { indirect: true, .. }
         )));
 
         // `format_args_count`'s object (`%table`) is a direct `#format_args`.
-        let count = program
-            .funcs
-            .iter()
-            .find(|f| f.name == ".lilac.format_args_count")
-            .expect("count");
-        assert!(count.code.iter().any(|i| matches!(
+        let count = func(&program, ".lilac.format_args_count");
+        assert!(decoded(count).iter().any(|i| matches!(
             i,
-            Instr::Field {
+            Decoded::Field {
                 indirect: false,
                 ..
             }
@@ -1087,14 +1116,10 @@ mod tests {
         let program = compile_src(
             "Pair: object {\n    a: @bit64\n    b: @bit64\n    get: function (instance: ref Pair) result: @bit8 {\n        result = @truncate(instance.b)\n    }\n}\nmain: function () nothing {\n    p: Pair = Pair {\n        a = 0x1\n        b = 0x2\n    }\n    r: @bit8 = p.get()\n}\n",
         );
-        let get = program
-            .funcs
-            .iter()
-            .find(|f| f.name == "Pair.get")
-            .expect("Pair.get");
-        assert!(get.code.iter().any(|i| matches!(
+        let get = func(&program, "Pair.get");
+        assert!(decoded(get).iter().any(|i| matches!(
             i,
-            Instr::Field {
+            Decoded::Field {
                 indirect: true,
                 off: 8,
                 ..

@@ -105,16 +105,19 @@ pub const OP_FMOD_BASE: u8 = 0x68;
 pub const OP_FLT_BASE: u8 = 0x6A;
 /// Base of the `FGt` width block.
 pub const OP_FGT_BASE: u8 = 0x6C;
-/// Width-free `IDivU`.
-pub const OP_IDIVU: u8 = 0x6E;
-/// Width-free `IModU`.
-pub const OP_IMODU: u8 = 0x6F;
-/// Width-free `Eq`.
-pub const OP_EQ: u8 = 0x70;
-/// Width-free `ILtU`.
-pub const OP_ILTU: u8 = 0x71;
-/// Width-free `IGtU`.
-pub const OP_IGTU: u8 = 0x72;
+/// Base of the unsigned `IDivU` width block (8/16/32/64).
+///
+/// Ruling R6: the width classes are retained so operands are masked to their
+/// declared width, matching M5c semantics.
+pub const OP_IDIVU_BASE: u8 = 0x20;
+/// Base of the unsigned `IModU` width block.
+pub const OP_IMODU_BASE: u8 = 0x24;
+/// Base of the bit-equality `Eq` width block.
+pub const OP_EQ_BASE: u8 = 0x28;
+/// Base of the unsigned `ILtU` width block.
+pub const OP_ILTU_BASE: u8 = 0x2C;
+/// Base of the unsigned `IGtU` width block.
+pub const OP_IGTU_BASE: u8 = 0x30;
 /// Width-free `ExtendZero`.
 pub const OP_EXTEND_ZERO: u8 = 0x73;
 
@@ -330,6 +333,65 @@ impl<'a> CodeBuilder<'a> {
     }
 }
 
+/// Encodes a whole typed instruction list whose branch targets are
+/// **instruction indices**, rewriting them to word offsets.
+///
+/// The migration to the word stream makes `pc` a word index, but the compiler,
+/// the `.lbc` parser, and the tests all describe branches by instruction index.
+/// This helper computes each instruction's word offset (a fixpoint, because a
+/// `BranchIf` target above 255 turns the instruction into the wide form) and
+/// returns the encoded [`CodeBuilder`] plus the `instruction index -> word pc`
+/// table (length `instrs.len() + 1`).
+pub(crate) fn encode_instrs<'a>(
+    types: &'a [TypeInfo],
+    instrs: &[Instr],
+) -> Result<(CodeBuilder<'a>, Vec<u32>), String> {
+    // Start with a one-word-per-instruction guess; the loop grows offsets until
+    // the encoded widths stop changing (monotone, so it terminates).
+    let mut offsets: Vec<u32> = (0..=instrs.len())
+        .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+        .collect();
+    loop {
+        let mut probe = CodeBuilder::new(types);
+        let mut starts = Vec::with_capacity(instrs.len());
+        for instr in instrs {
+            starts.push(to_u32(probe.words.len(), "word stream")?);
+            let adjusted = rewrite_targets(instr, &offsets)?;
+            probe.push(&adjusted)?;
+        }
+        starts.push(to_u32(probe.words.len(), "word stream")?);
+        if starts == offsets {
+            return Ok((probe, offsets));
+        }
+        offsets = starts;
+    }
+}
+
+/// Rewrites a typed instruction's branch targets from instruction indices to
+/// word offsets using `offsets`.
+fn rewrite_targets(instr: &Instr, offsets: &[u32]) -> Result<Instr, String> {
+    let mut out = instr.clone();
+    match &mut out {
+        Instr::Branch { target } => {
+            *target = word_offset(offsets, *target)?;
+        }
+        Instr::BranchIf { then, els, .. } => {
+            *then = word_offset(offsets, *then)?;
+            *els = word_offset(offsets, *els)?;
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// Maps an instruction index to its word offset.
+fn word_offset(offsets: &[u32], index: u32) -> Result<u32, String> {
+    offsets
+        .get(index as usize)
+        .copied()
+        .ok_or_else(|| format!("branch target instruction {index} out of range"))
+}
+
 /// The `u64` mask for a value of `size` bytes (saturating at 8).
 const fn mask_for_size(size: u32) -> u64 {
     if size >= 8 {
@@ -371,6 +433,11 @@ pub(crate) fn arith_opcode(op: ArithOp, size: u32) -> Result<u8, String> {
         ArithOp::IMod => (OP_IMOD_BASE, 4),
         ArithOp::ILt => (OP_ILT_BASE, 4),
         ArithOp::IGt => (OP_IGT_BASE, 4),
+        ArithOp::IDivU => (OP_IDIVU_BASE, 4),
+        ArithOp::IModU => (OP_IMODU_BASE, 4),
+        ArithOp::Eq => (OP_EQ_BASE, 4),
+        ArithOp::ILtU => (OP_ILTU_BASE, 4),
+        ArithOp::IGtU => (OP_IGTU_BASE, 4),
         ArithOp::FAdd => (OP_FADD_BASE, 2),
         ArithOp::FSub => (OP_FSUB_BASE, 2),
         ArithOp::FMul => (OP_FMUL_BASE, 2),
@@ -378,11 +445,6 @@ pub(crate) fn arith_opcode(op: ArithOp, size: u32) -> Result<u8, String> {
         ArithOp::FMod => (OP_FMOD_BASE, 2),
         ArithOp::FLt => (OP_FLT_BASE, 2),
         ArithOp::FGt => (OP_FGT_BASE, 2),
-        ArithOp::IDivU => return Ok(OP_IDIVU),
-        ArithOp::IModU => return Ok(OP_IMODU),
-        ArithOp::Eq => return Ok(OP_EQ),
-        ArithOp::ILtU => return Ok(OP_ILTU),
-        ArithOp::IGtU => return Ok(OP_IGTU),
     };
     let idx = width_index(size, per).ok_or_else(|| {
         format!(
@@ -435,6 +497,11 @@ pub(crate) const fn arith_from_opcode(base: u8) -> Option<(ArithOp, u8)> {
             };
             (op, (base - OP_IADD_BASE) % 4, 4)
         }
+        OP_IDIVU_BASE..=0x23 => (ArithOp::IDivU, base - OP_IDIVU_BASE, 4),
+        OP_IMODU_BASE..=0x27 => (ArithOp::IModU, base - OP_IMODU_BASE, 4),
+        OP_EQ_BASE..=0x2B => (ArithOp::Eq, base - OP_EQ_BASE, 4),
+        OP_ILTU_BASE..=0x2F => (ArithOp::ILtU, base - OP_ILTU_BASE, 4),
+        OP_IGTU_BASE..=0x33 => (ArithOp::IGtU, base - OP_IGTU_BASE, 4),
         OP_FADD_BASE..=0x6D => {
             let group = (base - OP_FADD_BASE) / 2;
             let op = match group {
@@ -448,11 +515,6 @@ pub(crate) const fn arith_from_opcode(base: u8) -> Option<(ArithOp, u8)> {
             };
             (op, (base - OP_FADD_BASE) % 2, 2)
         }
-        OP_IDIVU => return Some((ArithOp::IDivU, 0)),
-        OP_IMODU => return Some((ArithOp::IModU, 0)),
-        OP_EQ => return Some((ArithOp::Eq, 0)),
-        OP_ILTU => return Some((ArithOp::ILtU, 0)),
-        OP_IGTU => return Some((ArithOp::IGtU, 0)),
         _ => return None,
     };
     let width = if per == 4 {
@@ -878,27 +940,32 @@ mod tests {
                 dst: dd,
                 lhs: dl,
                 rhs: dr,
-            } => op == IDivU && dst == *dd && lhs == *dl && rhs == *dr,
+                width: dw,
+            } => op == IDivU && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
             Decoded::IModU {
                 dst: dd,
                 lhs: dl,
                 rhs: dr,
-            } => op == IModU && dst == *dd && lhs == *dl && rhs == *dr,
+                width: dw,
+            } => op == IModU && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
             Decoded::Eq {
                 dst: dd,
                 lhs: dl,
                 rhs: dr,
-            } => op == Eq && dst == *dd && lhs == *dl && rhs == *dr,
+                width: dw,
+            } => op == Eq && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
             Decoded::ILtU {
                 dst: dd,
                 lhs: dl,
                 rhs: dr,
-            } => op == ILtU && dst == *dd && lhs == *dl && rhs == *dr,
+                width: dw,
+            } => op == ILtU && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
             Decoded::IGtU {
                 dst: dd,
                 lhs: dl,
                 rhs: dr,
-            } => op == IGtU && dst == *dd && lhs == *dl && rhs == *dr,
+                width: dw,
+            } => op == IGtU && dst == *dd && lhs == *dl && rhs == *dr && width == *dw,
             _ => false,
         }
     }

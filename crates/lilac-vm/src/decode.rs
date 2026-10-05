@@ -280,7 +280,7 @@ pub enum Decoded<'a> {
         /// Operand width in bits.
         width: u8,
     },
-    /// Width-free unsigned integer divide.
+    /// Width-specialized unsigned integer divide.
     IDivU {
         /// Destination register.
         dst: u32,
@@ -288,8 +288,10 @@ pub enum Decoded<'a> {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width in bits.
+        width: u8,
     },
-    /// Width-free unsigned integer modulo.
+    /// Width-specialized unsigned integer modulo.
     IModU {
         /// Destination register.
         dst: u32,
@@ -297,8 +299,10 @@ pub enum Decoded<'a> {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width in bits.
+        width: u8,
     },
-    /// Width-free bit-equality comparison.
+    /// Width-specialized bit-equality comparison.
     Eq {
         /// Destination register.
         dst: u32,
@@ -306,8 +310,10 @@ pub enum Decoded<'a> {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width in bits.
+        width: u8,
     },
-    /// Width-free unsigned less-than.
+    /// Width-specialized unsigned less-than.
     ILtU {
         /// Destination register.
         dst: u32,
@@ -315,8 +321,10 @@ pub enum Decoded<'a> {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width in bits.
+        width: u8,
     },
-    /// Width-free unsigned greater-than.
+    /// Width-specialized unsigned greater-than.
     IGtU {
         /// Destination register.
         dst: u32,
@@ -324,6 +332,8 @@ pub enum Decoded<'a> {
         lhs: u32,
         /// Right register.
         rhs: u32,
+        /// Operand width in bits.
+        width: u8,
     },
     /// Width-specialized truncation.
     Trunc {
@@ -420,8 +430,12 @@ pub fn decode<'a>(
     let raw = w.to_le_bytes()[0];
     let wide = raw & WIDE_FLAG != 0;
     let base = raw & !WIDE_FLAG;
-    let count =
-        operand_count(base).ok_or_else(|| format!("unknown opcode 0x{base:02X} at pc {pc}"))?;
+    // Classify once: the arithmetic/convert opcode maps are consulted by both
+    // the arity check and the dispatch below.
+    let arith = arith_from_opcode(base);
+    let convert = convert_from_opcode(base);
+    let count = operand_count(base, arith.is_some(), convert.is_some())
+        .ok_or_else(|| format!("unknown opcode 0x{base:02X} at pc {pc}"))?;
     if wide && count == 0 {
         return Err(format!(
             "wide flag on zero-operand opcode 0x{base:02X} at pc {pc}"
@@ -563,8 +577,8 @@ pub fn decode<'a>(
         }
         b @ (OP_TRUNC_BASE..=0x5F) => {
             let (ops, n) = read_ops(code, pc, wide, 2)?;
-            let (_, width) = convert_from_opcode(b)
-                .ok_or_else(|| format!("unknown convert opcode 0x{b:02X} at pc {pc}"))?;
+            let (_, width) =
+                convert.ok_or_else(|| format!("unknown convert opcode 0x{b:02X} at pc {pc}"))?;
             (
                 Decoded::Trunc {
                     dst: ops[0],
@@ -584,10 +598,10 @@ pub fn decode<'a>(
                 n,
             )
         }
-        b if arith_from_opcode(b).is_some() => {
+        b if arith.is_some() => {
             let (ops, n) = read_ops(code, pc, wide, 3)?;
-            let (op, width) = arith_from_opcode(b)
-                .ok_or_else(|| format!("unknown arithmetic opcode 0x{b:02X} at pc {pc}"))?;
+            let (op, width) =
+                arith.ok_or_else(|| format!("unknown arithmetic opcode 0x{b:02X} at pc {pc}"))?;
             (arith_variant(op, width, ops[0], ops[1], ops[2]), n)
         }
         OP_CALL => {
@@ -629,6 +643,7 @@ pub fn decode<'a>(
 }
 
 /// Builds the flattened [`Decoded`] variant for an arithmetic operation.
+#[allow(clippy::too_many_lines)]
 fn arith_variant<'a>(op: ArithOp, width: u8, dst: u32, lhs: u32, rhs: u32) -> Decoded<'a> {
     match op {
         ArithOp::IAdd => Decoded::IAdd {
@@ -715,17 +730,45 @@ fn arith_variant<'a>(op: ArithOp, width: u8, dst: u32, lhs: u32, rhs: u32) -> De
             rhs,
             width,
         },
-        ArithOp::IDivU => Decoded::IDivU { dst, lhs, rhs },
-        ArithOp::IModU => Decoded::IModU { dst, lhs, rhs },
-        ArithOp::Eq => Decoded::Eq { dst, lhs, rhs },
-        ArithOp::ILtU => Decoded::ILtU { dst, lhs, rhs },
-        ArithOp::IGtU => Decoded::IGtU { dst, lhs, rhs },
+        ArithOp::IDivU => Decoded::IDivU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IModU => Decoded::IModU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::Eq => Decoded::Eq {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::ILtU => Decoded::ILtU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
+        ArithOp::IGtU => Decoded::IGtU {
+            dst,
+            lhs,
+            rhs,
+            width,
+        },
     }
 }
 
 /// The number of `a`/`b`/`c` operands a base opcode carries, or `None` if the
 /// opcode is unknown. The wide escape is only legal when this is non-zero.
-const fn operand_count(base: u8) -> Option<u8> {
+///
+/// `is_arith`/`is_convert` are precomputed by [`decode`] so the opcode maps are
+/// consulted only once per instruction.
+const fn operand_count(base: u8, is_arith: bool, is_convert: bool) -> Option<u8> {
     match base {
         OP_RETURN
         | OP_UNREACHABLE
@@ -744,9 +787,9 @@ const fn operand_count(base: u8) -> Option<u8> {
         | OP_FIELD_BASE..=OP_FIELD_LAST
         | OP_STOREFIELD_BASE..=OP_STOREFIELD_LAST => Some(3),
         _ => {
-            if arith_from_opcode(base).is_some() {
+            if is_arith {
                 Some(3)
-            } else if convert_from_opcode(base).is_some() {
+            } else if is_convert {
                 Some(2)
             } else {
                 None
@@ -1017,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_width_free_arith_without_width() {
+    fn decodes_width_specialized_unsigned_arith() {
         let types = test_types();
         let mut b = CodeBuilder::new(&types);
         b.push(&Instr::Arith {
@@ -1035,9 +1078,10 @@ mod tests {
             Decoded::Eq {
                 dst: 1,
                 lhs: 2,
-                rhs: 3
+                rhs: 3,
+                width: 64,
             }
         );
-        assert_eq!(b.words[0] & 0xFF, u32::from(crate::encode::OP_EQ));
+        assert_eq!(b.words[0] & 0xFF, u32::from(crate::encode::OP_EQ_BASE + 3));
     }
 }

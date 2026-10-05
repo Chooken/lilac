@@ -5,9 +5,11 @@
 //! syntax is defined by `to_text`; every instruction prints its resolved
 //! operands.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
+use crate::decode::{decode, Decoded};
+use crate::encode::encode_instrs;
 use crate::isa::{
     verify, ArithOp, Builtin, ConvertOp, Data, Func, Instr, Line, Operand, Program, TypeId,
     TypeInfo, LBC_VERSION,
@@ -23,14 +25,43 @@ impl Program {
         verify(self)
     }
 
-    /// Renders one instruction in canonical disassembly form.
+    /// Renders the instruction at word `pc` in canonical disassembly form.
     ///
     /// This is the same per-instruction text [`Program::to_text`] embeds; the
     /// debugger uses it for `disasm` and as the `list` fallback when no source
     /// is available.
-    #[must_use]
-    pub fn disasm_instr(&self, instr: &Instr) -> String {
-        self.instr_text(instr)
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `pc` is not a decodable instruction boundary.
+    pub fn disasm_at(&self, func: &Func, pc: usize) -> Result<String, String> {
+        let (decoded, _) = decode(&func.code, pc, &func.call_sites, &func.operands)?;
+        let map = word_to_index(func);
+        Ok(self.instr_text(&decoded, &map))
+    }
+
+    /// The printable name for a value of `size` bytes.
+    ///
+    /// The word stream bakes sizes, not type ids, so the disassembler picks the
+    /// first program type of the matching size (deterministically) and falls
+    /// back to a synthetic `#bitN` spelling. Task 4 finalizes this mapping.
+    fn type_for_size(&self, size: u32) -> String {
+        self.types
+            .iter()
+            .find(|info| info.size == size)
+            .map_or_else(
+                || format!("#bit{}", size.saturating_mul(8)),
+                |info| info.name.clone(),
+            )
+    }
+
+    /// The printable type name used for size-less forms (`Const`/`ConstData`).
+    fn const_type(&self) -> String {
+        self.types
+            .iter()
+            .find(|info| info.size >= 8)
+            .or_else(|| self.types.first())
+            .map_or_else(|| "#bit_native".to_string(), |info| info.name.clone())
     }
 
     /// Renders the canonical `.lbc` text form.
@@ -88,7 +119,7 @@ impl Program {
         let mut types: Vec<TypeInfo> = Vec::new();
         let mut type_ids: HashMap<String, TypeId> = HashMap::new();
         let mut data: Vec<Data> = Vec::new();
-        let mut funcs: Vec<Func> = Vec::new();
+        let mut parsed: Vec<ParsedFunc> = Vec::new();
         let mut func_refs: Vec<Vec<PendingFuncRef>> = Vec::new();
         let mut index = 0;
         while index < lines.len() {
@@ -122,7 +153,7 @@ impl Program {
                 }
                 "func" => {
                     let (func, next, refs) = parse_func(&lines, index, &type_ids)?;
-                    funcs.push(func);
+                    parsed.push(func);
                     func_refs.push(refs);
                     index = next;
                 }
@@ -136,7 +167,37 @@ impl Program {
             ));
         }
         let target = target.ok_or_else(|| "missing `target` header".to_string())?;
-        resolve_func_refs(&mut funcs, &func_refs)?;
+        // Resolve function-name references on the typed bodies, then encode
+        // each into the executed word stream (remapping line pcs to words).
+        let names: Vec<String> = parsed.iter().map(|func| func.name.clone()).collect();
+        let mut codes: Vec<Vec<Instr>> = parsed
+            .iter_mut()
+            .map(|func| std::mem::take(&mut func.code))
+            .collect();
+        resolve_func_refs(&mut codes, &names, &func_refs)?;
+        let mut funcs: Vec<Func> = Vec::with_capacity(parsed.len());
+        for (func, code) in parsed.into_iter().zip(codes) {
+            let (builder, offsets) = encode_instrs(&types, &code)?;
+            let mut lines = func.lines;
+            for line in &mut lines {
+                line.pc = *offsets
+                    .get(line.pc as usize)
+                    .ok_or_else(|| "line pc out of range".to_string())?;
+            }
+            funcs.push(Func {
+                name: func.name,
+                is_extern: func.is_extern,
+                ins: func.ins,
+                outs: func.outs,
+                n_regs: func.n_regs,
+                slot_bytes: func.slot_bytes,
+                code: builder.words,
+                call_sites: builder.call_sites,
+                operands: builder.operands,
+                lines,
+                place_names: func.place_names,
+            });
+        }
         let program = Program {
             version,
             target,
@@ -150,6 +211,11 @@ impl Program {
     }
 
     /// Writes one function body (header, places, lines, and code).
+    ///
+    /// The `.lbc` text is a disassembly of the word stream. For compatibility
+    /// with the M5c format, instruction line numbers and label names are
+    /// **instruction indices** (word `pc`s are mapped back); Task 4 switches
+    /// the format to raw word pcs.
     fn write_func(&self, out: &mut String, func: &Func) {
         let extern_kw = if func.is_extern { " extern" } else { "" };
         let _ = writeln!(
@@ -168,20 +234,46 @@ impl Program {
             }
             out.push('\n');
         }
+        let map = word_to_index(func);
         for line in &func.lines {
+            let pc = map.get(&line.pc).copied().unwrap_or(line.pc);
             let _ = writeln!(
                 out,
                 "  line {}:{}:{}:{}",
-                line.pc, line.file, line.line, line.col
+                pc, line.file, line.line, line.col
             );
         }
-        let labels = func.labels();
-        for (index, instr) in func.code.iter().enumerate() {
-            let pc = u32::try_from(index).unwrap_or(u32::MAX);
-            if labels.contains(&pc) {
-                let _ = writeln!(out, "  $L{pc}:");
+        // Decode the whole body first, so branch label names are known.
+        let mut instrs: Vec<(u32, Decoded<'_>, u32)> = Vec::new();
+        let mut pc = 0_usize;
+        let mut index = 0_u32;
+        while pc < func.code.len() {
+            let Ok((decoded, next)) = decode(&func.code, pc, &func.call_sites, &func.operands)
+            else {
+                break;
+            };
+            instrs.push((u32::try_from(pc).unwrap_or(u32::MAX), decoded, index));
+            let next = next as usize;
+            if next <= pc {
+                break;
             }
-            let _ = writeln!(out, "    {pc}  {}", self.instr_text(instr));
+            pc = next;
+            index = index.saturating_add(1);
+        }
+        let mut labels = BTreeSet::new();
+        labels.insert(0_u32);
+        for (_, decoded, _) in &instrs {
+            for target in branch_targets(decoded) {
+                if let Some(&target_index) = map.get(&target) {
+                    labels.insert(target_index);
+                }
+            }
+        }
+        for (_, decoded, index) in &instrs {
+            if labels.contains(index) {
+                let _ = writeln!(out, "  $L{index}:");
+            }
+            let _ = writeln!(out, "    {index}  {}", self.instr_text(decoded, &map));
         }
     }
 
@@ -222,35 +314,39 @@ impl Program {
             .map_or_else(|| format!("<missing:{func}>"), |entry| entry.name.clone())
     }
 
-    /// Renders one instruction with resolved operands.
+    /// Renders one decoded instruction with resolved operands.
     #[allow(clippy::too_many_lines)]
-    fn instr_text(&self, instr: &Instr) -> String {
+    fn instr_text(&self, instr: &Decoded, map: &HashMap<u32, u32>) -> String {
+        let label = |target: u32| {
+            map.get(&target)
+                .map_or_else(|| format!("$L{target}"), |index| format!("$L{index}"))
+        };
         match instr {
-            Instr::Const { dst, imm, ty } => {
-                format!("&{dst}: {} = const 0x{imm:x}", self.type_name(*ty))
+            Decoded::Const { dst, imm } => {
+                format!("&{dst}: {} = const 0x{imm:x}", self.const_type())
             }
-            Instr::ConstData { dst, data, ty } => {
-                format!("&{dst}: {} = const.data !c{data}", self.type_name(*ty))
+            Decoded::ConstData { dst, data } => {
+                format!("&{dst}: {} = const.data !c{data}", self.const_type())
             }
-            Instr::Copy { dst, src, ty } => format!(
+            Decoded::Copy { dst, src, size } => format!(
                 "{}: {} = copy {}",
                 operand_text(*dst),
-                self.type_name(*ty),
+                self.type_for_size(*size),
                 operand_text(*src)
             ),
-            Instr::CopyBytes { dst, src, size } => {
+            Decoded::CopyBytes { dst, src, size } => {
                 format!("copy.bytes %{dst} <- %{src}, {size}")
             }
-            Instr::Load { dst, src, ty } => {
-                format!("&{dst}: {} = load %{src}", self.type_name(*ty))
+            Decoded::Load { dst, src, size } => {
+                format!("&{dst}: {} = load %{src}", self.type_for_size(*size))
             }
-            Instr::Store { src, dst, ty } => format!(
+            Decoded::Store { src, dst, size } => format!(
                 "store {} -> %{dst} : {}",
                 operand_text(*src),
-                self.type_name(*ty)
+                self.type_for_size(*size)
             ),
-            Instr::Addr { dst, place } => format!("&{dst} = addr %{place}"),
-            Instr::AddrField {
+            Decoded::Addr { dst, place } => format!("&{dst} = addr %{place}"),
+            Decoded::AddrField {
                 dst,
                 place,
                 off,
@@ -259,74 +355,227 @@ impl Program {
                 "&{dst} = addr.field %{place} + {off}{}",
                 indirect_text(*indirect)
             ),
-            Instr::AddrFunc { dst, func } => {
+            Decoded::AddrFunc { dst, func } => {
                 format!("&{dst} = addr.func @{}", self.func_name(*func))
             }
-            Instr::Field {
+            Decoded::Field {
                 dst,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => format!(
                 "&{dst}: {} = field %{place} + {off}{}",
-                self.type_name(*ty),
+                self.type_for_size(*size),
                 indirect_text(*indirect)
             ),
-            Instr::StoreField {
+            Decoded::StoreField {
                 src,
                 place,
                 off,
-                ty,
+                size,
                 indirect,
             } => format!(
                 "store.field {} -> %{place} + {off}{} : {}",
                 operand_text(*src),
                 indirect_text(*indirect),
-                self.type_name(*ty)
+                self.type_for_size(*size)
             ),
-            Instr::Arith {
-                op,
-                dst,
-                lhs,
-                rhs,
-                operand_ty,
-                ty,
-            } => format!(
-                "&{dst}: {} = {} &{lhs}, &{rhs} : {}",
-                self.type_name(*ty),
-                op.as_str(),
-                self.type_name(*operand_ty)
+            Decoded::Trunc { dst, src, width } => format!(
+                "&{dst}: {} = trunc &{src}",
+                self.type_for_size(u32::from(*width) / 8)
             ),
-            Instr::Convert { op, dst, src, ty } => {
-                format!("&{dst}: {} = {} &{src}", self.type_name(*ty), op.as_str())
+            Decoded::ExtendZero { dst, src } => {
+                format!("&{dst}: {} = extend.zero &{src}", self.const_type())
             }
-            Instr::Call { func, ins, outs } => format!(
+            Decoded::Call { site, ins, outs } => format!(
                 "call @{} (in {}) (out {})",
-                self.func_name(*func),
+                self.func_name(site.func),
                 operand_list(ins),
                 slot_list(outs)
             ),
-            Instr::CallIndirect { callee, ins, outs } => format!(
+            Decoded::CallIndirect {
+                callee, ins, outs, ..
+            } => format!(
                 "call.indirect &{callee} (in {}) (out {})",
                 operand_list(ins),
                 slot_list(outs)
             ),
-            Instr::CallBuiltin { builtin, ins, outs } => format!(
+            Decoded::CallBuiltin {
+                builtin, ins, outs, ..
+            } => format!(
                 "call.builtin @{} (in {}) (out {})",
                 builtin.as_str(),
                 operand_list(ins),
                 slot_list(outs)
             ),
-            Instr::Branch { target } => format!("branch $L{target}"),
-            Instr::BranchIf { cond, then, els } => {
-                format!("branch.if &{cond}, $L{then}, $L{els}")
+            Decoded::Branch { target } => format!("branch {}", label(*target)),
+            Decoded::BranchIf { cond, then, els } => {
+                format!("branch.if &{cond}, {}, {}", label(*then), label(*els))
             }
-            Instr::Return => "return".to_string(),
-            Instr::Panic { data } => format!("panic !c{data}"),
-            Instr::Unreachable => "unreachable".to_string(),
+            Decoded::Return => "return".to_string(),
+            Decoded::Panic { data } => format!("panic !c{data}"),
+            Decoded::Unreachable => "unreachable".to_string(),
+            arith => self.render_arith(arith),
         }
     }
+
+    /// Renders a decoded arithmetic/comparison instruction.
+    #[allow(clippy::too_many_lines)]
+    fn render_arith(&self, instr: &Decoded) -> String {
+        use ArithOp::{
+            Eq, FAdd, FDiv, FGt, FLt, FMod, FMul, FSub, IAdd, IDiv, IDivU, IGt, IGtU, ILt, ILtU,
+            IMod, IModU, IMul, ISub,
+        };
+        let (op, dst, lhs, rhs, width) = match instr {
+            Decoded::IAdd {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IAdd, *dst, *lhs, *rhs, *width),
+            Decoded::ISub {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (ISub, *dst, *lhs, *rhs, *width),
+            Decoded::IMul {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IMul, *dst, *lhs, *rhs, *width),
+            Decoded::IDiv {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IDiv, *dst, *lhs, *rhs, *width),
+            Decoded::IMod {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IMod, *dst, *lhs, *rhs, *width),
+            Decoded::ILt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (ILt, *dst, *lhs, *rhs, *width),
+            Decoded::IGt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IGt, *dst, *lhs, *rhs, *width),
+            Decoded::IDivU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IDivU, *dst, *lhs, *rhs, *width),
+            Decoded::IModU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IModU, *dst, *lhs, *rhs, *width),
+            Decoded::Eq {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (Eq, *dst, *lhs, *rhs, *width),
+            Decoded::ILtU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (ILtU, *dst, *lhs, *rhs, *width),
+            Decoded::IGtU {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (IGtU, *dst, *lhs, *rhs, *width),
+            Decoded::FAdd {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FAdd, *dst, *lhs, *rhs, *width),
+            Decoded::FSub {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FSub, *dst, *lhs, *rhs, *width),
+            Decoded::FMul {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FMul, *dst, *lhs, *rhs, *width),
+            Decoded::FDiv {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FDiv, *dst, *lhs, *rhs, *width),
+            Decoded::FMod {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FMod, *dst, *lhs, *rhs, *width),
+            Decoded::FLt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FLt, *dst, *lhs, *rhs, *width),
+            Decoded::FGt {
+                dst,
+                lhs,
+                rhs,
+                width,
+            } => (FGt, *dst, *lhs, *rhs, *width),
+            _ => return String::new(),
+        };
+        let ty = self.type_for_size(u32::from(width) / 8);
+        format!("&{dst}: {ty} = {} &{lhs}, &{rhs} : {ty}", op.as_str())
+    }
+}
+
+/// The word `pc` of a decoded instruction's branch targets.
+fn branch_targets(instr: &Decoded) -> Vec<u32> {
+    match instr {
+        Decoded::Branch { target } => vec![*target],
+        Decoded::BranchIf { then, els, .. } => vec![*then, *els],
+        _ => Vec::new(),
+    }
+}
+
+/// Builds the `word pc -> instruction index` map for a function.
+fn word_to_index(func: &Func) -> HashMap<u32, u32> {
+    let mut map = HashMap::new();
+    let mut pc = 0_usize;
+    let mut index = 0_u32;
+    while pc < func.code.len() {
+        map.insert(u32::try_from(pc).unwrap_or(u32::MAX), index);
+        let Ok((_, next)) = decode(&func.code, pc, &func.call_sites, &func.operands) else {
+            break;
+        };
+        let next = next as usize;
+        if next <= pc {
+            break;
+        }
+        pc = next;
+        index = index.saturating_add(1);
+    }
+    map
 }
 
 /// A parsed instruction whose function references are not yet resolved.
@@ -376,13 +625,27 @@ struct FuncHeader {
     is_extern: bool,
 }
 
-/// Parses one function block, returning the function, the next line index, and
-/// any unresolved function-name references.
+/// A parsed function whose typed body has not yet been encoded. Function-name
+/// references are resolved program-wide before encoding.
+struct ParsedFunc {
+    name: String,
+    is_extern: bool,
+    ins: Vec<TypeId>,
+    outs: Vec<TypeId>,
+    n_regs: u32,
+    slot_bytes: u32,
+    code: Vec<Instr>,
+    lines: Vec<Line>,
+    place_names: Vec<(String, u32)>,
+}
+
+/// Parses one function block, returning the parsed body, the next line index,
+/// and any unresolved function-name references.
 fn parse_func(
     lines: &[&str],
     start: usize,
     type_ids: &HashMap<String, TypeId>,
-) -> Result<(Func, usize, Vec<PendingFuncRef>), String> {
+) -> Result<(ParsedFunc, usize, Vec<PendingFuncRef>), String> {
     let header = parse_func_header(lines[start].trim(), type_ids)?;
     let mut code: Vec<Instr> = Vec::new();
     let mut line_table: Vec<Line> = Vec::new();
@@ -455,7 +718,7 @@ fn parse_func(
         index += 1;
     }
     resolve_labels(&mut code, &branch_fixups, &labels)?;
-    let func = Func {
+    let func = ParsedFunc {
         name: header.name,
         is_extern: header.is_extern,
         ins: header.ins,
@@ -490,12 +753,16 @@ fn resolve_labels(
     Ok(())
 }
 
-/// Resolves function-name references to function indices.
-fn resolve_func_refs(funcs: &mut [Func], func_refs: &[Vec<PendingFuncRef>]) -> Result<(), String> {
-    let ids: HashMap<String, u32> = funcs
+/// Resolves function-name references to function indices on typed bodies.
+fn resolve_func_refs(
+    codes: &mut [Vec<Instr>],
+    names: &[String],
+    func_refs: &[Vec<PendingFuncRef>],
+) -> Result<(), String> {
+    let ids: HashMap<&str, u32> = names
         .iter()
         .enumerate()
-        .map(|(index, func)| (func.name.clone(), u32::try_from(index).unwrap_or(u32::MAX)))
+        .map(|(index, name)| (name.as_str(), u32::try_from(index).unwrap_or(u32::MAX)))
         .collect();
     for (func_index, refs) in func_refs.iter().enumerate() {
         for reference in refs {
@@ -504,10 +771,10 @@ fn resolve_func_refs(funcs: &mut [Func], func_refs: &[Vec<PendingFuncRef>]) -> R
                 PendingFuncRef::AddrFunc(index, name) => (*index, name, true),
             };
             let target = ids
-                .get(name)
+                .get(name.as_str())
                 .copied()
                 .ok_or_else(|| format!("unknown function `@{name}`"))?;
-            match (&mut funcs[func_index].code[instr_index], is_addr_func) {
+            match (&mut codes[func_index][instr_index], is_addr_func) {
                 (Instr::Call { func, .. }, false) | (Instr::AddrFunc { func, .. }, true) => {
                     *func = target;
                 }
@@ -1175,9 +1442,12 @@ fn operand_list(ins: &[Operand]) -> String {
 }
 
 /// Renders a `, `-joined slot list.
-fn slot_list(outs: &[u32]) -> String {
+fn slot_list(outs: &[Operand]) -> String {
     outs.iter()
-        .map(|slot| format!("%{slot}"))
+        .map(|operand| match operand {
+            Operand::Slot(slot) => format!("%{slot}"),
+            Operand::Reg(reg) => format!("&{reg}"),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1325,9 +1595,23 @@ fn parse_byte_escape(chars: &mut std::str::CharIndices<'_>) -> Result<u8, String
 
 #[cfg(test)]
 mod tests {
-    use crate::isa::{sample_program, Data, Func, Line, TypeInfo};
+    use crate::decode::{decode, Decoded};
+    use crate::isa::{sample_program, words_of, Data, Func, Line, TypeInfo};
 
     use super::*;
+
+    /// Decodes a function's whole word stream.
+    fn decoded(func: &Func) -> Vec<Decoded<'_>> {
+        let mut out = Vec::new();
+        let mut pc = 0_usize;
+        while pc < func.code.len() {
+            let (instr, next) = decode(&func.code, pc, &func.call_sites, &func.operands)
+                .unwrap_or_else(|err| panic!("decode at {pc}: {err}"));
+            out.push(instr);
+            pc = next as usize;
+        }
+        out
+    }
 
     #[test]
     fn text_round_trips() {
@@ -1383,18 +1667,18 @@ mod tests {
         let program = crate::compile::compile_src(
             "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
         );
-        let saw_indirect = program.funcs.iter().flat_map(|f| &f.code).any(|i| {
+        let saw_indirect = program.funcs.iter().flat_map(decoded).any(|i| {
             matches!(
                 i,
-                Instr::Field { indirect: true, .. }
-                    | Instr::AddrField { indirect: true, .. }
-                    | Instr::StoreField { indirect: true, .. }
+                Decoded::Field { indirect: true, .. }
+                    | Decoded::AddrField { indirect: true, .. }
+                    | Decoded::StoreField { indirect: true, .. }
             )
         });
-        let saw_direct = program.funcs.iter().flat_map(|f| &f.code).any(|i| {
+        let saw_direct = program.funcs.iter().flat_map(decoded).any(|i| {
             matches!(
                 i,
-                Instr::Field {
+                Decoded::Field {
                     indirect: false,
                     ..
                 }
@@ -1409,14 +1693,51 @@ mod tests {
 
     #[test]
     fn text_round_trips_rich_program() {
+        let types = vec![TypeInfo {
+            name: "#bit_native".to_string(),
+            size: 8,
+            is_ref: false,
+        }];
+        let (main_code, main_sites, main_ops) = words_of(
+            &types,
+            &[
+                Instr::Const {
+                    dst: 0,
+                    imm: 0x2a,
+                    ty: 0,
+                },
+                Instr::ConstData {
+                    dst: 1,
+                    data: 0,
+                    ty: 0,
+                },
+                Instr::Arith {
+                    op: ArithOp::IAdd,
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                    operand_ty: 0,
+                    ty: 0,
+                },
+                Instr::Call {
+                    func: 1,
+                    ins: vec![Operand::Reg(2)],
+                    outs: vec![3],
+                },
+                Instr::BranchIf {
+                    cond: 0,
+                    then: 5,
+                    els: 6,
+                },
+                Instr::Return,
+                Instr::Return,
+            ],
+        );
+        let (helper_code, helper_sites, helper_ops) = words_of(&types, &[Instr::Return]);
         let program = Program {
             version: LBC_VERSION.to_string(),
             target: crate::isa::VM_TARGET.to_string(),
-            types: vec![TypeInfo {
-                name: "#bit_native".to_string(),
-                size: 8,
-                is_ref: false,
-            }],
+            types,
             data: vec![Data {
                 bytes: b"hi".to_vec(),
                 global_off: 0,
@@ -1430,38 +1751,9 @@ mod tests {
                     outs: Vec::new(),
                     n_regs: 4,
                     slot_bytes: 16,
-                    code: vec![
-                        Instr::Const {
-                            dst: 0,
-                            imm: 0x2a,
-                            ty: 0,
-                        },
-                        Instr::ConstData {
-                            dst: 1,
-                            data: 0,
-                            ty: 0,
-                        },
-                        Instr::Arith {
-                            op: ArithOp::IAdd,
-                            dst: 2,
-                            lhs: 0,
-                            rhs: 1,
-                            operand_ty: 0,
-                            ty: 0,
-                        },
-                        Instr::Call {
-                            func: 1,
-                            ins: vec![Operand::Reg(2)],
-                            outs: vec![3],
-                        },
-                        Instr::BranchIf {
-                            cond: 0,
-                            then: 5,
-                            els: 6,
-                        },
-                        Instr::Return,
-                        Instr::Return,
-                    ],
+                    code: main_code,
+                    call_sites: main_sites,
+                    operands: main_ops,
                     lines: vec![Line {
                         pc: 0,
                         file: "t.lilac".to_string(),
@@ -1477,7 +1769,9 @@ mod tests {
                     outs: vec![0],
                     n_regs: 1,
                     slot_bytes: 8,
-                    code: vec![Instr::Return],
+                    code: helper_code,
+                    call_sites: helper_sites,
+                    operands: helper_ops,
                     lines: Vec::new(),
                     place_names: Vec::new(),
                 },
@@ -1489,25 +1783,51 @@ mod tests {
         assert_eq!(parsed, program);
     }
 
-    /// An `Arith` whose `operand_ty` (`#bit32`) differs from its result `ty`
-    /// (`#bit8`) must round-trip exactly, printing both.
+    /// A width-specialized `Arith` (`i.cmp.lt` on `#bit32` operands) round-trips:
+    /// the word stream bakes only the operand width, so both the result and the
+    /// operand print as the width's type.
     #[test]
     fn text_round_trips_arith_operand_width() {
+        let types = vec![
+            TypeInfo {
+                name: "#bit32".to_string(),
+                size: 4,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+        ];
+        let (code, sites, ops) = words_of(
+            &types,
+            &[
+                Instr::Const {
+                    dst: 0,
+                    imm: 0xffff_ffff,
+                    ty: 0,
+                },
+                Instr::Const {
+                    dst: 1,
+                    imm: 0x1,
+                    ty: 0,
+                },
+                Instr::Arith {
+                    op: ArithOp::ILt,
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                    operand_ty: 0,
+                    ty: 1,
+                },
+                Instr::Return,
+            ],
+        );
         let program = Program {
             version: LBC_VERSION.to_string(),
             target: crate::isa::VM_TARGET.to_string(),
-            types: vec![
-                TypeInfo {
-                    name: "#bit32".to_string(),
-                    size: 4,
-                    is_ref: false,
-                },
-                TypeInfo {
-                    name: "#bit8".to_string(),
-                    size: 1,
-                    is_ref: false,
-                },
-            ],
+            types,
             data: Vec::new(),
             globals: Vec::new(),
             funcs: vec![Func {
@@ -1517,33 +1837,15 @@ mod tests {
                 outs: Vec::new(),
                 n_regs: 3,
                 slot_bytes: 0,
-                code: vec![
-                    Instr::Const {
-                        dst: 0,
-                        imm: 0xffff_ffff,
-                        ty: 0,
-                    },
-                    Instr::Const {
-                        dst: 1,
-                        imm: 0x1,
-                        ty: 0,
-                    },
-                    Instr::Arith {
-                        op: ArithOp::ILt,
-                        dst: 2,
-                        lhs: 0,
-                        rhs: 1,
-                        operand_ty: 0,
-                        ty: 1,
-                    },
-                    Instr::Return,
-                ],
+                code,
+                call_sites: sites,
+                operands: ops,
                 lines: Vec::new(),
                 place_names: Vec::new(),
             }],
         };
         let text = program.to_text();
-        assert!(text.contains(": #bit8 = i.cmp.lt"), "{text}");
+        assert!(text.contains("#bit32 = i.cmp.lt"), "{text}");
         assert!(text.contains(" : #bit32"), "{text}");
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed, program);

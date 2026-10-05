@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use crate::decode::{decode, Decoded};
+
 /// Version of the `.lbc` text format.
 pub const LBC_VERSION: &str = "0.1";
 
@@ -486,35 +488,54 @@ pub struct Func {
     pub n_regs: u32,
     /// Per-frame place region size in bytes (zeroed at entry).
     pub slot_bytes: u32,
-    /// Instructions in program-counter order.
-    pub code: Vec<Instr>,
-    /// Source-line table, sorted by `pc`.
+    /// The executed compact `u32` word stream (M5c.1).
+    ///
+    /// `pc` is a word index; branch targets are word offsets. The typed
+    /// [`Instr`] is compile-time IR only.
+    pub code: Vec<u32>,
+    /// Resolved call sites referenced by the stream's call instructions.
+    pub call_sites: Vec<CallSite>,
+    /// Shared operand pool sliced by each [`CallSite`]'s ranges.
+    pub operands: Vec<Operand>,
+    /// Source-line table, sorted by `pc` (word offsets).
     pub lines: Vec<Line>,
     /// Original `%place` name to slot offset (debugger metadata).
     pub place_names: Vec<(String, u32)>,
 }
 
 impl Func {
-    /// Returns the set of program counters that begin a labeled block.
+    /// Returns the set of word program counters that begin a labeled block.
     ///
-    /// A pc is a label if it is `0` or the target of any branch.
+    /// A pc is a label if it is `0` or the target of any branch. The stream is
+    /// decoded linearly; a malformed stream simply stops the scan (the verifier
+    /// is the authority on well-formedness).
     #[must_use]
     pub fn labels(&self) -> BTreeSet<u32> {
         let mut set = BTreeSet::new();
         if !self.code.is_empty() {
             set.insert(0);
         }
-        for instr in &self.code {
-            match instr {
-                Instr::Branch { target } => {
-                    set.insert(*target);
+        let mut pc = 0_usize;
+        while pc < self.code.len() {
+            let Ok((decoded, next)) = decode(&self.code, pc, &self.call_sites, &self.operands)
+            else {
+                break;
+            };
+            match decoded {
+                Decoded::Branch { target } => {
+                    set.insert(target);
                 }
-                Instr::BranchIf { then, els, .. } => {
-                    set.insert(*then);
-                    set.insert(*els);
+                Decoded::BranchIf { then, els, .. } => {
+                    set.insert(then);
+                    set.insert(els);
                 }
                 _ => {}
             }
+            let next = next as usize;
+            if next <= pc {
+                break;
+            }
+            pc = next;
         }
         set
     }
@@ -616,18 +637,23 @@ pub(crate) fn derive_globals(data: &[Data]) -> Result<Vec<u8>, String> {
 ///
 /// A verified non-extern body must end in one of these so `pc` can never run
 /// off the end of `code`.
-fn is_terminator(instr: &Instr) -> bool {
+fn is_terminator(instr: &Decoded) -> bool {
     matches!(
         instr,
-        Instr::Return
-            | Instr::Panic { .. }
-            | Instr::Unreachable
-            | Instr::Branch { .. }
-            | Instr::BranchIf { .. }
+        Decoded::Return
+            | Decoded::Panic { .. }
+            | Decoded::Unreachable
+            | Decoded::Branch { .. }
+            | Decoded::BranchIf { .. }
     )
 }
 
-/// Verifies one function.
+/// Verifies one function by decoding its word stream.
+///
+/// The stream is decoded linearly to establish the set of valid instruction
+/// boundaries; every instruction is checked, then each branch target must land
+/// on one of those boundaries. A malformed stream is reported as a clean error,
+/// never a panic.
 fn verify_func(program: &Program, func: &Func) -> Result<(), String> {
     if func.n_regs > MAX_REGS {
         return Err(format!(
@@ -641,23 +667,43 @@ fn verify_func(program: &Program, func: &Func) -> Result<(), String> {
             func.name, func.slot_bytes
         ));
     }
-    if !func.is_extern {
-        match func.code.last() {
-            None => return Err(format!("function `{}` has an empty body", func.name)),
-            Some(last) if !is_terminator(last) => {
-                return Err(format!(
-                    "function `{}` does not end in a control-flow terminator",
-                    func.name
-                ));
-            }
-            Some(_) => {}
-        }
-    }
     for &ty in func.ins.iter().chain(&func.outs) {
         check_type(program, ty)?;
     }
-    for instr in &func.code {
-        verify_instr(program, func, instr)?;
+    if func.is_extern {
+        return Ok(());
+    }
+    let code_len = func.code.len();
+    if code_len == 0 {
+        return Err(format!("function `{}` has an empty body", func.name));
+    }
+    let mut boundaries = vec![false; code_len];
+    let mut targets: Vec<u32> = Vec::new();
+    let mut pc = 0_usize;
+    let mut last_terminator = false;
+    while pc < code_len {
+        boundaries[pc] = true;
+        let (decoded, next) = decode(&func.code, pc, &func.call_sites, &func.operands)
+            .map_err(|err| format!("function `{}`: {err}", func.name))?;
+        if next as usize <= pc {
+            return Err(format!(
+                "function `{}`: instruction at word {pc} does not advance",
+                func.name
+            ));
+        }
+        last_terminator = is_terminator(&decoded);
+        verify_decoded(program, func, &decoded, &mut targets)?;
+        pc = next as usize;
+    }
+    if !last_terminator {
+        return Err(format!(
+            "function `{}` does not end in a control-flow terminator",
+            func.name
+        ));
+    }
+    let code_len = u32::try_from(code_len).unwrap_or(u32::MAX);
+    for target in targets {
+        check_target(target, code_len, &boundaries)?;
     }
     Ok(())
 }
@@ -707,11 +753,12 @@ fn check_operand(operand: Operand, size: u32, n_regs: u32, slot_bytes: u32) -> R
     }
 }
 
-/// Validates a call's operand ranges against the callee signature.
+/// Validates a call's input operands and output slots against the callee
+/// signature. Decoded outputs are always [`Operand::Slot`]s.
 fn verify_call(
     program: &Program,
     ins: &[Operand],
-    outs: &[u32],
+    outs: &[Operand],
     ins_types: &[TypeId],
     outs_types: &[TypeId],
     n_regs: u32,
@@ -720,52 +767,55 @@ fn verify_call(
     for (operand, ty) in ins.iter().zip(ins_types) {
         check_operand(*operand, type_size(program, *ty)?, n_regs, slot_bytes)?;
     }
-    for (slot, ty) in outs.iter().zip(outs_types) {
-        check_slot(*slot, type_size(program, *ty)?, slot_bytes)?;
+    for (operand, ty) in outs.iter().zip(outs_types) {
+        match operand {
+            Operand::Slot(slot) => check_slot(*slot, type_size(program, *ty)?, slot_bytes)?,
+            Operand::Reg(_) => return Err("call output operand must be a slot".to_string()),
+        }
     }
     Ok(())
 }
 
-/// Verifies one instruction.
+/// Verifies one decoded instruction.
+///
+/// Branch targets are collected into `targets` and validated against the
+/// instruction-boundary set after the whole stream has been decoded.
 #[allow(clippy::too_many_lines)]
-fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), String> {
+fn verify_decoded(
+    program: &Program,
+    func: &Func,
+    instr: &Decoded,
+    targets: &mut Vec<u32>,
+) -> Result<(), String> {
     let n_regs = func.n_regs;
     let slot_bytes = func.slot_bytes;
-    let code_len = u32::try_from(func.code.len()).unwrap_or(u32::MAX);
     match instr {
-        Instr::Const { dst, ty, .. } => {
-            check_type(program, *ty)?;
-            check_reg(*dst, n_regs)?;
-        }
-        Instr::ConstData { dst, data, ty } => {
-            check_type(program, *ty)?;
+        Decoded::Const { dst, .. } => check_reg(*dst, n_regs)?,
+        Decoded::ConstData { dst, data } => {
             check_reg(*dst, n_regs)?;
             check_data(program, *data)?;
         }
-        Instr::Copy { dst, src, ty } => {
-            let size = type_size(program, *ty)?;
-            check_operand(*dst, size, n_regs, slot_bytes)?;
-            check_operand(*src, size, n_regs, slot_bytes)?;
+        Decoded::Copy { dst, src, size } => {
+            check_operand(*dst, *size, n_regs, slot_bytes)?;
+            check_operand(*src, *size, n_regs, slot_bytes)?;
         }
-        Instr::CopyBytes { dst, src, size } => {
+        Decoded::CopyBytes { dst, src, size } => {
             check_slot(*dst, *size, slot_bytes)?;
             check_slot(*src, *size, slot_bytes)?;
         }
-        Instr::Load { dst, src, ty } => {
-            check_type(program, *ty)?;
+        Decoded::Load { dst, src, .. } => {
             check_reg(*dst, n_regs)?;
             check_slot(*src, VM_POINTER_BYTES, slot_bytes)?;
         }
-        Instr::Store { src, dst, ty } => {
-            let size = type_size(program, *ty)?;
-            check_operand(*src, size, n_regs, slot_bytes)?;
+        Decoded::Store { src, dst, size } => {
+            check_operand(*src, *size, n_regs, slot_bytes)?;
             check_slot(*dst, VM_POINTER_BYTES, slot_bytes)?;
         }
-        Instr::Addr { dst, place } => {
+        Decoded::Addr { dst, place } => {
             check_reg(*dst, n_regs)?;
             check_slot(*place, 1, slot_bytes)?;
         }
-        Instr::AddrField {
+        Decoded::AddrField {
             dst,
             place,
             off,
@@ -774,68 +824,85 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             check_reg(*dst, n_regs)?;
             check_field_base(*place, *off, *indirect, slot_bytes)?;
         }
-        Instr::AddrFunc { dst, func: target } => {
+        Decoded::AddrFunc { dst, func: target } => {
             check_reg(*dst, n_regs)?;
             check_func(program, *target)?;
         }
-        Instr::Field {
+        Decoded::Field {
             dst,
             place,
             off,
-            ty,
+            size,
             indirect,
-        } => verify_field_read(
-            program, *dst, *place, *off, *ty, *indirect, n_regs, slot_bytes,
-        )?,
-        Instr::StoreField {
+        } => {
+            let extent = off
+                .checked_add(*size)
+                .ok_or_else(|| "field extent overflow".to_string())?;
+            check_reg(*dst, n_regs)?;
+            check_field_base(*place, extent, *indirect, slot_bytes)?;
+        }
+        Decoded::StoreField {
             src,
             place,
             off,
-            ty,
+            size,
             indirect,
-        } => verify_field_write(
-            program, *src, *place, *off, *ty, *indirect, n_regs, slot_bytes,
-        )?,
-        Instr::Arith {
-            dst,
-            lhs,
-            rhs,
-            operand_ty,
-            ty,
-            ..
         } => {
-            check_type(program, *ty)?;
-            check_type(program, *operand_ty)?;
+            let extent = off
+                .checked_add(*size)
+                .ok_or_else(|| "field extent overflow".to_string())?;
+            check_operand(*src, *size, n_regs, slot_bytes)?;
+            check_field_base(*place, extent, *indirect, slot_bytes)?;
+        }
+        Decoded::IAdd { dst, lhs, rhs, .. }
+        | Decoded::ISub { dst, lhs, rhs, .. }
+        | Decoded::IMul { dst, lhs, rhs, .. }
+        | Decoded::IDiv { dst, lhs, rhs, .. }
+        | Decoded::IMod { dst, lhs, rhs, .. }
+        | Decoded::ILt { dst, lhs, rhs, .. }
+        | Decoded::IGt { dst, lhs, rhs, .. }
+        | Decoded::FAdd { dst, lhs, rhs, .. }
+        | Decoded::FSub { dst, lhs, rhs, .. }
+        | Decoded::FMul { dst, lhs, rhs, .. }
+        | Decoded::FDiv { dst, lhs, rhs, .. }
+        | Decoded::FMod { dst, lhs, rhs, .. }
+        | Decoded::FLt { dst, lhs, rhs, .. }
+        | Decoded::FGt { dst, lhs, rhs, .. }
+        | Decoded::IDivU { dst, lhs, rhs, .. }
+        | Decoded::IModU { dst, lhs, rhs, .. }
+        | Decoded::Eq { dst, lhs, rhs, .. }
+        | Decoded::ILtU { dst, lhs, rhs, .. }
+        | Decoded::IGtU { dst, lhs, rhs, .. } => {
             check_reg(*dst, n_regs)?;
             check_reg(*lhs, n_regs)?;
             check_reg(*rhs, n_regs)?;
         }
-        Instr::Convert { dst, src, ty, .. } => {
-            check_type(program, *ty)?;
+        Decoded::Trunc { dst, src, .. } | Decoded::ExtendZero { dst, src } => {
             check_reg(*dst, n_regs)?;
             check_reg(*src, n_regs)?;
         }
-        Instr::Call {
-            func: target,
-            ins,
-            outs,
+        Decoded::Call { site, ins, outs } => {
+            verify_direct_call(program, site.func, ins, outs, n_regs, slot_bytes)?;
+        }
+        Decoded::CallIndirect {
+            callee, ins, outs, ..
         } => {
-            verify_direct_call(program, *target, ins, outs, n_regs, slot_bytes)?;
+            check_reg(*callee, n_regs)?;
+            verify_indirect_call(ins, outs, n_regs, slot_bytes)?;
         }
-        Instr::CallIndirect { callee, ins, outs } => {
-            verify_indirect_call(*callee, ins, outs, n_regs, slot_bytes)?;
-        }
-        Instr::CallBuiltin { builtin, ins, outs } => {
+        Decoded::CallBuiltin {
+            builtin, ins, outs, ..
+        } => {
             verify_builtin_call(*builtin, ins, outs, n_regs, slot_bytes)?;
         }
-        Instr::Branch { target } => check_target(*target, code_len)?,
-        Instr::BranchIf { cond, then, els } => {
+        Decoded::Branch { target } => targets.push(*target),
+        Decoded::BranchIf { cond, then, els } => {
             check_reg(*cond, n_regs)?;
-            check_target(*then, code_len)?;
-            check_target(*els, code_len)?;
+            targets.push(*then);
+            targets.push(*els);
         }
-        Instr::Return | Instr::Unreachable => {}
-        Instr::Panic { data } => check_data(program, *data)?,
+        Decoded::Return | Decoded::Unreachable => {}
+        Decoded::Panic { data } => check_data(program, *data)?,
     }
     Ok(())
 }
@@ -859,51 +926,12 @@ fn check_field_base(
     }
 }
 
-/// Verifies a scalar field read.
-#[allow(clippy::too_many_arguments)]
-fn verify_field_read(
-    program: &Program,
-    dst: u32,
-    place: u32,
-    off: u32,
-    ty: TypeId,
-    indirect: bool,
-    n_regs: u32,
-    slot_bytes: u32,
-) -> Result<(), String> {
-    let extent = off
-        .checked_add(type_size(program, ty)?)
-        .ok_or_else(|| "field extent overflow".to_string())?;
-    check_reg(dst, n_regs)?;
-    check_field_base(place, extent, indirect, slot_bytes)
-}
-
-/// Verifies a scalar field write.
-#[allow(clippy::too_many_arguments)]
-fn verify_field_write(
-    program: &Program,
-    src: Operand,
-    place: u32,
-    off: u32,
-    ty: TypeId,
-    indirect: bool,
-    n_regs: u32,
-    slot_bytes: u32,
-) -> Result<(), String> {
-    let size = type_size(program, ty)?;
-    let extent = off
-        .checked_add(size)
-        .ok_or_else(|| "field extent overflow".to_string())?;
-    check_operand(src, size, n_regs, slot_bytes)?;
-    check_field_base(place, extent, indirect, slot_bytes)
-}
-
 /// Verifies a direct call.
 fn verify_direct_call(
     program: &Program,
     target: u32,
     ins: &[Operand],
-    outs: &[u32],
+    outs: &[Operand],
     n_regs: u32,
     slot_bytes: u32,
 ) -> Result<(), String> {
@@ -923,18 +951,19 @@ fn verify_direct_call(
 
 /// Verifies an indirect call (operand widths are unknown; check bounds only).
 fn verify_indirect_call(
-    callee: u32,
     ins: &[Operand],
-    outs: &[u32],
+    outs: &[Operand],
     n_regs: u32,
     slot_bytes: u32,
 ) -> Result<(), String> {
-    check_reg(callee, n_regs)?;
     for operand in ins {
         check_operand(*operand, 1, n_regs, slot_bytes)?;
     }
-    for slot in outs {
-        check_slot(*slot, 1, slot_bytes)?;
+    for operand in outs {
+        match operand {
+            Operand::Slot(slot) => check_slot(*slot, 1, slot_bytes)?,
+            Operand::Reg(_) => return Err("call output operand must be a slot".to_string()),
+        }
     }
     Ok(())
 }
@@ -943,7 +972,7 @@ fn verify_indirect_call(
 fn verify_builtin_call(
     builtin: Builtin,
     ins: &[Operand],
-    outs: &[u32],
+    outs: &[Operand],
     n_regs: u32,
     slot_bytes: u32,
 ) -> Result<(), String> {
@@ -953,19 +982,28 @@ fn verify_builtin_call(
     for operand in ins {
         check_operand(*operand, VM_POINTER_BYTES, n_regs, slot_bytes)?;
     }
-    for slot in outs {
-        check_slot(*slot, VM_POINTER_BYTES, slot_bytes)?;
+    for operand in outs {
+        match operand {
+            Operand::Slot(slot) => check_slot(*slot, VM_POINTER_BYTES, slot_bytes)?,
+            Operand::Reg(_) => return Err("call output operand must be a slot".to_string()),
+        }
     }
     Ok(())
 }
 
-/// Validates a branch target.
-fn check_target(target: u32, code_len: u32) -> Result<(), String> {
-    if target < code_len {
+/// Validates a branch target against the code extent and instruction
+/// boundaries, so a branch cannot land inside a multi-word instruction.
+fn check_target(target: u32, code_len: u32, boundaries: &[bool]) -> Result<(), String> {
+    if target >= code_len {
+        return Err(format!(
+            "branch target {target} out of range (code_len {code_len})"
+        ));
+    }
+    if boundaries.get(target as usize).copied().unwrap_or(false) {
         Ok(())
     } else {
         Err(format!(
-            "branch target {target} out of range (code_len {code_len})"
+            "branch target {target} is not an instruction boundary"
         ))
     }
 }
@@ -998,16 +1036,34 @@ fn check_arity(got: usize, want: usize, what: &str) -> Result<(), String> {
     }
 }
 
+/// The single-type table used by the crate's test programs.
 #[cfg(test)]
-pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
+pub(crate) fn sample_types() -> Vec<TypeInfo> {
+    vec![TypeInfo {
+        name: "#bit_native".to_string(),
+        size: 8,
+        is_ref: false,
+    }]
+}
+
+/// Encodes a typed instruction list (instruction-index branch targets) into the
+/// `(words, call_sites, operands)` triple, panicking only on a test bug.
+#[cfg(test)]
+pub(crate) fn words_of(
+    types: &[TypeInfo],
+    instrs: &[Instr],
+) -> (Vec<u32>, Vec<CallSite>, Vec<Operand>) {
+    let (builder, _) = crate::encode::encode_instrs(types, instrs).expect("encode test program");
+    (builder.words, builder.call_sites, builder.operands)
+}
+
+/// Builds a one-function `main` program from a raw word stream.
+#[cfg(test)]
+pub(crate) fn sample_program_words(code: Vec<u32>) -> Program {
     Program {
         version: LBC_VERSION.to_string(),
         target: VM_TARGET.to_string(),
-        types: vec![TypeInfo {
-            name: "#bit_native".to_string(),
-            size: 8,
-            is_ref: false,
-        }],
+        types: sample_types(),
         data: Vec::new(),
         globals: Vec::new(),
         funcs: vec![Func {
@@ -1018,6 +1074,36 @@ pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
             n_regs: 1,
             slot_bytes: 8,
             code,
+            call_sites: Vec::new(),
+            operands: Vec::new(),
+            lines: Vec::new(),
+            place_names: Vec::new(),
+        }],
+    }
+}
+
+/// Builds a one-function `main` program from typed instructions, encoding them.
+#[cfg(test)]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
+    let types = sample_types();
+    let (words, call_sites, operands) = words_of(&types, &code);
+    Program {
+        version: LBC_VERSION.to_string(),
+        target: VM_TARGET.to_string(),
+        types,
+        data: Vec::new(),
+        globals: Vec::new(),
+        funcs: vec![Func {
+            name: "main".to_string(),
+            is_extern: false,
+            ins: Vec::new(),
+            outs: Vec::new(),
+            n_regs: 1,
+            slot_bytes: 8,
+            code: words,
+            call_sites,
+            operands,
             lines: Vec::new(),
             place_names: Vec::new(),
         }],
@@ -1027,11 +1113,42 @@ pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode::{OP_BRANCH, OP_CONST};
+
+    /// A `Const` word 0 for `dst` (followed by two immediate words).
+    fn const_word(dst: u32) -> u32 {
+        u32::from(OP_CONST) | (dst << 8)
+    }
+
+    /// A `Branch` word targeting word `target`.
+    fn branch_word(target: u32) -> u32 {
+        u32::from(OP_BRANCH) | (target << 8)
+    }
 
     #[test]
     fn verifier_rejects_branch_out_of_range() {
-        let program = sample_program(vec![Instr::Branch { target: 99 }]);
-        assert!(verify(&program).is_err());
+        let program = sample_program_words(vec![branch_word(99)]);
+        let err = verify(&program).expect_err("branch out of range");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    /// An unknown opcode in the stream is a clean verifier error.
+    #[test]
+    fn verifier_rejects_unknown_opcode() {
+        let program = sample_program_words(vec![0x00FF_FFFF]);
+        let err = verify(&program).expect_err("unknown opcode");
+        assert!(err.contains("unknown opcode"), "{err}");
+    }
+
+    /// A branch that lands inside a multi-word instruction (the `Const`
+    /// immediate) is rejected even though decoding there might succeed.
+    #[test]
+    fn verifier_rejects_misaligned_branch_target() {
+        // `Const &0 = 0` is three words; the branch's target (word 1) lands
+        // inside its immediate words.
+        let program = sample_program_words(vec![const_word(0), 0, 0, branch_word(1)]);
+        let err = verify(&program).expect_err("misaligned branch");
+        assert!(err.contains("boundary"), "{err}");
     }
 
     #[test]
