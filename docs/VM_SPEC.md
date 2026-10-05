@@ -300,15 +300,15 @@ func @Pair.get (in ref #Pair) -> (#bit8) regs 2 slots 9
 
 func @main () -> () regs 3 slots 42
   places %p=0 %tmp.1=16 %r=32 %tmp.2=33 %tmp.3=34
-  line 0:demo.lilac:11:13
-  line 1:demo.lilac:11:9
-  line 2:demo.lilac:12:13
-  line 3:demo.lilac:12:9
-  line 4:demo.lilac:10:5
-  line 5:demo.lilac:14:16
-  line 6:demo.lilac:14:16
-  line 7:demo.lilac:14:16
-  line 8:demo.lilac:14:5
+  line 0:demo.lilac:10:13
+  line 1:demo.lilac:10:9
+  line 2:demo.lilac:11:13
+  line 3:demo.lilac:11:9
+  line 4:demo.lilac:9:5
+  line 5:demo.lilac:13:16
+  line 6:demo.lilac:13:16
+  line 7:demo.lilac:13:16
+  line 8:demo.lilac:13:5
   $L0:
     0  &0: #bit64 = const 0x1
     1  store.field &0 -> %16 + 0 direct : #bit64
@@ -328,7 +328,8 @@ func @main () -> () regs 3 slots 42
   `--export=<name>`: with exactly one export root, that function is the VM entry
   point; with zero or multiple exports it falls back to `main`. The standalone
   `lilac-vm` runner always enters at `main`. No matching entry function is a
-  clean `no entry point \`main\`` error (exit 1), never a panic.
+  clean `no entry point \`<name>\`` error (exit 1), never a panic, where
+  `<name>` is `main` by default or the single `--export` name when one is given.
 - **Normal exit.** Returning from the entry frame reports exit code 0.
 - **Panic.** The `panic` terminator prints the referenced data constant's bytes
   to stderr as `panic: <message>` and exits **101**. `@lilac_abort` (used by the

@@ -648,9 +648,11 @@ desugars to existing constructs the way f-strings do.
 ## 10. Targets & the bytecode VM (informative)
 
 Targets are toolchain configuration, not language semantics: a target triple
-fixes `@bit_native`'s width (via the single `Arch::is_64_bit` rule), and the
-default remains `x86_64-unknown-none`. The compiler also ships a **second
-backend**. The triple **`lilacvm-unknown-none`** selects the bytecode VM
+fixes `@bit_native`'s width (via the single `Arch::is_64_bit` rule). The default
+remains `x86_64-unknown-none` for `check`/`emit-ir`/`emit-vm`/`run`, while
+`emit-llvm` deliberately defaults to the host target (an explicit
+`--target=` still wins). The compiler also ships a **second backend**. The
+triple **`lilacvm-unknown-none`** selects the bytecode VM
 (`crates/lilac-vm`), which lowers verified LIR to a portable `.lbc` text
 artifact and interprets it with no frontend and no LLVM:
 
