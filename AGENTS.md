@@ -34,6 +34,17 @@
   to `Arch::is_64_bit`) to pick `@bit_native`'s LLVM width. Because both funnel
   through `Arch::is_64_bit`, their widths cannot drift.
 
+## Bytecode VM (M5c)
+
+- `lilac-vm` is a **second backend**: it lowers verified LIR to canonical `.lbc`
+  text and interprets it, without linking LLVM. The VM and its runner never
+  depend on `inkwell`/`llvm-sys`, which stay confined to `lilac-codegen-llvm`.
+- The VM target is `lilacvm-unknown-none` (`Arch::LilacVm`, 64-bit). Selecting
+  it selects the VM backend; the single pointer-width rule in `lilac-target`
+  now covers `Arch::LilacVm` as well.
+- The ISA, `.lbc` format, memory model, entry/panic/`extern` behavior, and
+  debugger are documented in `docs/VM_SPEC.md`.
+
 ## Gates
 
 Run before committing:

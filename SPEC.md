@@ -645,6 +645,28 @@ context-switch helpers or a tiny C shim via the build script), never through a
 compiler intrinsic. `await` syntax is explicitly deferred: if ever added, it
 desugars to existing constructs the way f-strings do.
 
+## 10. Targets & the bytecode VM (informative)
+
+Targets are toolchain configuration, not language semantics: a target triple
+fixes `@bit_native`'s width (via the single `Arch::is_64_bit` rule), and the
+default remains `x86_64-unknown-none`. The compiler also ships a **second
+backend**. The triple **`lilacvm-unknown-none`** selects the bytecode VM
+(`crates/lilac-vm`), which lowers verified LIR to a portable `.lbc` text
+artifact and interprets it with no frontend and no LLVM:
+
+```text
+lilac emit-vm <file> [--check]   # canonical .lbc for the VM target
+lilac run <file>                 # compile and execute on the VM
+lilac-vm <file.lbc>              # standalone runner (no frontend, no LLVM)
+```
+
+`emit-vm`/`run` default to the VM target and reject a non-VM `--target`; the
+LLVM emitter rejects the VM target. The VM's ISA, `.lbc` format, memory model,
+entry/panic/`extern` behavior, and debugger are specified in `docs/VM_SPEC.md`.
+The repeatable `--export=<name>` roots already seed reachability; when exactly
+one export is given, `lilac run` also uses it as the VM entry point (otherwise
+the entry is `main`).
+
 ## Lilac to IR (informative; `IR_SPEC.md` is normative)
 
 Lowering follows the IR v2 rules in `IR_SPEC.md`: typed SSA registers (`&n: #type`),
