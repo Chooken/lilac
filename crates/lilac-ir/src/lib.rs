@@ -16,8 +16,10 @@ use lilac_span::Span;
 
 mod codec;
 mod dce;
+pub mod runtime;
 pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::prune_unreachable;
+pub use runtime::build_runtime;
 
 /// IR version header; bump on any normative IR change.
 pub const LILAC_IR_VERSION: &str = "0.2";
@@ -699,6 +701,39 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     Some(BuiltinSig { ins, outs })
 }
 
+/// Fixed layout of `#format_args`: a count plus sixteen named pieces. LIR has
+/// no array type, so the fixed table is spelled out as sixteen fields.
+static FORMAT_ARGS_LAYOUT: [(&str, &str); 17] = [
+    ("count", "#bitNative"),
+    ("p0", "#byte_buffer"),
+    ("p1", "#byte_buffer"),
+    ("p2", "#byte_buffer"),
+    ("p3", "#byte_buffer"),
+    ("p4", "#byte_buffer"),
+    ("p5", "#byte_buffer"),
+    ("p6", "#byte_buffer"),
+    ("p7", "#byte_buffer"),
+    ("p8", "#byte_buffer"),
+    ("p9", "#byte_buffer"),
+    ("p10", "#byte_buffer"),
+    ("p11", "#byte_buffer"),
+    ("p12", "#byte_buffer"),
+    ("p13", "#byte_buffer"),
+    ("p14", "#byte_buffer"),
+    ("p15", "#byte_buffer"),
+];
+
+/// Fixed field layouts of the builtin aggregate types. These never appear in
+/// `module.layouts`, so the verifier and the backend both consult this table.
+#[must_use]
+pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match ty {
+        "#byte_buffer" => Some(&[("len", "#bitNative"), ("data", "ref #bit8")]),
+        "#format_args" => Some(&FORMAT_ARGS_LAYOUT),
+        _ => None,
+    }
+}
+
 /// Whether an IR type spelling is a reference (`ref X`).
 fn is_ref_ty(ty: &str) -> bool {
     ty.starts_with("ref ")
@@ -1092,6 +1127,20 @@ impl Verifier<'_> {
         }
     }
 
+    /// The field layout of `owner_ty`: module-defined layouts first, then the
+    /// builtin aggregate table (`#byte_buffer`, `#format_args`).
+    fn layout_fields(&self, owner_ty: &str) -> Option<Vec<(&str, &str)>> {
+        if let Some(layout) = self.module.layouts.get(owner_ty) {
+            return Some(
+                layout
+                    .iter()
+                    .map(|(name, ty)| (name.as_str(), ty.as_str()))
+                    .collect(),
+            );
+        }
+        builtin_layout(owner_ty).map(<[(&str, &str)]>::to_vec)
+    }
+
     /// Checks a field reference against its owner's layout (name and index).
     fn check_field_ref(
         &mut self,
@@ -1103,7 +1152,7 @@ impl Verifier<'_> {
     ) {
         let owner_ty = places.get(obj).copied().unwrap_or("#unknown");
         let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
-        let Some(layout) = self.module.layouts.get(owner_ty) else {
+        let Some(layout) = self.layout_fields(owner_ty) else {
             self.error(
                 format!("field of `{obj}` with unknown layout `{owner_ty}`"),
                 span,
@@ -1117,7 +1166,7 @@ impl Verifier<'_> {
             );
             return;
         };
-        if field_name != name {
+        if *field_name != name {
             self.error(
                 format!("field `.{name}` is not at index `{idx}` of `{owner_ty}`"),
                 span,
@@ -1247,7 +1296,7 @@ impl Verifier<'_> {
     /// Checks a `field` against its owner's layout (name, index, and type).
     fn check_field_layout(&mut self, owner_ty: &str, name: &str, idx: u32, ty: &str, span: Span) {
         let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
-        let Some(layout) = self.module.layouts.get(owner_ty) else {
+        let Some(layout) = self.layout_fields(owner_ty) else {
             self.error(format!("field with unknown layout `{owner_ty}`"), span);
             return;
         };
@@ -1258,7 +1307,7 @@ impl Verifier<'_> {
             );
             return;
         };
-        if field_name != name || field_ty != ty {
+        if *field_name != name || *field_ty != ty {
             self.error(
                 format!("field `.{name}` is `{field_ty}` at index `{idx}`, not `{ty}`"),
                 span,
@@ -2098,5 +2147,53 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn builtin_layout_has_expected_fields() {
+        let byte_buffer = builtin_layout("#byte_buffer").expect("#byte_buffer has a layout");
+        assert_eq!(byte_buffer[0], ("len", "#bitNative"));
+        let format_args = builtin_layout("#format_args").expect("#format_args has a layout");
+        assert_eq!(format_args.len(), 17);
+        assert_eq!(format_args[1], ("p0", "#byte_buffer"));
+    }
+
+    /// A `field` on a builtin aggregate resolves against `builtin_layout`
+    /// (these types never appear in `module.layouts`).
+    #[test]
+    fn field_on_byte_buffer_uses_builtin_layout() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: vec![("buffer".to_owned(), "#byte_buffer".to_owned())],
+            outs: vec![("out".to_owned(), "ref #bit8".to_owned())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Field {
+                        obj: "buffer".to_owned(),
+                        name: "data".to_owned(),
+                        idx: 1,
+                        dst: "r".to_owned(),
+                        ty: "ref #bit8".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::CopyPlace {
+                        src: LirOperand::Reg("r".to_owned()),
+                        dst: "out".to_owned(),
+                        span: test_span(),
+                    },
+                ],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(
+            verify(&module, &mut diags).is_ok(),
+            "{:?}",
+            diags.diagnostics()
+        );
     }
 }
