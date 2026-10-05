@@ -451,7 +451,9 @@ impl<'a> CodeBuilder<'a> {
             Instr::Return => self.words.push(u32::from(OP_RETURN)),
             Instr::CopyReturn { src, ty } => {
                 let size = self.type_size(*ty)?;
-                if size > NARROW_MAX {
+                // The high bit of the packed byte carries the operand kind, so
+                // the size must fit in the low 7 bits.
+                if size > 0x7F {
                     return Err(format!("copy.ret size {size} too large"));
                 }
                 let packed = u32::from(kind(*src)) * 0x80 + size;

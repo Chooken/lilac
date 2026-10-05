@@ -2709,6 +2709,50 @@ mod tests {
         assert_eq!(a, Some(0x1), "f(3) takes the then-branch");
     }
 
+    /// Regression: a register-argument input (`func.arg_reg`) copied to a local
+    /// *place* must compile. The `CopyPlace` place-source path has to consult
+    /// `places.reg(place)` instead of assuming a frame slot, or `slot()` errors
+    /// with `unknown place`. The argument is runtime-derived so `f` survives
+    /// folding and actually exercises the register-argument ABI.
+    #[test]
+    fn register_arg_place_copy_compiles_and_runs() {
+        let src = "f: function (n: @bit_native) r: @bit_native {\n    m: @bit_native = n\n    r = @i_add(m, 0x1)\n}\nmain: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    a: @bit_native = f(n)\n}\n";
+        let program = compile_src(src);
+        let f = program
+            .funcs
+            .iter()
+            .find(|func| func.name == "f")
+            .expect("`f` must survive folding to exercise the register ABI");
+        assert!(f.arg_reg.is_some(), "f uses the register-argument ABI");
+        let a = run_and_capture_place(src, "a").expect("run");
+        assert_eq!(a, Some(0x4), "format_args_count=3, f(3) = 4");
+        assert_eq!(run_src(src).expect("run"), 0);
+    }
+
+    /// A sub-pointer-sized register-argument input (`#bit8`) is passed at its
+    /// real width: the callee copies it through a local place and returns it.
+    #[test]
+    fn register_arg_sub_pointer_width_round_trips() {
+        let src = "f: function (n: @bit8) r: @bit8 {\n    m: @bit8 = n\n    r = m\n}\nmain: function () nothing {\n    s: @byte_buffer = \"A\"\n    p: ref @bit8 = @byte_buffer_ptr(s)\n    c: @bit8 = @load_u8(p, 0x0)\n    a: @bit8 = f(c)\n}\n";
+        let program = compile_src(src);
+        let f = program
+            .funcs
+            .iter()
+            .find(|func| func.name == "f")
+            .expect("`f` must survive folding");
+        assert_eq!(f.ret_reg, Some(0), "single scalar output uses register 0");
+        assert_eq!(f.arg_reg, Some(1), "register-argument ABI");
+        assert_eq!(f.in_sizes, vec![1], "input width recorded as one byte");
+        let a = run_and_capture_place(src, "a").expect("run");
+        // `read_place` reads up to a pointer width, so mask the byte-sized place.
+        assert_eq!(
+            a.map(|value| value & 0xFF),
+            Some(0x41),
+            "the byte round-trips"
+        );
+        assert_eq!(run_src(src).expect("run"), 0);
+    }
+
     /// Runtime-level aliasing: `addr %out` is the caller's storage address, so
     /// a store through the taken address updates the caller's place.
     #[test]

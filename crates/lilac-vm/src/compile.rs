@@ -793,10 +793,25 @@ impl FuncBuilder<'_, '_> {
                             )
                         }
                         LirOperand::Place(place) => {
-                            let size = type_size(self.compiler.module, &dst_ty, 0)?;
-                            let src = self.slot(place)?;
-                            let dst = self.slot(dst)?;
-                            self.emit(Instr::CopyBytes { dst, src, size }, *span)
+                            if let Some(src_reg) = self.places.reg(place) {
+                                // Register-backed source (register-arg/return
+                                // place): read it directly rather than as a slotted.
+                                let ty = self.intern(&dst_ty)?;
+                                let dst = self.slot(dst)?;
+                                self.emit(
+                                    Instr::Copy {
+                                        dst: Operand::Slot(dst),
+                                        src: Operand::Reg(src_reg),
+                                        ty,
+                                    },
+                                    *span,
+                                )
+                            } else {
+                                let size = type_size(self.compiler.module, &dst_ty, 0)?;
+                                let src = self.slot(place)?;
+                                let dst = self.slot(dst)?;
+                                self.emit(Instr::CopyBytes { dst, src, size }, *span)
+                            }
                         }
                         LirOperand::Reg(reg) => {
                             let ty = self.intern(&dst_ty)?;

@@ -713,6 +713,11 @@ impl Func {
         };
         let mut offset = out_count.saturating_mul(VM_POINTER_BYTES);
         if self.arg_reg.is_some() {
+            // Record the input's width so `call` reads exactly it, not a full
+            // pointer, when the source is a sub-pointer-sized slot.
+            if let Some(&ty) = self.ins.first() {
+                self.in_sizes.push(type_size_of(types, ty));
+            }
             self.out_offset = offset;
             self.out_sizes.clear();
             self.out_sizes
