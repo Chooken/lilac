@@ -657,11 +657,11 @@ fn eval_int_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
             }
         }
         ArithOp::IModU => (left & m).checked_rem(right & m).unwrap_or(0),
-        ArithOp::Eq => u64::from(left == right),
+        ArithOp::Eq => u64::from((left & m) == (right & m)),
         ArithOp::ILt => u64::from(sign_extend(left, size) < sign_extend(right, size)),
-        ArithOp::ILtU => u64::from(left < right),
+        ArithOp::ILtU => u64::from((left & m) < (right & m)),
         ArithOp::IGt => u64::from(sign_extend(left, size) > sign_extend(right, size)),
-        ArithOp::IGtU => u64::from(left > right),
+        ArithOp::IGtU => u64::from((left & m) > (right & m)),
         ArithOp::FAdd
         | ArithOp::FSub
         | ArithOp::FMul
@@ -745,7 +745,23 @@ mod tests {
         let src =
             "helper: function (a: @bit_native) ret: @bit_native {\n    ret = @i_add(a, 0x1)\n}\n\
                    main: function () nothing {\n    x: @bit_native = helper(0x41)\n}\n";
-        assert_eq!(run_src(src).expect("run"), 0);
+        let program = compile_src(src);
+        let mut machine = Machine::new(&program).expect("entry");
+        // Drive the call and capture the caller's out place while its frame is
+        // still live: `x` must hold `0x41 + 1` only if the argument binding and
+        // the `Return` out-copy are both correct.
+        let mut x = None;
+        loop {
+            if let Some(value) = machine.read_place("x") {
+                x = Some(value);
+            }
+            match machine.step().expect("step") {
+                Step::Returned => break,
+                Step::Advanced => {}
+                Step::Panicked(code) => unreachable!("unexpected panic {code}"),
+            }
+        }
+        assert_eq!(x, Some(0x42), "argument binding / return out-copy");
     }
 
     #[test]
@@ -960,5 +976,84 @@ mod tests {
         machine.step().expect("const rhs");
         machine.step().expect("cmp");
         assert_eq!(machine.read_reg(2), Some(1), "-1.0f32 < 1.0f32");
+    }
+
+    /// Unsigned comparisons mask their operands to `operand_ty`'s width, so the
+    /// result does not depend on producers having zero-extended the operands.
+    #[test]
+    fn unsigned_compare_masks_to_operand_width() {
+        let types = vec![
+            isa::TypeInfo {
+                name: "#bit_native".to_string(),
+                size: 8,
+                is_ref: false,
+            },
+            isa::TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+        ];
+        // 0x100 vs 0x1 at `#bit8`: masked `0x00 < 0x01` is true; unmasked
+        // `0x100 < 0x01` is false.
+        let less_than = vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0x100,
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 1,
+                imm: 0x1,
+                ty: 0,
+            },
+            Instr::Arith {
+                op: isa::ArithOp::ILtU,
+                dst: 2,
+                lhs: 0,
+                rhs: 1,
+                operand_ty: 1,
+                ty: 1,
+            },
+            Instr::Return,
+        ];
+        let program = arith_program(types.clone(), less_than, 3);
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("const lhs");
+        machine.step().expect("const rhs");
+        machine.step().expect("cmp");
+        assert_eq!(machine.read_reg(2), Some(1), "0x100 < 0x1 masked to u8");
+
+        // 0x100 vs 0x0 at `#bit8`: masked `0x00 == 0x00` is true; unmasked is
+        // false.
+        let equal = vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0x100,
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 1,
+                imm: 0x0,
+                ty: 0,
+            },
+            Instr::Arith {
+                op: isa::ArithOp::Eq,
+                dst: 2,
+                lhs: 0,
+                rhs: 1,
+                operand_ty: 1,
+                ty: 1,
+            },
+            Instr::Return,
+        ];
+        let program = arith_program(types, equal, 3);
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("const lhs");
+        machine.step().expect("const rhs");
+        machine.step().expect("cmp");
+        assert_eq!(machine.read_reg(2), Some(1), "0x100 == 0x0 masked to u8");
     }
 }

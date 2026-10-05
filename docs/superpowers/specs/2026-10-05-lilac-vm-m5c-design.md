@@ -258,7 +258,7 @@ func @main () -> () regs 4 slots 16
   $entry:
     &0: #bit_native = const 0x1
     &1: #bit_native = const 0x2
-    &2: #bit_native = i.add &0, &1
+    &2: #bit_native = i.add &0, &1 : #bit_native
     call @.lilac.load_u8 (in &0, in &1) (out %0)
     branch $done
   $done:
