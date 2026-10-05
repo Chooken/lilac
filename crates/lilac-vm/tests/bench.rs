@@ -7,6 +7,13 @@
 //! ```text
 //! cargo test -p lilac-vm --test bench --features bench-baseline
 //! ```
+//!
+//! Every suite program computes a non-trivial checksum and then *conditionally
+//! traps* (through the runtime `@format_args_piece` abort path) based on that
+//! checksum, so a baseline that computes different values exits with a
+//! different code than the VM and fails [`treewalk_matches_vm_on_suite`]. The
+//! `calls` entry inverts the condition and is expected to trap (code 101), so
+//! the fidelity test is not merely "both engines return 0".
 
 #![cfg(feature = "bench-baseline")]
 
@@ -18,14 +25,22 @@ use lilac_vm::{compile, treewalk_run, Machine, Program};
 /// How many timed repetitions each closure gets (the best is reported).
 const RUNS: u32 = 10;
 
-/// A small program suite: recursion, a numeric loop, aggregate/runtime work,
-/// struct field access, and direct + indirect calls.
+/// The trap exit code (`@lilac_abort` / the runtime abort path).
+const TRAP: i32 = 101;
+
+/// A small program suite: `(name, expected exit code, source)`.
+///
+/// Each source computes a checksum and compares it with `check_eq`
+/// (trap-unless-equal, expected code 0) or `check_ne` (trap-on-equal, expected
+/// code [`TRAP`]). A wrong checksum in either engine flips the exit code, so the
+/// fidelity test pins equal computation per entry.
 // Raw strings are kept uniform (`r#"…"#`) because the `strings` entry contains
 // `"`, which forces hashes there.
 #[allow(clippy::needless_raw_string_hashes)]
-const SUITE: &[(&str, &str)] = &[
+const SUITE: &[(&str, i32, &str)] = &[
     (
         "fib",
+        0,
         r#"
 fib: function (n: @bit_native) r: @bit_native {
     if @i_less_than(n, 0x2) {
@@ -35,23 +50,35 @@ fib: function (n: @bit_native) r: @bit_native {
     }
 }
 
+check_eq: function (actual: @bit_native, expected: @bit_native) nothing {
+    ok: @bit8 = actual == expected
+    wide: @bit_native = @extend_zero(ok)
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+    count: @bit_native = @format_args_count(msg)
+    idx: @bit_native = @i_sub(count, wide)
+    piece: @byte_buffer = @format_args_piece(msg, idx)
+}
+
 main: function () nothing {
-    x: @bit_native = fib(0x12)
+    checksum: @bit_native = fib(0x12)
+    check_eq(checksum, 0xa18)
 }
 "#,
     ),
     (
         "mandelbrot",
+        0,
         r#"
-mandel: function (cx: @bit64, cy: @bit64) result: @bit64 {
-    zr: @bit64 = 0x0
-    zi: @bit64 = 0x0
-    i: @bit64 = 0x0
+mandel: function (cx: @bit_native, cy: @bit_native) result: @bit_native {
+    zr: @bit_native = 0x0
+    zi: @bit_native = 0x0
+    i: @bit_native = 0x0
     loop {
         if @i_less_than(i, 0x20) {
-            zr2: @bit64 = @i_mul(zr, zr)
-            zi2: @bit64 = @i_mul(zi, zi)
-            mag: @bit64 = @i_add(zr2, zi2)
+            zr2: @bit_native = @i_mul(zr, zr)
+            zi2: @bit_native = @i_mul(zi, zi)
+            mag: @bit_native = @i_add(zr2, zi2)
             if @i_less_than(mag, 0x400000) {
                 zi = @i_add(@i_mul(0x2, @i_mul(zr, zi)), cy)
                 zr = @i_add(@i_sub(zr2, zi2), cx)
@@ -66,16 +93,26 @@ mandel: function (cx: @bit64, cy: @bit64) result: @bit64 {
     result = i
 }
 
+check_eq: function (actual: @bit_native, expected: @bit_native) nothing {
+    ok: @bit8 = actual == expected
+    wide: @bit_native = @extend_zero(ok)
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+    count: @bit_native = @format_args_count(msg)
+    idx: @bit_native = @i_sub(count, wide)
+    piece: @byte_buffer = @format_args_piece(msg, idx)
+}
+
 main: function () nothing {
-    a: @bit64 = 0x0
-    b: @bit64 = 0x0
-    total: @bit64 = 0x0
+    a: @bit_native = 0x0
+    b: @bit_native = 0x0
+    checksum: @bit_native = 0x0
     loop {
         if @i_less_than(a, 0x8) {
             b = 0x0
             loop {
                 if @i_less_than(b, 0x8) {
-                    total = @i_add(total, mandel(@i_sub(@i_mul(a, 0x80), 0x400), @i_sub(@i_mul(b, 0x80), 0x400)))
+                    checksum = @i_add(checksum, mandel(@i_sub(@i_mul(a, 0x80), 0x400), @i_sub(@i_mul(b, 0x80), 0x400)))
                     b = @i_add(b, 0x1)
                 } else {
                     break
@@ -86,15 +123,27 @@ main: function () nothing {
             break
         }
     }
+    check_eq(checksum, 0x80)
 }
 "#,
     ),
     (
         "strings",
+        0,
         r#"
+check_eq: function (actual: @bit_native, expected: @bit_native) nothing {
+    ok: @bit8 = actual == expected
+    wide: @bit_native = @extend_zero(ok)
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+    count: @bit_native = @format_args_count(msg)
+    idx: @bit_native = @i_sub(count, wide)
+    piece: @byte_buffer = @format_args_piece(msg, idx)
+}
+
 main: function () nothing {
     i: @bit_native = 0x0
-    acc: @bit_native = 0x0
+    checksum: @bit_native = 0x0
     loop {
         if @i_less_than(i, 0x200) {
             buf: @byte_buffer = "lilac"
@@ -104,25 +153,37 @@ main: function () nothing {
             c: @bit8 = @load_u8(ptr, idx)
             @store_u8(ptr, idx, c)
             wide: @bit_native = @extend_zero(c)
-            acc = @i_add(acc, wide)
+            checksum = @i_add(checksum, wide)
             i = @i_add(i, 0x1)
         } else {
             break
         }
     }
+    check_eq(checksum, 0xced3)
 }
 "#,
     ),
     (
         "structs",
+        0,
         r#"
 Point: object {
-    x: @bit64
-    y: @bit64
+    x: @bit_native
+    y: @bit_native
 
-    sum: function (self) result: @bit64 {
+    sum: function (self) result: @bit_native {
         result = @i_add(self.x, self.y)
     }
+}
+
+check_eq: function (actual: @bit_native, expected: @bit_native) nothing {
+    ok: @bit8 = actual == expected
+    wide: @bit_native = @extend_zero(ok)
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+    count: @bit_native = @format_args_count(msg)
+    idx: @bit_native = @i_sub(count, wide)
+    piece: @byte_buffer = @format_args_piece(msg, idx)
 }
 
 main: function () nothing {
@@ -130,46 +191,59 @@ main: function () nothing {
         x = 0x1
         y = 0x2
     }
-    i: @bit64 = 0x0
-    acc: @bit64 = 0x0
+    i: @bit_native = 0x0
+    checksum: @bit_native = 0x0
     loop {
         if @i_less_than(i, 0x40) {
             p.x = @i_add(p.x, 0x1)
             p.y = @i_add(p.y, 0x1)
-            acc = @i_add(acc, p.sum())
+            checksum = @i_add(checksum, p.sum())
             i = @i_add(i, 0x1)
         } else {
             break
         }
     }
+    check_eq(checksum, 0x1100)
 }
 "#,
     ),
     (
         "calls",
+        TRAP,
         r#"
-add: function (a: @bit32, b: @bit32) r: @bit32 {
+add: function (a: @bit_native, b: @bit_native) r: @bit_native {
     r = @i_add(a, b)
 }
 
-sub: function (a: @bit32, b: @bit32) r: @bit32 {
+sub: function (a: @bit_native, b: @bit_native) r: @bit_native {
     r = @i_sub(a, b)
 }
 
+check_ne: function (actual: @bit_native, expected: @bit_native) nothing {
+    ok: @bit8 = actual == expected
+    wide: @bit_native = @extend_zero(ok)
+    part: @byte_buffer = "x"
+    msg: @format_args = $"a{part}b"
+    count: @bit_native = @format_args_count(msg)
+    idx: @bit_native = @i_sub(@i_add(count, wide), 0x1)
+    piece: @byte_buffer = @format_args_piece(msg, idx)
+}
+
 main: function () nothing {
-    op: function (@bit32, @bit32) @bit32 = add
-    i: @bit32 = 0x0
-    acc: @bit32 = 0x0
+    op: function (@bit_native, @bit_native) @bit_native = add
+    i: @bit_native = 0x0
+    checksum: @bit_native = 0x0
     loop {
         if @i_less_than(i, 0x40) {
-            acc = add(acc, i)
-            acc = sub(acc, 0x1)
-            acc = op(acc, i)
+            checksum = add(checksum, i)
+            checksum = sub(checksum, 0x1)
+            checksum = op(checksum, i)
             i = @i_add(i, 0x1)
         } else {
             break
         }
     }
+    check_ne(checksum, 0xf80)
 }
 "#,
     ),
@@ -197,26 +271,31 @@ fn time<R>(mut f: impl FnMut() -> R) -> Duration {
     best
 }
 
-/// The tree-walk baseline computes the same exit code as the VM on every entry.
+/// Each suite entry makes its computed checksum observable as an exit code:
+/// the tree-walk baseline and the VM must agree with the expected code, so a
+/// baseline that computes different values fails here instead of silently
+/// matching a bare `0`.
 #[test]
 fn treewalk_matches_vm_on_suite() {
-    for (name, src) in SUITE {
+    for (name, expected, src) in SUITE {
         let program = compile_src(src);
         let treewalk =
             treewalk_run(&program).unwrap_or_else(|err| panic!("{name}: treewalk error: {err}"));
         let vm = Machine::new(&program).expect("entry").run().expect("run");
-        assert_eq!(treewalk, vm, "{name}: engine exit codes differ");
+        assert_eq!(treewalk, *expected, "{name}: treewalk exit code");
+        assert_eq!(vm, *expected, "{name}: vm exit code");
     }
 }
 
 /// The VM must be at least 3× faster than the tree-walk baseline per entry.
 #[test]
 fn vm_is_at_least_3x_treewalk() {
-    for (name, src) in SUITE {
+    for (name, _expected, src) in SUITE {
         let program = compile_src(src);
         let tw = time(|| treewalk_run(&program));
         let vm = time(|| Machine::new(&program).expect("entry").run());
         eprintln!("{name}: treewalk={tw:?} vm={vm:?}");
+        assert!(vm > Duration::ZERO, "{name}: VM time measured as zero");
         assert!(
             tw.as_nanos() >= vm.as_nanos() * 3,
             "{name}: {tw:?} vs {vm:?}"
