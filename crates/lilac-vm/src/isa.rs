@@ -83,6 +83,22 @@ pub enum Operand {
     Slot(u32),
 }
 
+/// A resolved call site: callee and operand-pool ranges.
+///
+/// `ins` and `outs` index a function's shared `operands` pool; entries in
+/// `outs` are stored as [`Operand::Slot`] byte offsets. A compact call
+/// instruction carries a 24-bit index into `Func.call_sites` rather than
+/// inlining the operand lists, so the executed stream holds no `Vec`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallSite {
+    /// Callee function index (unused, `0`, for indirect and builtin calls).
+    pub func: u32,
+    /// Range of input operands in the pool.
+    pub ins: core::ops::Range<u32>,
+    /// Range of output slot operands in the pool.
+    pub outs: core::ops::Range<u32>,
+}
+
 /// A compiler leaf builtin.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Builtin {
