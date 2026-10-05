@@ -3,6 +3,10 @@ name = "lilac-vm"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "lilac-vm"
+path = "src/bin/lilac-vm.rs"
+
 [dependencies]
 lilac-codegen = { path = "../lilac-codegen" }
 lilac-error = { path = "../lilac-error" }
