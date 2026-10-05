@@ -2637,4 +2637,29 @@ mod tests {
         );
         assert_eq!(parsed.to_text(), text);
     }
+
+    /// Regression (M5c.1 final review, finding 2): a hand-written `.lbc` that
+    /// declares an `argreg` on a function without a single scalar input is
+    /// rejected cleanly by `parse_text` (which runs the verifier).
+    #[test]
+    fn parse_rejects_argreg_without_scalar_input() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].arg_reg = Some(0);
+        let text = program.to_text();
+        assert!(text.contains("argreg 0"), "text:\n{text}");
+        let err = Program::parse_text(&text).expect_err("invalid argreg");
+        assert!(err.contains("argreg"), "{err}");
+    }
+
+    /// A `retreg` outside the declared register file is rejected cleanly.
+    #[test]
+    fn parse_rejects_out_of_range_retreg() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].outs = vec![0];
+        program.funcs[0].ret_reg = Some(5);
+        let text = program.to_text();
+        assert!(text.contains("retreg 5"), "text:\n{text}");
+        let err = Program::parse_text(&text).expect_err("retreg out of range");
+        assert!(err.contains("out of range"), "{err}");
+    }
 }

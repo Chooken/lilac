@@ -53,6 +53,24 @@
    compares against a reasonable reference.
 9. **Release gate.** The bench runs in release mode and records absolute ns/op;
    a perf-budget assertion replaces the ratio-only check as the primary signal.
+10. **Register-based scalar ABI (arg + return), with by-ref fallback.** When a
+    function's signature is the single-scalar shape (one non-`ref` value no wider
+    than a pointer), the call round-trip is elided: the input is passed in a
+    reserved register (`argreg A`) and/or the output is returned in a reserved
+    register (`retreg R`) instead of the frame's input slots and out-ref cells.
+    Every other signature keeps the pointer ABI of decision 5. The verifier
+    enforces that `argreg`/`retreg` are declared only for this shape and within
+    `n_regs`.
+11. **Call-path inlining.** The interpreter's call/return path (`do_call`) is
+    force-inlined (`#[inline(always)]`) so the fused call opcodes do not pay an
+    out-of-line call on every dispatch.
+12. **Superinstruction fusions + redundant-copy elimination.** The LIR→bytecode
+    compiler fuses `copy`/`const`/`arith`/`branch` sequences and copies into the
+    return: `arith.imm`, `branch.if.imm`, `call.arith.imm`, `call.out`,
+    `call.arith.out`, `copy.ret`, `arith.ret`, plus staging-copy forwarding
+    (`fold_call_inputs`) and fall-through-`branch` elimination. These are compile
+    transforms only; every opcode round-trips through `encode`/`decode` and the
+    verifier, and `.lbc` remains a stable disassembly.
 
 ### 1.2 Evidence (measured before design)
 
@@ -208,6 +226,40 @@ terminator, `MAX_REGS`/`MAX_FRAME_BYTES`). A malformed stream is a clean error
   behavior.
 - The verifier's flow-insensitive "each out assigned ≥ once" rule is unchanged.
 
+### 5.1 Register-based scalar ABI (arg + return), with by-ref fallback
+
+The pointer ABI above is the fallback; the common single-scalar call elides the
+slot round-trip for both direction and result:
+
+- **Register argument (`argreg A`).** A function with exactly one non-`ref`
+  scalar input (no wider than a pointer, never address-taken, never passed as a
+  call output) reserves register `A` for it. `call` writes the input value
+  directly into `A`; `rebuild_layout` records its real width so a
+  sub-pointer-sized input is not over-read. The callee reads the input as a
+  register, not a frame slot.
+- **Register return (`retreg R`).** A function with exactly one non-`ref` scalar
+  output (no wider than a pointer, never address-taken or read, definitely
+  assigned on every returning path) reserves register `R` for it. The frame has
+  no out-ref cell; `return` yields `R`, and the caller applies it to its own out
+  place (or to a register, for `call.out`/`call.arith.out`). This removes the
+  callee store-through-ref and the caller's out-ref read.
+- **By-ref fallback.** Every other signature (multi-input/output, aggregates,
+  `ref`-typed values, address-taken or partially-assigned places) uses the §5
+  pointer ABI unchanged. Eligibility is decided at compile time from
+  place-usage + must-assignment analysis.
+- **Verifier.** `verify_func` requires `argreg`/`retreg` to be `< n_regs` and to
+  name a single non-`ref`, pointer-width-or-smaller input/output; a hand-written
+  `.lbc` cannot declare a reservation that `rebuild_layout` would trust and
+  mis-bind.
+- **Call inlining.** The interpreter's `do_call`/return path is
+  `#[inline(always)]`, so the register-ABI and fused-call handling stays in the
+  inner dispatch loop.
+- **Fusions around calls.** `call.arith.imm`/`call.arith.out` fold the argument
+  computation into the call; `call.out`/`call.arith.out` fold the post-return
+  copy into a register (a register-return callee's `R`, or a by-ref callee's out
+  place); `copy.ret`/`arith.ret` fold the trailing value computation into the
+  return. Each declines to fuse when an operand would not fit the narrow form.
+
 ## 6. Interpreter
 
 ### 6.1 Inner dispatch loop
@@ -288,12 +340,17 @@ re-measured after the VM rework.
 - Exit:
   1. Executed code is a `Vec<u32>` stream; the typed `Instr` is compile-time only.
   2. `fib(18)` in release is **< 0.2 ms** (≈1.2 ns/instruction over ~170k
-     instructions); mandelbrot/structs/calls improve proportionally. If the base
-     rework falls short, the sanctioned levers are superinstruction fusion and
-     redundant-copy elimination in the LIR→bytecode compiler (see §12), applied
-     within this milestone rather than deferred.
+     instructions); mandelbrot/structs/calls improve proportionally. The levers
+     applied within this milestone are: superinstruction fusion (`arith.imm`,
+     `branch.if.imm`, `call.arith.imm`, `call.out`, `call.arith.out`,
+     `copy.ret`, `arith.ret`), redundant-copy elimination, the register-based
+     scalar ABI (arg + return) with the by-ref fallback (§5.1), and call-path
+     inlining (force-inlined `do_call`).
   3. No runtime `type_size` call remains on the hot path; no copy on return for
-     by-ref outputs; the inner loop holds hot state in locals.
+     by-ref outputs; the inner loop holds hot state in locals; a single-scalar
+     call passes its argument and/or return value in a reserved register
+     (`argreg`/`retreg`) when eligible, and the verifier rejects an ineligible or
+     out-of-range reservation.
   4. All M5c behavior tests pass; the debugger works over the decoded stream;
      `.lbc` snapshots are regenerated and `--check`-stable.
   5. `cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`,
@@ -318,10 +375,16 @@ re-measured after the VM rework.
   instructions, near the limit of a switch interpreter. If the base rework
   (compact stream + precompute + by-ref outputs + inner loop) does not reach it,
   the sanctioned levers — applied within M5c.1 — are: superinstruction fusion
-  (e.g. fuse `copy`/`const`/`arith` sequences into one opcode) and
-  redundant-copy elimination in the LIR→bytecode compiler (keep values in
-  registers instead of round-tripping through slots), which cut the instruction
-  count directly. 50 µs remains LuaJIT territory (JIT/AOT) and is out of reach.
+  (`arith.imm`, `branch.if.imm`, the `call.*` call fusions, and the
+  `copy.ret`/`arith.ret` return fusions), redundant-copy elimination in the
+  LIR→bytecode compiler (keep values in registers instead of round-tripping
+  through slots), the register-based scalar ABI (arg + return) with the by-ref
+  fallback (§5.1), and call-path inlining. 50 µs remains LuaJIT territory
+  (JIT/AOT) and is out of reach.
+- **Register ABI eligibility.** The register ABI is only valid for the
+  single-scalar shape; the verifier enforces it, and the compiler's eligibility
+  analysis (place usage + must-assignment) must stay in sync with the verifier's
+  rule, or a valid program would be rejected / an invalid one accepted.
 - **Snapshot churn.** `.lbc` text changes shape; all VM snapshots regenerate.
 
 ## 13. Self-review
@@ -329,7 +392,7 @@ re-measured after the VM rework.
 - **Placeholders:** none — every type, field, format, and test names its owner;
   the exact opcode table is delegated to `VM_SPEC.md` at implementation, which is
   a concrete deliverable, not a TBD.
-- **Consistency:** §1.1's nine decisions match §3–§9; the compact encoding (§3)
+- **Consistency:** §1.1's twelve decisions match §3–§9; the compact encoding (§3)
   is the execution form the interpreter (§6) decodes; by-ref outputs (§5) match
   the LLVM ABI cited in §1.2; the release gate (§9) matches exit criterion §11.2.
 - **Scope:** strictly the VM performance rework — no language or LIR change, no

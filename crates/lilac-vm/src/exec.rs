@@ -786,7 +786,7 @@ impl<'a> Machine<'a> {
                         resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
                             .ok_or(VmError::BadInstr(pc))?;
                     if let Step::Panicked(code) =
-                        do_builtin(regs, arena, builtin, ins, outs, reg_base, slot_base)?
+                        do_builtin(regs, arena, builtin, ins, outs, reg_base, slot_base, pc)?
                     {
                         store_frame(frames, func_index, pc, pc + 1);
                         return Ok(code);
@@ -1271,7 +1271,7 @@ impl<'a> Machine<'a> {
             Decoded::CallBuiltin {
                 builtin, ins, outs, ..
             } => {
-                return self.call_builtin(builtin, ins, outs, reg_base, slot_base);
+                return self.call_builtin(builtin, ins, outs, reg_base, slot_base, pc);
             }
             Decoded::Return => return Ok(self.return_from_frame()),
             Decoded::CopyReturn { src, size } => {
@@ -1578,6 +1578,7 @@ impl<'a> Machine<'a> {
         outs: &[Operand],
         reg_base: u32,
         slot_base: u32,
+        pc: u32,
     ) -> Result<Step, VmError> {
         do_builtin(
             &mut self.regs,
@@ -1587,6 +1588,7 @@ impl<'a> Machine<'a> {
             outs,
             reg_base,
             slot_base,
+            pc,
         )
     }
 
@@ -2028,6 +2030,10 @@ fn return_frame(
 }
 
 /// Executes a compiler leaf builtin.
+///
+/// A malformed (directly built, unverified) program with the wrong operand
+/// count for `builtin` yields [`VmError::BadInstr`] at `pc`, never a panic.
+#[allow(clippy::too_many_arguments)]
 fn do_builtin(
     regs: &mut [u64],
     arena: &mut [u8],
@@ -2036,17 +2042,18 @@ fn do_builtin(
     outs: &[Operand],
     reg_base: u32,
     slot_base: u32,
+    pc: u32,
 ) -> Result<Step, VmError> {
     match builtin {
         Builtin::PtrAdd => {
             let (base, offset) = match ins {
                 [base, offset] => (*base, *offset),
-                _ => lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects two inputs"),
+                _ => return Err(VmError::BadInstr(pc)),
             };
             let base = read_scalar(regs, arena, reg_base, slot_base, base, VM_POINTER_BYTES)?;
             let offset = read_scalar(regs, arena, reg_base, slot_base, offset, VM_POINTER_BYTES)?;
             let Some(Operand::Slot(out)) = outs.first().copied() else {
-                lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects one output");
+                return Err(VmError::BadInstr(pc));
             };
             write_scalar(
                 regs,
@@ -2062,7 +2069,7 @@ fn do_builtin(
         Builtin::Memcpy => {
             let (dst, src, len) = match ins {
                 [dst, src, len] => (*dst, *src, *len),
-                _ => lilac_error::bug!(lilac_span::Span::dummy(), "@memcpy expects three inputs"),
+                _ => return Err(VmError::BadInstr(pc)),
             };
             let dst = read_scalar(regs, arena, reg_base, slot_base, dst, VM_POINTER_BYTES)?;
             let src = read_scalar(regs, arena, reg_base, slot_base, src, VM_POINTER_BYTES)?;

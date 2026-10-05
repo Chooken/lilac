@@ -614,8 +614,11 @@ pub struct Func {
     /// Precomputed by [`Program::rebuild_layouts`] so `call` binds arguments
     /// without a `type_size` lookup; parallel to `ins`.
     pub in_offsets: Vec<u32>,
-    /// Byte size of each input, parallel to [`Func::in_offsets`].
+    /// Byte size of each input.
     ///
+    /// Parallel to [`Func::in_offsets`] only for a slot-passed signature; a
+    /// register-argument function (`arg_reg`) has an empty `in_offsets` but
+    /// still records its single input's width here, so `call` reads exactly it.
     /// A `u32` (not `u8`) because runtime values such as `#format_args` are
     /// wider than 255 bytes.
     pub in_sizes: Vec<u32>,
@@ -888,6 +891,8 @@ fn verify_func(program: &Program, func: &Func) -> Result<(), String> {
     for &ty in func.ins.iter().chain(&func.outs) {
         check_type(program, ty)?;
     }
+    check_abi_register(program, func, func.arg_reg, "argreg", "input", &func.ins)?;
+    check_abi_register(program, func, func.ret_reg, "retreg", "output", &func.outs)?;
     if func.is_extern {
         return Ok(());
     }
@@ -951,6 +956,45 @@ fn check_reg(reg: u32, n_regs: u32) -> Result<(), String> {
     } else {
         Err(format!("register &{reg} out of range (n_regs {n_regs})"))
     }
+}
+
+/// Validates a function's register-ABI reservation.
+///
+/// The register-argument/return ABI is defined only for the compiler's
+/// single-scalar shape: the reserved register must exist and the signature must
+/// be exactly one non-reference, pointer-width-or-smaller value. `call` and
+/// `rebuild_layout` trust the reservation, so a hand-written `.lbc` must not be
+/// able to bind an output to the wrong place.
+fn check_abi_register(
+    program: &Program,
+    func: &Func,
+    reg: Option<u32>,
+    keyword: &str,
+    kind: &str,
+    sig: &[TypeId],
+) -> Result<(), String> {
+    let Some(reg) = reg else {
+        return Ok(());
+    };
+    check_reg(reg, func.n_regs)?;
+    let shape_ok = sig.len() == 1 && is_scalar(program, sig[0])?;
+    if shape_ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "function `{}` declares `{keyword} {reg}` but does not have a single scalar {kind}",
+            func.name
+        ))
+    }
+}
+
+/// Whether `ty` is a non-reference scalar no wider than a pointer.
+fn is_scalar(program: &Program, ty: TypeId) -> Result<bool, String> {
+    let info = program
+        .types
+        .get(ty as usize)
+        .ok_or_else(|| format!("type id {ty} out of range"))?;
+    Ok(!info.is_ref && info.size <= VM_POINTER_BYTES)
 }
 
 /// Validates a slot offset and the `size` bytes it covers.
@@ -1608,5 +1652,47 @@ mod tests {
             Instr::Return,
         ]);
         assert!(verify(&program).is_err());
+    }
+
+    /// A register ABI on the single-scalar shape the compiler emits verifies.
+    #[test]
+    fn verifier_accepts_single_scalar_register_abi() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].ins = vec![0];
+        program.funcs[0].outs = vec![0];
+        program.funcs[0].arg_reg = Some(0);
+        program.funcs[0].ret_reg = Some(0);
+        assert!(verify(&program).is_ok(), "{:?}", verify(&program));
+    }
+
+    /// Regression (M5c.1 final review, finding 2): a register ABI declared on a
+    /// function without a single scalar input is rejected, not trusted by
+    /// `rebuild_layout`.
+    #[test]
+    fn verifier_rejects_argreg_on_multi_input() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].ins = vec![0, 0];
+        program.funcs[0].arg_reg = Some(0);
+        let err = verify(&program).expect_err("multi-input argreg");
+        assert!(err.contains("argreg"), "{err}");
+    }
+
+    /// A `retreg` outside the declared register file is rejected.
+    #[test]
+    fn verifier_rejects_out_of_range_retreg() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].outs = vec![0];
+        program.funcs[0].ret_reg = Some(1);
+        let err = verify(&program).expect_err("retreg out of range");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    /// A `retreg` on a function with no single scalar output is rejected.
+    #[test]
+    fn verifier_rejects_retreg_without_scalar_output() {
+        let mut program = sample_program(vec![Instr::Return]);
+        program.funcs[0].ret_reg = Some(0);
+        let err = verify(&program).expect_err("retreg without scalar output");
+        assert!(err.contains("retreg"), "{err}");
     }
 }

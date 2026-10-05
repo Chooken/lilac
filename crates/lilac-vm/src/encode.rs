@@ -131,9 +131,10 @@ pub const OP_ARITH_IMM: u8 = 0x34;
 
 /// Fused arithmetic comparison + conditional branch.
 ///
-/// Layout: `[op | lhs:8 | (slot:1 | op_code:7) | unused:8]`, then the `then`
-/// target, the `els` target, and the little-endian low/high words of the `u64`
-/// immediate (`u64`). `op_code` is a width-specialized comparison opcode.
+/// Layout: `[op | lhs:8 | flags:8 | op_code:8]`, then the `then` target, the
+/// `els` target, and the little-endian low/high words of the `u64` immediate.
+/// `op_code` is a width-specialized comparison opcode; the [`WIDE_FLAG`] bit of
+/// `flags` distinguishes a slot `lhs` from a register `lhs`.
 pub const OP_BRANCH_IF_IMM: u8 = 0x35;
 
 /// Fused `ArithImm` feeding a direct call's single input register.

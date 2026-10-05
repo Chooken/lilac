@@ -1702,7 +1702,8 @@ fn fold_arith_call(
                         ty,
                     }) if outs.as_slice() == [*copy_slot]
                         && slot_reads.get(copy_slot).copied() == Some(1)
-                        && !is_target.get(i + 2).copied().unwrap_or(true) =>
+                        && !is_target.get(i + 2).copied().unwrap_or(true)
+                        && *copy_dst <= NARROW_MAX =>
                     {
                         let copy_size = types.get(*ty as usize).map(|info| info.size);
                         let out_size = module
@@ -1811,6 +1812,7 @@ fn fold_call_out(module: &LirModule, types: &[TypeInfo], code: &[Instr]) -> (Vec
             if outs.as_slice() == [*slot]
                 && reads.get(slot).copied() == Some(1)
                 && !is_target.get(i + 1).copied().unwrap_or(true)
+                && *dst <= NARROW_MAX
                 && copy_size.is_some()
                 && copy_size == out_size
             {
@@ -2421,7 +2423,11 @@ pub(crate) fn compile_src(src: &str) -> Program {
 mod tests {
     use super::compile_src;
     use crate::decode::{decode, Decoded};
-    use crate::isa::{Func, Program};
+    use crate::encode::NARROW_MAX;
+    use crate::isa::{ArithOp, Func, Instr, Operand, Program, TypeInfo};
+    use lilac_ir::{LirBlock, LirFunc, LirModule, LirTerm};
+    use lilac_span::Span;
+    use std::fmt::Write as _;
 
     /// Decodes a function's whole word stream for structural assertions.
     fn decoded(func: &Func) -> Vec<Decoded<'_>> {
@@ -2544,5 +2550,108 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// Regression (M5c.1 final review, finding 1): a function with more than
+    /// 255 SSA registers whose direct call's single output is copied into a
+    /// register must still compile. The `call.out`/`call.arith.out` fusions
+    /// emit the destination in a byte, so they must decline to fuse when
+    /// `dst > NARROW_MAX` (the unfused `call` + wide `copy` encode legally).
+    #[test]
+    fn wide_register_call_out_stays_legal() {
+        let mut src = String::from(
+            "main: function (a: @bit_native) nothing {\n    x0: @bit_native = @i_add(a, 0x1)\n",
+        );
+        for i in 1..300 {
+            let _ = writeln!(
+                src,
+                "    x{i}: @bit_native = @i_add(x{}, x{})",
+                i - 1,
+                i - 1
+            );
+        }
+        src.push_str(
+            "    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    piece: @byte_buffer = @format_args_piece(msg, @i_add(x0, 0x1))\n}\n",
+        );
+        let program = compile_src(&src);
+        let main = func(&program, "main");
+        assert!(
+            main.n_regs > NARROW_MAX,
+            "test must exceed the narrow register range (n_regs={})",
+            main.n_regs
+        );
+        for instr in decoded(main) {
+            match instr {
+                Decoded::CallOut { dst, .. } | Decoded::CallArithOut { dst, .. } => {
+                    assert!(dst <= NARROW_MAX, "fused call emitted a wide dst {dst}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Regression (M5c.1 final review, finding 1): the `arith`+`call`+`copy`
+    /// triple must decline to fuse into `call.arith.out` when the copy
+    /// destination does not fit the narrow byte. Reached only by hand-written
+    /// LIR, so this drives [`super::fold_arith_call`] directly.
+    #[test]
+    fn wide_register_call_arith_out_stays_unfused() {
+        let mut module = LirModule::new("lilacvm-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "f".to_string(),
+            ins: Vec::new(),
+            outs: vec![("r".to_string(), "#bit_native".to_string())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_string(),
+                insts: Vec::new(),
+                term: LirTerm::Return {
+                    span: Span::dummy(),
+                },
+                span: Span::dummy(),
+            }],
+        });
+        let types = vec![TypeInfo {
+            name: "#bit_native".to_string(),
+            size: 8,
+            is_ref: false,
+        }];
+        let code = vec![
+            Instr::ArithImm {
+                op: ArithOp::IAdd,
+                dst: 0,
+                lhs: 5,
+                lhs_slot: false,
+                imm: 1,
+                operand_ty: 0,
+            },
+            Instr::Call {
+                func: 0,
+                ins: vec![Operand::Reg(0)],
+                outs: vec![1],
+            },
+            Instr::Copy {
+                dst: Operand::Reg(300),
+                src: Operand::Slot(1),
+                ty: 0,
+            },
+        ];
+        let (folded, _) = super::fold_arith_call(&module, &types, &code);
+        assert!(
+            !folded
+                .iter()
+                .any(|instr| matches!(instr, Instr::CallArithOut { .. })),
+            "a wide copy destination must not be fused into call.arith.out"
+        );
+        assert!(
+            folded.iter().any(|instr| matches!(
+                instr,
+                Instr::Copy {
+                    dst: Operand::Reg(300),
+                    ..
+                }
+            )),
+            "the copy must survive for the wide form"
+        );
     }
 }

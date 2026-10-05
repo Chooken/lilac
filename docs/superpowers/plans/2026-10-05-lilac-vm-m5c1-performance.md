@@ -418,7 +418,27 @@ git commit -m "M5c.1: make the tree-walk baseline a fair reference"
 Run: `cargo test --release -p lilac-vm --test bench --features bench-baseline -- --nocapture`
 Expected: report ns/op; if `fib ≥ 0.2 ms`, apply the sanctioned levers.
 
-- [ ] **Step 3: Apply levers as needed.** Superinstruction fusion (fuse common `copy`/`const`/`arith`/`branch` sequences into single opcodes) and redundant-copy elimination in `compile.rs` (keep values in registers instead of round-tripping through slots), one lever at a time, re-measuring each.
+- [ ] **Step 3: Apply levers as needed**, one lever at a time, re-measuring each:
+
+  - **Superinstruction fusion** in `compile.rs`: fuse `copy`/`const`/`arith`
+    (`arith.imm`), `arith`/`branch` (`branch.if.imm`), and the call fusions
+    `call.arith.imm`/`call.out`/`call.arith.out` (fold the argument computation
+    and/or the post-return output copy into the call).
+  - **Return fusion** `copy.ret`/`arith.ret`: fold the trailing copy/arith into
+    the return register with the following `return`.
+  - **Register-based scalar ABI (arg + return)** with the by-ref fallback:
+    reserve a register for a single non-`ref` scalar input (`argreg`) and/or
+    output (`retreg`) so the call avoids the input-slot copy and the out-ref
+    cell/store/read; every other signature keeps the pointer ABI.
+  - **Redundant-copy elimination** in `compile.rs`: forward single-use staging
+    copies into their consumer (`fold_call_inputs`) and drop unneeded
+    fall-through branches, keeping values in registers instead of
+    round-tripping through slots.
+  - **Call-path inlining**: force-inline (`#[inline(always)]`) the interpreter's
+    `do_call`/return path so the fused-call dispatch stays in the inner loop.
+
+  Each new opcode round-trips through `encode`/`decode` and `.lbc`; the verifier
+  gains a rule for every new operand/ABI reservation.
 
 - [ ] **Step 4: Run the gate.**
 
