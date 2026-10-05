@@ -851,12 +851,7 @@ impl Verifier<'_> {
             }
             LirInst::CopyPlace { src, dst, span } => {
                 self.check_operand(src, regs, places, *span, func);
-                if !places.contains_key(dst.as_str()) {
-                    self.error(
-                        format!("copy to undeclared place `%{dst}` in `@{}`", func.name),
-                        *span,
-                    );
-                }
+                self.check_copy_place(src, dst, places, regs, *span, func);
                 assigned.insert(dst.as_str());
             }
             LirInst::Const { dst, lit, ty, span } => {
@@ -942,6 +937,41 @@ impl Verifier<'_> {
             | LirInst::FieldAddr { .. } => {
                 self.verify_store_ops(func, inst, places, regs);
             }
+        }
+    }
+
+    /// Checks a place copy: the destination must be declared and the source
+    /// operand's type must match it (`IR_SPEC.md` restricts `copy` to values of
+    /// the same type), so an adapter such as a `ref`-to-value dereference
+    /// cannot slip through as a raw pointer copy.
+    fn check_copy_place(
+        &mut self,
+        src: &LirOperand,
+        dst: &str,
+        places: &HashMap<&str, &str>,
+        regs: &HashMap<&str, RegDef>,
+        span: Span,
+        func: &LirFunc,
+    ) {
+        let Some(dst_ty) = places.get(dst).copied() else {
+            self.error(
+                format!("copy to undeclared place `%{dst}` in `@{}`", func.name),
+                span,
+            );
+            return;
+        };
+        let src_ty = match src {
+            LirOperand::Reg(reg) => regs.get(reg.as_str()).map(|def| def.ty.as_str()),
+            LirOperand::Place(place) => places.get(place.as_str()).copied(),
+        };
+        if let Some(src_ty) = src_ty.filter(|ty| *ty != dst_ty) {
+            self.error(
+                format!(
+                    "copy type mismatch in `@{}`: `{src_ty}` -> `{dst_ty}`",
+                    func.name
+                ),
+                span,
+            );
         }
     }
 
@@ -1486,6 +1516,51 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
+    }
+
+    /// `copy` moves values of the same type (`IR_SPEC.md`); a place-to-place
+    /// copy whose operand types differ (e.g. `ref #Object` into `#Object`) is
+    /// ill-typed and must be rejected, not silently pointer-copied.
+    #[test]
+    fn verify_rejects_copy_place_type_mismatch() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.layouts.insert(
+            "#Object".to_owned(),
+            vec![("value".to_owned(), "#bit32".to_owned())],
+        );
+        module.funcs.push(LirFunc {
+            name: "mismatch".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Alloca {
+                        ty: "ref #Object".to_owned(),
+                        place: "r".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Alloca {
+                        ty: "#Object".to_owned(),
+                        place: "v".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::CopyPlace {
+                        src: LirOperand::Place("r".to_owned()),
+                        dst: "v".to_owned(),
+                        span: test_span(),
+                    },
+                ],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
+        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        assert!(msgs.iter().any(|m| m.contains("copy")), "{msgs:?}");
     }
 
     #[test]

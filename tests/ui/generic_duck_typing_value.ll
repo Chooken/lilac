@@ -118,7 +118,8 @@ declare void @llvm.trap() #1
 define void @Object.get(ptr %in0, ptr %out0) {
 entry:
   %0 = load ptr, ptr %in0, align 8
-  store ptr %0, ptr %out0, align 8
+  %1 = load %Object, ptr %0, align 4
+  store %Object %1, ptr %out0, align 4
   ret void
 }
 

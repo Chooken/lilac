@@ -723,7 +723,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
+        // A `ref` place holds a pointer; loading a non-`ref` value out of it
+        // means following that pointer to the pointee first (`load %src`).
         let ptr = place_ptr(name, state);
+        let ptr = match state.place_types.get(name) {
+            Some(place_ty) if place_ty.starts_with("ref ") && !ty.starts_with("ref ") => {
+                checked(builder.build_load(self.ptr_type(), ptr, ""), "load ref")
+                    .into_pointer_value()
+            }
+            _ => ptr,
+        };
         checked(builder.build_load(self.lir_type(ty), ptr, ""), "load")
     }
 

@@ -8,7 +8,8 @@ function @Object.get
   out #Object %result
 {
   $entry:
-    copy %instance -> %result
+    &1: #Object = load %instance
+    copy &1 -> %result
     return
 }
 function @gen__1__Object

@@ -505,14 +505,7 @@ impl Lower<'_> {
             } => {
                 let place = self.declare(fs, name, *ty, *span);
                 if let Ok(operand) = self.eval(fs, value) {
-                    emit(
-                        fs,
-                        LirInst::CopyPlace {
-                            src: operand,
-                            dst: place,
-                            span: *span,
-                        },
-                    );
+                    self.store_operand(fs, &place, *ty, operand, value.ty, *span);
                 }
             }
             HirStmt::MultiLet {
@@ -671,6 +664,74 @@ impl Lower<'_> {
         place
     }
 
+    /// Writes `operand` (a value of `value_ty`) into `place` (declared as
+    /// `dst_ty`), adapting between references and values: a `ref` value stored
+    /// into a value place is dereferenced first, a value stored into a `ref`
+    /// place is written through it, and matching types are copied directly.
+    fn store_operand(
+        &mut self,
+        fs: &mut FuncState,
+        place: &str,
+        dst_ty: TypeRef,
+        operand: LirOperand,
+        value_ty: TypeRef,
+        span: Span,
+    ) {
+        if dst_ty.is_ref && !value_ty.is_ref {
+            emit(
+                fs,
+                LirInst::Store {
+                    src: operand,
+                    dst: place.to_owned(),
+                    span,
+                },
+            );
+        } else if !dst_ty.is_ref && value_ty.is_ref {
+            let source = match operand {
+                LirOperand::Place(src_place) => src_place,
+                LirOperand::Reg(reg) => {
+                    let tmp = self.fresh_tmp(fs, value_ty, span);
+                    emit(
+                        fs,
+                        LirInst::CopyPlace {
+                            src: LirOperand::Reg(reg),
+                            dst: tmp.clone(),
+                            span,
+                        },
+                    );
+                    tmp
+                }
+            };
+            let reg = fresh_reg(fs);
+            emit(
+                fs,
+                LirInst::Load {
+                    src: source,
+                    dst: reg.clone(),
+                    ty: lir_ty(self.types, dst_ty),
+                    span,
+                },
+            );
+            emit(
+                fs,
+                LirInst::CopyPlace {
+                    src: LirOperand::Reg(reg),
+                    dst: place.to_owned(),
+                    span,
+                },
+            );
+        } else {
+            emit(
+                fs,
+                LirInst::CopyPlace {
+                    src: operand,
+                    dst: place.to_owned(),
+                    span,
+                },
+            );
+        }
+    }
+
     /// Assigns a value operand to a target (rebinding, store-through,
     /// field store, or temp copy as the target shape demands).
     fn lower_assign(
@@ -686,25 +747,7 @@ impl Lower<'_> {
                 let Some((place, ty)) = fs.locals.get(name).cloned() else {
                     lilac_error::bug!(span, "assign to unbound local");
                 };
-                if ty.is_ref && !value_ty.is_ref {
-                    emit(
-                        fs,
-                        LirInst::Store {
-                            src: operand,
-                            dst: place,
-                            span,
-                        },
-                    );
-                } else {
-                    emit(
-                        fs,
-                        LirInst::CopyPlace {
-                            src: operand,
-                            dst: place,
-                            span,
-                        },
-                    );
-                }
+                self.store_operand(fs, &place, ty, operand, value_ty, span);
             }
             HirExprKind::Member { obj, field } => {
                 let Ok(obj_operand) = self.eval(fs, obj) else {
@@ -747,14 +790,7 @@ impl Lower<'_> {
             }
             HirExprKind::Temp(temp) => {
                 let place = self.temp_place(fs, *temp, target.ty, span);
-                emit(
-                    fs,
-                    LirInst::CopyPlace {
-                        src: operand,
-                        dst: place,
-                        span,
-                    },
-                );
+                self.store_operand(fs, &place, target.ty, operand, value_ty, span);
             }
             _ => {
                 lilac_error::bug!(span, "assignment to non-place expression");
