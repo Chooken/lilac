@@ -7,6 +7,8 @@
 
 pub mod codec;
 pub mod compile;
+pub mod exec;
 pub mod isa;
 pub use compile::compile;
+pub use exec::{FrameInfo, Machine, Step, VmError};
 pub use isa::*;
