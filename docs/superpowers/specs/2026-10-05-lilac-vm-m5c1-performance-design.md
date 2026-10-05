@@ -11,9 +11,9 @@
 
 ## 1. Outcome / constraints / success
 
-- **Outcome:** `fib(18)` in release drops from **1.19 ms** to the low hundreds of
-  microseconds — faster than CPython (~0.8 ms) — with proportional wins on the
-  rest of the suite, and the executed artifact is a compact `u32` stream
+- **Outcome:** `fib(18)` in release drops from **1.19 ms** to **under 0.2 ms**
+  (≈6×, and ~4× faster than CPython's ~0.8 ms) — with proportional wins on the
+  rest of the suite — and the executed artifact is a compact `u32` stream
   (≈16 instructions per cache line vs ≈1 today).
 - **Constraints:** (a) same gates as M5c plus a **release** bench gate
   (`cargo test --release -p lilac-vm --features bench-baseline`); (b) std-only,
@@ -272,8 +272,11 @@ re-measured after the VM rework.
   snapshots; update `VM_SPEC.md`/`AGENTS.md`.
 - Exit:
   1. Executed code is a `Vec<u32>` stream; the typed `Instr` is compile-time only.
-  2. `fib(18)` in release is in the low hundreds of µs and beats CPython
-     (< ~0.8 ms); mandelbrot/structs/calls improve proportionally.
+  2. `fib(18)` in release is **< 0.2 ms** (≈1.2 ns/instruction over ~170k
+     instructions); mandelbrot/structs/calls improve proportionally. If the base
+     rework falls short, the sanctioned levers are superinstruction fusion and
+     redundant-copy elimination in the LIR→bytecode compiler (see §12), applied
+     within this milestone rather than deferred.
   3. No runtime `type_size` call remains on the hot path; no copy on return for
      by-ref outputs; the inner loop holds hot state in locals.
   4. All M5c behavior tests pass; the debugger works over the decoded stream;
@@ -296,9 +299,14 @@ re-measured after the VM rework.
   roughly neutral vs a compact enum; the structural win is cache behavior on
   larger programs. The precompute + by-ref + inner-loop changes are the primary
   fib wins.
-- **50 µs is out of reach.** Matching LuaJIT needs JIT/AOT (the LLVM backend).
-  The honest target is "faster than CPython," with the design leaving room for
-  superinstructions later.
+- **0.2 ms is aggressive.** It is ≈1.2 ns/instruction over fib's ~170k
+  instructions, near the limit of a switch interpreter. If the base rework
+  (compact stream + precompute + by-ref outputs + inner loop) does not reach it,
+  the sanctioned levers — applied within M5c.1 — are: superinstruction fusion
+  (e.g. fuse `copy`/`const`/`arith` sequences into one opcode) and
+  redundant-copy elimination in the LIR→bytecode compiler (keep values in
+  registers instead of round-tripping through slots), which cut the instruction
+  count directly. 50 µs remains LuaJIT territory (JIT/AOT) and is out of reach.
 - **Snapshot churn.** `.lbc` text changes shape; all VM snapshots regenerate.
 
 ## 13. Self-review
