@@ -649,10 +649,10 @@ desugars to existing constructs the way f-strings do.
 
 Targets are toolchain configuration, not language semantics: a target triple
 fixes `@bit_native`'s width (via the single `Arch::is_64_bit` rule). The default
-remains `x86_64-unknown-none` for `check`/`emit-ir`/`emit-vm`/`run`, while
-`emit-llvm` deliberately defaults to the host target (an explicit
-`--target=` still wins). The compiler also ships a **second backend**. The
-triple **`lilacvm-unknown-none`** selects the bytecode VM
+remains `x86_64-unknown-none` for `check`/`emit-ir`; `emit-vm`/`run` default to
+the VM target (`lilacvm-unknown-none`); `emit-llvm` defaults to the host (an
+explicit `--target=` still wins). The compiler also ships a **second backend**.
+The triple **`lilacvm-unknown-none`** selects the bytecode VM
 (`crates/lilac-vm`), which lowers verified LIR to a portable `.lbc` text
 artifact and interprets it with no frontend and no LLVM:
 
@@ -662,8 +662,8 @@ lilac run <file>                 # compile and execute on the VM
 lilac-vm <file.lbc>              # standalone runner (no frontend, no LLVM)
 ```
 
-`emit-vm`/`run` default to the VM target and reject a non-VM `--target`; the
-LLVM emitter rejects the VM target. The VM's ISA, `.lbc` format, memory model,
+`emit-vm` and `lilac run` reject a non-VM `--target`, and `emit-llvm` rejects
+the VM target. The VM's ISA, `.lbc` format, memory model,
 entry/panic/`extern` behavior, and debugger are specified in `docs/VM_SPEC.md`.
 The repeatable `--export=<name>` roots already seed reachability; when exactly
 one export is given, `lilac run` also uses it as the VM entry point (otherwise
