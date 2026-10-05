@@ -16,9 +16,11 @@
 //! # Scope
 //!
 //! This task adds the memory instruction set (`Load`/`Store`/`Addr`/`AddrField`/
-//! `Field`/`StoreField`), indirect calls, and the `@ptr_add`/`@memcpy` builtins.
-//! `Panic`/`Unreachable`/`@lilac_abort` land in a later task; reaching them is
-//! an internal error (`lilac_error::bug!`).
+//! `Field`/`StoreField`), indirect calls, and the `@ptr_add`/`@memcpy` builtins,
+//! and executes the injected byte-buffer/`format_args` runtime bodies.
+//! `@lilac_abort` traps (stderr `panic: aborted`, [`Step::Panicked`]); `Panic`
+//! and `Unreachable` land in a later task and are still an internal error
+//! (`lilac_error::bug!`).
 
 use std::fmt;
 
@@ -27,6 +29,9 @@ use crate::isa::{ArithOp, Builtin, ConvertOp, Instr, Operand, Program, TypeId, V
 /// Maximum number of live frames before a call traps with
 /// [`VmError::StackOverflow`].
 pub const MAX_CALL_DEPTH: u32 = 4096;
+
+/// Exit code reported when a program traps through `@lilac_abort`.
+pub const ABORT_CODE: i32 = 101;
 
 /// High-bit tag distinguishing a function address from an arena ref.
 ///
@@ -363,7 +368,7 @@ impl<'a> Machine<'a> {
                 self.call(target, ins, reg_base, slot_base)?;
             }
             Instr::CallBuiltin { builtin, ins, outs } => {
-                self.call_builtin(*builtin, ins, outs, reg_base, slot_base)?;
+                return self.call_builtin(*builtin, ins, outs, reg_base, slot_base);
             }
             Instr::Return => return self.return_from_frame(program),
             other => lilac_error::bug!(
@@ -611,6 +616,9 @@ impl<'a> Machine<'a> {
     }
 
     /// Executes a compiler leaf builtin.
+    ///
+    /// Most builtins advance the frame; [`Builtin::Abort`] instead yields
+    /// [`Step::Panicked`] so the dispatch loop unwinds to a non-zero exit.
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -618,7 +626,7 @@ impl<'a> Machine<'a> {
         outs: &[u32],
         reg_base: u32,
         slot_base: u32,
-    ) -> Result<(), VmError> {
+    ) -> Result<Step, VmError> {
         match builtin {
             Builtin::PtrAdd => {
                 let (base, offset) = match ins {
@@ -638,7 +646,8 @@ impl<'a> Machine<'a> {
                     Operand::Slot(out),
                     base.wrapping_add(offset),
                     VM_POINTER_BYTES,
-                )
+                )?;
+                Ok(Step::Advanced)
             }
             Builtin::Memcpy => {
                 let (dst, src, len) = match ins {
@@ -653,12 +662,13 @@ impl<'a> Machine<'a> {
                 let dst_abs = usize::try_from(dst).map_err(|_| VmError::BadRef(dst))?;
                 let src_abs = usize::try_from(src).map_err(|_| VmError::BadRef(src))?;
                 let len = usize::try_from(len).map_err(|_| VmError::BadRef(len))?;
-                self.copy_arena(src_abs, dst_abs, len)
+                self.copy_arena(src_abs, dst_abs, len)?;
+                Ok(Step::Advanced)
             }
-            Builtin::Abort => lilac_error::bug!(
-                lilac_span::Span::dummy(),
-                "@lilac_abort is implemented in a later task"
-            ),
+            Builtin::Abort => {
+                eprintln!("panic: aborted");
+                Ok(Step::Panicked(ABORT_CODE))
+            }
         }
     }
 
@@ -1307,6 +1317,66 @@ mod tests {
     fn store_u8_out_of_range_traps() {
         let src = "main: function () nothing {\n    p: @bit8 = 0x0\n    r: ref @bit8 = ref p\n    @store_u8(r, 0x100000, 0x1)\n}\n";
         assert!(matches!(run_src(src), Err(VmError::BadRef(_))));
+    }
+
+    /// The `format_args` runtime bodies run as ordinary bytecode: `new`, three
+    /// `push`es through a `ref #format_args`, `count`, and a valid `piece`.
+    /// (`$"...{part}..."` lowers to those calls; the count is the piece count.)
+    const FORMAT_ARGS_SRC: &str = "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n";
+
+    /// `@byte_buffer_from(ref #bit8, #bit_native)` runs the injected body (an
+    /// `alloca`, two `store_field`s, and a `copy`) and `@byte_buffer_len` reads
+    /// the stored length back. The pointer is not foldable, so the call stays.
+    #[test]
+    fn byte_buffer_from_and_len() {
+        let src = "main: function () nothing {\n    s: @byte_buffer = \"hi\"\n    p: ref @bit8 = @byte_buffer_ptr(s)\n    b: @byte_buffer = @byte_buffer_from(p, 0x2)\n    n: @bit_native = @byte_buffer_len(b)\n}\n";
+        let n = run_and_capture_place(src, "n").expect("run");
+        assert_eq!(n, Some(0x2), "buffer length round-trips");
+        assert_eq!(run_src(src).expect("run"), 0);
+    }
+
+    /// A `format_args` table built by the runtime round-trips its piece count.
+    #[test]
+    fn format_args_round_trip() {
+        let n = run_and_capture_place(FORMAT_ARGS_SRC, "n").expect("run");
+        assert_eq!(n, Some(0x3), "three pieces: \"a\", part, \"b\"");
+        assert_eq!(run_src(FORMAT_ARGS_SRC).expect("run"), 0);
+    }
+
+    /// An out-of-range `format_args_piece` routes through the injected
+    /// `@lilac_abort` trap: exit code 101, never a VM internal error.
+    #[test]
+    fn format_args_piece_out_of_range_aborts() {
+        let src = "main: function () nothing {\n    args: @format_args = @format_args_new()\n    x: @byte_buffer = @format_args_piece(args, 0x0)\n}\n";
+        assert_eq!(run_src(src).expect("run"), 101);
+    }
+
+    /// Pins the two hardcoded agreements in `lilac-ir/src/runtime.rs`: a
+    /// `#byte_buffer` is 16 bytes and the `format_args` piece stride is 16.
+    #[test]
+    fn byte_buffer_size_and_format_args_stride_are_sixteen() {
+        let program = compile_src(FORMAT_ARGS_SRC);
+        let byte_buffer = program
+            .types
+            .iter()
+            .find(|info| info.name == "#byte_buffer")
+            .expect("#byte_buffer type");
+        assert_eq!(byte_buffer.size, 16, "#byte_buffer size pins runtime.rs");
+        for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
+            let func = program
+                .funcs
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("runtime function {name}"));
+            let has_stride = func.code.iter().any(|instr| {
+                matches!(
+                    instr,
+                    Instr::Const { imm: 0x10, ty, .. }
+                        if program.types[*ty as usize].name == "#bit_native"
+                )
+            });
+            assert!(has_stride, "{name} must embed the 16-byte piece stride");
+        }
     }
 
     /// A data buffer's pointer is read with `Field`, `@load_u8` addresses it
