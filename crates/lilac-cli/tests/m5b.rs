@@ -173,7 +173,7 @@ fn drops_and_zero_init_visible() {
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
     assert!(text.contains("zeroinitializer"), "{text}");
     assert!(
-        text.contains("call void @\"GenBox__1__bit32.@on_drop\""),
+        text.contains("call void @\"GenBox.1..bit32.@on_drop\""),
         "{text}"
     );
 }

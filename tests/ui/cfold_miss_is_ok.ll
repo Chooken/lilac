@@ -40,7 +40,7 @@ entry:
   ret void
 }
 
-define void @lilac_memcpy(ptr %dest, ptr %src, i64 %len) {
+define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len) {
 entry:
   call void @llvm.memcpy.p0.p0.i64(ptr align 1 %dest, ptr align 1 %src, i64 %len, i1 false)
   ret void
@@ -100,11 +100,11 @@ load:                                             ; preds = %entry
   ret { i64, ptr } %8
 
 trap:                                             ; preds = %entry
-  call void @lilac_abort()
+  call void @.lilac.abort()
   unreachable
 }
 
-define void @lilac_abort() {
+define void @.lilac.abort() {
 entry:
   call void @llvm.trap()
   unreachable
@@ -121,7 +121,7 @@ entry:
   ret void
 }
 
-define void @lilac_main(ptr %in0) {
+define void @.lilac.main(ptr %in0) {
 entry:
   %y = alloca i32, align 4
   store i32 0, ptr %y, align 4
@@ -137,7 +137,7 @@ define i32 @main() {
 entry:
   %n = alloca i32, align 4
   store i32 0, ptr %n, align 4
-  call void @lilac_main(ptr %n)
+  call void @.lilac.main(ptr %n)
   ret i32 0
 }
 

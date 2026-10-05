@@ -91,13 +91,15 @@ parameters never appear. Each reached `(declaration, type arguments)`
 instantiation is monomorphized to ordinary concrete items, and its symbols
 carry a deterministic, collision-free, arity-tagged mangle:
 
-`<Name>__<arity>__<arg1>__…`
+`<Name>.<arity>.<arg1>.…`
 
-Each argument is mangled recursively; builtins drop the leading `@`, `ref X`
-becomes `ref_X`, and a nested instance is its own mangled form. Examples:
-`gen_function__1__bit32`, `GenObject__1__bit32` (with methods such as
-`GenObject__1__bit32.get`), and `GenObj__1__GenObj__1__bit32`. The arity tag
+Each argument is mangled recursively; builtins gain a leading `.`, `ref X`
+becomes `ref..X`, and a nested instance is its own mangled form. Examples:
+`gen_function.1..bit32`, `GenObject.1..bit32` (with methods such as
+`GenObject.1..bit32.get`), and `GenObj.1.GenObj.1..bit32`. The arity tag
 keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
+`.` is reserved: Lilac identifiers are `[A-Za-z_][A-Za-z0-9_]*`, so no user
+name contains it and every generated segment is unambiguous.
 Object `type` layouts and RAII `drop` targets are keyed by the same mangled
 name; no instruction carries a generic parameter type.
 

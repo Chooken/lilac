@@ -161,10 +161,10 @@ fn store_u8(lower: &Lower<'_, '_>) {
 
 /// `@memcpy(ref i8, ref i8, iNative)`: `llvm.memcpy`.
 ///
-/// The emitted symbol is `lilac_memcpy`, not `memcpy`: the in-module definition
-/// must not collide with the host C library's `memcpy` at link time (and the
-/// `llvm.memcpy` inside must lower to the C library, not recurse into itself).
-/// `lower::builtin_symbol` maps the LIR builtin name `@memcpy` here.
+/// The emitted symbol is `.lilac.memcpy`, not `memcpy`: the in-module
+/// definition must not collide with the host C library's `memcpy` at link time
+/// (and the `llvm.memcpy` inside must lower to the C library, not recurse into
+/// itself). `lower::builtin_symbol` maps the LIR builtin name `@memcpy` here.
 fn memcpy(lower: &Lower<'_, '_>) {
     let native = lower.native_int();
     let ptr = lower.ptr_type();
@@ -174,7 +174,7 @@ fn memcpy(lower: &Lower<'_, '_>) {
         BasicMetadataTypeEnum::from(ptr),
         BasicMetadataTypeEnum::from(native),
     ];
-    let function = lower.runtime_fn("lilac_memcpy", void.fn_type(&params, false));
+    let function = lower.runtime_fn(".lilac.memcpy", void.fn_type(&params, false));
     let builder = entry(lower, function);
     let dest = param(function, 0, "memcpy").into_pointer_value();
     let src = param(function, 1, "memcpy").into_pointer_value();
@@ -273,7 +273,7 @@ fn format_args_count(lower: &Lower<'_, '_>) {
 
 /// `@format_args_piece(#format_args, iNative) -> #byte_buffer`: return `pieces[i]`.
 ///
-/// An out-of-range `index` (`index >= count`) traps via `@lilac_abort` rather
+/// An out-of-range `index` (`index >= count`) traps via `@.lilac.abort` rather
 /// than loading past the fixed 16-slot table. `push` already keeps `count <= 16`
 /// by dropping pieces once full, so this guards the read side too.
 fn format_args_piece(lower: &Lower<'_, '_>) {
@@ -286,7 +286,7 @@ fn format_args_piece(lower: &Lower<'_, '_>) {
         BasicMetadataTypeEnum::from(native),
     ];
     let function = lower.runtime_fn("format_args_piece", buffer_ty.fn_type(&params, false));
-    let abort = lower.runtime_fn("lilac_abort", void.fn_type(&[], false));
+    let abort = lower.runtime_fn(".lilac.abort", void.fn_type(&[], false));
 
     let builder = lower.context().create_builder();
     let entry_block = lower.context().append_basic_block(function, "entry");
@@ -328,11 +328,11 @@ fn format_args_piece(lower: &Lower<'_, '_>) {
     checked(builder.build_return(Some(&value)), "return piece");
 }
 
-/// `@lilac_abort()`: `llvm.trap` then `unreachable`.
+/// `@.lilac.abort()`: `llvm.trap` then `unreachable`.
 fn abort(lower: &Lower<'_, '_>) {
     let void = lower.context().void_type();
     let trap = lower.runtime_fn("llvm.trap", void.fn_type(&[], false));
-    let function = lower.runtime_fn("lilac_abort", void.fn_type(&[], false));
+    let function = lower.runtime_fn(".lilac.abort", void.fn_type(&[], false));
     let builder = entry(lower, function);
     checked(builder.build_call(trap, &[], ""), "trap call");
     checked(builder.build_unreachable(), "abort unreachable");

@@ -3,7 +3,7 @@ source_filename = "lilac"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-none"
 
-%GenBox__1__bit32 = type { i32 }
+%GenBox.1..bit32 = type { i32 }
 
 define { i64, ptr } @byte_buffer_from(ptr %data, i64 %len) {
 entry:
@@ -42,7 +42,7 @@ entry:
   ret void
 }
 
-define void @lilac_memcpy(ptr %dest, ptr %src, i64 %len) {
+define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len) {
 entry:
   call void @llvm.memcpy.p0.p0.i64(ptr align 1 %dest, ptr align 1 %src, i64 %len, i1 false)
   ret void
@@ -102,11 +102,11 @@ load:                                             ; preds = %entry
   ret { i64, ptr } %8
 
 trap:                                             ; preds = %entry
-  call void @lilac_abort()
+  call void @.lilac.abort()
   unreachable
 }
 
-define void @lilac_abort() {
+define void @.lilac.abort() {
 entry:
   call void @llvm.trap()
   unreachable
@@ -115,33 +115,33 @@ entry:
 ; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
 declare void @llvm.trap() #1
 
-define void @"GenBox__1__bit32.@on_drop"(ptr %in0) {
+define void @"GenBox.1..bit32.@on_drop"(ptr %in0) {
 entry:
   %0 = load ptr, ptr %in0, align 8
-  %1 = getelementptr inbounds %GenBox__1__bit32, ptr %0, i32 0, i32 0
+  %1 = getelementptr inbounds %GenBox.1..bit32, ptr %0, i32 0, i32 0
   store i32 0, ptr %1, align 4
   ret void
 }
 
-define void @lilac_main() {
+define void @.lilac.main() {
 entry:
-  %box = alloca %GenBox__1__bit32, align 8
-  store %GenBox__1__bit32 zeroinitializer, ptr %box, align 4
-  %tmp.1 = alloca %GenBox__1__bit32, align 8
-  store %GenBox__1__bit32 zeroinitializer, ptr %tmp.1, align 4
-  %0 = getelementptr inbounds %GenBox__1__bit32, ptr %tmp.1, i32 0, i32 0
+  %box = alloca %GenBox.1..bit32, align 8
+  store %GenBox.1..bit32 zeroinitializer, ptr %box, align 4
+  %tmp.1 = alloca %GenBox.1..bit32, align 8
+  store %GenBox.1..bit32 zeroinitializer, ptr %tmp.1, align 4
+  %0 = getelementptr inbounds %GenBox.1..bit32, ptr %tmp.1, i32 0, i32 0
   store i32 0, ptr %0, align 4
-  %1 = load %GenBox__1__bit32, ptr %tmp.1, align 4
-  store %GenBox__1__bit32 %1, ptr %box, align 4
+  %1 = load %GenBox.1..bit32, ptr %tmp.1, align 4
+  store %GenBox.1..bit32 %1, ptr %box, align 4
   %ref.arg = alloca ptr, align 8
   store ptr %box, ptr %ref.arg, align 8
-  call void @"GenBox__1__bit32.@on_drop"(ptr %ref.arg)
+  call void @"GenBox.1..bit32.@on_drop"(ptr %ref.arg)
   ret void
 }
 
 define i32 @main() {
 entry:
-  call void @lilac_main()
+  call void @.lilac.main()
   ret i32 0
 }
 

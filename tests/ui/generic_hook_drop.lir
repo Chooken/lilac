@@ -1,10 +1,10 @@
 lilac_ir = "0.2"
 target = "x86_64-unknown-none"
-type #GenBox__1__bit32 {
+type #GenBox.1..bit32 {
     value: #bit32,
 }
-function @GenBox__1__bit32.@on_drop
-  in ref #GenBox__1__bit32 %from
+function @GenBox.1..bit32.@on_drop
+  in ref #GenBox.1..bit32 %from
 {
   $entry:
     &1: #bit32 = const 0x0
@@ -14,12 +14,12 @@ function @GenBox__1__bit32.@on_drop
 function @main
 {
   $entry:
-    alloca #GenBox__1__bit32 %box : zeroed
-    alloca #GenBox__1__bit32 %tmp.1 : zeroed
+    alloca #GenBox.1..bit32 %box : zeroed
+    alloca #GenBox.1..bit32 %tmp.1 : zeroed
     &1: #bit32 = const 0x0
     copy &1 -> %tmp.1.value  // idx 0
     copy %tmp.1 -> %box
-    call @GenBox__1__bit32.@on_drop (in %box) (out)
+    call @GenBox.1..bit32.@on_drop (in %box) (out)
     drop %box
     return
 }

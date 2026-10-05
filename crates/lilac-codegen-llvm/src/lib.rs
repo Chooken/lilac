@@ -741,12 +741,12 @@ mod tests {
             "define i64 @byte_buffer_len({ i64, ptr } %buffer)",
             "define i8 @load_u8(ptr %data, i64 %index)",
             "define void @store_u8(ptr %data, i64 %index, i8 %value)",
-            "define void @lilac_memcpy(ptr %dest, ptr %src, i64 %len)",
+            "define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len)",
             "define { i64, [16 x { i64, ptr }] } @format_args_new()",
             "define void @format_args_push(ptr %table, { i64, ptr } %piece)",
             "define i64 @format_args_count({ i64, [16 x { i64, ptr }] } %table)",
             "define { i64, ptr } @format_args_piece({ i64, [16 x { i64, ptr }] } %table, i64 %index)",
-            "define void @lilac_abort()",
+            "define void @.lilac.abort()",
         ] {
             assert_eq!(
                 text.matches(needle).count(),
@@ -772,7 +772,7 @@ mod tests {
         assert!(text.contains("call void @llvm.trap()"), "{text}");
     }
 
-    /// `@format_args_piece` traps (via `@lilac_abort`) when `index >= count`
+    /// `@format_args_piece` traps (via `@.lilac.abort`) when `index >= count`
     /// instead of loading past the fixed 16-slot table.
     #[test]
     fn format_args_piece_bounds_check_aborts() {
@@ -782,7 +782,7 @@ mod tests {
             .find(|segment| segment.starts_with("{ i64, ptr } @format_args_piece"))
             .expect("format_args_piece definition");
         assert!(body.contains("icmp ult i64"), "{body}");
-        assert!(body.contains("call void @lilac_abort()"), "{body}");
+        assert!(body.contains("call void @.lilac.abort()"), "{body}");
         assert!(body.contains("unreachable"), "{body}");
     }
 
@@ -885,7 +885,7 @@ mod tests {
     }
 
     /// `return` → `ret void`, `unreachable` → `unreachable`, `panic` → a
-    /// `@lilac_abort` call plus `unreachable`, and `drop` emits nothing.
+    /// `@.lilac.abort` call plus `unreachable`, and `drop` emits nothing.
     #[test]
     fn lowers_terminators_and_drop() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
@@ -928,8 +928,8 @@ mod tests {
         ));
         let text = emit(&module);
         assert!(text.contains("ret void"), "{text}");
-        assert!(text.contains("define void @lilac_abort()"), "{text}");
-        assert!(text.contains("call void @lilac_abort()"), "{text}");
+        assert!(text.contains("define void @.lilac.abort()"), "{text}");
+        assert!(text.contains("call void @.lilac.abort()"), "{text}");
         assert!(text.contains("unreachable"), "{text}");
         assert!(!text.contains("drop"), "drop must not lower:\n{text}");
     }
@@ -1034,7 +1034,7 @@ mod tests {
         lilac_codegen_llvm::LlvmBackend::new("x86_64-pc-windows-msvc", optimize)
     }
 
-    /// A LIR `main` is emitted as `lilac_main` and the module gains an `i32
+    /// A LIR `main` is emitted as `.lilac.main` and the module gains an `i32
     /// @main()` wrapper that calls it and returns 0.
     #[test]
     fn emits_main_entry_wrapper() {
@@ -1043,15 +1043,15 @@ mod tests {
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
         let text = emit(&module);
-        assert!(text.contains("define void @lilac_main()"), "{text}");
+        assert!(text.contains("define void @.lilac.main()"), "{text}");
         assert!(text.contains("define i32 @main()"), "{text}");
-        assert!(text.contains("call void @lilac_main()"), "{text}");
+        assert!(text.contains("call void @.lilac.main()"), "{text}");
         assert!(text.contains("ret i32 0"), "{text}");
     }
 
     /// A `main` with an `in` place still gets a valid C entry wrapper: the
     /// wrapper allocates a zeroed slot and passes its address (the pointer
-    /// ABI), so the call's argument count matches `lilac_main`'s signature.
+    /// ABI), so the call's argument count matches `.lilac.main`'s signature.
     #[test]
     fn emits_main_wrapper_with_parameter_slots() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
@@ -1062,9 +1062,12 @@ mod tests {
             vec![ret_block("entry", Vec::new())],
         ));
         let text = emit(&module);
-        assert!(text.contains("define void @lilac_main(ptr %in0)"), "{text}");
+        assert!(
+            text.contains("define void @.lilac.main(ptr %in0)"),
+            "{text}"
+        );
         assert!(text.contains("store i32 0, ptr %n"), "{text}");
-        assert!(text.contains("call void @lilac_main(ptr %n)"), "{text}");
+        assert!(text.contains("call void @.lilac.main(ptr %n)"), "{text}");
     }
 
     /// A value place passed to a `ref` parameter is spilled into a pointer
@@ -1095,17 +1098,17 @@ mod tests {
         assert!(text.contains("call void @hook(ptr %ref.arg)"), "{text}");
     }
 
-    /// A module with no `main` gets no `lilac_main` and no entry wrapper, yet
+    /// A module with no `main` gets no `.lilac.main` and no entry wrapper, yet
     /// still verifies (Empty module has only the runtime).
     #[test]
     fn omits_entry_wrapper_without_main() {
         let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
-        assert!(!text.contains("lilac_main"), "{text}");
+        assert!(!text.contains(".lilac.main"), "{text}");
         assert!(!text.contains("define i32 @main"), "{text}");
     }
 
     /// A `call` and an `addr.func` targeting LIR `main` are rewritten to the
-    /// renamed `lilac_main` symbol.
+    /// renamed `.lilac.main` symbol.
     #[test]
     fn renames_calls_and_addr_func_to_main() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
@@ -1126,8 +1129,11 @@ mod tests {
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
         let text = emit(&module);
-        assert!(text.contains("call void @lilac_main()"), "{text}");
-        assert!(text.contains("ptrtoint (ptr @lilac_main to i64)"), "{text}");
+        assert!(text.contains("call void @.lilac.main()"), "{text}");
+        assert!(
+            text.contains("ptrtoint (ptr @.lilac.main to i64)"),
+            "{text}"
+        );
         assert!(!text.contains("call void @main()"), "{text}");
         assert!(!text.contains("ptr @main to i64"), "{text}");
     }

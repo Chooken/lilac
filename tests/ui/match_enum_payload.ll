@@ -42,7 +42,7 @@ entry:
   ret void
 }
 
-define void @lilac_memcpy(ptr %dest, ptr %src, i64 %len) {
+define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len) {
 entry:
   call void @llvm.memcpy.p0.p0.i64(ptr align 1 %dest, ptr align 1 %src, i64 %len, i1 false)
   ret void
@@ -102,11 +102,11 @@ load:                                             ; preds = %entry
   ret { i64, ptr } %8
 
 trap:                                             ; preds = %entry
-  call void @lilac_abort()
+  call void @.lilac.abort()
   unreachable
 }
 
-define void @lilac_abort() {
+define void @.lilac.abort() {
 entry:
   call void @llvm.trap()
   unreachable
@@ -115,7 +115,7 @@ entry:
 ; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
 declare void @llvm.trap() #1
 
-define void @lilac_main() {
+define void @.lilac.main() {
 l.3:
   %number = alloca %OptionalBit32, align 8
   store %OptionalBit32 zeroinitializer, ptr %number, align 4
@@ -162,7 +162,7 @@ l.1:                                              ; preds = %l.2, %l.4
 
 define i32 @main() {
 entry:
-  call void @lilac_main()
+  call void @.lilac.main()
   ret i32 0
 }
 

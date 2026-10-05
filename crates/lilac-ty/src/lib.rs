@@ -209,49 +209,50 @@ impl Types {
     }
 
     /// Deterministic, collision-free, arity-tagged symbol name for IR.
-    /// Builtins drop their `@`; `ref X` becomes `ref_X`; an `Instance` is
-    /// `<Name>__<arity>__<arg>__…`.
+    /// User identifiers cannot contain `.`, so it is the reserved separator:
+    /// builtins gain a leading `.`; `ref X` becomes `ref..X`; an `Instance` is
+    /// `<Name>.<arity>..<arg>..…`.
     pub fn mangle(&self, id: TypeId) -> String {
         match self.kind(id) {
-            TypeKind::Bit8 => "bit8".to_owned(),
-            TypeKind::Bit16 => "bit16".to_owned(),
-            TypeKind::Bit32 => "bit32".to_owned(),
-            TypeKind::Bit64 => "bit64".to_owned(),
-            TypeKind::BitNative => "bitNative".to_owned(),
-            TypeKind::ByteBuffer => "byte_buffer".to_owned(),
-            TypeKind::FormatArgs => "format_args".to_owned(),
-            TypeKind::Unknown => "unknown".to_owned(),
+            TypeKind::Bit8 => ".bit8".to_owned(),
+            TypeKind::Bit16 => ".bit16".to_owned(),
+            TypeKind::Bit32 => ".bit32".to_owned(),
+            TypeKind::Bit64 => ".bit64".to_owned(),
+            TypeKind::BitNative => ".bitNative".to_owned(),
+            TypeKind::ByteBuffer => ".byte_buffer".to_owned(),
+            TypeKind::FormatArgs => ".format_args".to_owned(),
+            TypeKind::Unknown => ".unknown".to_owned(),
             TypeKind::Object(def) => self.object_name(*def),
-            TypeKind::Param { index, .. } => format!("param{index}"),
+            TypeKind::Param { index, .. } => format!("param.{index}"),
             TypeKind::Instance { base, args } => {
-                let mut out = format!("{}__{}", self.object_name(*base), args.len());
+                let mut out = format!("{}.{}", self.object_name(*base), args.len());
                 for arg in args {
-                    out.push_str("__");
+                    out.push('.');
                     out.push_str(&self.mangle_ref(*arg));
                 }
                 out
             }
             TypeKind::Func { params, returns } => {
-                let mut out = format!("function__{}", params.len());
+                let mut out = format!("function.{}", params.len());
                 for param in params {
-                    out.push_str("__");
+                    out.push('.');
                     out.push_str(&self.mangle_ref(*param));
                 }
-                out.push_str("__returns__");
+                out.push_str(".returns.");
                 out.push_str(&returns.len().to_string());
                 for ret in returns {
-                    out.push_str("__");
+                    out.push('.');
                     out.push_str(&self.mangle_ref(*ret));
                 }
                 out
             }
-            TypeKind::Error => "error".to_owned(),
+            TypeKind::Error => ".error".to_owned(),
         }
     }
 
     fn mangle_ref(&self, ty: TypeRef) -> String {
         if ty.is_ref {
-            format!("ref_{}", self.mangle(ty.id))
+            format!("ref.{}", self.mangle(ty.id))
         } else {
             self.mangle(ty.id)
         }
@@ -446,7 +447,7 @@ mod tests {
             is_ref: false,
         };
         let outer = types.intern_instance(DefId(1), vec![arg]);
-        assert_eq!(types.mangle(outer), "GenObj__1__bit32");
+        assert_eq!(types.mangle(outer), "GenObj.1..bit32");
         let nested = types.intern_instance(
             DefId(1),
             vec![TypeRef {
@@ -454,7 +455,24 @@ mod tests {
                 is_ref: false,
             }],
         );
-        assert_eq!(types.mangle(nested), "GenObj__1__GenObj__1__bit32");
+        // `{base}.{argc}` then `.` + `mangle_ref(arg)`; a non-ref instance arg
+        // carries no leading dot of its own, so the separator is a single dot.
+        assert_eq!(types.mangle(nested), "GenObj.1.GenObj.1..bit32");
+    }
+
+    #[test]
+    fn underscore_in_base_name_is_not_a_separator() {
+        // A user object may contain `_`; only the reserved `.` separates the
+        // base name from the arity tag and arguments.
+        let mut types = Types::new();
+        types.set_object_name(DefId(1), "Gen_Obj");
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let arg = TypeRef {
+            id: bit32,
+            is_ref: false,
+        };
+        let instance = types.intern_instance(DefId(1), vec![arg]);
+        assert_eq!(types.mangle(instance), "Gen_Obj.1..bit32");
     }
 
     #[test]

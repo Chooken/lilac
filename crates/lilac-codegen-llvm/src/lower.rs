@@ -112,10 +112,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Appends the C entry point when the LIR defines `main`: `i32 @main()`
-    /// calls the renamed `lilac_main` and returns 0. A module without `main`
+    /// calls the renamed `.lilac.main` and returns 0. A module without `main`
     /// gets no wrapper.
     ///
-    /// `lilac_main` uses the pointer ABI, so a `main` with `in`/`out` places
+    /// `.lilac.main` uses the pointer ABI, so a `main` with `in`/`out` places
     /// would take pointer arguments. The wrapper supplies a zero-initialized
     /// stack slot for each (in declaration order, ins then outs) and passes its
     /// address, so a parameterized `main` still verifies and runs.
@@ -123,7 +123,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let Some(lir_main) = self.lir.funcs.iter().find(|func| func.name == "main") else {
             return;
         };
-        let Some(lilac_main) = self.module.get_function(symbol("main")) else {
+        let Some(entry_fn) = self.module.get_function(symbol("main")) else {
             bug!(Span::dummy(), "`main` was not declared");
         };
         let i32_ty = self.context.i32_type();
@@ -143,10 +143,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             );
             args.push(slot.into());
         }
-        checked(
-            builder.build_call(lilac_main, &args, ""),
-            "main wrapper call",
-        );
+        checked(builder.build_call(entry_fn, &args, ""), "main wrapper call");
         checked(
             builder.build_return(Some(&i32_ty.const_zero())),
             "main wrapper return",
@@ -674,10 +671,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// The `void @lilac_abort()` runtime symbol (its body is Task 5's).
+    /// The `void @.lilac.abort()` runtime symbol (its body is Task 5's).
     fn abort_fn(&self) -> FunctionValue<'ctx> {
         let fn_type = self.context.void_type().fn_type(&[], false);
-        self.runtime_fn("lilac_abort", fn_type)
+        self.runtime_fn(".lilac.abort", fn_type)
     }
 
     /// Resolves an operand to an SSA value: a register's value, or a load of a
@@ -945,7 +942,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Lowers a block terminator. `return` → `ret void`; `branch` → `br`;
     /// `branch.if` → `br i1` (the false edge is the next block in layout order
-    /// when `els` is absent); `panic` → `@lilac_abort()` + `unreachable`;
+    /// when `els` is absent); `panic` → `@.lilac.abort()` + `unreachable`;
     /// `unreachable` → `unreachable`.
     fn lower_term(
         &self,
@@ -996,23 +993,23 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 }
 
 /// The LLVM symbol a LIR function emits under. LIR `main` is renamed
-/// `lilac_main` so the generated C `main` wrapper can take the real entry
+/// `.lilac.main` so the generated C `main` wrapper can take the real entry
 /// symbol; every other function keeps its name. Calls and `addr.func` are
 /// mapped through this too, so references to `main` stay consistent.
 pub(crate) fn symbol(name: &str) -> &str {
     if name == "main" {
-        "lilac_main"
+        ".lilac.main"
     } else {
         name
     }
 }
 
 /// The LLVM symbol a `@`-prefixed LIR builtin emits under. `@memcpy` becomes
-/// `lilac_memcpy` so its in-module definition cannot collide with the host C
+/// `.lilac.memcpy` so its in-module definition cannot collide with the host C
 /// library's `memcpy`; every other builtin drops the `@`.
 fn builtin_symbol(name: &str) -> &str {
     match name {
-        "@memcpy" => "lilac_memcpy",
+        "@memcpy" => ".lilac.memcpy",
         other => other.strip_prefix('@').unwrap_or(other),
     }
 }

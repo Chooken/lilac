@@ -23,7 +23,7 @@ use super::{
 pub(super) struct FuncInstance {
     /// Template definition.
     pub def: DefId,
-    /// Mangled IR symbol (`gen_function__1__bit32`).
+    /// Mangled IR symbol (`gen_function.1..bit32`).
     pub name: String,
     /// Concrete (fully substituted) signature.
     pub sig: FuncSig,
@@ -182,7 +182,7 @@ impl Checker<'_> {
             if let Some(hook_def) = drop_hook {
                 // Register the concrete drop entry keyed by the instance's
                 // mangled name, pointing at its monomorphized `@on_drop`
-                // (`GenBox__1__bit32` -> `GenBox__1__bit32.@on_drop`).
+                // (`GenBox.1..bit32` -> `GenBox.1..bit32.@on_drop`).
                 match self.instantiate_func(hook_def, args, use_span) {
                     Ok(_) => {
                         let hook = self.instance_name(hook_def, args);
@@ -639,8 +639,9 @@ impl Checker<'_> {
     }
 
     /// Mangled IR symbol for one instance. Object members use the design's
-    /// `<object-instance-mangle>.<member>` form (`GenObject__1__bit32.get`);
-    /// free functions use `<Name>__<arity>__<arg>…` (design §3.4).
+    /// `<object-instance-mangle>.<member>` form (`GenObject.1..bit32.get`);
+    /// free functions use `<Name>.<arity>.<arg>…` (design §3.4). `.` is the
+    /// reserved separator; user identifiers cannot contain it.
     pub(super) fn instance_name(&mut self, def: DefId, args: &[TypeRef]) -> String {
         if let Some((_name, obj_def, count)) = self.method_object(def) {
             if count > 0 {
@@ -652,15 +653,15 @@ impl Checker<'_> {
                 let mut name = format!("{}.{member}", self.types.mangle(object_id));
                 // A method's own generic arguments (beyond the object's) are
                 // arity-tagged so distinct specializations never collide
-                //(`GenObject__1__bit32.get__1__bit64`, design §3.4).
+                //(`GenObject.1..bit32.get.1..bit64`, design §3.4).
                 let own = &args[count.min(args.len())..];
                 if !own.is_empty() {
-                    name.push_str("__");
+                    name.push('.');
                     name.push_str(&own.len().to_string());
                     for arg in own {
-                        name.push_str("__");
+                        name.push('.');
                         if arg.is_ref {
-                            name.push_str("ref_");
+                            name.push_str("ref.");
                         }
                         name.push_str(&self.types.mangle(arg.id));
                     }
@@ -668,11 +669,11 @@ impl Checker<'_> {
                 return name;
             }
         }
-        let mut name = format!("{}__{}", self.function_name(def), args.len());
+        let mut name = format!("{}.{}", self.function_name(def), args.len());
         for arg in args {
-            name.push_str("__");
+            name.push('.');
             if arg.is_ref {
-                name.push_str("ref_");
+                name.push_str("ref.");
             }
             name.push_str(&self.types.mangle(arg.id));
         }
@@ -891,11 +892,11 @@ impl Checker<'_> {
     }
 
     /// Concrete members of the object named `owner`, resolving an instance
-    /// mangle (`GenObject__1__bit32`) back to its base name.
+    /// mangle (`GenObject.1..bit32`) back to its base name.
     fn owner_members(&self, owner: &str) -> Vec<String> {
-        // The owner is either an IR mangle (`GenObject__1__bit32`) or the
+        // The owner is either an IR mangle (`GenObject.1..bit32`) or the
         // display form (`GenObject[@bit32]`); recover the base name from both.
-        let base = owner.split("__").next().unwrap_or(owner);
+        let base = owner.split('.').next().unwrap_or(owner);
         let base = base.split('[').next().unwrap_or(base);
         let mut members: Vec<String> = Vec::new();
         for (name, item) in &self.module.items {
@@ -1118,7 +1119,7 @@ mod tests {
             "single-frame chain duplicated: {rendered}"
         );
         assert!(
-            !rendered.contains("__1__"),
+            !rendered.contains(".1.."),
             "mangled symbol leaked: {rendered}"
         );
     }
@@ -1251,7 +1252,7 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("missing method `other`"), "{rendered}");
-        assert!(!rendered.contains("__1__"), "{rendered}");
+        assert!(!rendered.contains(".1.."), "{rendered}");
     }
 
     #[test]
@@ -1292,7 +1293,7 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         let names = names(&hir);
         assert!(
-            names.contains(&"gen_function__1__bit32"),
+            names.contains(&"gen_function.1..bit32"),
             "missing monomorphized instance: {names:?}"
         );
         assert!(
@@ -1333,7 +1334,7 @@ mod tests {
             note.contains("grow[Box[@bit32]]"),
             "readable nested arg: {note}"
         );
-        assert!(!note.contains("__1__"), "mangled symbol leaked: {note}");
+        assert!(!note.contains(".1.."), "mangled symbol leaked: {note}");
     }
 
     #[test]
@@ -1359,7 +1360,7 @@ mod tests {
             note.contains("GenObj[GenObj[@bit32]]"),
             "readable nested arg: {note}"
         );
-        assert!(!note.contains("__1__"), "mangled symbol leaked: {note}");
+        assert!(!note.contains(".1.."), "mangled symbol leaked: {note}");
     }
 
     #[test]
@@ -1386,12 +1387,12 @@ mod tests {
         let instances: Vec<&str> = hir
             .funcs
             .iter()
-            .filter(|func| func.name.starts_with("rec__"))
+            .filter(|func| func.name.starts_with("rec."))
             .map(|func| func.name.as_str())
             .collect();
         assert_eq!(
             instances,
-            vec!["rec__1__bit32"],
+            vec!["rec.1..bit32"],
             "expected exactly one cached instance, got {:?}",
             names(&hir)
         );
@@ -1438,7 +1439,7 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         let layout = hir
             .layouts
-            .get("GenObject__1__bit32")
+            .get("GenObject.1..bit32")
             .expect("missing instance layout");
         assert_eq!(layout.len(), 1, "{layout:?}");
         assert_eq!(layout[0].0, "value");
@@ -1458,7 +1459,7 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(
-            names(&hir).contains(&"GenObject__1__bit32.get"),
+            names(&hir).contains(&"GenObject.1..bit32.get"),
             "missing monomorphized method: {:?}",
             names(&hir)
         );
@@ -1472,13 +1473,13 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(
-            hir.drops.get("GenBox__1__bit32").map(String::as_str),
-            Some("GenBox__1__bit32.@on_drop"),
+            hir.drops.get("GenBox.1..bit32").map(String::as_str),
+            Some("GenBox.1..bit32.@on_drop"),
             "drops: {:?}",
             hir.drops
         );
         assert!(
-            names(&hir).contains(&"GenBox__1__bit32.@on_drop"),
+            names(&hir).contains(&"GenBox.1..bit32.@on_drop"),
             "missing monomorphized on_drop: {:?}",
             names(&hir)
         );
@@ -1510,7 +1511,7 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(
-            names(&hir).contains(&"GenObject__1__bit32.get"),
+            names(&hir).contains(&"GenObject.1..bit32.get"),
             "missing instance static method: {:?}",
             names(&hir)
         );
@@ -1519,18 +1520,18 @@ mod tests {
     #[test]
     fn method_own_generics_mangle_distinctly() {
         // A method's own generic arguments must be part of its symbol, or two
-        // specializations collide (`GenObject__1__bit32.get` twice).
+        // specializations collide (`GenObject.1..bit32.get` twice).
         let (diags, hir, _) = check(
             "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let names = names(&hir);
         assert!(
-            names.contains(&"GenObject__1__bit32.get__1__bit32"),
+            names.contains(&"GenObject.1..bit32.get.1..bit32"),
             "missing method-own-arg instance: {names:?}"
         );
         assert!(
-            names.contains(&"GenObject__1__bit32.get__1__bit64"),
+            names.contains(&"GenObject.1..bit32.get.1..bit64"),
             "missing method-own-arg instance: {names:?}"
         );
     }

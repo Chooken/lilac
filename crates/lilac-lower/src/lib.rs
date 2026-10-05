@@ -438,7 +438,7 @@ impl Lower<'_> {
         let mut drops = Vec::new();
         for (place, ty) in &fs.owned {
             // Drop keys follow the layout key: instances use the arity-tagged
-            // mangled name (`GenBox__1__bit32`); concrete types use the display
+            // mangled name (`GenBox.1..bit32`); concrete types use the display
             // name (design §3.4).
             let key = match self.types.kind(ty.id) {
                 lilac_ty::TypeKind::Instance { .. } => self.types.mangle(ty.id),
@@ -1888,8 +1888,8 @@ mod tests {
             "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("#GenObject__1__bit32"), "{text}");
-        assert!(text.contains("GenObject__1__bit32.get"), "{text}");
+        assert!(text.contains("#GenObject.1..bit32"), "{text}");
+        assert!(text.contains("GenObject.1..bit32.get"), "{text}");
     }
 
     #[test]
@@ -1898,8 +1898,8 @@ mod tests {
             "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("GenObject__1__bit32.get__1__bit32"), "{text}");
-        assert!(text.contains("GenObject__1__bit32.get__1__bit64"), "{text}");
+        assert!(text.contains("GenObject.1..bit32.get.1..bit32"), "{text}");
+        assert!(text.contains("GenObject.1..bit32.get.1..bit64"), "{text}");
     }
 
     #[test]
@@ -1933,11 +1933,11 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("drop %"), "{text}");
-        assert!(text.contains("@GenBox__1__bit32.@on_drop"), "{text}");
+        assert!(text.contains("@GenBox.1..bit32.@on_drop"), "{text}");
         // The destructor runs on live memory, so its call precedes the marker
         // that marks the place destroyed.
         let call = text
-            .find("call @GenBox__1__bit32.@on_drop")
+            .find("call @GenBox.1..bit32.@on_drop")
             .expect("on_drop call");
         let drop = text.find("drop %box").expect("drop marker");
         assert!(call < drop, "@on_drop must precede drop:\n{text}");
