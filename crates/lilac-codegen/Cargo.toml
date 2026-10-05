@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 lilac-ir = { path = "../lilac-ir" }
+lilac-span = { path = "../lilac-span" }
 
 [lints]
 workspace = true

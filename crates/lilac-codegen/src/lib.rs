@@ -41,8 +41,43 @@ pub trait Backend {
         Err(format!("backend `{}` cannot emit LLVM IR", self.name()))
     }
 
+    /// Emits textual bytecode for a verified module (M5c).
+    ///
+    /// Backends that do not produce bytecode keep the default error, which
+    /// names the backend so a `--backend=` mismatch is diagnosable. The
+    /// [`lilac_span::SourceMap`] lets the VM build a `.lbc` line table.
+    fn emit_bytecode(
+        &self,
+        _module: &LirModule,
+        _source_map: &lilac_span::SourceMap,
+    ) -> Result<String, String> {
+        Err(format!("backend `{}` cannot emit bytecode", self.name()))
+    }
+
     /// Builds and runs a host executable (build scripts; post-v1).
     fn build_exe_and_run(&self, _module: &LirModule) -> Result<i32, String> {
         Err("build-script execution is post-v1".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_emit_bytecode_errors_with_backend_name() {
+        struct Dummy;
+        impl Backend for Dummy {
+            fn name(&self) -> &'static str {
+                "dummy"
+            }
+            fn codegen(&self, _m: &LirModule) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let err = Dummy
+            .emit_bytecode(&LirModule::default(), &lilac_span::SourceMap::default())
+            .expect_err("default must error");
+        assert!(err.contains("dummy"), "{err}");
     }
 }
