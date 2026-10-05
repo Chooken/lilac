@@ -1,0 +1,15 @@
+[package]
+name = "lilac-vm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-error = { path = "../lilac-error" }
+lilac-ir = { path = "../lilac-ir" }
+lilac-span = { path = "../lilac-span" }
+
+[dev-dependencies]
+lilac-driver = { path = "../lilac-driver" }
+
+[lints]
+workspace = true
