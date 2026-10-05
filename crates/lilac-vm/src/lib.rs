@@ -6,5 +6,7 @@
 //! and standalone runner. It never links LLVM.
 
 pub mod codec;
+pub mod compile;
 pub mod isa;
+pub use compile::compile;
 pub use isa::*;
