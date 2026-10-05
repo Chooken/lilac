@@ -725,6 +725,10 @@ mod tests {
             is_extern: false,
             ins: vec![0],
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 4,
             slot_bytes: 8,
             code: fcode,
@@ -738,6 +742,7 @@ mod tests {
             }],
             place_names: Vec::new(),
         });
+        program.rebuild_layouts();
         program.verify().expect("verify");
         program
     }

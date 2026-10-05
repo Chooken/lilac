@@ -484,6 +484,24 @@ pub struct Func {
     pub ins: Vec<TypeId>,
     /// Output types.
     pub outs: Vec<TypeId>,
+    /// Byte offset of each input within the callee's input region.
+    ///
+    /// Precomputed by [`Program::rebuild_layouts`] so `call` binds arguments
+    /// without a `type_size` lookup; parallel to `ins`.
+    pub in_offsets: Vec<u32>,
+    /// Byte size of each input, parallel to [`Func::in_offsets`].
+    ///
+    /// A `u32` (not `u8`) because runtime values such as `#format_args` are
+    /// wider than 255 bytes.
+    pub in_sizes: Vec<u32>,
+    /// Byte offset of the output region within the frame's slot region.
+    ///
+    /// The input region precedes the output region, so this equals the summed
+    /// input sizes. Precomputed so `return` places results without a
+    /// `type_size` lookup.
+    pub out_offset: u32,
+    /// Byte size of each output, parallel to `outs`.
+    pub out_sizes: Vec<u32>,
     /// Register-file slots for a frame of this function.
     pub n_regs: u32,
     /// Per-frame place region size in bytes (zeroed at entry).
@@ -539,6 +557,33 @@ impl Func {
         }
         set
     }
+
+    /// Recomputes the precomputed call/return layout fields from the type table.
+    ///
+    /// Inputs occupy the frame's low slot region in signature order and outputs
+    /// immediately follow, matching how the compiler declares places. The
+    /// interpreter's `call`/`return` paths then bind arguments and place results
+    /// without any `type_size` lookup.
+    pub(crate) fn rebuild_layout(&mut self, types: &[TypeInfo]) {
+        self.in_offsets.clear();
+        self.in_sizes.clear();
+        let mut offset = 0_u32;
+        for &ty in &self.ins {
+            let size = type_size_of(types, ty);
+            self.in_offsets.push(offset);
+            self.in_sizes.push(size);
+            offset = offset.saturating_add(size);
+        }
+        self.out_offset = offset;
+        self.out_sizes.clear();
+        self.out_sizes
+            .extend(self.outs.iter().map(|&ty| type_size_of(types, ty)));
+    }
+}
+
+/// The size of a type id in a type table (zero when out of range).
+fn type_size_of(types: &[TypeInfo], ty: TypeId) -> u32 {
+    types.get(ty as usize).map_or(0, |info| info.size)
 }
 
 /// A whole bytecode program: versioned, target-tagged, and self-contained.
@@ -560,6 +605,20 @@ pub struct Program {
     pub globals: Vec<u8>,
     /// Functions.
     pub funcs: Vec<Func>,
+}
+
+impl Program {
+    /// Recomputes every function's precomputed call/return layout fields.
+    ///
+    /// Called by the compiler and the `.lbc` parser so that a runnable program
+    /// always carries the metadata `call`/`return` need. See
+    /// [`Func::rebuild_layout`].
+    pub(crate) fn rebuild_layouts(&mut self) {
+        let types = &self.types;
+        for func in &mut self.funcs {
+            func.rebuild_layout(types);
+        }
+    }
 }
 
 /// Verifies structural well-formedness of a program.
@@ -1071,6 +1130,10 @@ pub(crate) fn sample_program_words(code: Vec<u32>) -> Program {
             is_extern: false,
             ins: Vec::new(),
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 1,
             slot_bytes: 8,
             code,
@@ -1099,6 +1162,10 @@ pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
             is_extern: false,
             ins: Vec::new(),
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 1,
             slot_bytes: 8,
             code: words,

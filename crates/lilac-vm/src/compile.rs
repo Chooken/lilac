@@ -63,7 +63,7 @@ pub fn compile(module: &LirModule, source_map: &SourceMap) -> Result<Program, St
     for func in &module.funcs {
         funcs.push(compiler.compile_func(func)?);
     }
-    let program = Program {
+    let mut program = Program {
         version: LBC_VERSION.to_owned(),
         target: VM_TARGET.to_owned(),
         types: compiler.types.infos,
@@ -71,6 +71,7 @@ pub fn compile(module: &LirModule, source_map: &SourceMap) -> Result<Program, St
         globals: compiler.globals,
         funcs,
     };
+    program.rebuild_layouts();
     if let Err(err) = verify(&program) {
         lilac_error::bug!(Span::dummy(), "compiled program failed verification: {err}");
     }
@@ -784,6 +785,10 @@ impl FuncBuilder<'_, '_> {
                 is_extern: true,
                 ins,
                 outs,
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
                 n_regs: 0,
                 slot_bytes: self.places.total,
                 code: Vec::new(),
@@ -834,6 +839,10 @@ impl FuncBuilder<'_, '_> {
             is_extern: false,
             ins,
             outs,
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: self.next_reg,
             slot_bytes: self.places.total,
             code: words,

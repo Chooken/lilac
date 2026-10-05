@@ -235,6 +235,10 @@ impl Program {
                 is_extern: func.is_extern,
                 ins: func.ins,
                 outs: func.outs,
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
                 n_regs: func.n_regs,
                 slot_bytes: func.slot_bytes,
                 code: builder.words,
@@ -244,7 +248,7 @@ impl Program {
                 place_names: func.place_names,
             });
         }
-        let program = Program {
+        let mut program = Program {
             version,
             target,
             types,
@@ -252,6 +256,7 @@ impl Program {
             data,
             funcs,
         };
+        program.rebuild_layouts();
         program.verify()?;
         Ok(program)
     }
@@ -1858,7 +1863,7 @@ mod tests {
             ],
         );
         let (helper_code, helper_sites, helper_ops) = words_of(&types, &[Instr::Return]);
-        let program = Program {
+        let mut program = Program {
             version: LBC_VERSION.to_string(),
             target: crate::isa::VM_TARGET.to_string(),
             types,
@@ -1873,6 +1878,10 @@ mod tests {
                     is_extern: false,
                     ins: Vec::new(),
                     outs: Vec::new(),
+                    in_offsets: Vec::new(),
+                    in_sizes: Vec::new(),
+                    out_offset: 0,
+                    out_sizes: Vec::new(),
                     n_regs: 4,
                     slot_bytes: 16,
                     code: main_code,
@@ -1891,6 +1900,10 @@ mod tests {
                     is_extern: false,
                     ins: vec![0],
                     outs: vec![0],
+                    in_offsets: Vec::new(),
+                    in_sizes: Vec::new(),
+                    out_offset: 0,
+                    out_sizes: Vec::new(),
                     n_regs: 1,
                     slot_bytes: 8,
                     code: helper_code,
@@ -1901,6 +1914,7 @@ mod tests {
                 },
             ],
         };
+        program.rebuild_layouts();
         let text = program.to_text();
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed.to_text(), text);
@@ -1959,6 +1973,10 @@ mod tests {
                 is_extern: false,
                 ins: Vec::new(),
                 outs: Vec::new(),
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
                 n_regs: 3,
                 slot_bytes: 0,
                 code,
@@ -2022,6 +2040,10 @@ mod tests {
                 is_extern: false,
                 ins: Vec::new(),
                 outs: Vec::new(),
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
                 n_regs: 2,
                 slot_bytes: 0,
                 code,

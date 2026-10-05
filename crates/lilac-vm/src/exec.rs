@@ -27,7 +27,7 @@
 use std::fmt;
 
 use crate::decode::{decode, Decoded};
-use crate::isa::{ArithOp, Builtin, Operand, Program, TypeId, VM_POINTER_BYTES};
+use crate::isa::{ArithOp, Builtin, Operand, Program, VM_POINTER_BYTES};
 
 /// Maximum number of live frames before a call traps with
 /// [`VmError::StackOverflow`].
@@ -635,15 +635,14 @@ impl<'a> Machine<'a> {
             self.arena.len() + usize::try_from(callee.slot_bytes).unwrap_or(0),
             0,
         );
-        let mut offset = 0_u32;
         for (index, operand) in ins.iter().enumerate() {
-            let Some(&ty) = callee.ins.get(index) else {
+            let (Some(&dst_off), Some(&size)) =
+                (callee.in_offsets.get(index), callee.in_sizes.get(index))
+            else {
                 break;
             };
-            let size = type_size(program, ty);
-            let dst_abs = usize::try_from(slot_base).unwrap_or(0) + offset as usize;
+            let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst_off as usize;
             self.move_to_slot(caller_reg_base, caller_slot_base, *operand, size, dst_abs)?;
-            offset = offset.saturating_add(size);
         }
         self.frames.push(Frame {
             func: target,
@@ -666,10 +665,6 @@ impl<'a> Machine<'a> {
             return Ok(Step::Returned);
         };
         let exiting_func = &program.funcs[exiting.func as usize];
-        let mut out_offset = 0_u32;
-        for &ty in &exiting_func.ins {
-            out_offset = out_offset.saturating_add(type_size(program, ty));
-        }
         let Some(caller) = self.frames.last() else {
             return Ok(Step::Returned);
         };
@@ -684,13 +679,12 @@ impl<'a> Machine<'a> {
         let out_slots = caller_func
             .operands
             .get(exiting.outs.start as usize..exiting.outs.end as usize);
-        let mut running = out_offset;
+        let mut running = exiting_func.out_offset;
         if let Some(out_slots) = out_slots {
-            for (index, &ty) in exiting_func.outs.iter().enumerate() {
+            for (index, &size) in exiting_func.out_sizes.iter().enumerate() {
                 let Some(Operand::Slot(dst_off)) = out_slots.get(index) else {
                     break;
                 };
-                let size = type_size(program, ty);
                 let src = usize::try_from(exiting.slot_base).unwrap_or(0) + running as usize;
                 let dst = usize::try_from(caller_slot_base).unwrap_or(0) + *dst_off as usize;
                 self.copy_arena(src, dst, size as usize)?;
@@ -946,11 +940,6 @@ impl<'a> Machine<'a> {
     }
 }
 
-/// The size of a type id (zero when out of range).
-fn type_size(program: &Program, ty: TypeId) -> u32 {
-    program.types.get(ty as usize).map_or(0, |info| info.size)
-}
-
 /// The source line whose `pc` is the greatest not exceeding `pc`.
 fn line_for(func: &crate::isa::Func, pc: u32) -> Option<crate::isa::Line> {
     func.lines.iter().rev().find(|line| line.pc <= pc).cloned()
@@ -1176,6 +1165,27 @@ mod tests {
         assert_eq!(x, Some(0x42), "argument binding / return out-copy");
     }
 
+    /// The call/return path binds arguments and places results from the
+    /// precomputed [`crate::isa::Func`] layouts, never a `type_size` lookup: a
+    /// compiled `fib` carries populated `in_offsets`/`in_sizes`/`out_offset`/
+    /// `out_sizes`, and driving it copies the right value through each call.
+    #[test]
+    fn hot_path_has_no_type_lookups() {
+        let src = "fib: function (n: @bit_native) r: @bit_native {\n    if @i_less_than(n, 0x2) {\n        r = n\n    } else {\n        r = @i_add(fib(@i_sub(n, 0x1)), fib(@i_sub(n, 0x2)))\n    }\n}\n\nmain: function () nothing {\n    out: @bit_native = fib(0x12)\n}\n";
+        let program = compile_src(src);
+        let fib = program
+            .funcs
+            .iter()
+            .find(|func| func.name == "fib")
+            .expect("fib function");
+        assert_eq!(fib.in_offsets, vec![0], "input region starts at slot 0");
+        assert_eq!(fib.in_sizes, vec![8], "one pointer-wide input");
+        assert_eq!(fib.out_offset, 8, "output region follows the inputs");
+        assert_eq!(fib.out_sizes, vec![8], "one pointer-wide output");
+        let out = run_and_capture_place(src, "out").expect("run");
+        assert_eq!(out, Some(2584), "fib(18) copied through call/return");
+    }
+
     #[test]
     fn missing_entry_is_clean_error() {
         let program = compile_src("f: function () nothing {\n}\n");
@@ -1282,6 +1292,10 @@ mod tests {
             is_extern: true,
             ins: Vec::new(),
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
             code: Vec::new(),
@@ -1427,6 +1441,10 @@ mod tests {
             is_extern: false,
             ins: Vec::new(),
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
             code: fcode,
@@ -1466,6 +1484,10 @@ mod tests {
                 is_extern: false,
                 ins: Vec::new(),
                 outs: Vec::new(),
+                in_offsets: Vec::new(),
+                in_sizes: Vec::new(),
+                out_offset: 0,
+                out_sizes: Vec::new(),
                 n_regs,
                 slot_bytes: 0,
                 code: words,
@@ -1767,6 +1789,10 @@ mod tests {
             is_extern: false,
             ins: Vec::new(),
             outs: Vec::new(),
+            in_offsets: Vec::new(),
+            in_sizes: Vec::new(),
+            out_offset: 0,
+            out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
             code: hcode,
