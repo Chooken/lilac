@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn target_host_and_parse_round_trip() {
+    fn target_host_is_valid_and_parse_reports_width() {
         assert!(!Target::host().to_triple().is_empty());
         assert_eq!(
             Target::parse("x86_64-pc-windows-msvc")

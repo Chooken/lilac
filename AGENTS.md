@@ -27,10 +27,12 @@
   verifier also rejects duplicate function names.
 - `inkwell` is still confined to `lilac-codegen-llvm` (see above); the runtime
   move does not add LLVM dependencies elsewhere.
-- The single pointer-width rule `is_64_bit_triple(&str)` lives in
-  `lilac-target`. The driver (which bakes the `format_args` piece stride into
-  the injected runtime) and `lilac-codegen-llvm` (which picks `@bit_native`'s
-  LLVM width) both call it, so their widths cannot drift.
+- The single pointer-width rule lives in `lilac-target` and funnels through
+  `Arch::is_64_bit`. The driver reads `Target::bit_native_width()` (which calls
+  `Arch::is_64_bit`) to bake the `format_args` piece stride into the injected
+  runtime; `lilac-codegen-llvm` calls `is_64_bit_triple` (which also delegates
+  to `Arch::is_64_bit`) to pick `@bit_native`'s LLVM width. Because both funnel
+  through `Arch::is_64_bit`, their widths cannot drift.
 
 ## Gates
 

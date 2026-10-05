@@ -249,7 +249,7 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{opt_level, parse_common, Opt};
+    use super::{opt_level, parse_common, ExitCode, Opt};
     use lilac_codegen::OptLevel;
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -327,6 +327,9 @@ mod tests {
 
     #[test]
     fn unknown_target_is_rejected() {
-        assert!(parse_common(&args(&["f.lilac", "--target=foo"]), false).is_err());
+        assert_eq!(
+            parse_common(&args(&["f.lilac", "--target=foo"]), false).err(),
+            Some(ExitCode::from(2))
+        );
     }
 }

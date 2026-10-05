@@ -118,6 +118,9 @@ pub enum Os {
 
 impl Os {
     /// Parses an operating-system name.
+    ///
+    /// `"macos"` is accepted as an input alias; [`Os::as_str`] always renders
+    /// the canonical `darwin`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -319,6 +322,9 @@ impl Target {
 }
 
 impl Default for Target {
+    /// The bare-metal default (`x86_64-unknown-none`) is deliberately
+    /// host-independent so default `emit-ir` output is stable across build
+    /// machines.
     fn default() -> Self {
         Self {
             arch: Arch::X86_64,
@@ -330,6 +336,7 @@ impl Default for Target {
 }
 
 /// Failure modes of [`Target::parse`].
+#[non_exhaustive]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ParseError {
     /// The input was empty.
@@ -418,6 +425,26 @@ mod tests {
     }
 
     #[test]
+    fn os_unknown_with_vendor_parses() {
+        let t = Target::parse("x86_64-unknown-unknown").expect("valid");
+        assert_eq!(
+            (t.arch, t.vendor, t.os, t.abi),
+            (Arch::X86_64, Vendor::Unknown, Os::Unknown, Abi::None)
+        );
+        assert_eq!(t.to_triple(), "x86_64-unknown-unknown");
+    }
+
+    #[test]
+    fn vendor_omitted_musl_normalizes() {
+        let t = Target::parse("x86_64-linux-musl").expect("valid");
+        assert_eq!(
+            (t.arch, t.vendor, t.os, t.abi),
+            (Arch::X86_64, Vendor::Unknown, Os::Linux, Abi::Musl)
+        );
+        assert_eq!(t.to_triple(), "x86_64-unknown-linux-musl");
+    }
+
+    #[test]
     fn macos_renders_darwin() {
         let t = Target::parse("aarch64-apple-darwin").expect("valid");
         assert_eq!(t.os, Os::Macos);
@@ -448,28 +475,30 @@ mod tests {
     #[test]
     #[allow(clippy::bool_assert_comparison)]
     fn width_agrees_for_every_arch() {
-        for arch in [
-            Arch::X86,
-            Arch::X86_64,
-            Arch::Arm,
-            Arch::Aarch64,
-            Arch::Riscv32,
-            Arch::Riscv64,
-            Arch::Wasm32,
-            Arch::Wasm64,
-        ] {
+        let expected = [
+            (Arch::X86, 32),
+            (Arch::X86_64, 64),
+            (Arch::Arm, 32),
+            (Arch::Aarch64, 64),
+            (Arch::Riscv32, 32),
+            (Arch::Riscv64, 64),
+            (Arch::Wasm32, 32),
+            (Arch::Wasm64, 64),
+        ];
+        for (arch, width) in expected {
             let t = Target {
                 arch,
                 vendor: Vendor::Unknown,
                 os: Os::None,
                 abi: Abi::None,
             };
+            assert_eq!(t.bit_native_width(), width, "{arch:?}");
+            assert_eq!(arch.is_64_bit(), width == 64, "{arch:?}");
             assert_eq!(
                 is_64_bit_triple(&t.to_triple()),
                 arch.is_64_bit(),
                 "{arch:?}"
             );
-            assert_eq!(t.bit_native_width(), if arch.is_64_bit() { 64 } else { 32 });
         }
         assert_eq!(is_64_bit_triple("riscv64-unknown-none"), true);
         assert_eq!(is_64_bit_triple("riscv32-unknown-none"), false);
