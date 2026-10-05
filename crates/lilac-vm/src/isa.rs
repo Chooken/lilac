@@ -651,6 +651,7 @@ fn verify_call(
 }
 
 /// Verifies one instruction.
+#[allow(clippy::too_many_lines)]
 fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), String> {
     let n_regs = func.n_regs;
     let slot_bytes = func.slot_bytes;
@@ -689,10 +690,13 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             check_slot(*place, 1, slot_bytes)?;
         }
         Instr::AddrField {
-            dst, place, off, ..
+            dst,
+            place,
+            off,
+            indirect,
         } => {
             check_reg(*dst, n_regs)?;
-            check_slot(*place, *off, slot_bytes)?;
+            check_field_base(*place, *off, *indirect, slot_bytes)?;
         }
         Instr::AddrFunc { dst, func: target } => {
             check_reg(*dst, n_regs)?;
@@ -703,15 +707,19 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
             place,
             off,
             ty,
-            ..
-        } => verify_field_read(program, *dst, *place, *off, *ty, n_regs, slot_bytes)?,
+            indirect,
+        } => verify_field_read(
+            program, *dst, *place, *off, *ty, *indirect, n_regs, slot_bytes,
+        )?,
         Instr::StoreField {
             src,
             place,
             off,
             ty,
-            ..
-        } => verify_field_write(program, *src, *place, *off, *ty, n_regs, slot_bytes)?,
+            indirect,
+        } => verify_field_write(
+            program, *src, *place, *off, *ty, *indirect, n_regs, slot_bytes,
+        )?,
         Instr::Arith {
             dst, lhs, rhs, ty, ..
         } => {
@@ -750,13 +758,34 @@ fn verify_instr(program: &Program, func: &Func, instr: &Instr) -> Result<(), Str
     Ok(())
 }
 
+/// Validates a field instruction's object slot.
+///
+/// When `indirect`, the slot must hold a pointer-sized ref: `off` is relative
+/// to the dereferenced pointee, not the frame, so it is not added to the
+/// frame-slot bound. Otherwise the slot itself is the aggregate and must cover
+/// `direct_extent` bytes (`off`, or `off + size` for scalar reads/writes).
+fn check_field_base(
+    place: u32,
+    direct_extent: u32,
+    indirect: bool,
+    slot_bytes: u32,
+) -> Result<(), String> {
+    if indirect {
+        check_slot(place, VM_POINTER_BYTES, slot_bytes)
+    } else {
+        check_slot(place, direct_extent, slot_bytes)
+    }
+}
+
 /// Verifies a scalar field read.
+#[allow(clippy::too_many_arguments)]
 fn verify_field_read(
     program: &Program,
     dst: u32,
     place: u32,
     off: u32,
     ty: TypeId,
+    indirect: bool,
     n_regs: u32,
     slot_bytes: u32,
 ) -> Result<(), String> {
@@ -764,16 +793,18 @@ fn verify_field_read(
         .checked_add(type_size(program, ty)?)
         .ok_or_else(|| "field extent overflow".to_string())?;
     check_reg(dst, n_regs)?;
-    check_slot(place, extent, slot_bytes)
+    check_field_base(place, extent, indirect, slot_bytes)
 }
 
 /// Verifies a scalar field write.
+#[allow(clippy::too_many_arguments)]
 fn verify_field_write(
     program: &Program,
     src: Operand,
     place: u32,
     off: u32,
     ty: TypeId,
+    indirect: bool,
     n_regs: u32,
     slot_bytes: u32,
 ) -> Result<(), String> {
@@ -782,7 +813,7 @@ fn verify_field_write(
         .checked_add(size)
         .ok_or_else(|| "field extent overflow".to_string())?;
     check_operand(src, size, n_regs, slot_bytes)?;
-    check_slot(place, extent, slot_bytes)
+    check_field_base(place, extent, indirect, slot_bytes)
 }
 
 /// Verifies a direct call.
@@ -952,5 +983,69 @@ mod tests {
             global_off: 1,
         }];
         assert!(verify(&program).is_ok());
+    }
+
+    /// An `indirect` field access treats the object slot as a pointer: `off`
+    /// is relative to the pointee and must not be added to the frame-slot
+    /// bound, so an offset past the frame extent still verifies.
+    #[test]
+    fn verifier_accepts_indirect_field_beyond_frame_extent() {
+        let program = sample_program(vec![
+            Instr::Field {
+                dst: 0,
+                place: 0,
+                off: 1024,
+                ty: 0,
+                indirect: true,
+            },
+            Instr::AddrField {
+                dst: 0,
+                place: 0,
+                off: 1024,
+                indirect: true,
+            },
+            Instr::StoreField {
+                src: Operand::Reg(0),
+                place: 0,
+                off: 1024,
+                ty: 0,
+                indirect: true,
+            },
+            Instr::Return,
+        ]);
+        assert!(verify(&program).is_ok(), "{:?}", verify(&program));
+    }
+
+    /// An `indirect` field access still requires the object slot to hold a
+    /// full pointer.
+    #[test]
+    fn verifier_rejects_indirect_field_pointer_out_of_range() {
+        let program = sample_program(vec![
+            Instr::Field {
+                dst: 0,
+                place: 4,
+                off: 0,
+                ty: 0,
+                indirect: true,
+            },
+            Instr::Return,
+        ]);
+        assert!(verify(&program).is_err());
+    }
+
+    /// A direct field access stays bounded by `place + off + size`.
+    #[test]
+    fn verifier_rejects_direct_field_beyond_frame_extent() {
+        let program = sample_program(vec![
+            Instr::Field {
+                dst: 0,
+                place: 0,
+                off: 4,
+                ty: 0,
+                indirect: false,
+            },
+            Instr::Return,
+        ]);
+        assert!(verify(&program).is_err());
     }
 }

@@ -1056,4 +1056,28 @@ mod tests {
             }
         )));
     }
+
+    /// A ref-object field read at an `off` past the *frame's* direct extent must
+    /// compile: the slot holds a pointer, so `off` is relative to the pointee.
+    /// The `get` frame is `instance(8) + result(1)`, yet `instance.b` is at
+    /// offset 8 — the old frame-extent check rejected it and tripped `bug!`.
+    #[test]
+    fn ref_object_field_beyond_frame_extent_compiles() {
+        let program = compile_src(
+            "Pair: object {\n    a: @bit64\n    b: @bit64\n    get: function (instance: ref Pair) result: @bit8 {\n        result = @truncate(instance.b)\n    }\n}\nmain: function () nothing {\n    p: Pair = Pair {\n        a = 0x1\n        b = 0x2\n    }\n    r: @bit8 = p.get()\n}\n",
+        );
+        let get = program
+            .funcs
+            .iter()
+            .find(|f| f.name == "Pair.get")
+            .expect("Pair.get");
+        assert!(get.code.iter().any(|i| matches!(
+            i,
+            Instr::Field {
+                indirect: true,
+                off: 8,
+                ..
+            }
+        )));
+    }
 }
