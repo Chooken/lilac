@@ -16,11 +16,13 @@
 //! # Scope
 //!
 //! This task adds the memory instruction set (`Load`/`Store`/`Addr`/`AddrField`/
-//! `Field`/`StoreField`), indirect calls, and the `@ptr_add`/`@memcpy` builtins,
-//! and executes the injected byte-buffer/`format_args` runtime bodies.
-//! `@lilac_abort` traps (stderr `panic: aborted`, [`Step::Panicked`]); `Panic`
-//! and `Unreachable` land in a later task and are still an internal error
-//! (`lilac_error::bug!`).
+//! `Field`/`StoreField`), indirect calls, the `@ptr_add`/`@memcpy` builtins, the
+//! `Panic` terminator, and executes the injected byte-buffer/`format_args`
+//! runtime bodies. Both `@lilac_abort` and `Panic` trap through
+//! `trap_message`: they print `panic: <message>` to stderr and yield
+//! [`Step::Panicked`], which [`Machine::run`] maps to `Ok(101)`. `Unreachable`
+//! remains an internal error (`lilac_error::bug!`): reaching it means a verified
+//! program executed code the compiler proved dead.
 
 use std::fmt;
 
@@ -371,9 +373,20 @@ impl<'a> Machine<'a> {
                 return self.call_builtin(*builtin, ins, outs, reg_base, slot_base);
             }
             Instr::Return => return self.return_from_frame(program),
-            other => lilac_error::bug!(
+            Instr::Panic { data } => {
+                // The referenced data constant's bytes are the panic message.
+                // The verifier's `check_data` guarantees the index is in range;
+                // the empty fallback only guards an unverified program.
+                let message = program
+                    .data
+                    .get(*data as usize)
+                    .map_or(&[][..], |entry| entry.bytes.as_slice());
+                return Ok(trap(message));
+            }
+            Instr::Unreachable => lilac_error::bug!(
                 lilac_span::Span::dummy(),
-                "instruction not implemented in this task: {other:?}"
+                "executed an `unreachable` terminator in `{}`",
+                func.name
             ),
         }
         Ok(Step::Advanced)
@@ -665,10 +678,7 @@ impl<'a> Machine<'a> {
                 self.copy_arena(src_abs, dst_abs, len)?;
                 Ok(Step::Advanced)
             }
-            Builtin::Abort => {
-                eprintln!("panic: aborted");
-                Ok(Step::Panicked(ABORT_CODE))
-            }
+            Builtin::Abort => Ok(trap(b"aborted")),
         }
     }
 
@@ -793,6 +803,20 @@ fn type_size(program: &Program, ty: TypeId) -> u32 {
 /// The source line whose `pc` is the greatest not exceeding `pc`.
 fn line_for(func: &crate::isa::Func, pc: u32) -> Option<crate::isa::Line> {
     func.lines.iter().rev().find(|line| line.pc <= pc).cloned()
+}
+
+/// Renders the diagnostic line the VM prints when it traps.
+///
+/// Both the `Panic` terminator and `@lilac_abort` share this prefix so their
+/// output is consistent (`panic: <message>`).
+fn trap_message(message: &[u8]) -> String {
+    format!("panic: {}", String::from_utf8_lossy(message))
+}
+
+/// Prints `message` to stderr and yields the panic step for [`Machine::run`].
+fn trap(message: &[u8]) -> Step {
+    eprintln!("{}", trap_message(message));
+    Step::Panicked(ABORT_CODE)
 }
 
 /// A bit mask covering `size` bytes.
@@ -939,7 +963,7 @@ fn eval_arith(op: ArithOp, left: u64, right: u64, size: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Machine, Step, VmError};
+    use super::{trap_message, Machine, Step, VmError};
     use crate::compile::compile_src;
     use crate::isa::{self, Instr};
 
@@ -1095,6 +1119,41 @@ mod tests {
             machine.run(),
             Err(VmError::ExternCall(name)) if name == "ext"
         ));
+    }
+
+    /// A `Panic` terminator returns exit code 101, so `run` yields `Ok(101)`.
+    /// M5c has no source-level panic (the `LirTerm::Panic` terminator is not
+    /// produced by the frontend), so the program is built directly.
+    #[test]
+    fn panic_returns_101() {
+        assert_eq!(run(&panic_program(b"boom")).expect("run"), 101);
+    }
+
+    /// The trap message line is `panic: ` followed by the data constant's bytes.
+    #[test]
+    fn panic_trap_message_has_prefix_and_data_bytes() {
+        assert_eq!(trap_message(b"boom"), "panic: boom");
+    }
+
+    /// A call to an `extern` (bodyless) function is a clean VM runtime error,
+    /// not a trap. The declaration spelling matches `tests/ui/extern_decl.lilac`.
+    #[test]
+    fn extern_call_is_clean_error() {
+        let src = "puts: extern function (s: @byte_buffer) nothing\n\
+                   main: function () nothing {\n    puts(\"hi\")\n}\n";
+        assert!(matches!(run_src(src), Err(VmError::ExternCall(name)) if name == "puts"));
+    }
+
+    /// A one-function `main` program whose `Panic` references a data constant
+    /// holding `message`.
+    fn panic_program(message: &[u8]) -> isa::Program {
+        let mut program = isa::sample_program(vec![Instr::Panic { data: 0 }]);
+        program.data = vec![isa::Data {
+            bytes: message.to_vec(),
+            global_off: 0,
+        }];
+        program.globals = message.to_vec();
+        program
     }
 
     #[test]
