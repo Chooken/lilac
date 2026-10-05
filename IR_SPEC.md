@@ -274,12 +274,13 @@ panic !msg
 @compile_error(live)
 ```
 Lowering emits one `@compile_error(live)` marker per `@compile_error(msg)`
-call site. `compile.error` fires only if still live after constant folding
-(`E031`): a marker inside a branch eliminated by folding is dropped without
+call site. `compile.error` fires only if still live after constant folding and
+global dead-code elimination (`E031`): a marker inside a branch eliminated by
+folding, or inside a function unreachable from `main`, is dropped without
 diagnostic, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
-that survives folding is a live error, diagnosed during folding — never during
-verification (reaching the verifier is an internal error). The fold-required
+that survives is a live error, diagnosed after reachability pruning — never
+during verification (reaching the verifier is an internal error). The fold-required
 markers `@as_int`, `@as_float`, and `@size_of` are the same shape: the front-end
 emits a pre-fold node, the folder consumes it to a plain `const` (or `E060`), and
 a survivor reaching verification is an internal error, never a backend call.

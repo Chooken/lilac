@@ -179,3 +179,28 @@ fn cfold_dead_silent() {
     assert!(output.status.success(), "stderr:\n{stderr}");
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
+
+/// A `@compile_error` inside a hook that no code path invokes is silent: the
+/// hook is unreachable and DCE drops it before the live-error check.
+#[test]
+fn unused_hook_compile_error_silent() {
+    let output = lilac()
+        .args(["check", &ui("hook_unused_compile_error.lilac")])
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
+/// The same hook, invoked by a live `@on_drop`, reports `E031`.
+#[test]
+fn used_hook_compile_error_is_e031() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_hook_used_compile_error.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E031]"), "stderr:\n{stderr}");
+}

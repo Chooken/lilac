@@ -1666,8 +1666,9 @@ impl Lower<'_> {
     }
 
     /// Emits a `@compile_error` marker with a dummy `#bit8` result slot:
-    /// live sites never reach codegen (`fold` reports `E031` first); dead
-    /// ones prune away, leaving only an unused zeroed place behind.
+    /// live sites never reach codegen (the post-DCE check reports `E031`
+    /// first); dead ones prune away, leaving only an unused zeroed place
+    /// behind.
     fn lower_compile_error(
         &mut self,
         fs: &mut FuncState,

@@ -45,8 +45,9 @@ pub struct FoldValueError {
 /// Folds one function at a time: constant arithmetic, constant branch
 /// conditions (with dead-block pruning), fold-required intrinsics
 /// (`@as_int`/`@as_float`/`@size_of`), and dead `@compile_error` removal.
-/// Still-live `@compile_error` sites report `E031`; unfoldable intrinsics
-/// report `E060`.
+/// Still-live `@compile_error` sites are left in place for
+/// [`check_live_compile_errors`] (which the driver runs after reachability
+/// pruning); unfoldable intrinsics report `E060`.
 ///
 /// M3 adds bounded best-effort call-eval: a `call` whose `in` places are all
 /// constant is interpreted under [`MAX_FOLD_STEPS`]/[`MAX_CALL_DEPTH`]; a
@@ -55,8 +56,8 @@ pub struct FoldValueError {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorGuaranteed`] when a live `@compile_error` (`E031`) or a
-/// fold-required intrinsic value error (`E060`) was reported.
+/// Returns [`ErrorGuaranteed`] when a fold-required intrinsic value error
+/// (`E060`) was reported.
 pub fn fold(module: &mut LirModule, diags: &mut Diags) -> Result<(), ErrorGuaranteed> {
     fold_with_fuel(module, diags, MAX_FOLD_STEPS, MAX_CALL_DEPTH)
 }
@@ -93,6 +94,47 @@ fn fold_with_fuel(
         folder.fold_func(func);
     }
     if folder.failed {
+        Err(ErrorGuaranteed::new())
+    } else {
+        Ok(())
+    }
+}
+
+/// Reports `E031` for every still-live `@compile_error` in `module`.
+///
+/// Call this **after** reachability pruning
+/// ([`lilac_ir::prune_unreachable`]) so that errors in functions unreachable
+/// from `main` — uncalled functions and unused hooks — stay silent. Each site
+/// labels both the message literal and the call.
+///
+/// # Errors
+///
+/// Returns [`ErrorGuaranteed`] when at least one live site was reported.
+pub fn check_live_compile_errors(
+    module: &LirModule,
+    diags: &mut Diags,
+) -> Result<(), ErrorGuaranteed> {
+    let mut failed = false;
+    for func in &module.funcs {
+        for block in &func.blocks {
+            for inst in &block.insts {
+                if let LirInst::CompileError {
+                    msg,
+                    msg_span,
+                    call_span,
+                } = inst
+                {
+                    failed = true;
+                    diags.emit(
+                        Diagnostic::error("E031", msg.clone())
+                            .label(*msg_span, true, "message here".to_owned())
+                            .label(*call_span, false, "evaluated here".to_owned()),
+                    );
+                }
+            }
+        }
+    }
+    if failed {
         Err(ErrorGuaranteed::new())
     } else {
         Ok(())
@@ -1091,7 +1133,6 @@ impl Folder<'_> {
             self.fold_block(block, &mut consts);
         }
         Self::prune_dead(func);
-        self.check_live_errors(func);
     }
 
     /// Deletes unreachable non-entry blocks to a fixpoint (dead
@@ -1121,28 +1162,6 @@ impl Folder<'_> {
                 .retain(|block| block.label == entry || referenced.contains(&block.label));
             if func.blocks.len() == before {
                 break;
-            }
-        }
-    }
-
-    /// Reports still-live `@compile_error` sites as `E031` (both spans:
-    /// the message literal and the call).
-    fn check_live_errors(&mut self, func: &LirFunc) {
-        for block in &func.blocks {
-            for inst in &block.insts {
-                if let LirInst::CompileError {
-                    msg,
-                    msg_span,
-                    call_span,
-                } = inst
-                {
-                    self.failed = true;
-                    self.diags.emit(
-                        Diagnostic::error("E031", msg.clone())
-                            .label(*msg_span, true, "message here".to_owned())
-                            .label(*call_span, false, "evaluated here".to_owned()),
-                    );
-                }
             }
         }
     }
@@ -1841,7 +1860,11 @@ mod tests {
     fn live_compile_error_is_e031() {
         let mut module = branch_module(true);
         let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_err());
+        // Folding no longer decides E031; the module-level check does, so a
+        // caller that already pruned unreachable functions can run it.
+        assert!(fold(&mut module, &mut diags).is_ok());
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(check_live_compile_errors(&module, &mut diags).is_err());
         let errors: Vec<_> = diags
             .diagnostics()
             .iter()
@@ -1849,6 +1872,56 @@ mod tests {
             .collect();
         assert_eq!(errors.len(), 1, "{diags:?}");
         assert_eq!(errors[0].labels.len(), 2, "{diags:?}");
+    }
+
+    /// `main` plus an uncalled `dead` function carrying a `@compile_error`.
+    fn dead_error_module() -> LirModule {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: Vec::new(),
+                term: ret(),
+                span: test_span(),
+            }],
+        });
+        module.funcs.push(LirFunc {
+            name: "dead".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![LirInst::CompileError {
+                    msg: "boom".to_owned(),
+                    msg_span: test_span(),
+                    call_span: test_span(),
+                }],
+                term: ret(),
+                span: test_span(),
+            }],
+        });
+        module
+    }
+
+    /// Once DCE drops an unreachable function, its `@compile_error` is silent.
+    #[test]
+    fn pruned_compile_error_is_silent() {
+        let mut module = dead_error_module();
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok());
+        assert!(!diags.has_errors(), "fold must not report E031: {diags:?}");
+        lilac_ir::prune_unreachable(&mut module);
+        assert!(
+            module.funcs.iter().all(|f| f.name != "dead"),
+            "dead function must be pruned"
+        );
+        assert!(check_live_compile_errors(&module, &mut diags).is_ok());
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     fn e060_count(diags: &Diags) -> usize {

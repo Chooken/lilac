@@ -157,9 +157,10 @@ therefore the caller's explicit choice of sink, never hidden sugar behavior.
 ### Compile-time folding
 
 Constant `if` conditions are folded before code generation: only the live branch
-is kept. `@compile_error(msg)` fires only if it is still live after folding, so
-a `@compile_error` inside a dead branch is silently dropped. The former
-camelCase alias `@compilerError` is no longer accepted.
+is kept. `@compile_error(msg)` fires only if it is still live after folding and
+global dead-code elimination, so a `@compile_error` inside a dead branch, an
+uncalled function, or an unused hook is silently dropped. The former camelCase
+alias `@compilerError` is no longer accepted.
 
 Folding runs after `=>` (inline) functions are substituted, so a conversion
 helper written as `=>` that wraps `@as_int` / `@as_float` folds exactly like a

@@ -1,0 +1,12 @@
+Object: object {
+    member: @bit32
+    @on_drop: function (from: ref Object) nothing {
+        @compile_error("used hook")
+    }
+}
+
+main: function () nothing {
+    value: Object = Object {
+        member = 0x1
+    }
+}

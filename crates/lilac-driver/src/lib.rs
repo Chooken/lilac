@@ -142,8 +142,10 @@ impl Session {
     }
 
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
-    /// `fold` → inject runtime → `prune` → `verify`. Stops at the first failing
-    /// pass. `on_stage` fires at each reached boundary (see
+    /// `fold` → inject runtime → `prune` → check live `@compile_error` →
+    /// `verify`. Stops at the first failing pass. The live-error check runs
+    /// after `prune` so errors in functions unreachable from `main` are silent.
+    /// `on_stage` fires at each reached boundary (see
     /// [`Session::compile_lir_with_stages`]).
     fn run_pipeline(
         &mut self,
@@ -181,6 +183,7 @@ impl Session {
             .extend(lilac_ir::runtime::build_runtime(ptr_width));
         on_stage("runtime", &lir);
         lilac_ir::prune_unreachable(&mut lir);
+        lilac_const::check_live_compile_errors(&lir, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
@@ -472,6 +475,34 @@ mod tests {
             texts[3].1,
             module.to_text(),
             "final stage is the returned module"
+        );
+    }
+
+    /// A `@compile_error` in a function unreachable from `main` is silent:
+    /// global DCE drops the function before the live-error check runs.
+    #[test]
+    fn unreachable_compile_error_is_silent() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "dead.lilac",
+            "dead: function () nothing {\n    @compile_error(\"dead\")\n}\n\nmain: function () nothing {\n}\n",
+        );
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+    }
+
+    /// A `@compile_error` reachable from `main` still reports `E031`.
+    #[test]
+    fn reachable_compile_error_is_e031() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "live.lilac",
+            "boom: function () nothing {\n    @compile_error(\"live\")\n}\n\nmain: function () nothing {\n    boom()\n}\n",
+        );
+        assert!(result.is_err());
+        assert!(
+            session.render_diagnostics().contains("error[E031]"),
+            "{}",
+            session.render_diagnostics()
         );
     }
 }

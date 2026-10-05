@@ -328,8 +328,8 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `@compile_error` site (folding removes it or reports `E031`;
-    /// reaching `verify` is an internal error).
+    /// `@compile_error` site (folding removes it; the post-DCE check
+    /// reports `E031`; reaching `verify` is an internal error).
     CompileError {
         /// Error message.
         msg: String,
