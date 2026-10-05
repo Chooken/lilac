@@ -15,19 +15,26 @@
 //!
 //! # Scope
 //!
-//! This task implements scalars, control flow, direct calls, entry, and the
-//! within-frame `CopyBytes` a direct call needs. The memory instructions
-//! (`Load`/`Store`/`Addr`/`Field`), `CallIndirect`, builtins, `Panic`, and
-//! `Unreachable` are later tasks; reaching them is an internal error
-//! (`lilac_error::bug!`).
+//! This task adds the memory instruction set (`Load`/`Store`/`Addr`/`AddrField`/
+//! `Field`/`StoreField`), indirect calls, and the `@ptr_add`/`@memcpy` builtins.
+//! `Panic`/`Unreachable`/`@lilac_abort` land in a later task; reaching them is
+//! an internal error (`lilac_error::bug!`).
 
 use std::fmt;
 
-use crate::isa::{ArithOp, ConvertOp, Instr, Operand, Program, TypeId, VM_POINTER_BYTES};
+use crate::isa::{ArithOp, Builtin, ConvertOp, Instr, Operand, Program, TypeId, VM_POINTER_BYTES};
 
 /// Maximum number of live frames before a call traps with
 /// [`VmError::StackOverflow`].
 pub const MAX_CALL_DEPTH: u32 = 4096;
+
+/// High-bit tag distinguishing a function address from an arena ref.
+///
+/// [`Instr::AddrFunc`] stores `FUNC_TAG | func_id`; [`Instr::CallIndirect`]
+/// decodes it. Live arena refs are byte offsets bounded well below `1 << 63`
+/// (globals cap at 64 MiB and the call stack at [`MAX_CALL_DEPTH`] frames of at
+/// most `u32::MAX` bytes), so the tag cannot collide with a valid ref.
+const FUNC_TAG: u64 = 1 << 63;
 
 /// A VM runtime error.
 #[derive(Debug)]
@@ -254,10 +261,109 @@ impl<'a> Machine<'a> {
                     frame.pc = target;
                 }
             }
+            Instr::Load { dst, src, ty } => {
+                let size = type_size(program, *ty);
+                let ref_off = self.slot_ref(slot_base, *src)?;
+                if size <= VM_POINTER_BYTES {
+                    let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+                    let value = self.read_abs(abs, size).ok_or(VmError::BadRef(ref_off))?;
+                    self.set_reg(reg_base, *dst, value);
+                } else {
+                    // An aggregate register holds a ref, not the bytes, so a
+                    // `Load` of an indirect value passes the pointer through.
+                    self.set_reg(reg_base, *dst, ref_off);
+                }
+            }
+            Instr::Store { src, dst, ty } => {
+                let size = type_size(program, *ty);
+                let ref_off = self.slot_ref(slot_base, *dst)?;
+                let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+                if size <= VM_POINTER_BYTES {
+                    let value = self.read_scalar(reg_base, slot_base, *src, size)?;
+                    self.write_abs(abs, value, size)?;
+                } else {
+                    self.copy_operand_bytes(reg_base, slot_base, *src, abs, size)?;
+                }
+            }
+            Instr::Addr { dst, place } => {
+                let addr = u64::from(slot_base) + u64::from(*place);
+                self.set_reg(reg_base, *dst, addr);
+            }
+            Instr::AddrField {
+                dst,
+                place,
+                off,
+                indirect,
+            } => {
+                let base = self.field_base(slot_base, *place, *indirect)?;
+                let addr = base
+                    .checked_add(*off as usize)
+                    .ok_or(VmError::BadRef(base as u64))?;
+                let addr = u64::try_from(addr).map_err(|_| VmError::BadRef(base as u64))?;
+                self.set_reg(reg_base, *dst, addr);
+            }
+            Instr::AddrFunc { dst, func } => {
+                self.set_reg(reg_base, *dst, FUNC_TAG | u64::from(*func));
+            }
+            Instr::Field {
+                dst,
+                place,
+                off,
+                ty,
+                indirect,
+            } => {
+                let size = type_size(program, *ty);
+                let base = self.field_base(slot_base, *place, *indirect)?;
+                let addr = base
+                    .checked_add(*off as usize)
+                    .ok_or(VmError::BadRef(base as u64))?;
+                if size <= VM_POINTER_BYTES {
+                    let value = self
+                        .read_abs(addr, size)
+                        .ok_or(VmError::BadRef(addr as u64))?;
+                    self.set_reg(reg_base, *dst, value);
+                } else {
+                    // The compiler emits `AddrField` for aggregate fields; this
+                    // is a defensive fall-back that yields the field ref.
+                    let value = u64::try_from(addr).map_err(|_| VmError::BadRef(addr as u64))?;
+                    self.set_reg(reg_base, *dst, value);
+                }
+            }
+            Instr::StoreField {
+                src,
+                place,
+                off,
+                ty,
+                indirect,
+            } => {
+                let size = type_size(program, *ty);
+                let base = self.field_base(slot_base, *place, *indirect)?;
+                let addr = base
+                    .checked_add(*off as usize)
+                    .ok_or(VmError::BadRef(base as u64))?;
+                if size <= VM_POINTER_BYTES {
+                    let value = self.read_scalar(reg_base, slot_base, *src, size)?;
+                    self.write_abs(addr, value, size)?;
+                } else {
+                    self.copy_operand_bytes(reg_base, slot_base, *src, addr, size)?;
+                }
+            }
             Instr::Call {
                 func: target, ins, ..
             } => {
                 self.call(*target, ins, reg_base, slot_base)?;
+            }
+            Instr::CallIndirect { callee, ins, .. } => {
+                let value = self.reg(reg_base, *callee);
+                if value & FUNC_TAG == 0 {
+                    return Err(VmError::BadRef(value));
+                }
+                let target =
+                    u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
+                self.call(target, ins, reg_base, slot_base)?;
+            }
+            Instr::CallBuiltin { builtin, ins, outs } => {
+                self.call_builtin(*builtin, ins, outs, reg_base, slot_base)?;
             }
             Instr::Return => return self.return_from_frame(program),
             other => lilac_error::bug!(
@@ -456,6 +562,103 @@ impl<'a> Machine<'a> {
                 self.set_reg(reg_base, dst_reg, value);
                 Ok(())
             }
+        }
+    }
+
+    /// Reads the pointer-sized ref stored in a frame slot.
+    fn slot_ref(&self, slot_base: u32, place: u32) -> Result<u64, VmError> {
+        let abs = usize::try_from(slot_base).unwrap_or(0) + place as usize;
+        self.read_abs(abs, VM_POINTER_BYTES)
+            .ok_or(VmError::BadRef(abs as u64))
+    }
+
+    /// Resolves a field instruction's object base to an absolute arena offset.
+    ///
+    /// With `indirect`, the object slot holds a ref that is dereferenced first;
+    /// otherwise the frame slot itself is the aggregate base.
+    fn field_base(&self, slot_base: u32, place: u32, indirect: bool) -> Result<usize, VmError> {
+        let slot_abs = usize::try_from(slot_base).unwrap_or(0) + place as usize;
+        if indirect {
+            let ref_off = self
+                .read_abs(slot_abs, VM_POINTER_BYTES)
+                .ok_or(VmError::BadRef(slot_abs as u64))?;
+            usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))
+        } else {
+            Ok(slot_abs)
+        }
+    }
+
+    /// Copies `size` aggregate bytes from an operand to an absolute arena offset.
+    ///
+    /// A register operand of aggregate type is a ref to the bytes; a slot
+    /// operand holds the aggregate directly.
+    fn copy_operand_bytes(
+        &mut self,
+        reg_base: u32,
+        slot_base: u32,
+        operand: Operand,
+        dst_abs: usize,
+        size: u32,
+    ) -> Result<(), VmError> {
+        let src_abs = match operand {
+            Operand::Reg(reg) => {
+                let ref_off = self.reg(reg_base, reg);
+                usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?
+            }
+            Operand::Slot(off) => usize::try_from(slot_base).unwrap_or(0) + off as usize,
+        };
+        self.copy_arena(src_abs, dst_abs, size as usize)
+    }
+
+    /// Executes a compiler leaf builtin.
+    fn call_builtin(
+        &mut self,
+        builtin: Builtin,
+        ins: &[Operand],
+        outs: &[u32],
+        reg_base: u32,
+        slot_base: u32,
+    ) -> Result<(), VmError> {
+        match builtin {
+            Builtin::PtrAdd => {
+                let (base, offset) = match ins {
+                    [base, offset] => (*base, *offset),
+                    _ => {
+                        lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects two inputs")
+                    }
+                };
+                let base = self.read_scalar(reg_base, slot_base, base, VM_POINTER_BYTES)?;
+                let offset = self.read_scalar(reg_base, slot_base, offset, VM_POINTER_BYTES)?;
+                let Some(&out) = outs.first() else {
+                    lilac_error::bug!(lilac_span::Span::dummy(), "@ptr_add expects one output");
+                };
+                self.write_scalar(
+                    reg_base,
+                    slot_base,
+                    Operand::Slot(out),
+                    base.wrapping_add(offset),
+                    VM_POINTER_BYTES,
+                )
+            }
+            Builtin::Memcpy => {
+                let (dst, src, len) = match ins {
+                    [dst, src, len] => (*dst, *src, *len),
+                    _ => {
+                        lilac_error::bug!(lilac_span::Span::dummy(), "@memcpy expects three inputs")
+                    }
+                };
+                let dst = self.read_scalar(reg_base, slot_base, dst, VM_POINTER_BYTES)?;
+                let src = self.read_scalar(reg_base, slot_base, src, VM_POINTER_BYTES)?;
+                let len = self.read_scalar(reg_base, slot_base, len, VM_POINTER_BYTES)?;
+                let dst_abs = usize::try_from(dst).map_err(|_| VmError::BadRef(dst))?;
+                let src_abs = usize::try_from(src).map_err(|_| VmError::BadRef(src))?;
+                let len = usize::try_from(len).map_err(|_| VmError::BadRef(len))?;
+                self.copy_arena(src_abs, dst_abs, len)
+            }
+            Builtin::Abort => lilac_error::bug!(
+                lilac_span::Span::dummy(),
+                "@lilac_abort is implemented in a later task"
+            ),
         }
     }
 
@@ -733,6 +936,29 @@ mod tests {
     fn run_src(src: &str) -> Result<i32, VmError> {
         let program = compile_src(src);
         Machine::new(&program)?.run()
+    }
+
+    /// Runs `program` to completion.
+    fn run(program: &isa::Program) -> Result<i32, VmError> {
+        Machine::new(program)?.run()
+    }
+
+    /// Runs `src`, capturing the last value seen in `place` while its frame is
+    /// live (the frame is popped by the terminating `Return`).
+    fn run_and_capture_place(src: &str, place: &str) -> Result<Option<u64>, VmError> {
+        let program = compile_src(src);
+        let mut machine = Machine::new(&program)?;
+        let mut captured = None;
+        loop {
+            if let Some(value) = machine.read_place(place) {
+                captured = Some(value);
+            }
+            match machine.step()? {
+                Step::Advanced => {}
+                Step::Returned | Step::Panicked(_) => break,
+            }
+        }
+        Ok(captured)
     }
 
     #[test]
@@ -1055,5 +1281,134 @@ mod tests {
         machine.step().expect("const rhs");
         machine.step().expect("cmp");
         assert_eq!(machine.read_reg(2), Some(1), "0x100 == 0x0 masked to u8");
+    }
+
+    /// `Point { x, y }` stores both fields into an aggregate place; `p.x` reads
+    /// the first field back. Exercises `Addr`/`StoreField`/`Field` plus the
+    /// aggregate `Copy` that materializes the literal into `%p`.
+    #[test]
+    fn struct_field_round_trips() {
+        let src = "Point: object {\n    x: @bit_native\n    y: @bit_native\n}\n\
+                   main: function () nothing {\n    p: Point = Point {\n        x = 0x1\n        y = 0x2\n    }\n    a: @bit_native = p.x\n}\n";
+        let a = run_and_capture_place(src, "a").expect("run");
+        assert_eq!(a, Some(0x1), "first field round-trips");
+    }
+
+    /// `@ptr_add` on a frame ref with a large byte offset produces a ref beyond
+    /// the arena; the following `load` must trap with `BadRef`, never panic.
+    #[test]
+    fn ptr_add_out_of_range_traps() {
+        let src = "main: function () nothing {\n    p: @bit8 = 0x0\n    r: ref @bit8 = ref p\n    v: @bit8 = @load_u8(r, 0x100000)\n}\n";
+        assert!(matches!(run_src(src), Err(VmError::BadRef(_))));
+    }
+
+    /// A `store` through an out-of-range ref traps with `BadRef`.
+    #[test]
+    fn store_u8_out_of_range_traps() {
+        let src = "main: function () nothing {\n    p: @bit8 = 0x0\n    r: ref @bit8 = ref p\n    @store_u8(r, 0x100000, 0x1)\n}\n";
+        assert!(matches!(run_src(src), Err(VmError::BadRef(_))));
+    }
+
+    /// A data buffer's pointer is read with `Field`, `@load_u8` addresses it
+    /// with `@ptr_add`, and the resulting byte is loaded back.
+    #[test]
+    fn byte_buffer_load_uses_addr_field_and_ptr_add() {
+        let src = "main: function () nothing {\n    s: @byte_buffer = \"A\"\n    p: ref @bit8 = @byte_buffer_ptr(s)\n    c: @bit8 = @load_u8(p, 0x0)\n}\n";
+        let c = run_and_capture_place(src, "c").expect("run");
+        assert_eq!(c, Some(0x41), "first buffer byte is `A`");
+    }
+
+    /// `@memcpy` copies raw bytes through two refs; the copied byte is read
+    /// back through the destination ref.
+    #[test]
+    fn memcpy_builtin_copies_bytes() {
+        let src = "main: function () nothing {\n    cell: @bit8 = 0x0\n    dp: ref @bit8 = ref cell\n    s: @byte_buffer = \"A\"\n    sp: ref @bit8 = @byte_buffer_ptr(s)\n    @memcpy(dp, sp, 0x1)\n    c: @bit8 = @load_u8(dp, 0x0)\n}\n";
+        let c = run_and_capture_place(src, "c").expect("run");
+        assert_eq!(c, Some(0x41), "copied byte is `A`");
+    }
+
+    /// `AddrFunc` yields a decodable function address that `CallIndirect`
+    /// dispatches.
+    #[test]
+    fn addr_func_and_call_indirect_round_trip() {
+        let mut program = isa::sample_program(vec![
+            Instr::AddrFunc { dst: 0, func: 1 },
+            Instr::CallIndirect {
+                callee: 0,
+                ins: Vec::new(),
+                outs: Vec::new(),
+            },
+            Instr::Return,
+        ]);
+        program.funcs.push(isa::Func {
+            name: "helper".to_string(),
+            is_extern: false,
+            ins: Vec::new(),
+            outs: Vec::new(),
+            n_regs: 0,
+            slot_bytes: 0,
+            code: vec![Instr::Return],
+            lines: Vec::new(),
+            place_names: Vec::new(),
+        });
+        program.verify().expect("verify");
+        assert_eq!(run(&program).expect("run"), 0);
+    }
+
+    /// A `CallIndirect` through a value with no function tag is not a valid
+    /// function address and traps with `BadRef`.
+    #[test]
+    fn call_indirect_non_function_traps() {
+        let program = isa::sample_program(vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0x1,
+                ty: 0,
+            },
+            Instr::CallIndirect {
+                callee: 0,
+                ins: Vec::new(),
+                outs: Vec::new(),
+            },
+            Instr::Return,
+        ]);
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("const");
+        assert!(matches!(machine.step(), Err(VmError::BadRef(_))));
+    }
+
+    /// An `indirect` `Field` read through an out-of-range ref traps with
+    /// `BadRef`, never a panic.
+    #[test]
+    fn field_out_of_range_traps() {
+        let program = arith_program(
+            vec![isa::TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            }],
+            vec![
+                Instr::Field {
+                    dst: 0,
+                    place: 0,
+                    off: 0,
+                    ty: 0,
+                    indirect: true,
+                },
+                Instr::Return,
+            ],
+            1,
+        );
+        // `arith_program` has no slots; give it an 8-byte ref cell.
+        let mut program = program;
+        program.funcs[0].slot_bytes = 8;
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        // Seed the object slot with a huge ref before the field read.
+        machine
+            .write_abs(0, u64::MAX - 1, isa::VM_POINTER_BYTES)
+            .expect("seed ref");
+        assert!(matches!(machine.step(), Err(VmError::BadRef(_))));
     }
 }
