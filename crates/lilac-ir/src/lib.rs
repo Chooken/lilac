@@ -694,6 +694,11 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     Some(BuiltinSig { ins, outs })
 }
 
+/// Whether an IR type spelling is a reference (`ref X`).
+fn is_ref_ty(ty: &str) -> bool {
+    ty.starts_with("ref ")
+}
+
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.
 /// A `CompileError` node reaching here means folding never ran — an
 /// internal error (`bug!`), never a user diagnostic.
@@ -746,7 +751,14 @@ impl Verifier<'_> {
             );
             return;
         }
+        let mut seen: HashSet<&str> = HashSet::new();
         for func in &self.module.funcs {
+            if !seen.insert(func.name.as_str()) {
+                self.error(
+                    format!("duplicate function `@{}`", func.name),
+                    Span::dummy(),
+                );
+            }
             self.verify_func(func);
         }
     }
@@ -941,9 +953,10 @@ impl Verifier<'_> {
     }
 
     /// Checks a place copy: the destination must be declared and the source
-    /// operand's type must match it (`IR_SPEC.md` restricts `copy` to values of
-    /// the same type), so an adapter such as a `ref`-to-value dereference
-    /// cannot slip through as a raw pointer copy.
+    /// operand's type must be compatible. Two reference places are compatible
+    /// under opaque pointers (`ref X` -> `ref Y`), but a `ref`-to-value copy or
+    /// two distinct value types are rejected, so an adapter such as a
+    /// dereference cannot slip through as a raw pointer copy.
     fn check_copy_place(
         &mut self,
         src: &LirOperand,
@@ -964,7 +977,12 @@ impl Verifier<'_> {
             LirOperand::Reg(reg) => regs.get(reg.as_str()).map(|def| def.ty.as_str()),
             LirOperand::Place(place) => places.get(place.as_str()).copied(),
         };
-        if let Some(src_ty) = src_ty.filter(|ty| *ty != dst_ty) {
+        // Under opaque pointers any two reference places are layout-compatible,
+        // so `ref X` -> `ref Y` is a pointer copy. A reference/value mix or two
+        // distinct value types is still ill-typed.
+        if let Some(src_ty) = src_ty.filter(|src_ty| {
+            is_ref_ty(src_ty) != is_ref_ty(dst_ty) || (!is_ref_ty(src_ty) && *src_ty != dst_ty)
+        }) {
             self.error(
                 format!(
                     "copy type mismatch in `@{}`: `{src_ty}` -> `{dst_ty}`",
@@ -1561,6 +1579,77 @@ mod tests {
         assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
         let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
         assert!(msgs.iter().any(|m| m.contains("copy")), "{msgs:?}");
+    }
+
+    fn trivial_func(name: &str) -> LirFunc {
+        LirFunc {
+            name: name.to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: Vec::new(),
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        }
+    }
+
+    #[test]
+    fn verify_rejects_duplicate_function_names() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(trivial_func("dup"));
+        module.funcs.push(trivial_func("dup"));
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
+        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("duplicate function")),
+            "{msgs:?}"
+        );
+    }
+
+    /// Two reference places of different pointee types are compatible under
+    /// opaque pointers: `copy` between them is a pointer copy, not a value copy.
+    #[test]
+    fn verify_accepts_ref_to_ref_copy() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "refcopy".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Alloca {
+                        ty: "ref #bit8".to_owned(),
+                        place: "a".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Alloca {
+                        ty: "ref #byte_buffer".to_owned(),
+                        place: "b".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::CopyPlace {
+                        src: LirOperand::Place("a".to_owned()),
+                        dst: "b".to_owned(),
+                        span: test_span(),
+                    },
+                ],
+                term: LirTerm::Return { span: test_span() },
+                span: test_span(),
+            }],
+        });
+        let mut diags = lilac_error::Diags::new();
+        assert!(
+            verify(&module, &mut diags).is_ok(),
+            "{:?}",
+            diags.diagnostics()
+        );
     }
 
     #[test]
