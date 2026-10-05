@@ -2,11 +2,15 @@
 //! straightforward tree-walking baseline on every program in a small suite.
 //!
 //! This integration test links `lilac-vm` as a library (without `cfg(test)`),
-//! so the baseline lives behind the `bench-baseline` feature. Run it with:
+//! so the baseline lives behind the `bench-baseline` feature. Run it in release
+//! (a debug gate measures the wrong thing) with:
 //!
 //! ```text
-//! cargo test -p lilac-vm --test bench --features bench-baseline
+//! cargo test --release -p lilac-vm --test bench --features bench-baseline
 //! ```
+//!
+//! Each entry prints its absolute VM time in nanoseconds, and the `fib` entry
+//! is additionally held to [`FIB_BUDGET_NS`].
 //!
 //! Every suite program computes a non-trivial checksum and then *conditionally
 //! traps* (through the runtime `@format_args_piece` abort path) based on that
@@ -27,6 +31,12 @@ const RUNS: u32 = 10;
 
 /// The trap exit code (`@lilac_abort` / the runtime abort path).
 const TRAP: i32 = 101;
+
+/// Absolute wall-time budget for the `fib` program's VM run, in nanoseconds.
+///
+/// Initially generous (Task 1 records the baseline); tightened as the M5c.1
+/// performance work lands.
+const FIB_BUDGET_NS: u128 = 2_000_000;
 
 /// A small program suite: `(name, expected exit code, source)`.
 ///
@@ -294,11 +304,23 @@ fn vm_is_at_least_3x_treewalk() {
         let program = compile_src(src);
         let tw = time(|| treewalk_run(&program));
         let vm = time(|| Machine::new(&program).expect("entry").run());
-        eprintln!("{name}: treewalk={tw:?} vm={vm:?}");
+        eprintln!(
+            "{name}: treewalk={tw:?} ({} ns) vm={vm:?} ({} ns)",
+            tw.as_nanos(),
+            vm.as_nanos()
+        );
         assert!(vm > Duration::ZERO, "{name}: VM time measured as zero");
         assert!(
             tw.as_nanos() >= vm.as_nanos() * 3,
             "{name}: {tw:?} vs {vm:?}"
         );
+        if *name == "fib" {
+            assert!(
+                vm.as_nanos() < FIB_BUDGET_NS,
+                "fib: {} ns exceeds budget {} ns",
+                vm.as_nanos(),
+                FIB_BUDGET_NS
+            );
+        }
     }
 }
