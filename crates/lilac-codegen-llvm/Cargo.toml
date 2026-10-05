@@ -8,6 +8,7 @@ inkwell = { version = "0.10", features = ["llvm18-1"] }
 lilac-error = { path = "../lilac-error" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-span = { path = "../lilac-span" }
+lilac-target = { path = "../lilac-target" }
 lilac-codegen = { path = "../lilac-codegen" }
 
 [lints]

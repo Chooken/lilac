@@ -15,7 +15,8 @@ use inkwell::targets::{
 use inkwell::OptimizationLevel;
 
 use lilac_codegen::{Backend, OptLevel};
-use lilac_ir::{is_64_bit_triple, LirModule};
+use lilac_ir::LirModule;
+use lilac_target::is_64_bit_triple;
 
 mod lower;
 mod runtime;

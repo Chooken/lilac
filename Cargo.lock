@@ -105,6 +105,7 @@ dependencies = [
  "lilac-error",
  "lilac-ir",
  "lilac-span",
+ "lilac-target",
 ]
 
 [[package]]

@@ -27,6 +27,10 @@
   verifier also rejects duplicate function names.
 - `inkwell` is still confined to `lilac-codegen-llvm` (see above); the runtime
   move does not add LLVM dependencies elsewhere.
+- The single pointer-width rule `is_64_bit_triple(&str)` lives in
+  `lilac-target`. The driver (which bakes the `format_args` piece stride into
+  the injected runtime) and `lilac-codegen-llvm` (which picks `@bit_native`'s
+  LLVM width) both call it, so their widths cannot drift.
 
 ## Gates
 
