@@ -6,12 +6,12 @@ type !t0 = "#bit_native" size 8 ref 0
 func @main () -> () regs 3 slots 8
   places %x=0
   line 0:../../tests/ui/vm_hello.lilac:2:29
-  line 1:../../tests/ui/vm_hello.lilac:2:34
-  line 2:../../tests/ui/vm_hello.lilac:2:22
-  line 3:../../tests/ui/vm_hello.lilac:2:5
+  line 3:../../tests/ui/vm_hello.lilac:2:34
+  line 6:../../tests/ui/vm_hello.lilac:2:22
+  line 9:../../tests/ui/vm_hello.lilac:2:5
   $L0:
     0  &0: #bit_native = const 0x1
-    1  &1: #bit_native = const 0x2
-    2  &2: #bit_native = const 0x3
-    3  %0: #bit_native = copy &2
-    4  return
+    3  &1: #bit_native = const 0x2
+    6  &2: #bit_native = const 0x3
+    9  %0: #bit_native = copy &2
+    10  return

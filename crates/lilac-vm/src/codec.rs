@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use crate::decode::{decode, Decoded};
-use crate::encode::encode_instrs;
+use crate::encode::CodeBuilder;
 use crate::isa::{
     verify, ArithOp, Builtin, ConvertOp, Data, Func, Instr, Line, Operand, Program, TypeId,
     TypeInfo, LBC_VERSION,
@@ -36,8 +36,7 @@ impl Program {
     /// Returns a message when `pc` is not a decodable instruction boundary.
     pub fn disasm_at(&self, func: &Func, pc: usize) -> Result<String, String> {
         let (decoded, _) = decode(&func.code, pc, &func.call_sites, &func.operands)?;
-        let map = word_to_index(func);
-        Ok(self.instr_text(&decoded, &map))
+        Ok(self.instr_text(&decoded))
     }
 
     /// The printable name for a value of `size` bytes.
@@ -111,6 +110,7 @@ impl Program {
     /// Returns a human-readable message if the version is unsupported or any
     /// header, type, data, function, or instruction is malformed. The
     /// reconstructed program is passed through [`Program::verify`].
+    #[allow(clippy::too_many_lines)]
     pub fn parse_text(text: &str) -> Result<Program, String> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let lines: Vec<&str> = text.lines().collect();
@@ -168,7 +168,9 @@ impl Program {
         }
         let target = target.ok_or_else(|| "missing `target` header".to_string())?;
         // Resolve function-name references on the typed bodies, then encode
-        // each into the executed word stream (remapping line pcs to words).
+        // each into the executed word stream. Branch targets and line pcs are
+        // already word offsets, so each stated pc must match the word offset the
+        // builder reaches; a mismatch is a malformed artifact.
         let names: Vec<String> = parsed.iter().map(|func| func.name.clone()).collect();
         let mut codes: Vec<Vec<Instr>> = parsed
             .iter_mut()
@@ -177,12 +179,28 @@ impl Program {
         resolve_func_refs(&mut codes, &names, &func_refs)?;
         let mut funcs: Vec<Func> = Vec::with_capacity(parsed.len());
         for (func, code) in parsed.into_iter().zip(codes) {
-            let (builder, offsets) = encode_instrs(&types, &code)?;
-            let mut lines = func.lines;
-            for line in &mut lines {
-                line.pc = *offsets
-                    .get(line.pc as usize)
-                    .ok_or_else(|| "line pc out of range".to_string())?;
+            let mut builder = CodeBuilder::new(&types);
+            for (index, instr) in code.iter().enumerate() {
+                let expected = func
+                    .pcs
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| "instruction pc table out of range".to_string())?;
+                let actual = u32::try_from(builder.words.len())
+                    .map_err(|_| "word stream too large".to_string())?;
+                if actual != expected {
+                    return Err(format!(
+                        "instruction stated at word {expected} encodes at word {actual}"
+                    ));
+                }
+                builder.push(instr)?;
+            }
+            let code_len = u32::try_from(builder.words.len())
+                .map_err(|_| "word stream too large".to_string())?;
+            for line in &func.lines {
+                if line.pc > code_len {
+                    return Err(format!("line pc {} out of range", line.pc));
+                }
             }
             funcs.push(Func {
                 name: func.name,
@@ -194,7 +212,7 @@ impl Program {
                 code: builder.words,
                 call_sites: builder.call_sites,
                 operands: builder.operands,
-                lines,
+                lines: func.lines,
                 place_names: func.place_names,
             });
         }
@@ -212,10 +230,8 @@ impl Program {
 
     /// Writes one function body (header, places, lines, and code).
     ///
-    /// The `.lbc` text is a disassembly of the word stream. For compatibility
-    /// with the M5c format, instruction line numbers and label names are
-    /// **instruction indices** (word `pc`s are mapped back); Task 4 switches
-    /// the format to raw word pcs.
+    /// The `.lbc` text is a disassembly of the word stream: each instruction
+    /// and line is addressed by its word `pc`, and branch labels are `$L<word>`.
     fn write_func(&self, out: &mut String, func: &Func) {
         let extern_kw = if func.is_extern { " extern" } else { "" };
         let _ = writeln!(
@@ -234,46 +250,40 @@ impl Program {
             }
             out.push('\n');
         }
-        let map = word_to_index(func);
         for line in &func.lines {
-            let pc = map.get(&line.pc).copied().unwrap_or(line.pc);
             let _ = writeln!(
                 out,
                 "  line {}:{}:{}:{}",
-                pc, line.file, line.line, line.col
+                line.pc, line.file, line.line, line.col
             );
         }
         // Decode the whole body first, so branch label names are known.
-        let mut instrs: Vec<(u32, Decoded<'_>, u32)> = Vec::new();
+        let mut instrs: Vec<(u32, Decoded<'_>)> = Vec::new();
         let mut pc = 0_usize;
-        let mut index = 0_u32;
         while pc < func.code.len() {
             let Ok((decoded, next)) = decode(&func.code, pc, &func.call_sites, &func.operands)
             else {
                 break;
             };
-            instrs.push((u32::try_from(pc).unwrap_or(u32::MAX), decoded, index));
+            instrs.push((u32::try_from(pc).unwrap_or(u32::MAX), decoded));
             let next = next as usize;
             if next <= pc {
                 break;
             }
             pc = next;
-            index = index.saturating_add(1);
         }
         let mut labels = BTreeSet::new();
         labels.insert(0_u32);
-        for (_, decoded, _) in &instrs {
+        for (_, decoded) in &instrs {
             for target in branch_targets(decoded) {
-                if let Some(&target_index) = map.get(&target) {
-                    labels.insert(target_index);
-                }
+                labels.insert(target);
             }
         }
-        for (_, decoded, index) in &instrs {
-            if labels.contains(index) {
-                let _ = writeln!(out, "  $L{index}:");
+        for (pc, decoded) in &instrs {
+            if labels.contains(pc) {
+                let _ = writeln!(out, "  $L{pc}:");
             }
-            let _ = writeln!(out, "    {index}  {}", self.instr_text(decoded, &map));
+            let _ = writeln!(out, "    {pc}  {}", self.instr_text(decoded));
         }
     }
 
@@ -316,11 +326,8 @@ impl Program {
 
     /// Renders one decoded instruction with resolved operands.
     #[allow(clippy::too_many_lines)]
-    fn instr_text(&self, instr: &Decoded, map: &HashMap<u32, u32>) -> String {
-        let label = |target: u32| {
-            map.get(&target)
-                .map_or_else(|| format!("$L{target}"), |index| format!("$L{index}"))
-        };
+    fn instr_text(&self, instr: &Decoded) -> String {
+        let label = |target: u32| format!("$L{target}");
         match instr {
             Decoded::Const { dst, imm } => {
                 format!("&{dst}: {} = const 0x{imm:x}", self.const_type())
@@ -558,26 +565,6 @@ fn branch_targets(instr: &Decoded) -> Vec<u32> {
     }
 }
 
-/// Builds the `word pc -> instruction index` map for a function.
-fn word_to_index(func: &Func) -> HashMap<u32, u32> {
-    let mut map = HashMap::new();
-    let mut pc = 0_usize;
-    let mut index = 0_u32;
-    while pc < func.code.len() {
-        map.insert(u32::try_from(pc).unwrap_or(u32::MAX), index);
-        let Ok((_, next)) = decode(&func.code, pc, &func.call_sites, &func.operands) else {
-            break;
-        };
-        let next = next as usize;
-        if next <= pc {
-            break;
-        }
-        pc = next;
-        index = index.saturating_add(1);
-    }
-    map
-}
-
 /// A parsed instruction whose function references are not yet resolved.
 enum ParsedInstr {
     /// A fully resolved instruction.
@@ -635,6 +622,8 @@ struct ParsedFunc {
     n_regs: u32,
     slot_bytes: u32,
     code: Vec<Instr>,
+    /// Stated word pc of each instruction in `code` (parallel to it).
+    pcs: Vec<u32>,
     lines: Vec<Line>,
     place_names: Vec<(String, u32)>,
 }
@@ -648,6 +637,7 @@ fn parse_func(
 ) -> Result<(ParsedFunc, usize, Vec<PendingFuncRef>), String> {
     let header = parse_func_header(lines[start].trim(), type_ids)?;
     let mut code: Vec<Instr> = Vec::new();
+    let mut pcs: Vec<u32> = Vec::new();
     let mut line_table: Vec<Line> = Vec::new();
     let mut place_names: Vec<(String, u32)> = Vec::new();
     let mut labels: HashMap<String, u32> = HashMap::new();
@@ -683,13 +673,10 @@ fn parse_func(
             continue;
         }
         let (pc, text) = split_pc(line)?;
-        let expected = u32::try_from(code.len()).map_err(|_| "code too large".to_string())?;
-        if pc != expected {
-            return Err(format!("expected pc {expected}, found {pc}"));
-        }
         if let Some(label) = pending_label.take() {
             labels.insert(label, pc);
         }
+        pcs.push(pc);
         let instr_index = code.len();
         match parse_instr(text, type_ids)? {
             ParsedInstr::Ready(instr) => code.push(instr),
@@ -726,6 +713,7 @@ fn parse_func(
         n_regs: header.n_regs,
         slot_bytes: header.slot_bytes,
         code,
+        pcs,
         lines: line_table,
         place_names,
     };
@@ -1626,6 +1614,99 @@ mod tests {
         let text = program.to_text();
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed.to_text(), text);
+    }
+
+    #[test]
+    fn text_round_trips_word_stream() {
+        let program = crate::compile::compile_src(
+            "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+        );
+        let text = program.to_text();
+        // The disassembly addresses instructions by word pc: a `const` is three
+        // words, so the second one sits at word 3, not instruction index 1.
+        assert!(
+            text.contains("\n    3  &1: #bit_native = const 0x2\n"),
+            "text:\n{text}"
+        );
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed.to_text(), text);
+        assert_eq!(parsed.funcs[0].code, program.funcs[0].code);
+    }
+
+    #[test]
+    fn text_round_trips_branch_labels_as_word_pcs() {
+        let program = crate::compile::compile_src(
+            "main: function () nothing {\n    n: @bit_native = 0x0\n    loop {\n        n = @i_add(n, 0x1)\n        if @i_less_than(n, 0x3) {\n            keep: @bit_native = n\n        } else {\n            break\n        }\n    }\n}\n",
+        );
+        let text = program.to_text();
+        // Every branch target must be emitted as a `$L<word pc>` label, not as
+        // an instruction index.
+        let func = &program.funcs[0];
+        let mut pc = 0_usize;
+        let mut targets = Vec::new();
+        while pc < func.code.len() {
+            let (instr, next) =
+                decode(&func.code, pc, &func.call_sites, &func.operands).expect("decode");
+            match instr {
+                Decoded::Branch { target } => targets.push(target),
+                Decoded::BranchIf { then, els, .. } => {
+                    targets.push(then);
+                    targets.push(els);
+                }
+                _ => {}
+            }
+            pc = next as usize;
+        }
+        assert!(!targets.is_empty(), "test program has no branches");
+        for target in targets {
+            assert!(
+                text.contains(&format!("$L{target}:")),
+                "missing word-pc label $L{target} in:\n{text}"
+            );
+        }
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed.to_text(), text);
+        assert_eq!(parsed.funcs[0].code, program.funcs[0].code);
+    }
+
+    /// A `branch.if` whose word targets exceed a byte uses the wide form (three
+    /// words); it must disassemble to word-pc labels and reassemble exactly.
+    #[test]
+    fn text_round_trips_wide_branch_if() {
+        let mut instrs = Vec::new();
+        for imm in 0..100_u64 {
+            instrs.push(Instr::Const { dst: 0, imm, ty: 0 });
+        }
+        // Instruction index 100 is the `branch.if` (word 300); with wide
+        // targets it is three words, so index 101 lands at word 303. Both
+        // labels are three-digit word pcs.
+        instrs.push(Instr::BranchIf {
+            cond: 0,
+            then: 100,
+            els: 101,
+        });
+        instrs.push(Instr::Return);
+        instrs.push(Instr::Return);
+        let program = sample_program(instrs);
+        let text = program.to_text();
+        assert!(text.contains("$L300:"), "text:\n{text}");
+        assert!(text.contains("$L303:"), "text:\n{text}");
+        assert!(
+            program.funcs[0].code.len() > 255,
+            "expected a stream longer than the narrow operand range"
+        );
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(parsed.to_text(), text);
+        assert_eq!(parsed.funcs[0].code, program.funcs[0].code);
+    }
+
+    /// A stated instruction pc that does not match the word offset the stream
+    /// actually reaches is a clean parse error, not a panic.
+    #[test]
+    fn parse_rejects_misaligned_instruction_pc() {
+        let text = "lbc = \"0.1\"\ntarget = \"lilacvm-unknown-none\"\n\ntype !t0 = \"#bit_native\" size 8 ref 0\n\nfunc @main () -> () regs 1 slots 8\n  0  &0: #bit_native = const 0x1\n  2  return\n";
+        let err = Program::parse_text(text).expect_err("misaligned pc");
+        assert!(err.contains("encodes at word"), "{err}");
     }
 
     #[test]
