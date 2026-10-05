@@ -10,7 +10,7 @@ pub mod codec;
 pub mod compile;
 pub mod exec;
 pub mod isa;
-pub use backend::{run_lbc, VmBackend};
+pub use backend::{run_lbc, run_lbc_with_entry, VmBackend};
 pub use compile::compile;
 pub use exec::{FrameInfo, Machine, Step, VmError};
 pub use isa::*;

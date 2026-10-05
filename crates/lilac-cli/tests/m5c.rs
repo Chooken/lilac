@@ -96,3 +96,37 @@ fn emit_llvm_rejects_vm_target() {
     let out = run(["emit-llvm", SOURCE, "--target=lilacvm-unknown-none"]);
     assert_eq!(out.status.code(), Some(2), "stderr:\n{}", out.stderr);
 }
+
+/// Writes a bodyless-`main` library to a per-test temporary file and returns
+/// its path. The stem keeps parallel tests from colliding.
+fn write_library(stem: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("lilac-m5c-{}-{stem}.lilac", std::process::id()));
+    std::fs::write(&path, "api: function () nothing {\n}\n").expect("writes library");
+    path
+}
+
+/// A single `--export` names the entry point, so a library with no `main` runs.
+#[test]
+fn run_with_single_export_uses_it_as_entry() {
+    let path = write_library("export");
+    let source = path.to_str().expect("utf8 path");
+    let out = run(["run", "--export=api", source]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// With no export, `run` falls back to `main`; a library without one is a clean
+/// no-entry error (exit 1).
+#[test]
+fn run_without_export_needs_main() {
+    let path = write_library("noexport");
+    let source = path.to_str().expect("utf8 path");
+    let out = run(["run", source]);
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{}", out.stderr);
+    assert!(
+        out.stderr.contains("no entry point"),
+        "stderr:\n{}",
+        out.stderr
+    );
+    let _ = std::fs::remove_file(&path);
+}

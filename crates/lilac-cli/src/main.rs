@@ -538,7 +538,15 @@ fn cmd_run(args: &[String]) -> ExitCode {
         || common.debug.trace
         || !common.debug.breaks.is_empty()
         || common.source.is_some();
-    match lilac_vm::run_lbc(&text) {
+    // A single `--export` names the entry to run (it is the `--export` root the
+    // reachability pass already preserved); with zero or multiple exports the
+    // default `main` entry is used.
+    let entry = if session.exports.len() == 1 {
+        session.exports.iter().next().map(String::as_str)
+    } else {
+        None
+    };
+    match lilac_vm::run_lbc_with_entry(&text, entry) {
         Ok(code) => exit_code(code),
         Err(err) => {
             eprintln!("{err}");

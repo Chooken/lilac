@@ -28,16 +28,29 @@ impl Backend for VmBackend {
     }
 }
 
-/// Parses, verifies, and runs a `.lbc` program to completion.
+/// Parses, verifies, and runs a `.lbc` program to completion, entering at
+/// `main`.
 ///
 /// # Errors
 ///
 /// Returns a human-readable message when the text is not a valid program or
 /// when the machine traps at run time.
 pub fn run_lbc(text: &str) -> Result<i32, String> {
+    run_lbc_with_entry(text, None)
+}
+
+/// Parses, verifies, and runs a `.lbc` program to completion, entering at
+/// `entry` when given and at `main` otherwise.
+///
+/// # Errors
+///
+/// Returns a human-readable message when the text is not a valid program, when
+/// no function matches the entry, or when the machine traps at run time.
+pub fn run_lbc_with_entry(text: &str, entry: Option<&str>) -> Result<i32, String> {
     let program = Program::parse_text(text)?;
     program.verify()?;
-    let mut machine = Machine::new(&program).map_err(|err| err.to_string())?;
+    let mut machine =
+        Machine::with_entry(&program, entry.unwrap_or("main")).map_err(|err| err.to_string())?;
     machine.run().map_err(|err| err.to_string())
 }
 
