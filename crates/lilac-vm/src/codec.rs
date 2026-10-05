@@ -43,7 +43,7 @@ impl Program {
     ///
     /// The word stream bakes sizes, not type ids, so the disassembler picks the
     /// first program type of the matching size (deterministically) and falls
-    /// back to a synthetic `#bitN` spelling. Task 4 finalizes this mapping.
+    /// back to a synthetic `#bitN` spelling.
     fn type_for_size(&self, size: u32) -> String {
         self.types
             .iter()
@@ -54,8 +54,36 @@ impl Program {
             )
     }
 
-    /// The printable type name used for size-less forms (`Const`/`ConstData`).
-    fn const_type(&self) -> String {
+    /// The printable type name for a constant carrying `bytes` bytes of value.
+    ///
+    /// The stream bakes the immediate's bits, not its type id, so the
+    /// disassembler picks a type wide enough to hold the value without
+    /// re-masking: the first pointer-width type if one exists, else the
+    /// smallest type covering `bytes`, else a synthetic spelling. Choosing a
+    /// width `>=` the value's own keeps `parse_text(to_text(p))` on the same
+    /// word stream (a too-narrow choice would silently truncate the immediate).
+    fn const_type_for_bytes(&self, bytes: u32) -> String {
+        self.types
+            .iter()
+            .find(|info| info.size >= 8)
+            .or_else(|| {
+                self.types
+                    .iter()
+                    .filter(|info| info.size >= bytes)
+                    .min_by_key(|info| info.size)
+            })
+            .map_or_else(
+                || format!("#bit{}", bytes.saturating_mul(8)),
+                |info| info.name.clone(),
+            )
+    }
+
+    /// The printable type name for width-free forms (`extend.zero`).
+    ///
+    /// The width-free opcode bakes no type, so any parseable name preserves the
+    /// stream; prefer a pointer-width type, then the first type, then a
+    /// synthetic spelling for an empty table.
+    fn default_type(&self) -> String {
         self.types
             .iter()
             .find(|info| info.size >= 8)
@@ -330,10 +358,16 @@ impl Program {
         let label = |target: u32| format!("$L{target}");
         match instr {
             Decoded::Const { dst, imm } => {
-                format!("&{dst}: {} = const 0x{imm:x}", self.const_type())
+                format!(
+                    "&{dst}: {} = const 0x{imm:x}",
+                    self.const_type_for_bytes(required_bytes(*imm))
+                )
             }
             Decoded::ConstData { dst, data } => {
-                format!("&{dst}: {} = const.data !c{data}", self.const_type())
+                format!(
+                    "&{dst}: {} = const.data !c{data}",
+                    self.const_type_for_bytes(8)
+                )
             }
             Decoded::Copy { dst, src, size } => format!(
                 "{}: {} = copy {}",
@@ -393,7 +427,7 @@ impl Program {
                 self.type_for_size(u32::from(*width) / 8)
             ),
             Decoded::ExtendZero { dst, src } => {
-                format!("&{dst}: {} = extend.zero &{src}", self.const_type())
+                format!("&{dst}: {} = extend.zero &{src}", self.default_type())
             }
             Decoded::Call { site, ins, outs } => format!(
                 "call @{} (in {}) (out {})",
@@ -563,6 +597,15 @@ fn branch_targets(instr: &Decoded) -> Vec<u32> {
         Decoded::BranchIf { then, els, .. } => vec![*then, *els],
         _ => Vec::new(),
     }
+}
+
+/// The number of bytes needed to represent `value` (at least one).
+///
+/// Used to pick a const's printed type wide enough to hold its decoded bits
+/// without re-masking on the way back in.
+fn required_bytes(value: u64) -> u32 {
+    let bits = u64::BITS - value.leading_zeros();
+    bits.div_ceil(8).max(1)
 }
 
 /// A parsed instruction whose function references are not yet resolved.
@@ -1930,6 +1973,75 @@ mod tests {
         assert!(text.contains(" : #bit32"), "{text}");
         let parsed = Program::parse_text(&text).expect("parse");
         assert_eq!(parsed, program);
+        assert_eq!(parsed.to_text(), text);
+    }
+
+    /// A narrow type interned *first* must not be used to print a wider const:
+    /// the const's printed type has to hold its decoded immediate, or
+    /// `parse_text` re-masks and silently truncates the word stream (the
+    /// `lilac run` path re-parses emitted text, so it would execute the wrong
+    /// value).
+    #[test]
+    fn text_round_trips_const_wider_than_first_type() {
+        let types = vec![
+            TypeInfo {
+                name: "#bit8".to_string(),
+                size: 1,
+                is_ref: false,
+            },
+            TypeInfo {
+                name: "#bit32".to_string(),
+                size: 4,
+                is_ref: false,
+            },
+        ];
+        let (code, sites, ops) = words_of(
+            &types,
+            &[
+                Instr::Const {
+                    dst: 0,
+                    imm: 0x1,
+                    ty: 0,
+                },
+                Instr::Const {
+                    dst: 1,
+                    imm: 0x1234_5678,
+                    ty: 1,
+                },
+                Instr::Return,
+            ],
+        );
+        let program = Program {
+            version: LBC_VERSION.to_string(),
+            target: crate::isa::VM_TARGET.to_string(),
+            types,
+            data: Vec::new(),
+            globals: Vec::new(),
+            funcs: vec![Func {
+                name: "main".to_string(),
+                is_extern: false,
+                ins: Vec::new(),
+                outs: Vec::new(),
+                n_regs: 2,
+                slot_bytes: 0,
+                code,
+                call_sites: sites,
+                operands: ops,
+                lines: Vec::new(),
+                place_names: Vec::new(),
+            }],
+        };
+        let text = program.to_text();
+        assert!(text.contains("#bit8 = const 0x1"), "text:\n{text}");
+        assert!(
+            text.contains("#bit32 = const 0x12345678"),
+            "the wider const must not borrow the narrower first type:\n{text}"
+        );
+        let parsed = Program::parse_text(&text).expect("parse");
+        assert_eq!(
+            parsed.funcs[0].code, program.funcs[0].code,
+            "round trip truncated the const immediate"
+        );
         assert_eq!(parsed.to_text(), text);
     }
 }
