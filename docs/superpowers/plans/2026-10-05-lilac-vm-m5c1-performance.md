@@ -236,7 +236,7 @@ git commit -m "M5c.1: disassemble the word stream in .lbc and the debugger"
 
 **Interfaces:**
 - Consumes: Task 3 word stream.
-- Produces: `Func { pub in_offsets: Vec<u32>, pub in_sizes: Vec<u8>, pub out_offset: u32, pub out_sizes: Vec<u8> }`; no `type_size(program, ty)` call inside `step`/`call`/`return_from_frame`.
+- Produces: `Func { pub in_offsets: Vec<u32>, pub in_sizes: Vec<u32>, pub out_offset: u32, pub out_sizes: Vec<u32> }`; no `type_size(program, ty)` call inside `step`/`call`/`return_from_frame`.
 
 - [ ] **Step 1: Write failing test** (a structural guard):
 

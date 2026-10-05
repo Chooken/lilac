@@ -42,8 +42,11 @@
 - The VM target is `lilacvm-unknown-none` (`Arch::LilacVm`, 64-bit). Selecting
   it selects the VM backend; the single pointer-width rule in `lilac-target`
   now covers `Arch::LilacVm` as well.
-- The ISA, `.lbc` format, memory model, entry/panic/`extern` behavior, and
-  debugger are documented in `docs/VM_SPEC.md`.
+- The executed code is a compact `u32` word stream (`Func.code`, M5c.1) with a
+  wide-operand escape and call-site/operand pools; the typed `Instr` enum is
+  compile-time IR only. The ISA, word layout, opcode table, calling convention,
+  `.lbc` format, memory model, entry/panic/`extern` behavior, and debugger are
+  documented in `docs/VM_SPEC.md`.
 
 ## Gates
 

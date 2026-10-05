@@ -179,9 +179,9 @@ terminator, `MAX_REGS`/`MAX_FRAME_BYTES`). A malformed stream is a clean error
 ## 4. Precomputed metadata
 
 - `Func` gains:
-  - `in_offsets: Vec<u32>`, `in_sizes: Vec<u8>` — where each input lands in the
+  - `in_offsets: Vec<u32>`, `in_sizes: Vec<u32>` — where each input lands in the
     callee's input region.
-  - `out_offset: u32`, `out_sizes: Vec<u8>` — the result layout (used to place
+  - `out_offset: u32`, `out_sizes: Vec<u32>` — the result layout (used to place
     the out-ref region).
   - `code: Vec<u32>`, `call_sites: Vec<CallSite>`, `operands: Vec<Operand>`.
 - Instructions carry precomputed `size`/`mask`/`operand_size`/`result_size`
