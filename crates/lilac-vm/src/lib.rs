@@ -11,8 +11,12 @@ pub mod compile;
 pub mod debug;
 pub mod exec;
 pub mod isa;
+#[cfg(feature = "bench-baseline")]
+pub mod treewalk;
 pub use backend::{run_lbc, run_lbc_with_entry, VmBackend};
 pub use compile::compile;
 pub use debug::Debugger;
 pub use exec::{FrameInfo, Machine, Step, VmError};
 pub use isa::*;
+#[cfg(feature = "bench-baseline")]
+pub use treewalk::treewalk_run;
