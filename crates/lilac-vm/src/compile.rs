@@ -38,7 +38,7 @@
 //! place, including ref-typed locals, so the interpreter never needs the
 //! owner's type at run time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lilac_ir::{builtin_layout, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
 use lilac_span::{SourceMap, Span};
@@ -269,21 +269,42 @@ fn map_convert(op: &lilac_ir::ConvertOp) -> ConvertOp {
 }
 
 /// The per-frame place region: name → byte offset and type.
+///
+/// Output places are *ref-backed* (the pointer ABI, spec §5): instead of
+/// holding their value inline they occupy an 8-byte cell in the frame's
+/// out-ref region, which `call` fills with the absolute arena offset of the
+/// caller's storage. [`Places::is_out`] marks them so every access compiles
+/// indirect (through the ref), matching the LLVM backend.
 #[derive(Default)]
 struct Places {
     offsets: HashMap<String, u32>,
     types: HashMap<String, String>,
     names: Vec<(String, u32)>,
+    outputs: HashSet<String>,
+    scratch: Option<u32>,
     total: u32,
 }
 
 impl Places {
     /// Declares a place, packing it after all previously declared places.
-    fn declare(&mut self, module: &LirModule, name: &str, ty: &str) -> Result<(), String> {
+    ///
+    /// An output (`is_out`) is a pointer-sized ref cell regardless of its value
+    /// type; every other place occupies `type_size(ty)` bytes.
+    fn declare(
+        &mut self,
+        module: &LirModule,
+        name: &str,
+        ty: &str,
+        is_out: bool,
+    ) -> Result<(), String> {
         if self.offsets.contains_key(name) {
             return Err(format!("duplicate place `%{name}`"));
         }
-        let size = type_size(module, ty, 0)?;
+        let size = if is_out {
+            VM_POINTER_BYTES
+        } else {
+            type_size(module, ty, 0)?
+        };
         let off = self.total;
         self.total = self
             .total
@@ -291,8 +312,31 @@ impl Places {
             .ok_or_else(|| format!("frame too large for `{name}`"))?;
         self.offsets.insert(name.to_owned(), off);
         self.types.insert(name.to_owned(), ty.to_owned());
+        if is_out {
+            self.outputs.insert(name.to_owned());
+        }
         self.names.push((name.to_owned(), off));
         Ok(())
+    }
+
+    /// Whether `name` is a ref-backed output place.
+    fn is_out(&self, name: &str) -> bool {
+        self.outputs.contains(name)
+    }
+
+    /// The offset of a shared 8-byte scratch cell, allocated on first use.
+    ///
+    /// `load`/`store` of a `ref`-typed output need a second indirection: the
+    /// ref value lives in the caller's storage, so it is staged through this
+    /// cell. One cell suffices because it is consumed immediately.
+    fn scratch(&mut self) -> u32 {
+        if let Some(off) = self.scratch {
+            return off;
+        }
+        let off = self.total;
+        self.total = self.total.saturating_add(VM_POINTER_BYTES);
+        self.scratch = Some(off);
+        off
     }
 
     /// The byte offset of a declared place.
@@ -378,6 +422,73 @@ impl FuncBuilder<'_, '_> {
         }
     }
 
+    /// A fresh anonymous register (used for synthesized output reads).
+    fn fresh_reg(&mut self) -> u32 {
+        let index = self.next_reg;
+        self.next_reg = self.next_reg.saturating_add(1);
+        index
+    }
+
+    /// The `#ptr` type id (a pointer-sized scalar).
+    fn ptr_ty(&mut self) -> Result<TypeId, String> {
+        self.intern("#ptr")
+    }
+
+    /// Reads a place as a value operand.
+    ///
+    /// A ref-backed output is read through its caller-supplied ref into a
+    /// fresh register (`Load`); every other place is addressed directly as a
+    /// slot operand. This is how call inputs and value copies consume an
+    /// output's current value.
+    fn read_operand(&mut self, place: &str, span: Span) -> Result<Operand, String> {
+        if !self.places.is_out(place) {
+            return Ok(Operand::Slot(self.slot(place)?));
+        }
+        let ty_name = self.places.ty(place)?.to_owned();
+        let ty = self.intern(&ty_name)?;
+        let dst = self.fresh_reg();
+        let src = self.slot(place)?;
+        self.emit(Instr::Load { dst, src, ty }, span)?;
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Reads a LIR operand as a value (register as-is, place through
+    /// [`Self::read_operand`]).
+    fn value_operand(&mut self, operand: &LirOperand, span: Span) -> Result<Operand, String> {
+        match operand {
+            LirOperand::Reg(name) => Ok(Operand::Reg(self.reg(name)?)),
+            LirOperand::Place(name) => self.read_operand(name, span),
+        }
+    }
+
+    /// Loads the inner ref stored at a `ref`-typed output's caller storage.
+    ///
+    /// The output's ref cell points at the caller's storage, which itself holds
+    /// a `ref` value; a `load`/`store` through that output must use the inner
+    /// ref, so this reads it into a fresh register.
+    fn out_ref_value(&mut self, place: &str, span: Span) -> Result<u32, String> {
+        let ty = self.ptr_ty()?;
+        let dst = self.fresh_reg();
+        let src = self.slot(place)?;
+        self.emit(Instr::Load { dst, src, ty }, span)?;
+        Ok(dst)
+    }
+
+    /// Stages `reg`'s ref value in the shared scratch cell, returning the cell.
+    fn stage_ref(&mut self, reg: u32, span: Span) -> Result<u32, String> {
+        let ty = self.ptr_ty()?;
+        let scratch = self.places.scratch();
+        self.emit(
+            Instr::Copy {
+                dst: Operand::Slot(scratch),
+                src: Operand::Reg(reg),
+                ty,
+            },
+            span,
+        )?;
+        Ok(scratch)
+    }
+
     /// Pushes an instruction and records its source line (dummy spans skipped).
     fn emit(&mut self, instr: Instr, span: Span) -> Result<(), String> {
         let pc = u32::try_from(self.code.len()).map_err(|_| "program too large".to_string())?;
@@ -414,6 +525,14 @@ impl FuncBuilder<'_, '_> {
         match inst {
             LirInst::CopyReg { src, dst, ty, span } => {
                 let id = self.intern(ty)?;
+                if let LirOperand::Place(place) = src {
+                    if self.places.is_out(place) {
+                        let dst = self.def_reg_typed(dst, ty);
+                        let src = self.slot(place)?;
+                        self.emit(Instr::Load { dst, src, ty: id }, *span)?;
+                        return Ok(());
+                    }
+                }
                 if is_indirect(self.compiler.module, ty)? {
                     let dst = self.def_reg_typed(dst, ty);
                     self.emit(
@@ -444,32 +563,51 @@ impl FuncBuilder<'_, '_> {
                 }
             }
             LirInst::CopyPlace { src, dst, span } => {
-                let dst_slot = self.slot(dst)?;
                 let dst_ty = self.places.ty(dst)?.to_owned();
-                match src {
-                    LirOperand::Place(place) => {
-                        let size = type_size(self.compiler.module, &dst_ty, 0)?;
-                        let src = self.slot(place)?;
-                        self.emit(
-                            Instr::CopyBytes {
-                                dst: dst_slot,
-                                src,
-                                size,
-                            },
-                            *span,
-                        )
-                    }
-                    LirOperand::Reg(reg) => {
-                        let ty = self.intern(&dst_ty)?;
-                        let src = Operand::Reg(self.reg(reg)?);
-                        self.emit(
-                            Instr::Copy {
-                                dst: Operand::Slot(dst_slot),
-                                src,
-                                ty,
-                            },
-                            *span,
-                        )
+                if self.places.is_out(dst) {
+                    // Writing an output goes through its caller-supplied ref.
+                    let src = self.value_operand(src, *span)?;
+                    let ty = self.intern(&dst_ty)?;
+                    let dst = self.slot(dst)?;
+                    self.emit(Instr::Store { src, dst, ty }, *span)
+                } else {
+                    match src {
+                        LirOperand::Place(place) if self.places.is_out(place) => {
+                            // Reading an output stages its value in a register
+                            // first, then copies into the destination place.
+                            let ty = self.intern(&dst_ty)?;
+                            let reg = self.fresh_reg();
+                            let src = self.slot(place)?;
+                            self.emit(Instr::Load { dst: reg, src, ty }, *span)?;
+                            let dst = self.slot(dst)?;
+                            self.emit(
+                                Instr::Copy {
+                                    dst: Operand::Slot(dst),
+                                    src: Operand::Reg(reg),
+                                    ty,
+                                },
+                                *span,
+                            )
+                        }
+                        LirOperand::Place(place) => {
+                            let size = type_size(self.compiler.module, &dst_ty, 0)?;
+                            let src = self.slot(place)?;
+                            let dst = self.slot(dst)?;
+                            self.emit(Instr::CopyBytes { dst, src, size }, *span)
+                        }
+                        LirOperand::Reg(reg) => {
+                            let ty = self.intern(&dst_ty)?;
+                            let src = Operand::Reg(self.reg(reg)?);
+                            let dst = self.slot(dst)?;
+                            self.emit(
+                                Instr::Copy {
+                                    dst: Operand::Slot(dst),
+                                    src,
+                                    ty,
+                                },
+                                *span,
+                            )
+                        }
                     }
                 }
             }
@@ -513,16 +651,39 @@ impl FuncBuilder<'_, '_> {
             }
             LirInst::Load { src, dst, ty, span } => {
                 let dst = self.def_reg_typed(dst, ty);
-                let src = self.slot(src)?;
                 let ty = self.intern(ty)?;
-                self.emit(Instr::Load { dst, src, ty }, *span)
+                if self.places.is_out(src) {
+                    // The caller's storage holds the ref; load it, stage it, then
+                    // load the pointee through it.
+                    let inner = self.out_ref_value(src, *span)?;
+                    let src = self.stage_ref(inner, *span)?;
+                    self.emit(Instr::Load { dst, src, ty }, *span)
+                } else {
+                    let src = self.slot(src)?;
+                    self.emit(Instr::Load { dst, src, ty }, *span)
+                }
             }
             LirInst::Addr {
                 place, dst, span, ..
             } => {
                 let dst = self.def_reg_typed(dst, "#ptr");
-                let place = self.slot(place)?;
-                self.emit(Instr::Addr { dst, place }, *span)
+                if self.places.is_out(place) {
+                    // `addr %out` is the ref itself: copy the caller-supplied
+                    // offset out of the out-ref cell into the register.
+                    let ty = self.ptr_ty()?;
+                    let src = self.slot(place)?;
+                    self.emit(
+                        Instr::Copy {
+                            dst: Operand::Reg(dst),
+                            src: Operand::Slot(src),
+                            ty,
+                        },
+                        *span,
+                    )
+                } else {
+                    let place = self.slot(place)?;
+                    self.emit(Instr::Addr { dst, place }, *span)
+                }
             }
             LirInst::AddrFunc {
                 func, dst, span, ..
@@ -539,7 +700,7 @@ impl FuncBuilder<'_, '_> {
             } => {
                 let ins = ins
                     .iter()
-                    .map(|place| self.slot(place).map(Operand::Slot))
+                    .map(|place| self.read_operand(place, *span))
                     .collect::<Result<Vec<_>, _>>()?;
                 let outs = outs
                     .iter()
@@ -575,7 +736,7 @@ impl FuncBuilder<'_, '_> {
                 let dst = self.def_reg_typed(dst, ty);
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
-                let indirect = is_ref_ty(self.places.ty(obj)?);
+                let indirect = self.places.is_out(obj) || is_ref_ty(self.places.ty(obj)?);
                 if is_indirect(self.compiler.module, ty)? {
                     self.emit(
                         Instr::AddrField {
@@ -609,9 +770,9 @@ impl FuncBuilder<'_, '_> {
             } => {
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
-                let indirect = is_ref_ty(self.places.ty(obj)?);
+                let indirect = self.places.is_out(obj) || is_ref_ty(self.places.ty(obj)?);
                 let field_ty = field_type(self.compiler.module, self.places.ty(obj)?, *idx)?;
-                let src = self.operand(value)?;
+                let src = self.value_operand(value, *span)?;
                 let ty = self.intern(&field_ty)?;
                 self.emit(
                     Instr::StoreField {
@@ -625,18 +786,20 @@ impl FuncBuilder<'_, '_> {
                 )
             }
             LirInst::Store { src, dst, span } => {
-                let dst_slot = self.slot(dst)?;
                 let pointee = strip_ref(self.places.ty(dst)?).to_owned();
-                let src = self.operand(src)?;
                 let ty = self.intern(&pointee)?;
-                self.emit(
-                    Instr::Store {
-                        src,
-                        dst: dst_slot,
-                        ty,
-                    },
-                    *span,
-                )
+                if self.places.is_out(dst) {
+                    // Store *through* the ref held at the caller's storage: load
+                    // the inner ref, stage it, then store the value through it.
+                    let inner = self.out_ref_value(dst, *span)?;
+                    let dst = self.stage_ref(inner, *span)?;
+                    let src = self.value_operand(src, *span)?;
+                    self.emit(Instr::Store { src, dst, ty }, *span)
+                } else {
+                    let dst = self.slot(dst)?;
+                    let src = self.value_operand(src, *span)?;
+                    self.emit(Instr::Store { src, dst, ty }, *span)
+                }
             }
             LirInst::Convert {
                 op,
@@ -668,7 +831,7 @@ impl FuncBuilder<'_, '_> {
                 let dst = self.def_reg_typed(dst, "#ptr");
                 let place = self.slot(obj)?;
                 let off = self.field_off(obj, *idx)?;
-                let indirect = is_ref_ty(self.places.ty(obj)?);
+                let indirect = self.places.is_out(obj) || is_ref_ty(self.places.ty(obj)?);
                 self.emit(
                     Instr::AddrField {
                         dst,
@@ -962,17 +1125,20 @@ impl<'a> Compiler<'a> {
     /// Compiles one LIR function.
     fn compile_func(&mut self, func: &LirFunc) -> Result<Func, String> {
         let mut places = Places::default();
-        for (name, ty) in &func.ins {
-            places.declare(self.module, name, ty)?;
-        }
+        // Outputs are ref-backed and occupy the frame's low out-ref region
+        // (8 bytes each); inputs and locals follow. `rebuild_layout` computes
+        // matching input offsets.
         for (name, ty) in &func.outs {
-            places.declare(self.module, name, ty)?;
+            places.declare(self.module, name, ty, true)?;
+        }
+        for (name, ty) in &func.ins {
+            places.declare(self.module, name, ty, false)?;
         }
         if !func.is_extern {
             for block in &func.blocks {
                 for inst in &block.insts {
                     if let LirInst::Alloca { ty, place, .. } = inst {
-                        places.declare(self.module, place, ty)?;
+                        places.declare(self.module, place, ty, false)?;
                     }
                 }
             }

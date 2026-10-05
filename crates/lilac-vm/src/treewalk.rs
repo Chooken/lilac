@@ -53,16 +53,17 @@ const ABORT_CODE: i32 = 101;
 pub fn treewalk_run(program: &Program) -> Result<i32, String> {
     let mut interp = Interp::new(program);
     let main = interp.entry("main")?;
-    match interp.execute_function(main, &[])? {
-        Outcome::Returned(_) => Ok(0),
+    match interp.execute_function(main, &[], &[])? {
+        Outcome::Returned => Ok(0),
         Outcome::Panicked(code) => Ok(code),
     }
 }
 
 /// The result of executing one function body.
 enum Outcome {
-    /// The body returned, with one byte buffer per output place.
-    Returned(Vec<Vec<u8>>),
+    /// The body returned; outputs were written by reference into the caller's
+    /// storage, so there is nothing to return.
+    Returned,
     /// The body trapped with the given exit code.
     Panicked(i32),
 }
@@ -130,8 +131,14 @@ impl<'a> Interp<'a> {
         base
     }
 
-    /// Executes one function with `args` bound into its input slots.
-    fn execute_function(&mut self, func_index: u32, args: &[Vec<u8>]) -> Result<Outcome, String> {
+    /// Executes one function with `args` bound into its input region and the
+    /// caller's `out_refs` (absolute addresses) installed in the out-ref region.
+    fn execute_function(
+        &mut self,
+        func_index: u32,
+        args: &[Vec<u8>],
+        out_refs: &[u64],
+    ) -> Result<Outcome, String> {
         let program = self.program;
         let func = program
             .funcs
@@ -141,13 +148,15 @@ impl<'a> Interp<'a> {
             return Err(format!("cannot call extern function `{}`", func.name));
         }
         let slot_base = self.alloc(u64::from(func.slot_bytes));
-        let mut offset = 0_u64;
-        for (arg, ty) in args.iter().zip(&func.ins) {
-            let size = u64::from(type_size(program, *ty));
-            self.write_bytes(slot_base + offset, arg);
-            offset += size;
+        // The frame begins with the out-ref region: one u64 ref per output.
+        for (index, &addr) in out_refs.iter().enumerate() {
+            let cell = slot_base + (index as u64) * u64::from(VM_POINTER_BYTES);
+            self.write_abs(cell, addr, VM_POINTER_BYTES);
         }
-        let out_offset = offset;
+        // Inputs are copied into the region after the out-ref cells.
+        for (arg, &off) in args.iter().zip(&func.in_offsets) {
+            self.write_bytes(slot_base + u64::from(off), arg);
+        }
 
         let mut regs: HashMap<u32, u64> = HashMap::new();
         let labels: Vec<u32> = func.labels().into_iter().collect();
@@ -156,16 +165,7 @@ impl<'a> Interp<'a> {
         let outcome = loop {
             match self.run_block(func, pc, &labels, code_len, &mut regs, slot_base)? {
                 Flow::Goto(next) => pc = next,
-                Flow::Return => {
-                    let mut outs = Vec::with_capacity(func.outs.len());
-                    let mut out = out_offset;
-                    for &ty in &func.outs {
-                        let size = type_size(program, ty);
-                        outs.push(self.read_bytes(slot_base + out, size));
-                        out += u64::from(size);
-                    }
-                    break Outcome::Returned(outs);
-                }
+                Flow::Return => break Outcome::Returned,
                 Flow::Panicked(code) => break Outcome::Panicked(code),
             }
         };
@@ -391,11 +391,18 @@ impl<'a> Interp<'a> {
         for (operand, ty) in ins.iter().zip(&callee.ins) {
             args.push(self.operand_bytes(regs, slot_base, *operand, type_size(program, *ty)));
         }
-        match self.execute_function(target, &args)? {
-            Outcome::Returned(values) => {
-                self.write_out_slots(slot_base, outs, &values);
-                Ok(None)
-            }
+        // Resolve each caller out place to its absolute address; the callee
+        // writes them directly (pointer ABI).
+        let mut out_refs = Vec::with_capacity(outs.len());
+        for operand in outs {
+            let addr = match operand {
+                Operand::Slot(off) => slot_base + u64::from(*off),
+                Operand::Reg(reg) => regs.get(reg).copied().unwrap_or(0),
+            };
+            out_refs.push(addr);
+        }
+        match self.execute_function(target, &args, &out_refs)? {
+            Outcome::Returned => Ok(None),
             Outcome::Panicked(code) => Ok(Some(Flow::Panicked(code))),
         }
     }
@@ -508,15 +515,6 @@ impl<'a> Interp<'a> {
                 }
             }
             Operand::Slot(off) => self.read_bytes(slot_base + u64::from(off), size),
-        }
-    }
-
-    /// Writes a call's returned byte buffers into the caller's output slots.
-    fn write_out_slots(&mut self, slot_base: u64, outs: &[Operand], values: &[Vec<u8>]) {
-        for (operand, bytes) in outs.iter().zip(values) {
-            if let Operand::Slot(off) = operand {
-                self.write_bytes(slot_base + u64::from(*off), bytes);
-            }
         }
     }
 

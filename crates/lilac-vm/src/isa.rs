@@ -560,14 +560,16 @@ impl Func {
 
     /// Recomputes the precomputed call/return layout fields from the type table.
     ///
-    /// Inputs occupy the frame's low slot region in signature order and outputs
-    /// immediately follow, matching how the compiler declares places. The
-    /// interpreter's `call`/`return` paths then bind arguments and place results
-    /// without any `type_size` lookup.
+    /// The frame begins with the **out-ref region**: one `u64` ref per output
+    /// (the pointer ABI, spec §5). Inputs occupy the region immediately after it
+    /// in signature order; `out_offset` records where inputs end. The
+    /// interpreter's `call` then binds inputs and fills the out-ref region
+    /// without any `type_size` lookup, and `return` copies nothing.
     pub(crate) fn rebuild_layout(&mut self, types: &[TypeInfo]) {
         self.in_offsets.clear();
         self.in_sizes.clear();
-        let mut offset = 0_u32;
+        let out_count = u32::try_from(self.outs.len()).unwrap_or(u32::MAX);
+        let mut offset = out_count.saturating_mul(VM_POINTER_BYTES);
         for &ty in &self.ins {
             let size = type_size_of(types, ty);
             self.in_offsets.push(offset);

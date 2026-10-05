@@ -123,10 +123,6 @@ struct Frame {
     /// currently executing, which is `last_pc` once any instruction has run and
     /// the function entry otherwise.
     last_pc: Option<u32>,
-    /// Range of this frame's output slots within the **caller's** operand pool
-    /// (empty for the entry frame). Recorded at `call` so `return` need not
-    /// re-decode the caller's call instruction.
-    outs: core::ops::Range<u32>,
 }
 
 /// A bytecode interpreter over one [`Program`].
@@ -181,7 +177,6 @@ impl<'a> Machine<'a> {
             slot_base,
             pc: 0,
             last_pc: None,
-            outs: 0..0,
         }];
         Ok(Self {
             program,
@@ -465,11 +460,11 @@ impl<'a> Machine<'a> {
                 // is a register move (matching M5c's no-op mask).
                 self.set_reg(reg_base, dst, self.reg(reg_base, src));
             }
-            Decoded::Call { site, ins, .. } => {
-                self.call(site.func, ins, site.outs.clone(), reg_base, slot_base)?;
+            Decoded::Call { site, ins, outs } => {
+                self.call(site.func, ins, outs, reg_base, slot_base)?;
             }
             Decoded::CallIndirect {
-                callee, site, ins, ..
+                callee, ins, outs, ..
             } => {
                 let value = self.reg(reg_base, callee);
                 if value & FUNC_TAG == 0 {
@@ -477,14 +472,14 @@ impl<'a> Machine<'a> {
                 }
                 let target =
                     u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
-                self.call(target, ins, site.outs.clone(), reg_base, slot_base)?;
+                self.call(target, ins, outs, reg_base, slot_base)?;
             }
             Decoded::CallBuiltin {
                 builtin, ins, outs, ..
             } => {
                 return self.call_builtin(builtin, ins, outs, reg_base, slot_base);
             }
-            Decoded::Return => return self.return_from_frame(program),
+            Decoded::Return => return Ok(self.return_from_frame()),
             Decoded::Panic { data } => {
                 // The referenced data constant's bytes are the panic message.
                 // The verifier's `check_data` guarantees the index is in range;
@@ -601,16 +596,19 @@ impl<'a> Machine<'a> {
         self.program
     }
 
-    /// Pushes a callee frame, binding its inputs from `ins`.
+    /// Pushes a callee frame, binding its inputs and out-ref region from `ins`
+    /// and `outs`.
     ///
-    /// `outs` is the callee-side range into the caller's operand pool for the
-    /// call's output slots; it is recorded on the frame so `return` can place
-    /// the results without re-decoding the caller.
+    /// `outs` are the caller's output places (slot offsets into the caller's
+    /// frame, or a register holding an already-absolute offset). Each callee
+    /// output is bound by writing the caller place's absolute arena offset into
+    /// the callee's out-ref region, so the callee writes the caller's storage
+    /// directly (the pointer ABI).
     fn call(
         &mut self,
         target: u32,
         ins: &[Operand],
-        outs: core::ops::Range<u32>,
+        outs: &[Operand],
         caller_reg_base: u32,
         caller_slot_base: u32,
     ) -> Result<(), VmError> {
@@ -644,54 +642,40 @@ impl<'a> Machine<'a> {
             let dst_abs = usize::try_from(slot_base).unwrap_or(0) + dst_off as usize;
             self.move_to_slot(caller_reg_base, caller_slot_base, *operand, size, dst_abs)?;
         }
+        // Fill the out-ref region: one u64 absolute arena offset per output.
+        for (index, operand) in outs.iter().enumerate() {
+            let abs = match operand {
+                Operand::Slot(off) => u64::from(caller_slot_base) + u64::from(*off),
+                Operand::Reg(reg) => self.reg(caller_reg_base, *reg),
+            };
+            let cell = u32::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_mul(VM_POINTER_BYTES))
+                .and_then(|off| slot_base.checked_add(off))
+                .ok_or(VmError::BadRef(u64::from(slot_base)))?;
+            self.write_abs(usize::try_from(cell).unwrap_or(0), abs, VM_POINTER_BYTES)?;
+        }
         self.frames.push(Frame {
             func: target,
             reg_base,
             slot_base,
             pc: 0,
             last_pc: None,
-            outs,
         });
         Ok(())
     }
 
-    /// Pops the running frame, copying its outputs into the caller's slots.
-    fn return_from_frame(&mut self, program: &'a Program) -> Result<Step, VmError> {
+    /// Pops the running frame.
+    ///
+    /// Outputs were written by reference, so there is nothing to copy back;
+    /// an output the callee never wrote leaves the caller's storage unchanged.
+    fn return_from_frame(&mut self) -> Step {
         if self.frames.len() <= 1 {
             self.frames.pop();
-            return Ok(Step::Returned);
+            return Step::Returned;
         }
-        let Some(exiting) = self.frames.pop() else {
-            return Ok(Step::Returned);
-        };
-        let exiting_func = &program.funcs[exiting.func as usize];
-        let Some(caller) = self.frames.last() else {
-            return Ok(Step::Returned);
-        };
-        // Read the caller fields out and end the `frames` borrow before the
-        // copy loop touches `self`; `caller_func`/`out_slots` borrow `program`
-        // (a distinct `&'a Program`), so the loop copies inline with no
-        // per-return allocation.
-        let caller_func = &program.funcs[caller.func as usize];
-        let caller_slot_base = caller.slot_base;
-        // The call-site output slots were recorded on the callee frame at
-        // `call`, so no caller instruction is re-decoded here.
-        let out_slots = caller_func
-            .operands
-            .get(exiting.outs.start as usize..exiting.outs.end as usize);
-        let mut running = exiting_func.out_offset;
-        if let Some(out_slots) = out_slots {
-            for (index, &size) in exiting_func.out_sizes.iter().enumerate() {
-                let Some(Operand::Slot(dst_off)) = out_slots.get(index) else {
-                    break;
-                };
-                let src = usize::try_from(exiting.slot_base).unwrap_or(0) + running as usize;
-                let dst = usize::try_from(caller_slot_base).unwrap_or(0) + *dst_off as usize;
-                self.copy_arena(src, dst, size as usize)?;
-                running = running.saturating_add(size);
-            }
-        }
-        Ok(Step::Advanced)
+        self.frames.pop();
+        Step::Advanced
     }
 
     /// Copies an aggregate value between a register (used as a ref) and a slot.
@@ -1106,7 +1090,7 @@ mod tests {
     use super::{trap_message, Machine, Step, VmError};
     use crate::compile::compile_src;
     use crate::decode::{decode, Decoded};
-    use crate::isa::{self, Instr};
+    use crate::isa::{self, Instr, Operand};
 
     fn run_src(src: &str) -> Result<i32, VmError> {
         let program = compile_src(src);
@@ -1178,12 +1162,160 @@ mod tests {
             .iter()
             .find(|func| func.name == "fib")
             .expect("fib function");
-        assert_eq!(fib.in_offsets, vec![0], "input region starts at slot 0");
+        assert_eq!(
+            fib.in_offsets,
+            vec![8],
+            "inputs follow the 8-byte out-ref region"
+        );
         assert_eq!(fib.in_sizes, vec![8], "one pointer-wide input");
-        assert_eq!(fib.out_offset, 8, "output region follows the inputs");
+        assert_eq!(fib.out_offset, 16, "inputs end after the out-ref region");
         assert_eq!(fib.out_sizes, vec![8], "one pointer-wide output");
         let out = run_and_capture_place(src, "out").expect("run");
         assert_eq!(out, Some(2584), "fib(18) copied through call/return");
+    }
+
+    /// Builds a two-function program for the out-by-reference tests: `main`
+    /// (its `%x` at slot byte 8, pre-set to 0x7) calls function 1 with `%x` as
+    /// its out place, supplying `callee_code` as the callee body.
+    fn out_ref_program(callee_code: &[Instr], callee_slots: u32) -> isa::Program {
+        let types = vec![isa::TypeInfo {
+            name: "#bit_native".to_string(),
+            size: 8,
+            is_ref: false,
+        }];
+        let (main_code, main_calls, main_ops) = isa::words_of(
+            &types,
+            &[
+                Instr::Const {
+                    dst: 0,
+                    imm: 0x7,
+                    ty: 0,
+                },
+                Instr::Copy {
+                    dst: Operand::Slot(8),
+                    src: Operand::Reg(0),
+                    ty: 0,
+                },
+                Instr::Call {
+                    func: 1,
+                    ins: Vec::new(),
+                    outs: vec![8],
+                },
+                Instr::Return,
+            ],
+        );
+        let (callee_code, callee_calls, callee_ops) = isa::words_of(&types, callee_code);
+        let mut program = isa::Program {
+            version: isa::LBC_VERSION.to_string(),
+            target: isa::VM_TARGET.to_string(),
+            types,
+            data: Vec::new(),
+            globals: Vec::new(),
+            funcs: vec![
+                isa::Func {
+                    name: "main".to_string(),
+                    is_extern: false,
+                    ins: Vec::new(),
+                    outs: Vec::new(),
+                    in_offsets: Vec::new(),
+                    in_sizes: Vec::new(),
+                    out_offset: 0,
+                    out_sizes: Vec::new(),
+                    n_regs: 1,
+                    slot_bytes: 16,
+                    code: main_code,
+                    call_sites: main_calls,
+                    operands: main_ops,
+                    lines: Vec::new(),
+                    place_names: vec![("x".to_string(), 8)],
+                },
+                isa::Func {
+                    name: "callee".to_string(),
+                    is_extern: false,
+                    ins: Vec::new(),
+                    outs: vec![0],
+                    in_offsets: Vec::new(),
+                    in_sizes: Vec::new(),
+                    out_offset: 0,
+                    out_sizes: Vec::new(),
+                    n_regs: 3,
+                    slot_bytes: callee_slots,
+                    code: callee_code,
+                    call_sites: callee_calls,
+                    operands: callee_ops,
+                    lines: Vec::new(),
+                    place_names: Vec::new(),
+                },
+            ],
+        };
+        program.rebuild_layouts();
+        program.verify().expect("verify");
+        program
+    }
+
+    /// Drives `program` and captures the last value seen in `main`'s `%x`.
+    fn run_and_capture_x(program: &isa::Program) -> Option<u64> {
+        let mut machine = Machine::new(program).expect("entry");
+        let mut captured = None;
+        loop {
+            if let Some(value) = machine.read_place("x") {
+                captured = Some(value);
+            }
+            match machine.step().expect("step") {
+                Step::Advanced => {}
+                Step::Returned | Step::Panicked(_) => break,
+            }
+        }
+        captured
+    }
+
+    /// An output the callee never writes leaves the caller's own storage
+    /// unchanged (LLVM parity), not the callee's zeroed slot.
+    #[test]
+    fn unwritten_output_leaves_caller_storage_unchanged() {
+        // `callee` has one out place but its body is a bare `return`.
+        let program = out_ref_program(&[Instr::Return], 8);
+        assert_eq!(
+            run_and_capture_x(&program),
+            Some(0x7),
+            "unwritten output must not overwrite the caller"
+        );
+    }
+
+    /// `addr %out` yields the caller's storage address: a store through the
+    /// taken address updates the caller's place.
+    #[test]
+    fn addr_of_out_place_is_caller_storage() {
+        // callee: r0 = ref %out; p = r0; r1 = 0x2a; *p = r1.
+        let callee = [
+            Instr::Copy {
+                dst: Operand::Reg(0),
+                src: Operand::Slot(0),
+                ty: 0,
+            },
+            Instr::Copy {
+                dst: Operand::Slot(8),
+                src: Operand::Reg(0),
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 1,
+                imm: 0x2a,
+                ty: 0,
+            },
+            Instr::Store {
+                src: Operand::Reg(1),
+                dst: 8,
+                ty: 0,
+            },
+            Instr::Return,
+        ];
+        let program = out_ref_program(&callee, 16);
+        assert_eq!(
+            run_and_capture_x(&program),
+            Some(0x2a),
+            "store through the out place's address reaches the caller"
+        );
     }
 
     #[test]
