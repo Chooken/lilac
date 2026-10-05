@@ -673,6 +673,10 @@ impl<'a> Machine<'a> {
         let Some(caller) = self.frames.last() else {
             return Ok(Step::Returned);
         };
+        // Read the caller fields out and end the `frames` borrow before the
+        // copy loop touches `self`; `caller_func`/`out_slots` borrow `program`
+        // (a distinct `&'a Program`), so the loop copies inline with no
+        // per-return allocation.
         let caller_func = &program.funcs[caller.func as usize];
         let caller_slot_base = caller.slot_base;
         // The call-site output slots were recorded on the callee frame at
@@ -680,7 +684,6 @@ impl<'a> Machine<'a> {
         let out_slots = caller_func
             .operands
             .get(exiting.outs.start as usize..exiting.outs.end as usize);
-        let mut copies: Vec<(usize, usize, u32)> = Vec::new();
         let mut running = out_offset;
         if let Some(out_slots) = out_slots {
             for (index, &ty) in exiting_func.outs.iter().enumerate() {
@@ -690,12 +693,9 @@ impl<'a> Machine<'a> {
                 let size = type_size(program, ty);
                 let src = usize::try_from(exiting.slot_base).unwrap_or(0) + running as usize;
                 let dst = usize::try_from(caller_slot_base).unwrap_or(0) + *dst_off as usize;
-                copies.push((src, dst, size));
+                self.copy_arena(src, dst, size as usize)?;
                 running = running.saturating_add(size);
             }
-        }
-        for (src, dst, size) in copies {
-            self.copy_arena(src, dst, size as usize)?;
         }
         Ok(Step::Advanced)
     }
