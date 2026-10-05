@@ -75,11 +75,10 @@ pub enum Intrinsic {
 /// Looks up a compiler-known intrinsic by `@`-name.
 pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
     match name {
-        "@i_add" | "@i_sub" | "@i_mul" | "@i_div" | "@i_mod" | "@f_add" | "@f_sub" | "@f_mul"
-        | "@f_div" | "@f_mod" => Some(Intrinsic::Arith),
-        "@i_less_than" | "@i_greater_than" | "@f_less_than" | "@f_greater_than" => {
-            Some(Intrinsic::Cmp)
-        }
+        "@i_add" | "@i_sub" | "@i_mul" | "@i_div" | "@i_div_u" | "@i_mod" | "@i_mod_u"
+        | "@f_add" | "@f_sub" | "@f_mul" | "@f_div" | "@f_mod" => Some(Intrinsic::Arith),
+        "@i_less_than" | "@i_less_than_u" | "@i_greater_than" | "@i_greater_than_u"
+        | "@f_less_than" | "@f_greater_than" => Some(Intrinsic::Cmp),
         "@i_negate" | "@f_negate" => Some(Intrinsic::Negate),
         "@as_int" => Some(Intrinsic::AsInt),
         "@as_float" => Some(Intrinsic::AsFloat),
@@ -842,6 +841,22 @@ mod tests {
         assert!(matches!(
             lookup_intrinsic("@i_less_than"),
             Some(Intrinsic::Cmp)
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_less_than_u"),
+            Some(Intrinsic::Cmp)
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_greater_than_u"),
+            Some(Intrinsic::Cmp)
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_div_u"),
+            Some(Intrinsic::Arith)
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_mod_u"),
+            Some(Intrinsic::Arith)
         ));
         assert_eq!(lookup_intrinsic("@nope"), None);
     }

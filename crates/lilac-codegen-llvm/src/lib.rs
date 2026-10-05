@@ -455,7 +455,9 @@ mod tests {
             (ArithOp::ISub, "is"),
             (ArithOp::IMul, "im"),
             (ArithOp::IDiv, "id"),
+            (ArithOp::IDivU, "idu"),
             (ArithOp::IMod, "ir"),
+            (ArithOp::IModU, "iru"),
         ] {
             arith(&mut insts, op, "cr", "cr", dst, "#bit32");
         }
@@ -464,6 +466,7 @@ mod tests {
             (ArithOp::ILt, "lt"),
             (ArithOp::ILtU, "ltu"),
             (ArithOp::IGt, "gt"),
+            (ArithOp::IGtU, "gtu"),
         ] {
             arith(&mut insts, op, "cr", "cr", dst, "#bit8");
         }
@@ -514,11 +517,14 @@ mod tests {
             "sub i32",
             "mul i32",
             "sdiv i32",
+            "udiv i32",
             "srem i32",
+            "urem i32",
             "icmp eq i32",
             "icmp slt i32",
             "icmp ult i32",
             "icmp sgt i32",
+            "icmp ugt i32",
             "fadd float",
             "fsub float",
             "fmul float",

@@ -120,8 +120,12 @@ pub enum ArithOp {
     IMul,
     /// `i.div`.
     IDiv,
+    /// `i.div.u` (unsigned division).
+    IDivU,
     /// `i.mod`.
     IMod,
+    /// `i.mod.u` (unsigned remainder).
+    IModU,
     /// `f.add` (bitwise-float add).
     FAdd,
     /// `f.sub`.
@@ -140,6 +144,8 @@ pub enum ArithOp {
     ILtU,
     /// `i.cmp.gt`.
     IGt,
+    /// `i.cmp.gt.u` (unsigned greater-than).
+    IGtU,
     /// `f.cmp.lt`.
     FLt,
     /// `f.cmp.gt`.
@@ -500,7 +506,9 @@ fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::ISub => "i.sub",
         ArithOp::IMul => "i.mul",
         ArithOp::IDiv => "i.div",
+        ArithOp::IDivU => "i.div.u",
         ArithOp::IMod => "i.mod",
+        ArithOp::IModU => "i.mod.u",
         ArithOp::FAdd => "f.add",
         ArithOp::FSub => "f.sub",
         ArithOp::FMul => "f.mul",
@@ -510,6 +518,7 @@ fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::ILt => "i.cmp.lt",
         ArithOp::ILtU => "i.cmp.lt.u",
         ArithOp::IGt => "i.cmp.gt",
+        ArithOp::IGtU => "i.cmp.gt.u",
         ArithOp::FLt => "f.cmp.lt",
         ArithOp::FGt => "f.cmp.gt",
     }
@@ -1573,6 +1582,13 @@ mod tests {
     }
 
     #[test]
+    fn printer_renders_unsigned_ops() {
+        assert_eq!(print_op(&ArithOp::IGtU), "i.cmp.gt.u");
+        assert_eq!(print_op(&ArithOp::IDivU), "i.div.u");
+        assert_eq!(print_op(&ArithOp::IModU), "i.mod.u");
+    }
+
+    #[test]
     fn verify_accepts_clean() {
         let module = canonical_module();
         let mut diags = lilac_error::Diags::new();
@@ -1857,6 +1873,24 @@ mod tests {
             assert!(
                 verify(&module, &mut diags).is_ok(),
                 "{ty}: {:?}",
+                diags.diagnostics()
+            );
+        }
+    }
+
+    #[test]
+    fn verify_accepts_unsigned_ops_on_bit_containers() {
+        for (op, result_ty) in [
+            (ArithOp::IGtU, "#bit8"),
+            (ArithOp::IDivU, "#bit32"),
+            (ArithOp::IModU, "#bit32"),
+        ] {
+            let label = format!("{op:?}");
+            let module = module_with_arith(op, "#bit32", "#bit32", result_ty);
+            let mut diags = lilac_error::Diags::new();
+            assert!(
+                verify(&module, &mut diags).is_ok(),
+                "{label}: {:?}",
                 diags.diagnostics()
             );
         }

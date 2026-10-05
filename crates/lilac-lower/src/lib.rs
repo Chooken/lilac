@@ -247,6 +247,32 @@ fn fresh_reg(fs: &mut FuncState) -> String {
     format!("{}", fs.regs)
 }
 
+/// Maps an arithmetic intrinsic name (signed/unsigned integer and float) to
+/// its `ArithOp`, or `None` for a non-arithmetic intrinsic.
+fn arith_op_for(name: &str) -> Option<ArithOp> {
+    Some(match name {
+        "@i_add" => ArithOp::IAdd,
+        "@i_sub" => ArithOp::ISub,
+        "@i_mul" => ArithOp::IMul,
+        "@i_div" => ArithOp::IDiv,
+        "@i_div_u" => ArithOp::IDivU,
+        "@i_mod" => ArithOp::IMod,
+        "@i_mod_u" => ArithOp::IModU,
+        "@f_add" => ArithOp::FAdd,
+        "@f_sub" => ArithOp::FSub,
+        "@f_mul" => ArithOp::FMul,
+        "@f_div" => ArithOp::FDiv,
+        "@f_mod" => ArithOp::FMod,
+        "@i_less_than" => ArithOp::ILt,
+        "@i_less_than_u" => ArithOp::ILtU,
+        "@i_greater_than" => ArithOp::IGt,
+        "@i_greater_than_u" => ArithOp::IGtU,
+        "@f_less_than" => ArithOp::FLt,
+        "@f_greater_than" => ArithOp::FGt,
+        _ => return None,
+    })
+}
+
 /// Converts a layout position to a field index (layouts never approach
 /// `u32` limits; overflow is an internal error).
 fn field_idx(index: usize, span: Span) -> u32 {
@@ -1412,24 +1438,7 @@ impl Lower<'_> {
         result_ty: TypeRef,
         span: Span,
     ) -> Result<String, ErrorGuaranteed> {
-        let op: Option<ArithOp> = match name {
-            "@i_add" => Some(ArithOp::IAdd),
-            "@i_sub" => Some(ArithOp::ISub),
-            "@i_mul" => Some(ArithOp::IMul),
-            "@i_div" => Some(ArithOp::IDiv),
-            "@i_mod" => Some(ArithOp::IMod),
-            "@f_add" => Some(ArithOp::FAdd),
-            "@f_sub" => Some(ArithOp::FSub),
-            "@f_mul" => Some(ArithOp::FMul),
-            "@f_div" => Some(ArithOp::FDiv),
-            "@f_mod" => Some(ArithOp::FMod),
-            "@i_less_than" => Some(ArithOp::ILt),
-            "@i_greater_than" => Some(ArithOp::IGt),
-            "@f_less_than" => Some(ArithOp::FLt),
-            "@f_greater_than" => Some(ArithOp::FGt),
-            _ => None,
-        };
-        if let Some(op) = op {
+        if let Some(op) = arith_op_for(name) {
             if args.len() != 2 {
                 lilac_error::bug!(span, "arithmetic intrinsic without two operands");
             }
@@ -1883,6 +1892,17 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("branch.if"), "{text}");
         assert!(text.contains("branch $"), "{text}");
+    }
+
+    #[test]
+    fn lower_unsigned_intrinsics_map_to_unsigned_ops() {
+        let (text, diags) = lower_src(
+            "main: function () nothing {\n    a: @bit32 = 0x8\n    b: @bit32 = 0x2\n    q: @bit32 = @i_div_u(a, b)\n    r: @bit32 = @i_mod_u(a, b)\n    if @i_less_than_u(a, b) {\n        q = 0x1\n    }\n    if @i_greater_than_u(a, b) {\n        r = 0x1\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        for op in ["i.div.u", "i.mod.u", "i.cmp.lt.u", "i.cmp.gt.u"] {
+            assert!(text.contains(op), "missing `{op}` in:\n{text}");
+        }
     }
 
     #[test]

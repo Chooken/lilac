@@ -829,7 +829,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         match op {
-            ArithOp::IAdd | ArithOp::ISub | ArithOp::IMul | ArithOp::IDiv | ArithOp::IMod => {
+            ArithOp::IAdd
+            | ArithOp::ISub
+            | ArithOp::IMul
+            | ArithOp::IDiv
+            | ArithOp::IDivU
+            | ArithOp::IMod
+            | ArithOp::IModU => {
                 let left = reg_int(lhs, state);
                 let right = reg_int(rhs, state);
                 if !matches!(self.lir_type(ty), BasicTypeEnum::IntType(_)) {
@@ -843,17 +849,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ArithOp::ISub => builder.build_int_sub(left, right, ""),
                     ArithOp::IMul => builder.build_int_mul(left, right, ""),
                     ArithOp::IDiv => builder.build_int_signed_div(left, right, ""),
-                    _ => builder.build_int_signed_rem(left, right, ""),
+                    ArithOp::IDivU => builder.build_int_unsigned_div(left, right, ""),
+                    ArithOp::IMod => builder.build_int_signed_rem(left, right, ""),
+                    _ => builder.build_int_unsigned_rem(left, right, ""),
                 };
                 checked(value, "integer arith").into()
             }
-            ArithOp::Eq | ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt => {
+            ArithOp::Eq | ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt | ArithOp::IGtU => {
                 let left = reg_int(lhs, state);
                 let right = reg_int(rhs, state);
                 let predicate = match op {
                     ArithOp::Eq => IntPredicate::EQ,
                     ArithOp::ILt => IntPredicate::SLT,
                     ArithOp::ILtU => IntPredicate::ULT,
+                    ArithOp::IGtU => IntPredicate::UGT,
                     _ => IntPredicate::SGT,
                 };
                 let cmp = checked(

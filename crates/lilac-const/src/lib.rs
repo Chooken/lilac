@@ -525,9 +525,23 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
             Some((_, 0)) | None => ConstValue::Unknown,
             Some((l, r)) => ConstValue::Int(l.wrapping_div(r) & mask, width),
         },
+        ArithOp::IDivU => match ints {
+            Some((l, r)) => match (l & mask).checked_div(r & mask) {
+                Some(value) => ConstValue::Int(value & mask, width),
+                None => ConstValue::Unknown,
+            },
+            None => ConstValue::Unknown,
+        },
         ArithOp::IMod | ArithOp::FMod => match ints {
             Some((_, 0)) | None => ConstValue::Unknown,
             Some((l, r)) => ConstValue::Int(l.wrapping_rem(r) & mask, width),
+        },
+        ArithOp::IModU => match ints {
+            Some((l, r)) => match (l & mask).checked_rem(r & mask) {
+                Some(value) => ConstValue::Int(value & mask, width),
+                None => ConstValue::Unknown,
+            },
+            None => ConstValue::Unknown,
         },
         ArithOp::Eq => match (left, right) {
             (ConstValue::Int(l, _), ConstValue::Int(r, _)) => ConstValue::Bool(l == r),
@@ -544,6 +558,10 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
         },
         ArithOp::IGt | ArithOp::FGt => match ints {
             Some((l, r)) => ConstValue::Bool(l > r),
+            None => ConstValue::Unknown,
+        },
+        ArithOp::IGtU => match ints {
+            Some((l, r)) => ConstValue::Bool((l & mask) > (r & mask)),
             None => ConstValue::Unknown,
         },
     }
@@ -1716,6 +1734,33 @@ mod tests {
             }],
         });
         module
+    }
+
+    #[test]
+    fn eval_arith_unsigned_semantics() {
+        let max = ConstValue::Int(u64::MAX, 64);
+        let one = ConstValue::Int(1, 64);
+        assert!(matches!(
+            eval_arith(&ArithOp::IGtU, &max, &one, "#bit64"),
+            ConstValue::Bool(true)
+        ));
+        assert!(matches!(
+            eval_arith(&ArithOp::IDivU, &max, &ConstValue::Int(2, 64), "#bit64"),
+            ConstValue::Int(value, 64) if value == 0x7fff_ffff_ffff_ffff
+        ));
+        assert!(matches!(
+            eval_arith(
+                &ArithOp::IModU,
+                &ConstValue::Int(7, 64),
+                &ConstValue::Int(3, 64),
+                "#bit64"
+            ),
+            ConstValue::Int(1, 64)
+        ));
+        assert!(matches!(
+            eval_arith(&ArithOp::IDivU, &one, &ConstValue::Int(0, 64), "#bit64"),
+            ConstValue::Unknown
+        ));
     }
 
     #[test]

@@ -20,8 +20,9 @@ use crate::{
 /// Wire-format version; bump on any normative codec change.
 ///
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
-/// unsigned `format_args` bounds checks.
-pub const LIR_CODEC_VERSION: u32 = 2;
+/// unsigned `format_args` bounds checks. Version 3 appends the unsigned
+/// `IGtU`/`IDivU`/`IModU` tags (16–18).
+pub const LIR_CODEC_VERSION: u32 = 3;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -164,6 +165,9 @@ fn put_arith(w: &mut impl Write, op: &ArithOp) -> io::Result<()> {
         ArithOp::FLt => 13,
         ArithOp::FGt => 14,
         ArithOp::ILtU => 15,
+        ArithOp::IGtU => 16,
+        ArithOp::IDivU => 17,
+        ArithOp::IModU => 18,
     };
     put_u8(w, tag)
 }
@@ -564,6 +568,9 @@ fn get_arith(r: &mut impl Read) -> Result<ArithOp, CodecError> {
         13 => ArithOp::FLt,
         14 => ArithOp::FGt,
         15 => ArithOp::ILtU,
+        16 => ArithOp::IGtU,
+        17 => ArithOp::IDivU,
+        18 => ArithOp::IModU,
         _ => return Err(CodecError::Malformed("invalid ArithOp tag")),
     })
 }
@@ -1023,7 +1030,7 @@ mod tests {
     }
 
     /// Builds a module exercising every `LirInst` and `LirTerm` variant, both
-    /// `ConvertOp`s, all 16 `ArithOp`s, all three `LirCallee`s, both
+    /// `ConvertOp`s, all 19 `ArithOp`s, all three `LirCallee`s, both
     /// `LirDataKind`s, and a layout.
     #[allow(clippy::too_many_lines)]
     fn all_variants_module() -> LirModule {
@@ -1139,7 +1146,9 @@ mod tests {
             ArithOp::ISub,
             ArithOp::IMul,
             ArithOp::IDiv,
+            ArithOp::IDivU,
             ArithOp::IMod,
+            ArithOp::IModU,
             ArithOp::FAdd,
             ArithOp::FSub,
             ArithOp::FMul,
@@ -1149,6 +1158,7 @@ mod tests {
             ArithOp::ILt,
             ArithOp::ILtU,
             ArithOp::IGt,
+            ArithOp::IGtU,
             ArithOp::FLt,
             ArithOp::FGt,
         ]
