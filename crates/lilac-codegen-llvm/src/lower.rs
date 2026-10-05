@@ -26,8 +26,8 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
 use lilac_error::bug;
 use lilac_ir::{
-    builtin_sig, ArithOp, ConvertOp, LirCallee, LirDataKind, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm,
+    builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirDataKind, LirFunc, LirInst,
+    LirModule, LirOperand, LirTerm,
 };
 use lilac_span::Span;
 
@@ -167,8 +167,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "#bit64" => self.context.i64_type().into(),
             "#bitNative" => self.native.into(),
             "#ptr" => self.ptr_type().into(),
-            "#byte_buffer" => self.byte_buffer_type().into(),
-            "#format_args" => self.format_args_type().into(),
             "#str" | "#numlit" => bug!(
                 Span::dummy(),
                 "data-only type `{ty}` has no LLVM value type"
@@ -180,22 +178,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// `{len: iNative, ptr}`.
-    pub(crate) fn byte_buffer_type(&self) -> StructType<'ctx> {
-        self.context
-            .struct_type(&[self.native.into(), self.ptr_type().into()], false)
-    }
-
-    /// `{count: iNative, pieces: [16 x {len: iNative, ptr}]}`.
-    pub(crate) fn format_args_type(&self) -> StructType<'ctx> {
-        let piece = self
-            .context
-            .struct_type(&[self.native.into(), self.ptr_type().into()], false);
-        let table = piece.array_type(16);
-        self.context
-            .struct_type(&[self.native.into(), table.into()], false)
-    }
-
     /// The opaque `ptr` type used for every place under the pointer ABI.
     pub(crate) fn ptr_type(&self) -> PointerType<'ctx> {
         self.context.ptr_type(AddressSpace::default())
@@ -204,7 +186,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Defines one named LLVM struct per LIR layout, in sorted order so printed
     /// IR is deterministic. Opaque shells are created first so fields may refer
     /// to any layout regardless of name order.
+    ///
+    /// The builtin aggregates `#byte_buffer`/`#format_args` never appear in
+    /// `module.layouts`, so they are built here from `builtin_layout`, resolving
+    /// `#byte_buffer` before `#format_args` (which embeds it sixteen times).
     fn define_layouts(&mut self) {
+        for name in ["#byte_buffer", "#format_args"] {
+            let Some(layout) = builtin_layout(name) else {
+                continue;
+            };
+            let fields: Vec<BasicTypeEnum<'ctx>> =
+                layout.iter().map(|(_, ty)| self.lir_type(ty)).collect();
+            let struct_ty = self.context.struct_type(&fields, false);
+            self.named.insert(name.to_owned(), struct_ty);
+        }
         let mut names: Vec<&String> = self.lir.layouts.keys().collect();
         names.sort_unstable();
         for name in &names {
@@ -671,7 +666,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// The `void @.lilac.abort()` runtime symbol (its body is Task 5's).
+    /// The `void @.lilac.abort()` leaf runtime symbol.
     fn abort_fn(&self) -> FunctionValue<'ctx> {
         let fn_type = self.context.void_type().fn_type(&[], false);
         self.runtime_fn(".lilac.abort", fn_type)
@@ -798,8 +793,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             // The LIR verifier's `check_const_lit` accepts `#byte_buffer`,
             // `#format_args`, and `ref #bit8` data-symbol consts. A `[N x i8]`
             // global can only become a `#byte_buffer` wrapper or a bare
-            // reference; `#format_args` (a `{ iNative, [16 x …] }` piece table)
-            // has no meaningful lowering and no `lilac-lower` path emits one.
+            // reference; `#format_args` (a seventeen-field piece table) has no
+            // meaningful lowering and no `lilac-lower` path emits one.
             // This explicit, documented ICE pins the divergence
             // (`format_args_data_const_is_ice`).
             bug!(
@@ -1004,9 +999,10 @@ pub(crate) fn symbol(name: &str) -> &str {
     }
 }
 
-/// The LLVM symbol a `@`-prefixed LIR builtin emits under. `@memcpy` becomes
-/// `.lilac.memcpy` so its in-module definition cannot collide with the host C
-/// library's `memcpy`; every other builtin drops the `@`.
+/// The LLVM symbol a `@`-prefixed leaf LIR builtin emits under. `@memcpy`
+/// becomes `.lilac.memcpy` so its in-module definition cannot collide with the
+/// host C library's `memcpy`; `@ptr_add`/`@lilac_abort` map to their `.lilac.`
+/// leaves.
 fn builtin_symbol(name: &str) -> &str {
     match name {
         "@memcpy" => ".lilac.memcpy",

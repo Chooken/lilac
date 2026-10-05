@@ -476,6 +476,25 @@ fn eval_builtin(
     }
 }
 
+/// Maps a `.lilac.<name>` runtime function to its `@<name>` builtin spelling,
+/// or `None` for an ordinary user function. `fold` runs before the prelude is
+/// injected, so a runtime call has no body yet and must be recognized by name.
+fn lilac_func_builtin(name: &str) -> Option<String> {
+    name.strip_prefix(".lilac.").map(|rest| format!("@{rest}"))
+}
+
+/// The out-place types and result type of a runtime function the folder can
+/// evaluate, mirroring its prelude signature. `None` for pointer-producing or
+/// mutating runtime functions (the const value model has no pointers).
+fn runtime_out_types(builtin: &str) -> Option<(Vec<Option<String>>, &'static str)> {
+    match builtin {
+        "@byte_buffer_len" => Some((vec![Some("#bitNative".to_owned())], "#bitNative")),
+        "@byte_buffer_from" => Some((vec![Some("#byte_buffer".to_owned())], "#byte_buffer")),
+        "@load_u8" => Some((vec![Some("#bit8".to_owned())], "#bit8")),
+        _ => None,
+    }
+}
+
 /// Evaluates arithmetic over constants (misses stay `Unknown`: a missed
 /// fold is performance only, never a correctness error).
 fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> ConstValue {
@@ -919,6 +938,18 @@ impl Folder<'_> {
     ) -> Result<Option<FoldedCall>, Eval> {
         match callee {
             LirCallee::Func(name) => {
+                if let Some(builtin) = lilac_func_builtin(name) {
+                    let Some((out_types, out_ty)) = runtime_out_types(&builtin) else {
+                        return Ok(None);
+                    };
+                    return match eval_builtin(&builtin, args, out_ty) {
+                        Ok(value) => Ok(Some(FoldedCall {
+                            values: vec![value],
+                            out_types,
+                        })),
+                        Err(_) => Ok(None),
+                    };
+                }
                 let out_types = self.func_out_types(name);
                 let values = self.eval_user_call(name, args)?;
                 Ok(Some(FoldedCall { values, out_types }))
@@ -1308,6 +1339,9 @@ impl Evaluator<'_> {
     ) -> Result<(), Eval> {
         match callee {
             LirCallee::Func(name) => {
+                if let Some(builtin) = lilac_func_builtin(name) {
+                    return self.exec_builtin(&builtin, ins, outs, span, frame);
+                }
                 let args: Vec<ConstValue> = ins
                     .iter()
                     .map(|place| {
@@ -1633,15 +1667,6 @@ mod tests {
     fn call_func(name: &str, ins: &[&str], outs: &[&str]) -> LirInst {
         LirInst::Call {
             func: LirCallee::Func(name.to_owned()),
-            ins: strings(ins),
-            outs: strings(outs),
-            span: test_span(),
-        }
-    }
-
-    fn call_builtin(name: &str, ins: &[&str], outs: &[&str]) -> LirInst {
-        LirInst::Call {
-            func: LirCallee::Builtin(name.to_owned()),
             ins: strings(ins),
             outs: strings(outs),
             span: test_span(),
@@ -1992,7 +2017,7 @@ mod tests {
                         constant("r0", "0x0", "#bitNative"),
                         copy_place(reg("r0"), "i"),
                         copy_place(reg("r0"), "acc"),
-                        call_builtin("@byte_buffer_len", &["buf"], &["len"]),
+                        call_func(".lilac.byte_buffer_len", &["buf"], &["len"]),
                     ],
                     term: branch("cond"),
                     span: test_span(),
@@ -2012,8 +2037,8 @@ mod tests {
                     insts: vec![
                         alloca("ref #bit8", "p"),
                         alloca("#bit8", "c"),
-                        call_builtin("@byte_buffer_ptr", &["buf"], &["p"]),
-                        call_builtin("@load_u8", &["p", "i"], &["c"]),
+                        call_func(".lilac.byte_buffer_ptr", &["buf"], &["p"]),
+                        call_func(".lilac.load_u8", &["p", "i"], &["c"]),
                         copy_reg(place("c"), "r4", "#bit8"),
                         extend("r4", "r4b", "#bitNative"),
                         copy_reg(place("acc"), "r5", "#bitNative"),
@@ -2072,6 +2097,69 @@ mod tests {
         assert!(!text.contains("call @parse"), "{text}");
     }
 
+    /// A `.lilac.byte_buffer_len` call on a constant buffer folds during
+    /// `fold` (which runs before the prelude is injected), so a branch it
+    /// controls is resolved and a dead `@compile_error` is pruned silently.
+    #[test]
+    fn lilac_byte_buffer_len_folds_and_prunes_dead_compile_error() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "msg".to_owned(),
+            kind: LirDataKind::Str("boom".to_owned()),
+            span: test_span(),
+        });
+        module.data.push(LirData {
+            name: "ab".to_owned(),
+            kind: LirDataKind::Str("AB".to_owned()),
+            span: test_span(),
+        });
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![
+                LirBlock {
+                    label: "entry".to_owned(),
+                    insts: vec![
+                        alloca("#byte_buffer", "b"),
+                        alloca("#bitNative", "len"),
+                        constant("c", "!ab", "#byte_buffer"),
+                        copy_place(reg("c"), "b"),
+                        call_func(".lilac.byte_buffer_len", &["b"], &["len"]),
+                        copy_reg(place("len"), "n", "#bitNative"),
+                        constant("two", "0x2", "#bitNative"),
+                        arith(ArithOp::Eq, "n", "two", "eq", "#bitNative"),
+                    ],
+                    term: branch_if("eq", "ok", Some("err")),
+                    span: test_span(),
+                },
+                LirBlock {
+                    label: "ok".to_owned(),
+                    insts: Vec::new(),
+                    term: ret(),
+                    span: test_span(),
+                },
+                LirBlock {
+                    label: "err".to_owned(),
+                    insts: vec![LirInst::CompileError {
+                        msg: "boom".to_owned(),
+                        msg_span: test_span(),
+                        call_span: test_span(),
+                    }],
+                    term: ret(),
+                    span: test_span(),
+                },
+            ],
+        });
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let text = module.to_text();
+        assert!(!text.contains(".lilac.byte_buffer_len"), "{text}");
+        assert!(!text.contains("$err"), "{text}");
+    }
+
     #[test]
     fn call_eval_miss_stays_call() {
         let mut module = parser_module(false);
@@ -2126,9 +2214,9 @@ mod tests {
                     copy_place(reg("r0"), "z"),
                     constant("r1", "0x0", "#bit8"),
                     copy_place(reg("r1"), "v"),
-                    call_builtin("@byte_buffer_ptr", &["buf"], &["p"]),
-                    call_builtin("@store_u8", &["p", "z", "v"], &[]),
-                    call_builtin("@load_u8", &["p", "z"], &["w"]),
+                    call_func(".lilac.byte_buffer_ptr", &["buf"], &["p"]),
+                    call_func(".lilac.store_u8", &["p", "z", "v"], &[]),
+                    call_func(".lilac.load_u8", &["p", "z"], &["w"]),
                     copy_reg(place("w"), "r2", "#bit8"),
                     extend("r2", "r3", "#bitNative"),
                     copy_place(reg("r3"), "result"),

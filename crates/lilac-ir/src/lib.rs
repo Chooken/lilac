@@ -666,27 +666,6 @@ pub struct BuiltinSig {
 #[must_use]
 pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     let (ins, outs) = match name {
-        "@byte_buffer_from" => (
-            vec![Some("ref #bit8"), Some("#bitNative")],
-            vec![Some("#byte_buffer")],
-        ),
-        "@byte_buffer_ptr" => (vec![Some("#byte_buffer")], vec![Some("ref #bit8")]),
-        "@byte_buffer_len" => (vec![Some("#byte_buffer")], vec![Some("#bitNative")]),
-        "@format_args_new" => (vec![], vec![Some("#format_args")]),
-        "@format_args_push" => (vec![Some("ref #format_args"), Some("#byte_buffer")], vec![]),
-        "@format_args_count" => (vec![Some("#format_args")], vec![Some("#bitNative")]),
-        "@format_args_piece" => (
-            vec![Some("#format_args"), Some("#bitNative")],
-            vec![Some("#byte_buffer")],
-        ),
-        "@load_u8" => (
-            vec![Some("ref #bit8"), Some("#bitNative")],
-            vec![Some("#bit8")],
-        ),
-        "@store_u8" => (
-            vec![Some("ref #bit8"), Some("#bitNative"), Some("#bit8")],
-            vec![],
-        ),
         "@memcpy" => (
             vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bitNative")],
             vec![],
@@ -1966,25 +1945,18 @@ mod tests {
             is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
-                insts: vec![
-                    LirInst::Alloca {
-                        ty: "#format_args".to_owned(),
-                        place: "buf".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Call {
-                        func: LirCallee::Builtin("@format_args_new".into()),
-                        ins: Vec::new(),
-                        outs: vec!["buf".to_owned()],
-                        span: test_span(),
-                    },
-                ],
+                insts: vec![LirInst::Call {
+                    func: LirCallee::Builtin("@lilac_abort".into()),
+                    ins: Vec::new(),
+                    outs: Vec::new(),
+                    span: test_span(),
+                }],
                 term: LirTerm::Return { span: test_span() },
                 span: test_span(),
             }],
         });
         let text = module.to_text();
-        assert!(text.contains("call @format_args_new"), "{text}");
+        assert!(text.contains("call @lilac_abort"), "{text}");
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
     }
@@ -2000,69 +1972,25 @@ mod tests {
         assert!(abort.outs.is_empty(), "{:?}", abort.outs);
     }
 
+    /// After the runtime moved into LIR, only the three leaf intrinsics remain
+    /// builtins; every moved name is now an ordinary function symbol.
     #[test]
-    fn load_u8_and_store_u8_arity_includes_offset() {
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![
-                    LirInst::Alloca {
-                        ty: "ref #bit8".to_owned(),
-                        place: "p".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Alloca {
-                        ty: "#bitNative".to_owned(),
-                        place: "i".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Alloca {
-                        ty: "#bit8".to_owned(),
-                        place: "b".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Call {
-                        func: LirCallee::Builtin("@load_u8".into()),
-                        ins: vec!["p".to_owned(), "i".to_owned()],
-                        outs: vec!["b".to_owned()],
-                        span: test_span(),
-                    },
-                    LirInst::Call {
-                        func: LirCallee::Builtin("@store_u8".into()),
-                        ins: vec!["p".to_owned(), "i".to_owned(), "b".to_owned()],
-                        outs: Vec::new(),
-                        span: test_span(),
-                    },
-                ],
-                term: LirTerm::Return { span: test_span() },
-                span: test_span(),
-            }],
-        });
-        let mut diags = lilac_error::Diags::new();
-        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
-
-        // The pre-fix offset-less shapes are rejected.
-        for (name, ins) in [
-            ("@load_u8", vec!["p".to_owned()]),
-            ("@store_u8", vec!["p".to_owned(), "b".to_owned()]),
+    fn builtin_sig_shrinks_to_leaves() {
+        assert!(builtin_sig("@memcpy").is_some());
+        for removed in [
+            "@byte_buffer_from",
+            "@byte_buffer_ptr",
+            "@byte_buffer_len",
+            "@format_args_new",
+            "@format_args_push",
+            "@format_args_count",
+            "@format_args_piece",
+            "@load_u8",
+            "@store_u8",
         ] {
-            let mut bad = module.clone();
-            let last = bad.funcs[0].blocks[0].insts.len() - 1;
-            bad.funcs[0].blocks[0].insts[last] = LirInst::Call {
-                func: LirCallee::Builtin(name.to_owned()),
-                ins,
-                outs: Vec::new(),
-                span: test_span(),
-            };
-            let mut diags = lilac_error::Diags::new();
             assert!(
-                verify(&bad, &mut diags).is_err(),
-                "{name} accepted bad arity"
+                builtin_sig(removed).is_none(),
+                "`{removed}` must no longer be a builtin"
             );
         }
     }

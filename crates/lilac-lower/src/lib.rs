@@ -253,6 +253,18 @@ fn field_idx(index: usize, span: Span) -> u32 {
     u32::try_from(index).unwrap_or_else(|_| lilac_error::bug!(span, "field index overflow"))
 }
 
+/// The callee for a `lower_builtin_call` name. The byte-buffer, format-args,
+/// and byte-access runtime moved into LIR, so those calls target ordinary
+/// `.lilac.<name>` functions; only the remaining leaf (`@memcpy`) is a builtin.
+fn runtime_callee(name: &str) -> LirCallee {
+    match name {
+        "@byte_buffer_from" | "@byte_buffer_ptr" | "@byte_buffer_len" | "@format_args_new"
+        | "@format_args_push" | "@format_args_count" | "@format_args_piece" | "@load_u8"
+        | "@store_u8" => LirCallee::Func(format!(".lilac.{}", name.trim_start_matches('@'))),
+        _ => LirCallee::Builtin(name.to_owned()),
+    }
+}
+
 impl Lower<'_> {
     fn expand_const(&mut self, def: DefId, inlining: &mut HashSet<DefId>) -> HirExpr {
         let Some(value) = self.const_src.get(&def).cloned() else {
@@ -1543,12 +1555,13 @@ impl Lower<'_> {
         for arg in args {
             ins.push(self.eval_place(fs, arg)?);
         }
+        let callee = runtime_callee(name);
         if has_result {
             let temp = self.fresh_tmp(fs, result_ty, span);
             emit(
                 fs,
                 LirInst::Call {
-                    func: LirCallee::Builtin(name.to_owned()),
+                    func: callee.clone(),
                     ins,
                     outs: vec![temp.clone()],
                     span,
@@ -1569,7 +1582,7 @@ impl Lower<'_> {
             emit(
                 fs,
                 LirInst::Call {
-                    func: LirCallee::Builtin(name.to_owned()),
+                    func: callee,
                     ins,
                     outs: Vec::new(),
                     span,
@@ -1980,10 +1993,12 @@ mod tests {
 
     #[test]
     fn lower_builtin_calls() {
+        // The format-args runtime is ordinary LIR now: call sites name the
+        // `.lilac.*` function rather than a value-ABI builtin.
         let (text, diags) =
             lower_src("main: function () nothing {\n    x: @format_args = @format_args_new()\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("call @format_args_new"), "{text}");
+        assert!(text.contains("call @.lilac.format_args_new"), "{text}");
     }
 
     #[test]

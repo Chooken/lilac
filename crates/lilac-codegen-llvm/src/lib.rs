@@ -193,9 +193,16 @@ mod tests {
         module
     }
 
+    /// The `#format_args` LLVM struct is the 17-field expansion of
+    /// `builtin_layout` (a count plus sixteen named pieces), not an array.
+    fn format_args_llvm_type() -> String {
+        format!("{{ i64, {0} }}", ["{ i64, ptr }"; 16].join(", "))
+    }
+
     #[test]
     fn lowers_types_layouts_and_zero_init() {
         let text = emit(&type_module());
+        let format_args = format_args_llvm_type();
         for needle in [
             "i8",
             "i16",
@@ -204,12 +211,13 @@ mod tests {
             "ptr",
             "%Pair = type { i32, i8 }",
             "{ i64, ptr }",
-            "{ i64, [16 x { i64, ptr }] }",
+            format_args.as_str(),
         ] {
             assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
         }
         // Scalar zero values print as `0`/`null`; aggregate ones as
         // `zeroinitializer` (LLVM canonicalizes both to the same constant).
+        let format_args_store = format!("store {format_args} zeroinitializer");
         for needle in [
             "store i8 0",
             "store i16 0",
@@ -218,7 +226,7 @@ mod tests {
             "store ptr null",
             "store %Pair zeroinitializer",
             "store { i64, ptr } zeroinitializer",
-            "store { i64, [16 x { i64, ptr }] } zeroinitializer",
+            format_args_store.as_str(),
         ] {
             assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
         }
@@ -696,56 +704,45 @@ mod tests {
         assert!(text.contains("(ptr %value, ptr %out)"), "{text}");
     }
 
-    /// Builtin calls use the value ABI: inputs are loaded, the declared runtime
-    /// symbol is called, and the single result is stored into the out place.
+    /// Leaf builtin calls use the value ABI: inputs are loaded, the declared
+    /// runtime symbol is called, and the single result is stored into the out
+    /// place.
     #[test]
-    fn lowers_builtin_call_with_value_abi() {
+    fn lowers_leaf_builtin_call_with_value_abi() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         let mut insts = Vec::new();
-        alloca(&mut insts, "bytes", "ref #bit8");
-        alloca(&mut insts, "len", "#bitNative");
-        alloca(&mut insts, "buf", "#byte_buffer");
+        alloca(&mut insts, "base", "ref #bit8");
+        alloca(&mut insts, "off", "#bitNative");
+        alloca(&mut insts, "out", "ref #bit8");
         call(
             &mut insts,
-            LirCallee::Builtin("@byte_buffer_from".to_owned()),
-            &["bytes", "len"],
-            &["buf"],
+            LirCallee::Builtin("@ptr_add".to_owned()),
+            &["base", "off"],
+            &["out"],
         );
         module
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
         let text = emit(&module);
         assert!(
-            text.contains("define { i64, ptr } @byte_buffer_from(ptr %data, i64 %len)"),
+            text.contains("define ptr @.lilac.ptr_add(ptr %base, i64 %offset)"),
             "{text}"
         );
         assert!(
-            !text.contains("declare { i64, ptr } @byte_buffer_from"),
+            !text.contains("declare ptr @.lilac.ptr_add"),
             "runtime definition must be reused, not re-declared:\n{text}"
         );
-        assert!(
-            text.contains("call { i64, ptr } @byte_buffer_from(ptr %"),
-            "{text}"
-        );
-        assert!(text.contains("store { i64, ptr } %"), "{text}");
+        assert!(text.contains("call ptr @.lilac.ptr_add(ptr %"), "{text}");
+        assert!(text.contains("store ptr %"), "{text}");
     }
 
-    /// Task 5 emits the whole runtime set once per module, in the fixed order
-    /// the spec pins, with the `IR_SPEC.md` value signatures.
+    /// After the runtime moved into LIR, codegen defines only the three leaf
+    /// intrinsics (once each); the moved functions are ordinary LIR now.
     #[test]
-    fn emits_each_runtime_builtin_once_with_value_signature() {
+    fn emits_each_runtime_leaf_once_with_value_signature() {
         let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
         for needle in [
-            "define { i64, ptr } @byte_buffer_from(ptr %data, i64 %len)",
-            "define ptr @byte_buffer_ptr({ i64, ptr } %buffer)",
-            "define i64 @byte_buffer_len({ i64, ptr } %buffer)",
-            "define i8 @load_u8(ptr %data, i64 %index)",
-            "define void @store_u8(ptr %data, i64 %index, i8 %value)",
             "define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len)",
-            "define { i64, [16 x { i64, ptr }] } @format_args_new()",
-            "define void @format_args_push(ptr %table, { i64, ptr } %piece)",
-            "define i64 @format_args_count({ i64, [16 x { i64, ptr }] } %table)",
-            "define { i64, ptr } @format_args_piece({ i64, [16 x { i64, ptr }] } %table, i64 %index)",
             "define ptr @.lilac.ptr_add(ptr %base, i64 %offset)",
             "define void @.lilac.abort()",
         ] {
@@ -753,6 +750,22 @@ mod tests {
                 text.matches(needle).count(),
                 1,
                 "`{needle}` must be defined exactly once in:\n{text}"
+            );
+        }
+        for moved in [
+            "byte_buffer_from",
+            "byte_buffer_ptr",
+            "byte_buffer_len",
+            "load_u8",
+            "store_u8",
+            "format_args_new",
+            "format_args_push",
+            "format_args_count",
+            "format_args_piece",
+        ] {
+            assert!(
+                !text.contains(moved),
+                "`{moved}` must no longer be emitted by the backend:\n{text}"
             );
         }
     }
@@ -794,34 +807,28 @@ mod tests {
         assert!(!text.contains("@lilac_abort"), "{text}");
     }
 
-    /// `#format_args` is `{ iNative, [16 x { iNative, ptr }] }`, `new` returns a
-    /// zeroed table, and `push` appends only while `count < 16`.
+    /// The builtin aggregate LLVM types come from `builtin_layout`: a
+    /// `{ iNative, ptr }` `#byte_buffer` and a 17-field `#format_args` (a count
+    /// plus sixteen named pieces, no array).
     #[test]
-    fn emits_format_args_layout_capacity_and_abort() {
-        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
-        assert!(text.contains("{ i64, [16 x { i64, ptr }] }"), "{text}");
+    fn builtin_aggregates_follow_builtin_layout() {
+        let text = emit(&type_module());
+        assert!(text.contains("{ i64, ptr }"), "{text}");
+        assert!(text.contains(format_args_llvm_type().as_str()), "{text}");
         assert!(
-            text.contains("ret { i64, [16 x { i64, ptr }] } zeroinitializer"),
-            "{text}"
+            !text.contains("[16 x { i64, ptr }]"),
+            "`#format_args` must be sixteen named fields, not an array:\n{text}"
         );
-        assert!(text.contains("icmp ult i64"), "{text}");
-        assert!(text.contains("16"), "{text}");
-        assert!(text.contains("declare void @llvm.trap()"), "{text}");
-        assert!(text.contains("call void @llvm.trap()"), "{text}");
     }
 
-    /// `@format_args_piece` traps (via `@.lilac.abort`) when `index >= count`
-    /// instead of loading past the fixed 16-slot table.
+    /// The backend still declares and defines the `llvm.trap`-backed abort
+    /// leaf; the moved `format_args`/`byte_buffer` runtime is gone.
     #[test]
-    fn format_args_piece_bounds_check_aborts() {
+    fn keeps_only_the_trap_backed_leaf_runtime() {
         let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
-        let body = text
-            .split("\ndefine ")
-            .find(|segment| segment.starts_with("{ i64, ptr } @format_args_piece"))
-            .expect("format_args_piece definition");
-        assert!(body.contains("icmp ult i64"), "{body}");
-        assert!(body.contains("call void @.lilac.abort()"), "{body}");
-        assert!(body.contains("unreachable"), "{body}");
+        assert!(text.contains("declare void @llvm.trap()"), "{text}");
+        assert!(text.contains("call void @llvm.trap()"), "{text}");
+        assert!(text.contains("define void @.lilac.abort()"), "{text}");
     }
 
     /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`

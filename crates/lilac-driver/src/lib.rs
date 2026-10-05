@@ -206,6 +206,9 @@ impl Session {
         let triple = self.target.triple.clone();
         let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
         lilac_const::fold(&mut lir, &mut self.diags)?;
+        let ptr_width = self.target.bit_native_width() / 8;
+        lir.funcs
+            .extend(lilac_ir::runtime::build_runtime(ptr_width));
         lilac_ir::prune_unreachable(&mut lir);
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
@@ -282,6 +285,38 @@ mod tests {
             "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
+    }
+
+    /// A source that reaches no runtime function must not keep any of the
+    /// injected `.lilac.*` prelude: DCE culls it.
+    #[test]
+    fn no_runtime_source_culls_the_prelude() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir("hello.lilac", "main: function () nothing {\n}\n")
+            .expect("hello should compile");
+        let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.iter().all(|name| !name.starts_with(".lilac.")),
+            "unreachable prelude survived DCE: {names:?}"
+        );
+    }
+
+    /// A source that reaches the byte-buffer runtime keeps exactly the
+    /// reachable prelude functions (and no others). `@byte_buffer_ptr` cannot
+    /// be folded, so its `.lilac.` body survives DCE.
+    #[test]
+    fn used_runtime_survives_dce() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "string.lilac",
+                "main: function () nothing {\n    s: @byte_buffer = \"hello\"\n    p: ref @bit8 = @byte_buffer_ptr(s)\n}\n",
+            )
+            .expect("string should compile");
+        let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&".lilac.byte_buffer_ptr"), "{names:?}");
+        assert!(!names.contains(&".lilac.format_args_new"), "{names:?}");
     }
 
     #[test]

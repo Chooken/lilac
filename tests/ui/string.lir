@@ -15,8 +15,17 @@ function @main
     copy &cf.1 -> %tmp.1
     &2: #bitNative = copy %tmp.1
     copy &2 -> %n
-    call @byte_buffer_ptr (in %s) (out %tmp.2)
+    call @.lilac.byte_buffer_ptr (in %s) (out %tmp.2)
     &3: ref #bit8 = copy %tmp.2
     copy &3 -> %p
+    return
+}
+function @.lilac.byte_buffer_ptr
+  in #byte_buffer %buffer
+  out ref #bit8 %out
+{
+  $entry:
+    &r: ref #bit8 = field %buffer .data  // idx 1
+    copy &r -> %out
     return
 }
