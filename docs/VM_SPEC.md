@@ -89,10 +89,11 @@ pub struct Func {
 `in_sizes`/`out_sizes` are `u32` (not `u8`) because runtime values such as
 `#format_args` are 264 bytes. `CallSite` is
 `{ func: u32, ins: Range<u32>, outs: Range<u32> }`: the ranges index
-`Func::operands`, and every output operand is stored as `Operand::Slot`. The
-pool fields (and `arg_reg`/`ret_reg`) are **precomputed** by
-`Program::rebuild_layouts` so `call` binds arguments and `return` yields its
-result without any runtime `type_size` lookup.
+`Func::operands`, and every output operand is stored as `Operand::Slot`.
+`arg_reg`/`ret_reg` are chosen by the compiler (or read from the `.lbc` header);
+`Program::rebuild_layouts` consumes them and the type table to precompute the
+layout fields (`in_offsets`, `in_sizes`, `out_offset`, `out_sizes`) that `call`
+and `return` read, so neither performs a runtime `type_size` lookup.
 
 `Machine` holds three contiguous buffers: a `Vec<u64>` register file (all
 frames), a `Vec<u8>` **arena** (globals followed by each live frame's slot
@@ -271,7 +272,7 @@ in bit 7, whether `lhs` is a slot offset:
 | `0x36` | `call.arith.imm op lhs, 0xImm : ty -> @f (in ...) (out ...)` | `[op][lhs][flags][opcode]`, `call_site`, `imm_lo`, `imm_hi` | 4 |
 | `0x37` | `call.out &d, size -> @f (in ...) (out ...)` | `[op][dst][size][0]`, `call_site` | 2 |
 | `0x38` | `call.arith.out op lhs, 0xImm : ty, &d, size -> @f (in ...) (out ...)` | `[op][lhs][flags][opcode]`, `call_site`, `[dst][size]`, `imm_lo`, `imm_hi` | 5 |
-| `0x39` | `copy.ret src : ty` | `[op][src][packed]` (`packed = kind*0x80 + size`) | 1 |
+| `0x39` | `copy.ret src, ty` | `[op][src][packed]` (`packed = kind*0x80 + size`) | 1 |
 | `0x3A` | `arith.ret op &l, &r : ty` | `[op][lhs][rhs][opcode]` | 1 |
 
 `arith.imm` (opcode `0x34`) folds a single-use `copy %place -> &r` and
@@ -345,22 +346,23 @@ described below. Calling a function pushes a frame, allocates `n_regs` registers
 and `slot_bytes` zeroed arena bytes (registers are SSA and not re-zeroed), binds
 the callee's inputs, and jumps to its entry `pc`.
 
-- **Register ABI (eligible scalars).** A function is marked `argreg A` when it has
-  exactly one input whose type is a non-`ref` scalar of at most 8 bytes and that
-  input place is never address-taken and never passed as a call output. `call`
-  then writes the input value into the callee's register `A` (bypassing the input
-  slot). A function is marked `retreg R` when it has exactly one output whose type
-  is a non-`ref` scalar of at most 8 bytes, that output place is never
-  address-taken, never read, and never passed as a call output, and it is
-  definitely assigned on every returning path. Its result lives in register `R`
-  and `return` yields it; a register-return callee has **no out-ref region**.
+- **Register ABI (eligible small values).** A function is marked `argreg A` when
+  it has exactly one input whose type is a non-`ref` type of at most 8 bytes (a
+  scalar, including an inline small aggregate) and that input place is never
+  address-taken and never passed as a call output. `call` then writes the input
+  value into the callee's register `A` (bypassing the input slot). A function is
+  marked `retreg R` when it has exactly one output whose type is a non-`ref` type
+  of at most 8 bytes, that output place is never address-taken, never read, and
+  never passed as a call output, and it is definitely assigned on every returning
+  path. Its result lives in register `R` and `return` yields it; a
+  register-return callee has **no out-ref region**.
 - **Pointer ABI (otherwise).** The callee frame begins with an **out-ref region**
   of one `u64` per output: at `call`, the caller writes the absolute arena offset
   of each of its out places there, and the callee writes the caller's storage
   directly. `return` then copies **nothing** back — an output the callee never
   writes leaves the caller's storage unchanged (matching the LLVM backend). This
-  is the fallback for any aggregate/`ref`/wide input or output, or an
-  address-taken/read output.
+  is the fallback for any `ref` or wider-than-8-byte (out-of-line) input/output,
+  or an address-taken/read output.
 - The `call.out`/`call.arith.out` forms record a deferred copy on the pushed
   frame; when the callee returns, `&d` is set from the return register
   (register-return callee) or from the caller's out place (by-ref). The injected
@@ -380,7 +382,7 @@ Leaf builtins and their arities:
 | `branch.if &c, $L<t>, $L<e>` | Jump to `e` when `&c == 0`, otherwise to `t`. |
 | `branch.if.imm op lhs, 0xImm : ty, $L<t>, $L<e>` | Fused compare+branch: evaluate `op lhs, Imm` and branch on a non-zero result. |
 | `return` | Pop the frame; a register-return callee yields its return register, a by-ref callee copies nothing. Returning from the entry frame ends the program with exit 0. |
-| `copy.ret src : ty` | Copy `src` into the return register and return (return fusion). |
+| `copy.ret src, ty` | Copy `src` into the return register and return (return fusion). |
 | `arith.ret op &l, &r : ty` | Compute `op &l, &r` into the return register and return. |
 | `panic !cN` | Print the bytes of data constant `!cN` to stderr as `panic: <msg>` and exit 101. |
 | `unreachable` | VM trap: reaching it is a clean runtime error, exit 1, never a `bug!`. |
