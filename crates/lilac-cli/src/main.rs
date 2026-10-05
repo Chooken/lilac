@@ -2,24 +2,23 @@
 //! per milestone).
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{ErrorFormat, Opt, Session, Target};
+use lilac_driver::{ErrorFormat, OptimizeMode, Session, Target};
 use lilac_error::ErrorGuaranteed;
 use lilac_ir::LirModule;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [-O0|-O1|-O2|-O3|-Os] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]"
+    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>]"
 }
 
-/// Maps the driver's [`Opt`] onto the backend's [`lilac_codegen::OptLevel`].
-fn opt_level(opt: Opt) -> lilac_codegen::OptLevel {
-    match opt {
-        Opt::O0 => lilac_codegen::OptLevel::O0,
-        Opt::O1 => lilac_codegen::OptLevel::O1,
-        Opt::O2 => lilac_codegen::OptLevel::O2,
-        Opt::O3 => lilac_codegen::OptLevel::O3,
-        Opt::Os => lilac_codegen::OptLevel::Os,
+/// Maps the driver's [`OptimizeMode`] onto the backend's
+/// [`lilac_codegen::OptLevel`].
+fn opt_level(mode: OptimizeMode) -> lilac_codegen::OptLevel {
+    match mode {
+        OptimizeMode::Debug => lilac_codegen::OptLevel::O0,
+        OptimizeMode::Release => lilac_codegen::OptLevel::O2,
+        OptimizeMode::ReleaseSmall => lilac_codegen::OptLevel::Os,
     }
 }
 
@@ -101,10 +100,14 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             }
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
-        } else if let Some(opt) = Opt::parse(arg) {
-            session.optimize = opt;
+        } else if let Some(mode) = arg.strip_prefix("--mode=") {
+            let Some(parsed) = OptimizeMode::parse(mode) else {
+                eprintln!("unknown --mode={mode}; want debug|release|release-small");
+                return Err(ExitCode::from(2));
+            };
+            session.optimize = parsed;
         } else if *arg == "--release" {
-            session.optimize = Opt::O2;
+            session.optimize = OptimizeMode::Release;
         } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
             if dir.is_empty() {
                 eprintln!("--cache-dir= needs a path\n{}", usage());
@@ -333,7 +336,7 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_with_dumps, opt_level, parse_common, ExitCode, Opt, Session};
+    use super::{compile_with_dumps, opt_level, parse_common, ExitCode, OptimizeMode, Session};
     use lilac_codegen::OptLevel;
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -350,28 +353,30 @@ mod tests {
     }
 
     #[test]
-    fn opt_maps_to_codegen_level() {
-        assert_eq!(opt_level(Opt::O0), OptLevel::O0);
-        assert_eq!(opt_level(Opt::O1), OptLevel::O1);
-        assert_eq!(opt_level(Opt::O2), OptLevel::O2);
-        assert_eq!(opt_level(Opt::O3), OptLevel::O3);
-        assert_eq!(opt_level(Opt::Os), OptLevel::Os);
+    fn mode_maps_to_codegen_level() {
+        assert_eq!(opt_level(OptimizeMode::Debug), OptLevel::O0);
+        assert_eq!(opt_level(OptimizeMode::Release), OptLevel::O2);
+        assert_eq!(opt_level(OptimizeMode::ReleaseSmall), OptLevel::Os);
     }
 
     #[test]
     fn optimization_flags_last_wins() {
-        let common = parse_common(&args(&["f.lilac", "-O1", "-O3"]), false).expect("valid args");
-        assert_eq!(common.session.optimize, Opt::O3);
+        let common = parse_common(
+            &args(&["f.lilac", "--mode=debug", "--mode=release-small"]),
+            false,
+        )
+        .expect("valid args");
+        assert_eq!(common.session.optimize, OptimizeMode::ReleaseSmall);
     }
 
     #[test]
-    fn release_is_o2_and_cache_dir_parses() {
+    fn release_is_release_and_cache_dir_parses() {
         let common = parse_common(
             &args(&["f.lilac", "--release", "--cache-dir=out/cache"]),
             false,
         )
         .expect("valid args");
-        assert_eq!(common.session.optimize, Opt::O2);
+        assert_eq!(common.session.optimize, OptimizeMode::Release);
         assert_eq!(
             common.session.cache_dir,
             Some(std::path::PathBuf::from("out/cache"))
@@ -379,8 +384,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_flag_is_rejected() {
-        assert!(parse_common(&args(&["f.lilac", "-O9"]), false).is_err());
+    fn unknown_mode_is_rejected() {
+        assert!(parse_common(&args(&["f.lilac", "--mode=bogus"]), false).is_err());
     }
 
     #[test]
@@ -390,9 +395,9 @@ mod tests {
 
     #[test]
     fn release_then_opt_flag_last_wins() {
-        let common =
-            parse_common(&args(&["f.lilac", "--release", "-O0"]), false).expect("valid args");
-        assert_eq!(common.session.optimize, Opt::O0);
+        let common = parse_common(&args(&["f.lilac", "--release", "--mode=debug"]), false)
+            .expect("valid args");
+        assert_eq!(common.session.optimize, OptimizeMode::Debug);
     }
 
     #[test]

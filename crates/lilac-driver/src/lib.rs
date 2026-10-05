@@ -26,32 +26,27 @@ pub enum ErrorFormat {
     Json,
 }
 
-/// Optimization level (`-O0`..`-O3`, `-Os`).
+/// Optimization mode (Zig-style names). The CLI maps each onto the LLVM
+/// backend's [`lilac_codegen::OptLevel`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Opt {
+pub enum OptimizeMode {
     /// No optimization (default).
     #[default]
-    O0,
-    /// Basic optimization.
-    O1,
+    Debug,
     /// Standard optimization (`--release`).
-    O2,
-    /// Aggressive optimization.
-    O3,
+    Release,
     /// Optimize for size.
-    Os,
+    ReleaseSmall,
 }
 
-impl Opt {
-    /// Parses one of `-O0`/`-O1`/`-O2`/`-O3`/`-Os`; `None` otherwise.
+impl OptimizeMode {
+    /// Parses one of `debug`/`release`/`release-small`; `None` otherwise.
     #[must_use]
-    pub fn parse(flag: &str) -> Option<Self> {
-        match flag {
-            "-O0" => Some(Self::O0),
-            "-O1" => Some(Self::O1),
-            "-O2" => Some(Self::O2),
-            "-O3" => Some(Self::O3),
-            "-Os" => Some(Self::Os),
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "debug" => Some(Self::Debug),
+            "release" => Some(Self::Release),
+            "release-small" => Some(Self::ReleaseSmall),
             _ => None,
         }
     }
@@ -82,7 +77,7 @@ pub struct Session {
     /// Flags.
     pub opts: Opts,
     /// Optimization level (read by the M5b LLVM pipeline; inert until then).
-    pub optimize: Opt,
+    pub optimize: OptimizeMode,
     /// Cache directory (reserved for the post-v1 content cache).
     pub cache_dir: Option<PathBuf>,
     /// Warns `W020` on operator shape changes (silenced by `--allow`).
@@ -100,7 +95,7 @@ impl Default for Session {
             host: Target::host(),
             target: Target::default(),
             opts: Opts::default(),
-            optimize: Opt::default(),
+            optimize: OptimizeMode::default(),
             cache_dir: None,
             warn_on_operator_type_change: true,
         }
@@ -385,13 +380,16 @@ mod tests {
     }
 
     #[test]
-    fn opt_parses_known_flags_only() {
-        assert_eq!(Opt::parse("-O0"), Some(Opt::O0));
-        assert_eq!(Opt::parse("-O2"), Some(Opt::O2));
-        assert_eq!(Opt::parse("-O3"), Some(Opt::O3));
-        assert_eq!(Opt::parse("-Os"), Some(Opt::Os));
-        assert_eq!(Opt::parse("--release"), None);
-        assert_eq!(Opt::default(), Opt::O0);
+    fn mode_parses_known_names_only() {
+        assert_eq!(OptimizeMode::parse("debug"), Some(OptimizeMode::Debug));
+        assert_eq!(OptimizeMode::parse("release"), Some(OptimizeMode::Release));
+        assert_eq!(
+            OptimizeMode::parse("release-small"),
+            Some(OptimizeMode::ReleaseSmall)
+        );
+        assert_eq!(OptimizeMode::parse("O2"), None);
+        assert_eq!(OptimizeMode::parse("bogus"), None);
+        assert_eq!(OptimizeMode::default(), OptimizeMode::Debug);
     }
 
     #[test]

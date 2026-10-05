@@ -5,22 +5,23 @@
 
 use lilac_ir::LirModule;
 
-/// Optimization level for the LLVM pipeline (`-O0`..`-O3`, `-Os`).
+/// Optimization level for the LLVM pipeline (LLVM's `O0`..`O3`, `Os`).
 ///
 /// Defined here so backend crates can take an optimization level without
-/// depending on the driver.
+/// depending on the driver. The driver's user-facing `OptimizeMode` maps onto
+/// these in the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
-    /// No optimization (`-O0`).
+    /// No optimization.
     #[default]
     O0,
-    /// Light optimization (`-O1`).
+    /// Light optimization.
     O1,
-    /// Moderate optimization (`-O2`).
+    /// Moderate optimization.
     O2,
-    /// Aggressive optimization (`-O3`).
+    /// Aggressive optimization.
     O3,
-    /// Optimize for size (`-Os`).
+    /// Optimize for size.
     Os,
 }
 

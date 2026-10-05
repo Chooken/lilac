@@ -1,6 +1,6 @@
 //! M5b UI tests: `.ll` snapshots are byte-stable under the canonical
 //! `x86_64-unknown-none` triple, every success program links and runs on the
-//! host at `-O0` and `-O2`, and the zero-init plus RAII `@on_drop` call is
+//! host in the debug and release modes, and the zero-init plus RAII `@on_drop` call is
 //! visible in `generic_hook_drop.ll`.
 
 use std::path::{Path, PathBuf};
@@ -118,7 +118,7 @@ fn emit_host_ir(source: &Path, opt: &str, dest: &Path) {
 }
 
 /// Every success program links (toolchain `clang`) and runs to exit 0 on the
-/// host, at `-O0` and `-O2`. A failure here is a real backend bug, so it is
+/// host, in the debug and release modes. A failure here is a real backend bug, so it is
 /// reported rather than skipped.
 #[test]
 fn compiles_and_runs_on_host() {
@@ -128,7 +128,7 @@ fn compiles_and_runs_on_host() {
 
     for source in success_fixtures() {
         let name = stem(&source);
-        for (label, opt) in [("O0", "-O0"), ("O2", "-O2")] {
+        for (label, opt) in [("debug", "--mode=debug"), ("release", "--mode=release")] {
             let ll = scratch.join(format!("{name}-{label}.ll"));
             emit_host_ir(&source, opt, &ll);
 
@@ -211,7 +211,7 @@ fn fstring_runtime_compiles_and_runs_on_host() {
 
     let source = Path::new(&ui("fstring.lilac")).to_path_buf();
     let ll = scratch.join("fstring.ll");
-    emit_host_ir(&source, "-O0", &ll);
+    emit_host_ir(&source, "--mode=debug", &ll);
     let text = std::fs::read_to_string(&ll).expect("reads IR");
     assert!(text.contains(".lilac.format_args_push"), "{text}");
 
