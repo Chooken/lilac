@@ -9,12 +9,12 @@
 
 use crate::encode::{
     arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
-    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_BRANCH_IF_IMM,
-    OP_CALL, OP_CALL_ARITH_IMM, OP_CALL_ARITH_OUT, OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST,
-    OP_CALL_INDIRECT, OP_CALL_OUT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
-    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
-    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
-    OP_UNREACHABLE, WIDE_FLAG,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_ARITH_IMM, OP_ARITH_RET, OP_BRANCH, OP_BRANCH_IF,
+    OP_BRANCH_IF_IMM, OP_CALL, OP_CALL_ARITH_IMM, OP_CALL_ARITH_OUT, OP_CALL_BUILTIN_BASE,
+    OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CALL_OUT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE,
+    OP_COPY_BYTES, OP_COPY_LAST, OP_COPY_RET, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST,
+    OP_LOAD, OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE,
+    OP_STORE_LAST, OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand};
 
@@ -486,6 +486,24 @@ pub enum Decoded<'a> {
     },
     /// Return from the current function.
     Return,
+    /// Copy a scalar into the return register and return.
+    CopyReturn {
+        /// Source operand.
+        src: Operand,
+        /// Value byte size.
+        size: u32,
+    },
+    /// Compute arithmetic into the return register and return.
+    ArithReturn {
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operator.
+        op: ArithOp,
+        /// Operand width in bits.
+        width: u8,
+    },
     /// Print `data` bytes and abort.
     Panic {
         /// Data index.
@@ -531,6 +549,32 @@ pub fn decode<'a>(
     }
     let (decoded, words) = match base {
         OP_RETURN => (Decoded::Return, 1),
+        OP_COPY_RET => {
+            let (ops, n) = read_ops(code, pc, wide, 2)?;
+            let packed = ops[1];
+            (
+                Decoded::CopyReturn {
+                    src: operate(ops[0], packed & 0x80 != 0),
+                    size: packed & 0x7F,
+                },
+                n,
+            )
+        }
+        OP_ARITH_RET => {
+            let (ops, n) = read_ops(code, pc, wide, 3)?;
+            let op_code = u8::try_from(ops[2] & 0x7F).unwrap_or(0);
+            let (op, width) = arith_from_opcode(op_code)
+                .ok_or_else(|| format!("unknown arith.ret opcode 0x{op_code:02X} at pc {pc}"))?;
+            (
+                Decoded::ArithReturn {
+                    lhs: ops[0],
+                    rhs: ops[1],
+                    op,
+                    width,
+                },
+                n,
+            )
+        }
         OP_UNREACHABLE => (Decoded::Unreachable, 1),
         OP_PANIC => (Decoded::Panic { data: w >> 8 }, 1),
         OP_BRANCH => (Decoded::Branch { target: w >> 8 }, 1),
@@ -1005,13 +1049,14 @@ const fn operand_count(base: u8, is_arith: bool, is_convert: bool) -> Option<u8>
         | OP_CALL
         | OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST => Some(0),
         OP_CONST | OP_CONST_DATA | OP_CALL_INDIRECT => Some(1),
-        OP_ADDR | OP_ADDR_FUNC => Some(2),
+        OP_ADDR | OP_ADDR_FUNC | OP_COPY_RET => Some(2),
         OP_ARITH_IMM
         | OP_BRANCH_IF_IMM
         | OP_CALL_ARITH_IMM
         | OP_CALL_ARITH_OUT
         | OP_CALL_OUT
         | OP_BRANCH_IF
+        | OP_ARITH_RET
         | OP_COPY_BASE..=OP_COPY_LAST
         | OP_COPY_BYTES
         | OP_LOAD

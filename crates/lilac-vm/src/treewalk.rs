@@ -57,16 +57,16 @@ pub fn treewalk_run(program: &Program) -> Result<i32, String> {
     let mut interp = Interp::new(program);
     let main = interp.entry("main")?;
     match interp.execute_function(main, &[], &[])? {
-        Outcome::Returned => Ok(0),
+        Outcome::Returned(_) => Ok(0),
         Outcome::Panicked(code) => Ok(code),
     }
 }
 
 /// The result of executing one function body.
 enum Outcome {
-    /// The body returned; outputs were written by reference into the caller's
-    /// storage, so there is nothing to return.
-    Returned,
+    /// The body returned; the value is its return register (`0` for a
+    /// by-reference callee, whose outputs were written into the caller).
+    Returned(u64),
     /// The body trapped with the given exit code.
     Panicked(i32),
 }
@@ -155,19 +155,39 @@ impl<'a> Interp<'a> {
             let cell = slot_base + (index as u64) * u64::from(VM_POINTER_BYTES);
             self.write_abs(cell, addr, VM_POINTER_BYTES);
         }
-        // Inputs are copied into the region after the out-ref cells.
-        for (arg, &off) in args.iter().zip(&func.in_offsets) {
-            self.write_bytes(slot_base + u64::from(off), arg);
+        // Inputs are copied into the region after the out-ref cells, unless the
+        // function uses the register-argument ABI.
+        if func.arg_reg.is_none() {
+            for (arg, &off) in args.iter().zip(&func.in_offsets) {
+                self.write_bytes(slot_base + u64::from(off), arg);
+            }
         }
 
         let mut regs = vec![0_u64; usize::try_from(func.n_regs).unwrap_or(0)];
+        if let Some(arg_reg) = func.arg_reg {
+            if let Some(arg) = args.first() {
+                if let Some(slot) = regs.get_mut(arg_reg as usize) {
+                    *slot = arg
+                        .iter()
+                        .take(8)
+                        .enumerate()
+                        .fold(0_u64, |acc, (i, &b)| acc | (u64::from(b) << (i * 8)));
+                }
+            }
+        }
         let labels: Vec<u32> = func.labels().into_iter().collect();
         let code_len = u32::try_from(func.code.len()).map_err(|_| "function too large")?;
         let mut pc = 0_u32;
         let outcome = loop {
             match self.run_block(func, pc, &labels, code_len, &mut regs, slot_base)? {
                 Flow::Goto(next) => pc = next,
-                Flow::Return => break Outcome::Returned,
+                Flow::Return => {
+                    let ret = func
+                        .ret_reg
+                        .and_then(|reg| regs.get(reg as usize).copied())
+                        .unwrap_or(0);
+                    break Outcome::Returned(ret);
+                }
                 Flow::Panicked(code) => break Outcome::Panicked(code),
             }
         };
@@ -356,22 +376,16 @@ impl<'a> Interp<'a> {
                 set_reg(regs, *dst, value & mask(size));
                 Ok(None)
             }
-            Decoded::Call { site, ins, outs } => self.call(site.func, ins, outs, regs, slot_base),
+            Decoded::Call { site, ins, outs } => {
+                self.call(site.func, ins, outs, regs, slot_base, None)
+            }
             Decoded::CallOut {
                 dst,
-                size,
+                size: _,
                 site,
                 ins,
                 outs,
-            } => {
-                let flow = self.call(site.func, ins, outs, regs, slot_base)?;
-                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
-                    let address = slot_base + u64::from(slot_off);
-                    let value = self.read_abs(address, *size);
-                    set_reg(regs, *dst, value);
-                }
-                Ok(flow)
-            }
+            } => self.call(site.func, ins, outs, regs, slot_base, Some(*dst)),
             Decoded::CallArithImm {
                 lhs,
                 lhs_slot,
@@ -394,7 +408,7 @@ impl<'a> Interp<'a> {
                 } else {
                     return Err("fused call without a register input".to_string());
                 }
-                self.call(site.func, ins, outs, regs, slot_base)
+                self.call(site.func, ins, outs, regs, slot_base, None)
             }
             Decoded::CallArithOut {
                 lhs,
@@ -406,7 +420,7 @@ impl<'a> Interp<'a> {
                 ins,
                 outs,
                 dst,
-                size: out_size,
+                size: _,
             } => {
                 let size = u32::from(*width) / 8;
                 let left = if *lhs_slot {
@@ -420,13 +434,7 @@ impl<'a> Interp<'a> {
                 } else {
                     return Err("fused call without a register input".to_string());
                 }
-                let flow = self.call(site.func, ins, outs, regs, slot_base)?;
-                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
-                    let address = slot_base + u64::from(slot_off);
-                    let value = self.read_abs(address, *out_size);
-                    set_reg(regs, *dst, value);
-                }
-                Ok(flow)
+                self.call(site.func, ins, outs, regs, slot_base, Some(*dst))
             }
             Decoded::CallIndirect {
                 callee,
@@ -440,7 +448,7 @@ impl<'a> Interp<'a> {
                 }
                 let target = u32::try_from(value & !FUNC_TAG)
                     .map_err(|_| format!("invalid function reference {value}"))?;
-                self.call(target, ins, outs, regs, slot_base)
+                self.call(target, ins, outs, regs, slot_base, None)
             }
             Decoded::CallBuiltin {
                 builtin, ins, outs, ..
@@ -469,6 +477,28 @@ impl<'a> Interp<'a> {
                 Ok(Some(Flow::Goto(if value == 0 { *els } else { *then })))
             }
             Decoded::Return => Ok(Some(Flow::Return)),
+            Decoded::CopyReturn { src, size } => {
+                let value = self.read_scalar(regs, slot_base, *src, *size) & mask(*size);
+                if let Some(ret_reg) = caller.ret_reg {
+                    set_reg(regs, ret_reg, value);
+                }
+                Ok(Some(Flow::Return))
+            }
+            Decoded::ArithReturn {
+                lhs,
+                rhs,
+                op,
+                width,
+            } => {
+                let size = u32::from(*width) / 8;
+                let left = get_reg(regs, *lhs);
+                let right = get_reg(regs, *rhs);
+                let value = eval_arith(*op, left, right, size);
+                if let Some(ret_reg) = caller.ret_reg {
+                    set_reg(regs, ret_reg, value);
+                }
+                Ok(Some(Flow::Return))
+            }
             Decoded::Panic { data } => {
                 let message = program
                     .data
@@ -493,8 +523,9 @@ impl<'a> Interp<'a> {
         target: u32,
         ins: &[Operand],
         outs: &[Operand],
-        regs: &[u64],
+        regs: &mut [u64],
         slot_base: u64,
+        out_dst: Option<u32>,
     ) -> Result<Option<Flow>, String> {
         let program = self.program;
         let callee = program
@@ -509,17 +540,40 @@ impl<'a> Interp<'a> {
             args.push(self.operand_bytes(regs, slot_base, *operand, type_size(program, *ty)));
         }
         // Resolve each caller out place to its absolute address; the callee
-        // writes them directly (pointer ABI).
+        // writes them directly (pointer ABI). A register-return callee has no
+        // out-ref region.
         let mut out_refs = Vec::with_capacity(outs.len());
-        for operand in outs {
-            let addr = match operand {
-                Operand::Slot(off) => slot_base + u64::from(*off),
-                Operand::Reg(reg) => get_reg(regs, *reg),
-            };
-            out_refs.push(addr);
+        if callee.ret_reg.is_none() {
+            for operand in outs {
+                let addr = match operand {
+                    Operand::Slot(off) => slot_base + u64::from(*off),
+                    Operand::Reg(reg) => get_reg(regs, *reg),
+                };
+                out_refs.push(addr);
+            }
         }
         match self.execute_function(target, &args, &out_refs)? {
-            Outcome::Returned => Ok(None),
+            Outcome::Returned(ret) => {
+                let size = callee
+                    .out_sizes
+                    .first()
+                    .copied()
+                    .unwrap_or(VM_POINTER_BYTES);
+                if callee.ret_reg.is_some() {
+                    if let Some(dst) = out_dst {
+                        set_reg(regs, dst, ret);
+                    } else if let Some(Operand::Slot(off)) = outs.first().copied() {
+                        self.write_abs(slot_base + u64::from(off), ret, size);
+                    }
+                } else if let Some(dst) = out_dst {
+                    // By-reference callee: the value is in the caller's out slot.
+                    if let Some(Operand::Slot(off)) = outs.first().copied() {
+                        let value = self.read_abs(slot_base + u64::from(off), size);
+                        set_reg(regs, dst, value);
+                    }
+                }
+                Ok(None)
+            }
             Outcome::Panicked(code) => Ok(Some(Flow::Panicked(code))),
         }
     }

@@ -153,6 +153,16 @@ pub const OP_CALL_OUT: u8 = 0x37;
 /// `[dst:8 | size:8]`, then the immediate's low/high words.
 pub const OP_CALL_ARITH_OUT: u8 = 0x38;
 
+/// Copy a scalar into the return register and return.
+///
+/// Layout: `[op | src:8 | (slot:1 | size:7):8]`.
+pub const OP_COPY_RET: u8 = 0x39;
+
+/// Compute arithmetic into the return register and return.
+///
+/// Layout: `[op | lhs:8 | rhs:8 | op_code:8]`.
+pub const OP_ARITH_RET: u8 = 0x3A;
+
 /// Builds the compact word stream and its operand pools.
 ///
 /// Borrows the program type table so sizes/widths are computed at encode time.
@@ -439,6 +449,24 @@ impl<'a> CodeBuilder<'a> {
                 self.emit_ops(OP_BRANCH_IF, &[*cond, *then, *els])?;
             }
             Instr::Return => self.words.push(u32::from(OP_RETURN)),
+            Instr::CopyReturn { src, ty } => {
+                let size = self.type_size(*ty)?;
+                if size > NARROW_MAX {
+                    return Err(format!("copy.ret size {size} too large"));
+                }
+                let packed = u32::from(kind(*src)) * 0x80 + size;
+                self.emit_ops(OP_COPY_RET, &[operand_value(*src), packed])?;
+            }
+            Instr::ArithReturn {
+                op,
+                lhs,
+                rhs,
+                operand_ty,
+            } => {
+                let size = self.type_size(*operand_ty)?;
+                let code = arith_opcode(*op, size)?;
+                self.emit_ops(OP_ARITH_RET, &[*lhs, *rhs, u32::from(code)])?;
+            }
             Instr::Panic { data } => self.emit_field(OP_PANIC, *data)?,
             Instr::Unreachable => self.words.push(u32::from(OP_UNREACHABLE)),
         }
@@ -792,6 +820,8 @@ pub fn opcode_mnemonic(op: u8) -> &'static str {
         OP_CALL_ARITH_IMM => "call.arith.imm",
         OP_CALL_OUT => "call.out",
         OP_CALL_ARITH_OUT => "call.arith.out",
+        OP_COPY_RET => "copy.ret",
+        OP_ARITH_RET => "arith.ret",
         _ => "unknown",
     }
 }
@@ -1042,6 +1072,32 @@ mod tests {
                     && *func == site.func
                     && ins.as_slice() == *din
                     && outs_match(outs, douts)
+            }
+            (
+                Instr::CopyReturn { src, ty },
+                Decoded::CopyReturn {
+                    src: ds,
+                    size: dsize,
+                },
+            ) => *src == *ds && size_of(types, *ty) == *dsize,
+            (
+                Instr::ArithReturn {
+                    op,
+                    lhs,
+                    rhs,
+                    operand_ty,
+                },
+                Decoded::ArithReturn {
+                    lhs: dl,
+                    rhs: dr,
+                    op: dop,
+                    width,
+                },
+            ) => {
+                op == dop
+                    && lhs == dl
+                    && rhs == dr
+                    && width_of(size_of(types, *operand_ty)) == *width
             }
             (
                 Instr::CallOut {
@@ -1605,6 +1661,17 @@ mod tests {
             outs: vec![16],
             dst: 2,
             size: 8,
+        });
+        // Return-fused forms.
+        instrs.push(Instr::CopyReturn {
+            src: Operand::Reg(1),
+            ty: 3,
+        });
+        instrs.push(Instr::ArithReturn {
+            op: ArithOp::IAdd,
+            lhs: 1,
+            rhs: 2,
+            operand_ty: 3,
         });
         instrs
     }

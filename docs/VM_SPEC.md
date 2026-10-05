@@ -193,24 +193,34 @@ result width (`value & mask(size(ty))`).
 | --- | --- | --- |
 | `Call` | `call @f (in ...) (out ...)` | Direct call by function index. |
 | `CallArithImm` | `call.arith.imm op lhs, 0xImm : ty -> @f (in ...) (out ...)` | Fused `ArithImm` feeding the call's single input register. |
+| `CallArithOut` | `call.arith.out op lhs, 0xImm : ty, &d, size -> @f (in ...) (out ...)` | Fused `ArithImm` feeding the call, whose output is copied into `&d` on return. |
 | `CallOut` | `call.out &d, size -> @f (in ...) (out ...)` | Direct call whose single output is copied into `&d` on return. |
 | `CallIndirect` | `call.indirect &c (in ...) (out ...)` | Call the function id (from `addr.func`) held in `&c`. |
 | `CallBuiltin` | `call.builtin @b (in ...) (out ...)` | Leaf builtin: `ptr_add`, `memcpy`, or `lilac_abort`. |
 
 Inputs are operands (`&reg` or `%slot`); outputs are slots (`%slot`). Calling a
 function pushes a frame, allocates `n_regs` registers and `slot_bytes` zeroed
-arena bytes (registers are SSA and not re-zeroed), binds the callee's `ins` into
-its input slots, and jumps to its entry pc.
+arena bytes (registers are SSA and not re-zeroed), binds the callee's inputs,
+and jumps to its entry pc.
 
-**Outputs are by reference (pointer ABI).** The callee's frame begins with an
-out-ref region: at `call`, the caller writes the absolute arena offset of each
-of its out places there, and the callee writes the caller's storage directly.
-`return` therefore copies **nothing** back — an output the callee never writes
-leaves the caller's storage unchanged. `CallArithImm` folds the argument
-computation into the call. `CallOut` records a deferred copy on the pushed
-frame; when the callee returns, the value at the caller's out place is copied
-into `&d`, removing the separate read. The injected `.lilac.*` runtime functions
-are ordinary functions called through `Call`.
+**Register ABI (single scalar input/output).** A function with exactly one
+scalar input that is never address-taken is marked `argreg A`: `call` writes the
+input value into the callee register `A` instead of a frame slot. A function
+with exactly one scalar, write-only, definitely-assigned output is marked
+`retreg R`: its result lives in register `R`, and `return` yields that value. A
+register-return callee has **no out-ref region**; the caller places the returned
+value itself.
+
+**Otherwise, outputs are by reference (pointer ABI).** The callee's frame begins
+with an out-ref region: at `call`, the caller writes the absolute arena offset
+of each of its out places there, and the callee writes the caller's storage
+directly. `return` then copies **nothing** back — an output the callee never
+writes leaves the caller's storage unchanged. `CallArithImm`/`CallArithOut` fold
+the argument computation into the call. `CallOut`/`CallArithOut` record a
+deferred copy on the pushed frame; when the callee returns, `&d` is set either
+from the return register (register ABI) or from the caller's out place (by-ref).
+The injected `.lilac.*` runtime functions are ordinary functions called through
+`Call`.
 
 Leaf builtins and their arities:
 
@@ -225,7 +235,9 @@ Leaf builtins and their arities:
 | `Branch` | `branch $L<n>` | Unconditional jump to pc `n`. |
 | `BranchIf` | `branch.if &c, $L<t>, $L<e>` | Jump to `e` when `&c == 0`, otherwise to `t`. |
 | `BranchIfArithImm` | `branch.if.imm op lhs, 0xImm : ty, $L<t>, $L<e>` | Fused compare+branch: evaluate `op lhs, Imm` and branch on a non-zero result. |
-| `Return` | `return` | Copy outs to the caller's out slots and pop the frame; returning from the entry frame ends the program with exit 0. |
+| `Return` | `return` | Pop the frame; a register-return callee yields its return register, a by-ref callee copies nothing. Returning from the entry frame ends the program with exit 0. |
+| `CopyReturn` | `copy.ret src : ty` | Copy `src` into the return register and return (return fusion). |
+| `ArithReturn` | `arith.ret op &l, &r : ty` | Compute `op &l, &r` into the return register and return. |
 | `Panic` | `panic !cN` | Print the bytes of data constant `!cN` to stderr as `panic: <msg>` and exit 101. |
 | `Unreachable` | `unreachable` | VM trap: reaching it is a clean runtime error (`unreachable terminator`), exit 1, never a `bug!`. |
 
@@ -254,11 +266,12 @@ the text.
 - **Functions**:
 
   ```text
-  func @<name> (<ins>) -> (<outs>) regs <n_regs> slots <slot_bytes>[ extern]
+  func @<name> (<ins>) -> (<outs>) regs <n_regs> slots <slot_bytes>[ argreg A][ retreg R][ extern]
   ```
 
   The input list is `()` or `(in t, ...)`; the output list is `()` or
-  `(t, ...)`. An `extern` declaration has no body.
+  `(t, ...)`. `argreg`/`retreg` appear for the register ABI (see §3.3); an
+  `extern` declaration has no body.
 - **Places** (optional): `  places %<name>=<offset> ...` on one line, mapping
   original `%place` names to slot offsets for the debugger.
 - **Line table** (optional): `  line <pc>:<file>:<line>:<col>`, one per mapped

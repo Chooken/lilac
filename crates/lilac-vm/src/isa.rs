@@ -571,6 +571,24 @@ pub enum Instr {
     },
     /// Return from the current function.
     Return,
+    /// Copy a scalar into the return register and return (return fusion).
+    CopyReturn {
+        /// Source operand.
+        src: Operand,
+        /// Value type (byte size).
+        ty: TypeId,
+    },
+    /// Compute arithmetic into the return register and return (return fusion).
+    ArithReturn {
+        /// Operator.
+        op: ArithOp,
+        /// Left register.
+        lhs: u32,
+        /// Right register.
+        rhs: u32,
+        /// Operand width type.
+        operand_ty: TypeId,
+    },
     /// Print `data` bytes to stderr and abort non-zero.
     Panic {
         /// Data index.
@@ -614,6 +632,15 @@ pub struct Func {
     pub n_regs: u32,
     /// Per-frame place region size in bytes (zeroed at entry).
     pub slot_bytes: u32,
+    /// Reserved register index holding this function's single scalar input when
+    /// it uses the register-argument ABI (`None` = inputs live in the slot
+    /// region). When `Some`, `call` writes the input here instead of into the
+    /// frame's input slots.
+    pub arg_reg: Option<u32>,
+    /// Reserved register index holding this function's single scalar output when
+    /// it uses the register-return ABI (`None` = outputs are by reference).
+    /// `return` copies this register into the caller's out place.
+    pub ret_reg: Option<u32>,
     /// The executed compact `u32` word stream (M5c.1).
     ///
     /// `pc` is a word index; branch targets are word offsets. The typed
@@ -677,8 +704,21 @@ impl Func {
     pub(crate) fn rebuild_layout(&mut self, types: &[TypeInfo]) {
         self.in_offsets.clear();
         self.in_sizes.clear();
-        let out_count = u32::try_from(self.outs.len()).unwrap_or(u32::MAX);
+        // A register-return function has no out-ref cells; a register-argument
+        // function has no input cells in the slot region.
+        let out_count = if self.ret_reg.is_some() {
+            0
+        } else {
+            u32::try_from(self.outs.len()).unwrap_or(u32::MAX)
+        };
         let mut offset = out_count.saturating_mul(VM_POINTER_BYTES);
+        if self.arg_reg.is_some() {
+            self.out_offset = offset;
+            self.out_sizes.clear();
+            self.out_sizes
+                .extend(self.outs.iter().map(|&ty| type_size_of(types, ty)));
+            return;
+        }
         for &ty in &self.ins {
             let size = type_size_of(types, ty);
             self.in_offsets.push(offset);
@@ -811,6 +851,8 @@ fn is_terminator(instr: &Decoded) -> bool {
     matches!(
         instr,
         Decoded::Return
+            | Decoded::CopyReturn { .. }
+            | Decoded::ArithReturn { .. }
             | Decoded::Panic { .. }
             | Decoded::Unreachable
             | Decoded::Branch { .. }
@@ -1151,6 +1193,13 @@ fn verify_decoded(
             targets.push(*els);
         }
         Decoded::Return | Decoded::Unreachable => {}
+        Decoded::CopyReturn { src, size } => {
+            check_operand(*src, *size, n_regs, slot_bytes)?;
+        }
+        Decoded::ArithReturn { lhs, rhs, .. } => {
+            check_reg(*lhs, n_regs)?;
+            check_reg(*rhs, n_regs)?;
+        }
         Decoded::Panic { data } => check_data(program, *data)?,
     }
     Ok(())
@@ -1326,6 +1375,8 @@ pub(crate) fn sample_program_words(code: Vec<u32>) -> Program {
             out_sizes: Vec::new(),
             n_regs: 1,
             slot_bytes: 8,
+            arg_reg: None,
+            ret_reg: None,
             code,
             call_sites: Vec::new(),
             operands: Vec::new(),
@@ -1358,6 +1409,8 @@ pub(crate) fn sample_program(code: Vec<Instr>) -> Program {
             out_sizes: Vec::new(),
             n_regs: 1,
             slot_bytes: 8,
+            arg_reg: None,
+            ret_reg: None,
             code: words,
             call_sites,
             operands,

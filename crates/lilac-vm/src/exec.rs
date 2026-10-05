@@ -30,12 +30,12 @@ use std::fmt;
 use crate::decode::{decode, Decoded};
 use crate::encode::{
     builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE, OP_ADDRFIELD_LAST,
-    OP_ADDR_FUNC, OP_ARITH_IMM, OP_BRANCH, OP_BRANCH_IF, OP_BRANCH_IF_IMM, OP_CALL,
+    OP_ADDR_FUNC, OP_ARITH_IMM, OP_ARITH_RET, OP_BRANCH, OP_BRANCH_IF, OP_BRANCH_IF_IMM, OP_CALL,
     OP_CALL_ARITH_IMM, OP_CALL_ARITH_OUT, OP_CALL_BUILTIN_BASE, OP_CALL_BUILTIN_LAST,
     OP_CALL_INDIRECT, OP_CALL_OUT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
-    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FADD_BASE, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC,
-    OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
-    OP_UNREACHABLE, WIDE_FLAG,
+    OP_COPY_LAST, OP_COPY_RET, OP_EXTEND_ZERO, OP_FADD_BASE, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD,
+    OP_PANIC, OP_RETURN, OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST,
+    OP_TRUNC_BASE, OP_UNREACHABLE, WIDE_FLAG,
 };
 use crate::isa::{ArithOp, Builtin, CallSite, Operand, Program, VM_POINTER_BYTES};
 
@@ -133,17 +133,24 @@ struct Frame {
     /// currently executing, which is `last_pc` once any instruction has run and
     /// the function entry otherwise.
     last_pc: Option<u32>,
-    /// A deferred output copy applied when this frame returns, for the fused
-    /// `call.out` superinstruction: `(caller slot offset, dst register, size)`.
-    ///
-    /// When the callee returns, the value it wrote into the caller's out place
-    /// is copied into `dst` of the caller frame, eliminating the separate
-    /// `copy` instruction that would otherwise read the out place.
-    out_copy: Option<(u32, u32, u32)>,
+    /// Reserved return register of this frame's callee (`None` for by-ref).
+    ret_reg: Option<u32>,
+    /// A deferred output copy applied when this frame returns (fused
+    /// `call.out`/`call.arith.out`, or a register-return callee).
+    out_copy: Option<PendingOut>,
 }
 
-/// A pending caller-side output copy applied on return.
-type PendingOut = (u32, u32, u32);
+/// A caller-side output copy to apply when the callee returns.
+#[derive(Clone, Copy, Debug)]
+enum PendingOut {
+    /// Write the callee's return register into the caller's slot `slot_off`.
+    RetToSlot { slot_off: u32, size: u32 },
+    /// Write the callee's return register into the caller's register `dst`.
+    RetToReg { dst: u32 },
+    /// Read the caller's out slot `slot_off` into the caller's register `dst`
+    /// (by-reference output).
+    SlotToReg { slot_off: u32, dst: u32, size: u32 },
+}
 
 /// A bytecode interpreter over one [`Program`].
 pub struct Machine<'a> {
@@ -206,6 +213,7 @@ impl<'a> Machine<'a> {
             slot_base,
             pc: 0,
             last_pc: None,
+            ret_reg: None,
             out_copy: None,
         }];
         Ok(Self {
@@ -294,33 +302,16 @@ impl<'a> Machine<'a> {
             let wide = raw & WIDE_FLAG != 0;
             let base = raw & !WIDE_FLAG;
             let next: u32;
+            // Set by `return` and its fused variants; the shared return handling
+            // runs after the match so it is written once.
+            let mut return_now = false;
             match base {
                 OP_RETURN => {
                     if wide {
                         return Err(VmError::BadInstr(pc));
                     }
-                    store_frame(frames, func_index, pc, pc + 1);
-                    let (step, pending) = return_frame(frames, reg_top, slot_top);
-                    if step == Step::Returned {
-                        return Ok(0);
-                    }
-                    let Some(caller) = frames.last() else {
-                        return Ok(0);
-                    };
-                    // Apply a fused call's deferred output copy into the caller.
-                    if let Some((slot_off, dst, size)) = pending {
-                        let abs = caller.slot_base as usize + slot_off as usize;
-                        let value =
-                            read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?;
-                        set_reg_of(regs, caller.reg_base, dst, value);
-                    }
-                    func_index = caller.func;
-                    pc = caller.pc;
-                    reg_base = caller.reg_base;
-                    slot_base = caller.slot_base;
-                    func = &program.funcs[func_index as usize];
-                    code = func.code.as_slice();
-                    continue;
+                    next = pc + 1;
+                    return_now = true;
                 }
                 OP_UNREACHABLE => {
                     if wide {
@@ -538,7 +529,7 @@ impl<'a> Machine<'a> {
                     ) else {
                         return Err(VmError::BadInstr(pc));
                     };
-                    store_frame(frames, func_index, pc, pc + 1);
+                    store_pc(frames, func_index, pc + 1);
                     let callee_index = site.func;
                     let callee_reg_base = *reg_top;
                     let callee_slot_base = *slot_top;
@@ -554,6 +545,7 @@ impl<'a> Machine<'a> {
                         outs,
                         reg_base,
                         slot_base,
+                        None,
                     )?;
                     func_index = callee_index;
                     pc = 0;
@@ -603,7 +595,7 @@ impl<'a> Machine<'a> {
                         return Err(VmError::BadInstr(pc));
                     };
                     set_reg_of(regs, reg_base, dst_reg, value);
-                    store_frame(frames, func_index, pc, pc + 4);
+                    store_pc(frames, func_index, pc + 4);
                     let callee_index = site.func;
                     let callee_reg_base = *reg_top;
                     let callee_slot_base = *slot_top;
@@ -619,6 +611,7 @@ impl<'a> Machine<'a> {
                         outs,
                         reg_base,
                         slot_base,
+                        None,
                     )?;
                     func_index = callee_index;
                     pc = 0;
@@ -669,12 +662,11 @@ impl<'a> Machine<'a> {
                         return Err(VmError::BadInstr(pc));
                     };
                     set_reg_of(regs, reg_base, arg_reg, value);
-                    let Some(Operand::Slot(slot_off)) = outs.first().copied() else {
+                    let Some(Operand::Slot(_)) = outs.first().copied() else {
                         return Err(VmError::BadInstr(pc));
                     };
                     let dst = packed & 0xFF;
-                    let out_size = (packed >> 8) & 0xFF;
-                    store_frame(frames, func_index, pc, pc + 5);
+                    store_pc(frames, func_index, pc + 5);
                     let callee_index = site.func;
                     let callee_reg_base = *reg_top;
                     let callee_slot_base = *slot_top;
@@ -690,10 +682,8 @@ impl<'a> Machine<'a> {
                         outs,
                         reg_base,
                         slot_base,
+                        Some(dst),
                     )?;
-                    if let Some(callee_frame) = frames.last_mut() {
-                        callee_frame.out_copy = Some((slot_off, dst, out_size));
-                    }
                     func_index = callee_index;
                     pc = 0;
                     reg_base = callee_reg_base;
@@ -718,12 +708,11 @@ impl<'a> Machine<'a> {
                     ) else {
                         return Err(VmError::BadInstr(pc));
                     };
-                    let Some(Operand::Slot(slot_off)) = outs.first().copied() else {
+                    let Some(Operand::Slot(_)) = outs.first().copied() else {
                         return Err(VmError::BadInstr(pc));
                     };
                     let dst = (w >> 8) & 0xFF;
-                    let out_size = (w >> 16) & 0xFF;
-                    store_frame(frames, func_index, pc, pc + 2);
+                    store_pc(frames, func_index, pc + 2);
                     let callee_index = site.func;
                     let callee_reg_base = *reg_top;
                     let callee_slot_base = *slot_top;
@@ -739,10 +728,8 @@ impl<'a> Machine<'a> {
                         outs,
                         reg_base,
                         slot_base,
+                        Some(dst),
                     )?;
-                    if let Some(callee_frame) = frames.last_mut() {
-                        callee_frame.out_copy = Some((slot_off, dst, out_size));
-                    }
                     func_index = callee_index;
                     pc = 0;
                     reg_base = callee_reg_base;
@@ -773,12 +760,12 @@ impl<'a> Machine<'a> {
                     }
                     let target =
                         u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
-                    store_frame(frames, func_index, pc, pc + n + 1);
+                    store_pc(frames, func_index, pc + n + 1);
                     let callee_reg_base = *reg_top;
                     let callee_slot_base = *slot_top;
                     do_call(
                         program, regs, arena, frames, reg_top, slot_top, target, ins, outs,
-                        reg_base, slot_base,
+                        reg_base, slot_base, None,
                     )?;
                     func_index = target;
                     pc = 0;
@@ -821,6 +808,34 @@ impl<'a> Machine<'a> {
                     set_reg_of(regs, reg_base, ops[0], value);
                     next = pc + n;
                 }
+                OP_COPY_RET => {
+                    let (ops, n) = read_ops2(code, pc, wide)?;
+                    let packed = ops[1];
+                    let src = operate(ops[0], packed & 0x80 != 0);
+                    let size = packed & 0x7F;
+                    let Some(ret_reg) = func.ret_reg else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let value = read_scalar(regs, arena, reg_base, slot_base, src, size)?;
+                    set_reg_of(regs, reg_base, ret_reg, value & mask(size));
+                    next = pc + n;
+                    return_now = true;
+                }
+                OP_ARITH_RET => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let op_code = u8::try_from(ops[2] & 0x7F).unwrap_or(0);
+                    let Some(ret_reg) = func.ret_reg else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let left = reg_of(regs, reg_base, ops[0]);
+                    let right = reg_of(regs, reg_base, ops[1]);
+                    let Some(value) = eval_arith_code(op_code, left, right) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    set_reg_of(regs, reg_base, ret_reg, value);
+                    next = pc + n;
+                    return_now = true;
+                }
                 OP_ARITH_IMM => {
                     if wide {
                         return Err(VmError::BadInstr(pc));
@@ -860,6 +875,42 @@ impl<'a> Machine<'a> {
                     set_reg_of(regs, reg_base, ops[0], value);
                     next = pc + n;
                 }
+            }
+            if return_now {
+                let (step, pending, ret) = return_frame(regs, frames, reg_top, slot_top);
+                if step == Step::Returned {
+                    return Ok(0);
+                }
+                let Some(caller) = frames.last() else {
+                    return Ok(0);
+                };
+                match pending {
+                    Some(PendingOut::RetToSlot { slot_off, size }) => {
+                        let abs = caller.slot_base as usize + slot_off as usize;
+                        write_abs(arena, abs, ret, size)?;
+                    }
+                    Some(PendingOut::RetToReg { dst }) => {
+                        set_reg_of(regs, caller.reg_base, dst, ret);
+                    }
+                    Some(PendingOut::SlotToReg {
+                        slot_off,
+                        dst,
+                        size,
+                    }) => {
+                        let abs = caller.slot_base as usize + slot_off as usize;
+                        let value =
+                            read_abs(arena, abs, size).ok_or(VmError::BadRef(abs as u64))?;
+                        set_reg_of(regs, caller.reg_base, dst, value);
+                    }
+                    None => {}
+                }
+                func_index = caller.func;
+                pc = caller.pc;
+                reg_base = caller.reg_base;
+                slot_base = caller.slot_base;
+                func = &program.funcs[func_index as usize];
+                code = func.code.as_slice();
+                continue;
             }
             pc = next;
         }
@@ -1144,21 +1195,16 @@ impl<'a> Machine<'a> {
                 self.set_reg(reg_base, dst, value & mask(size));
             }
             Decoded::Call { site, ins, outs } => {
-                self.call(site.func, ins, outs, reg_base, slot_base)?;
+                self.call(site.func, ins, outs, reg_base, slot_base, None)?;
             }
             Decoded::CallOut {
                 dst,
-                size,
+                size: _,
                 site,
                 ins,
                 outs,
             } => {
-                self.call(site.func, ins, outs, reg_base, slot_base)?;
-                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
-                    if let Some(callee_frame) = self.frames.last_mut() {
-                        callee_frame.out_copy = Some((slot_off, dst, size));
-                    }
-                }
+                self.call(site.func, ins, outs, reg_base, slot_base, Some(dst))?;
             }
             Decoded::CallArithImm {
                 lhs,
@@ -1183,7 +1229,7 @@ impl<'a> Machine<'a> {
                     return Err(VmError::BadInstr(pc));
                 };
                 self.set_reg(reg_base, dst_reg, value);
-                self.call(site.func, ins, outs, reg_base, slot_base)?;
+                self.call(site.func, ins, outs, reg_base, slot_base, None)?;
             }
             Decoded::CallArithOut {
                 lhs,
@@ -1195,7 +1241,7 @@ impl<'a> Machine<'a> {
                 ins,
                 outs,
                 dst,
-                size: out_size,
+                size: _,
             } => {
                 let size = u32::from(width) / 8;
                 let left = if lhs_slot {
@@ -1209,12 +1255,7 @@ impl<'a> Machine<'a> {
                 if let Some(Operand::Reg(arg_reg)) = ins.first().copied() {
                     self.set_reg(reg_base, arg_reg, value);
                 }
-                self.call(site.func, ins, outs, reg_base, slot_base)?;
-                if let Some(Operand::Slot(slot_off)) = outs.first().copied() {
-                    if let Some(callee_frame) = self.frames.last_mut() {
-                        callee_frame.out_copy = Some((slot_off, dst, out_size));
-                    }
-                }
+                self.call(site.func, ins, outs, reg_base, slot_base, Some(dst))?;
             }
             Decoded::CallIndirect {
                 callee, ins, outs, ..
@@ -1225,7 +1266,7 @@ impl<'a> Machine<'a> {
                 }
                 let target =
                     u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
-                self.call(target, ins, outs, reg_base, slot_base)?;
+                self.call(target, ins, outs, reg_base, slot_base, None)?;
             }
             Decoded::CallBuiltin {
                 builtin, ins, outs, ..
@@ -1233,6 +1274,28 @@ impl<'a> Machine<'a> {
                 return self.call_builtin(builtin, ins, outs, reg_base, slot_base);
             }
             Decoded::Return => return Ok(self.return_from_frame()),
+            Decoded::CopyReturn { src, size } => {
+                let value = self.read_scalar(reg_base, slot_base, src, size)?;
+                if let Some(ret_reg) = func.ret_reg {
+                    self.set_reg(reg_base, ret_reg, value & mask(size));
+                }
+                return Ok(self.return_from_frame());
+            }
+            Decoded::ArithReturn {
+                lhs,
+                rhs,
+                op,
+                width,
+            } => {
+                let size = u32::from(width) / 8;
+                let left = self.reg(reg_base, lhs);
+                let right = self.reg(reg_base, rhs);
+                let value = eval_arith(op, left, right, size);
+                if let Some(ret_reg) = func.ret_reg {
+                    self.set_reg(reg_base, ret_reg, value);
+                }
+                return Ok(self.return_from_frame());
+            }
             Decoded::Panic { data } => {
                 // The referenced data constant's bytes are the panic message.
                 // The verifier's `check_data` guarantees the index is in range;
@@ -1384,6 +1447,7 @@ impl<'a> Machine<'a> {
         outs: &[Operand],
         caller_reg_base: u32,
         caller_slot_base: u32,
+        out_dst: Option<u32>,
     ) -> Result<(), VmError> {
         do_call(
             self.program,
@@ -1397,6 +1461,7 @@ impl<'a> Machine<'a> {
             outs,
             caller_reg_base,
             caller_slot_base,
+            out_dst,
         )
     }
 
@@ -1408,15 +1473,39 @@ impl<'a> Machine<'a> {
     /// register file and arena are not truncated (they stay at high-water);
     /// only the logical tops move, so calls reuse storage without churn.
     fn return_from_frame(&mut self) -> Step {
-        let (step, pending) = return_frame(&mut self.frames, &mut self.reg_top, &mut self.slot_top);
-        if let Some((slot_off, dst, size)) = pending {
-            let Some(caller) = self.frames.last() else {
-                return step;
-            };
-            let abs = usize::try_from(caller.slot_base).unwrap_or(0) + slot_off as usize;
-            if let Some(value) = read_abs(&self.arena, abs, size) {
+        let (step, pending, ret) = return_frame(
+            &self.regs,
+            &mut self.frames,
+            &mut self.reg_top,
+            &mut self.slot_top,
+        );
+        let Some(pending) = pending else {
+            return step;
+        };
+        let Some(caller) = self.frames.last() else {
+            return step;
+        };
+        let slot_abs =
+            |slot_off: u32| usize::try_from(caller.slot_base).unwrap_or(0) + slot_off as usize;
+        match pending {
+            PendingOut::RetToSlot { slot_off, size } => {
+                let abs = slot_abs(slot_off);
+                let _ = write_abs(&mut self.arena, abs, ret, size);
+            }
+            PendingOut::RetToReg { dst, .. } => {
                 let reg_base = caller.reg_base;
-                set_reg_of(&mut self.regs, reg_base, dst, value);
+                set_reg_of(&mut self.regs, reg_base, dst, ret);
+            }
+            PendingOut::SlotToReg {
+                slot_off,
+                dst,
+                size,
+            } => {
+                let abs = slot_abs(slot_off);
+                if let Some(value) = read_abs(&self.arena, abs, size) {
+                    let reg_base = caller.reg_base;
+                    set_reg_of(&mut self.regs, reg_base, dst, value);
+                }
             }
         }
         step
@@ -1754,6 +1843,17 @@ fn move_to_slot(
     }
 }
 
+/// Writes only the running frame's return pc (used by `call`; `last_pc` is
+/// debugger-only and not needed while a callee runs).
+#[inline]
+fn store_pc(frames: &mut [Frame], func_index: u32, next: u32) {
+    if let Some(frame) = frames.last_mut() {
+        if frame.func == func_index {
+            frame.pc = next;
+        }
+    }
+}
+
 /// Synchronizes a frame's `pc`/`last_pc`, keyed on `func_index`.
 fn store_frame(frames: &mut [Frame], func_index: u32, pc: u32, next: u32) {
     if let Some(frame) = frames.last_mut() {
@@ -1765,7 +1865,12 @@ fn store_frame(frames: &mut [Frame], func_index: u32, pc: u32, next: u32) {
 }
 
 /// Pushes a callee frame, binding its inputs and out-ref region.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::inline_always
+)]
+#[inline(always)]
 fn do_call(
     program: &Program,
     regs: &mut Vec<u64>,
@@ -1778,6 +1883,7 @@ fn do_call(
     outs: &[Operand],
     caller_reg_base: u32,
     caller_slot_base: u32,
+    out_dst: Option<u32>,
 ) -> Result<(), VmError> {
     let callee = program
         .funcs
@@ -1810,48 +1916,87 @@ fn do_call(
     arena[slot_base as usize..slot_end as usize].fill(0);
     *reg_top = reg_end;
     *slot_top = slot_end;
-    for (index, operand) in ins.iter().enumerate() {
-        let (Some(&dst_off), Some(&size)) =
-            (callee.in_offsets.get(index), callee.in_sizes.get(index))
-        else {
-            break;
-        };
-        let dst_abs = slot_base as usize + dst_off as usize;
-        move_to_slot(
-            regs,
-            arena,
-            caller_reg_base,
-            caller_slot_base,
-            *operand,
-            size,
-            dst_abs,
-        )?;
+    if let Some(arg_reg) = callee.arg_reg {
+        // Register-argument ABI: place the single input in the callee register.
+        if let Some(&operand) = ins.first() {
+            let size = callee.in_sizes.first().copied().unwrap_or(VM_POINTER_BYTES);
+            let value = read_scalar(
+                regs,
+                arena,
+                caller_reg_base,
+                caller_slot_base,
+                operand,
+                size,
+            )?;
+            set_reg_of(regs, reg_base, arg_reg, value);
+        }
+    } else {
+        for (index, operand) in ins.iter().enumerate() {
+            let (Some(&dst_off), Some(&size)) =
+                (callee.in_offsets.get(index), callee.in_sizes.get(index))
+            else {
+                break;
+            };
+            let dst_abs = slot_base as usize + dst_off as usize;
+            move_to_slot(
+                regs,
+                arena,
+                caller_reg_base,
+                caller_slot_base,
+                *operand,
+                size,
+                dst_abs,
+            )?;
+        }
     }
-    // Fill the out-ref region: one u64 absolute arena offset per output.
-    for (index, operand) in outs.iter().enumerate() {
-        let abs = match operand {
-            Operand::Slot(off) => u64::from(caller_slot_base) + u64::from(*off),
-            Operand::Reg(reg) => reg_of(regs, caller_reg_base, *reg),
-        };
-        let cell = u32::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_mul(VM_POINTER_BYTES))
-            .and_then(|off| slot_base.checked_add(off))
-            .ok_or(VmError::BadRef(u64::from(slot_base)))?;
-        write_abs(
-            arena,
-            usize::try_from(cell).unwrap_or(0),
-            abs,
-            VM_POINTER_BYTES,
-        )?;
+    // Fill the out-ref region: one u64 absolute arena offset per output. A
+    // register-return callee has no out-ref region.
+    if callee.ret_reg.is_none() {
+        for (index, operand) in outs.iter().enumerate() {
+            let abs = match operand {
+                Operand::Slot(off) => u64::from(caller_slot_base) + u64::from(*off),
+                Operand::Reg(reg) => reg_of(regs, caller_reg_base, *reg),
+            };
+            let cell = u32::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_mul(VM_POINTER_BYTES))
+                .and_then(|off| slot_base.checked_add(off))
+                .ok_or(VmError::BadRef(u64::from(slot_base)))?;
+            write_abs(
+                arena,
+                usize::try_from(cell).unwrap_or(0),
+                abs,
+                VM_POINTER_BYTES,
+            )?;
+        }
     }
+    // Arrange the caller-side output placement applied on return.
+    let out_size = callee.out_sizes.first().copied().unwrap_or(0);
+    let out_slot = outs.first().and_then(|operand| match operand {
+        Operand::Slot(off) => Some(*off),
+        Operand::Reg(_) => None,
+    });
+    let pending = match (callee.ret_reg.is_some(), out_dst, out_slot) {
+        (true, Some(dst), _) => Some(PendingOut::RetToReg { dst }),
+        (true, None, Some(slot_off)) => Some(PendingOut::RetToSlot {
+            slot_off,
+            size: out_size,
+        }),
+        (false, Some(dst), Some(slot_off)) => Some(PendingOut::SlotToReg {
+            slot_off,
+            dst,
+            size: out_size,
+        }),
+        _ => None,
+    };
     frames.push(Frame {
         func: target,
         reg_base,
         slot_base,
         pc: 0,
         last_pc: None,
-        out_copy: None,
+        ret_reg: callee.ret_reg,
+        out_copy: pending,
     });
     Ok(())
 }
@@ -1863,19 +2008,23 @@ fn do_call(
 /// without reallocation or re-zeroing (registers are SSA; the callee re-zeroes
 /// its own slot region on entry).
 fn return_frame(
+    regs: &[u64],
     frames: &mut Vec<Frame>,
     reg_top: &mut u32,
     slot_top: &mut u32,
-) -> (Step, Option<PendingOut>) {
+) -> (Step, Option<PendingOut>, u64) {
     let Some(frame) = frames.pop() else {
-        return (Step::Returned, None);
+        return (Step::Returned, None, 0);
     };
+    let ret = frame
+        .ret_reg
+        .map_or(0, |reg| reg_of(regs, frame.reg_base, reg));
     if frames.is_empty() {
-        return (Step::Returned, frame.out_copy);
+        return (Step::Returned, frame.out_copy, ret);
     }
     *reg_top = frame.reg_base;
     *slot_top = frame.slot_base;
-    (Step::Advanced, frame.out_copy)
+    (Step::Advanced, frame.out_copy, ret)
 }
 
 /// Executes a compiler leaf builtin.
@@ -2388,9 +2537,10 @@ mod tests {
     }
 
     /// The call/return path binds arguments and places results from the
-    /// precomputed [`crate::isa::Func`] layouts, never a `type_size` lookup: a
-    /// compiled `fib` carries populated `in_offsets`/`in_sizes`/`out_offset`/
-    /// `out_sizes`, and driving it copies the right value through each call.
+    /// precomputed [`crate::isa::Func`] metadata, never a `type_size` lookup.
+    /// A compiled `fib` has one scalar input and one scalar output, so it uses
+    /// the register ABI: the input and output live in reserved registers and
+    /// there is no slot input/out-ref region.
     #[test]
     fn hot_path_has_no_type_lookups() {
         let src = "fib: function (n: @bit_native) r: @bit_native {\n    if @i_less_than(n, 0x2) {\n        r = n\n    } else {\n        r = @i_add(fib(@i_sub(n, 0x1)), fib(@i_sub(n, 0x2)))\n    }\n}\n\nmain: function () nothing {\n    out: @bit_native = fib(0x12)\n}\n";
@@ -2400,13 +2550,15 @@ mod tests {
             .iter()
             .find(|func| func.name == "fib")
             .expect("fib function");
-        assert_eq!(
-            fib.in_offsets,
-            vec![8],
-            "inputs follow the 8-byte out-ref region"
+        assert!(fib.arg_reg.is_some(), "single scalar input uses a register");
+        assert!(
+            fib.ret_reg.is_some(),
+            "single scalar output uses a register"
         );
-        assert_eq!(fib.in_sizes, vec![8], "one pointer-wide input");
-        assert_eq!(fib.out_offset, 16, "inputs end after the out-ref region");
+        assert!(
+            fib.in_offsets.is_empty(),
+            "register-arg inputs are not in the slot region"
+        );
         assert_eq!(fib.out_sizes, vec![8], "one pointer-wide output");
         let out = run_and_capture_place(src, "out").expect("run");
         assert_eq!(out, Some(2584), "fib(18) copied through call/return");
@@ -2461,6 +2613,8 @@ mod tests {
                     out_sizes: Vec::new(),
                     n_regs: 1,
                     slot_bytes: 16,
+                    arg_reg: None,
+                    ret_reg: None,
                     code: main_code,
                     call_sites: main_calls,
                     operands: main_ops,
@@ -2478,6 +2632,8 @@ mod tests {
                     out_sizes: Vec::new(),
                     n_regs: 3,
                     slot_bytes: callee_slots,
+                    arg_reg: None,
+                    ret_reg: None,
                     code: callee_code,
                     call_sites: callee_calls,
                     operands: callee_ops,
@@ -2715,6 +2871,8 @@ mod tests {
             out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
+            arg_reg: None,
+            ret_reg: None,
             code: Vec::new(),
             call_sites: Vec::new(),
             operands: Vec::new(),
@@ -2864,6 +3022,8 @@ mod tests {
             out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
+            arg_reg: None,
+            ret_reg: None,
             code: fcode,
             call_sites: fcall,
             operands: fops,
@@ -2907,6 +3067,8 @@ mod tests {
                 out_sizes: Vec::new(),
                 n_regs,
                 slot_bytes: 0,
+                arg_reg: None,
+                ret_reg: None,
                 code: words,
                 call_sites,
                 operands,
@@ -3268,6 +3430,8 @@ mod tests {
             out_sizes: Vec::new(),
             n_regs: 0,
             slot_bytes: 0,
+            arg_reg: None,
+            ret_reg: None,
             code: hcode,
             call_sites: hcall,
             operands: hops,

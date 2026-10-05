@@ -40,7 +40,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lilac_ir::{builtin_layout, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
+use lilac_ir::{
+    builtin_layout, LirBlock, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm,
+};
 use lilac_span::{SourceMap, Span};
 
 use crate::encode::NARROW_MAX;
@@ -196,6 +198,144 @@ fn is_indirect(module: &LirModule, ty: &str) -> Result<bool, String> {
     Ok(type_size(module, ty, 0)? > VM_POINTER_BYTES)
 }
 
+/// How a named place is used across a function body.
+#[derive(Default, Clone, Copy)]
+struct PlaceUse {
+    /// Its address is taken (`addr`/field access).
+    addr: bool,
+    /// Its value is read.
+    read: bool,
+    /// It is written as a call's output (so needs a caller storage address).
+    call_out: bool,
+}
+
+/// Scans a function body for how `name` is used.
+fn place_use(func: &LirFunc, name: &str) -> PlaceUse {
+    let mut used = PlaceUse::default();
+    let is_place = |operand: &LirOperand| matches!(operand, LirOperand::Place(p) if p == name);
+    for block in &func.blocks {
+        for inst in &block.insts {
+            match inst {
+                LirInst::Addr { place, .. }
+                | LirInst::FieldAddr { obj: place, .. }
+                | LirInst::Field { obj: place, .. }
+                | LirInst::Load { src: place, .. }
+                | LirInst::Drop { place, .. } => {
+                    if place == name {
+                        used.addr = true;
+                    }
+                }
+                LirInst::StoreField { obj, value, .. } => {
+                    if obj == name {
+                        used.addr = true;
+                    }
+                    if is_place(value) {
+                        used.read = true;
+                    }
+                }
+                LirInst::CopyPlace { src, .. }
+                | LirInst::CopyReg { src, .. }
+                | LirInst::Store { src, .. } => {
+                    if is_place(src) {
+                        used.read = true;
+                    }
+                }
+                LirInst::Call { ins, outs, .. } => {
+                    if ins.iter().any(|p| p == name) {
+                        used.read = true;
+                    }
+                    if outs.iter().any(|p| p == name) {
+                        used.call_out = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    used
+}
+
+/// Whether `name` is assigned on every path to a `return`.
+fn output_definitely_assigned(func: &LirFunc, name: &str) -> bool {
+    let count = func.blocks.len();
+    if count == 0 {
+        return false;
+    }
+    let index: HashMap<&str, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.as_str(), i))
+        .collect();
+    let defines = |block: &LirBlock| {
+        block.insts.iter().any(|inst| match inst {
+            LirInst::CopyPlace { dst, .. } => dst == name,
+            LirInst::Call { outs, .. } => outs.iter().any(|p| p == name),
+            _ => false,
+        })
+    };
+    let defs: Vec<bool> = func.blocks.iter().map(defines).collect();
+    let succs: Vec<Vec<usize>> = (0..count)
+        .map(|i| {
+            let mut next = Vec::new();
+            match &func.blocks[i].term {
+                LirTerm::Branch { target, .. } => {
+                    if let Some(&t) = index.get(target.as_str()) {
+                        next.push(t);
+                    }
+                }
+                LirTerm::BranchIf { then, els, .. } => {
+                    if let Some(&t) = index.get(then.as_str()) {
+                        next.push(t);
+                    }
+                    let else_label = els
+                        .clone()
+                        .or_else(|| func.blocks.get(i + 1).map(|b| b.label.clone()));
+                    if let Some(label) = else_label {
+                        if let Some(&e) = index.get(label.as_str()) {
+                            next.push(e);
+                        }
+                    }
+                }
+                LirTerm::Return { .. } | LirTerm::Panic { .. } | LirTerm::Unreachable { .. } => {}
+            }
+            next
+        })
+        .collect();
+    // Must-analysis: `out[i]` = assigned along every path to (and through) block i.
+    let mut out = defs.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..count {
+            let in_i = if i == 0 {
+                false
+            } else {
+                let mut all = true;
+                let mut any = false;
+                for (p, succ) in succs.iter().enumerate() {
+                    if succ.contains(&i) {
+                        any = true;
+                        all &= out[p];
+                    }
+                }
+                any && all
+            };
+            let new = in_i || defs[i];
+            if new != out[i] {
+                out[i] = new;
+                changed = true;
+            }
+        }
+    }
+    for (i, block) in func.blocks.iter().enumerate() {
+        if matches!(block.term, LirTerm::Return { .. }) && !out[i] {
+            return false;
+        }
+    }
+    true
+}
+
 /// Parses an integer literal (`0x`/`0b`/decimal, `_` separators), mirroring the
 /// constant folder and the LLVM backend.
 fn parse_int(text: &str) -> Option<u64> {
@@ -279,6 +419,9 @@ fn map_convert(op: &lilac_ir::ConvertOp) -> ConvertOp {
 #[derive(Default)]
 struct Places {
     offsets: HashMap<String, u32>,
+    /// Places passed in/returned in a reserved register (register ABI) rather
+    /// than the frame slot region.
+    reg_offsets: HashMap<String, u32>,
     types: HashMap<String, String>,
     names: Vec<(String, u32)>,
     outputs: HashSet<String>,
@@ -318,6 +461,17 @@ impl Places {
         }
         self.names.push((name.to_owned(), off));
         Ok(())
+    }
+
+    /// Declares a place held in a reserved register (register ABI).
+    fn declare_reg(&mut self, name: &str, ty: &str, reg: u32) {
+        self.types.insert(name.to_owned(), ty.to_owned());
+        self.reg_offsets.insert(name.to_owned(), reg);
+    }
+
+    /// The reserved register index of a register-backed place.
+    fn reg(&self, name: &str) -> Option<u32> {
+        self.reg_offsets.get(name).copied()
     }
 
     /// Whether `name` is a ref-backed output place.
@@ -366,6 +520,10 @@ struct FuncBuilder<'a, 'm> {
     regs: HashMap<String, u32>,
     reg_types: HashMap<String, String>,
     next_reg: u32,
+    /// Reserved register holding this function's input (register-arg ABI).
+    arg_reg: Option<u32>,
+    /// Reserved register holding this function's output (register-return ABI).
+    ret_reg: Option<u32>,
     code: Vec<Instr>,
     lines: Vec<Line>,
 }
@@ -444,7 +602,10 @@ impl FuncBuilder<'_, '_> {
     fn operand(&self, operand: &LirOperand) -> Result<Operand, String> {
         match operand {
             LirOperand::Reg(name) => Ok(Operand::Reg(self.reg(name)?)),
-            LirOperand::Place(name) => Ok(Operand::Slot(self.slot(name)?)),
+            LirOperand::Place(name) => match self.places.reg(name) {
+                Some(reg) => Ok(Operand::Reg(reg)),
+                None => Ok(Operand::Slot(self.slot(name)?)),
+            },
         }
     }
 
@@ -467,6 +628,9 @@ impl FuncBuilder<'_, '_> {
     /// slot operand. This is how call inputs and value copies consume an
     /// output's current value.
     fn read_operand(&mut self, place: &str, span: Span) -> Result<Operand, String> {
+        if let Some(reg) = self.places.reg(place) {
+            return Ok(Operand::Reg(reg));
+        }
         if !self.places.is_out(place) {
             return Ok(Operand::Slot(self.slot(place)?));
         }
@@ -590,6 +754,19 @@ impl FuncBuilder<'_, '_> {
             }
             LirInst::CopyPlace { src, dst, span } => {
                 let dst_ty = self.places.ty(dst)?.to_owned();
+                if let Some(dst_reg) = self.places.reg(dst) {
+                    // Register-backed output: assign directly to its register.
+                    let src = self.value_operand(src, *span)?;
+                    let ty = self.intern(&dst_ty)?;
+                    return self.emit(
+                        Instr::Copy {
+                            dst: Operand::Reg(dst_reg),
+                            src,
+                            ty,
+                        },
+                        *span,
+                    );
+                }
                 if self.places.is_out(dst) {
                     // Writing an output goes through its caller-supplied ref.
                     let src = self.value_operand(src, *span)?;
@@ -1025,6 +1202,8 @@ impl FuncBuilder<'_, '_> {
                 out_sizes: Vec::new(),
                 n_regs: 0,
                 slot_bytes: self.places.total,
+                arg_reg: None,
+                ret_reg: None,
                 code: Vec::new(),
                 call_sites: Vec::new(),
                 operands: Vec::new(),
@@ -1062,6 +1241,8 @@ impl FuncBuilder<'_, '_> {
             fold_arith_call(self.compiler.module, &self.compiler.types.infos, &folded);
         let (folded, call_out_map) =
             fold_call_out(self.compiler.module, &self.compiler.types.infos, &folded);
+        let (folded, ret_map) =
+            fold_arith_to_ret(&self.compiler.types.infos, self.ret_reg, &folded);
         let (folded, branch_map) = fold_branch_if_imm(&folded);
         let (folded, fall_map) = drop_fallthrough_branches(&folded);
         let composed: Vec<u32> = arith_map
@@ -1069,6 +1250,7 @@ impl FuncBuilder<'_, '_> {
             .map(|&m| remap(&call_map, m))
             .map(|m| remap(&arith_call_map, m))
             .map(|m| remap(&call_out_map, m))
+            .map(|m| remap(&ret_map, m))
             .map(|m| remap(&branch_map, m))
             .map(|m| remap(&fall_map, m))
             .collect();
@@ -1078,6 +1260,30 @@ impl FuncBuilder<'_, '_> {
                 .ok_or_else(|| "source-line pc out of range".to_string())?;
         }
         self.code = folded;
+        // A `branch` whose target is a bare `return` can return directly,
+        // eliminating the jump (the shared return stays for other paths). This
+        // does not change the instruction count, so no index remap is needed.
+        let returns: Vec<bool> = self
+            .code
+            .iter()
+            .map(|instr| matches!(instr, Instr::Return))
+            .collect();
+        for instr in &mut self.code {
+            if let Instr::Branch { target } = instr {
+                if returns.get(*target as usize).copied().unwrap_or(false) {
+                    *instr = Instr::Return;
+                }
+            }
+        }
+        // Fuse a trailing `copy`/`arith` into the return register with the
+        // following `return`, then remap line pcs for the removed `return`.
+        let (final_code, return_map) = fold_return(self.ret_reg, &self.code);
+        for line in &mut self.lines {
+            line.pc = *return_map
+                .get(line.pc as usize)
+                .ok_or_else(|| "source-line pc out of range".to_string())?;
+        }
+        self.code = final_code;
         // The typed list still uses instruction-index branch targets and line
         // pcs; encode it into the executed word stream and remap both to word
         // offsets (M5c.1 makes `pc` a word index).
@@ -1102,6 +1308,8 @@ impl FuncBuilder<'_, '_> {
             out_sizes: Vec::new(),
             n_regs: self.next_reg,
             slot_bytes: self.places.total,
+            arg_reg: self.arg_reg,
+            ret_reg: self.ret_reg,
             code: words,
             call_sites,
             operands,
@@ -1183,11 +1391,13 @@ fn try_fuse(
     reads: &HashMap<u32, u32>,
     is_target: &[bool],
 ) -> Option<(Instr, usize)> {
-    // Shape A: `copy &r <- %s`, `const k -> &j`, `arith dst, &r, &j`.
+    // Shape A: `copy &r <- (%s | &s)`, `const k -> &j`, `arith dst, &r, &j`.
+    // The left operand may be a slot or a register (e.g. a register-passed
+    // argument); either way the fused instruction reads it directly.
     if let (
         Some(Instr::Copy {
             dst: Operand::Reg(copy_dst),
-            src: Operand::Slot(slot),
+            src,
             ty: copy_ty,
         }),
         Some(Instr::Const {
@@ -1205,6 +1415,10 @@ fn try_fuse(
         }),
     ) = (code.get(i), code.get(i + 1), code.get(i + 2))
     {
+        let (lhs_value, lhs_slot) = match src {
+            Operand::Slot(slot) => (*slot, true),
+            Operand::Reg(reg) => (*reg, false),
+        };
         if lhs == copy_dst
             && rhs == const_dst
             && read_once(reads, *copy_dst)
@@ -1212,7 +1426,7 @@ fn try_fuse(
             && !is_target.get(i + 1).copied().unwrap_or(true)
             && !is_target.get(i + 2).copied().unwrap_or(true)
             && *copy_dst <= NARROW_MAX
-            && *slot <= NARROW_MAX
+            && lhs_value <= NARROW_MAX
             && *dst <= NARROW_MAX
             && same_size(types, *copy_ty, *operand_ty)
         {
@@ -1220,8 +1434,8 @@ fn try_fuse(
                 Instr::ArithImm {
                     op: *op,
                     dst: *dst,
-                    lhs: *slot,
-                    lhs_slot: true,
+                    lhs: lhs_value,
+                    lhs_slot,
                     imm: *imm,
                     operand_ty: *operand_ty,
                 },
@@ -1617,6 +1831,199 @@ fn fold_call_out(module: &LirModule, types: &[TypeInfo], code: &[Instr]) -> (Vec
     (new_code, map)
 }
 
+/// Retargets an arithmetic producer whose result is copied into the return
+/// register, folding the copy into the producer.
+///
+/// `&tmp = op …; &ret = copy &tmp` becomes `&ret = op …` when `&tmp` is used
+/// only by the copy and the widths match.
+fn fold_arith_to_ret(
+    types: &[TypeInfo],
+    ret_reg: Option<u32>,
+    code: &[Instr],
+) -> (Vec<Instr>, Vec<u32>) {
+    let Some(ret_reg) = ret_reg else {
+        return (
+            code.to_vec(),
+            (0..=u32::try_from(code.len()).unwrap_or(u32::MAX)).collect(),
+        );
+    };
+    let reads = reg_read_count(code);
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        let folded = match (code.get(i), code.get(i + 1)) {
+            (Some(producer), Some(copy)) => {
+                try_retarget(types, producer, copy, ret_reg, &reads, &is_target, i)
+            }
+            _ => None,
+        };
+        if let Some(instr) = folded {
+            map[i] = start;
+            map[i + 1] = start;
+            new_code.push(instr);
+            i += 2;
+        } else {
+            map[i] = start;
+            new_code.push(code[i].clone());
+            i += 1;
+        }
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
+/// If `copy` copies `producer`'s result into the return register, retarget
+/// `producer` and return it.
+#[allow(clippy::match_same_arms)]
+fn try_retarget(
+    types: &[TypeInfo],
+    producer: &Instr,
+    copy: &Instr,
+    ret_reg: u32,
+    reads: &HashMap<u32, u32>,
+    is_target: &[bool],
+    i: usize,
+) -> Option<Instr> {
+    let Instr::Copy {
+        dst: Operand::Reg(dst_reg),
+        src: Operand::Reg(src_reg),
+        ty: copy_ty,
+    } = copy
+    else {
+        return None;
+    };
+    if *dst_reg != ret_reg
+        || !read_once(reads, *src_reg)
+        || is_target.get(i + 1).copied().unwrap_or(true)
+    {
+        return None;
+    }
+    let mut out = producer.clone();
+    match &mut out {
+        Instr::Arith { dst, ty, .. } => {
+            if *dst != *src_reg || !same_size(types, *ty, *copy_ty) {
+                return None;
+            }
+            *dst = *dst_reg;
+        }
+        Instr::ArithImm {
+            dst, operand_ty, ..
+        } => {
+            if *dst != *src_reg || !same_size(types, *operand_ty, *copy_ty) {
+                return None;
+            }
+            *dst = *dst_reg;
+        }
+        Instr::Convert { dst, ty, .. } => {
+            if *dst != *src_reg || !same_size(types, *ty, *copy_ty) {
+                return None;
+            }
+            *dst = *dst_reg;
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+/// Fuses a trailing `copy`/`arith` into the return register with a following
+/// `return` (`copy.ret` / `arith.ret`), removing one dispatch per return.
+fn fold_return(ret_reg: Option<u32>, code: &[Instr]) -> (Vec<Instr>, Vec<u32>) {
+    let identity = || (0..=u32::try_from(code.len()).unwrap_or(u32::MAX)).collect::<Vec<u32>>();
+    let Some(ret_reg) = ret_reg else {
+        return (code.to_vec(), identity());
+    };
+    let mut is_target = vec![false; code.len() + 1];
+    for instr in code {
+        match instr {
+            Instr::Branch { target } => mark_target(&mut is_target, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                mark_target(&mut is_target, *then);
+                mark_target(&mut is_target, *els);
+            }
+            _ => {}
+        }
+    }
+    let mut new_code = Vec::with_capacity(code.len());
+    let mut map = vec![0_u32; code.len() + 1];
+    let mut i = 0;
+    while i < code.len() {
+        let start = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+        let fused = match (code.get(i), code.get(i + 1)) {
+            (Some(producer), Some(Instr::Return))
+                if !is_target.get(i + 1).copied().unwrap_or(true) =>
+            {
+                match producer {
+                    Instr::Copy {
+                        dst: Operand::Reg(dst),
+                        src,
+                        ty,
+                    } if *dst == ret_reg => Some(Instr::CopyReturn { src: *src, ty: *ty }),
+                    Instr::Arith {
+                        op,
+                        dst,
+                        lhs,
+                        rhs,
+                        operand_ty,
+                        ..
+                    } if *dst == ret_reg => Some(Instr::ArithReturn {
+                        op: *op,
+                        lhs: *lhs,
+                        rhs: *rhs,
+                        operand_ty: *operand_ty,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(instr) = fused {
+            map[i] = start;
+            map[i + 1] = start;
+            new_code.push(instr);
+            i += 2;
+        } else {
+            map[i] = start;
+            new_code.push(code[i].clone());
+            i += 1;
+        }
+    }
+    map[code.len()] = u32::try_from(new_code.len()).unwrap_or(u32::MAX);
+    for instr in &mut new_code {
+        match instr {
+            Instr::Branch { target } => *target = remap(&map, *target),
+            Instr::BranchIf { then, els, .. } | Instr::BranchIfArithImm { then, els, .. } => {
+                *then = remap(&map, *then);
+                *els = remap(&map, *els);
+            }
+            _ => {}
+        }
+    }
+    (new_code, map)
+}
+
 /// Fuses `ArithImm` + `BranchIf` whose condition is the compare's destination.
 ///
 /// The comparison result register must be read only by the branch, so the
@@ -1898,15 +2305,61 @@ impl<'a> Compiler<'a> {
 
     /// Compiles one LIR function.
     fn compile_func(&mut self, func: &LirFunc) -> Result<Func, String> {
+        // Register ABI: pass the single scalar input and/or return the single
+        // scalar output in a reserved register, avoiding the frame slot
+        // round-trip. Only when the place is never address-taken/read (output)
+        // and the output is definitely assigned on every returning path.
+        let arg_name = func.ins.first().map(|(name, _)| name.clone());
+        let ret_name = func.outs.first().map(|(name, _)| name.clone());
+        let arg_eligible = func.ins.len() == 1
+            && !is_ref_ty(&func.ins[0].1)
+            && type_size(self.module, &func.ins[0].1, 0)? <= VM_POINTER_BYTES;
+        let ret_eligible = func.outs.len() == 1
+            && !is_ref_ty(&func.outs[0].1)
+            && type_size(self.module, &func.outs[0].1, 0)? <= VM_POINTER_BYTES;
+        let use_arg = arg_eligible
+            && arg_name.as_deref().is_some_and(|name| {
+                let used = place_use(func, name);
+                !used.addr && !used.call_out
+            });
+        let use_ret = ret_eligible
+            && ret_name.as_deref().is_some_and(|name| {
+                let used = place_use(func, name);
+                !used.addr && !used.read && !used.call_out && output_definitely_assigned(func, name)
+            });
+        let mut reserved = 0_u32;
+        let ret_reg = if use_ret {
+            let reg = reserved;
+            reserved += 1;
+            Some(reg)
+        } else {
+            None
+        };
+        let arg_reg = if use_arg {
+            let reg = reserved;
+            reserved += 1;
+            Some(reg)
+        } else {
+            None
+        };
+
         let mut places = Places::default();
         // Outputs are ref-backed and occupy the frame's low out-ref region
-        // (8 bytes each); inputs and locals follow. `rebuild_layout` computes
-        // matching input offsets.
+        // (8 bytes each) unless held in a return register; inputs and locals
+        // follow. `rebuild_layout` computes matching input offsets.
         for (name, ty) in &func.outs {
-            places.declare(self.module, name, ty, true)?;
+            if ret_name.as_deref() == Some(name.as_str()) && ret_reg.is_some() {
+                places.declare_reg(name, ty, ret_reg.unwrap_or(0));
+            } else {
+                places.declare(self.module, name, ty, true)?;
+            }
         }
         for (name, ty) in &func.ins {
-            places.declare(self.module, name, ty, false)?;
+            if arg_name.as_deref() == Some(name.as_str()) && arg_reg.is_some() {
+                places.declare_reg(name, ty, arg_reg.unwrap_or(0));
+            } else {
+                places.declare(self.module, name, ty, false)?;
+            }
         }
         if !func.is_extern {
             for block in &func.blocks {
@@ -1924,7 +2377,9 @@ impl<'a> Compiler<'a> {
             block_pc: HashMap::new(),
             regs: HashMap::new(),
             reg_types: HashMap::new(),
-            next_reg: 0,
+            next_reg: reserved,
+            arg_reg,
+            ret_reg,
             code: Vec::new(),
             lines: Vec::new(),
         };

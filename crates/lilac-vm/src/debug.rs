@@ -731,6 +731,8 @@ mod tests {
             out_sizes: Vec::new(),
             n_regs: 4,
             slot_bytes: 8,
+            arg_reg: None,
+            ret_reg: None,
             code: fcode,
             call_sites: fcall,
             operands: fops,

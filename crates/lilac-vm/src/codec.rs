@@ -241,6 +241,8 @@ impl Program {
                 out_sizes: Vec::new(),
                 n_regs: func.n_regs,
                 slot_bytes: func.slot_bytes,
+                arg_reg: func.arg_reg,
+                ret_reg: func.ret_reg,
                 code: builder.words,
                 call_sites: builder.call_sites,
                 operands: builder.operands,
@@ -267,9 +269,15 @@ impl Program {
     /// and line is addressed by its word `pc`, and branch labels are `$L<word>`.
     fn write_func(&self, out: &mut String, func: &Func) {
         let extern_kw = if func.is_extern { " extern" } else { "" };
+        let arg_kw = func
+            .arg_reg
+            .map_or_else(String::new, |reg| format!(" argreg {reg}"));
+        let ret_kw = func
+            .ret_reg
+            .map_or_else(String::new, |reg| format!(" retreg {reg}"));
         let _ = writeln!(
             out,
-            "func @{} {} -> {} regs {} slots {}{extern_kw}",
+            "func @{} {} -> {} regs {} slots {}{arg_kw}{ret_kw}{extern_kw}",
             func.name,
             self.signature_ins(&func.ins),
             self.signature_outs(&func.outs),
@@ -522,6 +530,21 @@ impl Program {
                 format!("branch.if &{cond}, {}, {}", label(*then), label(*els))
             }
             Decoded::Return => "return".to_string(),
+            Decoded::CopyReturn { src, size } => format!(
+                "copy.ret {}, {}",
+                operand_text(*src),
+                self.type_for_size(*size)
+            ),
+            Decoded::ArithReturn {
+                lhs,
+                rhs,
+                op,
+                width,
+            } => format!(
+                "arith.ret {} &{lhs}, &{rhs} : {}",
+                op.as_str(),
+                self.type_for_size(u32::from(*width) / 8)
+            ),
             Decoded::Panic { data } => format!("panic !c{data}"),
             Decoded::Unreachable => "unreachable".to_string(),
             Decoded::ArithImm {
@@ -804,6 +827,8 @@ struct FuncHeader {
     outs: Vec<TypeId>,
     n_regs: u32,
     slot_bytes: u32,
+    arg_reg: Option<u32>,
+    ret_reg: Option<u32>,
     is_extern: bool,
 }
 
@@ -816,6 +841,8 @@ struct ParsedFunc {
     outs: Vec<TypeId>,
     n_regs: u32,
     slot_bytes: u32,
+    arg_reg: Option<u32>,
+    ret_reg: Option<u32>,
     code: Vec<Instr>,
     /// Stated word pc of each instruction in `code` (parallel to it).
     pcs: Vec<u32>,
@@ -993,6 +1020,8 @@ fn parse_func(
         outs: header.outs,
         n_regs: header.n_regs,
         slot_bytes: header.slot_bytes,
+        arg_reg: header.arg_reg,
+        ret_reg: header.ret_reg,
         code,
         pcs,
         lines: line_table,
@@ -1183,13 +1212,16 @@ fn parse_func_header(line: &str, type_ids: &HashMap<String, TypeId>) -> Result<F
         return Err("expected `slots`".to_string());
     }
     let slot_bytes = parse_u32(tokens.next(), "slots")?;
-    let is_extern = match tokens.next() {
-        None => false,
-        Some("extern") => true,
-        Some(other) => return Err(format!("unexpected `{other}` in function header")),
-    };
-    if tokens.next().is_some() {
-        return Err("trailing tokens in function header".to_string());
+    let mut arg_reg = None;
+    let mut ret_reg = None;
+    let mut is_extern = false;
+    while let Some(token) = tokens.next() {
+        match token {
+            "extern" => is_extern = true,
+            "argreg" => arg_reg = Some(parse_u32(tokens.next(), "argreg")?),
+            "retreg" => ret_reg = Some(parse_u32(tokens.next(), "retreg")?),
+            other => return Err(format!("unexpected `{other}` in function header")),
+        }
     }
     Ok(FuncHeader {
         name: name.to_string(),
@@ -1197,6 +1229,8 @@ fn parse_func_header(line: &str, type_ids: &HashMap<String, TypeId>) -> Result<F
         outs,
         n_regs,
         slot_bytes,
+        arg_reg,
+        ret_reg,
         is_extern,
     })
 }
@@ -1279,6 +1313,8 @@ fn parse_instr(text: &str, type_ids: &HashMap<String, TypeId>) -> Result<ParsedI
         "branch.if" => parse_branch_if(rest),
         "branch.if.imm" => parse_branch_if_imm(rest, type_ids),
         "return" => Ok(ParsedInstr::Ready(Instr::Return)),
+        "copy.ret" => parse_copy_ret(rest, type_ids),
+        "arith.ret" => parse_arith_ret(rest, type_ids),
         "panic" => Ok(ParsedInstr::Ready(Instr::Panic {
             data: parse_data_ref(rest)?,
         })),
@@ -1623,6 +1659,33 @@ fn parse_call_args(text: &str) -> Result<(Vec<Operand>, Vec<u32>), String> {
         .strip_prefix("out")
         .ok_or_else(|| "expected `(out ...)`".to_string())?;
     Ok((parse_operand_list(ins_body)?, parse_slot_list(outs_body)?))
+}
+
+/// Parses a `copy.ret src, ty` return-fused instruction.
+fn parse_copy_ret(rest: &str, type_ids: &HashMap<String, TypeId>) -> Result<ParsedInstr, String> {
+    let (src_text, ty_text) = rest
+        .split_once(',')
+        .ok_or_else(|| "expected `src, ty`".to_string())?;
+    Ok(ParsedInstr::Ready(Instr::CopyReturn {
+        src: parse_operand(src_text.trim())?,
+        ty: parse_type(ty_text.trim(), type_ids)?,
+    }))
+}
+
+/// Parses an `arith.ret op &l, &r : ty` return-fused instruction.
+fn parse_arith_ret(rest: &str, type_ids: &HashMap<String, TypeId>) -> Result<ParsedInstr, String> {
+    let (op_text, args) = split_head(rest.trim());
+    let op = ArithOp::parse(op_text).ok_or_else(|| format!("unknown opcode `{op_text}`"))?;
+    let (regs, ty_text) = args
+        .split_once(" : ")
+        .ok_or_else(|| "arith.ret missing operand type".to_string())?;
+    let (lhs, rhs) = parse_reg_pair(regs)?;
+    Ok(ParsedInstr::Ready(Instr::ArithReturn {
+        op,
+        lhs,
+        rhs,
+        operand_ty: parse_type(ty_text.trim(), type_ids)?,
+    }))
 }
 
 /// Parses a `branch.if` instruction.
@@ -2230,6 +2293,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn text_round_trips_rich_program() {
         let types = vec![TypeInfo {
             name: "#bit_native".to_string(),
@@ -2293,6 +2357,8 @@ mod tests {
                     out_sizes: Vec::new(),
                     n_regs: 4,
                     slot_bytes: 16,
+                    arg_reg: None,
+                    ret_reg: None,
                     code: main_code,
                     call_sites: main_sites,
                     operands: main_ops,
@@ -2315,6 +2381,8 @@ mod tests {
                     out_sizes: Vec::new(),
                     n_regs: 1,
                     slot_bytes: 8,
+                    arg_reg: None,
+                    ret_reg: None,
                     code: helper_code,
                     call_sites: helper_sites,
                     operands: helper_ops,
@@ -2388,6 +2456,8 @@ mod tests {
                 out_sizes: Vec::new(),
                 n_regs: 3,
                 slot_bytes: 0,
+                arg_reg: None,
+                ret_reg: None,
                 code,
                 call_sites: sites,
                 operands: ops,
@@ -2458,6 +2528,8 @@ mod tests {
                 out_sizes: Vec::new(),
                 n_regs: 2,
                 slot_bytes: 16,
+                arg_reg: None,
+                ret_reg: None,
                 code,
                 call_sites: sites,
                 operands: ops,
@@ -2543,6 +2615,8 @@ mod tests {
                 out_sizes: Vec::new(),
                 n_regs: 2,
                 slot_bytes: 0,
+                arg_reg: None,
+                ret_reg: None,
                 code,
                 call_sites: sites,
                 operands: ops,
