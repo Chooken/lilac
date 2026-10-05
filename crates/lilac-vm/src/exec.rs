@@ -27,7 +27,15 @@
 use std::fmt;
 
 use crate::decode::{decode, Decoded};
-use crate::isa::{ArithOp, Builtin, Operand, Program, VM_POINTER_BYTES};
+use crate::encode::{
+    arith_from_opcode, builtin_from_index, convert_from_opcode, OP_ADDR, OP_ADDRFIELD_BASE,
+    OP_ADDRFIELD_LAST, OP_ADDR_FUNC, OP_BRANCH, OP_BRANCH_IF, OP_CALL, OP_CALL_BUILTIN_BASE,
+    OP_CALL_BUILTIN_LAST, OP_CALL_INDIRECT, OP_CONST, OP_CONST_DATA, OP_COPY_BASE, OP_COPY_BYTES,
+    OP_COPY_LAST, OP_EXTEND_ZERO, OP_FIELD_BASE, OP_FIELD_LAST, OP_LOAD, OP_PANIC, OP_RETURN,
+    OP_STOREFIELD_BASE, OP_STOREFIELD_LAST, OP_STORE_BASE, OP_STORE_LAST, OP_TRUNC_BASE,
+    OP_UNREACHABLE, WIDE_FLAG,
+};
+use crate::isa::{ArithOp, Builtin, CallSite, Operand, Program, VM_POINTER_BYTES};
 
 /// Maximum number of live frames before a call traps with
 /// [`VmError::StackOverflow`].
@@ -188,15 +196,329 @@ impl<'a> Machine<'a> {
 
     /// Runs until the entry frame returns or the program panics.
     ///
+    /// This is the hot path (spec §6.1): `func`, `code`, `pc`, `reg_base`, and
+    /// `slot_base` live in locals and the raw opcode byte is matched directly,
+    /// extracting operands with shifts. The frame stack is touched only on
+    /// call/return/trap; the per-instruction `decode`, frame re-derivation, and
+    /// `Result` of [`Machine::step`] are gone. [`Machine::step`] stays the
+    /// debugger's single-instruction path over the same stream.
+    ///
     /// # Errors
     ///
-    /// Propagates any [`VmError`] raised by [`Machine::step`].
+    /// Returns a clean [`VmError`] for a malformed (unverified) body, an
+    /// out-of-range arena access, a call to a bodyless function, or call-stack
+    /// overflow.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&mut self) -> Result<i32, VmError> {
+        let program = self.program;
+        let Some(frame) = self.frames.last() else {
+            return Ok(0);
+        };
+        let mut func_index = frame.func;
+        let mut pc = frame.pc;
+        let mut reg_base = frame.reg_base;
+        let mut slot_base = frame.slot_base;
+
         loop {
-            match self.step()? {
-                Step::Advanced => {}
-                Step::Returned => return Ok(0),
-                Step::Panicked(code) => return Ok(code),
+            let func = &program.funcs[func_index as usize];
+            let code = &func.code;
+            if pc as usize >= code.len() {
+                // The verifier guarantees every body ends in a terminator and
+                // every branch target is in range, but a directly constructed
+                // (unverified) `Program` can still run off the end.
+                return Err(VmError::BadPc(pc));
+            }
+            let w = code[pc as usize];
+            let raw = (w & 0xFF) as u8;
+            let wide = raw & WIDE_FLAG != 0;
+            let base = raw & !WIDE_FLAG;
+            let next: u32;
+            match base {
+                OP_RETURN => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    self.store_frame(func_index, pc, pc + 1);
+                    match self.return_from_frame() {
+                        Step::Returned => return Ok(0),
+                        Step::Advanced | Step::Panicked(_) => {
+                            let Some(frame) = self.frames.last() else {
+                                return Ok(0);
+                            };
+                            func_index = frame.func;
+                            pc = frame.pc;
+                            reg_base = frame.reg_base;
+                            slot_base = frame.slot_base;
+                            continue;
+                        }
+                    }
+                }
+                OP_UNREACHABLE => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    self.store_frame(func_index, pc, pc + 1);
+                    return Err(VmError::Unreachable);
+                }
+                OP_PANIC => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    // The referenced data constant's bytes are the panic
+                    // message; an unverified index falls back to empty.
+                    let message = program
+                        .data
+                        .get((w >> 8) as usize)
+                        .map_or(&[][..], |entry| entry.bytes.as_slice());
+                    self.store_frame(func_index, pc, pc + 1);
+                    let _ = trap(message);
+                    return Ok(ABORT_CODE);
+                }
+                OP_BRANCH => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    next = w >> 8;
+                }
+                OP_BRANCH_IF => {
+                    let (ops, _) = read_ops3(code, pc, wide)?;
+                    next = if self.reg(reg_base, ops[0]) == 0 {
+                        ops[2]
+                    } else {
+                        ops[1]
+                    };
+                }
+                OP_CONST => {
+                    let (dst, n) = read_ops1(code, pc, wide)?;
+                    let lo = *code
+                        .get(pc as usize + n as usize)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let hi = *code
+                        .get(pc as usize + n as usize + 1)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let imm = u64::from(lo) | (u64::from(hi) << 32);
+                    self.set_reg(reg_base, dst, imm);
+                    next = pc + n + 2;
+                }
+                OP_CONST_DATA => {
+                    let (dst, n) = read_ops1(code, pc, wide)?;
+                    let data = *code
+                        .get(pc as usize + n as usize)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let off = program
+                        .data
+                        .get(data as usize)
+                        .map_or(0, |entry| entry.global_off);
+                    self.set_reg(reg_base, dst, u64::from(off));
+                    next = pc + n + 1;
+                }
+                b @ (OP_COPY_BASE..=OP_COPY_LAST) => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let k = b - OP_COPY_BASE;
+                    let dst = operate(ops[0], k & 2 != 0);
+                    let src = operate(ops[1], k & 1 != 0);
+                    let size = ops[2];
+                    if size <= VM_POINTER_BYTES {
+                        let value = self.read_scalar(reg_base, slot_base, src, size)?;
+                        self.write_scalar(reg_base, slot_base, dst, value, size)?;
+                    } else {
+                        self.copy_aggregate(reg_base, slot_base, dst, src, size)?;
+                    }
+                    next = pc + n;
+                }
+                OP_COPY_BYTES => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let src_abs = slot_base as usize + ops[1] as usize;
+                    let dst_abs = slot_base as usize + ops[0] as usize;
+                    self.copy_arena(src_abs, dst_abs, ops[2] as usize)?;
+                    next = pc + n;
+                }
+                OP_LOAD => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let ref_off = self.slot_ref(slot_base, ops[1])?;
+                    if ops[2] <= VM_POINTER_BYTES {
+                        let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+                        let value = self.read_abs(abs, ops[2]).ok_or(VmError::BadRef(ref_off))?;
+                        self.set_reg(reg_base, ops[0], value);
+                    } else {
+                        // An aggregate `Load` passes the pointer through.
+                        self.set_reg(reg_base, ops[0], ref_off);
+                    }
+                    next = pc + n;
+                }
+                b @ (OP_STORE_BASE..=OP_STORE_LAST) => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let src = operate(ops[0], b == OP_STORE_LAST);
+                    let ref_off = self.slot_ref(slot_base, ops[1])?;
+                    let abs = usize::try_from(ref_off).map_err(|_| VmError::BadRef(ref_off))?;
+                    if ops[2] <= VM_POINTER_BYTES {
+                        let value = self.read_scalar(reg_base, slot_base, src, ops[2])?;
+                        self.write_abs(abs, value, ops[2])?;
+                    } else {
+                        self.copy_operand_bytes(reg_base, slot_base, src, abs, ops[2])?;
+                    }
+                    next = pc + n;
+                }
+                OP_ADDR => {
+                    let (ops, n) = read_ops2(code, pc, wide)?;
+                    self.set_reg(reg_base, ops[0], u64::from(slot_base) + u64::from(ops[1]));
+                    next = pc + n;
+                }
+                b @ (OP_ADDRFIELD_BASE..=OP_ADDRFIELD_LAST) => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let base_off = self.field_base(slot_base, ops[1], b == OP_ADDRFIELD_LAST)?;
+                    let addr = base_off
+                        .checked_add(ops[2] as usize)
+                        .ok_or(VmError::BadRef(base_off as u64))?;
+                    let addr = u64::try_from(addr).map_err(|_| VmError::BadRef(base_off as u64))?;
+                    self.set_reg(reg_base, ops[0], addr);
+                    next = pc + n;
+                }
+                OP_ADDR_FUNC => {
+                    let (ops, n) = read_ops2(code, pc, wide)?;
+                    self.set_reg(reg_base, ops[0], FUNC_TAG | u64::from(ops[1]));
+                    next = pc + n;
+                }
+                b @ (OP_FIELD_BASE..=OP_FIELD_LAST) => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let size = *code
+                        .get(pc as usize + n as usize)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let base_off = self.field_base(slot_base, ops[1], b == OP_FIELD_LAST)?;
+                    let addr = base_off
+                        .checked_add(ops[2] as usize)
+                        .ok_or(VmError::BadRef(base_off as u64))?;
+                    if size <= VM_POINTER_BYTES {
+                        let value = self
+                            .read_abs(addr, size)
+                            .ok_or(VmError::BadRef(addr as u64))?;
+                        self.set_reg(reg_base, ops[0], value);
+                    } else {
+                        // The compiler emits `AddrField` for aggregate fields;
+                        // this defensive fall-back yields the field ref.
+                        let value =
+                            u64::try_from(addr).map_err(|_| VmError::BadRef(addr as u64))?;
+                        self.set_reg(reg_base, ops[0], value);
+                    }
+                    next = pc + n + 1;
+                }
+                b @ (OP_STOREFIELD_BASE..=OP_STOREFIELD_LAST) => {
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    let size = *code
+                        .get(pc as usize + n as usize)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let k = b - OP_STOREFIELD_BASE;
+                    let src = operate(ops[0], k & 1 != 0);
+                    let base_off = self.field_base(slot_base, ops[1], k & 2 != 0)?;
+                    let addr = base_off
+                        .checked_add(ops[2] as usize)
+                        .ok_or(VmError::BadRef(base_off as u64))?;
+                    if size <= VM_POINTER_BYTES {
+                        let value = self.read_scalar(reg_base, slot_base, src, size)?;
+                        self.write_abs(addr, value, size)?;
+                    } else {
+                        self.copy_operand_bytes(reg_base, slot_base, src, addr, size)?;
+                    }
+                    next = pc + n + 1;
+                }
+                OP_CALL => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let (site, ins, outs) =
+                        resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
+                            .ok_or(VmError::BadInstr(pc))?;
+                    self.store_frame(func_index, pc, pc + 1);
+                    self.call(site.func, ins, outs, reg_base, slot_base)?;
+                    let Some(frame) = self.frames.last() else {
+                        return Ok(0);
+                    };
+                    func_index = frame.func;
+                    pc = frame.pc;
+                    reg_base = frame.reg_base;
+                    slot_base = frame.slot_base;
+                    continue;
+                }
+                OP_CALL_INDIRECT => {
+                    let (callee, n) = read_ops1(code, pc, wide)?;
+                    let index = *code
+                        .get(pc as usize + n as usize)
+                        .ok_or(VmError::BadInstr(pc))? as usize;
+                    let (_site, ins, outs) = resolve_call(&func.call_sites, &func.operands, index)
+                        .ok_or(VmError::BadInstr(pc))?;
+                    let value = self.reg(reg_base, callee);
+                    if value & FUNC_TAG == 0 {
+                        return Err(VmError::BadRef(value));
+                    }
+                    let target =
+                        u32::try_from(value & !FUNC_TAG).map_err(|_| VmError::BadRef(value))?;
+                    self.store_frame(func_index, pc, pc + n + 1);
+                    self.call(target, ins, outs, reg_base, slot_base)?;
+                    let Some(frame) = self.frames.last() else {
+                        return Ok(0);
+                    };
+                    func_index = frame.func;
+                    pc = frame.pc;
+                    reg_base = frame.reg_base;
+                    slot_base = frame.slot_base;
+                    continue;
+                }
+                b @ (OP_CALL_BUILTIN_BASE..=OP_CALL_BUILTIN_LAST) => {
+                    if wide {
+                        return Err(VmError::BadInstr(pc));
+                    }
+                    let Some(builtin) = builtin_from_index(b - OP_CALL_BUILTIN_BASE) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (_site, ins, outs) =
+                        resolve_call(&func.call_sites, &func.operands, (w >> 8) as usize)
+                            .ok_or(VmError::BadInstr(pc))?;
+                    if let Step::Panicked(code) =
+                        self.call_builtin(builtin, ins, outs, reg_base, slot_base)?
+                    {
+                        self.store_frame(func_index, pc, pc + 1);
+                        return Ok(code);
+                    }
+                    next = pc + 1;
+                }
+                b @ (OP_TRUNC_BASE..=0x5F) => {
+                    let (ops, n) = read_ops2(code, pc, wide)?;
+                    let Some((_, width)) = convert_from_opcode(b) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let value = self.reg(reg_base, ops[1]);
+                    self.set_reg(reg_base, ops[0], value & mask(u32::from(width) / 8));
+                    next = pc + n;
+                }
+                OP_EXTEND_ZERO => {
+                    let (ops, n) = read_ops2(code, pc, wide)?;
+                    self.set_reg(reg_base, ops[0], self.reg(reg_base, ops[1]));
+                    next = pc + n;
+                }
+                b => {
+                    let Some((op, width)) = arith_from_opcode(b) else {
+                        return Err(VmError::BadInstr(pc));
+                    };
+                    let (ops, n) = read_ops3(code, pc, wide)?;
+                    self.exec_arith(op, reg_base, ops[0], ops[1], ops[2], width);
+                    next = pc + n;
+                }
+            }
+            pc = next;
+        }
+    }
+
+    /// Synchronizes the running frame's `pc`/`last_pc` with the loop's locals.
+    ///
+    /// The inner loop keeps these in locals and only calls this on
+    /// call/return/trap (spec §6.1). It is keyed on `func_index` so that a
+    /// frame pushed or popped in between is never written with another frame's
+    /// counters.
+    fn store_frame(&mut self, func_index: u32, pc: u32, next: u32) {
+        if let Some(frame) = self.frames.last_mut() {
+            if frame.func == func_index {
+                frame.pc = next;
+                frame.last_pc = Some(pc);
             }
         }
     }
@@ -943,6 +1265,74 @@ fn trap(message: &[u8]) -> Step {
     Step::Panicked(ABORT_CODE)
 }
 
+/// Builds a register or slot [`Operand`] from a raw value and slot flag.
+const fn operate(value: u32, is_slot: bool) -> Operand {
+    if is_slot {
+        Operand::Slot(value)
+    } else {
+        Operand::Reg(value)
+    }
+}
+
+/// Reads a one-operand instruction's operand and its word count.
+#[inline]
+fn read_ops1(code: &[u32], pc: u32, wide: bool) -> Result<(u32, u32), VmError> {
+    if wide {
+        let ext0 = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
+        Ok((ext0 & 0xFFFF, 2))
+    } else {
+        let bytes = code[pc as usize].to_le_bytes();
+        Ok((u32::from(bytes[1]), 1))
+    }
+}
+
+/// Reads a two-operand instruction's operands and its word count.
+#[inline]
+fn read_ops2(code: &[u32], pc: u32, wide: bool) -> Result<([u32; 2], u32), VmError> {
+    if wide {
+        let ext0 = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
+        Ok(([ext0 & 0xFFFF, (ext0 >> 16) & 0xFFFF], 2))
+    } else {
+        let bytes = code[pc as usize].to_le_bytes();
+        Ok(([u32::from(bytes[1]), u32::from(bytes[2])], 1))
+    }
+}
+
+/// Reads a three-operand instruction's operands and its word count.
+#[inline]
+fn read_ops3(code: &[u32], pc: u32, wide: bool) -> Result<([u32; 3], u32), VmError> {
+    if wide {
+        let ext0 = *code.get(pc as usize + 1).ok_or(VmError::BadInstr(pc))?;
+        let ext1 = *code.get(pc as usize + 2).ok_or(VmError::BadInstr(pc))?;
+        Ok(([ext0 & 0xFFFF, (ext0 >> 16) & 0xFFFF, ext1], 3))
+    } else {
+        let bytes = code[pc as usize].to_le_bytes();
+        Ok((
+            [
+                u32::from(bytes[1]),
+                u32::from(bytes[2]),
+                u32::from(bytes[3]),
+            ],
+            1,
+        ))
+    }
+}
+
+/// Resolves a call-site index into its site and borrowed operand slices.
+///
+/// Returns `None` for an out-of-range call site or operand range, so the
+/// interpreter can report a clean [`VmError::BadInstr`] instead of panicking.
+fn resolve_call<'a>(
+    call_sites: &'a [CallSite],
+    operands: &'a [Operand],
+    index: usize,
+) -> Option<(&'a CallSite, &'a [Operand], &'a [Operand])> {
+    let site = call_sites.get(index)?;
+    let ins = operands.get(site.ins.start as usize..site.ins.end as usize)?;
+    let outs = operands.get(site.outs.start as usize..site.outs.end as usize)?;
+    Some((site, ins, outs))
+}
+
 /// A bit mask covering `size` bytes.
 fn mask(size: u32) -> u64 {
     if size >= 8 {
@@ -1147,6 +1537,48 @@ mod tests {
             }
         }
         assert_eq!(x, Some(0x42), "argument binding / return out-copy");
+    }
+
+    /// The inner dispatch loop ([`Machine::run`]) and the debugger's
+    /// single-instruction path ([`Machine::step`]) must agree on both the exit
+    /// code and the values written through call/return.
+    ///
+    /// Recursion is not constant-folded, so `fib` survives compilation and the
+    /// step-driven loop exercises real call/return frames; `out` is captured
+    /// while its frame is still live (the terminating `Return` pops it).
+    #[test]
+    fn run_and_step_agree_on_result() {
+        // `fib(18)` is beyond the constant folder's effort budget, so `fib`
+        // survives compilation (matching `hot_path_has_no_type_lookups`).
+        let src = "fib: function (n: @bit_native) r: @bit_native {\n    if @i_less_than(n, 0x2) {\n        r = n\n    } else {\n        r = @i_add(fib(@i_sub(n, 0x1)), fib(@i_sub(n, 0x2)))\n    }\n}\n\nmain: function () nothing {\n    out: @bit_native = fib(0x12)\n}\n";
+        let program = compile_src(src);
+        assert!(
+            program.funcs.iter().any(|func| func.name == "fib"),
+            "fib must survive folding to exercise call/return"
+        );
+
+        // The hot inner loop.
+        let run_code = Machine::new(&program).expect("entry").run().expect("run");
+
+        // The debugger's step()-driven path, capturing `out` while live.
+        let mut machine = Machine::new(&program).expect("entry");
+        let mut out = None;
+        let step_code = loop {
+            if let Some(value) = machine.read_place("out") {
+                out = Some(value);
+            }
+            match machine.step().expect("step") {
+                Step::Advanced => {}
+                Step::Returned => break 0,
+                Step::Panicked(code) => break code,
+            }
+        };
+
+        assert_eq!(
+            run_code, step_code,
+            "run() and step() agree on the exit code"
+        );
+        assert_eq!(out, Some(2584), "fib(18) copied through call/return");
     }
 
     /// The call/return path binds arguments and places results from the
