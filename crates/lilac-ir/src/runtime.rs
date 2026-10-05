@@ -15,10 +15,11 @@ use crate::{ArithOp, LirBlock, LirCallee, LirFunc, LirInst, LirOperand, LirTerm}
 
 /// Builds the runtime prelude for a target with `ptr_size`-byte pointers.
 ///
-/// The seven functions are returned in call-dependency order:
-/// `byte_buffer_from`, `byte_buffer_ptr`, `byte_buffer_len`, `format_args_new`,
-/// `format_args_push`, `format_args_count`, `format_args_piece`. The piece
-/// stride is `#byte_buffer`'s size, `2 * ptr_size` bytes.
+/// The nine functions are returned in call-dependency order:
+/// `byte_buffer_from`, `byte_buffer_ptr`, `byte_buffer_len`, `load_u8`,
+/// `store_u8`, `format_args_new`, `format_args_push`, `format_args_count`,
+/// `format_args_piece`. The piece stride is `#byte_buffer`'s size,
+/// `2 * ptr_size` bytes.
 #[must_use]
 pub fn build_runtime(ptr_size: u32) -> Vec<LirFunc> {
     let stride = format!("0x{:x}", 2 * ptr_size);
@@ -26,6 +27,8 @@ pub fn build_runtime(ptr_size: u32) -> Vec<LirFunc> {
         byte_buffer_from(),
         byte_buffer_ptr(),
         byte_buffer_len(),
+        load_u8(),
+        store_u8(),
         format_args_new(),
         format_args_push(&stride),
         format_args_count(),
@@ -247,6 +250,53 @@ fn byte_buffer_len() -> LirFunc {
     )
 }
 
+/// `.lilac.load_u8(ref #bit8 %base, #bitNative %index) -> #bit8`.
+///
+/// Addresses `base + index` with `@ptr_add`, then loads the byte through the
+/// resulting `ref #bit8` place.
+fn load_u8() -> LirFunc {
+    lir_func(
+        ".lilac.load_u8",
+        &[("base", "ref #bit8"), ("index", "#bitNative")],
+        &[("out", "#bit8")],
+        vec![block(
+            "entry",
+            vec![
+                alloca("ref #bit8", "slot"),
+                call_builtin("@ptr_add", &["base", "index"], &["slot"]),
+                load("slot", "r", "#bit8"),
+                copy_place(LirOperand::Reg("r".to_owned()), "out"),
+            ],
+            ret(),
+        )],
+    )
+}
+
+/// `.lilac.store_u8(ref #bit8 %base, #bitNative %index, #bit8 %value)`.
+///
+/// Addresses `base + index` with `@ptr_add`, then stores the byte through the
+/// resulting `ref #bit8` place.
+fn store_u8() -> LirFunc {
+    lir_func(
+        ".lilac.store_u8",
+        &[
+            ("base", "ref #bit8"),
+            ("index", "#bitNative"),
+            ("value", "#bit8"),
+        ],
+        &[],
+        vec![block(
+            "entry",
+            vec![
+                alloca("ref #bit8", "slot"),
+                call_builtin("@ptr_add", &["base", "index"], &["slot"]),
+                store(LirOperand::Place("value".to_owned()), "slot"),
+            ],
+            ret(),
+        )],
+    )
+}
+
 /// `.lilac.format_args_new() -> #format_args` (a zeroed piece table).
 fn format_args_new() -> LirFunc {
     lir_func(
@@ -388,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_has_seven_functions_in_order() {
+    fn runtime_has_nine_functions_in_order() {
         let funcs = build_runtime(8);
         let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
@@ -397,6 +447,8 @@ mod tests {
                 ".lilac.byte_buffer_from",
                 ".lilac.byte_buffer_ptr",
                 ".lilac.byte_buffer_len",
+                ".lilac.load_u8",
+                ".lilac.store_u8",
                 ".lilac.format_args_new",
                 ".lilac.format_args_push",
                 ".lilac.format_args_count",
@@ -404,6 +456,9 @@ mod tests {
             ]
         );
         assert!(funcs.iter().all(|f| !f.is_extern));
+        // The two byte-access bodies the backend no longer defines.
+        assert!(names.contains(&".lilac.load_u8"));
+        assert!(names.contains(&".lilac.store_u8"));
     }
 
     #[test]

@@ -1,0 +1,5 @@
+main: function () nothing {
+    s: @byte_buffer = "hello"
+    p: ref @bit8 = @byte_buffer_ptr(s)
+    c: @bit8 = @load_u8(p, 0x0)
+}

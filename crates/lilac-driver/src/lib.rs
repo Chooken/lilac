@@ -319,6 +319,22 @@ mod tests {
         assert!(!names.contains(&".lilac.format_args_new"), "{names:?}");
     }
 
+    /// A non-const `@load_u8`/`@store_u8` keeps its `.lilac.` body through DCE,
+    /// closing the gap where the moved byte-access runtime had no definition.
+    #[test]
+    fn non_const_byte_access_keeps_runtime() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "byte_access.lilac",
+                "main: function () nothing {\n    s: @byte_buffer = \"hello\"\n    p: ref @bit8 = @byte_buffer_ptr(s)\n    c: @bit8 = @load_u8(p, 0x0)\n    @store_u8(p, 0x0, 0x41)\n}\n",
+            )
+            .expect("byte access should compile");
+        let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&".lilac.load_u8"), "{names:?}");
+        assert!(names.contains(&".lilac.store_u8"), "{names:?}");
+    }
+
     #[test]
     fn pipeline_produces_lir() {
         let mut session = Session::new();

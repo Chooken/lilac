@@ -61,3 +61,12 @@ fn format_args_use_reaches_piece_runtime() {
     assert!(text.contains(".lilac.format_args_count"), "{text}");
     assert!(text.contains(".lilac.format_args_piece"), "{text}");
 }
+
+/// A non-const `@load_u8` reaches the `.lilac.load_u8` LIR body. This fixture is
+/// also host-compiled and run by the M5b harness, so the body lowers and links.
+#[test]
+fn non_const_load_u8_reaches_runtime() {
+    let text = emit_ir("load_u8.lilac");
+    assert!(text.contains(".lilac.load_u8"), "{text}");
+    assert!(text.contains(".lilac.byte_buffer_ptr"), "{text}");
+}

@@ -1,0 +1,45 @@
+lilac_ir = "0.2"
+target = "x86_64-unknown-none"
+!c0: str = "hello"
+function @main
+{
+  $entry:
+    alloca #byte_buffer %s : zeroed
+    alloca ref #bit8 %p : zeroed
+    alloca ref #bit8 %tmp.1 : zeroed
+    alloca #bit8 %c : zeroed
+    alloca #bitNative %tmp.2 : zeroed
+    alloca #bit8 %tmp.3 : zeroed
+    &1: #byte_buffer = const !c0
+    copy &1 -> %s
+    call @.lilac.byte_buffer_ptr (in %s) (out %tmp.1)
+    &2: ref #bit8 = copy %tmp.1
+    copy &2 -> %p
+    &3: #bitNative = const 0x0
+    copy &3 -> %tmp.2
+    call @.lilac.load_u8 (in %p, %tmp.2) (out %tmp.3)
+    &4: #bit8 = copy %tmp.3
+    copy &4 -> %c
+    return
+}
+function @.lilac.byte_buffer_ptr
+  in #byte_buffer %buffer
+  out ref #bit8 %out
+{
+  $entry:
+    &r: ref #bit8 = field %buffer .data  // idx 1
+    copy &r -> %out
+    return
+}
+function @.lilac.load_u8
+  in ref #bit8 %base
+  in #bitNative %index
+  out #bit8 %out
+{
+  $entry:
+    alloca ref #bit8 %slot : zeroed
+    call @ptr_add (in %base, %index) (out %slot)
+    &r: #bit8 = load %slot
+    copy &r -> %out
+    return
+}
