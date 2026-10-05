@@ -146,7 +146,7 @@ fn width_of(ty: &str) -> Option<u32> {
         "#bit8" => Some(8),
         "#bit16" => Some(16),
         "#bit32" => Some(32),
-        "#bit64" | "#bitNative" => Some(64),
+        "#bit64" | "#bit_native" => Some(64),
         _ => None,
     }
 }
@@ -488,7 +488,7 @@ fn lilac_func_builtin(name: &str) -> Option<String> {
 /// mutating runtime functions (the const value model has no pointers).
 fn runtime_out_types(builtin: &str) -> Option<(Vec<Option<String>>, &'static str)> {
     match builtin {
-        "@byte_buffer_len" => Some((vec![Some("#bitNative".to_owned())], "#bitNative")),
+        "@byte_buffer_len" => Some((vec![Some("#bit_native".to_owned())], "#bit_native")),
         "@byte_buffer_from" => Some((vec![Some("#byte_buffer".to_owned())], "#byte_buffer")),
         "@load_u8" => Some((vec![Some("#bit8".to_owned())], "#bit8")),
         _ => None,
@@ -964,7 +964,7 @@ impl Folder<'_> {
                 };
                 let out_types: Vec<Option<String>> =
                     sig.outs.iter().map(|ty| ty.map(str::to_owned)).collect();
-                let out_ty = sig.outs.first().copied().flatten().unwrap_or("#bitNative");
+                let out_ty = sig.outs.first().copied().flatten().unwrap_or("#bit_native");
                 match eval_builtin(name, args, out_ty) {
                     Ok(value) => Ok(Some(FoldedCall {
                         values: vec![value],
@@ -1390,7 +1390,7 @@ impl Evaluator<'_> {
                     .get(arg)
                     .cloned()
                     .unwrap_or(ConstValue::Unknown);
-                let result = eval_builtin(name, &[value], "#bitNative").map_err(|_| Eval::Miss)?;
+                let result = eval_builtin(name, &[value], "#bit_native").map_err(|_| Eval::Miss)?;
                 bind_out(frame, outs, &[result]);
                 Ok(())
             }
@@ -1978,7 +1978,7 @@ mod tests {
                         name: "@size_of".to_owned(),
                         arg: reg("1"),
                         dst: "2".to_owned(),
-                        ty: "#bitNative".to_owned(),
+                        ty: "#bit_native".to_owned(),
                         span: test_span(),
                     },
                 ],
@@ -1994,7 +1994,7 @@ mod tests {
     }
 
     /// A two-function module: `@parse` is a pure loop over `@load_u8` from
-    /// its `@byte_buffer` param accumulating a `#bitNative` sum. When
+    /// its `@byte_buffer` param accumulating a `#bit_native` sum. When
     /// `set_arg`, `main` passes a `"AB"` data buffer; otherwise the arg
     /// place is never assigned a constant.
     ///
@@ -2009,16 +2009,16 @@ mod tests {
         let parse = LirFunc {
             name: "parse".to_owned(),
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
-            outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            outs: vec![("result".to_owned(), "#bit_native".to_owned())],
             is_extern: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
                     insts: vec![
-                        alloca("#bitNative", "i"),
-                        alloca("#bitNative", "acc"),
-                        alloca("#bitNative", "len"),
-                        constant("r0", "0x0", "#bitNative"),
+                        alloca("#bit_native", "i"),
+                        alloca("#bit_native", "acc"),
+                        alloca("#bit_native", "len"),
+                        constant("r0", "0x0", "#bit_native"),
                         copy_place(reg("r0"), "i"),
                         copy_place(reg("r0"), "acc"),
                         call_func(".lilac.byte_buffer_len", &["buf"], &["len"]),
@@ -2029,8 +2029,8 @@ mod tests {
                 LirBlock {
                     label: "cond".to_owned(),
                     insts: vec![
-                        copy_reg(place("i"), "r1", "#bitNative"),
-                        copy_reg(place("len"), "r2", "#bitNative"),
+                        copy_reg(place("i"), "r1", "#bit_native"),
+                        copy_reg(place("len"), "r2", "#bit_native"),
                         arith(ArithOp::ILt, "r1", "r2", "r3", "#bit8"),
                     ],
                     term: branch_if("r3", "body", Some("done")),
@@ -2044,13 +2044,13 @@ mod tests {
                         call_func(".lilac.byte_buffer_ptr", &["buf"], &["p"]),
                         call_func(".lilac.load_u8", &["p", "i"], &["c"]),
                         copy_reg(place("c"), "r4", "#bit8"),
-                        extend("r4", "r4b", "#bitNative"),
-                        copy_reg(place("acc"), "r5", "#bitNative"),
-                        arith(ArithOp::IAdd, "r5", "r4b", "r6", "#bitNative"),
+                        extend("r4", "r4b", "#bit_native"),
+                        copy_reg(place("acc"), "r5", "#bit_native"),
+                        arith(ArithOp::IAdd, "r5", "r4b", "r6", "#bit_native"),
                         copy_place(reg("r6"), "acc"),
-                        copy_reg(place("i"), "r7", "#bitNative"),
-                        constant("r8", "0x1", "#bitNative"),
-                        arith(ArithOp::IAdd, "r7", "r8", "r9", "#bitNative"),
+                        copy_reg(place("i"), "r7", "#bit_native"),
+                        constant("r8", "0x1", "#bit_native"),
+                        arith(ArithOp::IAdd, "r7", "r8", "r9", "#bit_native"),
                         copy_place(reg("r9"), "i"),
                     ],
                     term: branch("cond"),
@@ -2059,7 +2059,7 @@ mod tests {
                 LirBlock {
                     label: "done".to_owned(),
                     insts: vec![
-                        copy_reg(place("acc"), "r10", "#bitNative"),
+                        copy_reg(place("acc"), "r10", "#bit_native"),
                         copy_place(reg("r10"), "result"),
                     ],
                     term: ret(),
@@ -2067,7 +2067,7 @@ mod tests {
                 },
             ],
         };
-        let mut main_insts = vec![alloca("#byte_buffer", "arg"), alloca("#bitNative", "res")];
+        let mut main_insts = vec![alloca("#byte_buffer", "arg"), alloca("#bit_native", "res")];
         if set_arg {
             main_insts.push(constant("m0", "!c0", "#byte_buffer"));
             main_insts.push(copy_place(reg("m0"), "arg"));
@@ -2127,13 +2127,13 @@ mod tests {
                     label: "entry".to_owned(),
                     insts: vec![
                         alloca("#byte_buffer", "b"),
-                        alloca("#bitNative", "len"),
+                        alloca("#bit_native", "len"),
                         constant("c", "!ab", "#byte_buffer"),
                         copy_place(reg("c"), "b"),
                         call_func(".lilac.byte_buffer_len", &["b"], &["len"]),
-                        copy_reg(place("len"), "n", "#bitNative"),
-                        constant("two", "0x2", "#bitNative"),
-                        arith(ArithOp::Eq, "n", "two", "eq", "#bitNative"),
+                        copy_reg(place("len"), "n", "#bit_native"),
+                        constant("two", "0x2", "#bit_native"),
+                        arith(ArithOp::Eq, "n", "two", "eq", "#bit_native"),
                     ],
                     term: branch_if("eq", "ok", Some("err")),
                     span: test_span(),
@@ -2192,7 +2192,7 @@ mod tests {
     }
 
     /// A two-function module where `@wipe` mutates its `@byte_buffer` param
-    /// (store `0x0` at offset 0, then load it back as a `#bitNative` result).
+    /// (store `0x0` at offset 0, then load it back as a `#bit_native` result).
     /// A pre-fix folder would fold this to `const 0x0`; the mutation guard
     /// must leave the runtime call.
     fn mutating_module() -> LirModule {
@@ -2205,16 +2205,16 @@ mod tests {
         let wipe = LirFunc {
             name: "wipe".to_owned(),
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
-            outs: vec![("result".to_owned(), "#bitNative".to_owned())],
+            outs: vec![("result".to_owned(), "#bit_native".to_owned())],
             is_extern: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
                     alloca("ref #bit8", "p"),
-                    alloca("#bitNative", "z"),
+                    alloca("#bit_native", "z"),
                     alloca("#bit8", "v"),
                     alloca("#bit8", "w"),
-                    constant("r0", "0x0", "#bitNative"),
+                    constant("r0", "0x0", "#bit_native"),
                     copy_place(reg("r0"), "z"),
                     constant("r1", "0x0", "#bit8"),
                     copy_place(reg("r1"), "v"),
@@ -2222,7 +2222,7 @@ mod tests {
                     call_func(".lilac.store_u8", &["p", "z", "v"], &[]),
                     call_func(".lilac.load_u8", &["p", "z"], &["w"]),
                     copy_reg(place("w"), "r2", "#bit8"),
-                    extend("r2", "r3", "#bitNative"),
+                    extend("r2", "r3", "#bit_native"),
                     copy_place(reg("r3"), "result"),
                 ],
                 term: ret(),
@@ -2238,7 +2238,7 @@ mod tests {
                 label: "entry".to_owned(),
                 insts: vec![
                     alloca("#byte_buffer", "arg"),
-                    alloca("#bitNative", "res"),
+                    alloca("#bit_native", "res"),
                     constant("m0", "!c0", "#byte_buffer"),
                     copy_place(reg("m0"), "arg"),
                     call_func("wipe", &["arg"], &["res"]),

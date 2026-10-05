@@ -1,5 +1,5 @@
 @mod: function (lhs: @bit32, rhs: @bit32) result: @bit32 {
-    result = @imod(lhs, rhs)
+    result = @i_mod(lhs, rhs)
 }
 
 main: function () nothing {

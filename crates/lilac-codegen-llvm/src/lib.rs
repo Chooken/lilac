@@ -147,7 +147,7 @@ mod tests {
             ("p16", "#bit16"),
             ("p32", "#bit32"),
             ("p64", "#bit64"),
-            ("pn", "#bitNative"),
+            ("pn", "#bit_native"),
             ("pr", "ref #bit32"),
             ("pbb", "#byte_buffer"),
             ("pfa", "#format_args"),
@@ -168,7 +168,7 @@ mod tests {
                 ("b".to_owned(), "#bit16".to_owned()),
                 ("c".to_owned(), "#bit32".to_owned()),
                 ("d".to_owned(), "#bit64".to_owned()),
-                ("e".to_owned(), "#bitNative".to_owned()),
+                ("e".to_owned(), "#bit_native".to_owned()),
                 ("r".to_owned(), "ref #bit32".to_owned()),
                 ("bb".to_owned(), "#byte_buffer".to_owned()),
                 ("fa".to_owned(), "#format_args".to_owned()),
@@ -706,7 +706,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         let mut insts = Vec::new();
         alloca(&mut insts, "base", "ref #bit8");
-        alloca(&mut insts, "off", "#bitNative");
+        alloca(&mut insts, "off", "#bit_native");
         alloca(&mut insts, "out", "ref #bit8");
         call(
             &mut insts,

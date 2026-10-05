@@ -49,26 +49,26 @@ function @.lilac.format_args_push
   in #byte_buffer %piece
 {
   $entry:
-    &c: #bitNative = field %table .count  // idx 0
-    &cap: #bitNative = const 0x10
-    &ok: #bitNative = i.cmp.lt.u &c, &cap
+    &c: #bit_native = field %table .count  // idx 0
+    &cap: #bit_native = const 0x10
+    &ok: #bit_native = i.cmp.lt.u &c, &cap
     branch.if &ok, $append, $done
   $append:
-    &c: #bitNative = field %table .count  // idx 0
+    &c: #bit_native = field %table .count  // idx 0
     &p0: ref #byte_buffer = field.addr %table .p0  // idx 1
     alloca ref #bit8 %base : zeroed
     copy &p0 -> %base
-    &stride: #bitNative = const 0x10
-    &off: #bitNative = i.mul &c, &stride
-    alloca #bitNative %offp : zeroed
+    &stride: #bit_native = const 0x10
+    &off: #bit_native = i.mul &c, &stride
+    alloca #bit_native %offp : zeroed
     copy &off -> %offp
     alloca ref #bit8 %slot : zeroed
     call @ptr_add (in %base, %offp) (out %slot)
     alloca ref #byte_buffer %s : zeroed
     copy %slot -> %s
     copy %piece -> ref %s
-    &one: #bitNative = const 0x1
-    &n: #bitNative = i.add &c, &one
+    &one: #bit_native = const 0x1
+    &n: #bit_native = i.add &c, &one
     copy &n -> %table.count  // idx 0
     branch $done
   $done:

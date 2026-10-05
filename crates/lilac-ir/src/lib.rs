@@ -29,7 +29,7 @@ pub const LILAC_IR_VERSION: &str = "0.3";
 pub struct LirModule {
     /// `lilac_ir = "..."` header value.
     pub version: String,
-    /// `target = "..."` header value (fixes `@bitNative` width).
+    /// `target = "..."` header value (fixes `@bit_native` width).
     pub target: String,
     /// Typed constants (`!c0: str`, `!c1: numlit`).
     pub data: Vec<LirData>,
@@ -675,11 +675,11 @@ pub struct BuiltinSig {
 pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     let (ins, outs) = match name {
         "@memcpy" => (
-            vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bitNative")],
+            vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bit_native")],
             vec![],
         ),
         "@ptr_add" => (
-            vec![Some("ref #bit8"), Some("#bitNative")],
+            vec![Some("ref #bit8"), Some("#bit_native")],
             vec![Some("ref #bit8")],
         ),
         "@lilac_abort" => (vec![], vec![]),
@@ -691,7 +691,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
 /// Fixed layout of `#format_args`: a count plus sixteen named pieces. LIR has
 /// no array type, so the fixed table is spelled out as sixteen fields.
 static FORMAT_ARGS_LAYOUT: [(&str, &str); 17] = [
-    ("count", "#bitNative"),
+    ("count", "#bit_native"),
     ("p0", "#byte_buffer"),
     ("p1", "#byte_buffer"),
     ("p2", "#byte_buffer"),
@@ -715,18 +715,18 @@ static FORMAT_ARGS_LAYOUT: [(&str, &str); 17] = [
 #[must_use]
 pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)]> {
     match ty {
-        "#byte_buffer" => Some(&[("len", "#bitNative"), ("data", "ref #bit8")]),
+        "#byte_buffer" => Some(&[("len", "#bit_native"), ("data", "ref #bit8")]),
         "#format_args" => Some(&FORMAT_ARGS_LAYOUT),
         _ => None,
     }
 }
 
-/// Whether `triple`'s architecture is 64-bit (fixes `@bitNative`'s width).
+/// Whether `triple`'s architecture is 64-bit (fixes `@bit_native`'s width).
 ///
 /// The rule is the architecture before the first `-`, treated as 64-bit iff it
 /// contains `"64"`. This is the single source of truth for both the driver,
 /// which bakes the `format_args` piece stride (`#byte_buffer`'s size) into the
-/// injected runtime, and the LLVM backend, which picks `@bitNative`'s LLVM
+/// injected runtime, and the LLVM backend, which picks `@bit_native`'s LLVM
 /// width. They **must** agree: if the driver baked one width while codegen laid
 /// out the other, `format_args_push`/`piece` would index the piece table by the
 /// wrong stride and corrupt memory silently instead of failing to compile.
@@ -815,7 +815,7 @@ impl Verifier<'_> {
                 | "#bit16"
                 | "#bit32"
                 | "#bit64"
-                | "#bitNative"
+                | "#bit_native"
                 | "#byte_buffer"
                 | "#format_args"
                 | "#str"
@@ -1332,7 +1332,7 @@ impl Verifier<'_> {
         regs: &HashMap<&str, RegDef>,
         span: Span,
     ) {
-        if !matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bitNative") {
+        if !matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native") {
             self.error(
                 format!(
                     "`{}` needs a bit-container type, found `{ty}`",
@@ -1989,7 +1989,7 @@ mod tests {
     #[test]
     fn ptr_add_and_abort_builtin_signatures() {
         let ptr_add = builtin_sig("@ptr_add").expect("@ptr_add is a builtin");
-        assert_eq!(ptr_add.ins, vec![Some("ref #bit8"), Some("#bitNative")]);
+        assert_eq!(ptr_add.ins, vec![Some("ref #bit8"), Some("#bit_native")]);
         assert_eq!(ptr_add.outs, vec![Some("ref #bit8")]);
 
         let abort = builtin_sig("@lilac_abort").expect("@lilac_abort is a builtin");
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn builtin_layout_has_expected_fields() {
         let byte_buffer = builtin_layout("#byte_buffer").expect("#byte_buffer has a layout");
-        assert_eq!(byte_buffer[0], ("len", "#bitNative"));
+        assert_eq!(byte_buffer[0], ("len", "#bit_native"));
         let format_args = builtin_layout("#format_args").expect("#format_args has a layout");
         assert_eq!(format_args.len(), 17);
         assert_eq!(format_args[1], ("p0", "#byte_buffer"));

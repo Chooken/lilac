@@ -37,7 +37,7 @@ function @addOne
     in #bit32 %value
     out #bit32 %result
 {
-    // result = @iadd(value, 0x1)
+    // result = @i_add(value, 0x1)
     copy #bit32, %value, &1
     copy #bit32, 0x1, &2
     i.add &1, &2, &3
@@ -48,7 +48,7 @@ function @addTwo
     in #bit32 %value
     out #bit32 %result
 {
-    // result = @iadd(value, 0x2)
+    // result = @i_add(value, 0x2)
     copy #bit32, %value, &1
     copy #bit32, 0x2, &2
     i.add &1, &2, &3

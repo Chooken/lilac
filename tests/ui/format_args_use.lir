@@ -15,10 +15,10 @@ function @main
     alloca ref #format_args %tmp.5 : zeroed
     alloca #byte_buffer %tmp.6 : zeroed
     alloca #format_args %msg : zeroed
-    alloca #bitNative %n : zeroed
-    alloca #bitNative %tmp.7 : zeroed
+    alloca #bit_native %n : zeroed
+    alloca #bit_native %tmp.7 : zeroed
     alloca #byte_buffer %first : zeroed
-    alloca #bitNative %tmp.8 : zeroed
+    alloca #bit_native %tmp.8 : zeroed
     alloca #byte_buffer %tmp.9 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %part
@@ -40,9 +40,9 @@ function @main
     call @.lilac.format_args_push (in %tmp.5, %tmp.6) (out)
     copy %__f -> %msg
     call @.lilac.format_args_count (in %msg) (out %tmp.7)
-    &11: #bitNative = copy %tmp.7
+    &11: #bit_native = copy %tmp.7
     copy &11 -> %n
-    &12: #bitNative = const 0x0
+    &12: #bit_native = const 0x0
     copy &12 -> %tmp.8
     call @.lilac.format_args_piece (in %msg, %tmp.8) (out %tmp.9)
     &13: #byte_buffer = copy %tmp.9
@@ -62,26 +62,26 @@ function @.lilac.format_args_push
   in #byte_buffer %piece
 {
   $entry:
-    &c: #bitNative = field %table .count  // idx 0
-    &cap: #bitNative = const 0x10
-    &ok: #bitNative = i.cmp.lt.u &c, &cap
+    &c: #bit_native = field %table .count  // idx 0
+    &cap: #bit_native = const 0x10
+    &ok: #bit_native = i.cmp.lt.u &c, &cap
     branch.if &ok, $append, $done
   $append:
-    &c: #bitNative = field %table .count  // idx 0
+    &c: #bit_native = field %table .count  // idx 0
     &p0: ref #byte_buffer = field.addr %table .p0  // idx 1
     alloca ref #bit8 %base : zeroed
     copy &p0 -> %base
-    &stride: #bitNative = const 0x10
-    &off: #bitNative = i.mul &c, &stride
-    alloca #bitNative %offp : zeroed
+    &stride: #bit_native = const 0x10
+    &off: #bit_native = i.mul &c, &stride
+    alloca #bit_native %offp : zeroed
     copy &off -> %offp
     alloca ref #bit8 %slot : zeroed
     call @ptr_add (in %base, %offp) (out %slot)
     alloca ref #byte_buffer %s : zeroed
     copy %slot -> %s
     copy %piece -> ref %s
-    &one: #bitNative = const 0x1
-    &n: #bitNative = i.add &c, &one
+    &one: #bit_native = const 0x1
+    &n: #bit_native = i.add &c, &one
     copy &n -> %table.count  // idx 0
     branch $done
   $done:
@@ -89,34 +89,34 @@ function @.lilac.format_args_push
 }
 function @.lilac.format_args_count
   in #format_args %table
-  out #bitNative %out
+  out #bit_native %out
 {
   $entry:
-    &r: #bitNative = field %table .count  // idx 0
+    &r: #bit_native = field %table .count  // idx 0
     copy &r -> %out
     return
 }
 function @.lilac.format_args_piece
   in #format_args %table
-  in #bitNative %index
+  in #bit_native %index
   out #byte_buffer %out
 {
   $entry:
-    &c: #bitNative = field %table .count  // idx 0
-    &idx: #bitNative = copy %index
-    &ok: #bitNative = i.cmp.lt.u &idx, &c
+    &c: #bit_native = field %table .count  // idx 0
+    &idx: #bit_native = copy %index
+    &ok: #bit_native = i.cmp.lt.u &idx, &c
     branch.if &ok, $load, $trap
   $trap:
     call @lilac_abort (in) (out)
     unreachable
   $load:
-    &idx: #bitNative = copy %index
+    &idx: #bit_native = copy %index
     &p0: ref #byte_buffer = field.addr %table .p0  // idx 1
     alloca ref #bit8 %base : zeroed
     copy &p0 -> %base
-    &stride: #bitNative = const 0x10
-    &off: #bitNative = i.mul &idx, &stride
-    alloca #bitNative %offp : zeroed
+    &stride: #bit_native = const 0x10
+    &off: #bit_native = i.mul &idx, &stride
+    alloca #bit_native %offp : zeroed
     copy &off -> %offp
     alloca ref #bit8 %slot : zeroed
     call @ptr_add (in %base, %offp) (out %slot)

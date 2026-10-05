@@ -132,7 +132,7 @@ closed in v1.
 
 LLVM mapping sketch:
 
-* `@bitN -> iN`, `@bitNative -> i32/i64 by target`, `ref T -> ptr`, `unknown -> ptr`,
+* `@bitN -> iN`, `@bit_native -> i32/i64 by target`, `ref T -> ptr`, `unknown -> ptr`,
   `nothing -> void`.
 * Every `alloca` + `llvm.memset 0` (spec zero-init).
 * Lilac `in/out` params -> LLVM params + `sret`/out-pointers.
@@ -314,7 +314,7 @@ not the current silent/`Missing Field`-at-definition behavior, and
 ### 5.2 Issues found in `IR_SPEC.md` + `tests/*.lilac-ir` (measured against MIR/LLVM)
 
 1. **No version/target header.** MIR has crate disambiguators; LLVM has
-   `target triple/datalayout`. Lilac IR has neither -> backend drift for `@bitNative`.
+   `target triple/datalayout`. Lilac IR has neither -> backend drift for `@bit_native`.
 2. **No block/terminator discipline.** `{$LABEL: …}` is optional, `branch.if` else
    optional, fallthrough of `match` (spec: silent fallthrough) has no explicit
    `unreachable`/`fallthrough` terminator. MIR requires every `BasicBlock` ends in
@@ -351,7 +351,7 @@ Header (new, 2 lines, keeps diffs small):
 
 ```lilac-ir
 lilac_ir = "0.2"
-target = "x86_64-unknown-none"   // fixes @bitNative width
+target = "x86_64-unknown-none"   // fixes @bit_native width
 ```
 
 Functions/blocks (terminator-required, typed regs, explicit labels):
@@ -393,7 +393,7 @@ Rules:
 
 Verifier (`lilac-ir::verify`, run before any backend — like `mir::verify`):
 
-* header present + version supported; `@bitNative` resolved by target.
+* header present + version supported; `@bit_native` resolved by target.
 * all `%/%&/@/#/$/!` names resolve; regs defined once before use in block.
 * every block ends in exactly one terminator; all branch targets exist.
 * `call` arity/types match; `field` index < layout len; arithmetic width matches
@@ -533,7 +533,7 @@ String: object {
 * Element access desugars to methods like operators do (`+` -> `@add`):
   `s.at(i)` and `s.slice(lo, hi) -> String` (new fat-pointer view, no copy).
 * Raw access stays `ref + offset` via three new byte intrinsics (see §9.4).
-  Pointer arithmetic itself remains `ref -> @bitNative + @iadd` per `SPEC.md` §5.
+  Pointer arithmetic itself remains `ref -> @bit_native + @i_add` per `SPEC.md` §5.
 * Fixed arrays later: `Array[T]` generic object + `Array(T, len)` constructor via
   `@init`. No `T[N]` const-generics in v1.
 
@@ -731,7 +731,7 @@ Two execution paths, kept separate on purpose:
 v1 reservation (so we don't paint ourselves shut):
 
 * `Session { host: Target, target: Target, optimize: Opt, cache_dir: Path }`
-  from day one — never assume host == target (matters for `@bitNative` + folding).
+  from day one — never assume host == target (matters for `@bit_native` + folding).
 * `lilac-ir` serializable (serde) so future cache keys can hash it.
 * `Backend` trait gets `fn build_exe_and_run(&self, module: &LirModule) -> Result<i32>`
   as a *default-unimplemented* method; LLVM implements it later via JIT/AOT+spawn.

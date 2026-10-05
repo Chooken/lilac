@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn hook_overloads_with_distinct_sigs_pass() {
         let (module, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @iadd(lhs, rhs)\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add(lhs, rhs)\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(module.hooks.get("@add").map(Vec::len), Some(2));
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn identical_hook_sigs_emit_e020() {
         let (_, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @iadd(lhs, rhs)\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n",
         );
         assert_eq!(e020_count(&diags), 1);
     }

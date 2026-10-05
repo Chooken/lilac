@@ -5,10 +5,10 @@
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
 > intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than`,
-> `@as_int`, `@size_of`, `@compile_error`, `@byte_buffer`, `@extend_zero`).
-> `@bitNative` keeps its legacy spelling. Legacy camelCase spellings from earlier
-> drafts and legacy `tests/` files are renamed on port; the old Zig pass is not
-> authoritative for spelling.
+> `@as_int`, `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
+> `@extend_zero`). Legacy camelCase spellings from earlier drafts and legacy
+> `tests/` files are renamed on port; the old Zig pass is not authoritative for
+> spelling.
 
 Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions such as strings, dynamic arrays, floating-point types, optionals, and mutability guards are deliberately excluded from the compiler and implemented within the standard library.
 
@@ -18,9 +18,9 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 ### Primitive Bit Containers
 
-* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@iadd` vs. `@fadd`).
+* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@i_add` vs. `@f_add`).
 
-* **`@bitNative`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
+* **`@bit_native`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
 
 * **`@byte_buffer`**: A builtin view over bytes: length plus pointer to the first
   byte. It is the type of number tokens (`5`), string literal payloads (`"hi"`),
@@ -91,7 +91,7 @@ values of length greater than one.
 
 * Numbers: `0x…` hex, `0b…` binary, otherwise decimal int or float (`10.5`).
   `_` separators allowed between digits (`0xFF_FF`). No sign is part of the
-  literal: unary `-` is always an operator (`@negate` / `@isub`-family folding).
+  literal: unary `-` is always an operator (`@negate` / `@i_sub`-family folding).
 * Strings: `"…"` with escapes `\"`, `\\`, `\n`, and `\xHH` only. Anything else
   after `\` is a lex error.
 * Chars: `'…'` holds exactly one scalar. Empty or multi-scalar char literals are
@@ -158,9 +158,8 @@ therefore the caller's explicit choice of sink, never hidden sugar behavior.
 
 Constant `if` conditions are folded before code generation: only the live branch
 is kept. `@compile_error(msg)` fires only if it is still live after folding, so
-a `@compile_error` inside a dead branch is silently dropped. The legacy
-camelCase spelling `@compilerError` is an alias for `@compile_error` and folds
-identically.
+a `@compile_error` inside a dead branch is silently dropped. The former
+camelCase alias `@compilerError` is no longer accepted.
 
 Folding runs after `=>` (inline) functions are substituted, so a conversion
 helper written as `=>` that wraps `@as_int` / `@as_float` folds exactly like a
@@ -177,16 +176,16 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 
 | Intrinsic | Signature | Description |
 | --- | --- | --- |
-| **`@iadd`** | `(lhs, rhs)` | Integer addition using standard two's-complement logic. |
-| **`@isub`** / **`@fsub`** | `(lhs, rhs)` | Integer subtraction. |
-| **`@imul`** / **`@fmul`** | `(lhs, rhs)` | Integer multiplication. |
-| **`@idiv`** / **`@fdiv`** | `(lhs, rhs)` | Integer division. |
-| **`@imod`** / **`@fmod`** | `(lhs, rhs)` | Integer modulo. |
-| **`@fadd`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation. |
-| **`@fsub`** | `(lhs, rhs)` | Floating-point subtraction using IEEE-754 bit interpretation. |
-| **`@fmul`** | `(lhs, rhs)` | Floating-point multiplication using IEEE-754 bit interpretation. |
-| **`@fdiv`** | `(lhs, rhs)` | Floating-point division using IEEE-754 bit interpretation. |
-| **`@fmod`** | `(lhs, rhs)` | Floating-point modulo using IEEE-754 bit interpretation. |
+| **`@i_add`** | `(lhs, rhs)` | Integer addition using standard two's-complement logic. |
+| **`@i_sub`** / **`@f_sub`** | `(lhs, rhs)` | Integer subtraction. |
+| **`@i_mul`** / **`@f_mul`** | `(lhs, rhs)` | Integer multiplication. |
+| **`@i_div`** / **`@f_div`** | `(lhs, rhs)` | Integer division. |
+| **`@i_mod`** / **`@f_mod`** | `(lhs, rhs)` | Integer modulo. |
+| **`@f_add`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation. |
+| **`@f_sub`** | `(lhs, rhs)` | Floating-point subtraction using IEEE-754 bit interpretation. |
+| **`@f_mul`** | `(lhs, rhs)` | Floating-point multiplication using IEEE-754 bit interpretation. |
+| **`@f_div`** | `(lhs, rhs)` | Floating-point division using IEEE-754 bit interpretation. |
+| **`@f_mod`** | `(lhs, rhs)` | Floating-point modulo using IEEE-754 bit interpretation. |
 | **`@i_less_than`** | `(lhs, rhs)` | Integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
 | **`@i_greater_than`** | `(lhs, rhs)` | Integer greater-than (two's-complement). Returns `@bit8`. |
 | **`@f_less_than`** | `(lhs, rhs)` | Float less-than (IEEE-754). Returns `@bit8`. |
@@ -195,18 +194,18 @@ Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation,
 | **`@f_negate`** | `(value)` | Float negation (IEEE-754 sign flip). |
 | **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Fold-required marker: consumed at compile time, never a runtime call; out-of-range or non-constant input is `E060`. |
 | **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Fold-required marker: consumed at compile time, never a runtime call; invalid or non-constant input is `E060`. |
-| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bitNative`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
+| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bit_native`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
-| **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bitNative` byte offset. Returns `@bit8`. |
-| **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bitNative` byte offset. |
-| **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bitNative`) from `ref @bit8` to `ref @bit8`. |
+| **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
+| **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
+| **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bit_native`) from `ref @bit8` to `ref @bit8`. |
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
-| **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bitNative`. |
-| **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bitNative` length. Same lifetime caveat as any `ref`. |
+| **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
+| **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bit_native` length. Same lifetime caveat as any `ref`. |
 | **`@format_args_new`** | `()` | Empty `@format_args` table (zero pieces). |
 | **`@format_args_push`** | `(args, piece)` | Appends a `@byte_buffer` piece to `ref @format_args`. Panics past 16 pieces. |
-| **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bitNative`. |
+| **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
 
@@ -215,8 +214,8 @@ markers**, not runtime builtin calls: the front-end emits a pre-fold node the
 constant folder must consume (or diagnose). A survivor reaching IR verification
 is an internal error, exactly like a live `@compile_error`. Builtin calls that
 do reach IR are checked against the builtin signature table; `@load_u8` takes
-two in-args (`ref #bit8`, `#bitNative`) and yields `#bit8`, while `@store_u8`
-takes three in-args (`ref #bit8`, `#bitNative`, `#bit8`) and yields nothing.
+two in-args (`ref #bit8`, `#bit_native`) and yields `#bit8`, while `@store_u8`
+takes three in-args (`ref #bit8`, `#bit_native`, `#bit8`) and yields nothing.
 
 ## 4. Functions & Control Flow
 
@@ -356,7 +355,7 @@ References **auto-dereference by default**. Operators act on the underlying valu
 
 * `ptr + 1` invokes `@add` on the underlying `@bit32`, incrementing the integer value by `1`.
 
-* It does **not** perform pointer arithmetic. To manipulate raw memory addresses, a reference must be explicitly converted to `@bitNative`.
+* It does **not** perform pointer arithmetic. To manipulate raw memory addresses, a reference must be explicitly converted to `@bit_native`.
 
 ## 6. Composite Types & Namespaces
 
@@ -466,7 +465,7 @@ Inlined functions may omit the return name but are restricted to a single output
 
 ```lilac
 inlined_const: @bit64 => 0x0
-inlined_func: function (val: @bit8) @bit8 => @iadd(val, 0x1)
+inlined_func: function (val: @bit8) @bit8 => @i_add(val, 0x1)
 ```
 
 ## 8. Operators, Conversions & RAII Hooks
@@ -493,7 +492,7 @@ would apply. The standard library provides these bindings once per bit width;
 without them only the explicit intrinsic form works:
 
 ```lilac
-@add: function (lhs: @bit8, rhs: @bit8) @bit8 => @iadd(lhs, rhs)
+@add: function (lhs: @bit8, rhs: @bit8) @bit8 => @i_add(lhs, rhs)
 @less_than: function (lhs: @bit32, rhs: @bit32) result: @bit8 {
     result = @i_less_than(lhs, rhs)
 }
@@ -612,7 +611,7 @@ Buffer: object {
 foreign symbol at link time.
 
 ```lilac
-malloc: extern function (size: @bitNative) ptr: ref @bit8
+malloc: extern function (size: @bit_native) ptr: ref @bit8
 ```
 
 Rules: C ABI; the symbol is unmangled and equals the declared name; calls

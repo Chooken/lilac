@@ -3581,7 +3581,7 @@ impl Checker<'_> {
                 let (_, hir) = self.check_expr(fctx, &args[0], None);
                 (
                     vec![TypeRef {
-                        id: self.builtin_ty("@bitNative"),
+                        id: self.builtin_ty("@bit_native"),
                         is_ref: false,
                     }],
                     vec![hir],
@@ -3724,13 +3724,13 @@ impl Checker<'_> {
             Intrinsic::LoadU8 => {
                 self.expect_arity(span, "@load_u8", args, 2)?;
                 let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bit_native")?;
                 Ok((vec![value(self.builtin_ty("@bit8"))], vec![h0, h1]))
             }
             Intrinsic::StoreU8 => {
                 self.expect_arity(span, "@store_u8", args, 3)?;
                 let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bit_native")?;
                 let h2 = self.check_fixed_arg(fctx, &args[2], "@bit8")?;
                 Ok((Vec::new(), vec![h0, h1, h2]))
             }
@@ -3738,7 +3738,7 @@ impl Checker<'_> {
                 self.expect_arity(span, "@memcpy", args, 3)?;
                 let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
                 let h1 = self.check_ref_bit8_arg(fctx, &args[1], span)?;
-                let h2 = self.check_fixed_arg(fctx, &args[2], "@bitNative")?;
+                let h2 = self.check_fixed_arg(fctx, &args[2], "@bit_native")?;
                 Ok((Vec::new(), vec![h0, h1, h2]))
             }
         }
@@ -3767,12 +3767,12 @@ impl Checker<'_> {
             Intrinsic::ByteBufferLen => {
                 self.expect_arity(span, "@byte_buffer_len", args, 1)?;
                 let h0 = self.check_fixed_arg(fctx, &args[0], "@byte_buffer")?;
-                Ok((vec![value(self.builtin_ty("@bitNative"))], vec![h0]))
+                Ok((vec![value(self.builtin_ty("@bit_native"))], vec![h0]))
             }
             Intrinsic::ByteBufferFrom => {
                 self.expect_arity(span, "@byte_buffer_from", args, 2)?;
                 let h0 = self.check_ref_bit8_arg(fctx, &args[0], span)?;
-                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bit_native")?;
                 Ok((vec![value(self.builtin_ty("@byte_buffer"))], vec![h0, h1]))
             }
             Intrinsic::FormatArgsNew => {
@@ -3803,12 +3803,12 @@ impl Checker<'_> {
             Intrinsic::FormatArgsCount => {
                 self.expect_arity(span, "@format_args_count", args, 1)?;
                 let h0 = self.check_fixed_arg(fctx, &args[0], "@format_args")?;
-                Ok((vec![value(self.builtin_ty("@bitNative"))], vec![h0]))
+                Ok((vec![value(self.builtin_ty("@bit_native"))], vec![h0]))
             }
             _ => {
                 self.expect_arity(span, "@format_args_piece", args, 2)?;
                 let h0 = self.check_fixed_arg(fctx, &args[0], "@format_args")?;
-                let h1 = self.check_fixed_arg(fctx, &args[1], "@bitNative")?;
+                let h1 = self.check_fixed_arg(fctx, &args[1], "@bit_native")?;
                 Ok((vec![value(self.builtin_ty("@byte_buffer"))], vec![h0, h1]))
             }
         }
@@ -5278,7 +5278,7 @@ mod tests {
 
     #[test]
     fn decimal_in_arith_is_e010() {
-        let diags = check_src("main: function () nothing {\n    x: @bit32 = @iadd(5, 6)\n}\n");
+        let diags = check_src("main: function () nothing {\n    x: @bit32 = @i_add(5, 6)\n}\n");
         assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
@@ -5369,7 +5369,7 @@ mod tests {
     #[test]
     fn func_value_call_checks() {
         let diags = check_src(
-            "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @iadd(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @iadd(value, 0x2)\n}\n",
+            "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @i_add(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @i_add(value, 0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -5387,7 +5387,7 @@ mod tests {
     #[test]
     fn static_call_checks() {
         let diags = check_src(
-            "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @iadd(instance.member, num)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
+            "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @i_add(instance.member, num)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -5512,7 +5512,7 @@ mod tests {
 
     #[test]
     fn inline_substituted_nonrecursive() {
-        let src = "addOne: function (value: @bit32) @bit32 => @iadd(value, 0x1)\nmain: function () nothing {\n    variable: @bit32 = addOne(0x1)\n}\n";
+        let src = "addOne: function (value: @bit32) @bit32 => @i_add(value, 0x1)\nmain: function () nothing {\n    variable: @bit32 = addOne(0x1)\n}\n";
         let (hir, diags) = check_hir_src(src);
         assert!(!diags.has_errors(), "{diags:?}");
         let main = hir
@@ -5529,7 +5529,7 @@ mod tests {
         let lilac_hir::HirCallee::Intrinsic { name } = callee else {
             panic!("expected intrinsic call, got {callee:?}");
         };
-        assert_eq!(name, "@iadd");
+        assert_eq!(name, "@i_add");
         assert_eq!(args.len(), 2);
     }
 

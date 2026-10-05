@@ -42,7 +42,7 @@ pub enum Intrinsic {
     AsInt,
     /// Parses `@byte_buffer` digits as a float (folds in M3).
     AsFloat,
-    /// Size in bytes as `@bitNative`.
+    /// Size in bytes as `@bit_native`.
     SizeOf,
     /// Narrows; target width comes from the expected type.
     Truncate,
@@ -75,8 +75,8 @@ pub enum Intrinsic {
 /// Looks up a compiler-known intrinsic by `@`-name.
 pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
     match name {
-        "@iadd" | "@isub" | "@imul" | "@idiv" | "@imod" | "@fadd" | "@fsub" | "@fmul" | "@fdiv"
-        | "@fmod" => Some(Intrinsic::Arith),
+        "@i_add" | "@i_sub" | "@i_mul" | "@i_div" | "@i_mod" | "@f_add" | "@f_sub" | "@f_mul"
+        | "@f_div" | "@f_mod" => Some(Intrinsic::Arith),
         "@i_less_than" | "@i_greater_than" | "@f_less_than" | "@f_greater_than" => {
             Some(Intrinsic::Cmp)
         }
@@ -96,8 +96,7 @@ pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
         "@format_args_push" => Some(Intrinsic::FormatArgsPush),
         "@format_args_count" => Some(Intrinsic::FormatArgsCount),
         "@format_args_piece" => Some(Intrinsic::FormatArgsPiece),
-        "@compile_error" | "@compilerError" => Some(Intrinsic::CompileError),
-        // Legacy camelCase spelling of `@compile_error` (see FAILS_compiler_error).
+        "@compile_error" => Some(Intrinsic::CompileError),
         _ => None,
     }
 }
@@ -838,7 +837,8 @@ mod tests {
 
     #[test]
     fn intrinsics_resolve_by_name() {
-        assert!(matches!(lookup_intrinsic("@iadd"), Some(Intrinsic::Arith)));
+        assert!(matches!(lookup_intrinsic("@i_add"), Some(Intrinsic::Arith)));
+        assert!(matches!(lookup_intrinsic("@f_add"), Some(Intrinsic::Arith)));
         assert!(matches!(
             lookup_intrinsic("@i_less_than"),
             Some(Intrinsic::Cmp)
@@ -847,11 +847,8 @@ mod tests {
     }
 
     #[test]
-    fn compiler_error_alias_maps() {
-        assert_eq!(
-            lookup_intrinsic("@compilerError"),
-            Some(Intrinsic::CompileError)
-        );
+    fn compiler_error_alias_removed() {
+        assert_eq!(lookup_intrinsic("@compilerError"), None);
         assert_eq!(
             lookup_intrinsic("@compile_error"),
             Some(Intrinsic::CompileError)

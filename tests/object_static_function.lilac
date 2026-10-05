@@ -2,7 +2,7 @@ Object: object {
     member: @bit8
 
     add: function (num: @bit32) result: @bit32 {
-        result = @iadd(instance.member, num)
+        result = @i_add(instance.member, num)
     }
 }
 

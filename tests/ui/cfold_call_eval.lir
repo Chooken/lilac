@@ -4,12 +4,12 @@ target = "x86_64-unknown-none"
 function @main
 {
   $entry:
-    alloca #bitNative %total : zeroed
-    alloca #bitNative %tmp.1 : zeroed
+    alloca #bit_native %total : zeroed
+    alloca #bit_native %tmp.1 : zeroed
     alloca #byte_buffer %tmp.2 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %tmp.2
-    &cf.1: #bitNative = const 0x83
+    &cf.1: #bit_native = const 0x83
     copy &cf.1 -> %tmp.1
     copy %tmp.1 -> %total
     return

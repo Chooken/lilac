@@ -1,5 +1,5 @@
 @mul: function (lhs: @bit32, rhs: @bit32) result: @bit32 {
-    result = @imul(lhs, rhs)
+    result = @i_mul(lhs, rhs)
 }
 
 main: function () nothing {

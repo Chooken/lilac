@@ -1,5 +1,5 @@
 @add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {
-    result = @iadd(lhs, rhs)
+    result = @i_add(lhs, rhs)
 }
 
 main: function () nothing {

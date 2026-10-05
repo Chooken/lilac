@@ -14,7 +14,7 @@ use lilac_lex::Lexer;
 use lilac_parse::Parser;
 use lilac_span::SourceMap;
 
-/// Compile target (fixes `@bitNative` width; host-vs-target split matters from M4).
+/// Compile target (fixes `@bit_native` width; host-vs-target split matters from M4).
 #[derive(Clone, Debug)]
 pub struct Target {
     /// Target triple, e.g. `x86_64-unknown-none`.
@@ -40,7 +40,7 @@ impl Target {
         Self::from_arch_os(std::env::consts::ARCH, std::env::consts::OS)
     }
 
-    /// `@bitNative` width in bits.
+    /// `@bit_native` width in bits.
     ///
     /// Delegates to [`lilac_ir::is_64_bit_triple`] so the width baked into the
     /// injected `format_args` piece stride always matches the backend's
@@ -129,7 +129,7 @@ pub struct Session {
     pub diags: Diags,
     /// Host (build scripts run here).
     pub host: Target,
-    /// Target (code runs here; fixes `@bitNative`).
+    /// Target (code runs here; fixes `@bit_native`).
     pub target: Target,
     /// Flags.
     pub opts: Opts,
@@ -460,7 +460,7 @@ mod tests {
             .flat_map(|block| &block.insts)
             .find_map(|inst| match inst {
                 lilac_ir::LirInst::Const { dst, lit, ty, .. }
-                    if dst == "stride" && ty == "#bitNative" =>
+                    if dst == "stride" && ty == "#bit_native" =>
                 {
                     Some(lit.clone())
                 }
@@ -486,7 +486,7 @@ mod tests {
             let module = session
                 .compile_lir(
                     "fs.lilac",
-                    "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bitNative = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
+                    "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
                 )
                 .unwrap_or_else(|_| panic!("{triple}: {}", session.render_diagnostics()));
             for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {

@@ -165,7 +165,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "#bit16" => self.context.i16_type().into(),
             "#bit32" => self.context.i32_type().into(),
             "#bit64" => self.context.i64_type().into(),
-            "#bitNative" => self.native.into(),
+            "#bit_native" => self.native.into(),
             "#ptr" => self.ptr_type().into(),
             "#str" | "#numlit" => bug!(
                 Span::dummy(),

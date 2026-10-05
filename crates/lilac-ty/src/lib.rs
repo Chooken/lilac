@@ -33,7 +33,7 @@ pub enum TypeKind {
     Bit32,
     /// `@bit64` raw container.
     Bit64,
-    /// `@bitNative` word-sized container.
+    /// `@bit_native` word-sized container.
     BitNative,
     /// `@byte_buffer` borrowed byte view.
     ByteBuffer,
@@ -113,7 +113,7 @@ impl Types {
             "@bit16" => 1,
             "@bit32" => 2,
             "@bit64" => 3,
-            "@bitNative" => 4,
+            "@bit_native" => 4,
             "@byte_buffer" => 5,
             "@format_args" => 6,
             "unknown" => 7,
@@ -219,7 +219,7 @@ impl Types {
             TypeKind::Bit16 => ".bit16".to_owned(),
             TypeKind::Bit32 => ".bit32".to_owned(),
             TypeKind::Bit64 => ".bit64".to_owned(),
-            TypeKind::BitNative => ".bitNative".to_owned(),
+            TypeKind::BitNative => ".bit_native".to_owned(),
             TypeKind::ByteBuffer => ".byte_buffer".to_owned(),
             TypeKind::FormatArgs => ".format_args".to_owned(),
             TypeKind::Unknown => ".unknown".to_owned(),
@@ -302,7 +302,7 @@ impl Types {
             TypeKind::Bit16 => "@bit16".to_owned(),
             TypeKind::Bit32 => "@bit32".to_owned(),
             TypeKind::Bit64 => "@bit64".to_owned(),
-            TypeKind::BitNative => "@bitNative".to_owned(),
+            TypeKind::BitNative => "@bit_native".to_owned(),
             TypeKind::ByteBuffer => "@byte_buffer".to_owned(),
             TypeKind::FormatArgs => "@format_args".to_owned(),
             TypeKind::Unknown => "unknown".to_owned(),
@@ -459,6 +459,19 @@ mod tests {
         // `{base}.{argc}` then `.` + `mangle_ref(arg)`; a non-ref instance arg
         // carries no leading dot of its own, so the separator is a single dot.
         assert_eq!(types.mangle(nested), "GenObj.1.GenObj.1..bit32");
+    }
+
+    #[test]
+    fn instance_over_native_mangles_snake() {
+        let mut types = Types::new();
+        types.set_object_name(DefId(1), "GenObj");
+        let native = types.builtin("@bit_native").expect("has @bit_native");
+        let arg = TypeRef {
+            id: native,
+            is_ref: false,
+        };
+        let outer = types.intern_instance(DefId(1), vec![arg]);
+        assert_eq!(types.mangle(outer), "GenObj.1..bit_native");
     }
 
     #[test]

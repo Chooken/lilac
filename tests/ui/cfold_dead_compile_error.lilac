@@ -4,6 +4,6 @@ main: function () nothing {
     }
     if 0x1 {
     } else {
-        @compilerError("dead else")
+        @compile_error("dead else")
     }
 }

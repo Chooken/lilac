@@ -1,6 +1,6 @@
 main: function () nothing {
     part: @byte_buffer = "x"
     msg: @format_args = $"a{part}b"
-    n: @bitNative = @format_args_count(msg)
+    n: @bit_native = @format_args_count(msg)
     first: @byte_buffer = @format_args_piece(msg, 0x0)
 }

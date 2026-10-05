@@ -12,9 +12,9 @@ main: function () nothing {
 }
 
 addOne: function (value: @bit32) result: @bit32 {
-    result = @iadd(value, 0x1)
+    result = @i_add(value, 0x1)
 }
 
 addTwo: function (value: @bit32) result: @bit32 {
-    result = @iadd(value, 0x2)
+    result = @i_add(value, 0x2)
 }

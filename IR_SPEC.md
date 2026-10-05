@@ -51,8 +51,8 @@ Builtin aggregates usable in `#` positions are `#byte_buffer` and
 layouts are fixed by the IR rather than declared in a `type` section:
 
 ```lilac-ir
-#byte_buffer { len: #bitNative, data: ref #bit8 }
-#format_args { count: #bitNative, p0: #byte_buffer, …, p15: #byte_buffer }
+#byte_buffer { len: #bit_native, data: ref #bit8 }
+#format_args { count: #bit_native, p0: #byte_buffer, …, p15: #byte_buffer }
 ```
 
 `#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
@@ -74,7 +74,7 @@ function @func_name
       return
 }
 ```
-`target` fixes `@bitNative` width. Every block starts with `$label:` and ends
+`target` fixes `@bit_native` width. Every block starts with `$label:` and ends
 with exactly one terminator (`return | branch | branch.if | panic | unreachable`).
 
 Foreign symbols are declared without a body; calls to them verify like
@@ -204,8 +204,8 @@ call &f (in %a) (out %b)
 
 | builtin | in-args | out | LLVM lowering |
 | --- | --- | --- | --- |
-| `@ptr_add` | `ref #bit8`, `#bitNative` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
-| `@memcpy` | `ref #bit8`, `ref #bit8`, `#bitNative` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
+| `@ptr_add` | `ref #bit8`, `#bit_native` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
+| `@memcpy` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
 | `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`) |
 
 The byte-buffer and format-args operations are **not** builtins: they are
@@ -214,15 +214,15 @@ ordinary LIR functions in the `.lilac.` namespace, built once by
 
 | runtime function | in-args | out |
 | --- | --- | --- |
-| `.lilac.byte_buffer_from` | `ref #bit8`, `#bitNative` | `#byte_buffer` |
+| `.lilac.byte_buffer_from` | `ref #bit8`, `#bit_native` | `#byte_buffer` |
 | `.lilac.byte_buffer_ptr` | `#byte_buffer` | `ref #bit8` |
-| `.lilac.byte_buffer_len` | `#byte_buffer` | `#bitNative` |
-| `.lilac.load_u8` | `ref #bit8`, `#bitNative` | `#bit8` |
-| `.lilac.store_u8` | `ref #bit8`, `#bitNative`, `#bit8` | — |
+| `.lilac.byte_buffer_len` | `#byte_buffer` | `#bit_native` |
+| `.lilac.load_u8` | `ref #bit8`, `#bit_native` | `#bit8` |
+| `.lilac.store_u8` | `ref #bit8`, `#bit_native`, `#bit8` | — |
 | `.lilac.format_args_new` | — | `#format_args` |
 | `.lilac.format_args_push` | `ref #format_args`, `#byte_buffer` | — |
-| `.lilac.format_args_count` | `#format_args` | `#bitNative` |
-| `.lilac.format_args_piece` | `#format_args`, `#bitNative` | `#byte_buffer` |
+| `.lilac.format_args_count` | `#format_args` | `#bit_native` |
+| `.lilac.format_args_piece` | `#format_args`, `#bit_native` | `#byte_buffer` |
 
 These functions call back into the `@ptr_add` and `@lilac_abort` leaves. The
 driver's pass order is `fold` → inject the prelude → `prune_unreachable`, so
@@ -342,7 +342,7 @@ Same width rule as integer arithmetic.
   never appear in verified IR — they fold to `const`.
 
 ## Verification (`lilac-ir::verify`, runs before any backend)
-1. Header present with supported `lilac_ir` version; `target` resolves `@bitNative`.
+1. Header present with supported `lilac_ir` version; `target` resolves `@bit_native`.
 2. All `!/@/#/%/$/&` names resolve; `&regs` defined once before use in block.
 3. Every block ends in exactly one terminator; all branch targets exist.
 4. `call` arity and `in/out` types match callee signature.
