@@ -212,6 +212,10 @@ name = "lilac-span"
 version = "0.2.0"
 
 [[package]]
+name = "lilac-target"
+version = "0.2.0"
+
+[[package]]
 name = "lilac-ty"
 version = "0.2.0"
 dependencies = [
