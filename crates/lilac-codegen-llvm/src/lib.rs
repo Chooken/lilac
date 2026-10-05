@@ -470,6 +470,7 @@ mod tests {
         for (op, dst) in [
             (ArithOp::Eq, "eq"),
             (ArithOp::ILt, "lt"),
+            (ArithOp::ILtU, "ltu"),
             (ArithOp::IGt, "gt"),
         ] {
             arith(&mut insts, op, "cr", "cr", dst, "#bit8");
@@ -524,6 +525,7 @@ mod tests {
             "srem i32",
             "icmp eq i32",
             "icmp slt i32",
+            "icmp ult i32",
             "icmp sgt i32",
             "fadd float",
             "fsub float",
@@ -829,6 +831,23 @@ mod tests {
         assert!(text.contains("declare void @llvm.trap()"), "{text}");
         assert!(text.contains("call void @llvm.trap()"), "{text}");
         assert!(text.contains("define void @.lilac.abort()"), "{text}");
+    }
+
+    /// The LIR prelude's `format_args` bounds checks are unsigned: an index
+    /// with the high bit set must trap, not read out of bounds.
+    #[test]
+    fn format_args_bounds_checks_are_unsigned() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs = lilac_ir::runtime::build_runtime(8);
+        let text = emit(&module);
+        for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
+            let body = text
+                .split("\ndefine ")
+                .find(|segment| segment.starts_with(&format!("void @{name}")))
+                .expect("format_args definition");
+            assert!(body.contains("icmp ult i64"), "{name} body:\n{body}");
+            assert!(!body.contains("icmp slt"), "{name} body:\n{body}");
+        }
     }
 
     /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`

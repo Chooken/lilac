@@ -84,7 +84,7 @@ entry:
   %0 = load ptr, ptr %in0, align 8
   %1 = getelementptr inbounds { i64, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr }, { i64, ptr } }, ptr %0, i32 0, i32 0
   %2 = load i64, ptr %1, align 8
-  %3 = icmp slt i64 %2, 16
+  %3 = icmp ult i64 %2, 16
   %4 = zext i1 %3 to i64
   %5 = icmp ne i64 %4, 0
   br i1 %5, label %append, label %done

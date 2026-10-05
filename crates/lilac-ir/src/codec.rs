@@ -160,6 +160,7 @@ fn put_arith(w: &mut impl Write, op: &ArithOp) -> io::Result<()> {
         ArithOp::IGt => 12,
         ArithOp::FLt => 13,
         ArithOp::FGt => 14,
+        ArithOp::ILtU => 15,
     };
     put_u8(w, tag)
 }
@@ -559,6 +560,7 @@ fn get_arith(r: &mut impl Read) -> Result<ArithOp, CodecError> {
         12 => ArithOp::IGt,
         13 => ArithOp::FLt,
         14 => ArithOp::FGt,
+        15 => ArithOp::ILtU,
         _ => return Err(CodecError::Malformed("invalid ArithOp tag")),
     })
 }
@@ -1142,6 +1144,7 @@ mod tests {
             ArithOp::FMod,
             ArithOp::Eq,
             ArithOp::ILt,
+            ArithOp::ILtU,
             ArithOp::IGt,
             ArithOp::FLt,
             ArithOp::FGt,

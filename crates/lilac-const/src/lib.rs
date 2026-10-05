@@ -538,6 +538,10 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
             Some((l, r)) => ConstValue::Bool(l < r),
             None => ConstValue::Unknown,
         },
+        ArithOp::ILtU => match ints {
+            Some((l, r)) => ConstValue::Bool((l & mask) < (r & mask)),
+            None => ConstValue::Unknown,
+        },
         ArithOp::IGt | ArithOp::FGt => match ints {
             Some((l, r)) => ConstValue::Bool(l > r),
             None => ConstValue::Unknown,

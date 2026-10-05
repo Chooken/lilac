@@ -1,4 +1,4 @@
-//! Builds the seven runtime functions as ordinary LIR.
+﻿//! Builds the seven runtime functions as ordinary LIR.
 //!
 //! The functions are not injected here; the driver appends `build_runtime` to
 //! a module between constant folding and dead-code pruning, where DCE keeps
@@ -328,7 +328,7 @@ fn format_args_push(stride: &str) -> LirFunc {
                 vec![
                     field("table", "count", 0, "c", "#bitNative"),
                     constant("cap", "0x10", "#bitNative"),
-                    arith(ArithOp::ILt, "c", "cap", "ok", "#bitNative"),
+                    arith(ArithOp::ILtU, "c", "cap", "ok", "#bitNative"),
                 ],
                 branch_if("ok", "append", "done"),
             ),
@@ -391,7 +391,7 @@ fn format_args_piece(stride: &str) -> LirFunc {
                 vec![
                     field("table", "count", 0, "c", "#bitNative"),
                     copy_reg(LirOperand::Place("index".to_owned()), "idx", "#bitNative"),
-                    arith(ArithOp::ILt, "idx", "c", "ok", "#bitNative"),
+                    arith(ArithOp::ILtU, "idx", "c", "ok", "#bitNative"),
                 ],
                 branch_if("ok", "load", "trap"),
             ),
@@ -427,7 +427,7 @@ fn format_args_piece(stride: &str) -> LirFunc {
 #[cfg(test)]
 mod tests {
     use super::build_runtime;
-    use crate::{verify, LirFunc, LirInst, LirModule};
+    use crate::{verify, ArithOp, LirFunc, LirInst, LirModule};
 
     fn e070_count(diags: &lilac_error::Diags) -> usize {
         diags
@@ -459,6 +459,36 @@ mod tests {
         // The two byte-access bodies the backend no longer defines.
         assert!(names.contains(&".lilac.load_u8"));
         assert!(names.contains(&".lilac.store_u8"));
+    }
+
+    /// Both `format_args` bounds checks use unsigned less-than, so a negative
+    /// (high-bit-set) index cannot slip past `index < count`.
+    #[test]
+    fn runtime_bounds_checks_are_unsigned() {
+        let funcs = build_runtime(8);
+        for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
+            let func = funcs
+                .iter()
+                .find(|f| f.name == name)
+                .expect("runtime function");
+            let ops: Vec<&ArithOp> = func
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|inst| match inst {
+                    LirInst::Arith { op, .. } => Some(op),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                ops.iter().any(|op| matches!(op, ArithOp::ILtU)),
+                "{name} must bounds-check with ILtU"
+            );
+            assert!(
+                !ops.iter().any(|op| matches!(op, ArithOp::ILt)),
+                "{name} must not use signed ILt"
+            );
+        }
     }
 
     #[test]

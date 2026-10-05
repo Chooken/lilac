@@ -135,6 +135,8 @@ pub enum ArithOp {
     Eq,
     /// `i.cmp.lt`.
     ILt,
+    /// `i.cmp.lt.u` (unsigned less-than).
+    ILtU,
     /// `i.cmp.gt`.
     IGt,
     /// `f.cmp.lt`.
@@ -505,6 +507,7 @@ fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::FMod => "f.mod",
         ArithOp::Eq => "cmp.eql",
         ArithOp::ILt => "i.cmp.lt",
+        ArithOp::ILtU => "i.cmp.lt.u",
         ArithOp::IGt => "i.cmp.gt",
         ArithOp::FLt => "f.cmp.lt",
         ArithOp::FGt => "f.cmp.gt",

@@ -847,12 +847,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 };
                 checked(value, "integer arith").into()
             }
-            ArithOp::Eq | ArithOp::ILt | ArithOp::IGt => {
+            ArithOp::Eq | ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt => {
                 let left = reg_int(lhs, state);
                 let right = reg_int(rhs, state);
                 let predicate = match op {
                     ArithOp::Eq => IntPredicate::EQ,
                     ArithOp::ILt => IntPredicate::SLT,
+                    ArithOp::ILtU => IntPredicate::ULT,
                     _ => IntPredicate::SGT,
                 };
                 let cmp = checked(

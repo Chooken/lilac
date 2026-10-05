@@ -51,7 +51,7 @@ function @.lilac.format_args_push
   $entry:
     &c: #bitNative = field %table .count  // idx 0
     &cap: #bitNative = const 0x10
-    &ok: #bitNative = i.cmp.lt &c, &cap
+    &ok: #bitNative = i.cmp.lt.u &c, &cap
     branch.if &ok, $append, $done
   $append:
     &c: #bitNative = field %table .count  // idx 0
