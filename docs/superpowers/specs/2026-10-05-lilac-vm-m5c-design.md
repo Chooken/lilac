@@ -204,10 +204,16 @@ enum Operand { Reg(u32), Slot(u32) }
 | `Load { dst: Reg, src: Slot, ty }` | read `size(ty)` bytes at the ref in `src` |
 | `Store { src: Operand, dst: Slot, ty }` | write `size(ty)` bytes through the ref in `dst` |
 | `Addr { dst: Reg, place: Slot }` | ref = frame slot address |
-| `AddrField { dst: Reg, place: Slot, off: u32 }` | ref = frame slot + field offset |
+| `AddrField { dst: Reg, place: Slot, off: u32, indirect: bool }` | ref = field base + `off` |
 | `AddrFunc { dst: Reg, func: u32 }` | ref = function id |
-| `Field { dst: Reg, place: Slot, off: u32, ty }` | scalar field read |
-| `StoreField { src: Operand, place: Slot, off: u32, ty }` | scalar field write |
+| `Field { dst: Reg, place: Slot, off: u32, ty, indirect: bool }` | scalar field read |
+| `StoreField { src: Operand, place: Slot, off: u32, ty, indirect: bool }` | scalar field write |
+
+For the three field instructions, `indirect` is `true` when the object
+place's declared type is a `ref T` (the slot holds a ref to the struct): the
+interpreter dereferences the slot's ref to get the field base before applying
+`off`, exactly as the LLVM backend's `field_ptr` does. `indirect == false`
+means the object place is the aggregate itself (field base = frame slot).
 | `Arith { op: ArithOp, dst: Reg, lhs: Reg, rhs: Reg, ty }` | typed arithmetic/comparison |
 | `Convert { op: ConvertOp, dst: Reg, src: Reg, ty }` | `trunc`/`extend.zero` |
 | `Call { func: u32, ins: Vec<Operand>, outs: Vec<Slot> }` | direct call |
