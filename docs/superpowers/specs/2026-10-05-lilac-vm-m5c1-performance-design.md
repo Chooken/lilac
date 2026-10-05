@@ -126,9 +126,10 @@ word0 = [ op:8 | a:8 | b:8 | c:8 ]        // op = w & 0xFF; a = (w>>8)&0xFF, ...
   type word. Width is chosen at encode time from the type table. Width is
   encoded only where semantics require it: signed div/mod and signed compares
   (sign extension), float ops (f32/f64), integer arithmetic result masking
-  (`IAdd`/`ISub`/`IMul`), and `Trunc`. Operations whose operands are
-  zero-extended to their declared width (`Eq`, unsigned compares, unsigned
-  div/mod, `ExtendZero`) need no width class.
+  (`IAdd`/`ISub`/`IMul`), `Trunc`, and the unsigned ops `Eq`/`ILtU`/`IGtU`/
+  `IDivU`/`IModU` (which mask their operands to the declared width, so a
+  non-zero-extended value cannot change an unsigned result). Only `ExtendZero`
+  is width-free (masking to the wider type is a no-op).
 - **Precomputed sizes, not type ids.** Every instruction that today carries a
   `TypeId` only to look up a size/width (`Copy`, `Load`, `Store`, `Field`,
   `StoreField`, `Convert`, `Arith`, `Const`) encodes the **precomputed byte
@@ -148,10 +149,11 @@ Flattened, `< 128` base opcodes:
   `StoreField`, `Call`, `CallIndirect`, `CallBuiltin`, `Branch`, `BranchIf`,
   `Return`, `Panic`, `Unreachable`.
 - **Arith/Convert:** one opcode per `(operation, width class)` where the width
-  matters (see §3.1) — `IAdd`/`ISub`/`IMul`/`IDiv`/`IMod`/`ILt`/`IGt`/`Trunc` at
-  widths 8/16/32/64, `FAdd`/`FSub`/`FMul`/`FDiv`/`FMod`/`FLt`/`FGt` at 32/64 —
-  and a single width-free opcode for `IDivU`/`IModU`/`Eq`/`ILtU`/`IGtU`/
-  `ExtendZero`. One word each; the interpreter matches the opcode directly.
+  matters (see §3.1) — `IAdd`/`ISub`/`IMul`/`IDiv`/`IMod`/`IDivU`/`IModU`/`Eq`/
+  `ILt`/`ILtU`/`IGt`/`IGtU`/`Trunc` at widths 8/16/32/64, and
+  `FAdd`/`FSub`/`FMul`/`FDiv`/`FMod`/`FLt`/`FGt` at 32/64 — plus a single
+  width-free opcode for `ExtendZero`. One word each; the interpreter matches the
+  opcode directly.
 
 The exact opcode table is enumerated in `docs/VM_SPEC.md` at implementation; the
 constraint is `< 128` base opcodes so the wide bit is available.
