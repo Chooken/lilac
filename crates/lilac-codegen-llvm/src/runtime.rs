@@ -31,6 +31,7 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     load_u8(lower);
     store_u8(lower);
     memcpy(lower);
+    ptr_add(lower);
     format_args_new(lower);
     format_args_push(lower);
     format_args_count(lower);
@@ -184,6 +185,28 @@ fn memcpy(lower: &Lower<'_, '_>) {
     len.set_name("len");
     checked(builder.build_memcpy(dest, 1, src, 1, len), "llvm.memcpy");
     checked(builder.build_return(None), "return void");
+}
+
+/// `@ptr_add(ref i8, iNative) -> ref i8`: byte-addressed pointer arithmetic.
+///
+/// The body is `ptrtoint(base) + offset` then `inttoptr`, the same safe
+/// integer-arithmetic lowering `byte_ptr` uses in place of a dynamic GEP.
+/// `lower::builtin_symbol` maps the LIR builtin name `@ptr_add` here.
+fn ptr_add(lower: &Lower<'_, '_>) {
+    let native = lower.native_int();
+    let ptr = lower.ptr_type();
+    let params = [
+        BasicMetadataTypeEnum::from(ptr),
+        BasicMetadataTypeEnum::from(native),
+    ];
+    let function = lower.runtime_fn(".lilac.ptr_add", ptr.fn_type(&params, false));
+    let builder = entry(lower, function);
+    let base = param(function, 0, "ptr_add").into_pointer_value();
+    let offset = param(function, 1, "ptr_add").into_int_value();
+    base.set_name("base");
+    offset.set_name("offset");
+    let address = byte_ptr(lower, &builder, base, offset);
+    checked(builder.build_return(Some(&address)), "return ptr_add");
 }
 
 /// `@format_args_new() -> #format_args`: a zeroed piece table.

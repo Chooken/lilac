@@ -51,6 +51,14 @@ entry:
 ; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
 declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
 
+define ptr @.lilac.ptr_add(ptr %base, i64 %offset) {
+entry:
+  %0 = ptrtoint ptr %base to i64
+  %1 = add i64 %0, %offset
+  %2 = inttoptr i64 %1 to ptr
+  ret ptr %2
+}
+
 define { i64, [16 x { i64, ptr }] } @format_args_new() {
 entry:
   ret { i64, [16 x { i64, ptr }] } zeroinitializer

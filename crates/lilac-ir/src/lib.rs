@@ -689,6 +689,11 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
             vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bitNative")],
             vec![],
         ),
+        "@ptr_add" => (
+            vec![Some("ref #bit8"), Some("#bitNative")],
+            vec![Some("ref #bit8")],
+        ),
+        "@lilac_abort" => (vec![], vec![]),
         _ => return None,
     };
     Some(BuiltinSig { ins, outs })
@@ -1933,6 +1938,17 @@ mod tests {
         assert!(text.contains("call @format_args_new"), "{text}");
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+    }
+
+    #[test]
+    fn ptr_add_and_abort_builtin_signatures() {
+        let ptr_add = builtin_sig("@ptr_add").expect("@ptr_add is a builtin");
+        assert_eq!(ptr_add.ins, vec![Some("ref #bit8"), Some("#bitNative")]);
+        assert_eq!(ptr_add.outs, vec![Some("ref #bit8")]);
+
+        let abort = builtin_sig("@lilac_abort").expect("@lilac_abort is a builtin");
+        assert!(abort.ins.is_empty(), "{:?}", abort.ins);
+        assert!(abort.outs.is_empty(), "{:?}", abort.outs);
     }
 
     #[test]

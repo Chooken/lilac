@@ -746,6 +746,7 @@ mod tests {
             "define void @format_args_push(ptr %table, { i64, ptr } %piece)",
             "define i64 @format_args_count({ i64, [16 x { i64, ptr }] } %table)",
             "define { i64, ptr } @format_args_piece({ i64, [16 x { i64, ptr }] } %table, i64 %index)",
+            "define ptr @.lilac.ptr_add(ptr %base, i64 %offset)",
             "define void @.lilac.abort()",
         ] {
             assert_eq!(
@@ -754,6 +755,43 @@ mod tests {
                 "`{needle}` must be defined exactly once in:\n{text}"
             );
         }
+    }
+
+    /// `@ptr_add` is emitted as `.lilac.ptr_add(ptr, iNative) -> ptr` using
+    /// safe `ptrtoint`/`add`/`inttoptr` integer arithmetic.
+    #[test]
+    fn emits_ptr_add_runtime_definition() {
+        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        assert!(
+            text.contains("define ptr @.lilac.ptr_add(ptr %base, i64 %offset)"),
+            "{text}"
+        );
+        let body = text
+            .split("\ndefine ")
+            .find(|segment| segment.starts_with("ptr @.lilac.ptr_add"))
+            .expect("ptr_add definition");
+        assert!(body.contains("ptrtoint ptr"), "{body}");
+        assert!(body.contains("inttoptr i64"), "{body}");
+    }
+
+    /// The `@lilac_abort` builtin resolves to the already-emitted
+    /// `.lilac.abort` runtime definition, not an undefined `@lilac_abort`.
+    #[test]
+    fn lilac_abort_builtin_calls_runtime_definition() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        call(
+            &mut insts,
+            LirCallee::Builtin("@lilac_abort".to_owned()),
+            &[],
+            &[],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("call void @.lilac.abort()"), "{text}");
+        assert!(!text.contains("@lilac_abort"), "{text}");
     }
 
     /// `#format_args` is `{ iNative, [16 x { iNative, ptr }] }`, `new` returns a
