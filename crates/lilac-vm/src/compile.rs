@@ -369,6 +369,31 @@ struct FuncBuilder<'a, 'm> {
     lines: Vec<Line>,
 }
 
+/// Which field of a branch instruction a deferred label patch fills.
+#[derive(Copy, Clone)]
+enum BranchSlot {
+    /// `Instr::Branch::target`.
+    Target,
+    /// `Instr::BranchIf::then`.
+    Then,
+    /// `Instr::BranchIf::els`.
+    Els,
+}
+
+/// A branch target left unresolved until every block start is known.
+///
+/// Block starts are recorded from *actual* emission (an out-place access can
+/// emit several instructions), so a terminator is emitted with placeholder
+/// targets and patched once the whole body has been walked.
+struct PendingTarget {
+    /// Index into [`FuncBuilder::code`] of the branch instruction.
+    index: usize,
+    /// Field of that instruction to patch.
+    slot: BranchSlot,
+    /// Label naming the destination block.
+    label: String,
+}
+
 impl FuncBuilder<'_, '_> {
     /// Interns a type in the program type table.
     fn intern(&mut self, ty: &str) -> Result<TypeId, String> {
@@ -882,12 +907,26 @@ impl FuncBuilder<'_, '_> {
     }
 
     /// Emits the code for a block terminator.
-    fn emit_term(&mut self, term: &LirTerm, next: Option<&str>) -> Result<(), String> {
+    ///
+    /// Branch targets are emitted as placeholders and pushed onto `pending`;
+    /// [`Self::resolve_targets`] fills them once every block start is known.
+    fn emit_term(
+        &mut self,
+        term: &LirTerm,
+        next: Option<&str>,
+        pending: &mut Vec<PendingTarget>,
+    ) -> Result<(), String> {
         match term {
             LirTerm::Return { span } => self.emit(Instr::Return, *span),
             LirTerm::Branch { target, span } => {
-                let target = self.label_pc(target)?;
-                self.emit(Instr::Branch { target }, *span)
+                let index = self.code.len();
+                self.emit(Instr::Branch { target: 0 }, *span)?;
+                pending.push(PendingTarget {
+                    index,
+                    slot: BranchSlot::Target,
+                    label: target.clone(),
+                });
+                Ok(())
             }
             LirTerm::BranchIf {
                 cond,
@@ -896,16 +935,32 @@ impl FuncBuilder<'_, '_> {
                 span,
             } => {
                 let cond = self.reg(cond)?;
-                let then = self.label_pc(then)?;
-                let els = if let Some(label) = els {
-                    self.label_pc(label)?
-                } else {
-                    let label = next.ok_or_else(|| {
-                        "`branch.if` without an else is the last block".to_string()
-                    })?;
-                    self.label_pc(label)?
+                let els_label = match els {
+                    Some(label) => label.clone(),
+                    None => next
+                        .ok_or_else(|| "`branch.if` without an else is the last block".to_string())?
+                        .to_owned(),
                 };
-                self.emit(Instr::BranchIf { cond, then, els }, *span)
+                let index = self.code.len();
+                self.emit(
+                    Instr::BranchIf {
+                        cond,
+                        then: 0,
+                        els: 0,
+                    },
+                    *span,
+                )?;
+                pending.push(PendingTarget {
+                    index,
+                    slot: BranchSlot::Then,
+                    label: then.clone(),
+                });
+                pending.push(PendingTarget {
+                    index,
+                    slot: BranchSlot::Els,
+                    label: els_label,
+                });
+                Ok(())
             }
             LirTerm::Panic { msg, span } => {
                 let data = self.compiler.data_id(msg)?;
@@ -913,6 +968,20 @@ impl FuncBuilder<'_, '_> {
             }
             LirTerm::Unreachable { span } => self.emit(Instr::Unreachable, *span),
         }
+    }
+
+    /// Fills every deferred branch target with its block's first instruction.
+    fn resolve_targets(&mut self, pending: Vec<PendingTarget>) -> Result<(), String> {
+        for patch in pending {
+            let target = self.label_pc(&patch.label)?;
+            match (&mut self.code[patch.index], patch.slot) {
+                (Instr::Branch { target: slot }, BranchSlot::Target) => *slot = target,
+                (Instr::BranchIf { then, .. }, BranchSlot::Then) => *then = target,
+                (Instr::BranchIf { els, .. }, BranchSlot::Els) => *els = target,
+                _ => return Err("internal branch patch mismatch".to_string()),
+            }
+        }
+        Ok(())
     }
 
     /// The program counter of a labeled block.
@@ -961,29 +1030,26 @@ impl FuncBuilder<'_, '_> {
                 place_names: std::mem::take(&mut self.places.names),
             });
         }
-        let mut pc = 0_u32;
-        for block in &func.blocks {
-            self.block_pc.insert(block.label.clone(), pc);
-            for inst in &block.insts {
-                pc = pc
-                    .checked_add(emitted_count(inst))
-                    .ok_or_else(|| "program too large".to_string())?;
-            }
-            pc = pc
-                .checked_add(1)
-                .ok_or_else(|| "program too large".to_string())?;
-        }
+        // Walk the blocks, recording each start from the *actual* instruction
+        // count emitted (an out-place access may expand to several ISA
+        // instructions). Terminators carry placeholder targets, resolved after
+        // every block start is known.
+        let mut pending: Vec<PendingTarget> = Vec::new();
         let block_count = func.blocks.len();
         for index in 0..block_count {
             let block = &func.blocks[index];
+            let start =
+                u32::try_from(self.code.len()).map_err(|_| "program too large".to_string())?;
+            self.block_pc.insert(block.label.clone(), start);
             self.regs.clear();
             self.reg_types.clear();
             for inst in &block.insts {
                 self.emit_inst(inst)?;
             }
             let next = func.blocks.get(index + 1).map(|b| b.label.as_str());
-            self.emit_term(&block.term, next)?;
+            self.emit_term(&block.term, next, &mut pending)?;
         }
+        self.resolve_targets(pending)?;
         // The typed list still uses instruction-index branch targets and line
         // pcs; encode it into the executed word stream and remap both to word
         // offsets (M5c.1 makes `pc` a word index).
@@ -1014,17 +1080,6 @@ impl FuncBuilder<'_, '_> {
             lines: self.lines,
             place_names: std::mem::take(&mut self.places.names),
         })
-    }
-}
-
-/// How many bytecode instructions one LIR instruction emits.
-fn emitted_count(inst: &LirInst) -> u32 {
-    match inst {
-        LirInst::Alloca { .. }
-        | LirInst::Drop { .. }
-        | LirInst::CompileError { .. }
-        | LirInst::FoldIntrinsic { .. } => 0,
-        _ => 1,
     }
 }
 

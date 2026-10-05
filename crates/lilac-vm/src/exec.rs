@@ -1282,10 +1282,43 @@ mod tests {
         );
     }
 
-    /// `addr %out` yields the caller's storage address: a store through the
-    /// taken address updates the caller's place.
+    /// Reading an output before a branch must not corrupt later block starts.
+    ///
+    /// `x = r` (an output read) expands to `Load` + `Copy`, so the entry block
+    /// emits more instructions than one per LIR instruction. Block starts must
+    /// come from real emission or the `branch.if` targets land wrong (on the
+    /// branch itself). `f` is reached with a runtime-derived argument so the
+    /// constant folder cannot fold it away. The loop is step-capped so a
+    /// corrupt target fails as a hang instead of hanging the suite.
     #[test]
-    fn addr_of_out_place_is_caller_storage() {
+    fn output_read_before_branch_targets_correctly() {
+        let src = "f: function (n: @bit_native) r: @bit_native {\n    r = n\n    x: @bit_native = r\n    if @i_less_than(x, 0x5) {\n        r = 0x1\n    } else {\n        r = 0x2\n    }\n}\nmain: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    a: @bit_native = f(n)\n}\n";
+        let program = compile_src(src);
+        assert!(
+            program.funcs.iter().any(|func| func.name == "f"),
+            "`f` must survive folding to exercise the branch layout"
+        );
+        let mut machine = Machine::new(&program).expect("entry");
+        let mut a = None;
+        let mut steps = 0_u32;
+        loop {
+            if let Some(value) = machine.read_place("a") {
+                a = Some(value);
+            }
+            steps += 1;
+            assert!(steps < 100_000, "did not terminate: corrupt branch target?");
+            match machine.step().expect("step") {
+                Step::Advanced => {}
+                Step::Returned | Step::Panicked(_) => break,
+            }
+        }
+        assert_eq!(a, Some(0x1), "f(3) takes the then-branch");
+    }
+
+    /// Runtime-level aliasing: `addr %out` is the caller's storage address, so
+    /// a store through the taken address updates the caller's place.
+    #[test]
+    fn out_place_address_aliases_caller_storage() {
         // callee: r0 = ref %out; p = r0; r1 = 0x2a; *p = r1.
         let callee = [
             Instr::Copy {
@@ -1316,6 +1349,20 @@ mod tests {
             Some(0x2a),
             "store through the out place's address reaches the caller"
         );
+    }
+
+    /// The compiler's `Addr %out` branch: source that takes `addr` of an out
+    /// place (`ref out`) and stores through it reaches the caller's storage.
+    #[test]
+    fn addr_of_out_place_is_caller_storage() {
+        let src = "set: function () out: @bit8 {\n    out = 0x0\n    p: ref @bit8 = ref out\n    @store_u8(p, 0x0, 0x2a)\n}\nmain: function () nothing {\n    b: @bit8 = set()\n    x: @bit_native = @extend_zero(b)\n}\n";
+        let program = compile_src(src);
+        assert!(
+            program.funcs.iter().any(|func| func.name == "set"),
+            "`set` must survive folding to exercise `addr %out`"
+        );
+        assert_eq!(run_and_capture_place(src, "x").expect("run"), Some(0x2a));
+        assert_eq!(run_src(src).expect("run"), 0);
     }
 
     #[test]

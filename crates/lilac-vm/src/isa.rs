@@ -494,11 +494,12 @@ pub struct Func {
     /// A `u32` (not `u8`) because runtime values such as `#format_args` are
     /// wider than 255 bytes.
     pub in_sizes: Vec<u32>,
-    /// Byte offset of the output region within the frame's slot region.
+    /// Byte offset just past the input region within the frame's slot region.
     ///
-    /// The input region precedes the output region, so this equals the summed
-    /// input sizes. Precomputed so `return` places results without a
-    /// `type_size` lookup.
+    /// The frame begins with the out-ref region (`outs.len()` pointer-sized
+    /// refs), so the inputs follow it and this equals
+    /// `outs.len() * VM_POINTER_BYTES + summed input sizes`. Retained as
+    /// layout metadata; `return` copies nothing (outputs are by reference).
     pub out_offset: u32,
     /// Byte size of each output, parallel to `outs`.
     pub out_sizes: Vec<u32>,
