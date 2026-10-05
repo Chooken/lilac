@@ -43,9 +43,14 @@ pub struct Debugger<'a> {
     halted: bool,
     /// The program's exit code once halted.
     exit: Option<i32>,
-    /// The `(func, pc)` location most recently stopped at, so resuming does not
-    /// immediately re-trigger the same breakpoint.
-    resume_from: Option<(u32, u32)>,
+    /// Set when a stop is returned to the REPL, so the next `run`/`continue`
+    /// executes one instruction before re-arming breakpoints instead of
+    /// immediately re-triggering the breakpoint the debugger is sitting on.
+    ///
+    /// Cleared by the first [`Debugger::advance`]; it must not be keyed on a
+    /// stale location or breakpoints silently stop working (a loop that
+    /// branches back to the stop pc, or a recursive re-entry at `pc == 0`).
+    skip_hit: bool,
 }
 
 impl<'a> Debugger<'a> {
@@ -61,7 +66,7 @@ impl<'a> Debugger<'a> {
             source,
             halted: false,
             exit: None,
-            resume_from: None,
+            skip_hit: false,
         }
     }
 
@@ -402,15 +407,16 @@ impl<'a> Debugger<'a> {
     }
 
     /// Whether any breakpoint matches the current location.
+    ///
+    /// This is purely positional: the one-hit suppression that stops a resume
+    /// from re-triggering the location it is parked on lives in
+    /// [`Debugger::skip_hit`], not here.
     fn hit_breakpoint(&self) -> bool {
-        let (func, pc) = (self.machine.func_index(), self.machine.pc());
-        let resume_line = self
-            .resume_from
-            .and_then(|(f, p)| line_at(self.func(f)?, p));
+        let (func_index, pc) = (self.machine.func_index(), self.machine.pc());
         for breakpoint in &self.breakpoints {
             match breakpoint {
                 Breakpoint::Func { index, .. } => {
-                    if *index == func && pc == 0 && self.resume_from != Some((func, pc)) {
+                    if *index == func_index && pc == 0 {
                         return true;
                     }
                 }
@@ -421,11 +427,13 @@ impl<'a> Debugger<'a> {
                     if current.line != *line || !file_matches(&current.file, file) {
                         continue;
                     }
-                    // Do not re-trigger the line we are already stopped on.
-                    let same_line = resume_line
-                        .as_ref()
-                        .is_some_and(|r| r.file == current.file && r.line == current.line);
-                    if !same_line {
+                    // Match only the line's entry instruction so `continue`
+                    // re-arms on the next visit (e.g. the next loop iteration)
+                    // rather than stopping on every instruction of the line.
+                    let Some(func) = self.func(func_index) else {
+                        continue;
+                    };
+                    if is_line_start(func, pc, &current.file, current.line) {
                         return true;
                     }
                 }
@@ -435,22 +443,26 @@ impl<'a> Debugger<'a> {
     }
 
     /// Resumes until a breakpoint matches or the program halts.
+    ///
+    /// When the debugger is parked on a breakpoint just hit, the first resume
+    /// steps once before checking again ([`Debugger::skip_hit`]); after that
+    /// single step every breakpoint is fully re-armed.
     fn resume(&mut self) -> Result<Stop, VmError> {
         loop {
             if self.halted {
                 return Ok(Stop::Halted);
             }
-            let current = (self.machine.func_index(), self.machine.pc());
-            if self.resume_from != Some(current) && self.hit_breakpoint() {
-                self.resume_from = Some(current);
+            if !self.skip_hit && self.hit_breakpoint() {
+                self.skip_hit = true;
                 return Ok(Stop::Breakpoint);
             }
             self.advance()?;
         }
     }
 
-    /// Executes one instruction, recording halt state.
+    /// Executes one instruction, recording halt state and re-arming breakpoints.
     fn advance(&mut self) -> Result<(), VmError> {
+        self.skip_hit = false;
         match self.machine.step()? {
             Step::Advanced => {}
             Step::Returned => {
@@ -465,13 +477,12 @@ impl<'a> Debugger<'a> {
         Ok(())
     }
 
-    /// Prints the stop location and records it as the resume point.
-    fn finish_stop(&mut self, output: &mut impl Write) {
+    /// Prints the location of a step stop.
+    fn finish_stop(&self, output: &mut impl Write) {
         if self.halted {
             self.print_halt(output);
         } else {
             self.print_here(output);
-            self.resume_from = Some((self.machine.func_index(), self.machine.pc()));
         }
     }
 
@@ -596,6 +607,22 @@ fn line_at(func: &Func, pc: u32) -> Option<Line> {
     func.lines.iter().rev().find(|line| line.pc <= pc).cloned()
 }
 
+/// Whether `pc` is the first instruction attributed to `(file, line)`.
+///
+/// A line breakpoint matches only the line's entry instruction, so a loop that
+/// branches back to that instruction fires once per iteration rather than once
+/// per instruction that shares the line.
+fn is_line_start(func: &Func, pc: u32, file: &str, line: u32) -> bool {
+    let here = func
+        .lines
+        .iter()
+        .any(|entry| entry.pc == pc && entry.line == line && entry.file == file);
+    here && !func
+        .lines
+        .iter()
+        .any(|entry| entry.pc < pc && entry.line == line && entry.file == file)
+}
+
 /// Splits off the first whitespace-delimited token.
 fn split_head(text: &str) -> (&str, &str) {
     text.split_once(char::is_whitespace)
@@ -607,6 +634,95 @@ mod tests {
     use super::Debugger;
     use crate::compile::compile_src;
     use crate::exec::Machine;
+    use crate::isa::{self, Instr, Operand};
+
+    /// `main` calls the recursive `f`, which recurses while `n < 3`.
+    ///
+    /// Built directly (not via `compile_src`) so the constant folder cannot
+    /// evaluate the recursion and prune `f` — the reason the original
+    /// `break_at_function_stops` test was vacuous.
+    fn recursive_program() -> isa::Program {
+        let mut program = isa::sample_program(vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0,
+                ty: 0,
+            },
+            Instr::Copy {
+                dst: Operand::Slot(0),
+                src: Operand::Reg(0),
+                ty: 0,
+            },
+            Instr::Call {
+                func: 1,
+                ins: vec![Operand::Slot(0)],
+                outs: Vec::new(),
+            },
+            Instr::Return,
+        ]);
+        program.funcs.push(isa::Func {
+            name: "f".to_string(),
+            is_extern: false,
+            ins: vec![0],
+            outs: Vec::new(),
+            n_regs: 4,
+            slot_bytes: 8,
+            code: vec![
+                Instr::Copy {
+                    dst: Operand::Reg(1),
+                    src: Operand::Slot(0),
+                    ty: 0,
+                },
+                Instr::Const {
+                    dst: 2,
+                    imm: 3,
+                    ty: 0,
+                },
+                Instr::Arith {
+                    op: isa::ArithOp::ILt,
+                    dst: 3,
+                    lhs: 1,
+                    rhs: 2,
+                    operand_ty: 0,
+                    ty: 0,
+                },
+                Instr::BranchIf {
+                    cond: 3,
+                    then: 4,
+                    els: 8,
+                },
+                Instr::Const {
+                    dst: 2,
+                    imm: 1,
+                    ty: 0,
+                },
+                Instr::Arith {
+                    op: isa::ArithOp::IAdd,
+                    dst: 3,
+                    lhs: 1,
+                    rhs: 2,
+                    operand_ty: 0,
+                    ty: 0,
+                },
+                Instr::Call {
+                    func: 1,
+                    ins: vec![Operand::Reg(3)],
+                    outs: Vec::new(),
+                },
+                Instr::Return,
+                Instr::Return,
+            ],
+            lines: vec![isa::Line {
+                pc: 0,
+                file: "t.lilac".to_string(),
+                line: 1,
+                col: 1,
+            }],
+            place_names: Vec::new(),
+        });
+        program.verify().expect("verify");
+        program
+    }
 
     #[test]
     fn stepi_advances_one_instruction() {
@@ -615,25 +731,76 @@ mod tests {
         let machine = Machine::new(&program).expect("entry");
         let mut dbg = Debugger::new(machine, None);
         let mut out = Vec::new();
-        dbg.run_repl(std::io::Cursor::new(b"stepi\ninfo regs\nquit\n"), &mut out)
-            .expect("repl");
-        let text = String::from_utf8(out).expect("utf8");
-        assert!(text.contains("regs"));
-    }
-
-    #[test]
-    fn break_at_function_stops() {
-        let program =
-            compile_src("f: function () nothing {\n}\nmain: function () nothing {\n    f()\n}\n");
-        let machine = Machine::new(&program).expect("entry");
-        let mut dbg = Debugger::new(machine, None);
-        let mut out = Vec::new();
         dbg.run_repl(
-            std::io::Cursor::new(b"break f\nrun\nbacktrace\nquit\n"),
+            std::io::Cursor::new(b"stepi\ndisasm\ninfo regs\nquit\n"),
             &mut out,
         )
         .expect("repl");
         let text = String::from_utf8(out).expect("utf8");
-        assert!(text.contains('f'));
+        // One `stepi` runs the entry instruction (pc 0) and no more: the
+        // disassembly marker sits on pc 1, not pc 2, and the value written by
+        // pc 0 is live.
+        assert!(text.contains("=> 1"), "transcript:\n{text}");
+        assert!(!text.contains("=> 2"), "transcript:\n{text}");
+        assert!(text.contains("&0 = 1 (0x1)"), "transcript:\n{text}");
+    }
+
+    #[test]
+    fn break_at_function_stops() {
+        let program = recursive_program();
+        let machine = Machine::new(&program).expect("entry");
+        let mut dbg = Debugger::new(machine, None);
+        dbg.set_breakpoint("f").expect("breakpoint");
+        let mut out = Vec::new();
+        dbg.run_repl(std::io::Cursor::new(b"run\nbacktrace\nquit\n"), &mut out)
+            .expect("repl");
+        let text = String::from_utf8(out).expect("utf8");
+        // `run` stops at f's entry, so the current frame is f and the
+        // backtrace lists f as the running frame under main.
+        assert!(text.contains("in f"), "transcript:\n{text}");
+        assert!(text.contains("#1 f at"), "transcript:\n{text}");
+    }
+
+    /// A line breakpoint on a loop body must fire on every iteration, not just
+    /// the first: `continue` must re-arm it once execution leaves the stopped
+    /// instruction.
+    #[test]
+    fn line_breakpoint_fires_on_each_loop_iteration() {
+        let program = compile_src(
+            "main: function () nothing {\n    n: @bit_native = 0x0\n    loop {\n        n = @i_add(n, 0x1)\n        if @i_less_than(n, 0x3) {\n            keep: @bit_native = n\n        } else {\n            break\n        }\n    }\n}\n",
+        );
+        let machine = Machine::new(&program).expect("entry");
+        let mut dbg = Debugger::new(machine, None);
+        dbg.set_breakpoint("t.lilac:4").expect("breakpoint");
+        let mut out = Vec::new();
+        dbg.run_repl(
+            std::io::Cursor::new(b"run\ncontinue\ncontinue\ncontinue\nquit\n"),
+            &mut out,
+        )
+        .expect("repl");
+        let text = String::from_utf8(out).expect("utf8");
+        // The body line executes for n = 1, 2, 3.
+        let hits = text.matches("stopped at t.lilac:4").count();
+        assert!(hits >= 3, "line breakpoint fired {hits} times:\n{text}");
+    }
+
+    /// A function breakpoint must fire on every entry, including recursive
+    /// re-entries that restart at the same `pc == 0`.
+    #[test]
+    fn function_breakpoint_fires_on_recursive_reentry() {
+        let program = recursive_program();
+        let machine = Machine::new(&program).expect("entry");
+        let mut dbg = Debugger::new(machine, None);
+        dbg.set_breakpoint("f").expect("breakpoint");
+        let mut out = Vec::new();
+        dbg.run_repl(
+            std::io::Cursor::new(b"run\ncontinue\ncontinue\ncontinue\nquit\n"),
+            &mut out,
+        )
+        .expect("repl");
+        let text = String::from_utf8(out).expect("utf8");
+        // f is entered for n = 0, 1, 2, 3.
+        let hits = text.matches("in f").count();
+        assert!(hits >= 3, "function breakpoint fired {hits} times:\n{text}");
     }
 }
