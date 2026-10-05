@@ -2,7 +2,8 @@
 //! text; the snapshot is byte-stable under `--check`, and a non-VM target is a
 //! usage error (exit 2).
 
-use std::process::{Command, ExitStatus};
+use std::io::Write as _;
+use std::process::{Command, ExitStatus, Stdio};
 
 fn lilac() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lilac"))
@@ -18,6 +19,29 @@ struct Run {
 
 fn run<const N: usize>(args: [&str; N]) -> Run {
     let output = lilac().args(args).output().expect("runs lilac");
+    Run {
+        status: output.status,
+        stdout: String::from_utf8(output.stdout).expect("utf8 stdout"),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Runs `lilac` with `input` on stdin, capturing stdout/stderr.
+fn run_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Run {
+    let mut child = lilac()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns lilac");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("writes stdin");
+    let output = child.wait_with_output().expect("waits for lilac");
     Run {
         status: output.status,
         stdout: String::from_utf8(output.stdout).expect("utf8 stdout"),
@@ -82,6 +106,15 @@ fn emit_vm_rejects_non_vm_target() {
 fn run_executes_and_exits_zero() {
     let out = run(["run", SOURCE]);
     assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+}
+
+/// `--step` drops into the debugger; `stepi` and `info regs` drive the REPL.
+#[test]
+fn run_step_enters_debugger() {
+    let out = run_with_stdin(["run", "--step", SOURCE], "stepi\ninfo regs\nquit\n");
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", out.stderr);
+    assert!(out.stdout.contains("lilac-vm"), "stdout:\n{}", out.stdout);
+    assert!(out.stdout.contains("regs"), "stdout:\n{}", out.stdout);
 }
 
 #[test]

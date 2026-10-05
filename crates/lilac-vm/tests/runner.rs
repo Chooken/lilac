@@ -69,8 +69,10 @@ fn rejects_non_vm_target() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// Debug flags enter the REPL; with no input it resumes to completion, so a
+/// non-interactive invocation still exits with the program's code.
 #[test]
-fn debug_flags_fall_back_to_plain_run() {
+fn debug_flags_enter_repl_and_run_to_completion() {
     let path = write_temp("debug", &valid_lbc());
     let out = run_bin(&path, &["--step", "--trace", "--break=main"]);
     assert_eq!(
@@ -79,4 +81,6 @@ fn debug_flags_fall_back_to_plain_run() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("lilac-vm"), "stdout: {stdout}");
 }

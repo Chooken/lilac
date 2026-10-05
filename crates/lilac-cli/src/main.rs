@@ -530,14 +530,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Task 12: Debugger. A breakpoint, `--step`, `--trace`, or a `--source`
-    // override will build a `lilac_vm::Debugger` over `text` and drive its
-    // REPL on stdin/stdout instead of the plain `run_lbc` below. Until Task 12
-    // lands those flags are accepted but inert, so a debug request runs plainly.
-    let _debug_requested = common.debug.step
-        || common.debug.trace
-        || !common.debug.breaks.is_empty()
-        || common.source.is_some();
     // A single `--export` names the entry to run (it is the `--export` root the
     // reachability pass already preserved); with zero or multiple exports the
     // default `main` entry is used.
@@ -546,7 +538,62 @@ fn cmd_run(args: &[String]) -> ExitCode {
     } else {
         None
     };
+    // A `--break`, `--step`, `--trace`, or `--source` request drops into the
+    // interactive debugger instead of the plain run.
+    let debug_requested = common.debug.step
+        || common.debug.trace
+        || !common.debug.breaks.is_empty()
+        || common.source.is_some();
+    if debug_requested {
+        return run_debugger(&text, entry, common.source.as_deref(), &common.debug.breaks);
+    }
     match lilac_vm::run_lbc_with_entry(&text, entry) {
+        Ok(code) => exit_code(code),
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Builds a [`lilac_vm::Debugger`] over emitted `.lbc` text and drives its REPL
+/// on the process's stdin/stdout.
+///
+/// `--source` text, when readable, overrides the line table's recorded path;
+/// otherwise the debugger reads the recorded file or falls back to
+/// disassembly. An invalid `--break` location is a usage error (exit 2); a VM
+/// runtime error is reported and exits 1.
+fn run_debugger(
+    text: &str,
+    entry: Option<&str>,
+    source_path: Option<&str>,
+    breaks: &[String],
+) -> ExitCode {
+    let program = match lilac_vm::Program::parse_text(text) {
+        Ok(program) => program,
+        Err(err) => {
+            eprintln!("internal error: cannot reparse emitted bytecode: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let machine = match lilac_vm::Machine::with_entry(&program, entry.unwrap_or("main")) {
+        Ok(machine) => machine,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let source = source_path.and_then(|path| std::fs::read_to_string(path).ok());
+    let mut debugger = lilac_vm::Debugger::new(machine, source);
+    for loc in breaks {
+        if let Err(err) = debugger.set_breakpoint(loc) {
+            eprintln!("invalid breakpoint `{loc}`: {err}");
+            return ExitCode::from(2);
+        }
+    }
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    match debugger.run_repl(stdin.lock(), &mut stdout) {
         Ok(code) => exit_code(code),
         Err(err) => {
             eprintln!("{err}");

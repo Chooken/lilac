@@ -5,8 +5,8 @@
 //! lilac-vm <file.lbc> [--source=<path>] [--break=<loc>]... [--step] [--trace]
 //! ```
 //!
-//! Debug flags are accepted so the command line is stable ahead of the Task 12
-//! debugger; until then a debug request falls back to a plain run.
+//! A `--break`/`--step`/`--trace`/`--source` request enters the interactive
+//! debugger; without any such flag the program runs to completion directly.
 
 use std::process::ExitCode;
 
@@ -118,11 +118,12 @@ fn run(cli: &Cli) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // Task 12: Debugger. When any debug flag is set, build a
-    // `lilac_vm::Debugger` over `program` and drive its REPL on stdin/stdout
-    // instead of the plain run below. Until Task 12 lands the flags are
-    // accepted but inert, so every request below performs a plain run.
-    let _debug_requested = cli.step || cli.trace || !cli.breaks.is_empty() || cli.source.is_some();
+    // A `--break`, `--step`, `--trace`, or `--source` request drops into the
+    // interactive debugger instead of the plain run.
+    let debug_requested = cli.step || cli.trace || !cli.breaks.is_empty() || cli.source.is_some();
+    if debug_requested {
+        return run_debugger(&program, cli);
+    }
     let mut machine = match Machine::with_entry(&program, "main") {
         Ok(machine) => machine,
         Err(err) => {
@@ -131,6 +132,42 @@ fn run(cli: &Cli) -> ExitCode {
         }
     };
     match machine.run() {
+        Ok(code) => exit_code(code),
+        Err(err) => {
+            eprintln!("{}: {err}", cli.file);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Drives the interactive debugger over an already-parsed program.
+///
+/// `--source` text, when readable, overrides the line table's recorded path; a
+/// `--break` location that does not resolve is a usage error (exit 2). At end
+/// of input the debugger resumes to completion, so a non-interactive invocation
+/// still terminates with the program's exit code.
+fn run_debugger(program: &Program, cli: &Cli) -> ExitCode {
+    let machine = match Machine::with_entry(program, "main") {
+        Ok(machine) => machine,
+        Err(err) => {
+            eprintln!("{}: {err}", cli.file);
+            return ExitCode::from(1);
+        }
+    };
+    let source = cli
+        .source
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let mut debugger = lilac_vm::Debugger::new(machine, source);
+    for loc in &cli.breaks {
+        if let Err(err) = debugger.set_breakpoint(loc) {
+            eprintln!("{}: invalid breakpoint `{loc}`: {err}", cli.file);
+            return ExitCode::from(2);
+        }
+    }
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    match debugger.run_repl(stdin.lock(), &mut stdout) {
         Ok(code) => exit_code(code),
         Err(err) => {
             eprintln!("{}: {err}", cli.file);

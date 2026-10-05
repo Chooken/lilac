@@ -103,6 +103,15 @@ struct Frame {
     slot_base: u32,
     /// Program counter of the next instruction to execute in this frame.
     pc: u32,
+    /// Program counter of the instruction most recently executed in this frame.
+    ///
+    /// `pc` is incremented before an instruction runs (and overwritten to a
+    /// branch target for a taken branch), so it points at the *next*
+    /// instruction. Diagnostics such as [`Machine::current_line`] and
+    /// [`Machine::backtrace`] instead report the instruction the frame is
+    /// currently executing, which is `last_pc` once any instruction has run and
+    /// the function entry otherwise.
+    last_pc: Option<u32>,
 }
 
 /// A bytecode interpreter over one [`Program`].
@@ -156,6 +165,7 @@ impl<'a> Machine<'a> {
             reg_base: 0,
             slot_base,
             pc: 0,
+            last_pc: None,
         }];
         Ok(Self {
             program,
@@ -206,6 +216,7 @@ impl<'a> Machine<'a> {
         // All instructions except branches fall through; branch arms overwrite.
         if let Some(frame) = self.frames.last_mut() {
             frame.pc = pc + 1;
+            frame.last_pc = Some(pc);
         }
         match instr {
             Instr::Const { dst, imm, ty } => {
@@ -404,15 +415,23 @@ impl<'a> Machine<'a> {
         self.frames.last().map_or(0, |frame| frame.func)
     }
 
-    /// The source line for the current frame's program counter, if known.
+    /// The source line for the current frame's current instruction, if known.
+    ///
+    /// This is the line of the instruction the frame most recently executed
+    /// (the call site for a suspended caller), not the line of the next
+    /// instruction `pc` points at.
     #[must_use]
     pub fn current_line(&self) -> Option<crate::isa::Line> {
         let frame = self.frames.last()?;
         let func = self.program.funcs.get(frame.func as usize)?;
-        line_for(func, frame.pc)
+        line_for(func, frame.last_pc.unwrap_or(frame.pc))
     }
 
     /// A stack trace from the outermost frame to the running one.
+    ///
+    /// Each frame's `line` is the source line of the instruction it is
+    /// currently executing (see [`Machine::current_line`]); `pc` remains the
+    /// next instruction to execute in that frame.
     #[must_use]
     pub fn backtrace(&self) -> Vec<FrameInfo> {
         self.frames
@@ -423,7 +442,7 @@ impl<'a> Machine<'a> {
                     func: frame.func,
                     name: func.map_or_else(String::new, |f| f.name.clone()),
                     pc: frame.pc,
-                    line: func.and_then(|f| line_for(f, frame.pc)),
+                    line: func.and_then(|f| line_for(f, frame.last_pc.unwrap_or(frame.pc))),
                 }
             })
             .collect()
@@ -504,6 +523,7 @@ impl<'a> Machine<'a> {
             reg_base,
             slot_base,
             pc: 0,
+            last_pc: None,
         });
         Ok(())
     }
@@ -1164,6 +1184,111 @@ mod tests {
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].name, "main");
         assert_eq!(trace[0].pc, 0);
+    }
+
+    /// `current_line` must report the line of the instruction just executed,
+    /// not the fall-through `pc` (the *next* instruction). Executing the last
+    /// instruction of source line 2 must still report line 2, not line 3.
+    #[test]
+    fn current_line_tracks_last_executed_instruction() {
+        let mut program = isa::sample_program(vec![
+            Instr::Const {
+                dst: 0,
+                imm: 0x1,
+                ty: 0,
+            },
+            Instr::Const {
+                dst: 0,
+                imm: 0x2,
+                ty: 0,
+            },
+            Instr::Return,
+        ]);
+        program.funcs[0].lines = vec![
+            isa::Line {
+                pc: 0,
+                file: "t.lilac".to_string(),
+                line: 2,
+                col: 1,
+            },
+            isa::Line {
+                pc: 1,
+                file: "t.lilac".to_string(),
+                line: 3,
+                col: 1,
+            },
+            isa::Line {
+                pc: 2,
+                file: "t.lilac".to_string(),
+                line: 4,
+                col: 1,
+            },
+        ];
+        let mut machine = Machine::new(&program).expect("entry");
+        assert_eq!(machine.current_line().map(|l| l.line), Some(2));
+        machine.step().expect("const");
+        assert_eq!(
+            machine.current_line().map(|l| l.line),
+            Some(2),
+            "after executing pc 0, still on line 2"
+        );
+        assert_eq!(machine.pc(), 1);
+        machine.step().expect("const");
+        assert_eq!(machine.current_line().map(|l| l.line), Some(3));
+    }
+
+    /// A suspended caller frame must report its call-site line, not the return
+    /// address's line. `main` calls `f` at pc 0 (line 5); the fall-through
+    /// return address pc 1 is line 6, so the buggy line would be 6.
+    #[test]
+    fn backtrace_reports_caller_call_site_line() {
+        let mut program = isa::sample_program(vec![
+            Instr::Call {
+                func: 1,
+                ins: Vec::new(),
+                outs: Vec::new(),
+            },
+            Instr::Return,
+        ]);
+        program.funcs[0].lines = vec![
+            isa::Line {
+                pc: 0,
+                file: "t.lilac".to_string(),
+                line: 5,
+                col: 1,
+            },
+            isa::Line {
+                pc: 1,
+                file: "t.lilac".to_string(),
+                line: 6,
+                col: 1,
+            },
+        ];
+        program.funcs.push(isa::Func {
+            name: "f".to_string(),
+            is_extern: false,
+            ins: Vec::new(),
+            outs: Vec::new(),
+            n_regs: 0,
+            slot_bytes: 0,
+            code: vec![Instr::Return],
+            lines: vec![isa::Line {
+                pc: 0,
+                file: "t.lilac".to_string(),
+                line: 10,
+                col: 1,
+            }],
+            place_names: Vec::new(),
+        });
+        program.verify().expect("verify");
+        let mut machine = Machine::new(&program).expect("entry");
+        machine.step().expect("call");
+        let trace = machine.backtrace();
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0].name, "main");
+        assert_eq!(trace[0].line.as_ref().map(|l| l.line), Some(5));
+        assert_eq!(trace[1].name, "f");
+        assert_eq!(trace[1].line.as_ref().map(|l| l.line), Some(10));
     }
 
     /// Builds a one-function `main` program with explicit types and code.

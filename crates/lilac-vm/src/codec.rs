@@ -23,6 +23,16 @@ impl Program {
         verify(self)
     }
 
+    /// Renders one instruction in canonical disassembly form.
+    ///
+    /// This is the same per-instruction text [`Program::to_text`] embeds; the
+    /// debugger uses it for `disasm` and as the `list` fallback when no source
+    /// is available.
+    #[must_use]
+    pub fn disasm_instr(&self, instr: &Instr) -> String {
+        self.instr_text(instr)
+    }
+
     /// Renders the canonical `.lbc` text form.
     ///
     /// The output is deterministic (types, data, and functions in index order;

@@ -1,0 +1,639 @@
+//! Interactive debugger REPL over a [`Machine`].
+//!
+//! [`Debugger`] drives a bytecode [`Machine`] from a line-oriented command
+//! stream (spec §8). It supports `break`/`delete`/`clear`, `run`/`continue`,
+//! `step`/`stepi`/`next`/`finish`, `print`, `info`, `backtrace`, `disasm`,
+//! `list`, and `quit`. Source text is loaded from the line table's recorded
+//! path (or an explicit override); when it is unavailable, `list` falls back to
+//! disassembly and stepping still works at instruction granularity.
+//!
+//! The REPL reports the source line of the next instruction to execute
+//! (computed from the current frame's program counter) for stops, while
+//! [`Machine::current_line`]/[`Machine::backtrace`] report the instruction a
+//! frame is currently executing; see [`crate::exec`] for that distinction.
+
+use std::io::{BufRead, Write};
+
+use crate::exec::{Machine, Step, VmError};
+use crate::isa::{Func, Line};
+
+/// A requested stop location.
+enum Breakpoint {
+    /// Stop when the function at `index` is entered.
+    Func { index: u32, name: String },
+    /// Stop on `line` of `file` (matched by exact name or path suffix).
+    Line { file: String, line: u32 },
+}
+
+/// Why a resume returned control to the REPL.
+enum Stop {
+    /// A breakpoint matched.
+    Breakpoint,
+    /// The program returned or panicked.
+    Halted,
+}
+
+/// An interactive debugger over one [`Machine`].
+pub struct Debugger<'a> {
+    machine: Machine<'a>,
+    breakpoints: Vec<Breakpoint>,
+    /// Explicit source text override (from `--source`).
+    source: Option<String>,
+    /// Set once the program has returned or panicked.
+    halted: bool,
+    /// The program's exit code once halted.
+    exit: Option<i32>,
+    /// The `(func, pc)` location most recently stopped at, so resuming does not
+    /// immediately re-trigger the same breakpoint.
+    resume_from: Option<(u32, u32)>,
+}
+
+impl<'a> Debugger<'a> {
+    /// Creates a debugger for `machine`.
+    ///
+    /// `source` is optional source text overriding the line table's recorded
+    /// path; pass `None` to let the debugger read the recorded file.
+    #[must_use]
+    pub fn new(machine: Machine<'a>, source: Option<String>) -> Self {
+        Self {
+            machine,
+            breakpoints: Vec::new(),
+            source,
+            halted: false,
+            exit: None,
+            resume_from: None,
+        }
+    }
+
+    /// Adds a breakpoint at `"<fn>"` or `"<file>:<line>"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `loc` is empty, malformed, or names an unknown
+    /// function.
+    pub fn set_breakpoint(&mut self, loc: &str) -> Result<(), String> {
+        let loc = loc.trim();
+        if loc.is_empty() {
+            return Err("break needs a function name or file:line".to_string());
+        }
+        if let Some((file, line)) = parse_line_loc(loc) {
+            if line == 0 {
+                return Err("line numbers are 1-based".to_string());
+            }
+            self.breakpoints.push(Breakpoint::Line { file, line });
+            return Ok(());
+        }
+        let index = self
+            .machine
+            .program()
+            .funcs
+            .iter()
+            .position(|f| f.name == loc)
+            .ok_or_else(|| format!("no function `{loc}`"))?;
+        let index = u32::try_from(index).map_err(|_| "too many functions".to_string())?;
+        self.breakpoints.push(Breakpoint::Func {
+            index,
+            name: loc.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Runs the command loop until `quit` or end of input.
+    ///
+    /// At end of input the program is resumed to completion, so a
+    /// non-interactive invocation with debug flags behaves like a plain run.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`VmError`] raised while stepping the machine.
+    pub fn run_repl(
+        &mut self,
+        input: impl BufRead,
+        output: &mut impl Write,
+    ) -> Result<i32, VmError> {
+        if self.halted {
+            self.print_halt(output);
+        } else {
+            self.print_here(output);
+        }
+        let mut lines = input.lines();
+        loop {
+            let _ = write!(output, "(lilac-vm) ");
+            if let Some(Ok(raw)) = lines.next() {
+                if self.dispatch(raw.trim(), output)? {
+                    return Ok(self.exit.unwrap_or(0));
+                }
+            } else {
+                // End of input (or a read error): run the rest of the program,
+                // ignoring breakpoints, so piped/no input terminates.
+                while !self.halted {
+                    self.advance()?;
+                }
+                return Ok(self.exit.unwrap_or(0));
+            }
+        }
+    }
+
+    /// Dispatches one command line; returns `true` when the user asked to quit.
+    fn dispatch(&mut self, line: &str, output: &mut impl Write) -> Result<bool, VmError> {
+        let (head, rest) = split_head(line);
+        match head {
+            "" => {}
+            "break" | "b" => self.cmd_break(rest, output),
+            "delete" | "d" => self.cmd_delete(rest, output),
+            "clear" => {
+                self.breakpoints.clear();
+                let _ = writeln!(output, "cleared breakpoints");
+            }
+            "run" | "r" | "continue" | "c" => self.cmd_run(output)?,
+            "step" | "s" => self.cmd_step(output)?,
+            "stepi" | "si" => self.cmd_stepi(output)?,
+            "next" | "n" => self.cmd_next(output)?,
+            "finish" | "fin" => self.cmd_finish(output)?,
+            "print" | "p" => self.cmd_print(rest, output),
+            "info" | "i" => self.cmd_info(rest, output),
+            "backtrace" | "bt" | "where" => self.cmd_backtrace(output),
+            "disasm" | "dis" => self.cmd_disasm(rest, output),
+            "list" | "l" => self.cmd_list(rest, output),
+            "quit" | "q" | "exit" => return Ok(true),
+            other => {
+                let _ = writeln!(output, "unknown command `{other}`");
+            }
+        }
+        Ok(false)
+    }
+
+    /// `break <loc>`.
+    fn cmd_break(&mut self, loc: &str, output: &mut impl Write) {
+        match self.set_breakpoint(loc) {
+            Ok(()) => {
+                let _ = writeln!(
+                    output,
+                    "breakpoint {} set at {}",
+                    self.breakpoints.len(),
+                    loc.trim()
+                );
+                self.print_breakpoints(output);
+            }
+            Err(err) => {
+                let _ = writeln!(output, "error: {err}");
+            }
+        }
+    }
+
+    /// `delete <n>`.
+    fn cmd_delete(&mut self, rest: &str, output: &mut impl Write) {
+        let index = rest.trim().parse::<usize>().ok();
+        match index {
+            Some(n) if n >= 1 && n <= self.breakpoints.len() => {
+                self.breakpoints.remove(n - 1);
+                let _ = writeln!(output, "deleted breakpoint {n}");
+                self.print_breakpoints(output);
+            }
+            _ => {
+                let _ = writeln!(
+                    output,
+                    "delete needs a breakpoint number (see `info breaks`)"
+                );
+            }
+        }
+    }
+
+    /// `run` / `continue`.
+    fn cmd_run(&mut self, output: &mut impl Write) -> Result<(), VmError> {
+        match self.resume()? {
+            Stop::Breakpoint => self.print_here(output),
+            Stop::Halted => self.print_halt(output),
+        }
+        Ok(())
+    }
+
+    /// `stepi`: execute exactly one instruction.
+    fn cmd_stepi(&mut self, output: &mut impl Write) -> Result<(), VmError> {
+        if self.halted {
+            self.print_halt(output);
+            return Ok(());
+        }
+        self.advance()?;
+        self.finish_stop(output);
+        Ok(())
+    }
+
+    /// `step`: run to the next source line, entering calls.
+    fn cmd_step(&mut self, output: &mut impl Write) -> Result<(), VmError> {
+        if self.halted {
+            self.print_halt(output);
+            return Ok(());
+        }
+        let start = self.about_key();
+        loop {
+            self.advance()?;
+            if self.halted || self.about_key() != start {
+                break;
+            }
+        }
+        self.finish_stop(output);
+        Ok(())
+    }
+
+    /// `next`: run to the next source line, stepping over calls.
+    fn cmd_next(&mut self, output: &mut impl Write) -> Result<(), VmError> {
+        if self.halted {
+            self.print_halt(output);
+            return Ok(());
+        }
+        let start_depth = self.depth();
+        let start = self.about_key();
+        loop {
+            self.advance()?;
+            if self.halted || (self.depth() <= start_depth && self.about_key() != start) {
+                break;
+            }
+        }
+        self.finish_stop(output);
+        Ok(())
+    }
+
+    /// `finish`: run until the current frame returns to its caller.
+    fn cmd_finish(&mut self, output: &mut impl Write) -> Result<(), VmError> {
+        if self.halted {
+            self.print_halt(output);
+            return Ok(());
+        }
+        let start_depth = self.depth();
+        loop {
+            self.advance()?;
+            if self.halted || self.depth() < start_depth {
+                break;
+            }
+        }
+        self.finish_stop(output);
+        Ok(())
+    }
+
+    /// `print <reg>` or `print %<place>`.
+    fn cmd_print(&mut self, rest: &str, output: &mut impl Write) {
+        let arg = rest.trim();
+        if arg.is_empty() {
+            let _ = writeln!(output, "usage: print <reg> | print %<place>");
+            return;
+        }
+        if let Some(place) = arg.strip_prefix('%') {
+            match self.machine.read_place(place) {
+                Some(value) => {
+                    let _ = writeln!(output, "%{place} = {value} (0x{value:x})");
+                }
+                None => {
+                    let _ = writeln!(output, "no place %{place} in the current frame");
+                }
+            }
+            return;
+        }
+        let reg = arg.strip_prefix('&').unwrap_or(arg);
+        match reg.parse::<u32>() {
+            Ok(reg) => match self.machine.read_reg(reg) {
+                Some(value) => {
+                    let _ = writeln!(output, "&{reg} = {value} (0x{value:x})");
+                }
+                None => {
+                    let _ = writeln!(output, "register &{reg} is not live");
+                }
+            },
+            Err(_) => {
+                let _ = writeln!(output, "print expects a register index or %place");
+            }
+        }
+    }
+
+    /// `info regs|stack|funcs|breaks`.
+    fn cmd_info(&mut self, rest: &str, output: &mut impl Write) {
+        match rest.trim() {
+            "regs" | "registers" => self.info_regs(output),
+            "stack" => self.cmd_backtrace(output),
+            "funcs" | "functions" => {
+                let _ = writeln!(output, "funcs:");
+                for (index, func) in self.machine.program().funcs.iter().enumerate() {
+                    let _ = writeln!(output, "  #{index} {}", func.name);
+                }
+            }
+            "breaks" | "breakpoints" => self.print_breakpoints(output),
+            _ => {
+                let _ = writeln!(output, "info topics: regs, stack, funcs, breaks");
+            }
+        }
+    }
+
+    /// Prints the current frame's registers.
+    fn info_regs(&self, output: &mut impl Write) {
+        let _ = writeln!(output, "regs:");
+        if let Some(func) = self.current_func() {
+            for reg in 0..func.n_regs {
+                let value = self.machine.read_reg(reg).unwrap_or(0);
+                let _ = writeln!(output, "  &{reg} = {value} (0x{value:x})");
+            }
+        }
+    }
+
+    /// `backtrace`: one line per live frame.
+    fn cmd_backtrace(&self, output: &mut impl Write) {
+        let trace = self.machine.backtrace();
+        let _ = writeln!(output, "backtrace:");
+        for (index, frame) in trace.iter().enumerate() {
+            let location = frame.line.as_ref().map_or_else(
+                || format!("@{}", frame.pc),
+                |line| format!("{}:{}", line.file, line.line),
+            );
+            let _ = writeln!(output, "  #{index} {} at {location}", frame.name);
+        }
+    }
+
+    /// `disasm [pc]`: a window of canonical disassembly around `pc`.
+    fn cmd_disasm(&self, rest: &str, output: &mut impl Write) {
+        let Some(func) = self.current_func() else {
+            let _ = writeln!(output, "no current function");
+            return;
+        };
+        let program = self.machine.program();
+        let pc = rest
+            .trim()
+            .parse::<usize>()
+            .unwrap_or_else(|_| self.machine.pc() as usize);
+        let start = pc.saturating_sub(3);
+        let end = pc.saturating_add(4).min(func.code.len());
+        let _ = writeln!(output, "disasm of {} (pc {pc}):", func.name);
+        for index in start..end {
+            let marker = if index == pc { "=>" } else { "  " };
+            let _ = writeln!(
+                output,
+                "{marker} {index}  {}",
+                program.disasm_instr(&func.code[index])
+            );
+        }
+    }
+
+    /// `list [file:line]`: source lines around the current location.
+    fn cmd_list(&mut self, rest: &str, output: &mut impl Write) {
+        let source = self.locate_source();
+        let Some(source) = source else {
+            let _ = writeln!(output, "(source unavailable; showing disassembly)");
+            self.cmd_disasm("", output);
+            return;
+        };
+        let lines: Vec<&str> = source.lines().collect();
+        let requested = rest.trim();
+        let target = if requested.is_empty() {
+            self.about_line().map(|line| line.line)
+        } else {
+            parse_line_loc(requested)
+                .map(|(_, line)| line)
+                .or_else(|| requested.parse::<u32>().ok())
+        };
+        let Some(target) = target else {
+            let _ = writeln!(output, "list needs a line number or file:line");
+            return;
+        };
+        let start = target.saturating_sub(2).max(1);
+        let end = target.saturating_add(3);
+        for number in start..=end {
+            if let Some(text) = lines.get((number - 1) as usize) {
+                let _ = writeln!(output, "{number}\t{text}");
+            }
+        }
+    }
+
+    /// Whether any breakpoint matches the current location.
+    fn hit_breakpoint(&self) -> bool {
+        let (func, pc) = (self.machine.func_index(), self.machine.pc());
+        let resume_line = self
+            .resume_from
+            .and_then(|(f, p)| line_at(self.func(f)?, p));
+        for breakpoint in &self.breakpoints {
+            match breakpoint {
+                Breakpoint::Func { index, .. } => {
+                    if *index == func && pc == 0 && self.resume_from != Some((func, pc)) {
+                        return true;
+                    }
+                }
+                Breakpoint::Line { file, line } => {
+                    let Some(current) = self.about_line() else {
+                        continue;
+                    };
+                    if current.line != *line || !file_matches(&current.file, file) {
+                        continue;
+                    }
+                    // Do not re-trigger the line we are already stopped on.
+                    let same_line = resume_line
+                        .as_ref()
+                        .is_some_and(|r| r.file == current.file && r.line == current.line);
+                    if !same_line {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Resumes until a breakpoint matches or the program halts.
+    fn resume(&mut self) -> Result<Stop, VmError> {
+        loop {
+            if self.halted {
+                return Ok(Stop::Halted);
+            }
+            let current = (self.machine.func_index(), self.machine.pc());
+            if self.resume_from != Some(current) && self.hit_breakpoint() {
+                self.resume_from = Some(current);
+                return Ok(Stop::Breakpoint);
+            }
+            self.advance()?;
+        }
+    }
+
+    /// Executes one instruction, recording halt state.
+    fn advance(&mut self) -> Result<(), VmError> {
+        match self.machine.step()? {
+            Step::Advanced => {}
+            Step::Returned => {
+                self.halted = true;
+                self.exit = Some(0);
+            }
+            Step::Panicked(code) => {
+                self.halted = true;
+                self.exit = Some(code);
+            }
+        }
+        Ok(())
+    }
+
+    /// Prints the stop location and records it as the resume point.
+    fn finish_stop(&mut self, output: &mut impl Write) {
+        if self.halted {
+            self.print_halt(output);
+        } else {
+            self.print_here(output);
+            self.resume_from = Some((self.machine.func_index(), self.machine.pc()));
+        }
+    }
+
+    /// Prints the next instruction's location.
+    fn print_here(&self, output: &mut impl Write) {
+        match self.about_line() {
+            Some(line) => {
+                let _ = writeln!(
+                    output,
+                    "stopped at {}:{}:{} in {}",
+                    line.file,
+                    line.line,
+                    line.col,
+                    self.current_name()
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    output,
+                    "stopped at @{}:{}",
+                    self.current_name(),
+                    self.machine.pc()
+                );
+            }
+        }
+    }
+
+    /// Prints the exit status.
+    fn print_halt(&self, output: &mut impl Write) {
+        match self.exit {
+            Some(code) => {
+                let _ = writeln!(output, "program exited with code {code}");
+            }
+            None => {
+                let _ = writeln!(output, "program halted");
+            }
+        }
+    }
+
+    /// Prints the breakpoint table with 1-based numbers.
+    fn print_breakpoints(&self, output: &mut impl Write) {
+        if self.breakpoints.is_empty() {
+            let _ = writeln!(output, "no breakpoints");
+            return;
+        }
+        let _ = writeln!(output, "breakpoints:");
+        for (index, breakpoint) in self.breakpoints.iter().enumerate() {
+            match breakpoint {
+                Breakpoint::Func { name, .. } => {
+                    let _ = writeln!(output, "  {}: break {}", index + 1, name);
+                }
+                Breakpoint::Line { file, line } => {
+                    let _ = writeln!(output, "  {}: break {file}:{line}", index + 1);
+                }
+            }
+        }
+    }
+
+    /// The source line of the next instruction to execute.
+    fn about_line(&self) -> Option<Line> {
+        line_at(self.current_func()?, self.machine.pc())
+    }
+
+    /// A comparable `(file, line)` key for the current location.
+    fn about_key(&self) -> Option<(String, u32)> {
+        self.about_line().map(|line| (line.file, line.line))
+    }
+
+    /// The current frame's function, or `None` when the program is halted.
+    fn current_func(&self) -> Option<&Func> {
+        if self.halted {
+            return None;
+        }
+        self.func(self.machine.func_index())
+    }
+
+    /// The function at `index`.
+    fn func(&self, index: u32) -> Option<&Func> {
+        self.machine.program().funcs.get(index as usize)
+    }
+
+    /// The current function's name.
+    fn current_name(&self) -> String {
+        self.current_func()
+            .map_or_else(|| "<none>".to_string(), |func| func.name.clone())
+    }
+
+    /// The number of live frames.
+    fn depth(&self) -> usize {
+        self.machine.backtrace().len()
+    }
+
+    /// Loads source text from the override or the line table's recorded path.
+    fn locate_source(&self) -> Option<String> {
+        if let Some(source) = &self.source {
+            return Some(source.clone());
+        }
+        let path = self
+            .machine
+            .program()
+            .funcs
+            .iter()
+            .find_map(|func| func.lines.first().map(|line| line.file.clone()))?;
+        std::fs::read_to_string(path).ok()
+    }
+}
+
+/// Splits a `file:line` location; the suffix must parse as a `u32`.
+fn parse_line_loc(loc: &str) -> Option<(String, u32)> {
+    let (file, line) = loc.rsplit_once(':')?;
+    let line = line.parse::<u32>().ok()?;
+    Some((file.to_string(), line))
+}
+
+/// Whether a recorded file name matches a breakpoint's requested file.
+fn file_matches(actual: &str, wanted: &str) -> bool {
+    actual == wanted || actual.ends_with(wanted)
+}
+
+/// The source line whose `pc` is the greatest not exceeding `pc`.
+fn line_at(func: &Func, pc: u32) -> Option<Line> {
+    func.lines.iter().rev().find(|line| line.pc <= pc).cloned()
+}
+
+/// Splits off the first whitespace-delimited token.
+fn split_head(text: &str) -> (&str, &str) {
+    text.split_once(char::is_whitespace)
+        .map_or((text, ""), |(head, rest)| (head, rest.trim_start()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Debugger;
+    use crate::compile::compile_src;
+    use crate::exec::Machine;
+
+    #[test]
+    fn stepi_advances_one_instruction() {
+        let program =
+            compile_src("main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n");
+        let machine = Machine::new(&program).expect("entry");
+        let mut dbg = Debugger::new(machine, None);
+        let mut out = Vec::new();
+        dbg.run_repl(std::io::Cursor::new(b"stepi\ninfo regs\nquit\n"), &mut out)
+            .expect("repl");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("regs"));
+    }
+
+    #[test]
+    fn break_at_function_stops() {
+        let program =
+            compile_src("f: function () nothing {\n}\nmain: function () nothing {\n    f()\n}\n");
+        let machine = Machine::new(&program).expect("entry");
+        let mut dbg = Debugger::new(machine, None);
+        let mut out = Vec::new();
+        dbg.run_repl(
+            std::io::Cursor::new(b"break f\nrun\nbacktrace\nquit\n"),
+            &mut out,
+        )
+        .expect("repl");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains('f'));
+    }
+}
