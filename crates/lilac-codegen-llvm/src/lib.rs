@@ -325,6 +325,44 @@ mod tests {
         });
     }
 
+    /// A `main` calling all three leaf builtins, so every leaf must be emitted.
+    fn all_leaves_module() -> LirModule {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("dest", "ref #bit8"),
+            ("src", "ref #bit8"),
+            ("len", "#bit_native"),
+            ("base", "ref #bit8"),
+            ("off", "#bit_native"),
+            ("out", "ref #bit8"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+        call(
+            &mut insts,
+            LirCallee::Builtin("@memcpy".to_owned()),
+            &["dest", "src", "len"],
+            &[],
+        );
+        call(
+            &mut insts,
+            LirCallee::Builtin("@ptr_add".to_owned()),
+            &["base", "off"],
+            &["out"],
+        );
+        call(
+            &mut insts,
+            LirCallee::Builtin("@lilac_abort".to_owned()),
+            &[],
+            &[],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        module
+    }
+
     /// One function exercising every Task-3 instruction family so the printed
     /// IR shows each opcode. Arithmetic operands are loaded (not constants) so
     /// LLVM's builder cannot fold the opcodes away.
@@ -737,10 +775,11 @@ mod tests {
     }
 
     /// After the runtime moved into LIR, codegen defines only the three leaf
-    /// intrinsics (once each); the moved functions are ordinary LIR now.
+    /// intrinsics (once each), and only when the module calls them; the moved
+    /// functions are ordinary LIR now.
     #[test]
     fn emits_each_runtime_leaf_once_with_value_signature() {
-        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        let text = emit(&all_leaves_module());
         for needle in [
             "define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len)",
             "define ptr @.lilac.ptr_add(ptr %base, i64 %offset)",
@@ -774,7 +813,7 @@ mod tests {
     /// safe `ptrtoint`/`add`/`inttoptr` integer arithmetic.
     #[test]
     fn emits_ptr_add_runtime_definition() {
-        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        let text = emit(&all_leaves_module());
         assert!(
             text.contains("define ptr @.lilac.ptr_add(ptr %base, i64 %offset)"),
             "{text}"
@@ -785,6 +824,84 @@ mod tests {
             .expect("ptr_add definition");
         assert!(body.contains("ptrtoint ptr"), "{body}");
         assert!(body.contains("inttoptr i64"), "{body}");
+    }
+
+    /// A module that calls no leaf builtin and has no `panic` emits none of the
+    /// three leaf definitions and never declares `llvm.trap`.
+    #[test]
+    fn culls_all_unused_leaf_builtins() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
+        let text = emit(&module);
+        for needle in [
+            "define void @.lilac.memcpy",
+            "define ptr @.lilac.ptr_add",
+            "define void @.lilac.abort",
+            "declare void @llvm.trap",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "unused leaf `{needle}` was emitted in:\n{text}"
+            );
+        }
+    }
+
+    /// Only the leaves a module calls are emitted: a `@memcpy` call emits
+    /// `.lilac.memcpy` alone, with no `.lilac.ptr_add`/`.lilac.abort` and no
+    /// `llvm.trap` declaration.
+    #[test]
+    fn emits_only_the_called_leaf_builtin() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("dest", "ref #bit8"),
+            ("src", "ref #bit8"),
+            ("len", "#bit_native"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+        call(
+            &mut insts,
+            LirCallee::Builtin("@memcpy".to_owned()),
+            &["dest", "src", "len"],
+            &[],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("define void @.lilac.memcpy"), "{text}");
+        assert!(!text.contains("define ptr @.lilac.ptr_add"), "{text}");
+        assert!(!text.contains("define void @.lilac.abort"), "{text}");
+        assert!(!text.contains("declare void @llvm.trap"), "{text}");
+    }
+
+    /// A `@ptr_add` call emits `.lilac.ptr_add` but not `.lilac.memcpy`.
+    #[test]
+    fn emits_ptr_add_only_when_called() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("base", "ref #bit8"),
+            ("off", "#bit_native"),
+            ("out", "ref #bit8"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+        call(
+            &mut insts,
+            LirCallee::Builtin("@ptr_add".to_owned()),
+            &["base", "off"],
+            &["out"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("define ptr @.lilac.ptr_add"), "{text}");
+        assert!(!text.contains("define void @.lilac.memcpy"), "{text}");
     }
 
     /// The `@lilac_abort` builtin resolves to the already-emitted
@@ -822,10 +939,22 @@ mod tests {
     }
 
     /// The backend still declares and defines the `llvm.trap`-backed abort
-    /// leaf; the moved `format_args`/`byte_buffer` runtime is gone.
+    /// leaf when a module calls `@lilac_abort`; the moved
+    /// `format_args`/`byte_buffer` runtime is gone.
     #[test]
     fn keeps_only_the_trap_backed_leaf_runtime() {
-        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = Vec::new();
+        call(
+            &mut insts,
+            LirCallee::Builtin("@lilac_abort".to_owned()),
+            &[],
+            &[],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
         assert!(text.contains("declare void @llvm.trap()"), "{text}");
         assert!(text.contains("call void @llvm.trap()"), "{text}");
         assert!(text.contains("define void @.lilac.abort()"), "{text}");

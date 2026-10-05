@@ -158,8 +158,8 @@ fn compiles_and_runs_on_host() {
 }
 
 /// The LIR runtime is culled when unused: `emit-llvm` for a program that
-/// reaches none of it contains no runtime bodies and no runtime calls (only
-/// the backend's always-present leaf definitions remain).
+/// reaches none of it contains no runtime bodies, no runtime calls, and none of
+/// the backend's leaf definitions.
 #[test]
 fn no_runtime_fixture_emits_no_runtime_text() {
     let output = lilac()
@@ -181,16 +181,15 @@ fn no_runtime_fixture_emits_no_runtime_text() {
     ] {
         assert!(!text.contains(needle), "unexpected `{needle}` in:\n{text}");
     }
-    // The backend always hand-writes the three leaf definitions
-    // (`@ptr_add`/`@memcpy`/`@lilac_abort`); assert they are present even when
-    // the program calls none, so the "no runtime text" check above is anchored
-    // against something rather than only asserting absences.
+    // The backend hand-writes the three leaf definitions only when a program
+    // reaches them; this program reaches none, so they are culled too.
     for def in [
         "define ptr @.lilac.ptr_add(ptr %base, i64 %offset)",
         "define void @.lilac.memcpy(ptr %dest, ptr %src, i64 %len)",
         "define void @.lilac.abort()",
+        "declare void @llvm.trap()",
     ] {
-        assert!(text.contains(def), "missing `{def}` in:\n{text}");
+        assert!(!text.contains(def), "unexpected `{def}` in:\n{text}");
     }
     // This program calls none of the leaves.
     for call in [

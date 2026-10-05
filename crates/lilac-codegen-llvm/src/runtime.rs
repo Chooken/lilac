@@ -16,11 +16,23 @@ use lilac_span::Span;
 
 use crate::lower::{checked, Lower};
 
-/// Emits every leaf runtime symbol exactly once, in the fixed order.
+/// Emits each leaf runtime symbol a module actually calls, in the fixed order.
+///
+/// The definitions must precede `lower_func` so `lower_builtin_call` reuses
+/// them; a module that calls no leaf emits none, and the `llvm.trap`-backed
+/// `.lilac.abort` is emitted when `@lilac_abort` or a `panic` terminator needs
+/// it.
 pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
-    memcpy(lower);
-    ptr_add(lower);
-    abort(lower);
+    let used = lower.used_builtins();
+    if used.contains("@memcpy") {
+        memcpy(lower);
+    }
+    if used.contains("@ptr_add") {
+        ptr_add(lower);
+    }
+    if used.contains("@lilac_abort") {
+        abort(lower);
+    }
 }
 
 /// Reads the `index`th parameter of a runtime function, raising an ICE when absent.

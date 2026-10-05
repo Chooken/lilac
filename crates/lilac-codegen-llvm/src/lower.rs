@@ -8,7 +8,7 @@
 //! `unreachable`). Builtin calls use the value ABI and reuse the runtime
 //! definitions the `runtime` module emits before any user function.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
@@ -148,6 +148,31 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             builder.build_return(Some(&i32_ty.const_zero())),
             "main wrapper return",
         );
+    }
+
+    /// The leaf builtins this module references, so the runtime emits only the
+    /// ones a surviving function calls: every `@`-builtin `call`, plus
+    /// `@lilac_abort` whenever a `panic` terminator survives (it lowers to a
+    /// `.lilac.abort` call). Names keep their `@` sigil.
+    pub(crate) fn used_builtins(&self) -> HashSet<&str> {
+        let mut used = HashSet::new();
+        for func in &self.lir.funcs {
+            for block in &func.blocks {
+                for inst in &block.insts {
+                    if let LirInst::Call {
+                        func: LirCallee::Builtin(name),
+                        ..
+                    } = inst
+                    {
+                        used.insert(name.as_str());
+                    }
+                }
+                if matches!(block.term, LirTerm::Panic { .. }) {
+                    used.insert("@lilac_abort");
+                }
+            }
+        }
+        used
     }
 
     /// Emits the fixed in-module builtin runtime.
