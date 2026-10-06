@@ -167,10 +167,7 @@ impl Session {
         let mut parser = Parser::new(tokens, file);
         let program = parser.parse_program(&mut self.diags)?;
         let module = lilac_resolve::collect(&program, &mut self.diags);
-        // Task 4 migrates `lower` to `ResolvedProject`; until then keep the
-        // module alive (clone) so both the new typeck signatures and the old
-        // lowering signature stay satisfied.
-        let project = lilac_resolve::ResolvedProject::single(module.clone(), file);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = lilac_ty::Types::new();
         let sigs = lilac_typeck::collect_sigs(
             &project,
@@ -185,7 +182,7 @@ impl Session {
             return Err(ErrorGuaranteed::new());
         }
         let triple = self.target.to_triple();
-        let mut lir = lilac_lower::lower(&hir, &module, &types, &mut self.diags, &triple)?;
+        let mut lir = lilac_lower::lower(&hir, &project, &types, &mut self.diags, &triple)?;
         on_stage("lower", &lir);
         lilac_const::fold(&mut lir, &mut self.diags)?;
         on_stage("fold", &lir);

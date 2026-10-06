@@ -15,19 +15,20 @@ use lilac_ir::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
     LirOperand, LirTerm,
 };
-use lilac_resolve::{DefId, Module};
+use lilac_resolve::{DefId, ResolvedProject};
 use lilac_span::Span;
 use lilac_ty::{TypeId, TypeRef, Types};
 
 /// Lowers typed HIR to Lilac IR.
 pub fn lower(
     hir: &HirProgram,
-    module: &Module,
+    project: &ResolvedProject,
     types: &Types,
     diags: &mut Diags,
     target_triple: &str,
 ) -> Result<LirModule, ErrorGuaranteed> {
     let mut lower = Lower {
+        project,
         types,
         diags,
         module: LirModule::new(target_triple),
@@ -39,10 +40,10 @@ pub fn lower(
         failed: false,
     };
     for (name, members) in &hir.layouts {
-        let is_aggregate = module
-            .items
-            .get(name)
-            .is_some_and(|item| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }));
+        let is_aggregate = project
+            .all_items()
+            .find(|(item_name, _)| *item_name == name.as_str())
+            .is_some_and(|(_, item)| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }));
         let mut layout = Vec::with_capacity(members.len() + 1);
         let mut variants = Vec::with_capacity(members.len());
         for (member, ty) in members {
@@ -67,7 +68,8 @@ pub fn lower(
         lower.consts.insert(def, expanded);
     }
     for func in &hir.funcs {
-        lower.func_names.insert(func.def, func.name.clone());
+        let symbol = lower.symbol(func.def, &func.name);
+        lower.func_names.insert(func.def, symbol);
     }
     for func in &hir.funcs {
         lower.lower_func(func);
@@ -106,6 +108,8 @@ fn lir_ty(types: &Types, ty: TypeRef) -> String {
 }
 
 struct Lower<'a> {
+    /// Resolved namespaces, for qualifying emitted symbols (spec §7.1).
+    project: &'a ResolvedProject,
     types: &'a Types,
     diags: &'a mut Diags,
     module: LirModule,
@@ -292,6 +296,23 @@ fn runtime_callee(name: &str) -> LirCallee {
 }
 
 impl Lower<'_> {
+    /// The emitted LIR symbol for an item: its namespace path (omitted at the
+    /// root) plus `.` and its existing local name (spec §7.1). The local name
+    /// already carries any object-member and generic-instance suffix.
+    fn symbol(&self, def: DefId, local: &str) -> String {
+        match self.project.namespace_of(def) {
+            Some(ns) => {
+                let path = self.project.namespace_path(ns);
+                if path.is_empty() {
+                    local.to_owned()
+                } else {
+                    format!("{path}.{local}")
+                }
+            }
+            None => local.to_owned(),
+        }
+    }
+
     fn expand_const(&mut self, def: DefId, inlining: &mut HashSet<DefId>) -> HirExpr {
         let Some(value) = self.const_src.get(&def).cloned() else {
             lilac_error::bug!(Span::dummy(), "unknown constant in expansion");
@@ -396,6 +417,7 @@ impl Lower<'_> {
 
     /// Lowers one function (parameters and return slots become places).
     fn lower_func(&mut self, func: &HirFunc) {
+        let symbol = self.symbol(func.def, &func.name);
         let mut fs = FuncState::new();
         if let Some((parent, _)) = func.name.split_once('.') {
             fs.is_member = true;
@@ -427,7 +449,7 @@ impl Lower<'_> {
         }
         if func.is_extern {
             self.module.funcs.push(LirFunc {
-                name: func.name.clone(),
+                name: symbol,
                 ins: fs.ins,
                 outs: fs.outs,
                 is_extern: true,
@@ -452,7 +474,7 @@ impl Lower<'_> {
             fs.blocks[0].insts = allocas;
         }
         self.module.funcs.push(LirFunc {
-            name: func.name.clone(),
+            name: symbol,
             ins: fs.ins,
             outs: fs.outs,
             is_extern: false,
@@ -1411,7 +1433,14 @@ impl Lower<'_> {
                 );
                 LirCallee::Reg(reg)
             }
-            HirCallee::Hook { name, .. } => LirCallee::Func(name.clone()),
+            HirCallee::Hook { name, def } => {
+                let name = self
+                    .func_names
+                    .get(def)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                LirCallee::Func(name)
+            }
             HirCallee::Intrinsic { .. } => {
                 lilac_error::bug!(span, "intrinsic in general call path");
             }
@@ -1877,11 +1906,11 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
-        let project = lilac_resolve::ResolvedProject::single(module.clone(), file);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = lilac_typeck::collect_sigs(&project, &program, &mut types, &mut diags, true);
         let hir = lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut diags);
-        let lir = lower(&hir, &module, &types, &mut diags, "x86_64-unknown-none")
+        let lir = lower(&hir, &project, &types, &mut diags, "x86_64-unknown-none")
             .expect("test source lowers");
         (lir.to_text(), diags)
     }
