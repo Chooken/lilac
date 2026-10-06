@@ -345,8 +345,11 @@ version = "0.2.0"
 dependencies = [
  "lilac-driver",
  "lilac-error",
+ "lilac-hir",
  "lilac-module",
+ "lilac-resolve",
  "lilac-span",
+ "lilac-ty",
  "lsp-server",
  "lsp-types",
  "serde_json",
