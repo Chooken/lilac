@@ -459,7 +459,7 @@ impl LirModule {
         for func in &self.funcs {
             lines.extend(print_func(func));
         }
-        lines
+        physical_lines(lines)
     }
 
     /// Canonical module text: header, data consts, type sections (sorted
@@ -480,6 +480,21 @@ impl LirModule {
     }
 }
 
+/// Splits each logical line on `\n`, yielding one entry per physical line and
+/// giving every part the logical line's span. Rejoining with `"\n"` reproduces
+/// the logical line, so `join_lines` stays byte-identical even when a `data`
+/// string literal contains a raw newline while `lines` stays one-per-physical
+/// line (matching [`str::lines`]).
+fn physical_lines(lines: Vec<(String, Option<Span>)>) -> Vec<(String, Option<Span>)> {
+    let mut out = Vec::with_capacity(lines.len());
+    for (text, span) in lines {
+        for part in text.split('\n') {
+            out.push((part.to_owned(), span));
+        }
+    }
+    out
+}
+
 /// Joins `(line, span)` pairs with `"\n"` and appends a trailing newline.
 fn join_lines(lines: &[(String, Option<Span>)]) -> String {
     let mut text = lines
@@ -497,21 +512,14 @@ impl Default for LirModule {
     }
 }
 
-/// Escapes `"`, `\`, and the line breaks `\n`/`\r` inside `data` literal text.
-///
-/// Control characters must be escaped so a literal stays on one physical line;
-/// otherwise a raw newline would split one `lines` entry across two physical
-/// lines and desynchronize the per-line span map.
+/// Escapes `"` and `\` inside `data` literal text.
 fn escape_data(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
-        match ch {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            _ => escaped.push(ch),
+        if ch == '"' || ch == '\\' {
+            escaped.push('\\');
         }
+        escaped.push(ch);
     }
     escaped
 }
@@ -2348,20 +2356,32 @@ mod tests {
     }
 
     #[test]
-    fn spanned_data_literal_with_newlines_stays_one_line() {
+    fn spanned_data_literal_with_newlines_keeps_physical_lines_aligned() {
         let mut module = canonical_module();
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("a\nb\r".to_owned()),
+            kind: LirDataKind::Str("a\nb".to_owned()),
             span: test_span(),
         });
         let spanned = module.to_text_spanned();
+        // (a) Byte-identical to `to_text`, raw newline preserved.
         assert_eq!(spanned.text, module.to_text());
-        assert_eq!(spanned.lines.len(), spanned.text.lines().count());
         assert!(
-            spanned.text.contains("!c0: str = \"a\\nb\\r\""),
+            spanned.text.contains("!c0: str = \"a\nb\""),
             "{}",
             spanned.text
         );
+        // (b) One span per physical line.
+        assert_eq!(spanned.lines.len(), spanned.text.lines().count());
+        // (c) Both physical lines of the data carry the data's span.
+        let lines: Vec<&str> = spanned.text.lines().collect();
+        let data_line = lines
+            .iter()
+            .position(|l| l.starts_with("!c0: str"))
+            .expect("data line");
+        assert_eq!(lines[data_line], "!c0: str = \"a");
+        assert_eq!(lines[data_line + 1], "b\"");
+        assert_eq!(spanned.lines[data_line], Some(test_span()));
+        assert_eq!(spanned.lines[data_line + 1], Some(test_span()));
     }
 }

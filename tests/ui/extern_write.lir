@@ -1,6 +1,7 @@
 lilac_ir = "0.3"
 target = "x86_64-unknown-none"
-!c0: str = "hi\n"
+!c0: str = "hi
+"
 extern @write
   in #bit32 %fd
   in ref #bit8 %buf
