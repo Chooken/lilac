@@ -1,0 +1,5 @@
+pair: extern function () result: @bit32, second: @bit32
+
+main: function () nothing {
+    a: @bit32, b: @bit32 = pair()
+}

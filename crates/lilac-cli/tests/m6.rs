@@ -377,6 +377,47 @@ fn nested_private_field_denied_is_e026() {
     assert!(!stderr.contains("error[E021]"), "stderr:\n{stderr}");
 }
 
+// --- extern C ABI signatures (E028) --------------------------------------
+
+/// An `extern` signature the C ABI cannot represent is `E028`: a `>1` out, or a
+/// parameter/return that is neither a bit integer nor `ref T`. The diagnostic
+/// must reach the user as an ordinary `error[E028]` — never the
+/// `internal error: LLVM codegen failed:` framing — and must never
+/// panic/signal (the `m4_regressions` contract).
+#[test]
+fn unsupported_extern_signatures_are_e028() {
+    for fixture in [
+        "FAILS_extern_multi_out.lilac",
+        "FAILS_extern_aggregate_param.lilac",
+    ] {
+        for cmd in ["check", "emit-llvm"] {
+            let output = lilac()
+                .args([cmd, &ui(fixture)])
+                .output()
+                .expect("runs lilac");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_ne!(
+                output.status.code(),
+                Some(101),
+                "{fixture} (`{cmd}`) panicked:\n{stderr}"
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{fixture} (`{cmd}`) stderr:\n{stderr}"
+            );
+            assert!(
+                stderr.contains("error[E028]"),
+                "{fixture} (`{cmd}`) stderr:\n{stderr}"
+            );
+            assert!(
+                !stderr.contains("internal error:"),
+                "{fixture} (`{cmd}`) leaked the internal-error framing:\n{stderr}"
+            );
+        }
+    }
+}
+
 // --- Module project snapshots and end-to-end run -------------------------
 
 fn modules_dir() -> PathBuf {
