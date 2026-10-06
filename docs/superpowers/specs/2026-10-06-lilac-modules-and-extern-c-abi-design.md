@@ -112,10 +112,10 @@ crates/
   lilac-parse/        # parse `private { … }` at item and object-member position
   lilac-module/       # NEW: folder loader (root discovery + `using` fixpoint),
                       #      I/O injected via an Fs trait; pure logic + tests
-  lilac-resolve/      # per-namespace Module merge, per-file visible scopes,
-                      #      visibility, E020/E025/E026/E029
-  lilac-typeck/       # resolve names against the referencing file's scope
-  lilac-lower/        # consume the resolved project (per-file scopes)
+  lilac-resolve/      # namespace tree + ResolvedProject (per-file scopes,
+                      #      visibility, unit-global hooks); E020/E025/E026/E029
+  lilac-typeck/       # resolve names via ResolvedProject + the file's FileScope
+  lilac-lower/        # consume ResolvedProject; emit namespace-mangled symbols
   lilac-driver/       # compile_project(project) multi-file pipeline
   lilac-codegen-llvm/ # extern C ABI: signature + call lowering, E028
   lilac-cli/          # accept a directory (or a file → its parent)
@@ -226,31 +226,75 @@ paths, resolves them root-relative, reads newly-reached folders, and repeats to
 a fixpoint (each folder once). A missing folder emits `E025`.
 
 **Resolution (`lilac-resolve`).** Each `ResItem` gains visibility and namespace
-identity:
+identity; the project becomes a namespace tree plus a unit-global hook set:
 
 ```rust
-pub enum Visibility { Public, Private }
+pub enum Visibility { Public, Private }        // Public, or Restricted(own ns)
 pub struct ResItem { pub id: DefId, pub kind: ResKind, pub span: Span,
-                     pub vis: Visibility, pub ns: u32 }
+                     pub vis: Visibility, pub ns: NsId }
 
-pub struct FileScope { pub file: FileId, pub visible: Module }
-pub struct ResolvedProject { pub modules: Vec<Module>, pub files: Vec<FileScope> }
+pub struct NamespaceData { pub path: String, pub parent: Option<NsId>,
+                           pub items: HashMap<String, ResItem> }
+pub struct FileScope { pub file: FileId, pub ns: NsId,
+                       pub visible: HashMap<String, Lookup> }
+pub enum Lookup { One(ResItem), Ambiguous(Vec<Span>) }
+pub struct ResolvedProject {
+    pub namespaces: Vec<NamespaceData>,       // [0] = root
+    pub hooks: HashMap<String, Vec<ResItem>>, // unit-global overload sets
+    pub files: Vec<FileScope>,
+}
 ```
 
-`collect_project` merges each namespace's files into a `Module` (`E020` across
-files), then computes each file's `visible` module: its own namespace's items
-(public **and** private), then each `using`d namespace's **public** items, with
-local names shadowing imported ones and import-vs-import collisions recorded as
-an ambiguous marker (`E029` on use). Object member scopes carry per-member
-visibility for the member lookup gate.
+`collect_project` merges each namespace's files into its `NamespaceData.items`
+(`E020` across files), collects top-level hooks into the unit-global set
+(`E020` on identical signatures), then computes each file's `visible` map: its
+own namespace's items (public **and** private), its ancestors' items (public by
+ancestor reach, private by descendant reach), then each `using`d namespace's
+**public** items, with local names shadowing imported ones and import-vs-import
+collisions recorded as `Lookup::Ambiguous` (`E029` on use).
 
-**Typeck / lower.** Name lookup consults the *referencing function's file scope*
-(`FileScope.visible`) and the enclosing object's member visibility, not a single
-global module. Generic instantiation and hook overload sets stay global and
-deduplicated, shared across files (a monomorphization cache), so cross-file
-instances are built once. The exact threading of `FileId`/scope into
-`check_bodies`/`lower` is the plan's work; the invariant is that a lookup can
-only see names its file is allowed to see.
+### 7.1 Symbol naming (mangling)
+
+LIR/LLVM symbols are flat and unique (the verifier rejects duplicates, `E070`),
+but namespaces reuse names, so every top-level item is emitted under a
+**namespace-path prefix**:
+
+- symbol = the namespace path joined by `.` plus a `.` (omitted for the root),
+  then the item's local qualified name.
+- root `foo` → `foo`; namespace `A` `foo` → `A.foo`; `A.B` `foo` → `A.B.foo`; an
+  object method in `A` → `A.Object.Method`; generic instances keep their existing
+  suffix (`A.GenBox.1..bit32.@on_drop`).
+- The prefix cannot collide with the reserved `.lilac.` namespace (a path never
+  starts with `.`) and cannot be written in source (identifiers contain no `.`).
+- Because the root namespace adds no prefix, **every existing single-file
+  `.lir`/`.ll` snapshot is byte-identical** and `main` stays `main`.
+- A cross-namespace reference resolves through the referring file's scope to the
+  target's `DefId`; lowering emits the target's mangled symbol. Data constants
+  and the `.lilac.` runtime are unaffected.
+- **Extern declarations and hooks are exempt:** an `extern` keeps its unmangled
+  C name (§8), and top-level hooks are unit-global (§7.2) so they carry no
+  namespace prefix.
+
+### 7.2 Cross-namespace hooks
+
+Top-level hooks (`@add`, `@conversion`, …) form **one overload set per hook name
+for the whole compilation unit** (coherence-like, as Rust trait impls are
+global), independent of namespace and `using`; two hooks with identical
+signatures anywhere are `E020`. `private` does not gate top-level hooks.
+Object-member hooks follow member visibility like any other member.
+
+### 7.3 Resolution architecture
+
+Name lookup is context-sensitive (per file/namespace) while signature
+collection, generic instantiation, and hook sets are unit-global. A single
+`ResolvedProject` is threaded through the pipeline (rustc's module-context/Rib
+model): `collect_sigs`, `check_bodies`, and `lower` take `&ResolvedProject` and
+the `FileId` being processed instead of one global `&Module`, and resolve every
+item reference through that file's `FileScope` (`Lookup`, with `E029` on an
+ambiguous use). Object-member resolution is type-relative and stays in typeck,
+where the `E026` gate lives. The exact signatures are the plan's work; the
+invariant is that a lookup can only see names its file is allowed to see, and
+that the emitted symbol for a resolved item is its namespace-mangled name (§7.1).
 
 **Single-file compatibility.** `compile_source`/`compile_lir` remain for the
 existing UI fixtures; a single file is a one-file project.
@@ -364,6 +408,14 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
 - **Rust alignment.** Reach follows Rust's ancestor/descendant model; we
   deliberately keep opt-out `private`, implicit folders, no qualified paths, no
   `pub use`, and class-scoped object members as documented divergences.
+- **Symbol churn under namespaces.** Non-root items gain a dotted prefix
+  (`A.B.foo`); existing single-file snapshots are unaffected because the root
+  namespace has no prefix, but new module fixtures show prefixed symbols, and any
+  future ABI consumer must expect them.
+- **Resolution refactor is the bulk of the work.** Replacing the single global
+  `Module` with a per-file-scope `ResolvedProject` touches every name-lookup site
+  in typeck and lowering; the single-file path and all existing snapshots are the
+  regression net.
 
 ## 15. Self-review
 
@@ -372,9 +424,9 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
   to the implementation plan as a concrete design task, not a TBD.
 - **Consistency:** §1.1's nine decisions match §3–§9; the reach rules in §5
   implement decision 9 and are reflected in §4 and the `E026` row of §10; the
-  loader (§7) is the input to resolution (§4–§6); the extern ABI (§8) matches the
-  fixture fixes (§12); the diagnostics table (§10) matches the error sites named
-  in §4–§6.
+  loader (§7) feeds resolution (§7.1–§7.3), whose mangling and unit-global hooks
+  back §3–§6; the extern ABI (§8) matches the fixture fixes (§12); the
+  diagnostics table (§10) matches the error sites named in §4–§6.
 - **Scope:** strictly modules + visibility + a minimal extern C ABI — no stdlib,
   no build tooling, no IR format change.
 - **Ambiguity:** root discovery, `using` base, visibility of private items,
