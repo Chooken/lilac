@@ -116,7 +116,7 @@ pub struct Module {
 pub enum Lookup {
     /// Exactly one visible binding.
     One(ResItem),
-    /// Import-vs-import collision; the spans are the competing declarations.
+    /// Import-vs-import collision; the spans are the competing `using` sites.
     Ambiguous(Vec<Span>),
 }
 
@@ -254,40 +254,60 @@ fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId>
     None
 }
 
-/// Signature equality for overload uniqueness (names excluded, types included).
-fn same_sig(a: &ResItem, b: &ResItem) -> bool {
-    match (&a.kind, &b.kind) {
-        (
-            ResKind::Hook {
-                params: ap,
-                returns: ar,
-                ..
-            },
-            ResKind::Hook {
-                params: bp,
-                returns: br,
-                ..
-            },
-        ) => sig_key(ap, ar) == sig_key(bp, br),
-        _ => true,
+/// Whether `name` is a builtin type spelling that must stay unqualified.
+///
+/// Kept in sync with `lilac_ty::Types::builtin` (which cannot be used here:
+/// `lilac-ty` depends on this crate).
+fn is_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "@bit8"
+            | "@bit16"
+            | "@bit32"
+            | "@bit64"
+            | "@bit_native"
+            | "@byte_buffer"
+            | "@format_args"
+            | "unknown"
+    )
+}
+
+/// Namespace-qualifies a user type name for signature comparison (`a.Thing` ≠
+/// `b.Thing`, spec §7.1); builtins and the root namespace stay bare.
+fn qualify_type_name(name: &str, path: &str) -> String {
+    if path.is_empty() || is_builtin_type(name) {
+        name.to_owned()
+    } else {
+        format!("{path}.{name}")
     }
 }
 
-/// Signature key for overload uniqueness (names excluded, types included).
-fn ty_key(ty: &AstType) -> String {
-    match &ty.func {
-        Some(func) => {
-            let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty)).collect();
-            let rs: Vec<String> = func.returns.iter().map(|r| ty_key(&r.ty)).collect();
-            format!("function({})->({})", ps.join(","), rs.join(","))
-        }
-        None => format!("{}:{}:{:?}", ty.name, ty.is_ref, ty.generic_args),
+/// Signature key for overload uniqueness (names excluded, types included),
+/// qualifying user type names with the item's namespace path so two
+/// namespaces' same-named types do not collapse to one signature.
+fn ty_key(ty: &AstType, path: &str) -> String {
+    if let Some(func) = &ty.func {
+        let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty, path)).collect();
+        let rs: Vec<String> = func.returns.iter().map(|r| ty_key(&r.ty, path)).collect();
+        format!("function({})->({})", ps.join(","), rs.join(","))
+    } else {
+        let args: Vec<String> = ty
+            .generic_args
+            .iter()
+            .map(|arg| ty_key(arg, path))
+            .collect();
+        format!(
+            "{}:{}:{:?}",
+            qualify_type_name(&ty.name, path),
+            ty.is_ref,
+            args
+        )
     }
 }
 
-fn sig_key(params: &[Param], returns: &[Param]) -> String {
-    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty)).collect();
-    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty)).collect();
+fn sig_key(params: &[Param], returns: &[Param], path: &str) -> String {
+    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty, path)).collect();
+    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty, path)).collect();
     format!("({})->({})", ps.join(","), rs.join(","))
 }
 
@@ -295,6 +315,8 @@ struct Collector<'a> {
     diags: &'a mut Diags,
     next: u32,
     ns: NsId,
+    /// Namespace path by [`NsId`] (index), for signature qualification.
+    ns_paths: Vec<String>,
 }
 
 impl Collector<'_> {
@@ -302,6 +324,33 @@ impl Collector<'_> {
         let id = DefId(self.next);
         self.next += 1;
         id
+    }
+
+    /// The dotted path of `ns` (`""` for the root or an unknown id).
+    fn path_of(&self, ns: NsId) -> &str {
+        self.ns_paths
+            .get(usize::try_from(ns.0).unwrap_or(usize::MAX))
+            .map_or("", String::as_str)
+    }
+
+    /// Signature equality for overload uniqueness (names excluded, types
+    /// included, qualified by each item's own namespace).
+    fn same_sig(&self, a: &ResItem, b: &ResItem) -> bool {
+        match (&a.kind, &b.kind) {
+            (
+                ResKind::Hook {
+                    params: ap,
+                    returns: ar,
+                    ..
+                },
+                ResKind::Hook {
+                    params: bp,
+                    returns: br,
+                    ..
+                },
+            ) => sig_key(ap, ar, self.path_of(a.ns)) == sig_key(bp, br, self.path_of(b.ns)),
+            _ => true,
+        }
     }
 
     /// Collects one file's top-level definitions. Flattens top-level `private`
@@ -360,7 +409,10 @@ impl Collector<'_> {
     /// signature anywhere in the compilation unit (`E020`, spec §7.2).
     fn add_hook(&mut self, hooks: &mut HashMap<String, Vec<ResItem>>, name: &str, item: ResItem) {
         let overloads = hooks.entry(name.to_owned()).or_default();
-        if overloads.iter().any(|previous| same_sig(previous, &item)) {
+        if overloads
+            .iter()
+            .any(|previous| self.same_sig(previous, &item))
+        {
             let previous_span = overloads
                 .first()
                 .map_or(item.span, |previous| previous.span);
@@ -458,7 +510,10 @@ impl Collector<'_> {
         if matches!(item.kind, ResKind::Hook { .. }) {
             if let Some(hooks) = hooks {
                 let overloads = hooks.entry(name.to_owned()).or_default();
-                if overloads.iter().any(|previous| same_sig(previous, &item)) {
+                if overloads
+                    .iter()
+                    .any(|previous| self.same_sig(previous, &item))
+                {
                     let previous_span = overloads
                         .first()
                         .map_or(item.span, |previous| previous.span);
@@ -490,6 +545,7 @@ pub fn collect(program: &Program, diags: &mut Diags) -> Module {
         diags,
         next: 0,
         ns: NsId(0),
+        ns_paths: vec![String::new()],
     };
     collector.collect_program(program, NsId(0))
 }
@@ -545,10 +601,15 @@ pub fn collect_project(
         diags,
         next: 0,
         ns: NsId(0),
+        ns_paths: project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.clone())
+            .collect(),
     };
     let mut hooks: HashMap<String, Vec<ResItem>> = HashMap::new();
-    for (index, file) in project.files.iter().enumerate() {
-        let Some(program) = by_file.get(&index).copied() else {
+    for file in &project.files {
+        let Some(program) = by_file.get(&(file.file.0 as usize)).copied() else {
             continue;
         };
         let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
@@ -585,11 +646,11 @@ pub fn collect_project(
     }
 
     let mut files = Vec::with_capacity(project.files.len());
-    for (index, file) in project.files.iter().enumerate() {
+    for file in &project.files {
         let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
-        let visible = compute_visible(&namespaces, ns, &file.usings, &by_path);
+        let visible = compute_visible(&namespaces, ns, &file.usings, &file.using_spans, &by_path);
         files.push(FileScope {
-            file: FileId(u32::try_from(index).unwrap_or(u32::MAX)),
+            file: file.file,
             ns,
             visible,
         });
@@ -625,10 +686,15 @@ fn add_local(
 }
 
 /// Builds the per-file `visible` map for a file in `ns` with `usings`.
+///
+/// `using_spans` runs parallel to `usings`; an import-vs-import collision is
+/// recorded as [`Lookup::Ambiguous`] carrying the two **`using` directive**
+/// spans (spec §10: the reference plus both import sites).
 fn compute_visible(
     namespaces: &[NamespaceData],
     ns: NsId,
     usings: &[String],
+    using_spans: &[Span],
     by_path: &HashMap<String, NsId>,
 ) -> HashMap<String, Lookup> {
     let mut visible: HashMap<String, Lookup> = HashMap::new();
@@ -649,9 +715,9 @@ fn compute_visible(
     }
     add_local(namespaces, ns, &mut visible, &mut local);
 
-    let mut imported: HashMap<String, Vec<ResItem>> = HashMap::new();
+    let mut imported: HashMap<String, Vec<(ResItem, Span)>> = HashMap::new();
     let mut seen: HashSet<NsId> = HashSet::new();
-    for using in usings {
+    for (index, using) in usings.iter().enumerate() {
         let Some(&target) = by_path.get(using.as_str()) else {
             continue;
         };
@@ -661,22 +727,26 @@ fn compute_visible(
         let Some(data) = namespace_at(namespaces, target) else {
             continue;
         };
+        let site = using_spans.get(index).copied().unwrap_or_else(Span::dummy);
         for (name, item) in &data.items {
             if item.vis != Visibility::Public || local.contains(name) {
                 continue;
             }
-            imported.entry(name.clone()).or_default().push(item.clone());
+            imported
+                .entry(name.clone())
+                .or_default()
+                .push((item.clone(), site));
         }
     }
     for items in imported.values_mut() {
-        items.sort_by_key(|item| (item.span.file.0, item.span.lo.0));
+        items.sort_by_key(|(item, _)| (item.span.file.0, item.span.lo.0));
     }
     for (name, items) in imported {
-        if let [item] = items.as_slice() {
+        if let [(item, _)] = items.as_slice() {
             visible.insert(name, Lookup::One(item.clone()));
         } else {
-            let spans = items.iter().map(|item| item.span).collect();
-            visible.insert(name, Lookup::Ambiguous(spans));
+            let sites = items.iter().map(|(_, site)| *site).collect();
+            visible.insert(name, Lookup::Ambiguous(sites));
         }
     }
     visible
@@ -906,6 +976,7 @@ mod tests {
             programs.push((file, program));
             files.push(FileUnit {
                 name: spec.name.to_owned(),
+                file,
                 ns: spec.ns,
                 src: spec.src.to_owned(),
                 usings: spec
@@ -913,6 +984,7 @@ mod tests {
                     .iter()
                     .map(|using| (*using).to_owned())
                     .collect(),
+                using_spans: spec.usings.iter().map(|_| Span::dummy()).collect(),
             });
             ns_files[spec.ns].push(index);
         }

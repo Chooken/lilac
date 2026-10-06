@@ -1,0 +1,6 @@
+using a
+using b
+
+main: function () nothing {
+    x: @bit32 = foo()
+}

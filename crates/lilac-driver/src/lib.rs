@@ -169,14 +169,17 @@ impl Session {
         fs: &mut dyn Fs,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        let project = lilac_module::load(root, fs, &mut self.diags)?;
+        // `load` registers each source in this session's `SourceMap` itself, so
+        // the loader's `E025`/`using` spans resolve without `FileId(index)`
+        // coincidence (finding: `E025` labels never rendered).
+        let project = lilac_module::load(root, fs, &mut self.source_map, &mut self.diags)?;
         let mut programs: Vec<(FileId, Program)> = Vec::with_capacity(project.files.len());
         let mut merged = Program {
             items: Vec::new(),
             span: Span::dummy(),
         };
-        for (index, unit) in project.files.iter().enumerate() {
-            let file = self.source_map.add_file(&unit.name, &unit.src);
+        for unit in &project.files {
+            let file = unit.file;
             let (tokens, lex_errors) = Lexer::lex_all(&unit.src, file);
             for error in lex_errors {
                 self.diags.emit(error);
@@ -184,8 +187,7 @@ impl Session {
             let mut parser = Parser::new(tokens, file);
             let program = parser.parse_program(&mut self.diags)?;
             merged.items.extend(program.items.iter().cloned());
-            let id = FileId(u32::try_from(index).unwrap_or(u32::MAX));
-            programs.push((id, program));
+            programs.push((file, program));
         }
         let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
         self.finish_pipeline(&merged, &resolved, on_stage)
@@ -234,6 +236,13 @@ impl Session {
             &mut self.diags,
             self.warn_on_operator_type_change,
         );
+        // Signature collection can reject a definition (`E020`/`E052`), leaving
+        // some `DefId` without a signature. Stop before `check_bodies`, which
+        // assumes every reachable definition has one (defense in depth against
+        // any future signatureless-def class panicking in `bug!`).
+        if self.diags.has_errors() {
+            return Err(ErrorGuaranteed::new());
+        }
         let hir = lilac_typeck::check_bodies(program, project, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());

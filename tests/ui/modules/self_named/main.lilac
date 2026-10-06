@@ -1,0 +1,7 @@
+using foo
+
+main: function () nothing {
+    cell: @bit8 = 0x0
+    p: ref @bit8 = ref cell
+    foo.bar(p)
+}

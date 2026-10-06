@@ -90,8 +90,12 @@ fn layout_key(place_ty: &str) -> &str {
 
 /// Whether `local` already begins with the namespace `path` and its `.`
 /// separator, so [`Lower::symbol`] must not prefix it a second time. Generic
-/// object instance names are built from the qualified object name
-/// (`util.GenBox.1..bit32`), while top-level and object-member names stay local.
+/// object instance names (`util.GenBox.1..bit32`) and object-member names
+/// (`util.Object.method`) are built from the qualified owner; only bare
+/// top-level names have no dotted prefix. A namespace whose name equals one of
+/// its object names (`foo` containing object `foo`) is safe because the member
+/// prefix is now genuinely `foo` (`foo.foo.bar`), not just the object's local
+/// name.
 fn already_prefixed(local: &str, path: &str) -> bool {
     local.len() > path.len()
         && local.starts_with(path)
@@ -437,7 +441,11 @@ impl Lower<'_> {
     fn lower_func(&mut self, func: &HirFunc) {
         let symbol = self.symbol(func.def, &func.name, func.is_extern);
         let mut fs = FuncState::new();
-        if let Some((parent, _)) = func.name.split_once('.') {
+        // Object-member and generic-instance names are `[<ns>.]<Object>[.…].<member>`;
+        // the owning type is everything before the final `.`, which may itself
+        // contain namespace and instance dots (`util.GenBox.1..bit32.get`).
+        // Bare top-level names have no dot.
+        if let Some((parent, _)) = func.name.rsplit_once('.') {
             fs.is_member = true;
             fs.member_parent = Some(parent.to_owned());
         }

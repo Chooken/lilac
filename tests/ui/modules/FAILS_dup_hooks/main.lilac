@@ -1,0 +1,6 @@
+using util
+
+@h: function (x: @bit8) result: @bit8 => @i_add(x, x)
+
+main: function () nothing {
+}

@@ -1,0 +1,5 @@
+using b
+
+main: function () nothing {
+    x: @bit32 = c
+}

@@ -23,7 +23,7 @@ use lilac_ast::{Item, ItemKind};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_lex::Lexer;
 use lilac_parse::Parser;
-use lilac_span::{FileId, Span};
+use lilac_span::{FileId, SourceMap, Span};
 
 /// Injected filesystem: the loader never touches `std::fs` directly.
 pub trait Fs {
@@ -38,12 +38,17 @@ pub trait Fs {
 pub struct FileUnit {
     /// File name (no directory).
     pub name: String,
+    /// Identity of this file in the caller's [`SourceMap`].
+    pub file: FileId,
     /// Owning namespace (index into [`Project::namespaces`]).
     pub ns: usize,
     /// Raw source text.
     pub src: String,
     /// Dotted `using` paths, in source order.
     pub usings: Vec<String>,
+    /// Span of each `using` directive, parallel to [`FileUnit::usings`]; the
+    /// `E029` ambiguity diagnostic labels these import sites.
+    pub using_spans: Vec<Span>,
 }
 
 /// One namespace: a folder and the files directly inside it.
@@ -72,10 +77,16 @@ pub struct Project {
 ///
 /// The root namespace is index 0 (path `""`). Namespaces are appended in the
 /// order their folders are first reached, and each namespace's files are kept
-/// sorted by file name. Files are assigned ids equal to their index in
-/// [`Project::files`], so a caller that registers the sources in the same order
-/// sees matching spans.
-pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, ErrorGuaranteed> {
+/// sorted by file name. Every source is registered in `sources` as it is read,
+/// and its returned [`FileId`] is stored on [`FileUnit::file`]; `E025` spans
+/// (and later the loader's `using` spans) therefore resolve against the
+/// caller's [`SourceMap`] without relying on `FileId(index)` coincidence.
+pub fn load(
+    root: &Path,
+    fs: &mut dyn Fs,
+    sources: &mut SourceMap,
+    diags: &mut Diags,
+) -> Result<Project, ErrorGuaranteed> {
     let Ok(root_entries) = fs.list_dir(root) else {
         diags.emit(Diagnostic::error(
             "E025",
@@ -98,14 +109,14 @@ pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, 
     let mut failed = false;
 
     while let Some(ns) = queue.pop_front() {
-        let mut sources: Vec<PathBuf> = listings[ns]
+        let mut file_paths: Vec<PathBuf> = listings[ns]
             .iter()
             .filter(|path| is_lilac_file(path))
             .cloned()
             .collect();
-        sources.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        file_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-        for path in sources {
+        for path in file_paths {
             let Ok(src) = fs.read(&path) else {
                 diags.emit(Diagnostic::error(
                     "E025",
@@ -113,14 +124,17 @@ pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, 
                 ));
                 return Err(ErrorGuaranteed::new());
             };
-            let file_id = FileId(u32::try_from(files.len()).unwrap_or(u32::MAX));
+            let name = file_name_str(&path);
+            let file_id = sources.add_file(&name, &src);
             let usings = scan_usings(&src, file_id);
             let index = files.len();
             files.push(FileUnit {
-                name: file_name_str(&path),
+                name,
+                file: file_id,
                 ns,
                 src,
                 usings: usings.iter().map(|(path, _)| path.clone()).collect(),
+                using_spans: usings.iter().map(|(_, span)| *span).collect(),
             });
             namespaces[ns].files.push(index);
 
@@ -274,6 +288,13 @@ mod tests {
             .count()
     }
 
+    /// Test-local [`load`] with a throwaway [`SourceMap`] (most tests do not
+    /// inspect span resolution).
+    fn load(root: &Path, fs: &mut MemFs, diags: &mut Diags) -> Result<Project, ErrorGuaranteed> {
+        let mut sources = SourceMap::new();
+        super::load(root, fs, &mut sources, diags)
+    }
+
     #[test]
     fn loads_root_and_used_namespace_sorted() {
         let root = PathBuf::from("proj");
@@ -326,8 +347,9 @@ mod tests {
         let mut fs = MemFs::new();
         fs.add(&root, "main.lilac", "using missing\n");
 
+        let mut sources = SourceMap::new();
         let mut diags = Diags::new();
-        let result = load(&root, &mut fs, &mut diags);
+        let result = super::load(&root, &mut fs, &mut sources, &mut diags);
 
         assert!(result.is_err());
         assert_eq!(e025_count(&diags), 1, "{diags:?}");
@@ -342,6 +364,13 @@ mod tests {
             .find(|label| label.primary)
             .expect("primary label");
         assert!(!label.span.is_empty());
+        // The `using` span must resolve against the caller's `SourceMap`, so the
+        // driver can render a `--> file:line` label (spec §10).
+        assert_eq!(
+            sources.span_text(label.span),
+            Some("using missing"),
+            "E025 label span does not resolve in the SourceMap"
+        );
     }
 
     #[test]

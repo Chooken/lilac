@@ -26,15 +26,15 @@ pub(crate) fn qualify_name(project: &ResolvedProject, def: DefId, local: &str) -
 }
 
 /// Emits `E029` for a name bound by two equally visible imports (spec §6):
-/// the reference plus every competing declaration.
-pub(crate) fn emit_ambiguous(name: &str, span: Span, competing: &[Span], diags: &mut Diags) {
+/// the reference plus each competing `using` site.
+pub(crate) fn emit_ambiguous(name: &str, span: Span, using_sites: &[Span], diags: &mut Diags) {
     let mut diagnostic = Diagnostic::error("E029", format!("`{name}` is ambiguous")).label(
         span,
         true,
         "ambiguous reference here".to_owned(),
     );
-    for site in competing {
-        diagnostic = diagnostic.label(*site, false, "candidate from here".to_owned());
+    for site in using_sites {
+        diagnostic = diagnostic.label(*site, false, "imported here".to_owned());
     }
     diags.emit(diagnostic);
 }

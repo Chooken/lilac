@@ -490,25 +490,6 @@ fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) ->
     rec(&program.items, &top_scope, def, None)
 }
 
-/// Finds a module constant's declared type by name, descending into `private`
-/// blocks so a namespace-private constant resolves like a public one.
-fn find_const_type(items: &[Item], name: &str) -> Option<AstType> {
-    for item in items {
-        if let ItemKind::Private { items } = &item.kind {
-            if let Some(ty) = find_const_type(items, name) {
-                return Some(ty);
-            }
-            continue;
-        }
-        if let ItemKind::Const { ty, .. } = &item.kind {
-            if item.name == name {
-                return Some(ty.clone());
-            }
-        }
-    }
-    None
-}
-
 /// Whether HIR contains a branch-join temp: control flow inside a value
 /// that must stay straight-line (module constants and `=>` bodies fold in
 /// M3, so they stay `E030` here).
@@ -1190,7 +1171,15 @@ impl Checker<'_> {
                 self.hook_name(&qual, resolved.id)
             }
             _ => match &parent {
-                Some((parent_name, _)) => format!("{parent_name}.{}", item.name),
+                // Qualify the owner with its namespace, like hook owners and
+                // generic instances: otherwise a namespace named after its own
+                // object (`foo` containing object `foo`) makes lowering's
+                // namespace prefix check mis-strip and emit `foo.bar` instead
+                // of `foo.foo.bar` (spec §7.1).
+                Some((parent_name, parent_def)) => {
+                    let owner = qualify_name(self.project, *parent_def, parent_name);
+                    format!("{owner}.{}", item.name)
+                }
                 None => item.name.clone(),
             },
         };
@@ -4153,7 +4142,7 @@ impl Checker<'_> {
                     .label(span, true, "hooks are not values".to_owned()),
             )),
             ResKind::Const => {
-                let ty = self.const_type(name, span)?;
+                let ty = self.const_type(&item, name, span)?;
                 Ok((ty, item.id))
             }
             ResKind::Object { .. } | ResKind::Enum { .. } => {
@@ -4172,18 +4161,43 @@ impl Checker<'_> {
         }
     }
 
-    fn const_type(&mut self, name: &str, span: Span) -> Result<TypeRef, ErrorGuaranteed> {
-        let found = find_const_type(&self.program.items, name);
-        match found {
-            Some(ty) => Ok(self.resolve_ty(&ty)),
-            None => Err(self.diags.emit(
-                Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                    span,
-                    true,
-                    "not a local or item".to_owned(),
-                ),
-            )),
-        }
+    fn const_type(
+        &mut self,
+        item: &ResItem,
+        name: &str,
+        span: Span,
+    ) -> Result<TypeRef, ErrorGuaranteed> {
+        // Match the const's AST item by identity/namespace (never by name alone:
+        // two namespaces may declare the same const name with different types),
+        // and resolve its declared type in the file that declares it.
+        let (ty, file) = match find_item(self.program, self.project, item.id) {
+            Some((ast, _, _)) => match &ast.kind {
+                ItemKind::Const { ty, .. } => (ty.clone(), ast.span.file),
+                _ => {
+                    return Err(self.diags.emit(
+                        Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                            span,
+                            true,
+                            "not a local or item".to_owned(),
+                        ),
+                    ));
+                }
+            },
+            None => {
+                return Err(self.diags.emit(
+                    Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                        span,
+                        true,
+                        "not a local or item".to_owned(),
+                    ),
+                ));
+            }
+        };
+        let saved = self.file;
+        self.file = file;
+        let resolved = self.resolve_ty(&ty);
+        self.file = saved;
+        Ok(resolved)
     }
 
     fn tag_type(

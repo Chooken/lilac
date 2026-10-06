@@ -50,6 +50,106 @@ fn check_missing_using_folder_is_e025() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E025]"), "stderr:\n{stderr}");
+    // The loader's `using` span must render a source location (spec §10),
+    // not just the headline: `main.lilac:1` on the `using missing` directive.
+    assert!(
+        stderr.contains("-->") && stderr.contains("main.lilac:1"),
+        "E025 label has no source location:\n{stderr}"
+    );
+}
+
+/// Two namespaces may each declare a same-named type and an identically shaped
+/// top-level hook over their *own* type. The signatures are distinct once the
+/// type names are namespace-qualified, so this must compile cleanly — never
+/// ICE with a signatureless `DefId` (regression: unqualified `same_sig`).
+#[test]
+fn cross_namespace_same_named_hooks_do_not_ice() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("two_ns_hooks"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "compiler panicked:\n{stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "expected a clean compile, stderr:\n{stderr}"
+    );
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
+/// A genuinely duplicate hook signature across namespaces is `E020`, and the
+/// driver must stop before checking bodies rather than ICE (defense in depth).
+#[test]
+fn duplicate_cross_namespace_hooks_are_e020_not_ice() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("FAILS_dup_hooks"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "compiler panicked:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("error[E020]"), "stderr:\n{stderr}");
+}
+
+/// A const name declared in two namespaces with different types resolves to the
+/// const the *referring file* can see, not the first name match in program
+/// order (regression: `find_const_type` ignored namespaces → spurious `E043`).
+#[test]
+fn cross_namespace_same_named_consts_resolve_per_file() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("const_ns"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected a clean compile, stderr:\n{stderr}"
+    );
+}
+
+/// A namespace whose name equals one of its object names must still emit the
+/// fully-qualified member symbol (`foo.foo.bar`), not the mis-stripped
+/// `foo.bar` (regression: `already_prefixed`).
+#[test]
+fn namespace_named_after_its_object_qualifies_member() {
+    let ir = emit_ir("self_named");
+    assert!(
+        ir.contains("function @foo.foo.bar"),
+        "missing `@foo.foo.bar` in:\n{ir}"
+    );
+}
+
+/// An import-vs-import collision is `E029` labelled at the reference and both
+/// `using` sites (spec §10), not at the competing declarations.
+#[test]
+fn ambiguous_import_labels_both_using_sites() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("FAILS_ambiguous_using"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E029]"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("main.lilac:1") && stderr.contains("main.lilac:2"),
+        "E029 must label both `using` sites in main.lilac:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("main.lilac:5"),
+        "E029 must label the ambiguous reference:\n{stderr}"
+    );
 }
 
 /// Runs `emit-ir` over a project directory and returns its IR text.

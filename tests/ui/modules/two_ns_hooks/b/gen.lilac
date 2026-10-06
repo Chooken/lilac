@@ -1,0 +1,7 @@
+Thing: object {
+    x: @bit32
+}
+
+@h: function (value: ref Thing) result: @bit32 {
+    result = value.x
+}
