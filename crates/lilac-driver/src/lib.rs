@@ -246,11 +246,14 @@ impl Session {
         self.analysis.as_ref()
     }
 
-    /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
-    /// `fold` → inject runtime → `prune` → check live `@compile_error` →
-    /// `verify`. Stops at the first failing pass. The live-error check runs
-    /// after `prune` so errors in functions unreachable from `main` or an
-    /// `--export` root are silent.
+    /// Lex → parse → decimal-AST `fold` → `collect` → `collect_sigs` →
+    /// `check_bodies` → `lower` → LIR const `fold` (`lilac-const`) → inject
+    /// runtime → `prune` → check live `@compile_error` → `verify`. Stops at the
+    /// first failing pass. The first fold is [`lilac_decimal::fold`] over the
+    /// parsed AST (it folds `+ - * / %` of decimal literals and emits `E060`);
+    /// it is distinct from the later `lilac-const` fold, which collapses LIR
+    /// constants. The live-error check runs after `prune` so errors in
+    /// functions unreachable from `main` or an `--export` root are silent.
     /// `on_stage` fires at each reached boundary (see
     /// [`Session::compile_lir_with_stages`]).
     fn run_pipeline(

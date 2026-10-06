@@ -127,6 +127,8 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             };
             session.optimize = parsed;
         } else if parse_session_flag(arg, &mut session)? {
+            // Consumed by the session-wide parser above: `--release`,
+            // `--decimal-scale=`, and `--decimal-round=`.
         } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
             if dir.is_empty() {
                 eprintln!("--cache-dir= needs a path\n{}", usage());
@@ -883,14 +885,42 @@ mod tests {
     }
 
     #[test]
+    fn decimal_scale_accepts_bounds() {
+        for (value, want) in [("0", 0), ("1000", 1000)] {
+            let argv = args(&["f.lilac", &format!("--decimal-scale={value}")]);
+            let parsed = parse_common(&argv, false).expect("bound accepted");
+            assert_eq!(
+                parsed.session.decimal.scale, want,
+                "--decimal-scale={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_round_accepts_trunc() {
+        let parsed = parse_common(&args(&["f.lilac", "--decimal-round=trunc"]), false)
+            .expect("trunc accepted");
+        assert_eq!(parsed.session.decimal.round, DecimalRound::Trunc);
+    }
+
+    #[test]
     fn decimal_scale_rejects_out_of_range() {
-        assert!(parse_common(&args(&["f.lilac", "--decimal-scale=1001"]), false).is_err());
-        assert!(parse_common(&args(&["f.lilac", "--decimal-scale=abc"]), false).is_err());
+        for value in ["1001", "abc"] {
+            let argv = args(&["f.lilac", &format!("--decimal-scale={value}")]);
+            assert_eq!(
+                parse_common(&argv, false).err(),
+                Some(ExitCode::from(2)),
+                "--decimal-scale={value}"
+            );
+        }
     }
 
     #[test]
     fn decimal_round_rejects_unknown() {
-        assert!(parse_common(&args(&["f.lilac", "--decimal-round=up"]), false).is_err());
+        assert_eq!(
+            parse_common(&args(&["f.lilac", "--decimal-round=up"]), false).err(),
+            Some(ExitCode::from(2))
+        );
     }
 
     #[test]

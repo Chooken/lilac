@@ -80,7 +80,7 @@ pub fn fold(program: &mut Program, policy: Policy, diags: &mut Diags) {
 mod tests {
     use super::*;
     use crate::Round;
-    use lilac_ast::{walk_expr, walk_program, Expr, Program, Visitor};
+    use lilac_ast::{walk_expr, walk_program, Expr, FuncBody, ItemKind, Program, Stmt, Visitor};
     use lilac_error::Diags;
     use lilac_lex::Lexer;
     use lilac_parse::Parser;
@@ -119,6 +119,20 @@ mod tests {
         n.0
     }
 
+    /// The initializer of the first `let` in the first function of `program`.
+    fn let_value(program: &Program) -> &Expr {
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected a function item");
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected a block body");
+        };
+        let Stmt::Let { value, .. } = &block.stmts[0] else {
+            panic!("expected a let statement");
+        };
+        value
+    }
+
     #[test]
     fn folds_nested_literal_expression() {
         let (p, d) = fold_src("main: function () nothing {\n    x: @byte_buffer = 2 * 3 + 4\n}\n");
@@ -148,9 +162,80 @@ mod tests {
         assert_eq!(numbers(&p), vec!["6".to_owned()]);
     }
 
+    /// Review Focus #4: a `Number op Number` pair nested in control flow and
+    /// data-literal positions still folds, not just one inside an f-string.
+    #[test]
+    fn folds_inside_if_and_loop_bodies() {
+        let (p, d) = fold_src(
+            "main: function () nothing {\n    if flag {\n        x: @byte_buffer = 2 * 3\n    }\n    loop {\n        y: @byte_buffer = 4 + 5\n        break\n    }\n}\n",
+        );
+        assert!(!d.has_errors());
+        assert_eq!(numbers(&p), vec!["6".to_owned(), "9".to_owned()]);
+    }
+
+    #[test]
+    fn folds_inside_match_arm() {
+        let (p, d) = fold_src(
+            "main: function () nothing {\n    match n {\n        0x1 => {\n            x: @byte_buffer = 2 * 3\n        }\n    }\n}\n",
+        );
+        assert!(!d.has_errors());
+        assert_eq!(numbers(&p), vec!["6".to_owned()]);
+    }
+
+    #[test]
+    fn folds_inside_struct_literal_field() {
+        let (p, d) = fold_src(
+            "Object: object {\n    member: @byte_buffer\n}\nmain: function () nothing {\n    v: Object = Object {\n        member = 2 * 3\n    }\n}\n",
+        );
+        assert!(!d.has_errors());
+        assert_eq!(numbers(&p), vec!["6".to_owned()]);
+    }
+
+    /// The folded `Number` keeps the original binop's span, so a later pass
+    /// (and diagnostics) still points at the source expression.
+    #[test]
+    fn folded_number_preserves_binop_span() {
+        let src = "main: function () nothing {\n    x: @byte_buffer = 2 * 3\n}\n";
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("t.lilac", src);
+        let (tokens, _) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        let mut parser = Parser::new(tokens, file);
+        let mut program = parser.parse_program(&mut diags).expect("parses");
+        let before = match let_value(&program) {
+            Expr::BinOp { span, .. } => *span,
+            other => panic!("expected a binop before folding, got {other:?}"),
+        };
+        fold(
+            &mut program,
+            Policy {
+                scale: 10,
+                round: Round::Trunc,
+            },
+            &mut diags,
+        );
+        let after = match let_value(&program) {
+            Expr::Number(_, span) => *span,
+            other => panic!("expected a folded number, got {other:?}"),
+        };
+        assert_eq!(before, after);
+    }
+
     #[test]
     fn division_by_zero_reports_e060() {
         let (_, d) = fold_src("main: function () nothing {\n    x: @byte_buffer = 1 / 0\n}\n");
         assert!(d.diagnostics().iter().any(|e| e.code == "E060"));
+    }
+
+    #[test]
+    fn modulo_by_zero_reports_e060() {
+        let (_, d) = fold_src("main: function () nothing {\n    x: @byte_buffer = 1 % 0\n}\n");
+        assert!(
+            d.diagnostics()
+                .iter()
+                .any(|e| e.code == "E060" && e.msg.contains("modulo by zero")),
+            "{:?}",
+            d.diagnostics()
+        );
     }
 }

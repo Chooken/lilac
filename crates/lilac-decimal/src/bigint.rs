@@ -46,7 +46,7 @@ impl Big {
                 *slot = b'0' + (value % 10) as u8;
                 value /= 10;
             }
-            out.push_str(std::str::from_utf8(&buf).unwrap_or(""));
+            out.push_str(std::str::from_utf8(&buf).expect("decimal digits are ASCII"));
         }
         out
     }

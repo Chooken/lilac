@@ -3,20 +3,36 @@
 //! `--decimal-round`, and division/modulo by zero is `E060`. The folded result
 //! lowers to a `numlit` data const whose payload appears verbatim in `emit-ir`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn lilac() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lilac"))
 }
 
+/// A temporary `.lilac` source file that removes itself when dropped, so every
+/// test cleans up its own file (matching the M5c UI tests' hygiene).
+struct TempSrc(PathBuf);
+
+impl TempSrc {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempSrc {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Writes `src` to a unique temp `.lilac` file so these tests can run in
-/// parallel without sharing a path.
-fn write_src(name: &str, src: &str) -> PathBuf {
+/// parallel without sharing a path; the file is deleted when the guard drops.
+fn write_src(name: &str, src: &str) -> TempSrc {
     let mut p = std::env::temp_dir();
     p.push(format!("lilac_decimal_{}_{name}.lilac", std::process::id()));
     std::fs::write(&p, src).expect("write temp source");
-    p
+    TempSrc(p)
 }
 
 /// Runs `emit-ir <extra> <src>` and returns the emitted LIR text, asserting the
@@ -26,7 +42,7 @@ fn emit_ir(name: &str, src: &str, extra: &[&str]) -> String {
     let output = lilac()
         .arg("emit-ir")
         .args(extra)
-        .arg(&path)
+        .arg(path.path())
         .output()
         .expect("runs lilac");
     assert!(
@@ -84,7 +100,7 @@ fn division_by_zero_fails_with_e060() {
     );
     let output = lilac()
         .arg("check")
-        .arg(&path)
+        .arg(path.path())
         .output()
         .expect("runs lilac");
     assert_ne!(
@@ -96,4 +112,28 @@ fn division_by_zero_fails_with_e060() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E060]"), "stderr:\n{stderr}");
     assert!(stderr.contains("division by zero"), "stderr:\n{stderr}");
+}
+
+/// A decimal modulo by zero is a hard `E060` too, and it must survive the full
+/// `check` path (not just the `eval` unit test).
+#[test]
+fn modulo_by_zero_fails_with_e060() {
+    let path = write_src(
+        "mod_zero",
+        "main: function () nothing {\n    x: @byte_buffer = 1 % 0\n}\n",
+    );
+    let output = lilac()
+        .arg("check")
+        .arg(path.path())
+        .output()
+        .expect("runs lilac");
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "expected `1 % 0` to fail; stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E060]"), "stderr:\n{stderr}");
+    assert!(stderr.contains("modulo by zero"), "stderr:\n{stderr}");
 }

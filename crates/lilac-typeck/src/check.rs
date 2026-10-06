@@ -607,8 +607,11 @@ fn bit_width(types: &Types, id: TypeId) -> u32 {
     }
 }
 
-/// True for hex/bin literals (`0x`/`0X`/`0b`/`0B`), whose bits are fully
-/// known; decimals are `NumberLiteral`s typed as `@byte_buffer`.
+/// True for every non-decimal literal, whose bits are fully known. Today that
+/// is exactly the `0x`/`0X`/`0b`/`0B` forms the lexer produces, so this is the
+/// complement of [`lilac_decimal::is_decimal_literal`]; a future non-decimal
+/// numeric form would also classify here and feed [`lit_bits`]. Decimals are
+/// `NumberLiteral`s typed as `@byte_buffer`.
 fn is_lit_literal(bytes: &str) -> bool {
     !lilac_decimal::is_decimal_literal(bytes)
 }
@@ -5451,13 +5454,12 @@ mod tests {
     }
 
     #[test]
-    fn is_lit_literal_matches_decimal_predicate() {
-        for text in ["0x1", "0X1", "0b1", "0B1", "5", "10_000", "10.5"] {
-            assert_eq!(
-                is_lit_literal(text),
-                !lilac_decimal::is_decimal_literal(text),
-                "{text}"
-            );
+    fn is_lit_literal_classifies_hex_bin_and_decimal() {
+        for text in ["0x1", "0X1", "0b1", "0B1"] {
+            assert!(is_lit_literal(text), "{text} is a fully-known bit literal");
+        }
+        for text in ["5", "10.5"] {
+            assert!(!is_lit_literal(text), "{text} is a decimal literal");
         }
     }
 
