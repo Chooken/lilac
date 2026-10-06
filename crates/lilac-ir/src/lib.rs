@@ -697,6 +697,17 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     Some(BuiltinSig { ins, outs })
 }
 
+/// Whether a LIR type spelling is representable in the platform C ABI used by
+/// `extern`: a bit width by value, or any `ref T` (an opaque pointer).
+///
+/// This is the single source of truth for the `extern` accept-set, shared by
+/// the `E028` frontend validation (`lilac-lower`) and the LLVM signature
+/// lowering (`lilac-codegen-llvm`), so the two cannot drift.
+#[must_use]
+pub fn is_c_abi_type(ty: &str) -> bool {
+    ty.starts_with("ref ") || matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native")
+}
+
 /// Fixed layout of `#format_args`: a count plus sixteen named pieces. LIR has
 /// no array type, so the fixed table is spelled out as sixteen fields.
 static FORMAT_ARGS_LAYOUT: [(&str, &str); 17] = [

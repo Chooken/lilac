@@ -338,7 +338,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Maps a LIR type to its platform C ABI type, or `None` when it is not one
     /// of the supported by-value scalars or a reference (pointer).
+    ///
+    /// The accept-set comes from [`lilac_ir::is_c_abi_type`] — the same
+    /// predicate the frontend `E028` check uses — so a type the driver accepts
+    /// always has a mapping here.
     fn extern_c_type(&self, ty: &str) -> Option<BasicTypeEnum<'ctx>> {
+        if !lilac_ir::is_c_abi_type(ty) {
+            return None;
+        }
         if ty.starts_with("ref ") {
             return Some(self.ptr_type().into());
         }

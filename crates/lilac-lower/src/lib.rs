@@ -98,22 +98,22 @@ pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diag
 }
 
 /// Checks one `extern` function's signature, emitting `E028` per offending
-/// slot. Place names mirror `lower_func`'s `arg.N` fallback for anonymous slots
-/// so a diagnostic reads the same as the lowered LIR.
+/// slot. Place names mirror `lower_func`'s `arg.N`/`out.N` fallback for
+/// anonymous slots so a diagnostic reads the same as the lowered LIR.
 fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
     let mut args = 0;
-    let mut place_name = |param: &HirParam| -> String {
+    let mut place_name = |param: &HirParam, prefix: &str| -> String {
         if param.name.is_empty() {
             args += 1;
-            format!("arg.{args}")
+            format!("{prefix}.{args}")
         } else {
             param.name.clone()
         }
     };
     for param in &func.params {
-        let place = place_name(param);
+        let place = place_name(param, "arg");
         let ty = lir_ty(types, param.ty);
-        if !is_c_abi_type(&ty) {
+        if !lilac_ir::is_c_abi_type(&ty) {
             diags.emit(
                 Diagnostic::error(
                     "E028",
@@ -139,9 +139,9 @@ fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
             .help("an `extern` may return at most one C value"),
         );
     } else if let Some(ret) = func.returns.first() {
-        let place = place_name(ret);
+        let place = place_name(ret, "out");
         let ty = lir_ty(types, ret.ty);
-        if !is_c_abi_type(&ty) {
+        if !lilac_ir::is_c_abi_type(&ty) {
             diags.emit(
                 Diagnostic::error(
                     "E028",
@@ -152,12 +152,6 @@ fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
             );
         }
     }
-}
-
-/// Whether a LIR type spelling is representable in the platform C ABI: a bit
-/// width by value, or any `ref T` (an opaque pointer).
-fn is_c_abi_type(ty: &str) -> bool {
-    ty.starts_with("ref ") || matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native")
 }
 
 /// Layout key for a place type: references address their pointee's layout.
