@@ -1,15 +1,18 @@
 //! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` (more subcommands land
 //! per milestone).
 
+mod std_fs;
+
 use lilac_codegen::Backend as _;
 use lilac_driver::{ErrorFormat, OptimizeMode, Session, Target};
 use lilac_error::ErrorGuaranteed;
 use lilac_ir::LirModule;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -249,18 +252,79 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
     })
 }
 
+/// Whether `path` names a directory (a project root) rather than a source file.
+fn is_dir(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+/// Compiles `path`: a directory is loaded as a folder project, while a file
+/// keeps the existing single-source pipeline so every single-file snapshot is
+/// byte-identical. Returns the compile result plus any LIR-dump I/O error, or
+/// `Err(ExitCode)` when the source file cannot be read (exit 2).
+fn compile_input(
+    session: &mut Session,
+    path: &str,
+    dump_dir: Option<&Path>,
+) -> Result<(Result<LirModule, ErrorGuaranteed>, Option<String>), ExitCode> {
+    if is_dir(path) {
+        Ok(compile_project_with_dumps(session, path, dump_dir))
+    } else {
+        let src = read_source(path)?;
+        Ok(compile_with_dumps(session, path, &src, dump_dir))
+    }
+}
+
+/// Like [`compile_with_dumps`], but for a project directory root: the folder's
+/// `*.lilac` files (and every transitively-`using`d folder) are loaded through
+/// [`StdFs`] and compiled as one project.
+fn compile_project_with_dumps(
+    session: &mut Session,
+    root: &str,
+    dump_dir: Option<&Path>,
+) -> (Result<LirModule, ErrorGuaranteed>, Option<String>) {
+    let mut fs = StdFs;
+    let Some(dir) = dump_dir else {
+        return (session.compile_project(Path::new(root), &mut fs), None);
+    };
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        return (
+            session.compile_project(Path::new(root), &mut fs),
+            Some(format!(
+                "cannot create LIR dump directory {}: {err}",
+                dir.display()
+            )),
+        );
+    }
+    let stem = Path::new(root)
+        .file_name()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("module")
+        .to_owned();
+    let mut io_error: Option<String> = None;
+    let result =
+        session.compile_project_with_stages(Path::new(root), &mut fs, &mut |stage, lir| {
+            if io_error.is_some() {
+                return;
+            }
+            let path = dir.join(format!("{stem}.{stage}.lir"));
+            if let Err(err) = std::fs::write(&path, lir.to_text()) {
+                io_error = Some(format!("cannot write LIR dump {}: {err}", path.display()));
+            }
+        });
+    (result, io_error)
+}
+
 fn cmd_check(args: &[String]) -> ExitCode {
     let common = match parse_common(args, false) {
         Ok(common) => common,
         Err(code) => return code,
     };
-    let src = match read_source(&common.file) {
-        Ok(src) => src,
-        Err(code) => return code,
-    };
     let mut session = common.session;
     let (result, dump_err) =
-        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
     let code = match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
@@ -278,13 +342,12 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         Ok(common) => common,
         Err(code) => return code,
     };
-    let src = match read_source(&common.file) {
-        Ok(src) => src,
-        Err(code) => return code,
-    };
     let mut session = common.session;
     let (result, dump_err) =
-        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
     let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
@@ -329,10 +392,6 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
         Ok(common) => common,
         Err(code) => return code,
     };
-    let src = match read_source(&common.file) {
-        Ok(src) => src,
-        Err(code) => return code,
-    };
     let mut session = common.session;
     // Unlike `check`/`emit-ir`, `emit-llvm` defaults to the real host so the IR
     // data layout matches the machine it will run on. An explicit `--target=`
@@ -352,7 +411,10 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
     session.target = target;
     let triple = target.to_triple();
     let (result, dump_err) =
-        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
     let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
@@ -410,10 +472,6 @@ fn cmd_emit_vm(args: &[String]) -> ExitCode {
         Ok(common) => common,
         Err(code) => return code,
     };
-    let src = match read_source(&common.file) {
-        Ok(src) => src,
-        Err(code) => return code,
-    };
     let mut session = common.session;
     if common.target_set {
         if !session.target.is_vm() {
@@ -433,7 +491,10 @@ fn cmd_emit_vm(args: &[String]) -> ExitCode {
         };
     }
     let (result, dump_err) =
-        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
     let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
@@ -492,10 +553,6 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Ok(common) => common,
         Err(code) => return code,
     };
-    let src = match read_source(&common.file) {
-        Ok(src) => src,
-        Err(code) => return code,
-    };
     let mut session = common.session;
     if common.target_set {
         if !session.target.is_vm() {
@@ -515,7 +572,10 @@ fn cmd_run(args: &[String]) -> ExitCode {
         };
     }
     let (result, dump_err) =
-        compile_with_dumps(&mut session, &common.file, &src, common.dump_lir.as_deref());
+        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
     let Ok(module) = result else {
         eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);

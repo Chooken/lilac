@@ -10,6 +10,7 @@ lilac-lex = { path = "../lilac-lex" }
 lilac-ast = { path = "../lilac-ast" }
 lilac-parse = { path = "../lilac-parse" }
 lilac-resolve = { path = "../lilac-resolve" }
+lilac-module = { path = "../lilac-module" }
 lilac-ty = { path = "../lilac-ty" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-typeck = { path = "../lilac-typeck" }

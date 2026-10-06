@@ -1,0 +1,4 @@
+using missing
+
+main: function () nothing {
+}

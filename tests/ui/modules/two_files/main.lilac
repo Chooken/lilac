@@ -1,0 +1,5 @@
+using util
+
+main: function () nothing {
+    helper()
+}

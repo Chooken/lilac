@@ -6,14 +6,15 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lilac_ast::Program;
 use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
 use lilac_ir::LirModule;
 use lilac_lex::Lexer;
+use lilac_module::Fs;
 use lilac_parse::Parser;
-use lilac_span::SourceMap;
+use lilac_span::{FileId, SourceMap, Span};
 
 pub use lilac_target::Target;
 
@@ -146,6 +147,50 @@ impl Session {
         Ok(module)
     }
 
+    /// Compiles a whole folder project rooted at `root`, loading every file
+    /// reachable through `using` via the injected [`Fs`] (the driver itself
+    /// does no I/O). Returns the folded, verified module.
+    ///
+    /// Sources are registered in `Project::files` order so the loader's
+    /// `FileId(index)` spans resolve against this session's [`SourceMap`].
+    pub fn compile_project(
+        &mut self,
+        root: &Path,
+        fs: &mut dyn Fs,
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        self.compile_project_with_stages(root, fs, &mut |_: &'static str, _: &LirModule| {})
+    }
+
+    /// Like [`Session::compile_project`], but fires `on_stage` at every pipeline
+    /// boundary exactly as [`Session::compile_lir_with_stages`] does.
+    pub fn compile_project_with_stages(
+        &mut self,
+        root: &Path,
+        fs: &mut dyn Fs,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        let project = lilac_module::load(root, fs, &mut self.diags)?;
+        let mut programs: Vec<(FileId, Program)> = Vec::with_capacity(project.files.len());
+        let mut merged = Program {
+            items: Vec::new(),
+            span: Span::dummy(),
+        };
+        for (index, unit) in project.files.iter().enumerate() {
+            let file = self.source_map.add_file(&unit.name, &unit.src);
+            let (tokens, lex_errors) = Lexer::lex_all(&unit.src, file);
+            for error in lex_errors {
+                self.diags.emit(error);
+            }
+            let mut parser = Parser::new(tokens, file);
+            let program = parser.parse_program(&mut self.diags)?;
+            merged.items.extend(program.items.iter().cloned());
+            let id = FileId(u32::try_from(index).unwrap_or(u32::MAX));
+            programs.push((id, program));
+        }
+        let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
+        self.finish_pipeline(&merged, &resolved, on_stage)
+    }
+
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
     /// `fold` → inject runtime → `prune` → check live `@compile_error` →
     /// `verify`. Stops at the first failing pass. The live-error check runs
@@ -168,21 +213,33 @@ impl Session {
         let program = parser.parse_program(&mut self.diags)?;
         let module = lilac_resolve::collect(&program, &mut self.diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
+        let lir = self.finish_pipeline(&program, &project, on_stage)?;
+        Ok((program, lir))
+    }
+
+    /// The backend half of the pipeline, shared by the single-file and project
+    /// entry points: `collect_sigs` → `check_bodies` → `lower` → `fold` →
+    /// inject runtime → `prune` → check live `@compile_error` → `verify`.
+    fn finish_pipeline(
+        &mut self,
+        program: &Program,
+        project: &lilac_resolve::ResolvedProject,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
         let mut types = lilac_ty::Types::new();
         let sigs = lilac_typeck::collect_sigs(
-            &project,
-            &program,
+            project,
+            program,
             &mut types,
             &mut self.diags,
             self.warn_on_operator_type_change,
         );
-        let hir =
-            lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut self.diags);
+        let hir = lilac_typeck::check_bodies(program, project, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
         let triple = self.target.to_triple();
-        let mut lir = lilac_lower::lower(&hir, &project, &types, &mut self.diags, &triple)?;
+        let mut lir = lilac_lower::lower(&hir, project, &types, &mut self.diags, &triple)?;
         on_stage("lower", &lir);
         lilac_const::fold(&mut lir, &mut self.diags)?;
         on_stage("fold", &lir);
@@ -197,7 +254,7 @@ impl Session {
             return Err(ErrorGuaranteed::new());
         }
         on_stage("final", &lir);
-        Ok((program, lir))
+        Ok(lir)
     }
 
     /// Renders all recorded diagnostics to one string.

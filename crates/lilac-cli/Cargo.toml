@@ -14,6 +14,7 @@ lilac-driver = { path = "../lilac-driver" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-codegen = { path = "../lilac-codegen" }
 lilac-codegen-llvm = { path = "../lilac-codegen-llvm" }
+lilac-module = { path = "../lilac-module" }
 lilac-vm = { path = "../lilac-vm" }
 
 [lints]

@@ -1,0 +1,3 @@
+helper: function () nothing {
+    x: @bit32 = 0x1
+}
