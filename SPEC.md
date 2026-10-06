@@ -71,6 +71,21 @@ Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
 `@as_int` is a fold-time value error (`E060`), not a type error — the price of
 the shared representation.
 
+Arithmetic between two decimal literals is folded exactly at parse time: a
+binary `+ - * / %` whose **both** operands are decimal literals becomes a
+single folded decimal literal, so `2 * 3 + 4` is the literal `10` and nothing
+is evaluated at run time. `+ - *` are exact. `/` divides to the session scale
+(default `10` fractional digits) and truncates toward zero unless
+`--decimal-round=half-up` is set, which rounds halves away from zero;
+`--decimal-scale=N` (0–1000) sets the scale. `%` is the floored remainder
+(`a % b = a - b·floor(a/b)`), taking the divisor's sign. A folded result is
+rendered in canonical form: no leading zeros, no trailing fractional zeros, no
+bare `.`, and never `-0` (so `6 / 3` is `3`, not `3.0`). A decimal `x / 0` or
+`x % 0` is a fold-time value error (`E060`: `division by zero` / `modulo by
+zero`). These are the only operators folded; comparisons and logical operators
+are never folded, and any operand that is not a decimal literal (an identifier,
+a hex/bin literal) leaves the operation for ordinary type checking.
+
 String literals (`"hi"`) have type `@byte_buffer` backed by a `data` const, with
 no heap allocation: `data !cN: str = "hi"` plus `const !cN:#byte_buffer`, a
 data-backed buffer value. `@byte_buffer_from` stays a builtin for user code,
