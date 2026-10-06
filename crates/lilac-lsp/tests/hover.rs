@@ -139,3 +139,18 @@ fn hover_on_a_call_shows_the_signature() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+#[test]
+fn hover_on_whitespace_is_null() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "main: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    assert!(hover_at(&client, &uri, 1, 0).is_none());
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
