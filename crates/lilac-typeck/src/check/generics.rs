@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use lilac_ast::{Expr, ItemKind, Type as AstType};
+use lilac_ast::{Expr, Item, ItemKind, Type as AstType};
 use lilac_error::{Diagnostic, ErrorGuaranteed, CHAIN_FRAME_PREFIX};
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc};
 use lilac_resolve::{DefId, ResItem, ResKind};
@@ -109,9 +109,13 @@ impl Checker<'_> {
             );
             return Err(ErrorGuaranteed::new());
         }
+        let saved_file = self.file;
         let Some((item, resolved, _parent)) = find_item(self.program, self.project, base) else {
             lilac_error::bug!(use_span, "instantiate_object on an unknown object");
         };
+        // The object's field templates resolve in the file that declares the
+        // object, not in the file that instantiated it.
+        self.file = item.span.file;
         let ItemKind::Object {
             members,
             generic_params,
@@ -126,18 +130,7 @@ impl Checker<'_> {
         self.object_instances.insert(key.clone(), instance_ty);
         self.active_objects.push(key.clone());
 
-        // Concrete layout: resolve each field template in the object's
-        // parameter scope, substitute the instance's arguments, then register
-        // any nested instances the field mentions.
-        let mut layout = Vec::new();
-        for member in members {
-            if let ItemKind::Field { ty } = &member.kind {
-                let template = self.resolve_in_scope(ty, generic_params);
-                let concrete = self.types.substitute(template, args);
-                let concrete = self.instantiate_ty(concrete, member.span);
-                layout.push((member.name.clone(), Some(concrete)));
-            }
-        }
+        let layout = self.object_layout(members, generic_params, args);
         let mangled = self.types.mangle(id);
         self.layouts.insert(mangled.clone(), layout);
 
@@ -191,6 +184,7 @@ impl Checker<'_> {
             }
         }
         self.active_objects.pop();
+        self.file = saved_file;
         if failed {
             self.object_instances.remove(&key);
             self.layouts.remove(&mangled);
@@ -198,6 +192,27 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         Ok(instance_ty)
+    }
+
+    /// Resolves an object's concrete field layout: each field template is
+    /// resolved in the object's parameter scope, substituted with the
+    /// instance's arguments, then registered (nested instances included).
+    fn object_layout(
+        &mut self,
+        members: &[Item],
+        generic_params: &[String],
+        args: &[TypeRef],
+    ) -> Vec<(String, Option<TypeRef>)> {
+        let mut layout = Vec::new();
+        for member in members {
+            if let ItemKind::Field { ty } = &member.kind {
+                let template = self.resolve_in_scope(ty, generic_params);
+                let concrete = self.types.substitute(template, args);
+                let concrete = self.instantiate_ty(concrete, member.span);
+                layout.push((member.name.clone(), Some(concrete)));
+            }
+        }
+        layout
     }
 
     /// Monomorphizes `def` at `args`, memoizing by `(DefId, args)`.
@@ -483,6 +498,10 @@ impl Checker<'_> {
         let ItemKind::Func(decl) = &item.kind else {
             lilac_error::bug!(item.span, "instantiated item is not a function");
         };
+        // The specialized body resolves its types in the file that declares the
+        // generic, not in the file that instantiated it.
+        let saved_file = self.file;
+        self.file = item.span.file;
         let scope = self.func_scope(def);
         let saved_params = std::mem::replace(&mut self.current_params, scope);
         let saved_args = std::mem::replace(&mut self.current_args, args.to_vec());
@@ -526,6 +545,7 @@ impl Checker<'_> {
         }
         self.current_params = saved_params;
         self.current_args = saved_args;
+        self.file = saved_file;
         if self.errors_since(errors_before) {
             Err(ErrorGuaranteed::new())
         } else {

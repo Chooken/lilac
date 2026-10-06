@@ -2817,7 +2817,12 @@ impl Checker<'_> {
             // concrete body resolves against its own (empty) scope.
             let saved_params = std::mem::take(&mut self.current_params);
             let saved_args = std::mem::take(&mut self.current_args);
+            // A lazily-checked inline callee may live in another file than its
+            // caller; its body resolves its own types in the declaring file.
+            let saved_file = self.file;
+            self.file = callee.ast.span.file;
             self.check_func(callee.ast, &callee.resolved, callee.decl, callee.parent);
+            self.file = saved_file;
             self.current_params = saved_params;
             self.current_args = saved_args;
             self.in_progress.remove(&def);
