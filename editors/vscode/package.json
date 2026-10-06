@@ -8,8 +8,16 @@
   "engines": { "vscode": "^1.82.0" },
   "categories": ["Programming Languages"],
   "main": "./extension.js",
-  "activationEvents": ["onLanguage:lilac"],
+  "activationEvents": [
+    "onLanguage:lilac",
+    "onCommand:lilac.showLir",
+    "onCommand:lilac.selectLirStage"
+  ],
   "contributes": {
+    "commands": [
+      { "command": "lilac.showLir", "title": "Lilac: Show IR" },
+      { "command": "lilac.selectLirStage", "title": "Lilac: Select IR Stage" }
+    ],
     "languages": [
       {
         "id": "lilac",
