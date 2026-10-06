@@ -2,11 +2,13 @@
   "name": "lilac",
   "displayName": "Lilac",
   "description": "Syntax highlighting for the Lilac language and Lilac IR",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "lilac-lang",
   "repository": { "type": "git", "url": "https://github.com/Chooken/Lilac.git" },
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:lilac"],
   "contributes": {
     "languages": [
       {
@@ -33,11 +35,24 @@
         "scopeName": "source.lilac-ir",
         "path": "./syntaxes/lilac-ir.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Lilac",
+      "properties": {
+        "lilac.serverPath": {
+          "type": "string",
+          "default": "lilac-lsp",
+          "description": "Path to the lilac-lsp executable."
+        }
+      }
+    }
   },
   "scripts": {
     "test": "node scripts/run-grammar-tests.mjs \"test/*.test\"",
     "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "vscode-tmgrammar-test": "^0.1.3",
