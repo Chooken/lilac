@@ -1,0 +1,22 @@
+Object: object {
+    private {
+        private {
+            f: @bit8
+        }
+    }
+
+    @init: function () result: Object {
+        result = Object {
+            f = 0x1
+        }
+    }
+
+    get: function (instance: ref Object) result: @bit8 {
+        result = instance.f
+    }
+}
+
+main: function () nothing {
+    variable: Object = Object()
+    value: @bit8 = variable.get()
+}

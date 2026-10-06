@@ -684,27 +684,26 @@ impl Checker<'_> {
             }
             if let ItemKind::Object { members, .. } = &item.kind {
                 let owner = self.qualify_local(item.span.file, &item.name);
-                for member in members {
-                    if let ItemKind::Private { items } = &member.kind {
-                        for inner in items {
-                            self.collect_member_field(&owner, inner);
-                        }
-                        continue;
-                    }
-                    self.collect_member_field(&owner, member);
-                }
+                self.collect_member_fields(&owner, members);
             }
         }
     }
 
-    /// Records one object member's field type (flattening `private` blocks via
-    /// the caller) and recurses into any nested object declaration.
-    fn collect_member_field(&mut self, owner: &str, member: &Item) {
-        if let ItemKind::Field { ty } = &member.kind {
-            self.fields
-                .insert((owner.to_owned(), member.name.clone()), ty.clone());
+    /// Records an object's member fields, flattening `private` blocks at any
+    /// nesting depth into the same owner, and recurses into any nested object
+    /// declaration found among the members.
+    fn collect_member_fields(&mut self, owner: &str, members: &[Item]) {
+        for member in members {
+            if let ItemKind::Private { items } = &member.kind {
+                self.collect_member_fields(owner, items);
+                continue;
+            }
+            if let ItemKind::Field { ty } = &member.kind {
+                self.fields
+                    .insert((owner.to_owned(), member.name.clone()), ty.clone());
+            }
+            self.collect_fields(std::slice::from_ref(member));
         }
-        self.collect_fields(std::slice::from_ref(member));
     }
 
     fn mismatch(
@@ -6035,5 +6034,23 @@ mod tests {
             "expected @format_args_push, got {:?}",
             push.kind
         );
+    }
+
+    #[test]
+    fn nested_private_object_field_resolves() {
+        // Regression: a field wrapped in nested `private` blocks must flatten
+        // into the object's member fields, not be routed as a top-level item
+        // (which silently dropped it and produced a spurious `E021`).
+        let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    @init: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n\n    get: function (instance: ref Object) result: @bit8 {\n        result = instance.f\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object()\n    value: @bit8 = variable.get()\n}\n";
+        let diags = check_src(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn nested_private_object_field_is_e026_outside() {
+        let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    @init: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object()\n    value: @bit8 = variable.f\n}\n";
+        let diags = check_src(src);
+        assert!(has_code(&diags, "E026"), "{diags:?}");
+        assert!(!has_code(&diags, "E021"), "{diags:?}");
     }
 }

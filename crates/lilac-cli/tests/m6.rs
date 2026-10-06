@@ -219,3 +219,32 @@ fn private_static_member_allowed_inside_object() {
     assert!(output.status.success(), "stderr:\n{stderr}");
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
+
+/// A field wrapped in nested `private { private { … } }` still resolves as an
+/// object member field from inside the object (no spurious `E021`).
+#[test]
+fn nested_private_field_resolves_inside_object() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("private_nested_ok.lilac"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
+/// External access to a field wrapped in nested `private` blocks is `E026`
+/// (not a spurious missing-field `E021`).
+#[test]
+fn nested_private_field_denied_is_e026() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("FAILS_private_nested_member.lilac"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E026]"), "stderr:\n{stderr}");
+    assert!(!stderr.contains("error[E021]"), "stderr:\n{stderr}");
+}

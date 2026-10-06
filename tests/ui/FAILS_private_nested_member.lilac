@@ -1,0 +1,18 @@
+Object: object {
+    private {
+        private {
+            f: @bit8
+        }
+    }
+
+    @init: function () result: Object {
+        result = Object {
+            f = 0x1
+        }
+    }
+}
+
+main: function () nothing {
+    variable: Object = Object()
+    value: @bit8 = variable.f
+}
