@@ -626,6 +626,176 @@ pub fn walk_expr<V: Visitor + ?Sized>(visitor: &mut V, expr: &Expr) {
     }
 }
 
+/// Mutable AST visitor: override only what a pass needs; defaults walk children.
+pub trait MutVisitor {
+    /// Visits a program root.
+    fn visit_program_mut(&mut self, program: &mut Program) {
+        walk_program_mut(self, program);
+    }
+    /// Visits one item.
+    fn visit_item_mut(&mut self, item: &mut Item) {
+        walk_item_mut(self, item);
+    }
+    /// Visits one statement.
+    fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
+        walk_stmt_mut(self, stmt);
+    }
+    /// Visits one expression.
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        walk_expr_mut(self, expr);
+    }
+}
+
+/// Default mutable program walk for [`MutVisitor`].
+pub fn walk_program_mut<V: MutVisitor + ?Sized>(visitor: &mut V, program: &mut Program) {
+    for item in &mut program.items {
+        visitor.visit_item_mut(item);
+    }
+}
+
+/// Default mutable item walk for [`MutVisitor`].
+pub fn walk_item_mut<V: MutVisitor + ?Sized>(visitor: &mut V, item: &mut Item) {
+    match &mut item.kind {
+        ItemKind::Func(decl) => {
+            if let Some(FuncBody::Block(block)) = &mut decl.body {
+                for stmt in &mut block.stmts {
+                    visitor.visit_stmt_mut(stmt);
+                }
+            } else if let Some(FuncBody::Inline(expr)) = &mut decl.body {
+                visitor.visit_expr_mut(expr);
+            }
+        }
+        ItemKind::Object { members, .. } | ItemKind::Private { items: members } => {
+            for member in members {
+                visitor.visit_item_mut(member);
+            }
+        }
+        ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
+        ItemKind::Const { value, .. } => visitor.visit_expr_mut(value),
+    }
+}
+
+/// Default mutable statement walk for [`MutVisitor`].
+pub fn walk_stmt_mut<V: MutVisitor + ?Sized>(visitor: &mut V, stmt: &mut Stmt) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::MultiLet { value, .. } => visitor.visit_expr_mut(value),
+        Stmt::Assign { target, value, .. } => {
+            visitor.visit_expr_mut(target);
+            visitor.visit_expr_mut(value);
+        }
+        Stmt::ExprStmt(expr) => visitor.visit_expr_mut(expr),
+        Stmt::Return { .. } | Stmt::Break { .. } => {}
+        Stmt::If {
+            cond, then, els, ..
+        } => {
+            visitor.visit_expr_mut(cond);
+            for stmt in &mut then.stmts {
+                visitor.visit_stmt_mut(stmt);
+            }
+            if let Some(els) = els {
+                for stmt in &mut els.stmts {
+                    visitor.visit_stmt_mut(stmt);
+                }
+            }
+        }
+        Stmt::Loop {
+            cond, body, els, ..
+        } => {
+            if let Some(cond) = cond {
+                visitor.visit_expr_mut(cond);
+            }
+            for stmt in &mut body.stmts {
+                visitor.visit_stmt_mut(stmt);
+            }
+            if let Some(els) = els {
+                for stmt in &mut els.stmts {
+                    visitor.visit_stmt_mut(stmt);
+                }
+            }
+        }
+        Stmt::Match {
+            scrutinee,
+            arms,
+            els,
+            ..
+        } => {
+            visitor.visit_expr_mut(scrutinee);
+            for arm in arms {
+                match &mut arm.body {
+                    MatchArmBody::Block(block) => {
+                        for stmt in &mut block.stmts {
+                            visitor.visit_stmt_mut(stmt);
+                        }
+                    }
+                    MatchArmBody::Inline(stmt) => visitor.visit_stmt_mut(stmt),
+                }
+            }
+            if let Some(els) = els {
+                for stmt in &mut els.stmts {
+                    visitor.visit_stmt_mut(stmt);
+                }
+            }
+        }
+    }
+}
+
+/// Default mutable expression walk for [`MutVisitor`].
+pub fn walk_expr_mut<V: MutVisitor + ?Sized>(visitor: &mut V, expr: &mut Expr) {
+    match expr {
+        Expr::Ident(..) | Expr::Tag(..) | Expr::Number(..) | Expr::Str(..) | Expr::Char(..) => {}
+        Expr::Call { callee, args, .. } => {
+            visitor.visit_expr_mut(callee);
+            for arg in args {
+                visitor.visit_expr_mut(arg);
+            }
+        }
+        Expr::Member { obj, .. } => visitor.visit_expr_mut(obj),
+        Expr::BinOp { lhs, rhs, .. } => {
+            visitor.visit_expr_mut(lhs);
+            visitor.visit_expr_mut(rhs);
+        }
+        Expr::IfValue {
+            cond, then, els, ..
+        } => {
+            visitor.visit_expr_mut(cond);
+            visitor.visit_expr_mut(then);
+            visitor.visit_expr_mut(els);
+        }
+        Expr::MatchValue {
+            scrutinee,
+            arms,
+            els,
+            ..
+        } => {
+            visitor.visit_expr_mut(scrutinee);
+            for arm in arms {
+                match &mut arm.body {
+                    MatchArmBody::Block(block) => {
+                        for stmt in &mut block.stmts {
+                            visitor.visit_stmt_mut(stmt);
+                        }
+                    }
+                    MatchArmBody::Inline(stmt) => visitor.visit_stmt_mut(stmt),
+                }
+            }
+            visitor.visit_expr_mut(els);
+        }
+        Expr::StructLit { fields, .. } => {
+            for field in fields {
+                visitor.visit_expr_mut(&mut field.value);
+            }
+        }
+        Expr::FString { parts, .. } => {
+            for part in parts {
+                if let FStrPart::Hole(expr) = part {
+                    visitor.visit_expr_mut(expr);
+                }
+            }
+        }
+        Expr::RefOf { value, .. } => visitor.visit_expr_mut(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,5 +824,33 @@ mod tests {
         let mut counter = Counter { exprs: 0 };
         counter.visit_expr(&expr);
         assert_eq!(counter.exprs, 3);
+    }
+
+    struct NumberRename;
+    impl MutVisitor for NumberRename {
+        fn visit_expr_mut(&mut self, expr: &mut Expr) {
+            walk_expr_mut(self, expr);
+            if let Expr::Number(text, _) = expr {
+                if text == "0x1" {
+                    *text = "0x9".to_owned();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mut_visitor_rewrites_nested_exprs() {
+        let span = Span::dummy();
+        let mut expr = Expr::BinOp {
+            lhs: Box::new(Expr::Number("0x1".to_owned(), span)),
+            op: BinOp::Add,
+            rhs: Box::new(Expr::Number("0x2".to_owned(), span)),
+            span,
+        };
+        NumberRename.visit_expr_mut(&mut expr);
+        let Expr::BinOp { lhs, .. } = expr else {
+            panic!("still a binop")
+        };
+        assert!(matches!(*lhs, Expr::Number(ref t, _) if t == "0x9"));
     }
 }
