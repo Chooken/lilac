@@ -4920,6 +4920,7 @@ impl Checker<'_> {
             id: want,
             is_ref: false,
         };
+        let tag = Span::new(span.lo.0, span.lo.0 + 1 + name.len() as u32, span.file);
         if let Some(payload_ty) = payload {
             if args.len() != 1 {
                 self.diags.emit(
@@ -4936,6 +4937,7 @@ impl Checker<'_> {
                 let _ = self.expect_type(got, payload_ty.id, args[0].span(), args[0].span());
             }
             let value_hir = self.convert_if_needed(got, payload_ty.id, value_hir);
+            self.record_use(tag, def);
             Ok(CallOutcome::Inline(
                 HirExpr {
                     ty,
@@ -4959,6 +4961,7 @@ impl Checker<'_> {
                 );
                 return Ok(CallOutcome::Inline(poison.clone(), poison.ty));
             }
+            self.record_use(tag, def);
             Ok(CallOutcome::Inline(
                 HirExpr {
                     ty,
@@ -5494,6 +5497,21 @@ mod tests {
         assert!(
             hir.uses.iter().any(|s| {
                 &src[s.span.lo.0 as usize..s.span.hi.0 as usize] == "member"
+                    && s.def != lilac_resolve::DefId::ERROR
+            }),
+            "{:?}",
+            hir.uses
+        );
+    }
+
+    #[test]
+    fn variant_use_is_recorded() {
+        let src = "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    v: OptionalBit32 = .Some(0x0)\n    w: OptionalBit32 = .None\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            hir.uses.iter().any(|s| {
+                &src[s.span.lo.0 as usize..s.span.hi.0 as usize] == ".Some"
                     && s.def != lilac_resolve::DefId::ERROR
             }),
             "{:?}",
