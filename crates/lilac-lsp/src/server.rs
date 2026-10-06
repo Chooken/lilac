@@ -17,7 +17,7 @@ use lsp_types::{
 use crate::convert::to_lsp_diagnostic;
 use crate::documents::Documents;
 use crate::fs::OverlayFs;
-use crate::index::Retained;
+use crate::index::{LirStages, Retained};
 
 /// Debounce window before recompiling after an edit.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -108,6 +108,11 @@ impl Server {
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(request.id, result)))?;
+        } else if request.method == "lilac/lir" {
+            let result = self.lir_response(&request);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(request.id, result)))?;
         } else {
             let method = request.method;
             self.connection
@@ -158,6 +163,26 @@ impl Server {
         }
     }
 
+    /// The `lilac/lir` reply: a stage payload, or `null`.
+    fn lir_response(&self, request: &Request) -> serde_json::Value {
+        let params = &request.params;
+        let Some(uri) = params
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|uri| Url::parse(uri).ok())
+        else {
+            return serde_json::Value::Null;
+        };
+        let Some(stage) = params.get("stage").and_then(serde_json::Value::as_str) else {
+            return serde_json::Value::Null;
+        };
+        let retained = self.project.as_ref().or_else(|| self.per_file.get(&uri));
+        let Some(retained) = retained else {
+            return serde_json::Value::Null;
+        };
+        crate::lir::lir_payload(retained, &uri, stage).unwrap_or(serde_json::Value::Null)
+    }
+
     fn handle_notification(&mut self, notification: Notification) {
         let method = notification.method.clone();
         match method.as_str() {
@@ -205,7 +230,10 @@ impl Server {
         if let Some(root) = self.root.clone() {
             let mut session = Session::new();
             let mut fs = OverlayFs { overlay: &overlay };
-            let _ = session.compile_project(&root, &mut fs);
+            let mut stages = LirStages::default();
+            let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
+                stages.modules.push((name, lir.clone()));
+            });
             let file_uris: HashMap<FileId, Url> = session
                 .project_files()
                 .iter()
@@ -231,12 +259,17 @@ impl Server {
                 .iter()
                 .map(|(id, uri)| (uri.clone(), *id))
                 .collect();
-            new_project = Some(Retained::build(session, file_uris, uri_files));
+            new_project = Some(Retained::build_with_stages(
+                session, file_uris, uri_files, stages,
+            ));
         } else {
             for (uri, document) in self.documents.iter() {
                 let mut session = Session::new();
                 let name = document.path.to_string_lossy().into_owned();
-                let _ = session.compile_lir(&name, &document.text);
+                let mut stages = LirStages::default();
+                let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {
+                    stages.modules.push((name, lir.clone()));
+                });
                 let entry = by_uri.entry(uri.clone()).or_default();
                 for diagnostic in session.diags.diagnostics() {
                     if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
@@ -247,7 +280,10 @@ impl Server {
                 }
                 let file_uris = HashMap::from([(FileId(0), uri.clone())]);
                 let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
-                new_per_file.insert(uri.clone(), Retained::build(session, file_uris, uri_files));
+                new_per_file.insert(
+                    uri.clone(),
+                    Retained::build_with_stages(session, file_uris, uri_files, stages),
+                );
             }
         }
 
