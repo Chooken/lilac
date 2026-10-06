@@ -5,9 +5,12 @@ use lsp_types::{
 
 fn read_response(client: &Connection, id: &RequestId) -> lsp_server::Response {
     loop {
-        match client.receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+        match client
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+        {
             Ok(Message::Response(response)) if &response.id == id => return response,
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(err) => panic!("no response for {id:?}: {err}"),
         }
     }
@@ -18,10 +21,9 @@ fn initializes_shuts_down_and_exits() {
     let (server, client) = Connection::memory();
     let handle = std::thread::spawn(move || lilac_lsp::run(server).expect("server runs"));
 
-    let params = serde_json::from_value::<InitializeParams>(
-        serde_json::json!({ "capabilities": {} }),
-    )
-    .expect("params");
+    let params =
+        serde_json::from_value::<InitializeParams>(serde_json::json!({ "capabilities": {} }))
+            .expect("params");
     let init_id = RequestId::from(1);
     client
         .sender

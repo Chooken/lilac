@@ -19,7 +19,7 @@ fn read_response(client: &Connection, id: &RequestId) {
     loop {
         match client.receiver.recv_timeout(Duration::from_secs(5)) {
             Ok(Message::Response(response)) if &response.id == id => return,
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(err) => panic!("no response for {id:?}: {err}"),
         }
     }
@@ -123,7 +123,7 @@ fn publish_for(client: &Connection, uri: &Url) -> PublishDiagnosticsParams {
                     return params;
                 }
             }
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(err) => panic!("no diagnostics for {uri}: {err}"),
         }
     }
@@ -168,7 +168,11 @@ fn unknown_name_is_e021() {
     let (client, handle) = start_server();
     initialize(&client, None);
     let uri = main_uri();
-    did_open(&client, &uri, "main: function () nothing {\n    x: @bit8 = nope\n}\n");
+    did_open(
+        &client,
+        &uri,
+        "main: function () nothing {\n    x: @bit8 = nope\n}\n",
+    );
     let params = publish_for(&client, &uri);
     assert!(has_code(&params, "E021"), "{:?}", params.diagnostics);
     shutdown(&client);

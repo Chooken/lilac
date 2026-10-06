@@ -652,9 +652,10 @@ mod tests {
 
     impl lilac_module::Fs for TestFs {
         fn read(&mut self, path: &Path) -> std::io::Result<String> {
-            self.files.get(path).cloned().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")
-            })
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
         }
 
         fn list_dir(&mut self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {

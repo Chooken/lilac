@@ -548,7 +548,11 @@ mod tests {
         let root = PathBuf::from("proj");
         let mut fs = MemFs::new();
         fs.add(&root, "main.lilac", "using util\n");
-        fs.add(&root, "util/helper.lilac", "helper: function () nothing {}\n");
+        fs.add(
+            &root,
+            "util/helper.lilac",
+            "helper: function () nothing {}\n",
+        );
 
         let mut diags = Diags::new();
         let project = load(&root, &mut fs, &mut diags).expect("load succeeds");

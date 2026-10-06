@@ -85,17 +85,21 @@ impl Server {
     fn handle_request(&mut self, request: Request) -> Result<(), Box<dyn Error + Send + Sync>> {
         if request.method == "shutdown" {
             self.shutdown = true;
-            self.connection.sender.send(Message::Response(Response::new_ok(
-                request.id,
-                serde_json::Value::Null,
-            )))?;
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::Value::Null,
+                )))?;
         } else {
             let method = request.method;
-            self.connection.sender.send(Message::Response(Response::new_err(
-                request.id,
-                METHOD_NOT_FOUND,
-                format!("method not found: {method}"),
-            )))?;
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_err(
+                    request.id,
+                    METHOD_NOT_FOUND,
+                    format!("method not found: {method}"),
+                )))?;
         }
         Ok(())
     }
@@ -158,11 +162,9 @@ impl Server {
                 let Some(uri) = file_uris.get(&id).cloned() else {
                     continue;
                 };
-                if let Some(lsp) =
-                    to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
-                        file_uris.get(&file).cloned()
-                    })
-                {
+                if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
+                    file_uris.get(&file).cloned()
+                }) {
                     by_uri.entry(uri).or_default().push(lsp);
                 }
             }
@@ -208,10 +210,13 @@ impl Server {
             version: None,
         };
         if let Ok(params) = serde_json::to_value(params) {
-            let _ = self.connection.sender.send(Message::Notification(Notification {
-                method: "textDocument/publishDiagnostics".to_owned(),
-                params,
-            }));
+            let _ = self
+                .connection
+                .sender
+                .send(Message::Notification(Notification {
+                    method: "textDocument/publishDiagnostics".to_owned(),
+                    params,
+                }));
         }
     }
 }

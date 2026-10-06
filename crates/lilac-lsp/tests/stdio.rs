@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 fn write_message(stdin: &mut impl Write, value: &serde_json::Value) {
