@@ -9,7 +9,6 @@
 //! never print.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_span::Span;
@@ -37,6 +36,19 @@ pub struct LirModule {
     pub funcs: Vec<LirFunc>,
     /// Type name → `(field, type)` in order (verifier only, never printed).
     pub layouts: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Canonical module text plus the source span of each physical line.
+///
+/// `lines[i]` is the span for `text`'s `i`-th line (0-based, matching
+/// [`str::lines`]); `None` marks a compiler-generated line (header, `in`/`out`
+/// signatures, braces, type sections) with no single source location.
+#[derive(Clone, Debug)]
+pub struct SpannedText {
+    /// Canonical module text, byte-identical to [`LirModule::to_text`].
+    pub text: String,
+    /// One entry per line of `text`; `None` when no source span applies.
+    pub lines: Vec<Option<Span>>,
 }
 
 /// One typed constant.
@@ -417,34 +429,66 @@ impl LirModule {
         }
     }
 
-    /// Canonical header text.
+    /// Canonical header text: the two header lines, neither source-spanned.
     #[must_use]
     pub fn header_text(&self) -> String {
-        format!(
-            "lilac_ir = \"{}\"\ntarget = \"{}\"\n",
-            self.version, self.target
-        )
+        join_lines(&self.header_lines())
+    }
+
+    /// The two compiler-generated header lines (`lilac_ir`, `target`).
+    fn header_lines(&self) -> Vec<(String, Option<Span>)> {
+        vec![
+            (format!("lilac_ir = \"{}\"", self.version), None),
+            (format!("target = \"{}\"", self.target), None),
+        ]
+    }
+
+    /// Every physical line of the module text, paired with its source span
+    /// (`None` for compiler-generated lines). The single traversal shared by
+    /// [`Self::to_text`] and [`Self::to_text_spanned`].
+    fn module_lines(&self) -> Vec<(String, Option<Span>)> {
+        let mut lines = self.header_lines();
+        for data in &self.data {
+            lines.extend(print_data(data));
+        }
+        let mut names: Vec<&str> = self.layouts.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        for name in names {
+            lines.extend(print_layout(name, &self.layouts[name]));
+        }
+        for func in &self.funcs {
+            lines.extend(print_func(func));
+        }
+        lines
     }
 
     /// Canonical module text: header, data consts, type sections (sorted
     /// by name for deterministic snapshots), then functions.
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut out = self.header_text();
-        for data in &self.data {
-            out.push_str(&print_data(data));
-            out.push('\n');
-        }
-        let mut names: Vec<&str> = self.layouts.keys().map(String::as_str).collect();
-        names.sort_unstable();
-        for name in names {
-            out.push_str(&print_layout(name, &self.layouts[name]));
-        }
-        for func in &self.funcs {
-            out.push_str(&print_func(func));
-        }
-        out
+        join_lines(&self.module_lines())
     }
+
+    /// Canonical module text plus the source span of each physical line.
+    #[must_use]
+    pub fn to_text_spanned(&self) -> SpannedText {
+        let lines = self.module_lines();
+        SpannedText {
+            text: join_lines(&lines),
+            lines: lines.into_iter().map(|(_, span)| span).collect(),
+        }
+    }
+}
+
+/// Joins `(line, span)` pairs with `"\n"` and appends a trailing newline.
+fn join_lines(lines: &[(String, Option<Span>)]) -> String {
+    let mut text = lines
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text
 }
 
 impl Default for LirModule {
@@ -465,24 +509,27 @@ fn escape_data(text: &str) -> String {
     escaped
 }
 
-fn print_data(data: &LirData) -> String {
+fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
     let (kind, value) = match &data.kind {
         LirDataKind::Str(text) => ("str", escape_data(text)),
         LirDataKind::NumLit(text) => ("numlit", escape_data(text)),
     };
-    format!("!{}: {kind} = \"{value}\"", data.name)
+    vec![(
+        format!("!{}: {kind} = \"{value}\"", data.name),
+        Some(data.span),
+    )]
 }
 
 /// Prints one type section (`type #Name` with `name: #ty` members in
-/// layout order; the section order itself is sorted in `to_text`).
-fn print_layout(name: &str, members: &[(String, String)]) -> String {
-    let mut out = format!("type {name} {{\n");
+/// layout order; the section order itself is sorted in `to_text`). Type
+/// sections are compiler-generated, so every line carries no span.
+fn print_layout(name: &str, members: &[(String, String)]) -> Vec<(String, Option<Span>)> {
+    let mut lines = vec![(format!("type {name} {{"), None)];
     for (member, ty) in members {
-        use std::fmt::Write as _;
-        let _ = writeln!(out, "    {member}: {ty},");
+        lines.push((format!("    {member}: {ty},"), None));
     }
-    out.push_str("}\n");
-    out
+    lines.push(("}".to_owned(), None));
+    lines
 }
 
 fn print_operand(operand: &LirOperand) -> String {
@@ -637,32 +684,70 @@ fn print_term(term: &LirTerm) -> String {
     }
 }
 
-fn print_func(func: &LirFunc) -> String {
+/// The source span of an instruction: its `span` field, except
+/// `CompileError`, which only records the `@compile_error` call site.
+fn inst_span(inst: &LirInst) -> Span {
+    match inst {
+        LirInst::CopyReg { span, .. }
+        | LirInst::CopyPlace { span, .. }
+        | LirInst::Const { span, .. }
+        | LirInst::Load { span, .. }
+        | LirInst::Addr { span, .. }
+        | LirInst::AddrFunc { span, .. }
+        | LirInst::Call { span, .. }
+        | LirInst::Field { span, .. }
+        | LirInst::StoreField { span, .. }
+        | LirInst::Store { span, .. }
+        | LirInst::Convert { span, .. }
+        | LirInst::FieldAddr { span, .. }
+        | LirInst::Alloca { span, .. }
+        | LirInst::Drop { span, .. }
+        | LirInst::Arith { span, .. }
+        | LirInst::FoldIntrinsic { span, .. } => *span,
+        LirInst::CompileError { call_span, .. } => *call_span,
+    }
+}
+
+/// The source span of a terminator (every variant carries one).
+fn term_span(term: &LirTerm) -> Span {
+    match term {
+        LirTerm::Return { span, .. }
+        | LirTerm::Branch { span, .. }
+        | LirTerm::BranchIf { span, .. }
+        | LirTerm::Panic { span, .. }
+        | LirTerm::Unreachable { span, .. } => *span,
+    }
+}
+
+fn print_func(func: &LirFunc) -> Vec<(String, Option<Span>)> {
     let header = if func.is_extern {
-        format!("extern @{}\n", func.name)
+        format!("extern @{}", func.name)
     } else {
-        format!("function @{}\n", func.name)
+        format!("function @{}", func.name)
     };
-    let mut out = header;
+    let mut lines = vec![(header, None)];
     for (place, ty) in &func.ins {
-        let _ = writeln!(out, "  in {ty} %{place}");
+        lines.push((format!("  in {ty} %{place}"), None));
     }
     for (place, ty) in &func.outs {
-        let _ = writeln!(out, "  out {ty} %{place}");
+        lines.push((format!("  out {ty} %{place}"), None));
     }
     if func.is_extern {
-        return out;
+        return lines;
     }
-    out.push_str("{\n");
+    lines.push(("{".to_owned(), None));
     for block in &func.blocks {
-        let _ = writeln!(out, "  ${}:", block.label);
+        lines.push((format!("  ${}:", block.label), Some(block.span)));
         for inst in &block.insts {
-            let _ = writeln!(out, "    {}", print_inst(inst));
+            lines.push((format!("    {}", print_inst(inst)), Some(inst_span(inst))));
         }
-        let _ = writeln!(out, "    {}", print_term(&block.term));
+        lines.push((
+            format!("    {}", print_term(&block.term)),
+            Some(term_span(&block.term)),
+        ));
     }
-    out.push_str("}\n");
-    out
+    lines.push(("}".to_owned(), None));
+    lines
 }
 
 /// Signature of a compiler builtin: input/output type slots in `#`-spelling.
@@ -2176,5 +2261,82 @@ mod tests {
             "{:?}",
             diags.diagnostics()
         );
+    }
+
+    #[test]
+    fn spanned_text_matches_to_text_byte_for_byte() {
+        let mut module = canonical_module();
+        module.layouts.insert(
+            "#Number".to_owned(),
+            vec![("tag".to_owned(), "#bit8".to_owned())],
+        );
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span: test_span(),
+        });
+        let spanned = module.to_text_spanned();
+        assert_eq!(spanned.text, module.to_text());
+        assert_eq!(spanned.lines.len(), spanned.text.lines().count());
+    }
+
+    #[test]
+    fn spanned_instruction_and_terminator_lines_carry_spans() {
+        let module = canonical_module();
+        let spanned = module.to_text_spanned();
+        let lines: Vec<&str> = spanned.text.lines().collect();
+        let inst_line = lines
+            .iter()
+            .position(|l| l.contains("= copy %in"))
+            .expect("instruction line");
+        let term_line = lines
+            .iter()
+            .position(|l| l.trim() == "return")
+            .expect("terminator line");
+        assert_eq!(spanned.lines[inst_line], Some(test_span()));
+        assert_eq!(spanned.lines[term_line], Some(test_span()));
+    }
+
+    #[test]
+    fn spanned_header_and_layout_lines_have_no_span() {
+        let mut module = canonical_module();
+        module.layouts.insert(
+            "#Number".to_owned(),
+            vec![("tag".to_owned(), "#bit8".to_owned())],
+        );
+        let spanned = module.to_text_spanned();
+        let lines: Vec<&str> = spanned.text.lines().collect();
+        for needle in [
+            "lilac_ir =",
+            "target =",
+            "function @",
+            "  in ",
+            "type #Number",
+            "{",
+            "}",
+        ] {
+            if let Some(i) = lines.iter().position(|l| l.contains(needle)) {
+                assert_eq!(
+                    spanned.lines[i], None,
+                    "line `{needle}` should have no span"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spanned_extern_only_module_is_consistent() {
+        let mut module = LirModule::default();
+        module.funcs.push(LirFunc {
+            name: "puts".to_owned(),
+            ins: vec![("s".to_owned(), "#bit8".to_owned())],
+            outs: vec![],
+            is_extern: true,
+            blocks: vec![],
+        });
+        let spanned = module.to_text_spanned();
+        assert_eq!(spanned.text, module.to_text());
+        assert_eq!(spanned.lines.len(), spanned.text.lines().count());
+        assert!(spanned.lines.iter().all(Option::is_none));
     }
 }
