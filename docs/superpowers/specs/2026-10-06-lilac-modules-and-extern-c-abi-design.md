@@ -62,9 +62,10 @@
 5. **`private { … }`.** Allowed at file top-level and inside `object`; gates
    **every** member (fields, functions/methods, nested types, hooks, consts).
    - *namespace-private*: visible to the defining namespace and its descendant
-     namespaces (Rust's rule), excluded from `using`; any other access → `E026`.
-   - *object-private*: visible only within that object's own member bodies;
-     hidden from `obj.m` / `Object.m`; violation → `E026`.
+     namespaces (Rust's rule); excluded from `using`, so an importer cannot name
+     it at all (Rust glob behavior: an unresolved name, not a privacy error).
+   - *object-private*: the member is found but inaccessible from outside the
+     object → `E026`.
 6. **Collisions.** A local name shadows an imported one; two imports exporting
    the same name is an ambiguity error only if referenced (`E029`).
 7. **`extern` C ABI.** Scalars by value, `ref T` → pointer; 0 outs = `void`,
@@ -174,8 +175,9 @@ Two invariants are preserved: `lilac-driver` still owns no filesystem I/O
 - **Namespace-private.** Items in a top-level `private` block belong to the
   folder's namespace but are excluded from the namespace's `using` export. They
   are visible to the defining namespace and its descendant namespaces (Rust's
-  rule: private = the module and its descendants) — never to ancestors, siblings,
-  or importers.
+  rule: private = the module and its descendants). Because `using` is glob-like
+  and globs skip private items (rustc's behavior), an importer cannot *name* a
+  private item at all — it is an unresolved name, not a privacy error.
 - **Object-private.** Members in a `private` block inside an `object` are
   visible only within that object's own member bodies — i.e. functions whose
   enclosing scope is the object. They are hidden from external `obj.m` and
@@ -185,10 +187,11 @@ Two invariants are preserved: `lilac-driver` still owns no filesystem I/O
   the root is always in it. A namespace sees all items of its ancestors (public
   by ancestor reach, private by descendant reach), its own items, and the public
   items of the namespaces it `using`s.
-- **Lookup gating.** A lookup to a declaration outside its visibility reach —
-  private from an ancestor, sibling, or importer; or any cross-object access to a
-  private member — is `E026`, labelled at both the access site and the
-  declaration.
+- **Lookup gating.** Member access is a qualified path, so a private member that
+  is found but inaccessible from outside the object is `E026`, labelled at the
+  access site and the declaration. Namespace-private items are instead excluded
+  from `using`, so importers see them as unresolved (rustc's glob rule); `E026`
+  does not fire for them.
 - **Name occupancy.** A private declaration still occupies its name: a private
   and a public declaration of the same name in one namespace is `E020`.
 
@@ -290,7 +293,7 @@ C ABI. Internal (non-extern) functions are unchanged.
 |---|---|---|
 | `E020` (extended) | duplicate top-level name across files in one namespace | redefined + first defined, different files |
 | `E025` (new) | `using` target missing or not a directory | the `using` path |
-| `E026` (new) | access to a private declaration across a scope boundary | access site + declaration |
+| `E026` (new) | access to a private object member across an object boundary | access site + declaration |
 | `E028` (new) | invalid `extern` signature (unsupported param/return, >1 out) | the offending slot |
 | `E029` (new) | reference to a name exported by two `using`d namespaces | reference + both `using` sites |
 
@@ -318,8 +321,8 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
 - **Resolver:** per-file `using` visibility, non-transitivity, ancestor-public
   reach (root items visible in a subfolder with no import), descendant-private
   reach (a subfolder sees a parent's private), namespace-private exclusion from
-  importers/siblings/ancestors (`E026`), object-private member access (`E026`),
-  import ambiguity (`E029`), cross-file `E020`.
+  importers (an unresolved name, not `E026`), object-private member access
+  (`E026`), import ambiguity (`E029`), cross-file `E020`.
 - **Snapshots:** `tests/ui/modules/` fixtures produce merged `.lir`/`.ll`.
 - **Extern:** `extern_write.lilac` links with clang, runs, and asserts stdout;
   `FAILS_extern_multi_out.lilac` / `FAILS_extern_aggregate_param.lilac` → `E028`.
@@ -331,10 +334,10 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
    any root-namespace file is found.
 2. `using A.B` imports public names, per-file, non-transitively; missing folder
    is `E025`.
-3. `private` hides namespace items from ancestors, siblings, and importers (but
-   descendants see them), and hides object members from external access;
-   violations are `E026`. Ancestor items (including the root) are visible with no
-   import.
+3. `private` excludes namespace items from importers (they see an unresolved
+   name) while descendants still see them, and hides object members from
+   external access (`E026`). Ancestor items (including the root) are visible with
+   no import.
 4. A libc `write`/`malloc` program links and runs with correct output.
 5. `cargo test --workspace` and the release bench gate pass; every existing
    snapshot is unchanged except the intentionally-rewritten `extern_decl`.
