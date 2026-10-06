@@ -263,6 +263,88 @@ mod tests {
         assert!(!text.contains("define i64 @write"), "{text}");
     }
 
+    /// A call to an `extern` uses the platform C ABI: scalar `in` places are
+    /// loaded and passed by value, `ref T` places pass their pointer, and the
+    /// single return is stored into the out place — not the internal
+    /// pointer-place ABI.
+    #[test]
+    fn extern_call_uses_c_abi() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.data.push(LirData {
+            name: "data".to_owned(),
+            kind: LirDataKind::Str("hi".to_owned()),
+            span: span(),
+        });
+        module.funcs.push(LirFunc {
+            name: "write".to_owned(),
+            ins: vec![
+                ("fd".to_owned(), "#bit32".to_owned()),
+                ("buf".to_owned(), "ref #bit8".to_owned()),
+                ("n".to_owned(), "#bit_native".to_owned()),
+            ],
+            outs: vec![("written".to_owned(), "#bit_native".to_owned())],
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("fd", "#bit32"),
+            ("buf", "ref #bit8"),
+            ("n", "#bit_native"),
+            ("written", "#bit_native"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+        insts.push(LirInst::Const {
+            dst: "1".to_owned(),
+            lit: "1".to_owned(),
+            ty: "#bit32".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fd");
+        insts.push(LirInst::Const {
+            dst: "2".to_owned(),
+            lit: "!data".to_owned(),
+            ty: "ref #bit8".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("2".to_owned()), "buf");
+        insts.push(LirInst::Const {
+            dst: "3".to_owned(),
+            lit: "2".to_owned(),
+            ty: "#bit_native".to_owned(),
+            span: span(),
+        });
+        copy_place(&mut insts, LirOperand::Reg("3".to_owned()), "n");
+        call(
+            &mut insts,
+            LirCallee::Func("write".to_owned()),
+            &["fd", "buf", "n"],
+            &["written"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        // The values `(fd=1, buf=@data, n=2)` are materialized into their
+        // places; at O0 their loads pass as SSA values, not folded literals.
+        assert!(text.contains("store i32 1"), "{text}");
+        assert!(text.contains("store ptr @data"), "{text}");
+        assert!(text.contains("store i64 2"), "{text}");
+        // The C ABI call: scalars by value, the `ref` place's pointer, i64
+        // return — never the internal all-`ptr` place ABI.
+        let call = text
+            .lines()
+            .find(|line| line.contains("call i64 @write("))
+            .expect("extern write call");
+        assert!(call.contains("(i32 %"), "{call}");
+        assert!(call.contains(", ptr %"), "{call}");
+        assert!(call.contains(", i64 %"), "{call}");
+        assert!(!text.contains("call i64 @write(ptr"), "{text}");
+        // The single C return is stored into the out place.
+        assert!(text.contains("store i64 %"), "{text}");
+    }
+
     /// An `extern` parameter outside the scalar/pointer set is `E028`, not a
     /// mis-compiled struct pointer.
     #[test]

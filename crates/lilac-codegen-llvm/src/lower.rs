@@ -576,7 +576,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// A direct user call: `call void @f(ptr %in…, ptr %out…)`.
+    /// A direct user call. An internal callee uses the pointer-place ABI
+    /// `call void @f(ptr %in…, ptr %out…)`; an `extern` callee uses the
+    /// platform C ABI, with scalars by value, `ref T` as a pointer, and the
+    /// single return stored into the out place.
     fn lower_direct_call(
         &self,
         name: &str,
@@ -585,14 +588,62 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) {
-        let Some(function) = self.module.get_function(symbol(name)) else {
-            bug!(Span::dummy(), "call to unknown function `@{name}`");
-        };
         let Some(callee) = self.lir.funcs.iter().find(|func| func.name == name) else {
             bug!(Span::dummy(), "call to unknown function `@{name}`");
         };
-        let args = self.direct_call_args(callee, ins, outs, builder, state);
-        checked(builder.build_call(function, &args, ""), "direct call");
+        let llvm_name = if callee.is_extern { name } else { symbol(name) };
+        let Some(function) = self.module.get_function(llvm_name) else {
+            bug!(Span::dummy(), "call to unknown function `@{name}`");
+        };
+        if callee.is_extern {
+            let args = self.extern_call_args(callee, ins, builder, state);
+            let result = checked(builder.build_call(function, &args, ""), "extern call");
+            if let Some(out) = outs.first() {
+                let value = match result.try_as_basic_value() {
+                    ValueKind::Basic(value) => value,
+                    ValueKind::Instruction(_) => {
+                        bug!(Span::dummy(), "extern `@{name}` unexpectedly returned void")
+                    }
+                };
+                checked(
+                    builder.build_store(place_ptr(out, state), value),
+                    "extern result store",
+                );
+            }
+        } else {
+            let args = self.direct_call_args(callee, ins, outs, builder, state);
+            checked(builder.build_call(function, &args, ""), "direct call");
+        }
+    }
+
+    /// C-ABI arguments for an `extern` call: scalar `in` places are loaded and
+    /// passed by value; a `ref T` parameter gets a pointer (the load of a `ref`
+    /// place, or the address of a non-`ref` one).
+    fn extern_call_args(
+        &self,
+        callee: &LirFunc,
+        ins: &[String],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> Vec<BasicMetadataValueEnum<'ctx>> {
+        ins.iter()
+            .zip(&callee.ins)
+            .map(|(place, (_, param_ty))| {
+                if param_ty.starts_with("ref ") {
+                    let arg_is_ref = state
+                        .place_types
+                        .get(place)
+                        .is_some_and(|ty| ty.starts_with("ref "));
+                    if arg_is_ref {
+                        BasicMetadataValueEnum::from(self.load_place(place, builder, state))
+                    } else {
+                        BasicMetadataValueEnum::from(place_ptr(place, state))
+                    }
+                } else {
+                    BasicMetadataValueEnum::from(self.load_as(place, param_ty, builder, state))
+                }
+            })
+            .collect()
     }
 
     /// The address of every listed place (pointer ABI), inputs then outputs,
