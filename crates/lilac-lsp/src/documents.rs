@@ -74,6 +74,11 @@ impl Documents {
     pub fn path_of(&self, uri: &Url) -> Option<&Path> {
         self.map.get(uri).map(|document| document.path.as_path())
     }
+
+    /// Iterates open documents as `(uri, document)`.
+    pub fn iter(&self) -> impl Iterator<Item = (&Url, &Document)> {
+        self.map.iter()
+    }
 }
 
 #[cfg(test)]

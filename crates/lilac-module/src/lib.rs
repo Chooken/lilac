@@ -89,12 +89,36 @@ pub fn load(
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> Result<Project, ErrorGuaranteed> {
+    let (project, failed) = load_with_status(root, fs, sources, diags);
+    if failed {
+        Err(ErrorGuaranteed::new())
+    } else {
+        Ok(project)
+    }
+}
+
+/// Like [`load`], but returns the (possibly partial) project together with a
+/// `failed` flag instead of an error, so callers can still map the files read
+/// before a bad `using`.
+pub fn load_with_status(
+    root: &Path,
+    fs: &mut dyn Fs,
+    sources: &mut SourceMap,
+    diags: &mut Diags,
+) -> (Project, bool) {
     let Ok(root_entries) = fs.list_dir(root) else {
         diags.emit(Diagnostic::error(
             "E025",
             format!("cannot read module folder `{}`", root.display()),
         ));
-        return Err(ErrorGuaranteed::new());
+        return (
+            Project {
+                root: root.to_path_buf(),
+                namespaces: Vec::new(),
+                files: Vec::new(),
+            },
+            true,
+        );
     };
 
     let mut namespaces = vec![Namespace {
@@ -124,7 +148,14 @@ pub fn load(
                     "E025",
                     format!("cannot read module file `{}`", path.display()),
                 ));
-                return Err(ErrorGuaranteed::new());
+                return (
+                    Project {
+                        root: root.to_path_buf(),
+                        namespaces,
+                        files,
+                    },
+                    true,
+                );
             };
             let name = file_name_str(&path);
             let file_id = sources.add_file(&name, &src);
@@ -170,14 +201,14 @@ pub fn load(
         }
     }
 
-    if failed {
-        return Err(ErrorGuaranteed::new());
-    }
-    Ok(Project {
-        root: root.to_path_buf(),
-        namespaces,
-        files,
-    })
+    (
+        Project {
+            root: root.to_path_buf(),
+            namespaces,
+            files,
+        },
+        failed,
+    )
 }
 
 /// Whether `path` names a `*.lilac` source file.

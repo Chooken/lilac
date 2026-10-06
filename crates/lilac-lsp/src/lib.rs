@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use lsp_server::{Connection, Message, Response};
+use lsp_server::Connection;
 use lsp_types::{
     InitializeParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
     TextDocumentSyncKind,
@@ -12,9 +12,7 @@ pub mod convert;
 pub mod documents;
 pub mod fs;
 pub mod roots;
-
-/// JSON-RPC code for an unknown method.
-const METHOD_NOT_FOUND: i32 = -32601;
+pub mod server;
 
 /// Runs the server over `connection` until the client sends `exit`.
 ///
@@ -22,7 +20,7 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// arrives first (the client violated the protocol).
 pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (id, params) = connection.initialize_start()?;
-    let _params: InitializeParams = serde_json::from_value(params)?;
+    let params: InitializeParams = serde_json::from_value(params)?;
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -37,36 +35,7 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         serde_json::json!({ "capabilities": capabilities, "serverInfo": server_info }),
     )?;
 
-    let mut shutdown = false;
-    for message in &connection.receiver {
-        match message {
-            Message::Request(request) => {
-                if request.method == "shutdown" {
-                    shutdown = true;
-                    connection.sender.send(Message::Response(Response::new_ok(
-                        request.id,
-                        serde_json::Value::Null,
-                    )))?;
-                } else {
-                    let method = request.method;
-                    connection.sender.send(Message::Response(Response::new_err(
-                        request.id,
-                        METHOD_NOT_FOUND,
-                        format!("method not found: {method}"),
-                    )))?;
-                }
-            }
-            Message::Notification(notification) => {
-                if notification.method == "exit" {
-                    return if shutdown {
-                        Ok(())
-                    } else {
-                        Err("exit received before shutdown".into())
-                    };
-                }
-            }
-            Message::Response(_) => {}
-        }
-    }
-    Ok(())
+    let root = roots::root_from_params(&params);
+    let mut server = server::Server::new(connection, root);
+    server.main_loop()
 }

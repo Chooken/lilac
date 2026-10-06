@@ -177,12 +177,16 @@ impl Session {
         // the loader's `E025`/`using` spans resolve without `FileId(index)`
         // coincidence (finding: `E025` labels never rendered).
         self.project_files.clear();
-        let project = lilac_module::load(root, fs, &mut self.source_map, &mut self.diags)?;
+        let (project, failed) =
+            lilac_module::load_with_status(root, fs, &mut self.source_map, &mut self.diags);
         self.project_files = project
             .files
             .iter()
             .map(|file| (file.file, file.path.clone()))
             .collect();
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
         let mut programs: Vec<(FileId, Program)> = Vec::with_capacity(project.files.len());
         let mut merged = Program {
             items: Vec::new(),
