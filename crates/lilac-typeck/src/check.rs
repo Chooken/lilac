@@ -8,7 +8,7 @@ use lilac_hir::{
     HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
     HirPattern, HirProgram, HirStmt, TempId,
 };
-use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject};
+use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject, Visibility};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
@@ -124,18 +124,10 @@ pub fn check_bodies(
         active_objects: Vec::new(),
         layouts: HashMap::new(),
         reported_failures: HashSet::new(),
+        enclosing_object: None,
     };
     checker.collect_fields(&program.items);
-    for item in &program.items {
-        let file = item.span.file;
-        let project = checker.project;
-        if let Ok(Some(resolved)) = lookup_one(project, file, &item.name, item.span, checker.diags)
-        {
-            let resolved = resolved.clone();
-            checker.file = file;
-            checker.check_item(item, &resolved, None);
-        }
-    }
+    checker.check_items(&program.items);
     let generic_objects: HashSet<String> = checker
         .project
         .all_items()
@@ -149,54 +141,84 @@ pub fn check_bodies(
         .collect();
     let mut layouts = std::mem::take(&mut checker.layouts);
     if !checker.diags.has_errors() {
-        for item in &program.items {
-            let owner = checker.qualify_local(item.span.file, &item.name);
-            if generic_objects.contains(&owner) {
-                // Generic object layouts are concrete per instance (M4 Task 5);
-                // resolving `T` here would leak a template into HIR.
-                continue;
-            }
-            checker.file = item.span.file;
-            if let ItemKind::Object { members, .. } = &item.kind {
-                let mut fields = Vec::new();
-                for member in members {
-                    if let ItemKind::Field { ty } = &member.kind {
-                        let field_ty = resolve_type(
-                            ty,
-                            checker.types,
-                            checker.project,
-                            checker.file,
-                            checker.diags,
-                            &[],
-                        );
-                        fields.push((member.name.clone(), Some(field_ty)));
-                    }
-                }
-                layouts.insert(owner, fields);
-            } else if let ItemKind::Enum { variants, .. } = &item.kind {
-                let mut entries = Vec::new();
-                for variant in variants {
-                    let payload = variant.payload.as_ref().map(|ty| {
-                        resolve_type(
-                            ty,
-                            checker.types,
-                            checker.project,
-                            checker.file,
-                            checker.diags,
-                            &[],
-                        )
-                    });
-                    entries.push((variant.name.clone(), payload));
-                }
-                layouts.insert(owner, entries);
-            }
-        }
+        collect_layouts(&mut checker, &program.items, &generic_objects, &mut layouts);
     }
     HirProgram {
         funcs: checker.hir,
         consts: checker.consts,
         layouts,
         drops: checker.drops,
+    }
+}
+
+/// Collects object/enum layouts, descending into `private { … }` blocks so a
+/// private object/enum still gets a layout and a private field still occupies
+/// its slot (privacy gates access, not layout).
+fn collect_layouts(
+    checker: &mut Checker,
+    items: &[Item],
+    generic_objects: &HashSet<String>,
+    layouts: &mut HashMap<String, Vec<(String, Option<TypeRef>)>>,
+) {
+    for item in items {
+        if let ItemKind::Private { items } = &item.kind {
+            collect_layouts(checker, items, generic_objects, layouts);
+            continue;
+        }
+        let owner = checker.qualify_local(item.span.file, &item.name);
+        if generic_objects.contains(&owner) {
+            // Generic object layouts are concrete per instance (M4 Task 5);
+            // resolving `T` here would leak a template into HIR.
+            continue;
+        }
+        checker.file = item.span.file;
+        if let ItemKind::Object { members, .. } = &item.kind {
+            let mut fields = Vec::new();
+            collect_layout_fields(checker, members, &mut fields);
+            layouts.insert(owner, fields);
+        } else if let ItemKind::Enum { variants, .. } = &item.kind {
+            let mut entries = Vec::new();
+            for variant in variants {
+                let payload = variant.payload.as_ref().map(|ty| {
+                    resolve_type(
+                        ty,
+                        checker.types,
+                        checker.project,
+                        checker.file,
+                        checker.diags,
+                        &[],
+                    )
+                });
+                entries.push((variant.name.clone(), payload));
+            }
+            layouts.insert(owner, entries);
+        }
+    }
+}
+
+/// Appends an object's field slots in declaration order, flattening `private`
+/// member blocks.
+fn collect_layout_fields(
+    checker: &mut Checker,
+    members: &[Item],
+    fields: &mut Vec<(String, Option<TypeRef>)>,
+) {
+    for member in members {
+        if let ItemKind::Private { items } = &member.kind {
+            collect_layout_fields(checker, items, fields);
+            continue;
+        }
+        if let ItemKind::Field { ty } = &member.kind {
+            let field_ty = resolve_type(
+                ty,
+                checker.types,
+                checker.project,
+                checker.file,
+                checker.diags,
+                &[],
+            );
+            fields.push((member.name.clone(), Some(field_ty)));
+        }
     }
 }
 
@@ -245,6 +267,9 @@ struct Checker<'a> {
     /// `E042` reports already emitted, keyed by
     /// `(generic DefId, args, call-site file, call-site byte)`.
     reported_failures: HashSet<(DefId, Vec<TypeRef>, u32, u32)>,
+    /// The object whose member body is being checked, if any: an object-private
+    /// member is visible only while this matches the member's owning object.
+    enclosing_object: Option<DefId>,
 }
 
 struct FuncCtx {
@@ -412,6 +437,14 @@ fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) ->
         parent: Option<(String, DefId)>,
     ) -> ItemLookup<'a> {
         for ast in ast_items {
+            if let ItemKind::Private { items } = &ast.kind {
+                // `private` wrappers are not definitions: descend with the same
+                // scope, which resolves the wrapped items by name.
+                if let Some(found) = rec(items, scope, def, parent.clone()) {
+                    return Some(found);
+                }
+                continue;
+            }
             let Some(resolved) = scope(ast) else {
                 continue;
             };
@@ -455,6 +488,25 @@ fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) ->
             .map(|(_, item)| item.clone())
     };
     rec(&program.items, &top_scope, def, None)
+}
+
+/// Finds a module constant's declared type by name, descending into `private`
+/// blocks so a namespace-private constant resolves like a public one.
+fn find_const_type(items: &[Item], name: &str) -> Option<AstType> {
+    for item in items {
+        if let ItemKind::Private { items } = &item.kind {
+            if let Some(ty) = find_const_type(items, name) {
+                return Some(ty);
+            }
+            continue;
+        }
+        if let ItemKind::Const { ty, .. } = &item.kind {
+            if item.name == name {
+                return Some(ty.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Whether HIR contains a branch-join temp: control flow inside a value
@@ -626,17 +678,33 @@ impl Checker<'_> {
 
     fn collect_fields(&mut self, items: &[Item]) {
         for item in items {
+            if let ItemKind::Private { items } = &item.kind {
+                self.collect_fields(items);
+                continue;
+            }
             if let ItemKind::Object { members, .. } = &item.kind {
                 let owner = self.qualify_local(item.span.file, &item.name);
                 for member in members {
-                    if let ItemKind::Field { ty } = &member.kind {
-                        self.fields
-                            .insert((owner.clone(), member.name.clone()), ty.clone());
+                    if let ItemKind::Private { items } = &member.kind {
+                        for inner in items {
+                            self.collect_member_field(&owner, inner);
+                        }
+                        continue;
                     }
-                    self.collect_fields(std::slice::from_ref(member));
+                    self.collect_member_field(&owner, member);
                 }
             }
         }
+    }
+
+    /// Records one object member's field type (flattening `private` blocks via
+    /// the caller) and recurses into any nested object declaration.
+    fn collect_member_field(&mut self, owner: &str, member: &Item) {
+        if let ItemKind::Field { ty } = &member.kind {
+            self.fields
+                .insert((owner.to_owned(), member.name.clone()), ty.clone());
+        }
+        self.collect_fields(std::slice::from_ref(member));
     }
 
     fn mismatch(
@@ -801,6 +869,46 @@ impl Checker<'_> {
         (ty, hir)
     }
 
+    /// Checks every item in `items`, descending into `private { … }` blocks so
+    /// a namespace-private body is checked and later lowered like a public one.
+    fn check_items(&mut self, items: &[Item]) {
+        for item in items {
+            if let ItemKind::Private { items } = &item.kind {
+                self.check_items(items);
+                continue;
+            }
+            let file = item.span.file;
+            let project = self.project;
+            if let Ok(Some(resolved)) = lookup_one(project, file, &item.name, item.span, self.diags)
+            {
+                let resolved = resolved.clone();
+                self.file = file;
+                self.check_item(item, &resolved, None);
+            }
+        }
+    }
+
+    /// Checks one object member, flattening `private { … }` blocks so a private
+    /// member body is checked in its object's context.
+    fn check_member(
+        &mut self,
+        member: &Item,
+        resolved_members: &HashMap<String, ResItem>,
+        owner: &Item,
+        owner_def: DefId,
+    ) {
+        if let ItemKind::Private { items } = &member.kind {
+            for inner in items {
+                self.check_member(inner, resolved_members, owner, owner_def);
+            }
+            return;
+        }
+        if let Some(member_resolved) = resolved_members.get(&member.name) {
+            let parent = Some((owner.name.clone(), owner_def));
+            self.check_item(member, member_resolved, parent);
+        }
+    }
+
     fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
         self.file = item.span.file;
         match &item.kind {
@@ -821,13 +929,7 @@ impl Checker<'_> {
                         return;
                     }
                     for member in members {
-                        if let Some(member_resolved) = resolved_members.get(&member.name) {
-                            self.check_item(
-                                member,
-                                member_resolved,
-                                Some((item.name.clone(), resolved.id)),
-                            );
-                        }
+                        self.check_member(member, resolved_members, item, resolved.id);
                     }
                     if let Some(drop) = resolved_members.get("@on_drop") {
                         if matches!(drop.kind, ResKind::Hook { .. })
@@ -992,6 +1094,8 @@ impl Checker<'_> {
         parent: Option<(String, DefId)>,
     ) -> (CheckedBody, Vec<HirParam>, Vec<HirParam>) {
         let errors_before = self.diags.checkpoint();
+        let enclosing_def = parent.as_ref().map(|(_, def)| *def);
+        let saved_enclosing = std::mem::replace(&mut self.enclosing_object, enclosing_def);
         let (mut fctx, params, returns) = self.func_ctx(decl, sig, parent);
         let outcome = match &decl.body {
             None => CheckedBody::Extern,
@@ -1027,6 +1131,7 @@ impl Checker<'_> {
                 }
             }
         };
+        self.enclosing_object = saved_enclosing;
         if matches!(outcome, CheckedBody::Block(_) | CheckedBody::Inline { .. })
             && self.diags.checkpoint() == errors_before
         {
@@ -1201,6 +1306,20 @@ impl Checker<'_> {
         expected: Option<TypeId>,
         annotate: bool,
     ) -> Result<TypeRef, ErrorGuaranteed> {
+        let owner = match self.types.kind(obj).clone() {
+            lilac_ty::TypeKind::Object(def) => Some(def),
+            lilac_ty::TypeKind::Instance { base, .. } => Some(base),
+            _ => None,
+        };
+        if let Some(owner) = owner {
+            if let Some(ResKind::Object { members, .. }) = self.find_by_def(owner) {
+                if let Some(member) = members.get(field) {
+                    if self.private_member_denied(member, owner, span) {
+                        return Err(ErrorGuaranteed::new());
+                    }
+                }
+            }
+        }
         // A generic instance resolves its base object's field template under
         // the object's parameter scope, then substitutes the instance's args.
         if let lilac_ty::TypeKind::Instance { base, args } = self.types.kind(obj).clone() {
@@ -1275,6 +1394,21 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Emits `E026` when `member` is an object-private member accessed from
+    /// outside its owning object, labelled at the access and the declaration.
+    /// Returns `true` when the access must be rejected.
+    fn private_member_denied(&mut self, member: &ResItem, owner: DefId, access: Span) -> bool {
+        if member.vis != Visibility::Private || self.enclosing_object == Some(owner) {
+            return false;
+        }
+        self.diags.emit(
+            Diagnostic::error("E026", format!("`{}` is a private member", member.name))
+                .label(access, true, "accessed from outside its object")
+                .label(member.span, false, "declared private here"),
+        );
+        true
     }
 
     fn check_stmt(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) {
@@ -2710,6 +2844,9 @@ impl Checker<'_> {
                 ),
             ));
         };
+        if self.private_member_denied(&hook, item.id, span) {
+            return Err(ErrorGuaranteed::new());
+        }
         let Some(sig) = self.func_sig(hook.id) else {
             lilac_error::bug!(hook.span, "missing signature for `@init` hook");
         };
@@ -2944,6 +3081,9 @@ impl Checker<'_> {
             }
             return Err(self.diags.emit(diagnostic));
         };
+        if self.private_member_denied(&member, *def, member_span) {
+            return Err(ErrorGuaranteed::new());
+        }
         let (sig, callee) = self.resolve_method(field, &member, recv.ty, member_span)?;
         self.check_method_args(fctx, &sig, callee, recv, args, span)
     }
@@ -2983,6 +3123,9 @@ impl Checker<'_> {
             }
             return Err(self.diags.emit(diagnostic));
         };
+        if self.private_member_denied(&member, base, member_span) {
+            return Err(ErrorGuaranteed::new());
+        }
         let ResKind::Func { generic_params, .. } = &member.kind else {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("`{field}` is not callable")).label(
@@ -3215,6 +3358,9 @@ impl Checker<'_> {
             }
             return Err(self.diags.emit(diagnostic));
         };
+        if self.private_member_denied(&member, type_item.id, span) {
+            return Err(ErrorGuaranteed::new());
+        }
         match &member.kind {
             ResKind::Func {
                 generic,
@@ -3442,6 +3588,9 @@ impl Checker<'_> {
             }
             return Err(self.diags.emit(diagnostic));
         };
+        if self.private_member_denied(&member, base, span) {
+            return Err(ErrorGuaranteed::new());
+        }
         let ResKind::Func {
             generic,
             generic_params,
@@ -4025,10 +4174,7 @@ impl Checker<'_> {
     }
 
     fn const_type(&mut self, name: &str, span: Span) -> Result<TypeRef, ErrorGuaranteed> {
-        let found = self.program.items.iter().find_map(|item| match &item.kind {
-            ItemKind::Const { ty, .. } if item.name == name => Some(ty.clone()),
-            _ => None,
-        });
+        let found = find_const_type(&self.program.items, name);
         match found {
             Some(ty) => Ok(self.resolve_ty(&ty)),
             None => Err(self.diags.emit(

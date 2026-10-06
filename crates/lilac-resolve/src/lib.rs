@@ -306,8 +306,7 @@ impl Collector<'_> {
 
     /// Collects one file's top-level definitions. Flattens top-level `private`
     /// blocks, marking their items [`Visibility::Private`] (top-level hooks
-    /// stay public: `private` does not gate them, spec §7.2). Object-member
-    /// `private` handling lands with `E026`.
+    /// stay public: `private` does not gate them, spec §7.2).
     fn collect_program(&mut self, program: &Program, ns: NsId) -> Module {
         self.ns = ns;
         let mut module = Module::default();
@@ -331,6 +330,29 @@ impl Collector<'_> {
             };
             let name = item.name.clone();
             self.insert_overload(&mut module.items, Some(&mut module.hooks), &name, resolved);
+        }
+    }
+
+    /// Collects one object's members, flattening nested `private` blocks and
+    /// marking their members [`Visibility::Private`] (spec §5). Object-member
+    /// hooks follow member visibility like any other member (spec §7.2).
+    fn collect_members(
+        &mut self,
+        items: &[Item],
+        vis: Visibility,
+        table: &mut HashMap<String, ResItem>,
+    ) {
+        for member in items {
+            if let ItemKind::Private { items } = &member.kind {
+                self.collect_members(items, Visibility::Private, table);
+                continue;
+            }
+            if let Some(mut resolved) = self.item(member) {
+                resolved.vis = vis;
+                // Member scope tracks no overload sets: same-name members
+                // always report E020, hooks included.
+                self.insert_overload(table, None, &member.name, resolved);
+            }
         }
     }
 
@@ -395,13 +417,7 @@ impl Collector<'_> {
                 generic_params,
             } => {
                 let mut table = HashMap::new();
-                for member in members {
-                    if let Some(resolved) = self.item(member) {
-                        // Member scope tracks no overload sets: same-name
-                        // members always report E020, hooks included.
-                        self.insert_overload(&mut table, None, &member.name, resolved);
-                    }
-                }
+                self.collect_members(members, Visibility::Public, &mut table);
                 ResKind::Object {
                     members: table,
                     generic_params: generic_params.clone(),
@@ -761,6 +777,30 @@ mod tests {
             members.get("get").map(|m| &m.kind),
             Some(ResKind::Func { .. })
         ));
+    }
+
+    #[test]
+    fn object_private_members_recorded() {
+        let (module, diags) = resolve_src(
+            "Object: object {\n    public_member: @bit8\n    private {\n        secret: @bit8\n        hidden: function () nothing {}\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let object = module.items.get("Object").expect("has Object");
+        let ResKind::Object { members, .. } = &object.kind else {
+            panic!("expected object, got {:?}", object.kind);
+        };
+        assert_eq!(
+            members.get("public_member").map(|m| m.vis),
+            Some(Visibility::Public)
+        );
+        assert_eq!(
+            members.get("secret").map(|m| m.vis),
+            Some(Visibility::Private)
+        );
+        assert_eq!(
+            members.get("hidden").map(|m| m.vis),
+            Some(Visibility::Private)
+        );
     }
 
     #[test]

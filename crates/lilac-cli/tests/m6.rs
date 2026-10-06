@@ -11,6 +11,10 @@ fn modules(name: &str) -> String {
     format!("../../tests/ui/modules/{name}")
 }
 
+fn ui(name: &str) -> String {
+    format!("../../tests/ui/{name}")
+}
+
 #[test]
 fn check_two_file_folder_succeeds() {
     let output = lilac()
@@ -139,4 +143,79 @@ fn two_namespaces_same_named_generics_keep_their_own_shapes() {
         !b_use.contains("const 0x1"),
         "b_use used a's tag body:\n{b_use}"
     );
+}
+
+/// An object-private member called from outside the object is `E026`, labelled
+/// at the access site and the declaration.
+#[test]
+fn private_member_denied_is_e026() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("FAILS_private_member.lilac"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E026]"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("FAILS_private_member.lilac:16"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("FAILS_private_member.lilac:5"),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A `private` member is visible inside the owning object's own member bodies.
+#[test]
+fn private_member_allowed_inside_object() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("private_member_ok.lilac"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
+/// A namespace-private function is checked and lowered with its own namespace
+/// (typeck must descend into `ItemKind::Private`, not skip it).
+#[test]
+fn namespace_private_function_compiles() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("private_namespace_ok.lilac"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
+/// An external static `Object.member()` call to a private member is `E026`.
+#[test]
+fn private_static_member_denied_is_e026() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("FAILS_private_static_member.lilac"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E026]"), "stderr:\n{stderr}");
+}
+
+/// `Object.member()` to a private member is allowed inside the owning object.
+#[test]
+fn private_static_member_allowed_inside_object() {
+    let output = lilac()
+        .arg("check")
+        .arg(ui("private_static_member_ok.lilac"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }

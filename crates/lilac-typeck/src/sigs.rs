@@ -587,20 +587,18 @@ fn collect_item(
                 return;
             };
             let member_parent = Some((item.name.as_str(), resolved.id, resolved_params.as_slice()));
-            for member in members {
-                if let Some(resolved_member) = resolved_members.get(&member.name) {
-                    if matches!(resolved_member.kind, ResKind::Hook { .. }) {
-                        collect_hook_sig(&member.name, resolved_member, member_parent, ctx);
-                    } else {
-                        collect_item(member, resolved_member, member_parent, ctx);
-                    }
+            let mut flat = Vec::new();
+            flat_members(members, resolved_members, &mut flat);
+            for (member, resolved_member) in &flat {
+                if matches!(resolved_member.kind, ResKind::Hook { .. }) {
+                    collect_hook_sig(&member.name, resolved_member, member_parent, ctx);
+                } else {
+                    collect_item(member, resolved_member, member_parent, ctx);
                 }
             }
             if generic_params.is_empty() {
-                for member in members {
-                    if let Some(resolved_member) = resolved_members.get(&member.name) {
-                        validate_raii_hook(member, resolved_member, &item.name, resolved.id, ctx);
-                    }
+                for (member, resolved_member) in &flat {
+                    validate_raii_hook(member, resolved_member, &item.name, resolved.id, ctx);
                 }
             }
         }
@@ -609,6 +607,43 @@ fn collect_item(
         | ItemKind::Private { .. }
         | ItemKind::Const { .. }
         | ItemKind::Field { .. } => {}
+    }
+}
+
+/// Collects signature-bearing items, descending into `private { … }` blocks so
+/// wrapped functions/objects get signatures and are checked and lowered.
+fn collect_top_items(items: &[Item], ctx: &mut SigCtx) {
+    for item in items {
+        if let ItemKind::Private { items } = &item.kind {
+            collect_top_items(items, ctx);
+            continue;
+        }
+        let file = item.span.file;
+        if let Ok(Some(resolved)) = lookup_one(ctx.project, file, &item.name, item.span, ctx.diags)
+        {
+            let resolved = resolved.clone();
+            ctx.file = file;
+            collect_item(item, &resolved, None, ctx);
+        }
+    }
+}
+
+/// Flattens an object's member AST paired with the resolution, descending into
+/// nested `private { … }` blocks (a private member is an ordinary member whose
+/// visibility resolve recorded).
+fn flat_members<'a>(
+    items: &'a [Item],
+    resolved: &'a HashMap<String, ResItem>,
+    out: &mut Vec<(&'a Item, &'a ResItem)>,
+) {
+    for member in items {
+        if let ItemKind::Private { items } = &member.kind {
+            flat_members(items, resolved, out);
+            continue;
+        }
+        if let Some(resolved_member) = resolved.get(&member.name) {
+            out.push((member, resolved_member));
+        }
     }
 }
 
@@ -705,14 +740,7 @@ pub fn collect_sigs(
         sigs: &mut sigs,
         warn_op_change,
     };
-    for item in &program.items {
-        let file = item.span.file;
-        if let Ok(Some(resolved)) = lookup_one(project, file, &item.name, item.span, ctx.diags) {
-            let resolved = resolved.clone();
-            ctx.file = file;
-            collect_item(item, &resolved, None, &mut ctx);
-        }
-    }
+    collect_top_items(&program.items, &mut ctx);
     let top_hooks: Vec<(String, Vec<ResItem>)> = project
         .hooks
         .iter()

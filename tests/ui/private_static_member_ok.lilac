@@ -1,0 +1,15 @@
+Object: object {
+    private {
+        secret: function () result: @bit8 {
+            result = 0x1
+        }
+    }
+
+    reveal: function () result: @bit8 {
+        result = Object.secret()
+    }
+}
+
+main: function () nothing {
+    value: @bit8 = Object.reveal()
+}

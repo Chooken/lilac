@@ -1,0 +1,21 @@
+Object: object {
+    member: @bit8
+
+    private {
+        secret: function (instance: ref Object) result: @bit8 {
+            result = instance.member
+        }
+    }
+
+    reveal: function (instance: ref Object) result: @bit8 {
+        result = instance.secret()
+    }
+}
+
+main: function () nothing {
+    variable: Object = Object {
+        member = 0x1
+    }
+
+    value: @bit8 = variable.reveal()
+}
