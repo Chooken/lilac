@@ -539,7 +539,16 @@ pub fn collect_project(
         let module = collector.collect_program(program, ns);
         if let Some(data) = namespaces.get_mut(usize::try_from(ns.0).unwrap_or(usize::MAX)) {
             for (name, item) in module.items {
-                collector.insert(&mut data.items, &name, item);
+                if matches!(item.kind, ResKind::Hook { .. }) {
+                    // Hook names are overload sets merged unit-globally by
+                    // `add_hook` below. The namespace keeps only the first
+                    // overload so `namespace_of`/lookup can still find it; a
+                    // same-name hook in another file must not be `E020` just
+                    // for sharing the namespace.
+                    data.items.entry(name).or_insert(item);
+                } else {
+                    collector.insert(&mut data.items, &name, item);
+                }
             }
         }
         for (name, overloads) in module.hooks {
@@ -1139,5 +1148,195 @@ mod tests {
         for overload in overloads {
             assert_eq!(resolved.namespace_of(overload.id), Some(util));
         }
+    }
+
+    #[test]
+    fn cross_file_distinct_hook_overloads_do_not_collide() {
+        let (resolved, diags) = collect_project_src(
+            &[""],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "a.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 0,
+                    name: "b.lilac",
+                    src: "@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(resolved.hooks.get("@h").map(Vec::len), Some(2));
+        // The namespace still records the first overload for `namespace_of`.
+        let first = one(&resolved, FileId(0), "@h");
+        assert_eq!(resolved.namespace_of(first.id), Some(NsId(0)));
+    }
+
+    #[test]
+    fn cross_file_identical_hooks_emit_e020() {
+        let (_, diags) = collect_project_src(
+            &[""],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "a.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 0,
+                    name: "b.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn local_name_shadows_import() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "using util\nfoo: function () nothing {}\n",
+                    usings: &["util"],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "foo: function () nothing {}\nbar: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let foo = one(&resolved, FileId(0), "foo");
+        assert_eq!(resolved.namespace_of(foo.id), Some(NsId(0)));
+        let bar = one(&resolved, FileId(0), "bar");
+        assert_eq!(resolved.namespace_of(bar.id), Some(NsId(1)));
+    }
+
+    #[test]
+    fn using_is_not_transitive() {
+        let (resolved, diags) = collect_project_src(
+            &["", "a", "b", "c"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "main: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "a.lilac",
+                    src: "using b\n",
+                    usings: &["b"],
+                },
+                Spec {
+                    ns: 2,
+                    name: "b.lilac",
+                    src: "using c\nb_item: function () nothing {}\n",
+                    usings: &["c"],
+                },
+                Spec {
+                    ns: 3,
+                    name: "c.lilac",
+                    src: "c_item: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(resolved.lookup(FileId(1), "b_item").is_some());
+        assert!(resolved.lookup(FileId(1), "c_item").is_none());
+        assert!(resolved.lookup(FileId(2), "c_item").is_some());
+    }
+
+    #[test]
+    fn using_is_per_file() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util1", "util2"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "a.lilac",
+                    src: "using util1\n",
+                    usings: &["util1"],
+                },
+                Spec {
+                    ns: 0,
+                    name: "b.lilac",
+                    src: "using util2\n",
+                    usings: &["util2"],
+                },
+                Spec {
+                    ns: 1,
+                    name: "one.lilac",
+                    src: "one: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    name: "two.lilac",
+                    src: "two: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(resolved.lookup(FileId(0), "one").is_some());
+        assert!(resolved.lookup(FileId(0), "two").is_none());
+        assert!(resolved.lookup(FileId(1), "two").is_some());
+        assert!(resolved.lookup(FileId(1), "one").is_none());
+    }
+
+    #[test]
+    fn nested_namespace_parent_chain_and_path() {
+        let (resolved, diags) = collect_project_src(
+            &["", "a", "a.b"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "root_item: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "a.lilac",
+                    src: "a_item: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    name: "deep.lilac",
+                    src: "deep_item: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(resolved.namespace_path(NsId(0)), "");
+        assert_eq!(resolved.namespace_path(NsId(1)), "a");
+        assert_eq!(resolved.namespace_path(NsId(2)), "a.b");
+        assert_eq!(resolved.namespaces[0].parent, None);
+        assert_eq!(resolved.namespaces[1].parent, Some(NsId(0)));
+        assert_eq!(resolved.namespaces[2].parent, Some(NsId(1)));
+        // `a.b` reaches both its ancestors (root and `a`) with no import.
+        assert!(resolved.lookup(FileId(2), "root_item").is_some());
+        assert!(resolved.lookup(FileId(2), "a_item").is_some());
+        assert_eq!(
+            resolved.namespace_of(one(&resolved, FileId(2), "deep_item").id),
+            Some(NsId(2))
+        );
     }
 }
