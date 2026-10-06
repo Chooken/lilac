@@ -87,6 +87,8 @@ pub struct Session {
     /// Extra reachability roots (`--export=<name>`): functions to keep alive
     /// even when nothing calls them, so a library can expose entry points.
     pub exports: HashSet<String>,
+    /// Loaded project files: identity to path (empty outside project compiles).
+    pub project_files: Vec<(FileId, PathBuf)>,
 }
 
 impl Default for Session {
@@ -104,6 +106,7 @@ impl Default for Session {
             cache_dir: None,
             warn_on_operator_type_change: true,
             exports: HashSet::new(),
+            project_files: Vec::new(),
         }
     }
 }
@@ -173,7 +176,13 @@ impl Session {
         // `load` registers each source in this session's `SourceMap` itself, so
         // the loader's `E025`/`using` spans resolve without `FileId(index)`
         // coincidence (finding: `E025` labels never rendered).
+        self.project_files.clear();
         let project = lilac_module::load(root, fs, &mut self.source_map, &mut self.diags)?;
+        self.project_files = project
+            .files
+            .iter()
+            .map(|file| (file.file, file.path.clone()))
+            .collect();
         let mut programs: Vec<(FileId, Program)> = Vec::with_capacity(project.files.len());
         let mut merged = Program {
             items: Vec::new(),
@@ -192,6 +201,13 @@ impl Session {
         }
         let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
         self.finish_pipeline(&merged, &resolved, on_stage)
+    }
+
+    /// The loaded project's file identities and paths (empty outside project
+    /// compiles); maps diagnostic spans to file paths.
+    #[must_use]
+    pub fn project_files(&self) -> &[(FileId, PathBuf)] {
+        &self.project_files
     }
 
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
@@ -623,5 +639,39 @@ mod tests {
         let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
         assert!(names.contains(&"api"), "{names:?}");
         assert!(!names.contains(&"dead"), "{names:?}");
+    }
+
+    struct TestFs {
+        files: std::collections::HashMap<PathBuf, String>,
+        dirs: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+    }
+
+    impl lilac_module::Fs for TestFs {
+        fn read(&mut self, path: &Path) -> std::io::Result<String> {
+            self.files.get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")
+            })
+        }
+
+        fn list_dir(&mut self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.dirs.get(dir).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such directory")
+            })
+        }
+    }
+
+    #[test]
+    fn project_files_maps_ids_to_paths() {
+        let root = PathBuf::from("proj");
+        let main = root.join("main.lilac");
+        let mut fs = TestFs {
+            files: [(main.clone(), "main: function () nothing {\n}\n".to_owned())]
+                .into_iter()
+                .collect(),
+            dirs: [(root.clone(), vec![main.clone()])].into_iter().collect(),
+        };
+        let mut session = Session::new();
+        let _ = session.compile_project(&root, &mut fs);
+        assert_eq!(session.project_files(), [(FileId(0), main)]);
     }
 }
