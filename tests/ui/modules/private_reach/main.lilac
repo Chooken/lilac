@@ -1,0 +1,11 @@
+using util
+
+root_bump: function (cell: ref @bit8) nothing {
+    @store_u8(cell, 0x0, 0x1)
+}
+
+main: function () nothing {
+    cell: @bit8 = 0x0
+    p: ref @bit8 = ref cell
+    write_byte(p)
+}

@@ -1,7 +1,13 @@
 //! M6a UI tests: the CLI compiles a whole folder project and reports `E025`
-//! for a `using` whose target folder is missing.
+//! for a `using` whose target folder is missing. Module fixtures also have
+//! merged `.lir`/`.ll` snapshots and a clang end-to-end run.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The canonical triple the committed `.ll` snapshots are pinned to (M5a/M5b
+/// portability precedent).
+const CANONICAL_TARGET: &str = "x86_64-unknown-none";
 
 fn lilac() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lilac"))
@@ -247,4 +253,166 @@ fn nested_private_field_denied_is_e026() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E026]"), "stderr:\n{stderr}");
     assert!(!stderr.contains("error[E021]"), "stderr:\n{stderr}");
+}
+
+// --- Module project snapshots and end-to-end run -------------------------
+
+fn modules_dir() -> PathBuf {
+    Path::new("../../tests/ui/modules").to_path_buf()
+}
+
+/// Every committed snapshot directly under `tests/ui/modules` with extension
+/// `ext`, sorted. These sit *beside* their project directory (the CLI maps a
+/// directory argument to `<dir>.<ext>`).
+fn module_snapshots(ext: &str) -> Vec<PathBuf> {
+    let mut snapshots: Vec<PathBuf> = std::fs::read_dir(modules_dir())
+        .expect("reads tests/ui/modules")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == ext))
+        .collect();
+    snapshots.sort();
+    assert!(!snapshots.is_empty(), "no module `.{ext}` snapshots found");
+    snapshots
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .expect("utf8 stem")
+        .to_owned()
+}
+
+/// `emit-ir --check` over every module project snapshot. The snapshot's stem is
+/// the project directory (`two_files.lir` checks `two_files/`), so a failing
+/// project's stale snapshot is caught here.
+#[test]
+fn module_lir_snapshots_stable() {
+    for snapshot in module_snapshots("lir") {
+        let project = snapshot.with_extension("");
+        assert!(
+            project.is_dir(),
+            "{} has no project directory",
+            snapshot.display()
+        );
+        let output = lilac()
+            .args(["emit-ir", "--check"])
+            .arg(&project)
+            .output()
+            .expect("runs lilac");
+        assert!(
+            output.status.success(),
+            "{}:\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// There is exactly one canonical-triple `.ll` per module `.lir`, and each one
+/// is byte-stable under `emit-llvm --check`.
+#[test]
+fn module_ll_snapshots_stable() {
+    let lir_stems: Vec<String> = module_snapshots("lir").iter().map(|p| stem(p)).collect();
+    let ll = module_snapshots("ll");
+    let ll_stems: Vec<String> = ll.iter().map(|p| stem(p)).collect();
+    assert_eq!(
+        ll_stems, lir_stems,
+        "there must be exactly one `.ll` snapshot per module `.lir`"
+    );
+
+    for snapshot in ll {
+        let project = snapshot.with_extension("");
+        let output = lilac()
+            .args([
+                "emit-llvm",
+                "--check",
+                &format!("--target={CANONICAL_TARGET}"),
+            ])
+            .arg(&project)
+            .output()
+            .expect("runs lilac");
+        assert!(
+            output.status.success(),
+            "{}:\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Non-root symbols carry their namespace prefix while root symbols stay bare:
+/// `private_reach`'s `util/write_byte` is `@util.write_byte`, its private
+/// `secret` is `@util.secret`, but the root `root_bump` is `@root_bump`, and no
+/// bare `@write_byte`/`@secret` is emitted.
+#[test]
+fn module_symbols_are_namespace_prefixed() {
+    let ir = emit_ir("private_reach");
+    for needle in ["@util.write_byte", "@util.secret", "@root_bump"] {
+        assert!(ir.contains(needle), "missing `{needle}` in:\n{ir}");
+    }
+    for bare in ["@write_byte", "@secret"] {
+        assert!(!ir.contains(bare), "unprefixed `{bare}` in:\n{ir}");
+    }
+}
+
+/// Locates the toolchain `clang`: `%LLVM_SYS_181_PREFIX%\bin\clang[.exe]`, else
+/// `clang` on `PATH` (same lookup as `m5b.rs`).
+fn clang() -> PathBuf {
+    if let Ok(prefix) = std::env::var("LLVM_SYS_181_PREFIX") {
+        let name = if cfg!(windows) { "clang.exe" } else { "clang" };
+        let candidate = Path::new(&prefix).join("bin").join(name);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    PathBuf::from("clang")
+}
+
+/// A `private_reach` project whose root `main` reaches `util.write_byte` (which
+/// itself reaches the root `root_bump` by ancestor reach and the namespace-
+/// private `secret`) compiles to host IR, links with the toolchain `clang`, and
+/// runs to exit 0.
+#[test]
+fn module_project_compiles_links_and_runs() {
+    let clang = clang();
+    let scratch = std::env::temp_dir().join(format!("lilac-m6-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("creates scratch dir");
+
+    let output = lilac()
+        .args(["emit-llvm", "--mode=debug"])
+        .arg(modules("private_reach"))
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "emit-llvm failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ll = scratch.join("private_reach.ll");
+    std::fs::write(&ll, &output.stdout).expect("writes IR");
+
+    let exe = scratch.join("private_reach.exe");
+    let link = Command::new(&clang)
+        .arg(&ll)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("runs clang");
+    assert!(
+        link.status.success(),
+        "private_reach failed to link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("runs executable");
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "private_reach exited with {:?}",
+        run.status.code()
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
 }

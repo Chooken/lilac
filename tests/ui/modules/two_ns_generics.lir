@@ -1,0 +1,61 @@
+lilac_ir = "0.3"
+target = "x86_64-unknown-none"
+type #a.GenBox.1..bit32 {
+    value: #bit32,
+}
+type #b.GenBox.1..bit64 {
+    value: #bit64,
+}
+function @b.GenBox.1..bit64.get
+  in ref #b.GenBox.1..bit64 %instance
+  out #bit64 %result
+{
+  $entry:
+    &1: #bit64 = field %instance .value  // idx 0
+    copy &1 -> %result
+    return
+}
+function @b_use
+{
+  $entry:
+    alloca #b.GenBox.1..bit64 %x : zeroed
+    alloca #b.GenBox.1..bit64 %tmp.1 : zeroed
+    alloca #bit64 %y : zeroed
+    alloca #bit64 %tmp.2 : zeroed
+    alloca ref #b.GenBox.1..bit64 %tmp.3 : zeroed
+    &1: #bit64 = const 0x2
+    copy &1 -> %tmp.1.value  // idx 0
+    copy %tmp.1 -> %x
+    &2: ref #b.GenBox.1..bit64 = addr %x
+    copy &2 -> %tmp.3
+    call @b.GenBox.1..bit64.get (in %tmp.3) (out %tmp.2)
+    copy %tmp.2 -> %y
+    return
+}
+function @a.GenBox.1..bit32.get
+  in ref #a.GenBox.1..bit32 %instance
+  out #bit32 %result
+{
+  $entry:
+    &1: #bit32 = field %instance .value  // idx 0
+    copy &1 -> %result
+    return
+}
+function @main
+{
+  $entry:
+    alloca #a.GenBox.1..bit32 %x : zeroed
+    alloca #a.GenBox.1..bit32 %tmp.1 : zeroed
+    alloca #bit32 %y : zeroed
+    alloca #bit32 %tmp.2 : zeroed
+    alloca ref #a.GenBox.1..bit32 %tmp.3 : zeroed
+    &1: #bit32 = const 0x1
+    copy &1 -> %tmp.1.value  // idx 0
+    copy %tmp.1 -> %x
+    &2: ref #a.GenBox.1..bit32 = addr %x
+    copy &2 -> %tmp.3
+    call @a.GenBox.1..bit32.get (in %tmp.3) (out %tmp.2)
+    copy %tmp.2 -> %y
+    call @b_use (in) (out)
+    return
+}
