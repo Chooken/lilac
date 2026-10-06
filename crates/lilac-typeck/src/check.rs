@@ -610,10 +610,7 @@ fn bit_width(types: &Types, id: TypeId) -> u32 {
 /// True for hex/bin literals (`0x`/`0X`/`0b`/`0B`), whose bits are fully
 /// known; decimals are `NumberLiteral`s typed as `@byte_buffer`.
 fn is_lit_literal(bytes: &str) -> bool {
-    bytes.starts_with("0x")
-        || bytes.starts_with("0X")
-        || bytes.starts_with("0b")
-        || bytes.starts_with("0B")
+    !lilac_decimal::is_decimal_literal(bytes)
 }
 
 /// Number of significant bits of a hex/bin literal (with `_` separators),
@@ -5414,7 +5411,7 @@ impl Checker<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_bodies;
+    use super::{check_bodies, is_lit_literal};
     use lilac_error::Diags;
     use lilac_lex::Lexer;
     use lilac_parse::Parser;
@@ -5443,6 +5440,25 @@ mod tests {
 
     fn has_code(diags: &Diags, code: &str) -> bool {
         diags.diagnostics().iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn is_lit_literal_handles_uppercase_prefixes() {
+        assert!(is_lit_literal("0X1"));
+        assert!(is_lit_literal("0B1"));
+        assert!(!is_lit_literal("5"));
+        assert!(!is_lit_literal("10.5"));
+    }
+
+    #[test]
+    fn is_lit_literal_matches_decimal_predicate() {
+        for text in ["0x1", "0X1", "0b1", "0B1", "5", "10_000", "10.5"] {
+            assert_eq!(
+                is_lit_literal(text),
+                !lilac_decimal::is_decimal_literal(text),
+                "{text}"
+            );
+        }
     }
 
     fn check_hir(src: &str) -> (Diags, lilac_hir::HirProgram) {

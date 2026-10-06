@@ -10,6 +10,7 @@ lilac-ast = { path = "../lilac-ast" }
 lilac-ty = { path = "../lilac-ty" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-resolve = { path = "../lilac-resolve" }
+lilac-decimal = { path = "../lilac-decimal" }
 
 [dev-dependencies]
 lilac-lex = { path = "../lilac-lex" }
