@@ -1,0 +1,145 @@
+use std::time::Duration;
+
+use lsp_server::{Connection, Message, Notification, Request, RequestId};
+use lsp_types::{
+    DidOpenTextDocumentParams, GotoDefinitionResponse, Location, PublishDiagnosticsParams,
+    TextDocumentItem, Url,
+};
+
+fn start_server() -> (Connection, std::thread::JoinHandle<()>) {
+    let (server, client) = Connection::memory();
+    let handle = std::thread::spawn(move || {
+        let _ = lilac_lsp::run(server);
+    });
+    (client, handle)
+}
+
+fn read_response(client: &Connection, id: &RequestId) -> lsp_server::Response {
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Response(response)) if &response.id == id => return response,
+            Ok(_) => {}
+            Err(err) => panic!("no response for {id:?}: {err}"),
+        }
+    }
+}
+
+fn initialize(client: &Connection) {
+    let id = RequestId::from(1);
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "initialize".to_owned(),
+            params: serde_json::json!({ "capabilities": {} }),
+        }))
+        .expect("initialize");
+    read_response(client, &id);
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "initialized".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("initialized");
+}
+
+fn shutdown(client: &Connection) {
+    let id = RequestId::from(2);
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "shutdown".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("shutdown");
+    read_response(client, &id);
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "exit".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("exit");
+}
+
+fn did_open(client: &Connection, uri: &Url, text: &str) {
+    let params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "lilac".to_owned(),
+            version: 1,
+            text: text.to_owned(),
+        },
+    };
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "textDocument/didOpen".to_owned(),
+            params: serde_json::to_value(params).expect("serialize"),
+        }))
+        .expect("didOpen");
+}
+
+fn publish_for(client: &Connection, uri: &Url) -> PublishDiagnosticsParams {
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                let params: PublishDiagnosticsParams =
+                    serde_json::from_value(notification.params).expect("decode");
+                if &params.uri == uri {
+                    return params;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no diagnostics for {uri}: {err}"),
+        }
+    }
+}
+
+fn definition_at(client: &Connection, uri: &Url, line: u32, character: u32) -> Option<Location> {
+    let id = RequestId::from(60);
+    let params = serde_json::json!({
+        "textDocument": { "uri": uri.as_str() },
+        "position": { "line": line, "character": character },
+    });
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "textDocument/definition".to_owned(),
+            params,
+        }))
+        .expect("definition");
+    let response = read_response(client, &id);
+    match response.response_result {
+        Ok(value) if !value.is_null() => serde_json::from_value::<GotoDefinitionResponse>(value)
+            .ok()
+            .and_then(|response| match response {
+                GotoDefinitionResponse::Scalar(location) => Some(location),
+                GotoDefinitionResponse::Array(mut locations) => locations.pop(),
+                GotoDefinitionResponse::Link(_) => None,
+            }),
+        _ => None,
+    }
+}
+
+#[test]
+fn definition_jumps_to_the_callee_declaration() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "foo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let location = definition_at(&client, &uri, 3, 5).expect("definition");
+    assert_eq!(location.uri, uri);
+    assert_eq!(location.range.start.line, 0);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

@@ -4,7 +4,7 @@ use std::error::Error;
 
 use lsp_server::Connection;
 use lsp_types::{
-    HoverProviderCapability, InitializeParams, ServerCapabilities, ServerInfo,
+    HoverProviderCapability, InitializeParams, OneOf, ServerCapabilities, ServerInfo,
     TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 
@@ -27,6 +27,7 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
     };
     let server_info = ServerInfo {

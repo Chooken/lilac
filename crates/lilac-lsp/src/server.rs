@@ -103,6 +103,11 @@ impl Server {
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(request.id, result)))?;
+        } else if request.method == "textDocument/definition" {
+            let result = self.definition_response(&request);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(request.id, result)))?;
         } else {
             let method = request.method;
             self.connection
@@ -130,6 +135,25 @@ impl Server {
         };
         match crate::handlers::hover(retained, uri, position) {
             Some(hover) => serde_json::to_value(hover).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    /// The `textDocument/definition` reply: a location, or `null`.
+    fn definition_response(&self, request: &Request) -> serde_json::Value {
+        let Ok(params) =
+            serde_json::from_value::<lsp_types::GotoDefinitionParams>(request.params.clone())
+        else {
+            return serde_json::Value::Null;
+        };
+        let position = params.text_document_position_params.position;
+        let uri = &params.text_document_position_params.text_document.uri;
+        let retained = self.project.as_ref().or_else(|| self.per_file.get(uri));
+        let Some(retained) = retained else {
+            return serde_json::Value::Null;
+        };
+        match crate::handlers::definition(retained, uri, position) {
+            Some(response) => serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
             None => serde_json::Value::Null,
         }
     }

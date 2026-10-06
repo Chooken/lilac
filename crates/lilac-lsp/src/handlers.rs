@@ -3,7 +3,10 @@
 use lilac_hir::NameSite;
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
-use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range, Url};
+use lsp_types::{
+    GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
+    Range, Url,
+};
 
 use crate::convert::{byte_offset, span_range};
 use crate::index::{AnalysisIndex, Retained};
@@ -34,6 +37,26 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
         }),
         range: Some(range),
     })
+}
+
+/// Go-to-definition for the item use at `position`, if any.
+#[must_use]
+pub fn definition(
+    retained: &Retained,
+    uri: &Url,
+    position: Position,
+) -> Option<GotoDefinitionResponse> {
+    let file = *retained.uri_files.get(uri)?;
+    let source = retained.session.source_map.file(file)?;
+    let byte = byte_offset(&source.src, position)?;
+    let site = smallest_use(&retained.index, file, byte)?;
+    let info = retained.index.defs.get(&site.def)?;
+    let target = retained.file_uris.get(&info.span.file)?;
+    let range = span_range(&retained.session.source_map, info.span)?;
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri: target.clone(),
+        range,
+    }))
 }
 
 /// The smallest resolved use whose span contains `byte`.
