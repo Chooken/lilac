@@ -98,5 +98,34 @@ s: "no close
 t: 1
 // ^ constant.numeric.integer.lilac
 
+// SYNTAX TEST "source.lilac" "comments and operators"
+
+// a comment
+// <----- comment.line.double-slash.lilac
+x = 1
+//^ keyword.operator.lilac
+a == b
+//^^ keyword.operator.lilac
+f(x, y)
+// ^ keyword.operator.lilac
+p -> q
+//^^ keyword.operator.lilac
+
+// SYNTAX TEST "source.lilac" "hook declaration"
+
+@myhook: function
+// <----- entity.name.function.lilac
+
+// SYNTAX TEST "source.lilac" "f-string escapes and nesting"
+
+m: $"{{ }}"
+//   ^^ constant.character.escape.lilac
+//      ^^ constant.character.escape.lilac
+n: $"a {f("x")} b"
+// ^^ string.interpolated.lilac
+//      ^ punctuation.section.interpolation.lilac
+//        ^^^ string.quoted.double.lilac
+//            ^ punctuation.section.interpolation.lilac
+
 // SYNTAX TEST "source.lilac" "empty input"
 

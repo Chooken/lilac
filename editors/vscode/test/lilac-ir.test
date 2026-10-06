@@ -4,6 +4,8 @@ lilac_ir = "0.3"
 // <-------- keyword.other.lilac-ir
 target = "x86_64"
 // <------ keyword.other.lilac-ir
+"0.3"
+// <----- string.quoted.double.lilac-ir
 
 // SYNTAX TEST "source.lilac-ir" "sigils"
 
