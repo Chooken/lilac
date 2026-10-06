@@ -307,6 +307,14 @@ impl Server {
             self.send_diagnostics(uri, Vec::new());
         }
         self.published = current;
+
+        let _ = self
+            .connection
+            .sender
+            .send(Message::Notification(Notification {
+                method: "lilac/lirInvalidated".to_owned(),
+                params: serde_json::Value::Null,
+            }));
     }
 
     fn send_diagnostics(&self, uri: &Url, diagnostics: Vec<LspDiagnostic>) {

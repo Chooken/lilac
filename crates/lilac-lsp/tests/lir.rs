@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId};
-use lsp_types::{DidOpenTextDocumentParams, PublishDiagnosticsParams, TextDocumentItem, Url};
+use lsp_types::{
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, PublishDiagnosticsParams,
+    TextDocumentContentChangeEvent, TextDocumentItem, Url, VersionedTextDocumentIdentifier,
+};
 
 fn start_server() -> (Connection, std::thread::JoinHandle<()>) {
     let (server, client) = Connection::memory();
@@ -79,6 +82,27 @@ fn did_open(client: &Connection, uri: &Url, text: &str) {
         .expect("didOpen");
 }
 
+fn did_change(client: &Connection, uri: &Url, text: &str) {
+    let params = DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier {
+            uri: uri.clone(),
+            version: 2,
+        },
+        content_changes: vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_owned(),
+        }],
+    };
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "textDocument/didChange".to_owned(),
+            params: serde_json::to_value(params).expect("serialize"),
+        }))
+        .expect("didChange");
+}
+
 fn publish_for(client: &Connection, uri: &Url) -> PublishDiagnosticsParams {
     loop {
         match client.receiver.recv_timeout(Duration::from_secs(5)) {
@@ -153,6 +177,35 @@ fn lir_request_is_null_for_an_unreached_stage() {
 
     assert!(lir_request(&client, &uri, "final").is_null());
     assert!(!lir_request(&client, &uri, "lower").is_null());
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+fn next_invalidation(client: &Connection) {
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(n)) if n.method == "lilac/lirInvalidated" => return,
+            Ok(_) => {}
+            Err(err) => panic!("no lilac/lirInvalidated: {err}"),
+        }
+    }
+}
+
+#[test]
+fn an_edit_sends_lir_invalidated() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    did_open(&client, &uri, "main: function () nothing {\n}\n");
+    let _ = publish_for(&client, &uri);
+
+    did_change(
+        &client,
+        &uri,
+        "main: function () nothing {\n    x: @bit32 = 0x1\n}\n",
+    );
+    next_invalidation(&client);
 
     shutdown(&client);
     handle.join().expect("server thread");
