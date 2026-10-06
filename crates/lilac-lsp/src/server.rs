@@ -17,6 +17,7 @@ use lsp_types::{
 use crate::convert::to_lsp_diagnostic;
 use crate::documents::Documents;
 use crate::fs::OverlayFs;
+use crate::index::Retained;
 
 /// Debounce window before recompiling after an edit.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -33,6 +34,10 @@ pub struct Server {
     generation: u64,
     published: HashSet<Url>,
     shutdown: bool,
+    /// Retained project compile (project mode).
+    project: Option<Retained>,
+    /// Retained per-document compiles (single-file mode).
+    per_file: HashMap<Url, Retained>,
 }
 
 impl Server {
@@ -47,6 +52,8 @@ impl Server {
             generation: 0,
             published: HashSet::new(),
             shutdown: false,
+            project: None,
+            per_file: HashMap::new(),
         }
     }
 
@@ -91,6 +98,11 @@ impl Server {
                     request.id,
                     serde_json::Value::Null,
                 )))?;
+        } else if request.method == "textDocument/hover" {
+            let result = self.hover_response(&request);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(request.id, result)))?;
         } else {
             let method = request.method;
             self.connection
@@ -102,6 +114,24 @@ impl Server {
                 )))?;
         }
         Ok(())
+    }
+
+    /// The `textDocument/hover` reply: a hover object, or `null`.
+    fn hover_response(&self, request: &Request) -> serde_json::Value {
+        let Ok(params) = serde_json::from_value::<lsp_types::HoverParams>(request.params.clone())
+        else {
+            return serde_json::Value::Null;
+        };
+        let position = params.text_document_position_params.position;
+        let uri = &params.text_document_position_params.text_document.uri;
+        let retained = self.project.as_ref().or_else(|| self.per_file.get(uri));
+        let Some(retained) = retained else {
+            return serde_json::Value::Null;
+        };
+        match crate::handlers::hover(retained, uri, position) {
+            Some(hover) => serde_json::to_value(hover).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        }
     }
 
     fn handle_notification(&mut self, notification: Notification) {
@@ -145,6 +175,8 @@ impl Server {
         let generation = self.generation;
         let overlay = self.documents.overlay();
         let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> = HashMap::new();
+        let mut new_project = None;
+        let mut new_per_file: HashMap<Url, Retained> = HashMap::new();
 
         if let Some(root) = self.root.clone() {
             let mut session = Session::new();
@@ -171,6 +203,11 @@ impl Server {
                     by_uri.entry(uri).or_default().push(lsp);
                 }
             }
+            let uri_files = file_uris
+                .iter()
+                .map(|(id, uri)| (uri.clone(), *id))
+                .collect();
+            new_project = Some(Retained::build(session, file_uris, uri_files));
         } else {
             for (uri, document) in self.documents.iter() {
                 let mut session = Session::new();
@@ -184,6 +221,9 @@ impl Server {
                         entry.push(lsp);
                     }
                 }
+                let file_uris = HashMap::from([(FileId(0), uri.clone())]);
+                let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
+                new_per_file.insert(uri.clone(), Retained::build(session, file_uris, uri_files));
             }
         }
 
@@ -195,6 +235,9 @@ impl Server {
         if generation != self.generation {
             return;
         }
+
+        self.project = new_project;
+        self.per_file = new_per_file;
 
         let current: HashSet<Url> = by_uri.keys().cloned().collect();
         for (uri, diagnostics) in &by_uri {

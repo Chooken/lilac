@@ -53,7 +53,7 @@ pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
 }
 
 /// LSP range for a span, or `None` when it is dummy or its file is unknown.
-fn span_range(sources: &SourceMap, span: Span) -> Option<Range> {
+pub(crate) fn span_range(sources: &SourceMap, span: Span) -> Option<Range> {
     if span.is_dummy() {
         return None;
     }

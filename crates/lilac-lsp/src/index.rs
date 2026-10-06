@@ -148,7 +148,7 @@ fn walk_block(block: &HirBlock, out: &mut Vec<(Span, TypeRef)>) {
 fn walk_stmt(stmt: &HirStmt, out: &mut Vec<(Span, TypeRef)>) {
     match stmt {
         HirStmt::Let { value, .. } | HirStmt::MultiLet { value, .. } | HirStmt::ExprStmt(value) => {
-            walk_expr(value, out)
+            walk_expr(value, out);
         }
         HirStmt::Assign { target, value, .. } => {
             walk_expr(target, out);
