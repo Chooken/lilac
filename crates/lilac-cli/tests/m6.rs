@@ -87,3 +87,56 @@ fn two_namespaces_same_named_generics_do_not_collide() {
         assert!(ir.contains(needle), "missing `{needle}` in:\n{ir}");
     }
 }
+
+/// Returns the braced body following `header` (a `type #X {` or `function @f`).
+fn block_after<'a>(ir: &'a str, header: &str) -> &'a str {
+    let start = ir
+        .find(header)
+        .unwrap_or_else(|| panic!("missing `{header}` in:\n{ir}"));
+    let rest = &ir[start..];
+    let open = rest.find('{').expect("open brace");
+    let close = rest[open..].find('}').expect("close brace");
+    &rest[open..open + close]
+}
+
+/// Two namespaces defining the **same-named generic object with different
+/// shapes** must instantiate from their own AST: each namespace's layout and
+/// generic function body must match its declaration, never the other's.
+/// Regression: `find_item` paired a def with the first same-named AST item in
+/// program order, so a later namespace's instance was built from an earlier
+/// namespace's members (previously an ICE / silently wrong IR).
+#[test]
+fn two_namespaces_same_named_generics_keep_their_own_shapes() {
+    let ir = emit_ir("two_ns_gen_shapes");
+
+    let a_layout = block_after(&ir, "type #a.GenBox.1..bit32");
+    assert!(a_layout.contains("a_value: #bit32"), "{a_layout}");
+    assert!(
+        !a_layout.contains("b_value"),
+        "a reused b's shape:\n{a_layout}"
+    );
+
+    let b_layout = block_after(&ir, "type #b.GenBox.1..bit64");
+    assert!(b_layout.contains("b_value: #bit64"), "{b_layout}");
+    assert!(b_layout.contains("b_extra: #bit64"), "{b_layout}");
+    assert!(
+        !b_layout.contains("a_value"),
+        "b reused a's shape:\n{b_layout}"
+    );
+
+    // The generic `tag[T]` bodies differ per namespace (0x1 vs 0x2); each call
+    // must fold from its own namespace's specialization.
+    let main = block_after(&ir, "function @main");
+    assert!(main.contains("const 0x1"), "{main}");
+    assert!(
+        !main.contains("const 0x2"),
+        "main used b's tag body:\n{main}"
+    );
+
+    let b_use = block_after(&ir, "function @b_use");
+    assert!(b_use.contains("const 0x2"), "{b_use}");
+    assert!(
+        !b_use.contains("const 0x1"),
+        "b_use used a's tag body:\n{b_use}"
+    );
+}

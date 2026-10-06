@@ -1,0 +1,10 @@
+using b
+
+b_use: function () nothing {
+    x: GenBox[@bit64] = GenBox {
+        b_value = 0x2
+        b_extra = 0x3
+    }
+    y: @bit64 = x.b_value
+    m: @bit32 = tag[@bit64](0x0)
+}

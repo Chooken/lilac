@@ -1,0 +1,8 @@
+GenBox[T]: object {
+    b_value: T
+    b_extra: T
+}
+
+tag[T]: function (x: T) result: @bit32 {
+    result = 0x2
+}

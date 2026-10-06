@@ -407,44 +407,52 @@ fn find_parent_name(project: &ResolvedProject, def: DefId) -> Option<String> {
 fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) -> ItemLookup<'a> {
     fn rec<'a>(
         ast_items: &'a [Item],
-        scope: &dyn Fn(&str) -> Vec<ResItem>,
+        scope: &dyn Fn(&Item) -> Option<ResItem>,
         def: DefId,
         parent: Option<(String, DefId)>,
     ) -> ItemLookup<'a> {
         for ast in ast_items {
-            for resolved in scope(&ast.name) {
-                if resolved.id == def {
-                    return Some((ast, resolved, parent));
-                }
-                if let (
-                    ItemKind::Object { members, .. },
-                    ResKind::Object {
-                        members: resolved_members,
-                        ..
-                    },
-                ) = (&ast.kind, &resolved.kind)
-                {
-                    let grandparent = Some((ast.name.clone(), resolved.id));
-                    let member_scope =
-                        |name: &str| resolved_members.get(name).cloned().into_iter().collect();
-                    if let Some(found) = rec(members, &member_scope, def, grandparent) {
-                        return Some(found);
-                    }
+            let Some(resolved) = scope(ast) else {
+                continue;
+            };
+            if resolved.id == def {
+                return Some((ast, resolved, parent));
+            }
+            if let (
+                ItemKind::Object { members, .. },
+                ResKind::Object {
+                    members: resolved_members,
+                    ..
+                },
+            ) = (&ast.kind, &resolved.kind)
+            {
+                let grandparent = Some((ast.name.clone(), resolved.id));
+                let member_scope = |member: &Item| resolved_members.get(&member.name).cloned();
+                if let Some(found) = rec(members, &member_scope, def, grandparent) {
+                    return Some(found);
                 }
             }
         }
         None
     }
-    // Same-named items in different namespaces must not shadow each other: keep
-    // every top-level candidate and let `rec` pick the one matching `def`.
-    let mut top: HashMap<&str, Vec<&ResItem>> = HashMap::new();
-    for (name, item) in project.all_items() {
-        top.entry(name).or_default().push(item);
-    }
-    let top_scope = |name: &str| {
-        top.get(name)
-            .map(|candidates| candidates.iter().map(|item| (*item).clone()).collect())
-            .unwrap_or_default()
+    // Pair each AST item with the definition from *its own* namespace. The same
+    // local name can be declared in several namespaces, so match on
+    // `(name, namespace)`, never name alone; otherwise a def whose namespace
+    // appears later in program order would be paired with an earlier
+    // namespace's AST item and compiled from the wrong body/members.
+    let ns_of = |file: FileId| {
+        project
+            .files
+            .iter()
+            .find(|scope| scope.file == file)
+            .map(|scope| scope.ns)
+    };
+    let top_scope = |ast: &Item| {
+        let ns = ns_of(ast.span.file);
+        project
+            .all_items()
+            .find(|(name, item)| *name == ast.name && Some(item.ns) == ns)
+            .map(|(_, item)| item.clone())
     };
     rec(&program.items, &top_scope, def, None)
 }
