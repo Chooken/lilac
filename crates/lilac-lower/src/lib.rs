@@ -1441,7 +1441,14 @@ impl Lower<'_> {
                 );
                 LirCallee::Reg(reg)
             }
-            HirCallee::Hook { name, .. } => LirCallee::Func(name.clone()),
+            HirCallee::Hook { name, def } => {
+                let name = self
+                    .func_names
+                    .get(def)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                LirCallee::Func(name)
+            }
             HirCallee::Intrinsic { .. } => {
                 lilac_error::bug!(span, "intrinsic in general call path");
             }
