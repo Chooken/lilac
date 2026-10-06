@@ -22,6 +22,17 @@ pub struct HirProgram {
     pub layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
     /// Drop hooks: display name → mangled `@on_drop` callee.
     pub drops: HashMap<String, String>,
+    /// Resolved item uses (for editor hover / go-to-definition).
+    pub uses: Vec<NameSite>,
+}
+
+/// One resolved item use: the name token's span and what it resolved to.
+#[derive(Clone, Copy, Debug)]
+pub struct NameSite {
+    /// The name token (callee, member field, tag, or bare identifier).
+    pub span: Span,
+    /// The item it resolved to (`DefId::ERROR` when not an item).
+    pub def: DefId,
 }
 
 /// One checked module constant (`name: Type = expr` or `=> expr`).

@@ -6,7 +6,7 @@ use lilac_ast::{BinOp, Expr, Item, ItemKind, Program, Stmt, Type as AstType};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_hir::{
     HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
-    HirPattern, HirProgram, HirStmt, TempId,
+    HirPattern, HirProgram, HirStmt, NameSite, TempId,
 };
 use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject, Visibility};
 use lilac_span::{FileId, Span};
@@ -125,6 +125,7 @@ pub fn check_bodies(
         layouts: HashMap::new(),
         reported_failures: HashSet::new(),
         enclosing_object: None,
+        uses: Vec::new(),
     };
     checker.collect_fields(&program.items);
     checker.check_items(&program.items);
@@ -148,6 +149,7 @@ pub fn check_bodies(
         consts: checker.consts,
         layouts,
         drops: checker.drops,
+        uses: checker.uses,
     }
 }
 
@@ -270,6 +272,8 @@ struct Checker<'a> {
     /// The object whose member body is being checked, if any: an object-private
     /// member is visible only while this matches the member's owning object.
     enclosing_object: Option<DefId>,
+    /// Resolved item uses recorded for the editor (hover / go-to-definition).
+    uses: Vec<NameSite>,
 }
 
 struct FuncCtx {
@@ -1923,6 +1927,7 @@ impl Checker<'_> {
                     },
                     DefId::ERROR,
                 ));
+                self.record_use(*span, def);
                 let hir_name = if name == "self" && fctx.locals.contains_key("self") {
                     "instance".to_owned()
                 } else {
@@ -4096,6 +4101,12 @@ impl Checker<'_> {
         Ok(self.convert_if_needed(got, want_id, hir))
     }
 
+    fn record_use(&mut self, span: Span, def: DefId) {
+        if def != DefId::ERROR {
+            self.uses.push(NameSite { span, def });
+        }
+    }
+
     fn ident_type(
         &mut self,
         fctx: &mut FuncCtx,
@@ -5408,6 +5419,21 @@ mod tests {
         let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
         let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (diags, hir)
+    }
+
+    #[test]
+    fn bare_ident_use_is_recorded() {
+        let src = "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let lo = src.rfind("pi").expect("use site") as u32;
+        assert!(
+            hir.uses
+                .iter()
+                .any(|s| s.span.lo.0 == lo && s.def != lilac_resolve::DefId::ERROR),
+            "{:?}",
+            hir.uses
+        );
     }
 
     #[test]
