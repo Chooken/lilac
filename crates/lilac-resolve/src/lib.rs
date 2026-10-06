@@ -150,6 +150,9 @@ pub struct ResolvedProject {
     pub hooks: HashMap<String, Vec<ResItem>>,
     /// One visible scope per source file.
     pub files: Vec<FileScope>,
+    /// Owning namespace of every collected definition (top-level items,
+    /// object members, and every hook overload).
+    def_ns: HashMap<DefId, NsId>,
 }
 
 impl ResolvedProject {
@@ -165,6 +168,13 @@ impl ResolvedProject {
             parent: None,
             items: module.items,
         };
+        let mut def_ns = HashMap::new();
+        for item in root.items.values() {
+            index_defs(NsId(0), item, &mut def_ns);
+        }
+        for item in module.hooks.values().flatten() {
+            index_defs(NsId(0), item, &mut def_ns);
+        }
         Self {
             namespaces: vec![root],
             hooks: module.hooks,
@@ -173,6 +183,7 @@ impl ResolvedProject {
                 ns: NsId(0),
                 visible,
             }],
+            def_ns,
         }
     }
 
@@ -191,37 +202,28 @@ impl ResolvedProject {
             .flat_map(|ns| ns.items.iter().map(|(name, item)| (name.as_str(), item)))
     }
 
-    /// The emitted symbol for `def`: its namespace-qualified name, with no
-    /// prefix for the root namespace.
-    pub fn symbol_of(&self, def: DefId) -> Option<String> {
-        for ns in &self.namespaces {
-            for item in ns.items.values() {
-                if let Some(local) = qualify_name(item, def) {
-                    if ns.path.is_empty() {
-                        return Some(local);
-                    }
-                    return Some(format!("{}.{}", ns.path, local));
-                }
-            }
-        }
-        None
+    /// The namespace `def` was declared in, if the project collected it.
+    pub fn namespace_of(&self, def: DefId) -> Option<NsId> {
+        self.def_ns.get(&def).copied()
+    }
+
+    /// The dotted path of `ns` from the root (`""` for the root namespace).
+    pub fn namespace_path(&self, ns: NsId) -> &str {
+        let index = usize::try_from(ns.0).unwrap_or(usize::MAX);
+        self.namespaces
+            .get(index)
+            .map_or("", |data| data.path.as_str())
     }
 }
 
-/// Reconstructs the source-qualified name of `def`, descending into object
-/// members (root/namespace prefix is added by the caller).
-fn qualify_name(item: &ResItem, def: DefId) -> Option<String> {
-    if item.id == def {
-        return Some(item.name.clone());
-    }
+/// Records `item` and, recursively, its object members as owned by `ns`.
+fn index_defs(ns: NsId, item: &ResItem, index: &mut HashMap<DefId, NsId>) {
+    index.insert(item.id, ns);
     if let ResKind::Object { members, .. } = &item.kind {
         for member in members.values() {
-            if let Some(local) = qualify_name(member, def) {
-                return Some(format!("{}.{}", item.name, local));
-            }
+            index_defs(ns, member, index);
         }
     }
-    None
 }
 
 /// Signature key for overload uniqueness (names excluded, types included).
@@ -408,7 +410,7 @@ mod tests {
     use lilac_parse::Parser;
     use lilac_span::SourceMap;
 
-    fn resolve_src(src: &str) -> (Module, Diags) {
+    fn resolve_with_file(src: &str) -> (Module, FileId, Diags) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -421,6 +423,11 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = collect(&program, &mut diags);
+        (module, file, diags)
+    }
+
+    fn resolve_src(src: &str) -> (Module, Diags) {
+        let (module, _file, diags) = resolve_with_file(src);
         (module, diags)
     }
 
@@ -435,18 +442,7 @@ mod tests {
     #[test]
     fn single_project_lookup() {
         let src = "main: function () nothing {}\n";
-        let mut sm = SourceMap::new();
-        let file = sm.add_file("test.lilac", src);
-        let (tokens, lex_errors) = Lexer::lex_all(src, file);
-        let mut diags = Diags::new();
-        for error in lex_errors {
-            diags.emit(error);
-        }
-        let mut parser = Parser::new(tokens, file);
-        let program = parser
-            .parse_program(&mut diags)
-            .expect("test source parses");
-        let module = collect(&program, &mut diags);
+        let (module, file, diags) = resolve_with_file(src);
         assert!(!diags.has_errors(), "{diags:?}");
         let def = module.items.get("main").expect("has main").id;
         let project = ResolvedProject::single(module, file);
@@ -454,7 +450,25 @@ mod tests {
             panic!("expected exactly one binding");
         };
         assert_eq!(item.id, def);
-        assert_eq!(project.symbol_of(def).as_deref(), Some("main"));
+        assert_eq!(project.namespace_of(def), Some(NsId(0)));
+        assert_eq!(project.namespace_path(NsId(0)), "");
+    }
+
+    #[test]
+    fn hook_overload_defs_share_root_namespace() {
+        let (module, file, diags) = resolve_with_file(
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add(lhs, rhs)\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let overloads = module.hooks.get("@add").expect("has @add");
+        assert_eq!(overloads.len(), 2);
+        let second = overloads[1].id;
+        assert!(
+            !module.items.values().any(|item| item.id == second),
+            "the non-first overload must not live in `items`"
+        );
+        let project = ResolvedProject::single(module, file);
+        assert_eq!(project.namespace_of(second), Some(NsId(0)));
     }
 
     #[test]
