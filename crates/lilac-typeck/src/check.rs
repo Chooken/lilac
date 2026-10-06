@@ -145,12 +145,13 @@ pub fn check_bodies(
                 ResKind::Object { generic_params, .. } if !generic_params.is_empty()
             )
         })
-        .map(|(name, _)| name.to_owned())
+        .map(|(name, item)| qualify_name(checker.project, item.id, name))
         .collect();
     let mut layouts = std::mem::take(&mut checker.layouts);
     if !checker.diags.has_errors() {
         for item in &program.items {
-            if generic_objects.contains(&item.name) {
+            let owner = checker.qualify_local(item.span.file, &item.name);
+            if generic_objects.contains(&owner) {
                 // Generic object layouts are concrete per instance (M4 Task 5);
                 // resolving `T` here would leak a template into HIR.
                 continue;
@@ -171,7 +172,7 @@ pub fn check_bodies(
                         fields.push((member.name.clone(), Some(field_ty)));
                     }
                 }
-                layouts.insert(item.name.clone(), fields);
+                layouts.insert(owner, fields);
             } else if let ItemKind::Enum { variants, .. } = &item.kind {
                 let mut entries = Vec::new();
                 for variant in variants {
@@ -187,7 +188,7 @@ pub fn check_bodies(
                     });
                     entries.push((variant.name.clone(), payload));
                 }
-                layouts.insert(item.name.clone(), entries);
+                layouts.insert(owner, entries);
             }
         }
     }
@@ -394,7 +395,7 @@ fn find_parent_name(project: &ResolvedProject, def: DefId) -> Option<String> {
     for (item_name, item) in project.all_items() {
         if let ResKind::Object { members, .. } = &item.kind {
             if members.values().any(|member| member.id == def) {
-                return Some(item_name.to_owned());
+                return Some(qualify_name(project, item.id, item_name));
             }
         }
     }
@@ -406,36 +407,45 @@ fn find_parent_name(project: &ResolvedProject, def: DefId) -> Option<String> {
 fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) -> ItemLookup<'a> {
     fn rec<'a>(
         ast_items: &'a [Item],
-        scope: &dyn Fn(&str) -> Option<ResItem>,
+        scope: &dyn Fn(&str) -> Vec<ResItem>,
         def: DefId,
         parent: Option<(String, DefId)>,
     ) -> ItemLookup<'a> {
         for ast in ast_items {
-            let Some(resolved) = scope(&ast.name) else {
-                continue;
-            };
-            if resolved.id == def {
-                return Some((ast, resolved, parent));
-            }
-            if let (
-                ItemKind::Object { members, .. },
-                ResKind::Object {
-                    members: resolved_members,
-                    ..
-                },
-            ) = (&ast.kind, &resolved.kind)
-            {
-                let grandparent = Some((ast.name.clone(), resolved.id));
-                let member_scope = |name: &str| resolved_members.get(name).cloned();
-                if let Some(found) = rec(members, &member_scope, def, grandparent) {
-                    return Some(found);
+            for resolved in scope(&ast.name) {
+                if resolved.id == def {
+                    return Some((ast, resolved, parent));
+                }
+                if let (
+                    ItemKind::Object { members, .. },
+                    ResKind::Object {
+                        members: resolved_members,
+                        ..
+                    },
+                ) = (&ast.kind, &resolved.kind)
+                {
+                    let grandparent = Some((ast.name.clone(), resolved.id));
+                    let member_scope =
+                        |name: &str| resolved_members.get(name).cloned().into_iter().collect();
+                    if let Some(found) = rec(members, &member_scope, def, grandparent) {
+                        return Some(found);
+                    }
                 }
             }
         }
         None
     }
-    let top: HashMap<&str, &ResItem> = project.all_items().collect();
-    let top_scope = |name: &str| top.get(name).map(|item| (*item).clone());
+    // Same-named items in different namespaces must not shadow each other: keep
+    // every top-level candidate and let `rec` pick the one matching `def`.
+    let mut top: HashMap<&str, Vec<&ResItem>> = HashMap::new();
+    for (name, item) in project.all_items() {
+        top.entry(name).or_default().push(item);
+    }
+    let top_scope = |name: &str| {
+        top.get(name)
+            .map(|candidates| candidates.iter().map(|item| (*item).clone()).collect())
+            .unwrap_or_default()
+    };
     rec(&program.items, &top_scope, def, None)
 }
 
@@ -590,13 +600,30 @@ fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> Error
 }
 
 impl Checker<'_> {
+    /// The namespace-qualified name of an item declared in `file` (root adds no
+    /// prefix), matching the type interner's `types.display`/`types.mangle`.
+    fn qualify_local(&self, file: FileId, local: &str) -> String {
+        let path = self
+            .project
+            .files
+            .iter()
+            .find(|scope| scope.file == file)
+            .map_or("", |scope| self.project.namespace_path(scope.ns));
+        if path.is_empty() {
+            local.to_owned()
+        } else {
+            format!("{path}.{local}")
+        }
+    }
+
     fn collect_fields(&mut self, items: &[Item]) {
         for item in items {
             if let ItemKind::Object { members, .. } = &item.kind {
+                let owner = self.qualify_local(item.span.file, &item.name);
                 for member in members {
                     if let ItemKind::Field { ty } = &member.kind {
                         self.fields
-                            .insert((item.name.clone(), member.name.clone()), ty.clone());
+                            .insert((owner.clone(), member.name.clone()), ty.clone());
                     }
                     self.collect_fields(std::slice::from_ref(member));
                 }
@@ -798,8 +825,9 @@ impl Checker<'_> {
                         if matches!(drop.kind, ResKind::Hook { .. })
                             && self.func_sig(drop.id).is_some()
                         {
-                            let name = self.hook_name(&format!("{}.@on_drop", item.name), drop.id);
-                            self.drops.insert(item.name.clone(), name);
+                            let owner = self.qualify_local(item.span.file, &item.name);
+                            let name = self.hook_name(&format!("{owner}.@on_drop"), drop.id);
+                            self.drops.insert(owner, name);
                         }
                     }
                 }
@@ -1038,7 +1066,13 @@ impl Checker<'_> {
         let hir_name = match &resolved.kind {
             ResKind::Hook { .. } => {
                 let qual = match &parent {
-                    Some((parent_name, _)) => format!("{parent_name}.{}", item.name),
+                    Some((parent_name, parent_def)) => {
+                        // Object hooks keep their qualified owner so two
+                        // namespaces' same-named hooks cannot collide (lower
+                        // leaves `@`-bearing names bare).
+                        let owner = qualify_name(self.project, *parent_def, parent_name);
+                        format!("{owner}.{}", item.name)
+                    }
                     None => item.name.clone(),
                 };
                 self.hook_name(&qual, resolved.id)
@@ -2671,9 +2705,9 @@ impl Checker<'_> {
         let Some(sig) = self.func_sig(hook.id) else {
             lilac_error::bug!(hook.span, "missing signature for `@init` hook");
         };
+        let qualified = qualify_name(self.project, item.id, name);
         let obj_ty = {
             let id = self.types.intern_object(item.id);
-            let qualified = qualify_name(self.project, item.id, name);
             self.types.set_object_name(item.id, &qualified);
             id
         };
@@ -2687,7 +2721,7 @@ impl Checker<'_> {
             ));
         }
         let hir_args = self.check_args(fctx, &sig, args, span)?;
-        let hook_name = self.hook_name(&format!("{name}.@init"), hook.id);
+        let hook_name = self.hook_name(&format!("{qualified}.@init"), hook.id);
         Ok(CallOutcome::Call(CheckedCall {
             outs: sig.returns.clone(),
             callee: HirCallee::Hook {

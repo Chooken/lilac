@@ -1,0 +1,8 @@
+using b
+
+b_use: function () nothing {
+    x: GenBox[@bit64] = GenBox {
+        value = 0x2
+    }
+    y: @bit64 = x.get()
+}

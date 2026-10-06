@@ -1,0 +1,7 @@
+GenBox[T]: object {
+    value: T
+
+    get: function (instance: ref GenBox[T]) result: T {
+        result = instance.value
+    }
+}

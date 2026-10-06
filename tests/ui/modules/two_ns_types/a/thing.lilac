@@ -1,0 +1,7 @@
+Thing: object {
+    a_field: @bit32
+
+    @on_drop: function (from: ref Thing) nothing {
+        from.a_field = 0x0
+    }
+}

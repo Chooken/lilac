@@ -15,7 +15,8 @@ use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    find_item, is_poison, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
+    find_item, is_poison, qualify_name, subst_ident, CallOutcome, CheckedBody, CheckedCall,
+    Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -743,11 +744,12 @@ impl Checker<'_> {
         Some((parent_name, parent_def, count))
     }
 
-    /// Source name of an object definition by identity.
+    /// Namespace-qualified source name of an object definition by identity
+    /// (root adds no prefix), matching the type interner's stored name.
     pub(super) fn object_name_of(&self, def: DefId) -> String {
         for (name, item) in self.project.all_items() {
             if item.id == def {
-                return name.to_owned();
+                return qualify_name(self.project, def, name);
             }
         }
         format!("object#{}", def.0)

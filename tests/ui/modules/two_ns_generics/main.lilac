@@ -1,0 +1,9 @@
+using a
+
+main: function () nothing {
+    x: GenBox[@bit32] = GenBox {
+        value = 0x1
+    }
+    y: @bit32 = x.get()
+    b_use()
+}

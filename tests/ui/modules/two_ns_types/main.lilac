@@ -1,0 +1,9 @@
+using a
+
+main: function () nothing {
+    x: Thing = Thing {
+        a_field = 0x1
+    }
+    y: @bit32 = x.a_field
+    b_use()
+}

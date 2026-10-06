@@ -39,10 +39,10 @@ pub fn lower(
         drops: &hir.drops,
         failed: false,
     };
-    let enum_names: HashSet<&str> = project
+    let enum_names: HashSet<String> = project
         .all_items()
         .filter(|(_, item)| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }))
-        .map(|(name, _)| name)
+        .map(|(name, item)| lower.symbol(item.id, name, false))
         .collect();
     for (name, members) in &hir.layouts {
         let is_aggregate = enum_names.contains(name.as_str());
@@ -86,6 +86,16 @@ pub fn lower(
 /// Layout key for a place type: references address their pointee's layout.
 fn layout_key(place_ty: &str) -> &str {
     place_ty.strip_prefix("ref ").unwrap_or(place_ty)
+}
+
+/// Whether `local` already begins with the namespace `path` and its `.`
+/// separator, so [`Lower::symbol`] must not prefix it a second time. Generic
+/// object instance names are built from the qualified object name
+/// (`util.GenBox.1..bit32`), while top-level and object-member names stay local.
+fn already_prefixed(local: &str, path: &str) -> bool {
+    local.len() > path.len()
+        && local.starts_with(path)
+        && local.as_bytes().get(path.len()) == Some(&b'.')
 }
 fn lir_ty(types: &Types, ty: TypeRef) -> String {
     let base = match types.kind(ty.id) {
@@ -311,7 +321,7 @@ impl Lower<'_> {
         match self.project.namespace_of(def) {
             Some(ns) => {
                 let path = self.project.namespace_path(ns);
-                if path.is_empty() {
+                if path.is_empty() || already_prefixed(local, path) {
                     local.to_owned()
                 } else {
                     format!("{path}.{local}")
