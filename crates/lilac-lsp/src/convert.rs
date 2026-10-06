@@ -26,6 +26,32 @@ pub fn position(src: &str, byte: usize) -> Position {
     )
 }
 
+/// Byte offset for a 0-based line and UTF-16-code-unit column.
+///
+/// Returns `None` when the line does not exist; a column past the line end
+/// clamps to the line end.
+#[must_use]
+pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
+    let mut line_start = 0usize;
+    let mut line = 0u32;
+    while line < position.line {
+        let newline = src[line_start..].find('\n')?;
+        line_start += newline + 1;
+        line += 1;
+    }
+    let line_end = src[line_start..]
+        .find('\n')
+        .map_or(src.len(), |offset| line_start + offset);
+    let mut units = 0u32;
+    for (offset, ch) in src[line_start..line_end].char_indices() {
+        if units >= position.character {
+            return Some(line_start + offset);
+        }
+        units += u32::try_from(ch.len_utf16()).unwrap_or(1);
+    }
+    Some(line_end)
+}
+
 /// LSP range for a span, or `None` when it is dummy or its file is unknown.
 fn span_range(sources: &SourceMap, span: Span) -> Option<Range> {
     if span.is_dummy() {
@@ -121,6 +147,29 @@ mod tests {
     #[test]
     fn position_survives_crlf() {
         assert_eq!(position("a\r\nb", 3), Position::new(1, 0));
+    }
+
+    #[test]
+    fn byte_offset_inverts_position() {
+        let src = "abc\ndef\n";
+        for byte in 0..=src.len() {
+            if !src.is_char_boundary(byte) {
+                continue;
+            }
+            assert_eq!(
+                byte_offset(src, position(src, byte)),
+                Some(byte),
+                "byte {byte}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_offset_clamps_and_rejects_unknown_lines() {
+        assert_eq!(byte_offset("é x", Position::new(0, 2)), Some(3));
+        assert_eq!(byte_offset("😀x", Position::new(0, 2)), Some(4));
+        assert_eq!(byte_offset("abc\n", Position::new(0, 99)), Some(3));
+        assert_eq!(byte_offset("abc\n", Position::new(5, 0)), None);
     }
 
     #[test]
