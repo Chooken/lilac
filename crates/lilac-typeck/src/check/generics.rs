@@ -15,8 +15,7 @@ use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    find_item, is_poison, resolve_type, subst_ident, CallOutcome, CheckedBody, CheckedCall,
-    Checker, FuncCtx,
+    find_item, is_poison, subst_ident, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -110,7 +109,7 @@ impl Checker<'_> {
             );
             return Err(ErrorGuaranteed::new());
         }
-        let Some((item, resolved, _parent)) = find_item(self.program, self.module, base) else {
+        let Some((item, resolved, _parent)) = find_item(self.program, self.project, base) else {
             lilac_error::bug!(use_span, "instantiate_object on an unknown object");
         };
         let ItemKind::Object {
@@ -133,8 +132,7 @@ impl Checker<'_> {
         let mut layout = Vec::new();
         for member in members {
             if let ItemKind::Field { ty } = &member.kind {
-                let template =
-                    resolve_type(ty, self.types, self.module, self.diags, generic_params);
+                let template = self.resolve_in_scope(ty, generic_params);
                 let concrete = self.types.substitute(template, args);
                 let concrete = self.instantiate_ty(concrete, member.span);
                 layout.push((member.name.clone(), Some(concrete)));
@@ -343,7 +341,7 @@ impl Checker<'_> {
             }
         } else {
             diagnostic = diagnostic.label(use_span, true, "instantiated here");
-            if let Some((item, _, _)) = find_item(self.program, self.module, def) {
+            if let Some((item, _, _)) = find_item(self.program, self.project, def) {
                 diagnostic = diagnostic.label(
                     item.span,
                     false,
@@ -479,7 +477,7 @@ impl Checker<'_> {
         sig: &FuncSig,
         name: &str,
     ) -> Result<(), ErrorGuaranteed> {
-        let Some((item, _resolved, parent)) = find_item(self.program, self.module, def) else {
+        let Some((item, _resolved, parent)) = find_item(self.program, self.project, def) else {
             lilac_error::bug!(Span::dummy(), "instantiated function has no AST item");
         };
         let ItemKind::Func(decl) = &item.kind else {
@@ -682,7 +680,7 @@ impl Checker<'_> {
 
     /// The source member name of a method/associated function.
     fn member_name(&self, def: DefId) -> String {
-        for item in self.module.items.values() {
+        for (_, item) in self.project.all_items() {
             if let ResKind::Object { members, .. } = &item.kind {
                 for (member_name, member) in members {
                     if member.id == def {
@@ -698,7 +696,7 @@ impl Checker<'_> {
     /// parameters first, then the function's own (Task 3 convention, so
     /// `substitute` indices line up with the substitution vector).
     fn func_scope(&self, def: DefId) -> Vec<String> {
-        let own = find_item(self.program, self.module, def)
+        let own = find_item(self.program, self.project, def)
             .and_then(|(_, resolved, _)| match &resolved.kind {
                 ResKind::Func { generic_params, .. } | ResKind::Hook { generic_params, .. } => {
                     Some(generic_params.clone())
@@ -719,7 +717,7 @@ impl Checker<'_> {
     /// The enclosing object of a method/associated function, if any:
     /// `(object name, object DefId, object parameter count)`.
     fn method_object(&self, def: DefId) -> Option<(String, DefId, usize)> {
-        let (_item, _resolved, parent) = find_item(self.program, self.module, def)?;
+        let (_item, _resolved, parent) = find_item(self.program, self.project, def)?;
         let (parent_name, parent_def) = parent?;
         let count = self.object_params(parent_def).len();
         Some((parent_name, parent_def, count))
@@ -727,9 +725,9 @@ impl Checker<'_> {
 
     /// Source name of an object definition by identity.
     pub(super) fn object_name_of(&self, def: DefId) -> String {
-        for (name, item) in &self.module.items {
+        for (name, item) in self.project.all_items() {
             if item.id == def {
-                return name.clone();
+                return name.to_owned();
             }
         }
         format!("object#{}", def.0)
@@ -737,7 +735,7 @@ impl Checker<'_> {
 
     /// The declared generic parameter names of an object, in order.
     pub(super) fn object_params(&self, def: DefId) -> Vec<String> {
-        for item in self.module.items.values() {
+        for (_, item) in self.project.all_items() {
             if item.id == def {
                 if let ResKind::Object { generic_params, .. } = &item.kind {
                     return generic_params.clone();
@@ -749,7 +747,7 @@ impl Checker<'_> {
 
     /// A top-level or object-member `ResItem` by identity.
     pub(super) fn res_item(&self, def: DefId) -> Option<ResItem> {
-        for item in self.module.items.values() {
+        for (_, item) in self.project.all_items() {
             if item.id == def {
                 return Some(item.clone());
             }
@@ -766,9 +764,9 @@ impl Checker<'_> {
 
     /// Source name of a function definition (qualified for object members).
     fn function_name(&self, def: DefId) -> String {
-        for (name, item) in &self.module.items {
+        for (name, item) in self.project.all_items() {
             if item.id == def {
-                return name.clone();
+                return name.to_owned();
             }
             if let ResKind::Object { members, .. } = &item.kind {
                 for (member_name, member) in members {
@@ -899,7 +897,7 @@ impl Checker<'_> {
         let base = owner.split('.').next().unwrap_or(owner);
         let base = base.split('[').next().unwrap_or(base);
         let mut members: Vec<String> = Vec::new();
-        for (name, item) in &self.module.items {
+        for (name, item) in self.project.all_items() {
             if name == owner || name == base {
                 if let ResKind::Object { members: table, .. } = &item.kind {
                     members.extend(table.keys().cloned());
@@ -1038,9 +1036,10 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = crate::collect_sigs(&module, &program, &mut types, &mut diags, true);
-        let hir = crate::check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        let sigs = crate::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let hir = crate::check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (diags, hir, types, sm)
     }
 

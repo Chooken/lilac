@@ -8,11 +8,11 @@ use lilac_hir::{
     HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
     HirPattern, HirProgram, HirStmt, TempId,
 };
-use lilac_resolve::{DefId, Module, ResItem, ResKind};
-use lilac_span::Span;
+use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject};
+use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
-use super::{lookup_intrinsic, resolve_type, Intrinsic, Sigs};
+use super::{lookup_intrinsic, lookup_one, qualify_name, resolve_type, Intrinsic, Sigs};
 
 mod generics;
 use generics::FuncInstance;
@@ -93,14 +93,15 @@ struct InlineCallee<'a> {
 /// driver discards it whenever diagnostics contain errors.
 pub fn check_bodies(
     program: &Program,
-    module: &Module,
+    project: &ResolvedProject,
     sigs: &Sigs,
     types: &mut Types,
     diags: &mut Diags,
 ) -> HirProgram {
     let mut checker = Checker {
         program,
-        module,
+        project,
+        file: FileId(u32::MAX),
         sigs,
         types,
         diags,
@@ -126,22 +127,25 @@ pub fn check_bodies(
     };
     checker.collect_fields(&program.items);
     for item in &program.items {
-        if let Some(resolved) = checker.module.items.get(&item.name) {
+        let file = item.span.file;
+        let project = checker.project;
+        if let Ok(Some(resolved)) = lookup_one(project, file, &item.name, item.span, checker.diags)
+        {
             let resolved = resolved.clone();
+            checker.file = file;
             checker.check_item(item, &resolved, None);
         }
     }
     let generic_objects: HashSet<String> = checker
-        .module
-        .items
-        .iter()
+        .project
+        .all_items()
         .filter(|(_, item)| {
             matches!(
                 &item.kind,
                 ResKind::Object { generic_params, .. } if !generic_params.is_empty()
             )
         })
-        .map(|(name, _)| name.clone())
+        .map(|(name, _)| name.to_owned())
         .collect();
     let mut layouts = std::mem::take(&mut checker.layouts);
     if !checker.diags.has_errors() {
@@ -151,12 +155,19 @@ pub fn check_bodies(
                 // resolving `T` here would leak a template into HIR.
                 continue;
             }
+            checker.file = item.span.file;
             if let ItemKind::Object { members, .. } = &item.kind {
                 let mut fields = Vec::new();
                 for member in members {
                     if let ItemKind::Field { ty } = &member.kind {
-                        let field_ty =
-                            resolve_type(ty, checker.types, checker.module, checker.diags, &[]);
+                        let field_ty = resolve_type(
+                            ty,
+                            checker.types,
+                            checker.project,
+                            checker.file,
+                            checker.diags,
+                            &[],
+                        );
                         fields.push((member.name.clone(), Some(field_ty)));
                     }
                 }
@@ -165,7 +176,14 @@ pub fn check_bodies(
                 let mut entries = Vec::new();
                 for variant in variants {
                     let payload = variant.payload.as_ref().map(|ty| {
-                        resolve_type(ty, checker.types, checker.module, checker.diags, &[])
+                        resolve_type(
+                            ty,
+                            checker.types,
+                            checker.project,
+                            checker.file,
+                            checker.diags,
+                            &[],
+                        )
                     });
                     entries.push((variant.name.clone(), payload));
                 }
@@ -183,7 +201,9 @@ pub fn check_bodies(
 
 struct Checker<'a> {
     program: &'a Program,
-    module: &'a Module,
+    project: &'a ResolvedProject,
+    /// File of the item currently being checked (for per-file name scopes).
+    file: FileId,
     sigs: &'a Sigs,
     types: &'a mut Types,
     diags: &'a mut Diags,
@@ -370,11 +390,11 @@ fn fresh_local(fctx: &mut FuncCtx, base: &str) -> String {
 type ItemLookup<'a> = Option<(&'a Item, ResItem, Option<(String, DefId)>)>;
 
 /// Finds the enclosing object's name for a member definition, if any.
-fn find_parent_name(module: &Module, def: DefId) -> Option<String> {
-    for (item_name, item) in &module.items {
+fn find_parent_name(project: &ResolvedProject, def: DefId) -> Option<String> {
+    for (item_name, item) in project.all_items() {
         if let ResKind::Object { members, .. } = &item.kind {
             if members.values().any(|member| member.id == def) {
-                return Some(item_name.clone());
+                return Some(item_name.to_owned());
             }
         }
     }
@@ -383,19 +403,19 @@ fn find_parent_name(module: &Module, def: DefId) -> Option<String> {
 
 /// Finds the AST item plus its resolution for a definition, tracking the
 /// enclosing object (if any) for implicit-`instance` binding.
-fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLookup<'a> {
+fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) -> ItemLookup<'a> {
     fn rec<'a>(
         ast_items: &'a [Item],
-        scope: &HashMap<String, ResItem>,
+        scope: &dyn Fn(&str) -> Option<ResItem>,
         def: DefId,
         parent: Option<(String, DefId)>,
     ) -> ItemLookup<'a> {
         for ast in ast_items {
-            let Some(resolved) = scope.get(&ast.name) else {
+            let Some(resolved) = scope(&ast.name) else {
                 continue;
             };
             if resolved.id == def {
-                return Some((ast, resolved.clone(), parent));
+                return Some((ast, resolved, parent));
             }
             if let (
                 ItemKind::Object { members, .. },
@@ -406,14 +426,17 @@ fn find_item<'a>(program: &'a Program, module: &'a Module, def: DefId) -> ItemLo
             ) = (&ast.kind, &resolved.kind)
             {
                 let grandparent = Some((ast.name.clone(), resolved.id));
-                if let Some(found) = rec(members, resolved_members, def, grandparent) {
+                let member_scope = |name: &str| resolved_members.get(name).cloned();
+                if let Some(found) = rec(members, &member_scope, def, grandparent) {
                     return Some(found);
                 }
             }
         }
         None
     }
-    rec(&program.items, &module.items, def, None)
+    let top: HashMap<&str, &ResItem> = project.all_items().collect();
+    let top_scope = |name: &str| top.get(name).map(|item| (*item).clone());
+    rec(&program.items, &top_scope, def, None)
 }
 
 /// Whether HIR contains a branch-join temp: control flow inside a value
@@ -620,7 +643,7 @@ impl Checker<'_> {
         if self.func_sig(func).is_none() {
             return value_hir;
         }
-        let qual = match find_parent_name(self.module, func) {
+        let qual = match find_parent_name(self.project, func) {
             Some(parent) => format!("{parent}.@conversion"),
             None => "@conversion".to_owned(),
         };
@@ -744,6 +767,7 @@ impl Checker<'_> {
     }
 
     fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
+        self.file = item.span.file;
         match &item.kind {
             ItemKind::Func(decl) => self.check_func(item, resolved, decl, parent),
             ItemKind::Object { members, .. } => {
@@ -827,7 +851,7 @@ impl Checker<'_> {
     /// exactly like `resolve_type(..., &[])`.
     fn resolve_ty(&mut self, ty: &AstType) -> TypeRef {
         let params = self.current_params.clone();
-        let resolved = resolve_type(ty, self.types, self.module, self.diags, &params);
+        let resolved = self.resolve_in_scope(ty, &params);
         let resolved = if self.current_args.is_empty() {
             resolved
         } else {
@@ -835,6 +859,11 @@ impl Checker<'_> {
             self.types.substitute(resolved, &args)
         };
         self.instantiate_ty(resolved, ty.span)
+    }
+
+    /// Resolves a syntactic type against the current project/file scope.
+    fn resolve_in_scope(&mut self, ty: &AstType, params: &[String]) -> TypeRef {
+        resolve_type(ty, self.types, self.project, self.file, self.diags, params)
     }
 
     /// The concrete type bound to a generic parameter name in the current
@@ -862,7 +891,8 @@ impl Checker<'_> {
             .is_some_and(|param| param.name.is_empty() && param.ty.name == "self");
         if let Some((parent_name, parent_def)) = parent {
             let parent_id = self.types.intern_object(parent_def);
-            self.types.set_object_name(parent_def, parent_name.as_str());
+            let qualified = qualify_name(self.project, parent_def, &parent_name);
+            self.types.set_object_name(parent_def, &qualified);
             let receiver = if has_self {
                 sig.params.first().copied().unwrap_or(TypeRef {
                     id: parent_id,
@@ -1135,7 +1165,14 @@ impl Checker<'_> {
             let name = self.object_name_of(base);
             if let Some(ty) = self.fields.get(&(name.clone(), field.to_owned())).cloned() {
                 let params = self.object_params(base);
-                let resolved = resolve_type(&ty, self.types, self.module, self.diags, &params);
+                let resolved = resolve_type(
+                    &ty,
+                    self.types,
+                    self.project,
+                    self.file,
+                    self.diags,
+                    &params,
+                );
                 return Ok(self.types.substitute(resolved, &args));
             }
             let mut diagnostic = Diagnostic::error(
@@ -1183,7 +1220,7 @@ impl Checker<'_> {
     }
 
     fn find_by_def(&self, def: DefId) -> Option<ResKind> {
-        for item in self.module.items.values() {
+        for (_, item) in self.project.all_items() {
             if item.id == def {
                 return Some(item.kind.clone());
             }
@@ -1899,15 +1936,19 @@ impl Checker<'_> {
             },
             poison_expr(span),
         );
-        let Some(item) = self.module.items.get(ty_name).cloned() else {
-            self.diags.emit(
-                Diagnostic::error("E023", format!("unknown type `{ty_name}`")).label(
-                    span,
-                    true,
-                    "no such type in scope".to_owned(),
-                ),
-            );
-            return poison;
+        let item = match lookup_one(self.project, self.file, ty_name, span, self.diags) {
+            Ok(Some(item)) => item.clone(),
+            Ok(None) => {
+                self.diags.emit(
+                    Diagnostic::error("E023", format!("unknown type `{ty_name}`")).label(
+                        span,
+                        true,
+                        "no such type in scope".to_owned(),
+                    ),
+                );
+                return poison;
+            }
+            Err(()) => return poison,
         };
         let ResKind::Object {
             members,
@@ -1924,8 +1965,9 @@ impl Checker<'_> {
             return poison;
         };
         let obj_ty = if generic_params.is_empty() {
+            let name = qualify_name(self.project, item.id, ty_name);
             let id = self.types.intern_object(item.id);
-            self.types.set_object_name(item.id, ty_name);
+            self.types.set_object_name(item.id, &name);
             TypeRef { id, is_ref: false }
         } else {
             // A generic object literal takes its arguments from the expected
@@ -2434,8 +2476,19 @@ impl Checker<'_> {
                         ),
                     ));
                 }
-                if let Some(item) = self.module.items.get(name).cloned() {
-                    return self.check_named_call(fctx, name, &item, generic_args, args, span);
+                match lookup_one(self.project, self.file, name, *name_span, self.diags) {
+                    Ok(Some(item)) => {
+                        return self.check_named_call(
+                            fctx,
+                            name,
+                            &item.clone(),
+                            generic_args,
+                            args,
+                            span,
+                        );
+                    }
+                    Err(()) => return Err(ErrorGuaranteed::new()),
+                    Ok(None) => {}
                 }
                 if let Some(intrinsic) = lookup_intrinsic(name) {
                     if !generic_args.is_empty() {
@@ -2530,7 +2583,7 @@ impl Checker<'_> {
                     return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
                 }
                 if let Some((ast_item, resolved, parent)) =
-                    find_item(self.program, self.module, item.id)
+                    find_item(self.program, self.project, item.id)
                 {
                     if let ItemKind::Func(decl) = &ast_item.kind {
                         if matches!(decl.body, Some(lilac_ast::FuncBody::Inline(_))) {
@@ -2620,7 +2673,8 @@ impl Checker<'_> {
         };
         let obj_ty = {
             let id = self.types.intern_object(item.id);
-            self.types.set_object_name(item.id, name);
+            let qualified = qualify_name(self.project, item.id, name);
+            self.types.set_object_name(item.id, &qualified);
             id
         };
         if sig.returns.len() != 1 || sig.returns[0].id != obj_ty {
@@ -2947,7 +3001,7 @@ impl Checker<'_> {
                 let Some(sig) = self.func_sig(member.id) else {
                     lilac_error::bug!(member.span, "missing signature for member hook");
                 };
-                let qual = match find_parent_name(self.module, member.id) {
+                let qual = match find_parent_name(self.project, member.id) {
                     Some(parent) => format!("{parent}.{field}"),
                     None => field.to_owned(),
                 };
@@ -3102,7 +3156,8 @@ impl Checker<'_> {
             )
             .label(span, true, "no such member".to_owned());
             let owner_id = self.types.intern_object(type_item.id);
-            self.types.set_object_name(type_item.id, type_name);
+            let qualified = qualify_name(self.project, type_item.id, type_name);
+            self.types.set_object_name(type_item.id, &qualified);
             let owner_ty = TypeRef {
                 id: owner_id,
                 is_ref: false,
@@ -3192,22 +3247,27 @@ impl Checker<'_> {
         {
             return Some(result);
         }
-        if let Some(type_item) = self.module.items.get(name).cloned() {
-            if matches!(
-                type_item.kind,
-                ResKind::Object { .. } | ResKind::Enum { .. }
-            ) {
-                return Some(self.check_static_call(
-                    fctx,
-                    name,
-                    &type_item,
-                    field,
-                    generic_args,
-                    args,
-                    span,
-                    expected,
-                ));
+        match lookup_one(self.project, self.file, name, span, self.diags) {
+            Ok(Some(type_item)) => {
+                if matches!(
+                    &type_item.kind,
+                    ResKind::Object { .. } | ResKind::Enum { .. }
+                ) {
+                    let type_item = type_item.clone();
+                    return Some(self.check_static_call(
+                        fctx,
+                        name,
+                        &type_item,
+                        field,
+                        generic_args,
+                        args,
+                        span,
+                        expected,
+                    ));
+                }
             }
+            Err(()) => return Some(Err(ErrorGuaranteed::new())),
+            Ok(None) => {}
         }
         None
     }
@@ -3861,54 +3921,60 @@ impl Checker<'_> {
         if let Some(ty) = fctx.locals.get(name) {
             return Ok((*ty, DefId::ERROR));
         }
-        if let Some(item) = self.module.items.get(name).cloned() {
-            let kind = item.kind.clone();
-            return match kind {
-                ResKind::Func {
-                    generic,
-                    generic_params,
-                    ..
-                } => {
-                    if generic {
-                        Err(self.emit_generic_arity(span, name, generic_params.len(), 0))
-                    } else {
-                        let Some(sig) = self.func_sig(item.id) else {
-                            lilac_error::bug!(span, "missing signature for function value");
-                        };
-                        let id = self
-                            .types
-                            .intern_func(sig.params.clone(), sig.returns.clone());
-                        Ok((TypeRef { id, is_ref: false }, item.id))
-                    }
-                }
-                ResKind::Hook { .. } => Err(self.diags.emit(
-                    Diagnostic::error("E021", format!("cannot use function `{name}` as a value"))
-                        .label(span, true, "hooks are not values".to_owned()),
-                )),
-                ResKind::Const => {
-                    let ty = self.const_type(name, span)?;
-                    Ok((ty, item.id))
-                }
-                ResKind::Object { .. } | ResKind::Enum { .. } => Err(self.diags.emit(
-                    Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
-                        .label(span, true, "name a variable instead".to_owned()),
-                )),
-                ResKind::Field => Err(self.diags.emit(
+        let item = match lookup_one(self.project, self.file, name, span, self.diags) {
+            Ok(Some(item)) => item.clone(),
+            Ok(None) => {
+                return Err(self.diags.emit(
                     Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                         span,
                         true,
-                        "fields need a receiver".to_owned(),
+                        "not a local or item".to_owned(),
                     ),
-                )),
-            };
+                ));
+            }
+            Err(()) => return Err(ErrorGuaranteed::new()),
+        };
+        let kind = item.kind.clone();
+        match kind {
+            ResKind::Func {
+                generic,
+                generic_params,
+                ..
+            } => {
+                if generic {
+                    Err(self.emit_generic_arity(span, name, generic_params.len(), 0))
+                } else {
+                    let Some(sig) = self.func_sig(item.id) else {
+                        lilac_error::bug!(span, "missing signature for function value");
+                    };
+                    let id = self
+                        .types
+                        .intern_func(sig.params.clone(), sig.returns.clone());
+                    Ok((TypeRef { id, is_ref: false }, item.id))
+                }
+            }
+            ResKind::Hook { .. } => Err(self.diags.emit(
+                Diagnostic::error("E021", format!("cannot use function `{name}` as a value"))
+                    .label(span, true, "hooks are not values".to_owned()),
+            )),
+            ResKind::Const => {
+                let ty = self.const_type(name, span)?;
+                Ok((ty, item.id))
+            }
+            ResKind::Object { .. } | ResKind::Enum { .. } => {
+                Err(self.diags.emit(
+                    Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
+                        .label(span, true, "name a variable instead".to_owned()),
+                ))
+            }
+            ResKind::Field => Err(self.diags.emit(
+                Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                    span,
+                    true,
+                    "fields need a receiver".to_owned(),
+                ),
+            )),
         }
-        Err(self.diags.emit(
-            Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                span,
-                true,
-                "not a local or item".to_owned(),
-            ),
-        ))
     }
 
     fn const_type(&mut self, name: &str, span: Span) -> Result<TypeRef, ErrorGuaranteed> {
@@ -4237,7 +4303,7 @@ impl Checker<'_> {
             return None;
         }
         let slot_names: Vec<String> = match callee_def
-            .and_then(|def| find_item(self.program, self.module, def))
+            .and_then(|def| find_item(self.program, self.project, def))
         {
             Some((ast_item, _, _)) => match &ast_item.kind {
                 ItemKind::Func(decl) => decl.returns.iter().map(|slot| slot.name.clone()).collect(),
@@ -5107,9 +5173,10 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
-        check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         diags
     }
 
@@ -5130,9 +5197,10 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
-        let hir = check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (diags, hir)
     }
 
@@ -5418,9 +5486,10 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&module, &program, &mut types, &mut diags, true);
-        let hir = check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (hir, diags)
     }
 

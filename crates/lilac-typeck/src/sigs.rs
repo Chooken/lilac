@@ -4,8 +4,61 @@ use std::collections::HashMap;
 
 use lilac_ast::{Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
-use lilac_resolve::{DefId, Module, ResItem, ResKind};
+use lilac_resolve::{DefId, Lookup, ResItem, ResKind, ResolvedProject};
+use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
+
+/// Namespace-qualifies a user type name for the type interner (spec §7.1).
+///
+/// The root namespace adds no prefix, so every single-file name is unchanged.
+pub(crate) fn qualify_name(project: &ResolvedProject, def: DefId, local: &str) -> String {
+    match project.namespace_of(def) {
+        Some(ns) => {
+            let path = project.namespace_path(ns);
+            if path.is_empty() {
+                local.to_owned()
+            } else {
+                format!("{path}.{local}")
+            }
+        }
+        None => local.to_owned(),
+    }
+}
+
+/// Emits `E029` for a name bound by two equally visible imports (spec §6):
+/// the reference plus every competing declaration.
+pub(crate) fn emit_ambiguous(name: &str, span: Span, competing: &[Span], diags: &mut Diags) {
+    let mut diagnostic = Diagnostic::error("E029", format!("`{name}` is ambiguous")).label(
+        span,
+        true,
+        "ambiguous reference here".to_owned(),
+    );
+    for site in competing {
+        diagnostic = diagnostic.label(*site, false, "candidate from here".to_owned());
+    }
+    diags.emit(diagnostic);
+}
+
+/// Resolves one name through `file`'s scope.
+///
+/// `Ok(Some)` is a unique binding, `Ok(None)` means no binding, and `Err(())`
+/// is an `E029` already reported ambiguity (the caller must poison).
+pub(crate) fn lookup_one<'a>(
+    project: &'a ResolvedProject,
+    file: FileId,
+    name: &str,
+    span: Span,
+    diags: &mut Diags,
+) -> Result<Option<&'a ResItem>, ()> {
+    match project.lookup(file, name) {
+        Some(Lookup::One(item)) => Ok(Some(item)),
+        Some(Lookup::Ambiguous(competing)) => {
+            emit_ambiguous(name, span, competing, diags);
+            Err(())
+        }
+        None => Ok(None),
+    }
+}
 
 /// Collected signatures for a module.
 #[derive(Clone, Debug, Default)]
@@ -110,18 +163,19 @@ pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
 pub fn resolve_type(
     ty: &AstType,
     types: &mut Types,
-    module: &Module,
+    project: &ResolvedProject,
+    file: FileId,
     diags: &mut Diags,
     params: &[String],
 ) -> TypeRef {
     if let Some(func) = &ty.func {
         let mut param_tys = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            param_tys.push(resolve_type(&param.ty, types, module, diags, params));
+            param_tys.push(resolve_type(&param.ty, types, project, file, diags, params));
         }
         let mut return_tys = Vec::with_capacity(func.returns.len());
         for slot in &func.returns {
-            return_tys.push(resolve_type(&slot.ty, types, module, diags, params));
+            return_tys.push(resolve_type(&slot.ty, types, project, file, diags, params));
         }
         let id = types.intern_func(param_tys, return_tys);
         return TypeRef {
@@ -130,7 +184,7 @@ pub fn resolve_type(
         };
     }
     if !ty.generic_args.is_empty() {
-        return resolve_applied(ty, types, module, diags, params);
+        return resolve_applied(ty, types, project, file, diags, params);
     }
     if let Some(index) = params.iter().position(|name| name == &ty.name) {
         let id = types.intern_param(u32::try_from(index).unwrap_or(u32::MAX), &ty.name);
@@ -158,17 +212,24 @@ pub fn resolve_type(
             is_ref: ty.is_ref,
         };
     }
-    if let Some(item) = module.items.get(&ty.name) {
-        match &item.kind {
-            ResKind::Object { .. } | ResKind::Enum { .. } => {
+    match lookup_one(project, file, &ty.name, ty.span, diags) {
+        Ok(Some(item)) => {
+            if matches!(&item.kind, ResKind::Object { .. } | ResKind::Enum { .. }) {
+                let name = qualify_name(project, item.id, &ty.name);
                 let id = types.intern_object(item.id);
-                types.set_object_name(item.id, &ty.name);
+                types.set_object_name(item.id, &name);
                 return TypeRef {
                     id,
                     is_ref: ty.is_ref,
                 };
             }
-            _ => {}
+        }
+        Ok(None) => {}
+        Err(()) => {
+            return TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            };
         }
     }
     diags.emit(
@@ -193,7 +254,8 @@ pub fn resolve_type(
 fn resolve_applied(
     ty: &AstType,
     types: &mut Types,
-    module: &Module,
+    project: &ResolvedProject,
+    file: FileId,
     diags: &mut Diags,
     params: &[String],
 ) -> TypeRef {
@@ -202,19 +264,23 @@ fn resolve_applied(
         is_ref: false,
     };
     let found = ty.generic_args.len();
-    let Some(item) = module.items.get(&ty.name) else {
-        if types.builtin(&ty.name).is_some() {
-            emit_arity_error(diags, ty, found, None);
-        } else {
-            diags.emit(
-                Diagnostic::error("E023", format!("unknown type `{}`", ty.name)).label(
-                    ty.span,
-                    true,
-                    "no such type in scope".to_owned(),
-                ),
-            );
+    let item = match lookup_one(project, file, &ty.name, ty.span, diags) {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            if types.builtin(&ty.name).is_some() {
+                emit_arity_error(diags, ty, found, None);
+            } else {
+                diags.emit(
+                    Diagnostic::error("E023", format!("unknown type `{}`", ty.name)).label(
+                        ty.span,
+                        true,
+                        "no such type in scope".to_owned(),
+                    ),
+                );
+            }
+            return poison;
         }
-        return poison;
+        Err(()) => return poison,
     };
     let decl_params: Vec<String> = match &item.kind {
         ResKind::Object { generic_params, .. } => generic_params.clone(),
@@ -227,9 +293,10 @@ fn resolve_applied(
     let args = ty
         .generic_args
         .iter()
-        .map(|arg| resolve_type(arg, types, module, diags, params))
+        .map(|arg| resolve_type(arg, types, project, file, diags, params))
         .collect();
-    types.set_object_name(item.id, &ty.name);
+    let name = qualify_name(project, item.id, &ty.name);
+    types.set_object_name(item.id, &name);
     let id = types.intern_instance(item.id, args);
     TypeRef {
         id,
@@ -282,10 +349,11 @@ fn collect_param(
     ctx: &mut SigCtx,
 ) -> TypeRef {
     if let Some((parent_name, parent_def, parent_params)) = parent {
+        let qualified = qualify_name(ctx.project, parent_def, parent_name);
         if param.name.is_empty() && param.ty.name == "self" && param.ty.generic_args.is_empty() {
             if parent_params.is_empty() {
                 let id = ctx.types.intern_object(parent_def);
-                ctx.types.set_object_name(parent_def, parent_name);
+                ctx.types.set_object_name(parent_def, &qualified);
                 return TypeRef { id, is_ref: true };
             }
             let args = parent_params
@@ -299,15 +367,23 @@ fn collect_param(
                 })
                 .collect();
             let id = ctx.types.intern_instance(parent_def, args);
-            ctx.types.set_object_name(parent_def, parent_name);
+            ctx.types.set_object_name(parent_def, &qualified);
             return TypeRef { id, is_ref: true };
         }
     }
-    resolve_type(&param.ty, ctx.types, ctx.module, ctx.diags, params)
+    resolve_type(
+        &param.ty,
+        ctx.types,
+        ctx.project,
+        ctx.file,
+        ctx.diags,
+        params,
+    )
 }
 
 struct SigCtx<'a> {
-    module: &'a Module,
+    project: &'a ResolvedProject,
+    file: FileId,
     types: &'a mut Types,
     diags: &'a mut Diags,
     sigs: &'a mut Sigs,
@@ -577,7 +653,8 @@ fn validate_raii_hook(
             }
         }
         let parent_id = ctx.types.intern_object(parent_def);
-        ctx.types.set_object_name(parent_def, parent_name);
+        let qualified = qualify_name(ctx.project, parent_def, parent_name);
+        ctx.types.set_object_name(parent_def, &qualified);
         if !(sig.returns.len() == 1 && sig.returns[0].id == parent_id && !sig.returns[0].is_ref) {
             ctx.diags.emit(
                 Diagnostic::error("E022", "`@init` must return exactly its object type").label(
@@ -589,7 +666,8 @@ fn validate_raii_hook(
         }
     } else if member.name == "@on_drop" {
         let parent_id = ctx.types.intern_object(parent_def);
-        ctx.types.set_object_name(parent_def, parent_name);
+        let qualified = qualify_name(ctx.project, parent_def, parent_name);
+        ctx.types.set_object_name(parent_def, &qualified);
         let shaped = sig.params.len() == 1
             && sig.params[0].is_ref
             && sig.params[0].id == parent_id
@@ -612,7 +690,7 @@ fn validate_raii_hook(
 /// declare their own generic parameters report `E052`. `warn_op_change`
 /// enables the `W020` operator-shape lint.
 pub fn collect_sigs(
-    module: &Module,
+    project: &ResolvedProject,
     program: &Program,
     types: &mut Types,
     diags: &mut Diags,
@@ -620,26 +698,29 @@ pub fn collect_sigs(
 ) -> Sigs {
     let mut sigs = Sigs::default();
     let mut ctx = SigCtx {
-        module,
+        project,
+        file: FileId(u32::MAX),
         types,
         diags,
         sigs: &mut sigs,
         warn_op_change,
     };
     for item in &program.items {
-        if let Some(resolved) = ctx.module.items.get(&item.name) {
+        let file = item.span.file;
+        if let Ok(Some(resolved)) = lookup_one(project, file, &item.name, item.span, ctx.diags) {
             let resolved = resolved.clone();
+            ctx.file = file;
             collect_item(item, &resolved, None, &mut ctx);
         }
     }
-    let top_hooks: Vec<(String, Vec<ResItem>)> = ctx
-        .module
+    let top_hooks: Vec<(String, Vec<ResItem>)> = project
         .hooks
         .iter()
         .map(|(name, overloads)| (name.clone(), overloads.clone()))
         .collect();
     for (name, overloads) in &top_hooks {
         for overload in overloads {
+            ctx.file = overload.span.file;
             collect_hook_sig(name, overload, None, &mut ctx);
         }
     }
@@ -652,14 +733,14 @@ mod tests {
     use lilac_error::Diags;
     use lilac_lex::Lexer;
     use lilac_parse::Parser;
-    use lilac_resolve::Module;
-    use lilac_span::{SourceMap, Span};
+    use lilac_resolve::{Module, ResolvedProject};
+    use lilac_span::{FileId, SourceMap, Span};
 
-    fn sigs_of(src: &str) -> (Sigs, Types, Module, Diags) {
+    fn sigs_of(src: &str) -> (Sigs, Types, ResolvedProject, Diags) {
         sigs_of_warn(src, true)
     }
 
-    fn sigs_of_warn(src: &str, warn_op_change: bool) -> (Sigs, Types, Module, Diags) {
+    fn sigs_of_warn(src: &str, warn_op_change: bool) -> (Sigs, Types, ResolvedProject, Diags) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -672,9 +753,18 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = collect_sigs(&module, &program, &mut types, &mut diags, warn_op_change);
-        (sigs, types, module, diags)
+        let sigs = collect_sigs(&project, &program, &mut types, &mut diags, warn_op_change);
+        (sigs, types, project, diags)
+    }
+
+    fn item<'a>(project: &'a ResolvedProject, name: &str) -> &'a ResItem {
+        project
+            .all_items()
+            .find(|(item_name, _)| *item_name == name)
+            .map(|(_, item)| item)
+            .expect("project has item")
     }
 
     fn code_count(diags: &Diags, code: &str) -> usize {
@@ -708,21 +798,48 @@ mod tests {
     #[test]
     fn unknown_type_is_e023() {
         let mut types = Types::new();
-        let module = Module::default();
+        let project = ResolvedProject::single(Module::default(), FileId(0));
         let mut diags = Diags::new();
-        let resolved = resolve_type(&named_type("Nope"), &mut types, &module, &mut diags, &[]);
+        let resolved = resolve_type(
+            &named_type("Nope"),
+            &mut types,
+            &project,
+            FileId(0),
+            &mut diags,
+            &[],
+        );
         assert_eq!(resolved.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 1);
-        let bare = resolve_type(&named_type("unknown"), &mut types, &module, &mut diags, &[]);
+        let bare = resolve_type(
+            &named_type("unknown"),
+            &mut types,
+            &project,
+            FileId(0),
+            &mut diags,
+            &[],
+        );
         assert_eq!(bare.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 2);
     }
 
     #[test]
+    fn ambiguous_lookup_is_e029() {
+        let mut diags = Diags::new();
+        emit_ambiguous(
+            "Foo",
+            Span::dummy(),
+            &[Span::dummy(), Span::dummy()],
+            &mut diags,
+        );
+        assert_eq!(code_count(&diags, "E029"), 1);
+        assert_eq!(diags.diagnostics()[0].labels.len(), 3);
+    }
+
+    #[test]
     fn generic_type_arg_interns_instance() {
-        let (_, mut types, module, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
+        let (_, mut types, project, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
         let ty = applied_type("GenObj", vec![named_type("@bit32")]);
-        let resolved = resolve_type(&ty, &mut types, &module, &mut diags, &[]);
+        let resolved = resolve_type(&ty, &mut types, &project, FileId(0), &mut diags, &[]);
         assert!(!resolved.is_ref);
         assert!(
             matches!(types.kind(resolved.id), lilac_ty::TypeKind::Instance { .. }),
@@ -736,9 +853,9 @@ mod tests {
 
     #[test]
     fn generic_arg_arity_is_e044() {
-        let (_, mut types, module, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
+        let (_, mut types, project, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
         let ty = applied_type("GenObj", vec![named_type("@bit8"), named_type("@bit16")]);
-        let resolved = resolve_type(&ty, &mut types, &module, &mut diags, &[]);
+        let resolved = resolve_type(&ty, &mut types, &project, FileId(0), &mut diags, &[]);
         assert_eq!(resolved.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E044"), 1);
     }
@@ -746,10 +863,17 @@ mod tests {
     #[test]
     fn template_sig_uses_param() {
         let mut types = Types::new();
-        let module = Module::default();
+        let project = ResolvedProject::single(Module::default(), FileId(0));
         let mut diags = Diags::new();
         let params = vec!["T".to_owned()];
-        let resolved = resolve_type(&named_type("T"), &mut types, &module, &mut diags, &params);
+        let resolved = resolve_type(
+            &named_type("T"),
+            &mut types,
+            &project,
+            FileId(0),
+            &mut diags,
+            &params,
+        );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(types.display(resolved.id), "T");
         assert!(matches!(
@@ -760,11 +884,11 @@ mod tests {
 
     #[test]
     fn generic_self_is_ref_instance() {
-        let (sigs, types, module, diags) = sigs_of(
+        let (sigs, types, project, diags) = sigs_of(
             "GenObj[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        let object = module.items.get("GenObj").expect("has GenObj");
+        let object = item(&project, "GenObj");
         let lilac_resolve::ResKind::Object { members, .. } = &object.kind else {
             panic!("expected object");
         };
@@ -820,11 +944,11 @@ mod tests {
 
     #[test]
     fn self_param_rewrites_to_ref_parent() {
-        let (sigs, types, module, diags) = sigs_of(
+        let (sigs, types, project, diags) = sigs_of(
             "Object: object {\n    get: function (self) result: @bit8 {\n        result = 0x1\n    }\n}\n",
         );
         assert!(!diags.has_errors());
-        let object = module.items.get("Object").expect("has Object");
+        let object = item(&project, "Object");
         let lilac_resolve::ResKind::Object { members, .. } = &object.kind else {
             panic!("expected object");
         };

@@ -1877,9 +1877,10 @@ mod tests {
             .parse_program(&mut diags)
             .expect("test source parses");
         let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module.clone(), file);
         let mut types = Types::new();
-        let sigs = lilac_typeck::collect_sigs(&module, &program, &mut types, &mut diags, true);
-        let hir = lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut diags);
+        let sigs = lilac_typeck::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let hir = lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         let lir = lower(&hir, &module, &types, &mut diags, "x86_64-unknown-none")
             .expect("test source lowers");
         (lir.to_text(), diags)

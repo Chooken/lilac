@@ -167,15 +167,20 @@ impl Session {
         let mut parser = Parser::new(tokens, file);
         let program = parser.parse_program(&mut self.diags)?;
         let module = lilac_resolve::collect(&program, &mut self.diags);
+        // Task 4 migrates `lower` to `ResolvedProject`; until then keep the
+        // module alive (clone) so both the new typeck signatures and the old
+        // lowering signature stay satisfied.
+        let project = lilac_resolve::ResolvedProject::single(module.clone(), file);
         let mut types = lilac_ty::Types::new();
         let sigs = lilac_typeck::collect_sigs(
-            &module,
+            &project,
             &program,
             &mut types,
             &mut self.diags,
             self.warn_on_operator_type_change,
         );
-        let hir = lilac_typeck::check_bodies(&program, &module, &sigs, &mut types, &mut self.diags);
+        let hir =
+            lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
