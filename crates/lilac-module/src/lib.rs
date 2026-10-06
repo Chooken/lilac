@@ -5,15 +5,21 @@
 //! are read and parsed only far enough to collect `using` directives. Each
 //! `using A.B` resolves root-relative to `<root>/A/B`; newly-reached folders
 //! are read and scanned, repeating until no new folder appears. Every folder is
-//! visited once, so cycles terminate. A `using` whose target is missing or is
-//! not a directory emits `E025` at the `using` span and fails the load.
+//! visited once, so cycles terminate. A `using` inside a `private { ... }`
+//! block is honored (it still loads the folder).
+//!
+//! `E025` is the module-load error: a `using` whose target is missing or is not
+//! a directory, an unreadable root folder, or an unreadable file. Each is
+//! reported at the most specific span available (the `using` span where there
+//! is one, a dummy span otherwise, with the path named in the headline) and
+//! fails the load.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lilac_ast::ItemKind;
+use lilac_ast::{Item, ItemKind};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_lex::Lexer;
 use lilac_parse::Parser;
@@ -71,6 +77,10 @@ pub struct Project {
 /// sees matching spans.
 pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, ErrorGuaranteed> {
     let Ok(root_entries) = fs.list_dir(root) else {
+        diags.emit(Diagnostic::error(
+            "E025",
+            format!("cannot read module folder `{}`", root.display()),
+        ));
         return Err(ErrorGuaranteed::new());
     };
 
@@ -97,6 +107,10 @@ pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, 
 
         for path in sources {
             let Ok(src) = fs.read(&path) else {
+                diags.emit(Diagnostic::error(
+                    "E025",
+                    format!("cannot read module file `{}`", path.display()),
+                ));
                 return Err(ErrorGuaranteed::new());
             };
             let file_id = FileId(u32::try_from(files.len()).unwrap_or(u32::MAX));
@@ -126,11 +140,13 @@ pub fn load(root: &Path, fs: &mut dyn Fs, diags: &mut Diags) -> Result<Project, 
                     ns_by_path.insert(target_path, new_ns);
                     queue.push_back(new_ns);
                 } else {
-                    diags.emit(Diagnostic::error("E025", "unresolved `using`").label(
-                        span,
-                        true,
-                        format!("cannot find folder `{target_path}`"),
-                    ));
+                    diags.emit(
+                        Diagnostic::error(
+                            "E025",
+                            format!("cannot find module folder `{target_path}`"),
+                        )
+                        .label(span, true, "imported here"),
+                    );
                     failed = true;
                 }
             }
@@ -177,14 +193,24 @@ fn scan_usings(src: &str, file: FileId) -> Vec<(String, Span)> {
     let Ok(program) = parser.parse_program(&mut ignore) else {
         return Vec::new();
     };
-    program
-        .items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Using { path } => Some((path.clone(), item.span)),
-            _ => None,
-        })
-        .collect()
+    let mut usings = Vec::new();
+    for item in &program.items {
+        collect_usings(item, &mut usings);
+    }
+    usings
+}
+
+/// Collects `using` paths from `item`, descending into `private` blocks.
+fn collect_usings(item: &Item, out: &mut Vec<(String, Span)>) {
+    match &item.kind {
+        ItemKind::Using { path } => out.push((path.clone(), item.span)),
+        ItemKind::Private { items } => {
+            for inner in items {
+                collect_usings(inner, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -369,5 +395,88 @@ mod tests {
             .find(|ns| ns.path == "a.b")
             .expect("a.b namespace loaded");
         assert_eq!(project.files[deep_ns.files[0]].name, "deep.lilac");
+    }
+
+    #[test]
+    fn non_lilac_files_are_ignored() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "get: function () nothing {}\n");
+        fs.add(&root, "notes.txt", "ignore me\n");
+        fs.add(&root, "README", "ignore me too\n");
+
+        let mut diags = Diags::new();
+        let project = load(&root, &mut fs, &mut diags).expect("load succeeds");
+
+        assert!(!diags.has_errors(), "{diags:?}");
+        let names: Vec<&str> = project
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(names, ["main.lilac"]);
+    }
+
+    #[test]
+    fn using_inside_private_block_is_honored() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "private {\n    using util\n}\n");
+        fs.add(
+            &root,
+            "util/helper.lilac",
+            "helper: function () nothing {}\n",
+        );
+
+        let mut diags = Diags::new();
+        let project = load(&root, &mut fs, &mut diags).expect("load succeeds");
+
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(project.namespaces.iter().any(|ns| ns.path == "util"));
+        let main = project
+            .files
+            .iter()
+            .find(|file| file.name == "main.lilac")
+            .expect("main file");
+        assert_eq!(main.usings, ["util"]);
+    }
+
+    #[test]
+    fn using_inside_private_block_missing_target_emits_e025() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "private {\n    using missing\n}\n");
+
+        let mut diags = Diags::new();
+        let result = load(&root, &mut fs, &mut diags);
+
+        assert!(result.is_err());
+        assert_eq!(e025_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn unreadable_root_folder_emits_e025() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+
+        let mut diags = Diags::new();
+        let result = load(&root, &mut fs, &mut diags);
+
+        assert!(result.is_err());
+        assert_eq!(e025_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn unreadable_file_emits_e025() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.dirs
+            .insert(root.clone(), vec![join_rel(&root, "broken.lilac")]);
+
+        let mut diags = Diags::new();
+        let result = load(&root, &mut fs, &mut diags);
+
+        assert!(result.is_err());
+        assert_eq!(e025_count(&diags), 1, "{diags:?}");
     }
 }
