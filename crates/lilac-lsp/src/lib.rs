@@ -13,6 +13,7 @@ pub mod documents;
 pub mod fs;
 pub mod handlers;
 pub mod index;
+pub mod lir;
 pub mod roots;
 pub mod server;
 
