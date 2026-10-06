@@ -4,7 +4,21 @@ use std::collections::HashMap;
 
 use lilac_ast::{Item, ItemKind, Param, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
-use lilac_span::Span;
+use lilac_span::{FileId, Span};
+
+/// Identity of one namespace in a [`ResolvedProject`] (index into its
+/// `namespaces` list; `NsId(0)` is the root).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NsId(pub u32);
+
+/// Declared visibility of a definition.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    /// Visible to importers (and, by namespace reach, to descendants).
+    Public,
+    /// Visible only within the declaring namespace and its descendants.
+    Private,
+}
 
 /// HIR-level definition identity, stable across passes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -20,10 +34,16 @@ impl DefId {
 pub struct ResItem {
     /// Stable identity.
     pub id: DefId,
+    /// Local (unqualified) declared name.
+    pub name: String,
     /// What was defined.
     pub kind: ResKind,
     /// Definition span.
     pub span: Span,
+    /// Declared visibility.
+    pub vis: Visibility,
+    /// Owning namespace.
+    pub ns: NsId,
 }
 
 /// Definition kinds tracked for typeck.
@@ -87,6 +107,121 @@ pub struct Module {
     pub items: HashMap<String, ResItem>,
     /// Hook name → every overload in definition order.
     pub hooks: HashMap<String, Vec<ResItem>>,
+}
+
+/// The result of resolving one name: a single binding, or several equally
+/// visible ones (reported as `E029` on use).
+#[derive(Clone, Debug)]
+pub enum Lookup {
+    /// Exactly one visible binding.
+    One(ResItem),
+    /// Import-vs-import collision; the spans are the competing declarations.
+    Ambiguous(Vec<Span>),
+}
+
+/// One namespace's own definitions.
+#[derive(Clone, Debug)]
+pub struct NamespaceData {
+    /// Dotted path from the root (`""` for the root).
+    pub path: String,
+    /// Enclosing namespace (`None` for the root).
+    pub parent: Option<NsId>,
+    /// Name → definition (first binding wins on duplicates).
+    pub items: HashMap<String, ResItem>,
+}
+
+/// One source file's namespace and the bindings it can see.
+#[derive(Clone, Debug)]
+pub struct FileScope {
+    /// The file this scope belongs to.
+    pub file: FileId,
+    /// The namespace the file is declared in.
+    pub ns: NsId,
+    /// Name → binding, already filtered by visibility and reach.
+    pub visible: HashMap<String, Lookup>,
+}
+
+/// A whole compilation unit's resolved namespaces and per-file scopes.
+#[derive(Clone, Debug)]
+pub struct ResolvedProject {
+    /// All namespaces; index 0 is the root.
+    pub namespaces: Vec<NamespaceData>,
+    /// Unit-global top-level hook overload sets.
+    pub hooks: HashMap<String, Vec<ResItem>>,
+    /// One visible scope per source file.
+    pub files: Vec<FileScope>,
+}
+
+impl ResolvedProject {
+    /// Wraps a single-file [`Module`] as a one-namespace project.
+    pub fn single(module: Module, file: FileId) -> Self {
+        let visible = module
+            .items
+            .iter()
+            .map(|(name, item)| (name.clone(), Lookup::One(item.clone())))
+            .collect();
+        let root = NamespaceData {
+            path: String::new(),
+            parent: None,
+            items: module.items,
+        };
+        Self {
+            namespaces: vec![root],
+            hooks: module.hooks,
+            files: vec![FileScope {
+                file,
+                ns: NsId(0),
+                visible,
+            }],
+        }
+    }
+
+    /// The binding `name` denotes in `file`, if any.
+    pub fn lookup(&self, file: FileId, name: &str) -> Option<&Lookup> {
+        self.files
+            .iter()
+            .find(|scope| scope.file == file)
+            .and_then(|scope| scope.visible.get(name))
+    }
+
+    /// Every top-level item across the project as `(local name, item)`.
+    pub fn all_items(&self) -> impl Iterator<Item = (&str, &ResItem)> {
+        self.namespaces
+            .iter()
+            .flat_map(|ns| ns.items.iter().map(|(name, item)| (name.as_str(), item)))
+    }
+
+    /// The emitted symbol for `def`: its namespace-qualified name, with no
+    /// prefix for the root namespace.
+    pub fn symbol_of(&self, def: DefId) -> Option<String> {
+        for ns in &self.namespaces {
+            for item in ns.items.values() {
+                if let Some(local) = qualify_name(item, def) {
+                    if ns.path.is_empty() {
+                        return Some(local);
+                    }
+                    return Some(format!("{}.{}", ns.path, local));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Reconstructs the source-qualified name of `def`, descending into object
+/// members (root/namespace prefix is added by the caller).
+fn qualify_name(item: &ResItem, def: DefId) -> Option<String> {
+    if item.id == def {
+        return Some(item.name.clone());
+    }
+    if let ResKind::Object { members, .. } = &item.kind {
+        for member in members.values() {
+            if let Some(local) = qualify_name(member, def) {
+                return Some(format!("{}.{}", item.name, local));
+            }
+        }
+    }
+    None
 }
 
 /// Signature key for overload uniqueness (names excluded, types included).
@@ -189,8 +324,11 @@ impl Collector<'_> {
         };
         Some(ResItem {
             id,
+            name: item.name.clone(),
             kind,
             span: item.span,
+            vis: Visibility::Public,
+            ns: NsId(0),
         })
     }
 
@@ -292,6 +430,31 @@ mod tests {
             .iter()
             .filter(|d| d.code == "E020")
             .count()
+    }
+
+    #[test]
+    fn single_project_lookup() {
+        let src = "main: function () nothing {}\n";
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = collect(&program, &mut diags);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let def = module.items.get("main").expect("has main").id;
+        let project = ResolvedProject::single(module, file);
+        let Lookup::One(item) = project.lookup(file, "main").expect("main is visible") else {
+            panic!("expected exactly one binding");
+        };
+        assert_eq!(item.id, def);
+        assert_eq!(project.symbol_of(def).as_deref(), Some("main"));
     }
 
     #[test]
