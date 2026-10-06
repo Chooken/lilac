@@ -4,6 +4,8 @@
 mod bigint;
 mod value;
 
+pub use value::eval;
+
 /// A binary arithmetic operator that can be folded on decimal literals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {

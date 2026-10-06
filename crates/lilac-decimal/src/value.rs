@@ -1,6 +1,7 @@
-#![allow(dead_code)]
+use std::cmp::Ordering;
 
 use crate::bigint::Big;
+use crate::{DecimalError, Op, Policy, Round};
 
 /// A parsed decimal literal: a sign, an unsigned integer coefficient, and the
 /// number of fractional digits of that coefficient.
@@ -96,11 +97,232 @@ impl Decimal {
         }
         out
     }
+
+    /// Form a normalized value: a zero result is always `0` (no sign, no
+    /// scale), matching [`Decimal::parse`]'s invariants.
+    fn normalized(negative: bool, digits: Big, scale: u32) -> Decimal {
+        if digits.is_zero() {
+            Decimal {
+                negative: false,
+                digits,
+                scale: 0,
+            }
+        } else {
+            Decimal {
+                negative,
+                digits,
+                scale,
+            }
+        }
+    }
+}
+
+/// Fold a binary arithmetic operator over two decimal-literal strings.
+///
+/// `+ - *` are exact; `/` is computed to `policy.scale` fractional digits and
+/// rounded per `policy.round`; `%` is floored (`a % b = a - b·floor(a/b)`),
+/// takes the divisor's sign, and is exact. Malformed operands yield
+/// [`DecimalError::Malformed`].
+pub fn eval(op: Op, lhs: &str, rhs: &str, policy: Policy) -> Result<String, DecimalError> {
+    let a = Decimal::parse(lhs).ok_or(DecimalError::Malformed)?;
+    let b = Decimal::parse(rhs).ok_or(DecimalError::Malformed)?;
+    let result = match op {
+        Op::Add => add_sub(&a, &b, false),
+        Op::Sub => add_sub(&a, &b, true),
+        Op::Mul => mul(&a, &b)?,
+        Op::Div => div(&a, &b, policy)?,
+        Op::Mod => modulo(&a, &b)?,
+    };
+    Ok(result.render())
+}
+
+fn add_sub(a: &Decimal, b: &Decimal, subtract: bool) -> Decimal {
+    let scale = a.scale.max(b.scale);
+    let left = a.digits.mul_pow10(scale - a.scale);
+    let right = b.digits.mul_pow10(scale - b.scale);
+    let right_negative = b.negative ^ subtract;
+    let (negative, digits) = signed_add(a.negative, &left, right_negative, &right);
+    Decimal::normalized(negative, digits, scale)
+}
+
+fn mul(a: &Decimal, b: &Decimal) -> Result<Decimal, DecimalError> {
+    let scale = a
+        .scale
+        .checked_add(b.scale)
+        .ok_or(DecimalError::Malformed)?;
+    Ok(Decimal::normalized(
+        a.negative ^ b.negative,
+        a.digits.mul(&b.digits),
+        scale,
+    ))
+}
+
+fn div(a: &Decimal, b: &Decimal, policy: Policy) -> Result<Decimal, DecimalError> {
+    if b.digits.is_zero() {
+        return Err(DecimalError::DivideByZero);
+    }
+    let scale = policy.scale;
+    let shift = b.scale.checked_add(scale).ok_or(DecimalError::Malformed)?;
+    let numerator = a.digits.mul_pow10(shift);
+    let denominator = b.digits.mul_pow10(a.scale);
+    let (mut quotient, remainder) = numerator
+        .divmod(&denominator)
+        .ok_or(DecimalError::DivideByZero)?;
+    if policy.round == Round::HalfUp
+        && remainder.add(&remainder).cmp(&denominator) != Ordering::Less
+    {
+        quotient = quotient.add(&one());
+    }
+    Ok(Decimal::normalized(
+        a.negative ^ b.negative,
+        quotient,
+        scale,
+    ))
+}
+
+fn modulo(a: &Decimal, b: &Decimal) -> Result<Decimal, DecimalError> {
+    if b.digits.is_zero() {
+        return Err(DecimalError::ModuloByZero);
+    }
+    // Magnitude quotient of `a / b`: floor(|a| / |b|) and its remainder.
+    let numerator = a.digits.mul_pow10(b.scale);
+    let denominator = b.digits.mul_pow10(a.scale);
+    let (quotient_mag, remainder) = numerator
+        .divmod(&denominator)
+        .ok_or(DecimalError::ModuloByZero)?;
+    // Floored division: when the signs differ and the division is inexact,
+    // the signed quotient is one below the truncated magnitude quotient.
+    let opposite = a.negative ^ b.negative;
+    let (quotient_mag, quotient_negative) = if opposite && !remainder.is_zero() {
+        (quotient_mag.add(&one()), true)
+    } else {
+        (quotient_mag, opposite)
+    };
+    // `r = a - b·q`, evaluated exactly at the operands' common scale.
+    let scale = a.scale.max(b.scale);
+    let left = a.digits.mul_pow10(scale - a.scale);
+    let product = b.digits.mul_pow10(scale - b.scale).mul(&quotient_mag);
+    let product_negative = b.negative ^ quotient_negative;
+    let (negative, digits) = signed_add(a.negative, &left, !product_negative, &product);
+    Ok(Decimal::normalized(negative, digits, scale))
+}
+
+/// Signed magnitude addition: `left ± right`, where the returned sign applies
+/// to the returned magnitude. A zero result carries no sign.
+fn signed_add(left_negative: bool, left: &Big, right_negative: bool, right: &Big) -> (bool, Big) {
+    if left_negative == right_negative {
+        (left_negative, left.add(right))
+    } else {
+        match left.cmp(right) {
+            Ordering::Equal => (false, Big::zero()),
+            Ordering::Greater => (left_negative, left.sub(right)),
+            Ordering::Less => (right_negative, right.sub(left)),
+        }
+    }
+}
+
+fn one() -> Big {
+    Big::from_decimal_digits("1").expect("`1` is valid decimal digits")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Decimal;
+    use super::{eval, Decimal};
+    use crate::{DecimalError, Op, Policy, Round};
+
+    fn ev(op: Op, l: &str, r: &str, scale: u32, round: Round) -> String {
+        eval(op, l, r, Policy { scale, round }).expect("eval ok")
+    }
+    fn trunc(scale: u32) -> Policy {
+        Policy {
+            scale,
+            round: Round::Trunc,
+        }
+    }
+
+    #[test]
+    fn add_exact() {
+        assert_eq!(ev(Op::Add, "1.5", "2.25", 10, Round::Trunc), "3.75");
+    }
+
+    #[test]
+    fn sub_yields_negative() {
+        assert_eq!(ev(Op::Sub, "2", "3", 10, Round::Trunc), "-1");
+    }
+
+    #[test]
+    fn mul_exact() {
+        assert_eq!(ev(Op::Mul, "10.5", "2", 10, Round::Trunc), "21");
+    }
+
+    #[test]
+    fn div_trunc_default_scale() {
+        assert_eq!(ev(Op::Div, "1", "3", 10, Round::Trunc), "0.3333333333");
+    }
+
+    #[test]
+    fn div_exact_has_no_trailing_zeros() {
+        assert_eq!(ev(Op::Div, "6", "3", 10, Round::Trunc), "2");
+        assert_eq!(ev(Op::Div, "1", "2", 10, Round::Trunc), "0.5");
+    }
+
+    #[test]
+    fn div_trunc_toward_zero_for_negatives() {
+        // Truncation toward zero, and never a negative zero.
+        assert_eq!(ev(Op::Div, "-1", "3", 0, Round::Trunc), "0");
+        assert_eq!(ev(Op::Div, "-3", "2", 0, Round::Trunc), "-1"); // toward zero, not -2
+    }
+
+    #[test]
+    fn div_half_up_away_from_zero() {
+        assert_eq!(ev(Op::Div, "1", "8", 2, Round::HalfUp), "0.13");
+        assert_eq!(ev(Op::Div, "-1", "8", 2, Round::HalfUp), "-0.13");
+        assert_eq!(ev(Op::Div, "1", "3", 2, Round::HalfUp), "0.33");
+    }
+
+    #[test]
+    fn div_scale_zero() {
+        assert_eq!(ev(Op::Div, "7", "2", 0, Round::Trunc), "3");
+    }
+
+    #[test]
+    fn mod_floored_positive_divisor() {
+        assert_eq!(ev(Op::Mod, "-7", "3", 10, Round::Trunc), "2");
+    }
+
+    #[test]
+    fn mod_floored_negative_divisor() {
+        assert_eq!(ev(Op::Mod, "7", "-3", 10, Round::Trunc), "-2");
+    }
+
+    #[test]
+    fn divide_by_zero_is_error() {
+        assert_eq!(
+            eval(Op::Div, "1", "0", trunc(10)),
+            Err(DecimalError::DivideByZero)
+        );
+    }
+
+    #[test]
+    fn modulo_by_zero_is_error() {
+        assert_eq!(
+            eval(Op::Mod, "1", "0", trunc(10)),
+            Err(DecimalError::ModuloByZero)
+        );
+    }
+
+    #[test]
+    fn large_operands_are_exact() {
+        // (10^100 - 1)^2 = 99 nines, an 8, 99 zeros, then a 1.
+        let big = "9".repeat(100);
+        let want = format!("{}8{}1", "9".repeat(99), "0".repeat(99));
+        assert_eq!(ev(Op::Mul, &big, &big, 10, Round::Trunc), want);
+    }
+
+    #[test]
+    fn underscored_operands() {
+        assert_eq!(ev(Op::Add, "10_000", "1", 10, Round::Trunc), "10001");
+    }
 
     #[test]
     fn render_canonical() {
