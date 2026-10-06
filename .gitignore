@@ -1,5 +1,3 @@
-.zig-cache/
-zig-out/
 .VSCodeCounter/
 target/
 .lilac-cache/
