@@ -48,7 +48,7 @@
     }
   },
   "scripts": {
-    "test": "node scripts/run-grammar-tests.mjs \"test/*.test\"",
+    "test": "node --test test/lirMap.test.js && node scripts/run-grammar-tests.mjs \"test/*.test\"",
     "package": "vsce package"
   },
   "dependencies": {
