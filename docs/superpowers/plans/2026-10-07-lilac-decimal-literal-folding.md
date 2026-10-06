@@ -331,7 +331,11 @@ fn div_exact_has_no_trailing_zeros() {
 }
 
 #[test]
-fn div_trunc_toward_zero_for_negatives() { assert_eq!(ev(Op::Div, "-1", "3", 10, Round::Trunc), "0"); }
+fn div_trunc_toward_zero_for_negatives() {
+    // Truncation toward zero, and never a negative zero.
+    assert_eq!(ev(Op::Div, "-1", "3", 0, Round::Trunc), "0");
+    assert_eq!(ev(Op::Div, "-3", "2", 0, Round::Trunc), "-1"); // toward zero, not -2
+}
 
 #[test]
 fn div_half_up_away_from_zero() {
