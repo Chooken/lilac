@@ -4,7 +4,7 @@
 mod std_fs;
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{ErrorFormat, OptimizeMode, Session, Target};
+use lilac_driver::{DecimalPolicy, DecimalRound, ErrorFormat, OptimizeMode, Session, Target};
 use lilac_error::ErrorGuaranteed;
 use lilac_ir::LirModule;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -126,8 +126,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 return Err(ExitCode::from(2));
             };
             session.optimize = parsed;
-        } else if *arg == "--release" {
-            session.optimize = OptimizeMode::Release;
+        } else if parse_session_flag(arg, &mut session)? {
         } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
             if dir.is_empty() {
                 eprintln!("--cache-dir= needs a path\n{}", usage());
@@ -172,6 +171,45 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         dump_lir,
         session,
     })
+}
+
+/// Parses the session-wide scalar flags `--release`, `--decimal-scale=`, and
+/// `--decimal-round=`, returning `Ok(true)` when `arg` was one of them.
+///
+/// Kept out of [`parse_common`] to stay under the pedantic line budget.
+fn parse_session_flag(arg: &str, session: &mut Session) -> Result<bool, ExitCode> {
+    if arg == "--release" {
+        session.optimize = OptimizeMode::Release;
+    } else if let Some(scale) = arg.strip_prefix("--decimal-scale=") {
+        match scale.parse::<u32>() {
+            Ok(value) if value <= 1000 => {
+                session.decimal = DecimalPolicy {
+                    scale: value,
+                    ..session.decimal
+                };
+            }
+            _ => {
+                eprintln!("invalid --decimal-scale={scale}; want 0..=1000");
+                return Err(ExitCode::from(2));
+            }
+        }
+    } else if let Some(round) = arg.strip_prefix("--decimal-round=") {
+        let parsed = match round {
+            "trunc" => DecimalRound::Trunc,
+            "half-up" => DecimalRound::HalfUp,
+            _ => {
+                eprintln!("unknown --decimal-round={round}; want trunc|half-up");
+                return Err(ExitCode::from(2));
+            }
+        };
+        session.decimal = DecimalPolicy {
+            round: parsed,
+            ..session.decimal
+        };
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Parses the `run`-oriented flags `--source=`, `--break=`, `--step`, and
@@ -723,6 +761,7 @@ fn exit_code(code: i32) -> ExitCode {
 mod tests {
     use super::{compile_with_dumps, opt_level, parse_common, ExitCode, OptimizeMode, Session};
     use lilac_codegen::OptLevel;
+    use lilac_driver::{DecimalPolicy, DecimalRound};
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
@@ -813,6 +852,45 @@ mod tests {
             parse_common(&args(&["f.lilac", "--dump-lir=out/dumps"]), true).expect("valid args");
         assert_eq!(with.dump_lir, Some(std::path::PathBuf::from("out/dumps")));
         assert!(parse_common(&args(&["f.lilac", "--dump-lir="]), true).is_err());
+    }
+
+    #[test]
+    fn decimal_flags_default() {
+        let c = parse_common(&args(&["f.lilac"]), false).expect("valid");
+        assert_eq!(
+            c.session.decimal,
+            DecimalPolicy {
+                scale: 10,
+                round: DecimalRound::Trunc
+            }
+        );
+    }
+
+    #[test]
+    fn decimal_flags_parse() {
+        let c = parse_common(
+            &args(&["f.lilac", "--decimal-scale=3", "--decimal-round=half-up"]),
+            false,
+        )
+        .expect("valid");
+        assert_eq!(
+            c.session.decimal,
+            DecimalPolicy {
+                scale: 3,
+                round: DecimalRound::HalfUp
+            }
+        );
+    }
+
+    #[test]
+    fn decimal_scale_rejects_out_of_range() {
+        assert!(parse_common(&args(&["f.lilac", "--decimal-scale=1001"]), false).is_err());
+        assert!(parse_common(&args(&["f.lilac", "--decimal-scale=abc"]), false).is_err());
+    }
+
+    #[test]
+    fn decimal_round_rejects_unknown() {
+        assert!(parse_common(&args(&["f.lilac", "--decimal-round=up"]), false).is_err());
     }
 
     #[test]
