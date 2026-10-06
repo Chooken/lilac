@@ -1,0 +1,34 @@
+{
+  "name": "lilac",
+  "displayName": "Lilac",
+  "description": "Syntax highlighting for the Lilac language and Lilac IR",
+  "version": "0.1.0",
+  "publisher": "lilac-lang",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lilac",
+        "aliases": ["Lilac", "lilac"],
+        "extensions": [".lilac"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lilac",
+        "scopeName": "source.lilac",
+        "path": "./syntaxes/lilac.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node scripts/run-grammar-tests.mjs \"test/*.test\"",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "vscode-tmgrammar-test": "^0.1.3",
+    "@vscode/vsce": "^4.0.0"
+  }
+}

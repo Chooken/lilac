@@ -1,0 +1,102 @@
+// SYNTAX TEST "source.lilac" "declarations"
+
+main: function
+// <---- entity.name.function.lilac
+//  ^ keyword.operator.lilac
+//    ^^^^^^^^ storage.type.lilac
+
+Shape: object
+// <----- entity.name.type.lilac
+//   ^ keyword.operator.lilac
+//     ^^^^^^ storage.type.lilac
+
+Color: enum
+// <----- entity.name.type.lilac
+//   ^ keyword.operator.lilac
+//     ^^^^ storage.type.lilac
+
+write: extern function
+// <----- entity.name.function.lilac
+//   ^ keyword.operator.lilac
+//     ^^^^^^ storage.type.lilac
+//            ^^^^^^^^ storage.type.lilac
+
+// SYNTAX TEST "source.lilac" "keywords"
+
+if x
+// <-- keyword.control.lilac
+else
+// <--- keyword.control.lilac
+loop
+// <--- keyword.control.lilac
+match x
+// <---- keyword.control.lilac
+break
+// <---- keyword.control.lilac
+return
+// <----- keyword.control.lilac
+and
+// <-- keyword.operator.lilac
+or
+// <- keyword.operator.lilac
+    private
+//  ^^^^^^^ storage.modifier.lilac
+    using A
+//  ^^^^^ keyword.control.import.lilac
+
+// SYNTAX TEST "source.lilac" "ref, unknown, nothing, self"
+
+ref unknown
+// <-- storage.type.lilac
+//   ^^^^^^^ storage.type.lilac
+nothing self
+// <------ storage.type.lilac
+//       ^^^^ storage.type.lilac
+
+// SYNTAX TEST "source.lilac" "builtin vs hook"
+
+a: @bit32
+// ^^^^^^ support.type.builtin.lilac
+b: @bit_x
+// ^^^^^^ support.function.builtin.lilac
+c: @byte_buffer
+// ^^^^^^^^^^^^ support.type.builtin.lilac
+d: @add(x)
+// ^^^^ support.function.builtin.lilac
+
+// SYNTAX TEST "source.lilac" "numbers"
+
+n: 0xFF_FF
+// ^^^^^^^ constant.numeric.hex.lilac
+m: 0b10_10
+// ^^^^^^^ constant.numeric.binary.lilac
+f: 10.5
+// ^^^^ constant.numeric.float.lilac
+i: 10_000
+// ^^^^^^ constant.numeric.integer.lilac
+
+// SYNTAX TEST "source.lilac" "strings, chars, escapes, comment vs string"
+
+s: "hi\n"
+// ^^^^^^ string.quoted.double.lilac
+//    ^^ constant.character.escape.lilac
+u: "http://x"
+// ^^^^^^^^^^ string.quoted.double.lilac
+c: 'A'
+// ^^^ string.quoted.single.lilac
+
+// SYNTAX TEST "source.lilac" "f-string holes"
+
+m: $"{@add(x)}"
+// ^^ string.interpolated.lilac
+//   ^ punctuation.section.interpolation.lilac
+//    ^^^^ support.function.builtin.lilac
+
+// SYNTAX TEST "source.lilac" "unterminated string"
+
+s: "no close
+t: 1
+// ^ constant.numeric.integer.lilac
+
+// SYNTAX TEST "source.lilac" "empty input"
+

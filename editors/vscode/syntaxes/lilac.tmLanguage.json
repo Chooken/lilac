@@ -1,0 +1,115 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lilac",
+  "scopeName": "source.lilac",
+  "fileTypes": ["lilac"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#decl-names" },
+    { "include": "#builtin-types" },
+    { "include": "#hooks" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#fstrings" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#brackets" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.lilac"
+    },
+    "decl-names": {
+      "patterns": [
+        {
+          "match": "^\\s*(@?[A-Za-z_]\\w*)(\\s*:)(\\s*)(extern\\s+)?(function)\\b",
+          "captures": {
+            "1": { "name": "entity.name.function.lilac" },
+            "2": { "name": "keyword.operator.lilac" },
+            "4": { "name": "storage.type.lilac" },
+            "5": { "name": "storage.type.lilac" }
+          }
+        },
+        {
+          "match": "^\\s*([A-Za-z_]\\w*)(\\s*:)(\\s*)(object|enum)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.lilac" },
+            "2": { "name": "keyword.operator.lilac" },
+            "4": { "name": "storage.type.lilac" }
+          }
+        }
+      ]
+    },
+    "builtin-types": {
+      "match": "@(bit8|bit16|bit32|bit64|bit_native|byte_buffer|format_args)\\b",
+      "name": "support.type.builtin.lilac"
+    },
+    "hooks": {
+      "match": "@[A-Za-z_]\\w*",
+      "name": "support.function.builtin.lilac"
+    },
+    "keywords": {
+      "patterns": [
+        { "match": "\\b(object|function|enum|extern)\\b", "name": "storage.type.lilac" },
+        { "match": "\\b(using)\\b", "name": "keyword.control.import.lilac" },
+        { "match": "\\b(private)\\b", "name": "storage.modifier.lilac" },
+        { "match": "\\b(ref|unknown|nothing|self)\\b", "name": "storage.type.lilac" },
+        { "match": "\\b(if|else|loop|match|break|return)\\b", "name": "keyword.control.lilac" },
+        { "match": "\\b(and|or)\\b", "name": "keyword.operator.lilac" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "match": "\\b0[xX][0-9A-Fa-f_]*\\b", "name": "constant.numeric.hex.lilac" },
+        { "match": "\\b0[bB][01_]*\\b", "name": "constant.numeric.binary.lilac" },
+        { "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b", "name": "constant.numeric.float.lilac" },
+        { "match": "\\b[0-9][0-9_]*\\b", "name": "constant.numeric.integer.lilac" }
+      ]
+    },
+    "fstrings": {
+      "begin": "\\$\"",
+      "end": "[\"\\n]",
+      "name": "string.interpolated.lilac",
+      "patterns": [
+        { "match": "\\{\\{|\\}\\}", "name": "constant.character.escape.lilac" },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "punctuation.section.interpolation.lilac",
+          "patterns": [
+            { "include": "#builtin-types" },
+            { "include": "#hooks" },
+            { "include": "#keywords" },
+            { "include": "#numbers" },
+            { "include": "#fstrings" },
+            { "include": "#strings" },
+            { "include": "#operators" }
+          ]
+        },
+        { "match": "\\\\[\\\\\"]", "name": "constant.character.escape.lilac" }
+      ]
+    },
+    "strings": {
+      "begin": "\"",
+      "end": "[\"\\n]",
+      "name": "string.quoted.double.lilac",
+      "patterns": [
+        { "match": "\\\\(?:[\"\\\\n]|x[0-9A-Fa-f]{2})", "name": "constant.character.escape.lilac" }
+      ]
+    },
+    "chars": {
+      "match": "'(\\\\.|[^'\\\\])'",
+      "name": "string.quoted.single.lilac"
+    },
+    "brackets": {
+      "match": "[\\[\\]]",
+      "name": "punctuation.section.brackets.lilac"
+    },
+    "operators": {
+      "match": "(==|=>|->|<=|>=|[.,:=+\\-*/%<>!])",
+      "name": "keyword.operator.lilac"
+    }
+  }
+}
