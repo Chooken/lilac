@@ -52,6 +52,11 @@ pub enum ItemKind {
         /// Dotted folder path.
         path: String,
     },
+    /// `private { <items> }` visibility wrapper (file or object scope).
+    Private {
+        /// Wrapped declarations.
+        items: Vec<Item>,
+    },
     /// `member: @bit8` bare field inside an `object` (no initializer).
     Field {
         /// Declared type.
@@ -490,7 +495,7 @@ pub fn walk_item<V: Visitor + ?Sized>(visitor: &mut V, item: &Item) {
                 visitor.visit_expr(expr);
             }
         }
-        ItemKind::Object { members, .. } => {
+        ItemKind::Object { members, .. } | ItemKind::Private { items: members } => {
             for member in members {
                 visitor.visit_item(member);
             }

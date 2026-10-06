@@ -798,7 +798,10 @@ impl Checker<'_> {
                     value: hir,
                 });
             }
-            ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
+            ItemKind::Enum { .. }
+            | ItemKind::Using { .. }
+            | ItemKind::Private { .. }
+            | ItemKind::Field { .. } => {}
         }
     }
 

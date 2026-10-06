@@ -183,7 +183,7 @@ impl Collector<'_> {
                     })
                     .collect(),
             },
-            ItemKind::Using { .. } => return None,
+            ItemKind::Using { .. } | ItemKind::Private { .. } => return None,
             ItemKind::Const { .. } => ResKind::Const,
             ItemKind::Field { .. } => ResKind::Field,
         };

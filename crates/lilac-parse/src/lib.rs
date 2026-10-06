@@ -159,6 +159,9 @@ impl Parser {
         if self.peek().kind == TokenKind::KwUsing {
             return self.parse_using(diags);
         }
+        if self.peek().kind == TokenKind::KwPrivate {
+            return self.parse_private_block(diags, in_object);
+        }
         let (name, name_span) = self.parse_item_name(diags)?;
         let generic_params = self.parse_generic_params(diags)?;
         self.expect(diags, TokenKind::Colon, "`:` after declaration name")?;
@@ -344,6 +347,42 @@ impl Parser {
             span: join_spans(using.span, end),
             name: path.clone(),
             kind: ItemKind::Using { path },
+        })
+    }
+
+    fn parse_private_block(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        in_object: bool,
+    ) -> Result<Item, ErrorGuaranteed> {
+        let keyword = self.bump();
+        self.expect(diags, TokenKind::LBrace, "`{` to open `private` body")?;
+        let mut items = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                let span = self.peek().span;
+                return Err(Self::err(
+                    diags,
+                    span,
+                    "unterminated `private` block; add a closing `}`",
+                ));
+            }
+            let before = self.pos;
+            if let Ok(item) = self.parse_item(diags, in_object) {
+                items.push(item);
+            } else {
+                self.failed = true;
+                self.synchronize();
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
+        }
+        let close = self.bump();
+        Ok(Item {
+            span: join_spans(keyword.span, close.span),
+            name: String::new(),
+            kind: ItemKind::Private { items },
         })
     }
 
@@ -1878,6 +1917,46 @@ mod tests {
             matches!(&scrutinee, Expr::Ident(name, _) if name == "Foo"),
             "got {scrutinee:?}"
         );
+    }
+
+    #[test]
+    fn private_block_parses_items() {
+        let (program, diags, _) = parse("private {\n    helper: function () nothing {}\n}\n");
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let ItemKind::Private { items } = &program.items[0].kind else {
+            panic!("expected private block, got {:?}", program.items[0].kind);
+        };
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0].kind, ItemKind::Func(_)));
+    }
+
+    #[test]
+    fn private_block_inside_object_parses() {
+        let src = "Object: object {\n    private {\n        helper: function () nothing {}\n        secret: @bit8\n    }\n}\n";
+        let (program, diags, _) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let ItemKind::Object { members, .. } = &program.items[0].kind else {
+            panic!("expected object, got {:?}", program.items[0].kind);
+        };
+        let ItemKind::Private { items } = &members[0].kind else {
+            panic!("expected private block, got {:?}", members[0].kind);
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn private_without_brace_is_e001() {
+        let (_, diags, _) = parse("private helper: function () nothing {}\n");
+        assert!(diags.has_errors());
+        assert!(diags.diagnostics().iter().any(|d| d.code == "E001"));
     }
 
     #[test]
