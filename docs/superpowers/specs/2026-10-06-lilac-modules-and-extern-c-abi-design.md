@@ -57,12 +57,12 @@
 3. **Compilation unit.** Root folder + every transitively-`using`d folder.
    Subfolders are never auto-loaded.
 4. **`using A.B`.** Root-relative dotted path → `<root>/A/B/`; imports that
-   namespace's public names into *this file's* scope only; non-transitive; never
-   parent folders.
+   namespace's public names into *this file's* scope only; non-transitive; for
+   non-ancestor namespaces only (ancestors are visible automatically, decision 9).
 5. **`private { … }`.** Allowed at file top-level and inside `object`; gates
    **every** member (fields, functions/methods, nested types, hooks, consts).
-   - *namespace-private*: visible to every file in the same folder, excluded
-     from `using`; cross-import access → `E026`.
+   - *namespace-private*: visible to the defining namespace and its descendant
+     namespaces (Rust's rule), excluded from `using`; any other access → `E026`.
    - *object-private*: visible only within that object's own member bodies;
      hidden from `obj.m` / `Object.m`; violation → `E026`.
 6. **Collisions.** A local name shadows an imported one; two imports exporting
@@ -71,6 +71,11 @@
    1 out = the C return value, >1 out = `E028`; aggregate params/returns are
    `E028` (deferred).
 8. **Entry.** `main` in the root namespace; `--export` seeds roots.
+9. **Visibility reach (Rust-aligned).** A namespace automatically sees **all**
+   items of its ancestor namespaces — public via ancestor reach, private via
+   descendant reach — so the root namespace's declarations are usable everywhere
+   with no import. `using` is only for non-ancestor namespaces, and imports only
+   their public items.
 
 ### 1.2 Evidence (current behavior, before design)
 
@@ -128,6 +133,9 @@ Two invariants are preserved: `lilac-driver` still owns no filesystem I/O
 - **Subfolder `A/B`.** Namespace named by its dotted path from the root (`A.B`).
   It is loaded only when some file in an already-loaded namespace `using`s it,
   directly or transitively. Its own files are all `*.lilac` directly inside it.
+- **Ancestors and descendants.** The folder tree gives every namespace an
+  ancestor chain up to the root and a descendant set. Only namespaces in the
+  compilation unit participate; the root is always in it.
 - **Merge.** Every item from a namespace's files lands in one `Module`. A
   top-level duplicate name across files is `E020`, with the two spans in their
   respective files.
@@ -145,11 +153,15 @@ Two invariants are preserved: `lilac-driver` still owns no filesystem I/O
 - **Path base.** Root-relative: `using Standard` → `<root>/Standard/`;
   `using A.B` → `<root>/A/B/`.
 - **Effect.** The public names exported by the target namespace become visible,
-  unqualified, in the file that contains the directive.
+  unqualified, in the file that contains the directive. `using` is only needed
+  for non-ancestor namespaces: ancestor namespaces are visible automatically
+  (§5), so importing one is redundant but allowed.
 - **Scope.** Per file. Sibling files in the same folder do not inherit it.
 - **Non-transitive.** If `B` `using`s `C`, a file in `A` that `using`s `B` does
   not see `C`'s names. (`C` is still part of the compilation unit.)
-- **No parents.** `using A` never imports the root or `A`'s ancestors.
+- **No parent pull-through.** `using` never imports a *parent's* import set, and
+  never imports private items; ancestor items are reached by visibility, not by
+  `using`.
 - **Errors.** A target that does not exist or is not a directory is `E025` at the
   `using` span. A folder is loaded once even if several files import it; cycles
   are allowed.
@@ -161,14 +173,22 @@ Two invariants are preserved: `lilac-driver` still owns no filesystem I/O
 - **AST.** `ItemKind::Private { items: Vec<Item> }`.
 - **Namespace-private.** Items in a top-level `private` block belong to the
   folder's namespace but are excluded from the namespace's `using` export. They
-  remain visible to every file in the same folder (same namespace).
+  are visible to the defining namespace and its descendant namespaces (Rust's
+  rule: private = the module and its descendants) — never to ancestors, siblings,
+  or importers.
 - **Object-private.** Members in a `private` block inside an `object` are
   visible only within that object's own member bodies — i.e. functions whose
   enclosing scope is the object. They are hidden from external `obj.m` and
   `Object.m`.
-- **Lookup gating.** A lookup that crosses a scope boundary — file → imported
-  folder, or outside → object — to a private declaration is `E026`, labelled at
-  both the access site and the declaration.
+- **Visibility reach.** For a namespace, "ancestor" and "descendant" are the
+  folder-tree relationships among the namespaces in the compilation unit (§3);
+  the root is always in it. A namespace sees all items of its ancestors (public
+  by ancestor reach, private by descendant reach), its own items, and the public
+  items of the namespaces it `using`s.
+- **Lookup gating.** A lookup to a declaration outside its visibility reach —
+  private from an ancestor, sibling, or importer; or any cross-object access to a
+  private member — is `E026`, labelled at both the access site and the
+  declaration.
 - **Name occupancy.** A private declaration still occupies its name: a private
   and a public declaration of the same name in one namespace is `E020`.
 
@@ -295,9 +315,11 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
   once, missing folder → `E025`, deterministic ordering.
 - **Parser:** `private { … }` at top level and in an `object`; malformed block →
   `E001`.
-- **Resolver:** per-file `using` visibility, non-transitivity, namespace-private
-  exclusion (`E026`), object-private member access (`E026`), import ambiguity
-  (`E029`), cross-file `E020`.
+- **Resolver:** per-file `using` visibility, non-transitivity, ancestor-public
+  reach (root items visible in a subfolder with no import), descendant-private
+  reach (a subfolder sees a parent's private), namespace-private exclusion from
+  importers/siblings/ancestors (`E026`), object-private member access (`E026`),
+  import ambiguity (`E029`), cross-file `E020`.
 - **Snapshots:** `tests/ui/modules/` fixtures produce merged `.lir`/`.ll`.
 - **Extern:** `extern_write.lilac` links with clang, runs, and asserts stdout;
   `FAILS_extern_multi_out.lilac` / `FAILS_extern_aggregate_param.lilac` → `E028`.
@@ -309,8 +331,10 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
    any root-namespace file is found.
 2. `using A.B` imports public names, per-file, non-transitively; missing folder
    is `E025`.
-3. `private` hides namespace items from importers and object members from
-   external access; violations are `E026`.
+3. `private` hides namespace items from ancestors, siblings, and importers (but
+   descendants see them), and hides object members from external access;
+   violations are `E026`. Ancestor items (including the root) are visible with no
+   import.
 4. A libc `write`/`malloc` program links and runs with correct output.
 5. `cargo test --workspace` and the release bench gate pass; every existing
    snapshot is unchanged except the intentionally-rewritten `extern_decl`.
@@ -330,15 +354,24 @@ New error docs: `docs/errors/E025.md`, `E026.md`, `E028.md`, `E029.md`. `SPEC.md
   still holds.
 - **Determinism.** Merged snapshots depend on stable file/namespace ordering,
   which the loader pins by sorting.
+- **Root-private is program-visible.** Under descendant reach (Rust's rule)
+  every namespace descends from the root, so a root `private` item is visible
+  throughout the package — effectively public in a single-package program.
+  Expected; `private` only bites in non-root namespaces.
+- **Rust alignment.** Reach follows Rust's ancestor/descendant model; we
+  deliberately keep opt-out `private`, implicit folders, no qualified paths, no
+  `pub use`, and class-scoped object members as documented divergences.
 
 ## 15. Self-review
 
 - **Placeholders:** none — every type, diagnostic, and fixture names its owner.
   The exact threading of file scopes through `check_bodies`/`lower` is delegated
   to the implementation plan as a concrete design task, not a TBD.
-- **Consistency:** §1.1's eight decisions match §3–§9; the loader (§7) is the
-  input to resolution (§4–§6); the extern ABI (§8) matches the fixture fixes
-  (§12); the diagnostics table (§10) matches the error sites named in §4–§6.
+- **Consistency:** §1.1's nine decisions match §3–§9; the reach rules in §5
+  implement decision 9 and are reflected in §4 and the `E026` row of §10; the
+  loader (§7) is the input to resolution (§4–§6); the extern ABI (§8) matches the
+  fixture fixes (§12); the diagnostics table (§10) matches the error sites named
+  in §4–§6.
 - **Scope:** strictly modules + visibility + a minimal extern C ABI — no stdlib,
   no build tooling, no IR format change.
 - **Ambiguity:** root discovery, `using` base, visibility of private items,
