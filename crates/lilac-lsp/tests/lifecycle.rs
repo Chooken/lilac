@@ -42,6 +42,14 @@ fn initializes_shuts_down_and_exits() {
         result.capabilities.text_document_sync,
         Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL))
     );
+    assert_eq!(
+        result.capabilities.hover_provider,
+        Some(lsp_types::HoverProviderCapability::Simple(true))
+    );
+    assert_eq!(
+        result.capabilities.definition_provider,
+        Some(lsp_types::OneOf::Left(true))
+    );
     assert_eq!(result.server_info.expect("server info").name, "lilac-lsp");
 
     client

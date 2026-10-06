@@ -154,3 +154,23 @@ fn hover_on_whitespace_is_null() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+#[test]
+fn hover_on_a_const_use_shows_its_type() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let line = 2; // "    x: @bit32 = pi"
+    let character = 17; // inside "pi"
+    let hover = hover_at(&client, &uri, line, character).expect("hover present");
+    let contents = format!("{:?}", hover.contents);
+    assert!(contents.contains("pi"), "{contents}");
+    assert!(contents.contains("@bit32"), "{contents}");
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

@@ -212,3 +212,21 @@ fn definition_survives_a_type_error() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+#[test]
+fn definition_on_a_member_field() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    v: Object = Object {\n        member = 0x1\n    }\n    x: @bit8 = v.member\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let line = 7; // "    x: @bit8 = v.member"
+    let character = 18; // inside "member"
+    let location = definition_at(&client, &uri, line, character).expect("definition");
+    assert_eq!(location.range.start.line, 1); // "    member: @bit8"
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

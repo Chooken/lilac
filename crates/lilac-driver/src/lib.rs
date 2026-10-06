@@ -389,6 +389,18 @@ mod tests {
     }
 
     #[test]
+    fn analysis_is_retained_on_success() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "ok.lilac",
+            "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
+        );
+        assert!(result.is_ok(), "{:?}", session.render_diagnostics());
+        let analysis = session.analysis().expect("analysis retained");
+        assert!(!analysis.hir.uses.is_empty(), "{:?}", analysis.hir.uses);
+    }
+
+    #[test]
     fn broken_source_reports_e001() {
         let mut session = Session::new();
         let result = session.compile_source("bad.lilac", "main: function ( {\n}\n");

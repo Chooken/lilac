@@ -1979,6 +1979,9 @@ impl Checker<'_> {
                     id: TypeId::ERROR,
                     is_ref: false,
                 });
+                if let lilac_ty::TypeKind::Object(def) = self.types.kind(ty.id) {
+                    self.record_use(*span, *def);
+                }
                 let hir = HirExpr {
                     ty,
                     span: *span,
@@ -5519,6 +5522,39 @@ mod tests {
             }),
             "{:?}",
             hir.uses
+        );
+    }
+
+    #[test]
+    fn bare_tag_use_is_recorded() {
+        let src = "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    v: OptionalBit32 = .None\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            hir.uses.iter().any(|s| {
+                &src[s.span.lo.0 as usize..s.span.hi.0 as usize] == ".None"
+                    && s.def != lilac_resolve::DefId::ERROR
+            }),
+            "{:?}",
+            hir.uses
+        );
+    }
+
+    #[test]
+    fn local_and_intrinsic_uses_are_skipped() {
+        let src = "pi: @bit8 = 0x1\nmain: function () nothing {\n    x: @bit8 = pi\n    y: @bit8 = @i_add(x, 0x1)\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let texts: Vec<&str> = hir
+            .uses
+            .iter()
+            .map(|s| &src[s.span.lo.0 as usize..s.span.hi.0 as usize])
+            .collect();
+        assert!(texts.contains(&"pi"), "{texts:?}");
+        assert!(!texts.contains(&"x"), "local use recorded: {texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.starts_with('@')),
+            "intrinsic recorded: {texts:?}"
         );
     }
 
