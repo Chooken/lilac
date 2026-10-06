@@ -1,5 +1,7 @@
 const {
     EventEmitter,
+    Range,
+    TextEditorRevealType,
     Uri,
     ViewColumn,
     commands,
@@ -81,11 +83,35 @@ async function showLir() {
     await languages.setTextDocumentLanguage(document, "lilac-ir");
 }
 
+function visibleEditorFor(uri) {
+    const key = uri.toString();
+    return window.visibleTextEditors.find(
+        (editor) => editor.document.uri.toString() === key
+    );
+}
+
+function restoreTopLine(editor, line) {
+    try {
+        if (editor.document.isClosed) {
+            return;
+        }
+        const range = new Range(line, 0, line, 0);
+        editor.revealRange(range, TextEditorRevealType.AtTop);
+    } catch {
+    }
+}
+
 function refreshLir() {
     for (const { sourceUri, uri } of openLirDocs.values()) {
         const emitter = sourceEmitters.get(sourceUri);
-        if (emitter) {
-            emitter.fire(uri);
+        if (!emitter) {
+            continue;
+        }
+        const editor = visibleEditorFor(uri);
+        const topLine = editor?.visibleRanges?.[0]?.start?.line;
+        emitter.fire(uri);
+        if (editor && typeof topLine === "number") {
+            setTimeout(() => restoreTopLine(editor, topLine), 0);
         }
     }
 }
