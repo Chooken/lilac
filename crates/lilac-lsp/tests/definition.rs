@@ -44,6 +44,29 @@ fn initialize(client: &Connection) {
         .expect("initialized");
 }
 
+fn initialize_root(client: &Connection, root: &Url) {
+    let id = RequestId::from(1);
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "initialize".to_owned(),
+            params: serde_json::json!({
+                "capabilities": {},
+                "workspaceFolders": [{ "uri": root.as_str(), "name": "ws" }],
+            }),
+        }))
+        .expect("initialize");
+    read_response(client, &id);
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "initialized".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("initialized");
+}
+
 fn shutdown(client: &Connection) {
     let id = RequestId::from(2);
     client
@@ -138,6 +161,52 @@ fn definition_jumps_to_the_callee_declaration() {
 
     let location = definition_at(&client, &uri, 3, 5).expect("definition");
     assert_eq!(location.uri, uri);
+    assert_eq!(location.range.start.line, 0);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn definition_crosses_files() {
+    // project root with two files; main calls a function declared in lib
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-def-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("lib.lilac"), "helper: function () nothing {\n}\n").expect("write lib");
+    let main = dir.join("main.lilac");
+    let main_text = "main: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&main, main_text).expect("write main");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = Url::from_file_path(&main).expect("uri");
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, main_text);
+    let _ = publish_for(&client, &main_uri);
+
+    let location = definition_at(&client, &main_uri, 1, 5).expect("definition");
+    assert!(
+        location.uri.path().ends_with("lib.lilac"),
+        "{}",
+        location.uri
+    );
+    assert_eq!(location.range.start.line, 0);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn definition_survives_a_type_error() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let location = definition_at(&client, &uri, 2, 15).expect("definition");
     assert_eq!(location.range.start.line, 0);
 
     shutdown(&client);
