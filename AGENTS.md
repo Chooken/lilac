@@ -85,6 +85,19 @@
   frontend check and `lilac-codegen-llvm`'s signature lowering, so they cannot
   drift.
 
+## Language server (lilac-lsp)
+
+- `lilac-lsp` is the editor language server: a stdio binary that speaks the
+  Language Server Protocol and publishes compiler diagnostics for `.lilac`
+  projects. It is editor tooling, not part of the compiler pipeline.
+- It is the **only** crate permitted to depend on `lsp-server`, `lsp-types`,
+  and `serde_json` (and thus serde). The compiler crates stay std-only.
+- The VSCode extension under `editors/vscode/` launches it via the
+  `lilac.serverPath` setting (default `lilac-lsp` on PATH).
+- The driver's `Session::project_files()` (fed by
+  `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
+  uses to attach diagnostics to document URIs.
+
 ## Gates
 
 Run before committing:
