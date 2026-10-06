@@ -17,6 +17,7 @@ lilac-typeck = { path = "../lilac-typeck" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-lower = { path = "../lilac-lower" }
 lilac-const = { path = "../lilac-const" }
+lilac-decimal = { path = "../lilac-decimal" }
 lilac-target = { path = "../lilac-target" }
 
 [lints]

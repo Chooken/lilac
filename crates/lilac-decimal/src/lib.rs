@@ -2,8 +2,10 @@
 //! literal strings of `+ - * / %` when both operands are decimal number
 //! literals (SPEC §2).
 mod bigint;
+mod fold;
 mod value;
 
+pub use fold::fold;
 pub use value::eval;
 
 /// A binary arithmetic operator that can be folded on decimal literals.

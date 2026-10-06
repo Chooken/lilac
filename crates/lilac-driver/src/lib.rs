@@ -18,6 +18,8 @@ use lilac_span::{FileId, SourceMap, Span};
 
 pub use lilac_target::Target;
 
+pub use lilac_decimal::{Policy as DecimalPolicy, Round as DecimalRound};
+
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ErrorFormat {
@@ -104,6 +106,8 @@ pub struct Session {
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Retained analysis from the last compile (best-effort; editor tooling).
     pub analysis: Option<Analysis>,
+    /// Policy for folding decimal-literal arithmetic (`+ - * / %`).
+    pub decimal: lilac_decimal::Policy,
 }
 
 impl Default for Session {
@@ -123,6 +127,10 @@ impl Default for Session {
             exports: HashSet::new(),
             project_files: Vec::new(),
             analysis: None,
+            decimal: lilac_decimal::Policy {
+                scale: 10,
+                round: lilac_decimal::Round::Trunc,
+            },
         }
     }
 }
@@ -215,7 +223,8 @@ impl Session {
                 self.diags.emit(error);
             }
             let mut parser = Parser::new(tokens, file);
-            let program = parser.parse_program(&mut self.diags)?;
+            let mut program = parser.parse_program(&mut self.diags)?;
+            lilac_decimal::fold(&mut program, self.decimal, &mut self.diags);
             merged.items.extend(program.items.iter().cloned());
             programs.push((file, program));
         }
@@ -256,7 +265,8 @@ impl Session {
             self.diags.emit(error);
         }
         let mut parser = Parser::new(tokens, file);
-        let program = parser.parse_program(&mut self.diags)?;
+        let mut program = parser.parse_program(&mut self.diags)?;
+        lilac_decimal::fold(&mut program, self.decimal, &mut self.diags);
         let module = lilac_resolve::collect(&program, &mut self.diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let lir = self.finish_pipeline(&program, &project, on_stage)?;
@@ -726,6 +736,44 @@ mod tests {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no such directory")
             })
         }
+    }
+
+    #[test]
+    fn session_decimal_defaults() {
+        assert_eq!(
+            Session::new().decimal,
+            lilac_decimal::Policy {
+                scale: 10,
+                round: lilac_decimal::Round::Trunc
+            }
+        );
+    }
+
+    #[test]
+    fn folded_decimal_literal_lowers_to_numlit() {
+        let mut s = Session::new();
+        let lir = s
+            .compile_lir(
+                "d.lilac",
+                "main: function () nothing {\n    x: @byte_buffer = 2 * 3\n}\n",
+            )
+            .expect("compiles");
+        assert!(lir
+            .data
+            .iter()
+            .any(|d| matches!(&d.kind, lilac_ir::LirDataKind::NumLit(t) if t == "6")));
+    }
+
+    #[test]
+    fn division_by_zero_is_e060() {
+        let mut s = Session::new();
+        assert!(s
+            .compile_lir(
+                "d.lilac",
+                "main: function () nothing {\n    x: @byte_buffer = 1 / 0\n}\n"
+            )
+            .is_err());
+        assert!(s.render_diagnostics().contains("E060"));
     }
 
     #[test]
