@@ -2647,6 +2647,9 @@ impl Checker<'_> {
                 }
                 match lookup_one(self.project, self.file, name, *name_span, self.diags) {
                     Ok(Some(item)) => {
+                        if matches!(item.kind, ResKind::Func { .. } | ResKind::Hook { .. }) {
+                            self.record_use(*name_span, item.id);
+                        }
                         return self.check_named_call(
                             fctx,
                             name,
@@ -5427,6 +5430,21 @@ mod tests {
         let (diags, hir) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");
         let lo = src.rfind("pi").expect("use site") as u32;
+        assert!(
+            hir.uses
+                .iter()
+                .any(|s| s.span.lo.0 == lo && s.def != lilac_resolve::DefId::ERROR),
+            "{:?}",
+            hir.uses
+        );
+    }
+
+    #[test]
+    fn callee_use_is_recorded() {
+        let src = "foo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let lo = src.rfind("foo").expect("call") as u32;
         assert!(
             hir.uses
                 .iter()
