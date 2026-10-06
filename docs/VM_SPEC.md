@@ -547,8 +547,11 @@ func @main () -> () regs 3 slots 42
   runner/CLI.
 - **`extern`.** A call to an `extern` (bodyless) function is a clean runtime
   error (`cannot call extern function \`name\``), exit 1 — foreign C calls are a
-  non-goal for the VM, matching the M5c design. Declaring an `extern` targeting
-  the entry function name is likewise a clean error.
+  non-goal for the VM, matching the M5c design. The `extern` C ABI of `SPEC.md`
+  §9 is an LLVM-backend concern only: the VM never links C and never validates
+  an `extern` signature (`E028` is emitted pre-codegen for non-VM targets).
+  Declaring an `extern` targeting the entry function name is likewise a clean
+  error.
 
 ## 6. Runner and debugger
 

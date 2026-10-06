@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.5-draft (M6a folder modules: implicit namespaces, visibility reach, per-namespace qualification). Status: draft, normative for the Rust rewrite.
+> Version: 0.6-draft (M6b extern C ABI: scalars by value, `ref T` → pointer, single return). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -667,11 +667,18 @@ foreign symbol at link time.
 malloc: extern function (size: @bit_native) ptr: ref @bit8
 ```
 
-Rules: C ABI; the symbol is unmangled and equals the declared name; calls
-typecheck only against the declared signature (a wrong declaration is user
-error and is diagnosed nowhere — declare carefully); libraries to link
-(`link = ["c"]`) are declared in the package manifest, never in code. No
-overloads, no calling-convention annotations in v1.
+Rules: an `extern` uses the platform C ABI. Each parameter maps to its C type:
+a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) by value, and
+any `ref T` to an opaque pointer. A single return slot becomes the C return
+value; no return slot is `void`. More than one out, or a parameter/return
+outside that set (an aggregate such as `@byte_buffer`, say), is `E028`,
+validated before codegen so it reports as an ordinary diagnostic. The symbol is
+unmangled and equals the declared name; calls typecheck only against the
+declared signature (a wrong declaration is user error and is diagnosed
+nowhere — declare carefully); libraries to link (`link = ["c"]`) are declared
+in the package manifest, never in code. No overloads, no calling-convention
+annotations in v1. The C ABI is LLVM-only: on the VM target a call to an
+`extern` stays a clean runtime error (`docs/VM_SPEC.md` §5).
 
 ### export (reserved)
 

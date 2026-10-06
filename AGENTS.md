@@ -71,6 +71,20 @@
   stays `main`. `extern` symbols stay unmangled, and a file argument on the CLI
   is single-file mode (its parent is not a project root).
 
+## Extern C ABI (M6b)
+
+- `extern` declarations and calls use the platform C ABI on the LLVM backend:
+  bit integers by value, `ref T` → pointer, 0 outs = `void`, 1 out = the C
+  return value, and an unmangled symbol equal to the declared name. `>1` out or
+  an unsupported param/return is `E028`. The VM is untouched: a call to an
+  `extern` stays a clean runtime error (the C ABI is LLVM-only).
+- `E028` is validated pre-codegen in the driver via
+  `lilac_lower::check_extern_signatures` (non-VM targets only), so
+  `check`/`emit-llvm` report it as an ordinary diagnostic rather than a backend
+  failure. `lilac_ir::is_c_abi_type` is the single accept-set shared by that
+  frontend check and `lilac-codegen-llvm`'s signature lowering, so they cannot
+  drift.
+
 ## Gates
 
 Run before committing:
