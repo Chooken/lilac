@@ -155,11 +155,14 @@ impl Server {
                 .iter()
                 .filter_map(|(id, path)| Url::from_file_path(path).ok().map(|uri| (*id, uri)))
                 .collect();
+            // Project-load errors (E025) can have no source span; attach those
+            // to the first open document so they are not dropped silently.
+            let fallback = self.documents.iter().next().map(|(uri, _)| uri.clone());
             for diagnostic in session.diags.diagnostics() {
-                let Some(id) = primary_file(diagnostic) else {
-                    continue;
-                };
-                let Some(uri) = file_uris.get(&id).cloned() else {
+                let target = primary_file(diagnostic)
+                    .and_then(|id| file_uris.get(&id).cloned())
+                    .or_else(|| fallback.clone());
+                let Some(uri) = target else {
                     continue;
                 };
                 if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {

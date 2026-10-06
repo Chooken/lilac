@@ -219,3 +219,23 @@ fn missing_using_is_e025() {
     handle.join().expect("server thread");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn unreadable_root_is_reported_on_the_open_document() {
+    // A project-load error with no source span (the root folder is gone) must
+    // still reach the editor, not vanish.
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-missing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main = dir.join("main.lilac");
+
+    let (client, handle) = start_server();
+    initialize(&client, Some(&root));
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, "main: function () nothing {\n}\n");
+    let params = publish_for(&client, &uri);
+    assert!(has_code(&params, "E025"), "{:?}", params.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

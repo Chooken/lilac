@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "publisher": "lilac-lang",
   "repository": { "type": "git", "url": "https://github.com/Chooken/Lilac.git" },
-  "engines": { "vscode": "^1.75.0" },
+  "engines": { "vscode": "^1.82.0" },
   "categories": ["Programming Languages"],
   "main": "./extension.js",
   "activationEvents": ["onLanguage:lilac"],
