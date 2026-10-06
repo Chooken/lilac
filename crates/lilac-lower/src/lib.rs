@@ -84,16 +84,33 @@ pub fn lower(
     }
 }
 
-/// Diagnoses `extern` signatures the platform C ABI cannot represent: a
-/// parameter or return that is neither a bit width nor `ref T`, or more than
-/// one out place. Each is `E028`, labelled at the offending slot (for `>1` out,
-/// at the extra slot). The C ABI is LLVM-only, so the driver calls this only
-/// for non-VM targets; the VM keeps its clean runtime error for `extern`.
+/// Diagnoses `extern` declarations the platform C ABI cannot represent: a
+/// parameter or return that is neither a bit width nor `ref T`, more than one
+/// out place, or an `extern` named `main` (the unmangled C entry point the
+/// compiler emits). Each is `E028`, labelled at the offending slot (for `>1`
+/// out, at the extra slot; for `main`, at the declaration). The C ABI is
+/// LLVM-only, so the driver calls this only for non-VM targets; the VM keeps
+/// its clean runtime error for `extern`.
 pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diags) {
     for func in &hir.funcs {
-        if func.is_extern {
-            check_extern_sig(func, types, diags);
+        if !func.is_extern {
+            continue;
         }
+        // Externs are never namespace-prefixed, so an `extern` named `main`
+        // anywhere in the unit keeps the C symbol `main` and collides with the
+        // entry wrapper the LLVM backend emits. Diagnose it here so `check`
+        // reports it instead of the backend ICEing on the missing `.lilac.main`.
+        if func.name == "main" {
+            diags.emit(
+                Diagnostic::error(
+                    "E028",
+                    "`extern` function `main` conflicts with the program entry point",
+                )
+                .label(func.span, true, "`main` is reserved for the entry point")
+                .help("rename the `extern`; an `extern` symbol is unmangled and cannot be `main`"),
+            );
+        }
+        check_extern_sig(func, types, diags);
     }
 }
 

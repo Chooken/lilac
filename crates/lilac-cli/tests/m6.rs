@@ -389,6 +389,7 @@ fn unsupported_extern_signatures_are_e028() {
     for fixture in [
         "FAILS_extern_multi_out.lilac",
         "FAILS_extern_aggregate_param.lilac",
+        "FAILS_extern_aggregate_return.lilac",
     ] {
         for cmd in ["check", "emit-llvm"] {
             let output = lilac()
@@ -415,6 +416,37 @@ fn unsupported_extern_signatures_are_e028() {
                 "{fixture} (`{cmd}`) leaked the internal-error framing:\n{stderr}"
             );
         }
+    }
+}
+
+/// An `extern` named `main` keeps the unmangled C symbol `main`, which collides
+/// with the entry wrapper the LLVM backend emits (the backend looks up
+/// `.lilac.main` and used to ICE). It must be a clean pre-codegen `E028` for
+/// both `check` and `emit-llvm`, never a panic/signal.
+#[test]
+fn extern_named_main_is_e028() {
+    let fixture = ui("FAILS_extern_main.lilac");
+    for cmd in ["check", "emit-llvm"] {
+        let output = lilac().args([cmd, &fixture]).output().expect("runs lilac");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(
+            output.status.code(),
+            Some(101),
+            "extern `main` (`{cmd}`) panicked:\n{stderr}"
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "extern `main` (`{cmd}`) stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("error[E028]"),
+            "extern `main` (`{cmd}`) stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("internal error:"),
+            "extern `main` (`{cmd}`) leaked the internal-error framing:\n{stderr}"
+        );
     }
 }
 
@@ -629,9 +661,79 @@ fn libc_write_prints_bytes_to_stdout() {
 
     // On Windows the linked C runtime's `write` is in text mode, so the `\n`
     // the program wrote arrives as `\r\n` on the captured pipe; normalize it
-    // before asserting the program produced exactly `hi\n`.
-    let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    // before asserting the program produced exactly `hi\n`. Gate the strip on
+    // Windows so a stray `\r` on Unix is not masked.
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stdout = if cfg!(windows) {
+        stdout.replace("\r\n", "\n")
+    } else {
+        stdout.into_owned()
+    };
     assert_eq!(stdout, "hi\n", "stdout was {stdout:?}");
 
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Emits host-triple IR for `source`, links it with the toolchain `clang`, runs
+/// the executable, and returns its output. `name` disambiguates the scratch
+/// directory across the tests in this binary.
+fn link_and_run(name: &str, source: &str) -> std::process::Output {
+    let clang = clang();
+    let scratch = std::env::temp_dir().join(format!("lilac-m6-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("creates scratch dir");
+
+    let output = lilac()
+        .args(["emit-llvm", "--mode=debug"])
+        .arg(source)
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "{name} emit-llvm failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ll = scratch.join("out.ll");
+    std::fs::write(&ll, &output.stdout).expect("writes IR");
+    let exe = scratch.join(if cfg!(windows) { "out.exe" } else { "out" });
+    let link = Command::new(&clang)
+        .arg(&ll)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("runs clang");
+    assert!(
+        link.status.success(),
+        "{name} failed to link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("runs executable");
+    let _ = std::fs::remove_dir_all(&scratch);
+    run
+}
+
+/// A `void`-returning (`0` out) extern links and runs: `srand(seed)` has no C
+/// return value, so its LIR has no out place and the call must be `void`.
+#[test]
+fn extern_void_links_and_runs() {
+    let run = link_and_run("extern_void", &ui("extern_void.lilac"));
+    assert!(
+        run.status.success(),
+        "extern_void exited with {:?}",
+        run.status.code()
+    );
+}
+
+/// A `ref T`-returning extern (`malloc`) links and runs; its pointer flows back
+/// into a `ref T` parameter of another extern (`free`), exercising the pointer
+/// return and pointer parameter paths end to end.
+#[test]
+fn extern_ref_return_links_and_runs() {
+    let run = link_and_run("extern_ptr", &ui("extern_ptr.lilac"));
+    assert!(
+        run.status.success(),
+        "extern_ptr exited with {:?}",
+        run.status.code()
+    );
 }

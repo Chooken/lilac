@@ -119,12 +119,22 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// calls the renamed `.lilac.main` and returns 0. A module without `main`
     /// gets no wrapper.
     ///
+    /// Only a non-`extern` `main` is the Lilac entry point. An `extern` named
+    /// `main` keeps the unmangled C symbol `main` (until the frontend rejects
+    /// it as `E028`), so it must not be mistaken for the entry and trigger the
+    /// `.lilac.main` lookup — that would ICE on user input.
+    ///
     /// `.lilac.main` uses the pointer ABI, so a `main` with `in`/`out` places
     /// would take pointer arguments. The wrapper supplies a zero-initialized
     /// stack slot for each (in declaration order, ins then outs) and passes its
     /// address, so a parameterized `main` still verifies and runs.
     fn emit_entry_wrapper(&self) {
-        let Some(lir_main) = self.lir.funcs.iter().find(|func| func.name == "main") else {
+        let Some(lir_main) = self
+            .lir
+            .funcs
+            .iter()
+            .find(|func| func.name == "main" && !func.is_extern)
+        else {
             return;
         };
         let Some(entry_fn) = self.module.get_function(symbol("main")) else {

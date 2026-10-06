@@ -672,7 +672,10 @@ a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) by value, and
 any `ref T` to an opaque pointer. A single return slot becomes the C return
 value; no return slot is `void`. More than one out, or a parameter/return
 outside that set (an aggregate such as `@byte_buffer`, say), is `E028`,
-validated before codegen so it reports as an ordinary diagnostic. The symbol is
+validated before codegen so it reports as an ordinary diagnostic. An `extern`
+may not be named `main`: extern symbols are unmangled, so the C symbol `main`
+would collide with the entry point the LLVM backend emits, and that is also
+`E028`. The symbol is
 unmangled and equals the declared name; calls typecheck only against the
 declared signature (a wrong declaration is user error and is diagnosed
 nowhere — declare carefully); libraries to link (`link = ["c"]`) are declared

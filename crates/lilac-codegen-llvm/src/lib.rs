@@ -331,18 +331,25 @@ mod tests {
         assert!(text.contains("store i32 1"), "{text}");
         assert!(text.contains("store ptr @data"), "{text}");
         assert!(text.contains("store i64 2"), "{text}");
-        // The C ABI call: scalars by value, the `ref` place's pointer, i64
-        // return — never the internal all-`ptr` place ABI.
+        // The C ABI call, exactly: the scalar/pointer places are loaded and
+        // passed by value (`i32 %0`, `ptr %1`, `i64 %2`), the single i64 return
+        // is `%3`, and it is stored into the `written` out place — never the
+        // internal all-`ptr` place ABI.
+        assert_eq!(
+            text.matches("call i64 @write").count(),
+            1,
+            "expected exactly one extern call:\n{text}"
+        );
         let call = text
             .lines()
-            .find(|line| line.contains("call i64 @write("))
+            .find(|line| line.contains("call i64 @write"))
             .expect("extern write call");
-        assert!(call.contains("(i32 %"), "{call}");
-        assert!(call.contains(", ptr %"), "{call}");
-        assert!(call.contains(", i64 %"), "{call}");
-        assert!(!text.contains("call i64 @write(ptr"), "{text}");
-        // The single C return is stored into the out place.
-        assert!(text.contains("store i64 %"), "{text}");
+        assert_eq!(
+            call.trim(),
+            "%3 = call i64 @write(i32 %0, ptr %1, i64 %2)",
+            "{text}"
+        );
+        assert!(text.contains("store i64 %3, ptr %written"), "{text}");
     }
 
     /// An `extern` parameter outside the scalar/pointer set is `E028`, not a
@@ -381,6 +388,26 @@ mod tests {
             .emit_llvm(&module)
             .expect_err("multiple outs must be E028");
         assert!(err.contains("error[E028]"), "{err}");
+    }
+
+    /// An `extern` named `main` keeps the unmangled C symbol `main`; the entry
+    /// wrapper must not mistake it for the Lilac entry and look up the absent
+    /// `.lilac.main`, which used to ICE on user input. The frontend rejects it
+    /// as `E028`; the backend must still emit (declaring `@main` and no wrapper)
+    /// rather than panic when driven directly.
+    #[test]
+    fn extern_main_does_not_ice() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let text = emit(&module);
+        assert!(text.contains("declare void @main()"), "{text}");
+        assert!(!text.contains("define i32 @main()"), "{text}");
     }
 
     #[test]

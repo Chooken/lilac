@@ -1,0 +1,5 @@
+srand: extern function (seed: @bit32) nothing
+
+main: function () nothing {
+    srand(0x1)
+}

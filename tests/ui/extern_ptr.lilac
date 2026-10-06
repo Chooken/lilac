@@ -1,0 +1,7 @@
+malloc: extern function (size: @bit64) result: ref @bit8
+free: extern function (p: ref @bit8) nothing
+
+main: function () nothing {
+    p: ref @bit8 = malloc(0x10)
+    free(p)
+}
