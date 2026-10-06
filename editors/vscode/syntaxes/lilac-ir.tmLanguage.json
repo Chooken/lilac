@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lilac IR",
+  "scopeName": "source.lilac-ir",
+  "fileTypes": ["lir"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#header" },
+    { "include": "#strings" },
+    { "include": "#sigils" },
+    { "include": "#keywords" },
+    { "include": "#instructions" },
+    { "include": "#operators" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.lilac-ir"
+    },
+    "header": {
+      "match": "\\b(lilac_ir|target)\\b(?=\\s*=)",
+      "name": "keyword.other.lilac-ir"
+    },
+    "strings": {
+      "begin": "\"",
+      "end": "[\"\\n]",
+      "name": "string.quoted.double.lilac-ir"
+    },
+    "sigils": {
+      "patterns": [
+        { "match": "![\\w.]+", "name": "variable.other.constant.lilac-ir" },
+        { "match": "@[\\w.]+", "name": "entity.name.function.lilac-ir" },
+        { "match": "#[\\w.]+", "name": "entity.name.type.lilac-ir" },
+        { "match": "%[\\w.]+", "name": "variable.other.lilac-ir" },
+        { "match": "\\$[\\w.]+", "name": "entity.name.label.lilac-ir" },
+        { "match": "&[\\w.]+", "name": "variable.other.ssa.lilac-ir" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "match": "\\b(function|extern|type)\\b", "name": "storage.type.lilac-ir" },
+        { "match": "\\b(in|out)\\b", "name": "storage.modifier.lilac-ir" },
+        { "match": "\\b(str|numlit)\\b", "name": "storage.type.lilac-ir" },
+        { "match": "\\bzeroed\\b", "name": "storage.modifier.lilac-ir" }
+      ]
+    },
+    "instructions": {
+      "match": "\\b(call|copy|const|load|addr\\.func|addr|field\\.addr|field|drop|alloca|branch\\.if|branch|return|panic|unreachable)\\b",
+      "name": "keyword.other.instruction.lilac-ir"
+    },
+    "operators": {
+      "match": "\\b(i\\.div\\.u|i\\.mod\\.u|i\\.add|i\\.sub|i\\.mul|i\\.div|i\\.mod|f\\.add|f\\.sub|f\\.mul|f\\.div|f\\.mod|cmp\\.eql|i\\.cmp\\.lt\\.u|i\\.cmp\\.lt|i\\.cmp\\.gt\\.u|i\\.cmp\\.gt|f\\.cmp\\.lt|f\\.cmp\\.gt|extend\\.zero|trunc)\\b",
+      "name": "keyword.operator.lilac-ir"
+    },
+    "numbers": {
+      "patterns": [
+        { "match": "\\b0[xX][0-9A-Fa-f_]*\\b", "name": "constant.numeric.lilac-ir" },
+        { "match": "\\b0[bB][01_]*\\b", "name": "constant.numeric.lilac-ir" },
+        { "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b", "name": "constant.numeric.lilac-ir" },
+        { "match": "\\b[0-9][0-9_]*\\b", "name": "constant.numeric.lilac-ir" }
+      ]
+    }
+  }
+}

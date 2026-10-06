@@ -1,0 +1,72 @@
+// SYNTAX TEST "source.lilac-ir" "header keys"
+
+lilac_ir = "0.3"
+// <-------- keyword.other.lilac-ir
+target = "x86_64"
+// <------ keyword.other.lilac-ir
+
+// SYNTAX TEST "source.lilac-ir" "sigils"
+
+!c0
+// <--- variable.other.constant.lilac-ir
+@main
+// <----- entity.name.function.lilac-ir
+#bit32
+// <------ entity.name.type.lilac-ir
+%tmp.2
+// <------ variable.other.lilac-ir
+$entry
+// <------ entity.name.label.lilac-ir
+&1
+// <-- variable.other.ssa.lilac-ir
+
+// SYNTAX TEST "source.lilac-ir" "keywords and instructions"
+
+function
+// <-------- storage.type.lilac-ir
+extern
+// <------ storage.type.lilac-ir
+type
+// <---- storage.type.lilac-ir
+str
+// <--- storage.type.lilac-ir
+numlit
+// <------ storage.type.lilac-ir
+in
+// <-- storage.modifier.lilac-ir
+out
+// <--- storage.modifier.lilac-ir
+zeroed
+// <------ storage.modifier.lilac-ir
+alloca
+// <------ keyword.other.instruction.lilac-ir
+call
+// <---- keyword.other.instruction.lilac-ir
+copy
+// <---- keyword.other.instruction.lilac-ir
+const
+// <----- keyword.other.instruction.lilac-ir
+branch.if
+// <--------- keyword.other.instruction.lilac-ir
+
+// SYNTAX TEST "source.lilac-ir" "operators and numbers"
+
+i.add
+// <----- keyword.operator.lilac-ir
+i.div.u
+// <------- keyword.operator.lilac-ir
+extend.zero
+// <----------- keyword.operator.lilac-ir
+0x1
+// <--- constant.numeric.lilac-ir
+10.5
+// <---- constant.numeric.lilac-ir
+
+// SYNTAX TEST "source.lilac-ir" "comment vs string"
+
+"http://x"
+// <---------- string.quoted.double.lilac-ir
+// idx 1
+// <-------- comment.line.double-slash.lilac-ir
+
+// SYNTAX TEST "source.lilac-ir" "empty input"
