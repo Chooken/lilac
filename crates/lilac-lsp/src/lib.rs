@@ -8,6 +8,10 @@ use lsp_types::{
     TextDocumentSyncKind,
 };
 
+pub mod documents;
+pub mod fs;
+pub mod roots;
+
 /// JSON-RPC code for an unknown method.
 const METHOD_NOT_FOUND: i32 = -32601;
 
