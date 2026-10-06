@@ -153,6 +153,12 @@ pub fn check_bodies(
     }
 }
 
+/// The field token's span inside a member-access span (the AST keeps only the
+/// whole-access span; the field name is the trailing identifier).
+fn field_span(span: Span, field: &str) -> Span {
+    Span::new(span.hi.0 - field.len() as u32, span.hi.0, span.file)
+}
+
 /// Collects object/enum layouts, descending into `private { … }` blocks so a
 /// private object/enum still gets a layout and a private field still occupies
 /// its slot (privacy gates access, not layout).
@@ -1262,17 +1268,22 @@ impl Checker<'_> {
                     ));
                 }
                 match self.field_type(obj_ty.id, field, *span, None, false) {
-                    Ok(ty) => Ok((
-                        ty,
-                        HirExpr {
+                    Ok(ty) => {
+                        if let Some(def) = self.member_def(obj_ty.id, field) {
+                            self.record_use(field_span(*span, field), def);
+                        }
+                        Ok((
                             ty,
-                            span: *span,
-                            kind: HirExprKind::Member {
-                                obj: Box::new(obj_hir),
-                                field: field.clone(),
+                            HirExpr {
+                                ty,
+                                span: *span,
+                                kind: HirExprKind::Member {
+                                    obj: Box::new(obj_hir),
+                                    field: field.clone(),
+                                },
                             },
-                        },
-                    )),
+                        ))
+                    }
                     Err(guaranteed) => Err(guaranteed),
                 }
             }
@@ -1386,6 +1397,20 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Resolves the `DefId` of `field` on a receiver type, for editor uses.
+    fn member_def(&self, obj: TypeId, field: &str) -> Option<DefId> {
+        let owner = match self.types.kind(obj) {
+            lilac_ty::TypeKind::Object(def) => Some(*def),
+            lilac_ty::TypeKind::Instance { base, .. } => Some(*base),
+            _ => None,
+        }?;
+        if let Some(ResKind::Object { members, .. }) = self.find_by_def(owner) {
+            members.get(field).map(|m| m.id)
+        } else {
+            None
+        }
     }
 
     /// Emits `E026` when `member` is an object-private member accessed from
@@ -1669,17 +1694,22 @@ impl Checker<'_> {
             );
         }
         match self.field_type(obj_ty.id, field, span, expected, true) {
-            Ok(ty) => (
-                ty,
-                HirExpr {
+            Ok(ty) => {
+                if let Some(def) = self.member_def(obj_ty.id, field) {
+                    self.record_use(field_span(span, field), def);
+                }
+                (
                     ty,
-                    span,
-                    kind: HirExprKind::Member {
-                        obj: Box::new(obj_hir),
-                        field: field.to_owned(),
+                    HirExpr {
+                        ty,
+                        span,
+                        kind: HirExprKind::Member {
+                            obj: Box::new(obj_hir),
+                            field: field.to_owned(),
+                        },
                     },
-                },
-            ),
+                )
+            }
             Err(_) => (
                 TypeRef {
                     id: TypeId::ERROR,
@@ -3080,6 +3110,7 @@ impl Checker<'_> {
         if self.private_member_denied(&member, *def, member_span) {
             return Err(ErrorGuaranteed::new());
         }
+        self.record_use(field_span(member_span, field), member.id);
         let (sig, callee) = self.resolve_method(field, &member, recv.ty, member_span)?;
         self.check_method_args(fctx, &sig, callee, recv, args, span)
     }
@@ -3122,6 +3153,7 @@ impl Checker<'_> {
         if self.private_member_denied(&member, base, member_span) {
             return Err(ErrorGuaranteed::new());
         }
+        self.record_use(field_span(member_span, field), member.id);
         let ResKind::Func { generic_params, .. } = &member.kind else {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("`{field}` is not callable")).label(
@@ -5449,6 +5481,21 @@ mod tests {
             hir.uses
                 .iter()
                 .any(|s| s.span.lo.0 == lo && s.def != lilac_resolve::DefId::ERROR),
+            "{:?}",
+            hir.uses
+        );
+    }
+
+    #[test]
+    fn member_use_is_recorded() {
+        let src = "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    v: Object = Object {\n        member = 0x1\n    }\n    x: @bit8 = v.member\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            hir.uses.iter().any(|s| {
+                &src[s.span.lo.0 as usize..s.span.hi.0 as usize] == "member"
+                    && s.def != lilac_resolve::DefId::ERROR
+            }),
             "{:?}",
             hir.uses
         );
