@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.4-draft (M4 duck-typed generics: explicit type arguments, E044, generic self, both receiver forms, in-body hooks). Status: draft, normative for the Rust rewrite.
+> Version: 0.5-draft (M6a folder modules: implicit namespaces, visibility reach, per-namespace qualification). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -387,17 +387,65 @@ Object: object {
 
 ### Namespaces & Visibility
 
-Namespaces mirror folders and object hierarchies. Every file in the same folder
-shares one namespace: files in a folder all see each other with no import. The
-**`using`** keyword imports a target folder's namespace into the current scope,
-excluding any declarations inside `private` blocks; imports are non-transitive
-and do not pull in parent folders. A `using` directive is scoped to the file
-that contains it: sibling files never inherit each other's imports, even though
-they share each other's declarations.
+Namespaces mirror folders; no declaration introduces one. Every `*.lilac` file
+directly in a folder belongs to that folder's namespace, and the files in one
+folder **merge**: they see each other's declarations with no import (a same-named
+declaration across them is `E020`). Subfolders are separate namespaces, named by
+their dotted path from the root (`<root>/A/B` is `A.B`). A subfolder is loaded
+only when a file in an already-loaded namespace `using`s it, directly or
+transitively; subfolders are never auto-loaded.
+
+**`using`.** `using A.B` resolves root-relative to `<root>/A/B` and makes that
+namespace's public (non-`private`) names visible, unqualified, **in the file that
+contains the directive only**. Sibling files do not inherit each other's
+`using`s even though they share each other's declarations. Imports are
+non-transitive (`B` `using C` does not expose `C` to a file in `A`) and never
+pull in a parent folder's imports. A `using` inside a `private { … }` block is
+still honored. Importing an ancestor namespace is allowed but unnecessary (see
+reach below).
 
 ```lilac
 using Standard
 ```
+
+**Ancestor/descendant reach.** The folder tree orders namespaces into ancestor
+chains and descendant sets; only namespaces in the compilation unit participate
+and the root is always in it. A namespace automatically sees every item of its
+ancestor namespaces — public items by *ancestor reach* and private items by
+*descendant reach* (a `private` item is visible to its defining namespace and its
+descendants). The root is an ancestor of all, so root declarations are usable
+everywhere with no import. `using` is only needed for **non-ancestor**
+namespaces, and it imports only their public items.
+
+**`private`.** `private { … }` may wrap items at file top level and at
+`object`-member position; nested blocks flatten. At top level it marks items
+*namespace-private*: they are excluded from the namespace's `using` export, so an
+importer sees an unresolved name (`E021`, not a privacy error), while the
+defining namespace and its descendants still see them. Inside an `object` it
+marks members *object-private*: the member is found but inaccessible from outside
+the object, which is `E026`. A private declaration still occupies its name (a
+private/public clash is `E020`), and `private` does not gate top-level hooks.
+
+**Collisions.** A same-named declaration in one namespace is `E020`, first
+binding wins. A local (or ancestor-reached) name shadows an imported one. If two
+`using`d namespaces export the same name, referencing it is `E029`; an
+unreferenced collision is not an error.
+
+**Qualification.** Namespaces are compile-time scopes only: there are no
+qualified paths in expressions (`A.B.foo` is not syntax). For code generation
+every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
+`A.Object.Method`, `A.GenBox.1..bit32.@on_drop`); the root namespace adds no
+prefix, so single-file programs stay byte-identical and `main` stays `main`.
+User-defined type names and generic instances are qualified the same way, so
+same-named types in different namespaces stay distinct, while builtin types are
+never qualified. Two exceptions carry no prefix: top-level hooks are unit-global
+(one overload set per hook name for the whole compilation unit) and `extern`
+symbols keep their unmangled declared name (§9).
+
+A namespace is loaded from a directory argument on the command line: a directory
+selects project mode (that folder is the root namespace). A file argument keeps
+single-file mode, so the file's parent folder is **not** treated as a project
+root and contributes no sibling files.
 
 ### Enums
 

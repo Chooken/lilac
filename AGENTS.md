@@ -48,6 +48,29 @@
   `.lbc` format, memory model, entry/panic/`extern` behavior, and debugger are
   documented in `docs/VM_SPEC.md`.
 
+## Folder modules and visibility (M6a)
+
+- `lilac-module` is the folder loader: it discovers the root folder, reads every
+  `*.lilac` file directly in it, and runs a `using` fixpoint over an injected
+  `Fs` trait (the driver stays I/O-free; `lilac-cli` supplies `StdFs`). A folder
+  is one namespace and its files merge. `E025` is the module-load error: a
+  missing/not-a-directory `using` target, an unreadable root folder, or an
+  unreadable file.
+- `lilac-resolve::ResolvedProject` replaces the single global `Module`: each
+  namespace's items plus one `FileScope` per file (its visible-name map, already
+  filtered by visibility and reach). `collect_project` builds it; typeck and
+  lowering thread the `FileId`/`ResolvedProject` and look names up through the
+  file's scope (`E029` on an ambiguous use).
+- Visibility reach is ancestor-public + descendant-private (Rust's rule). A
+  top-level `private { … }` excludes an item from `using` (importers see it as
+  unresolved, not `E026`); an object-member `private { … }` gates external access
+  with `E026`. Top-level hooks are unit-global and carry no namespace prefix.
+- Namespace qualification: every non-root symbol/type is prefixed by its dotted
+  namespace path (`A.B.foo`, `A.Object.Method`); the **root namespace adds no
+  prefix**, so existing single-file snapshots stay byte-identical and `main`
+  stays `main`. `extern` symbols stay unmangled, and a file argument on the CLI
+  is single-file mode (its parent is not a project root).
+
 ## Gates
 
 Run before committing:
