@@ -8,6 +8,7 @@ use lsp_types::{
     TextDocumentSyncKind,
 };
 
+pub mod convert;
 pub mod documents;
 pub mod fs;
 pub mod roots;
