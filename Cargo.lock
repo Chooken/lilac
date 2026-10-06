@@ -218,6 +218,7 @@ dependencies = [
  "lilac-ast",
  "lilac-error",
  "lilac-lex",
+ "lilac-module",
  "lilac-parse",
  "lilac-span",
 ]

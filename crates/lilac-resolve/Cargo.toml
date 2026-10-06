@@ -7,6 +7,7 @@ edition.workspace = true
 lilac-span = { path = "../lilac-span" }
 lilac-error = { path = "../lilac-error" }
 lilac-ast = { path = "../lilac-ast" }
+lilac-module = { path = "../lilac-module" }
 
 [dev-dependencies]
 lilac-lex = { path = "../lilac-lex" }

@@ -1,9 +1,10 @@
 //! Name resolution: `DefId`, scopes, folder-modules (real pass lands in M1).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lilac_ast::{Item, ItemKind, Param, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
+use lilac_module::Project;
 use lilac_span::{FileId, Span};
 
 /// Identity of one namespace in a [`ResolvedProject`] (index into its
@@ -170,10 +171,10 @@ impl ResolvedProject {
         };
         let mut def_ns = HashMap::new();
         for item in root.items.values() {
-            index_defs(NsId(0), item, &mut def_ns);
+            index_defs(item, &mut def_ns);
         }
         for item in module.hooks.values().flatten() {
-            index_defs(NsId(0), item, &mut def_ns);
+            index_defs(item, &mut def_ns);
         }
         Self {
             namespaces: vec![root],
@@ -216,13 +217,59 @@ impl ResolvedProject {
     }
 }
 
-/// Records `item` and, recursively, its object members as owned by `ns`.
-fn index_defs(ns: NsId, item: &ResItem, index: &mut HashMap<DefId, NsId>) {
-    index.insert(item.id, ns);
+/// Records `item` and, recursively, its object members under the namespace
+/// they carry in [`ResItem::ns`].
+fn index_defs(item: &ResItem, index: &mut HashMap<DefId, NsId>) {
+    index.insert(item.id, item.ns);
     if let ResKind::Object { members, .. } = &item.kind {
         for member in members.values() {
-            index_defs(ns, member, index);
+            index_defs(member, index);
         }
+    }
+}
+
+/// The dotted path of the enclosing folder (`""` for a top-level namespace),
+/// or `None` for the root itself.
+fn parent_path(path: &str) -> Option<&str> {
+    if path.is_empty() {
+        return None;
+    }
+    Some(match path.rfind('.') {
+        Some(index) => &path[..index],
+        None => "",
+    })
+}
+
+/// The nearest ancestor folder present in the compilation unit; `None` only
+/// for the root. Missing intermediate folders are skipped, so a lone `a.b`
+/// still reaches the root.
+fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId> {
+    let mut candidate = parent_path(path);
+    while let Some(candidate_path) = candidate {
+        if let Some(&ns) = by_path.get(candidate_path) {
+            return Some(ns);
+        }
+        candidate = parent_path(candidate_path);
+    }
+    None
+}
+
+/// Signature equality for overload uniqueness (names excluded, types included).
+fn same_sig(a: &ResItem, b: &ResItem) -> bool {
+    match (&a.kind, &b.kind) {
+        (
+            ResKind::Hook {
+                params: ap,
+                returns: ar,
+                ..
+            },
+            ResKind::Hook {
+                params: bp,
+                returns: br,
+                ..
+            },
+        ) => sig_key(ap, ar) == sig_key(bp, br),
+        _ => true,
     }
 }
 
@@ -247,6 +294,7 @@ fn sig_key(params: &[Param], returns: &[Param]) -> String {
 struct Collector<'a> {
     diags: &'a mut Diags,
     next: u32,
+    ns: NsId,
 }
 
 impl Collector<'_> {
@@ -254,6 +302,54 @@ impl Collector<'_> {
         let id = DefId(self.next);
         self.next += 1;
         id
+    }
+
+    /// Collects one file's top-level definitions. Flattens top-level `private`
+    /// blocks, marking their items [`Visibility::Private`] (top-level hooks
+    /// stay public: `private` does not gate them, spec §7.2). Object-member
+    /// `private` handling lands with `E026`.
+    fn collect_program(&mut self, program: &Program, ns: NsId) -> Module {
+        self.ns = ns;
+        let mut module = Module::default();
+        self.collect_top_level(&program.items, Visibility::Public, &mut module);
+        module
+    }
+
+    fn collect_top_level(&mut self, items: &[Item], vis: Visibility, module: &mut Module) {
+        for item in items {
+            if let ItemKind::Private { items } = &item.kind {
+                self.collect_top_level(items, Visibility::Private, module);
+                continue;
+            }
+            let Some(mut resolved) = self.item(item) else {
+                continue;
+            };
+            resolved.vis = if matches!(resolved.kind, ResKind::Hook { .. }) {
+                Visibility::Public
+            } else {
+                vis
+            };
+            let name = item.name.clone();
+            self.insert_overload(&mut module.items, Some(&mut module.hooks), &name, resolved);
+        }
+    }
+
+    /// Adds one hook overload to the unit-global set, rejecting an identical
+    /// signature anywhere in the compilation unit (`E020`, spec §7.2).
+    fn add_hook(&mut self, hooks: &mut HashMap<String, Vec<ResItem>>, name: &str, item: ResItem) {
+        let overloads = hooks.entry(name.to_owned()).or_default();
+        if overloads.iter().any(|previous| same_sig(previous, &item)) {
+            let previous_span = overloads
+                .first()
+                .map_or(item.span, |previous| previous.span);
+            self.diags.emit(
+                Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                    .label(item.span, true, "redefined here")
+                    .label(previous_span, false, "first defined here"),
+            );
+            return;
+        }
+        overloads.push(item);
     }
 
     fn insert(&mut self, scope: &mut HashMap<String, ResItem>, name: &str, item: ResItem) {
@@ -330,7 +426,7 @@ impl Collector<'_> {
             kind,
             span: item.span,
             vis: Visibility::Public,
-            ns: NsId(0),
+            ns: self.ns,
         })
     }
 
@@ -343,26 +439,13 @@ impl Collector<'_> {
         name: &str,
         item: ResItem,
     ) {
-        let same_sig = |a: &ResItem, b: &ResItem| match (&a.kind, &b.kind) {
-            (
-                ResKind::Hook {
-                    params: ap,
-                    returns: ar,
-                    ..
-                },
-                ResKind::Hook {
-                    params: bp,
-                    returns: br,
-                    ..
-                },
-            ) => sig_key(ap, ar) == sig_key(bp, br),
-            _ => true,
-        };
         if matches!(item.kind, ResKind::Hook { .. }) {
             if let Some(hooks) = hooks {
                 let overloads = hooks.entry(name.to_owned()).or_default();
-                if overloads.iter().any(|prev| same_sig(prev, &item)) {
-                    let previous_span = overloads.first().map_or(item.span, |prev| prev.span);
+                if overloads.iter().any(|previous| same_sig(previous, &item)) {
+                    let previous_span = overloads
+                        .first()
+                        .map_or(item.span, |previous| previous.span);
                     self.diags.emit(
                         Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
                             .label(item.span, true, "redefined here")
@@ -387,19 +470,191 @@ impl Collector<'_> {
 /// duplicates keep the first binding and report `E020`; hooks allow overloads
 /// with distinct signatures (identical ones still report `E020`).
 pub fn collect(program: &Program, diags: &mut Diags) -> Module {
-    let mut collector = Collector { diags, next: 0 };
-    let mut module = Module::default();
-    for item in &program.items {
-        if let Some(resolved) = collector.item(item) {
-            collector.insert_overload(
-                &mut module.items,
-                Some(&mut module.hooks),
-                &item.name,
-                resolved,
-            );
+    let mut collector = Collector {
+        diags,
+        next: 0,
+        ns: NsId(0),
+    };
+    collector.collect_program(program, NsId(0))
+}
+
+/// Collects a whole loaded [`Project`] into a [`ResolvedProject`].
+///
+/// `programs` pairs each file's [`FileId`] with its parsed [`Program`]. By the
+/// loader's contract (`lilac-module`) a file's `FileId` equals its index in
+/// `Project::files`, so this maps each program to its declared namespace.
+///
+/// Each namespace merges its files' top-level items (a cross-file duplicate is
+/// `E020`, first binding wins); top-level hooks go into one unit-global overload
+/// set (`E020` on an identical signature anywhere). Every file then gets a
+/// `visible` scope: its own namespace's items (public and private), its
+/// ancestors' items (public by ancestor reach, private by descendant reach),
+/// then each `using`d namespace's **public** items — local names shadowing
+/// imports, and an import-vs-import collision recorded as [`Lookup::Ambiguous`].
+pub fn collect_project(
+    project: &Project,
+    programs: &[(FileId, Program)],
+    diags: &mut Diags,
+) -> ResolvedProject {
+    let mut by_file: HashMap<usize, &Program> = HashMap::new();
+    for (file, program) in programs {
+        by_file.insert(file.0 as usize, program);
+    }
+
+    let mut namespaces: Vec<NamespaceData> = project
+        .namespaces
+        .iter()
+        .map(|ns| NamespaceData {
+            path: ns.path.clone(),
+            parent: None,
+            items: HashMap::new(),
+        })
+        .collect();
+    let by_path: HashMap<String, NsId> = project
+        .namespaces
+        .iter()
+        .enumerate()
+        .map(|(index, ns)| {
+            (
+                ns.path.clone(),
+                NsId(u32::try_from(index).unwrap_or(u32::MAX)),
+            )
+        })
+        .collect();
+    for data in &mut namespaces {
+        data.parent = nearest_ancestor(&data.path, &by_path);
+    }
+
+    let mut collector = Collector {
+        diags,
+        next: 0,
+        ns: NsId(0),
+    };
+    let mut hooks: HashMap<String, Vec<ResItem>> = HashMap::new();
+    for (index, file) in project.files.iter().enumerate() {
+        let Some(program) = by_file.get(&index).copied() else {
+            continue;
+        };
+        let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
+        let module = collector.collect_program(program, ns);
+        if let Some(data) = namespaces.get_mut(usize::try_from(ns.0).unwrap_or(usize::MAX)) {
+            for (name, item) in module.items {
+                collector.insert(&mut data.items, &name, item);
+            }
+        }
+        for (name, overloads) in module.hooks {
+            for item in overloads {
+                collector.add_hook(&mut hooks, &name, item);
+            }
         }
     }
-    module
+
+    let mut def_ns: HashMap<DefId, NsId> = HashMap::new();
+    for data in &namespaces {
+        for item in data.items.values() {
+            index_defs(item, &mut def_ns);
+        }
+    }
+    for item in hooks.values().flatten() {
+        index_defs(item, &mut def_ns);
+    }
+
+    let mut files = Vec::with_capacity(project.files.len());
+    for (index, file) in project.files.iter().enumerate() {
+        let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
+        let visible = compute_visible(&namespaces, ns, &file.usings, &by_path);
+        files.push(FileScope {
+            file: FileId(u32::try_from(index).unwrap_or(u32::MAX)),
+            ns,
+            visible,
+        });
+    }
+
+    ResolvedProject {
+        namespaces,
+        hooks,
+        files,
+        def_ns,
+    }
+}
+
+/// The namespace at `ns`, or `None` for an out-of-range id.
+fn namespace_at(namespaces: &[NamespaceData], ns: NsId) -> Option<&NamespaceData> {
+    namespaces.get(usize::try_from(ns.0).unwrap_or(usize::MAX))
+}
+
+/// Inserts `ns`'s items into `visible`, marking each name as locally bound.
+fn add_local(
+    namespaces: &[NamespaceData],
+    ns: NsId,
+    visible: &mut HashMap<String, Lookup>,
+    local: &mut HashSet<String>,
+) {
+    let Some(data) = namespace_at(namespaces, ns) else {
+        return;
+    };
+    for (name, item) in &data.items {
+        visible.insert(name.clone(), Lookup::One(item.clone()));
+        local.insert(name.clone());
+    }
+}
+
+/// Builds the per-file `visible` map for a file in `ns` with `usings`.
+fn compute_visible(
+    namespaces: &[NamespaceData],
+    ns: NsId,
+    usings: &[String],
+    by_path: &HashMap<String, NsId>,
+) -> HashMap<String, Lookup> {
+    let mut visible: HashMap<String, Lookup> = HashMap::new();
+    let mut local: HashSet<String> = HashSet::new();
+
+    let mut ancestors: Vec<NsId> = Vec::new();
+    let mut current = namespace_at(namespaces, ns).and_then(|data| data.parent);
+    while let Some(ancestor) = current {
+        if ancestors.contains(&ancestor) {
+            break;
+        }
+        ancestors.push(ancestor);
+        current = namespace_at(namespaces, ancestor).and_then(|data| data.parent);
+    }
+    ancestors.reverse();
+    for ancestor in ancestors {
+        add_local(namespaces, ancestor, &mut visible, &mut local);
+    }
+    add_local(namespaces, ns, &mut visible, &mut local);
+
+    let mut imported: HashMap<String, Vec<ResItem>> = HashMap::new();
+    let mut seen: HashSet<NsId> = HashSet::new();
+    for using in usings {
+        let Some(&target) = by_path.get(using.as_str()) else {
+            continue;
+        };
+        if !seen.insert(target) {
+            continue;
+        }
+        let Some(data) = namespace_at(namespaces, target) else {
+            continue;
+        };
+        for (name, item) in &data.items {
+            if item.vis != Visibility::Public || local.contains(name) {
+                continue;
+            }
+            imported.entry(name.clone()).or_default().push(item.clone());
+        }
+    }
+    for items in imported.values_mut() {
+        items.sort_by_key(|item| (item.span.file.0, item.span.lo.0));
+    }
+    for (name, items) in imported {
+        if let [item] = items.as_slice() {
+            visible.insert(name, Lookup::One(item.clone()));
+        } else {
+            let spans = items.iter().map(|item| item.span).collect();
+            visible.insert(name, Lookup::Ambiguous(spans));
+        }
+    }
+    visible
 }
 
 #[cfg(test)]
@@ -407,8 +662,10 @@ mod tests {
     use super::*;
     use lilac_error::Diags;
     use lilac_lex::Lexer;
+    use lilac_module::{FileUnit, Namespace};
     use lilac_parse::Parser;
     use lilac_span::SourceMap;
+    use std::path::PathBuf;
 
     fn resolve_with_file(src: &str) -> (Module, FileId, Diags) {
         let mut sm = SourceMap::new();
@@ -575,5 +832,312 @@ mod tests {
             panic!("expected object, got {:?}", object.kind);
         };
         assert_eq!(generic_params, &["T".to_owned()]);
+    }
+
+    struct Spec {
+        ns: usize,
+        name: &'static str,
+        src: &'static str,
+        usings: &'static [&'static str],
+    }
+
+    fn build_project(ns_paths: &[&str], specs: &[Spec]) -> (Project, Vec<(FileId, Program)>) {
+        let mut programs = Vec::new();
+        let mut files = Vec::new();
+        let mut ns_files: Vec<Vec<usize>> = vec![Vec::new(); ns_paths.len()];
+        for (index, spec) in specs.iter().enumerate() {
+            let file = FileId(u32::try_from(index).expect("index fits in u32"));
+            let (tokens, lex_errors) = Lexer::lex_all(spec.src, file);
+            assert!(lex_errors.is_empty(), "{lex_errors:?}");
+            let mut parse_diags = Diags::new();
+            let mut parser = Parser::new(tokens, file);
+            let program = parser
+                .parse_program(&mut parse_diags)
+                .expect("source parses");
+            programs.push((file, program));
+            files.push(FileUnit {
+                name: spec.name.to_owned(),
+                ns: spec.ns,
+                src: spec.src.to_owned(),
+                usings: spec
+                    .usings
+                    .iter()
+                    .map(|using| (*using).to_owned())
+                    .collect(),
+            });
+            ns_files[spec.ns].push(index);
+        }
+        let namespaces = ns_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| Namespace {
+                path: (*path).to_owned(),
+                dir: PathBuf::from(path),
+                files: ns_files[index].clone(),
+            })
+            .collect();
+        let project = Project {
+            root: PathBuf::from("proj"),
+            namespaces,
+            files,
+        };
+        (project, programs)
+    }
+
+    fn collect_project_src(ns_paths: &[&str], specs: &[Spec]) -> (ResolvedProject, Diags) {
+        let (project, programs) = build_project(ns_paths, specs);
+        let mut diags = Diags::new();
+        let resolved = collect_project(&project, &programs, &mut diags);
+        (resolved, diags)
+    }
+
+    fn one<'a>(project: &'a ResolvedProject, file: FileId, name: &str) -> &'a ResItem {
+        match project.lookup(file, name) {
+            Some(Lookup::One(item)) => item,
+            other => panic!("expected one binding for `{name}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn namespace_local_names_are_distinct() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let root_foo = one(&resolved, FileId(0), "foo");
+        let util_foo = one(&resolved, FileId(1), "foo");
+        assert_eq!(resolved.namespace_of(root_foo.id), Some(NsId(0)));
+        assert_eq!(resolved.namespace_of(util_foo.id), Some(NsId(1)));
+        assert_eq!(resolved.namespace_path(NsId(0)), "");
+        assert_eq!(resolved.namespace_path(NsId(1)), "util");
+    }
+
+    #[test]
+    fn descendant_sees_ancestor_without_import() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "bar: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(
+            resolved.namespace_of(one(&resolved, FileId(1), "foo").id),
+            Some(NsId(0))
+        );
+    }
+
+    #[test]
+    fn ancestor_does_not_see_descendant() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "main: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(resolved.lookup(FileId(0), "foo").is_none());
+    }
+
+    #[test]
+    fn namespace_private_is_not_importable() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "using util\n",
+                    usings: &["util"],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "private {\n    secret: function () nothing {}\n}\npublic_fn: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(resolved.lookup(FileId(0), "secret").is_none());
+        assert!(resolved.lookup(FileId(0), "public_fn").is_some());
+        assert!(resolved.lookup(FileId(1), "secret").is_some());
+    }
+
+    #[test]
+    fn colliding_imports_are_ambiguous() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util1", "util2"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "using util1\nusing util2\n",
+                    usings: &["util1", "util2"],
+                },
+                Spec {
+                    ns: 1,
+                    name: "one.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    name: "two.lilac",
+                    src: "foo: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        match resolved.lookup(FileId(0), "foo") {
+            Some(Lookup::Ambiguous(spans)) => assert_eq!(spans.len(), 2),
+            other => panic!("expected ambiguity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_file_duplicate_emits_e020() {
+        let (_, diags) = collect_project_src(
+            &[""],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "a.lilac",
+                    src: "dup: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 0,
+                    name: "b.lilac",
+                    src: "dup: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn hooks_are_unit_global_across_namespaces() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let overloads = resolved.hooks.get("@h").expect("has @h");
+        assert_eq!(overloads.len(), 2);
+        let namespaces: HashSet<_> = overloads.iter().map(|item| item.ns).collect();
+        assert_eq!(namespaces, HashSet::from([NsId(0), NsId(1)]));
+    }
+
+    #[test]
+    fn identical_hooks_across_namespaces_emit_e020() {
+        let (_, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn qualification_covers_members_and_hook_overloads() {
+        let (resolved, diags) = collect_project_src(
+            &["", "util"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "main: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "util.lilac",
+                    src: "Obj: object {\n    member: @bit8\n}\n@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let util = NsId(1);
+        let object = resolved
+            .all_items()
+            .find(|(_, item)| item.name == "Obj")
+            .map(|(_, item)| item)
+            .expect("has Obj");
+        assert_eq!(resolved.namespace_of(object.id), Some(util));
+        let ResKind::Object { members, .. } = &object.kind else {
+            panic!("expected object, got {:?}", object.kind);
+        };
+        let member = members.get("member").expect("has member");
+        assert_eq!(resolved.namespace_of(member.id), Some(util));
+        let overloads = resolved.hooks.get("@h").expect("has @h");
+        assert_eq!(overloads.len(), 2);
+        for overload in overloads {
+            assert_eq!(resolved.namespace_of(overload.id), Some(util));
+        }
     }
 }
