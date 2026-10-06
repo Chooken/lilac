@@ -38,6 +38,8 @@ pub trait Fs {
 pub struct FileUnit {
     /// File name (no directory).
     pub name: String,
+    /// Path the loader read this file from.
+    pub path: PathBuf,
     /// Identity of this file in the caller's [`SourceMap`].
     pub file: FileId,
     /// Owning namespace (index into [`Project::namespaces`]).
@@ -130,6 +132,7 @@ pub fn load(
             let index = files.len();
             files.push(FileUnit {
                 name,
+                path: path.clone(),
                 file: file_id,
                 ns,
                 src,
@@ -507,5 +510,23 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(e025_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn file_unit_carries_read_path() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "using util\n");
+        fs.add(&root, "util/helper.lilac", "helper: function () nothing {}\n");
+
+        let mut diags = Diags::new();
+        let project = load(&root, &mut fs, &mut diags).expect("load succeeds");
+
+        let helper = project
+            .files
+            .iter()
+            .find(|file| file.name == "helper.lilac")
+            .expect("helper loaded");
+        assert_eq!(helper.path, join_rel(&root, "util/helper.lilac"));
     }
 }

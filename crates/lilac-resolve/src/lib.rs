@@ -1071,6 +1071,7 @@ mod tests {
             programs.push((file, program));
             files.push(FileUnit {
                 name: spec.name.to_owned(),
+                path: PathBuf::from(spec.name),
                 file,
                 ns: spec.ns,
                 src: spec.src.to_owned(),
