@@ -272,6 +272,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lilac-decimal"
+version = "0.2.0"
+dependencies = [
+ "lilac-ast",
+ "lilac-error",
+ "lilac-lex",
+ "lilac-parse",
+ "lilac-span",
+]
+
+[[package]]
 name = "lilac-driver"
 version = "0.2.0"
 dependencies = [
