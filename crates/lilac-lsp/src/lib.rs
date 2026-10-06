@@ -11,6 +11,7 @@ use lsp_types::{
 pub mod convert;
 pub mod documents;
 pub mod fs;
+pub mod index;
 pub mod roots;
 pub mod server;
 
