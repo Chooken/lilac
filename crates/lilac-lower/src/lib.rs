@@ -39,11 +39,13 @@ pub fn lower(
         drops: &hir.drops,
         failed: false,
     };
+    let enum_names: HashSet<&str> = project
+        .all_items()
+        .filter(|(_, item)| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }))
+        .map(|(name, _)| name)
+        .collect();
     for (name, members) in &hir.layouts {
-        let is_aggregate = project
-            .all_items()
-            .find(|(item_name, _)| *item_name == name.as_str())
-            .is_some_and(|(_, item)| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }));
+        let is_aggregate = enum_names.contains(name.as_str());
         let mut layout = Vec::with_capacity(members.len() + 1);
         let mut variants = Vec::with_capacity(members.len());
         for (member, ty) in members {
@@ -68,7 +70,7 @@ pub fn lower(
         lower.consts.insert(def, expanded);
     }
     for func in &hir.funcs {
-        let symbol = lower.symbol(func.def, &func.name);
+        let symbol = lower.symbol(func.def, &func.name, func.is_extern);
         lower.func_names.insert(func.def, symbol);
     }
     for func in &hir.funcs {
@@ -296,10 +298,16 @@ fn runtime_callee(name: &str) -> LirCallee {
 }
 
 impl Lower<'_> {
-    /// The emitted LIR symbol for an item: its namespace path (omitted at the
-    /// root) plus `.` and its existing local name (spec §7.1). The local name
-    /// already carries any object-member and generic-instance suffix.
-    fn symbol(&self, def: DefId, local: &str) -> String {
+    /// The emitted LIR symbol for an item. Hooks (`@` in the name, top-level or
+    /// object) and `extern` functions keep their bare local name — hooks are
+    /// unit-global and externs keep their unmangled C name (spec §7.1/§7.2).
+    /// Everything else is its namespace path (omitted at the root) plus `.`
+    /// and its existing local name; that local name already carries any
+    /// object-member and generic-instance suffix.
+    fn symbol(&self, def: DefId, local: &str, is_extern: bool) -> String {
+        if is_extern || local.contains('@') {
+            return local.to_owned();
+        }
         match self.project.namespace_of(def) {
             Some(ns) => {
                 let path = self.project.namespace_path(ns);
@@ -417,7 +425,7 @@ impl Lower<'_> {
 
     /// Lowers one function (parameters and return slots become places).
     fn lower_func(&mut self, func: &HirFunc) {
-        let symbol = self.symbol(func.def, &func.name);
+        let symbol = self.symbol(func.def, &func.name, func.is_extern);
         let mut fs = FuncState::new();
         if let Some((parent, _)) = func.name.split_once('.') {
             fs.is_member = true;
@@ -1433,14 +1441,7 @@ impl Lower<'_> {
                 );
                 LirCallee::Reg(reg)
             }
-            HirCallee::Hook { name, def } => {
-                let name = self
-                    .func_names
-                    .get(def)
-                    .cloned()
-                    .unwrap_or_else(|| name.clone());
-                LirCallee::Func(name)
-            }
+            HirCallee::Hook { name, .. } => LirCallee::Func(name.clone()),
             HirCallee::Intrinsic { .. } => {
                 lilac_error::bug!(span, "intrinsic in general call path");
             }
