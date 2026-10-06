@@ -497,14 +497,21 @@ impl Default for LirModule {
     }
 }
 
-/// Escapes `"` and `\` inside `data` literal text.
+/// Escapes `"`, `\`, and the line breaks `\n`/`\r` inside `data` literal text.
+///
+/// Control characters must be escaped so a literal stays on one physical line;
+/// otherwise a raw newline would split one `lines` entry across two physical
+/// lines and desynchronize the per-line span map.
 fn escape_data(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
-        if ch == '"' || ch == '\\' {
-            escaped.push('\\');
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(ch),
         }
-        escaped.push(ch);
     }
     escaped
 }
@@ -2338,5 +2345,23 @@ mod tests {
         assert_eq!(spanned.text, module.to_text());
         assert_eq!(spanned.lines.len(), spanned.text.lines().count());
         assert!(spanned.lines.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn spanned_data_literal_with_newlines_stays_one_line() {
+        let mut module = canonical_module();
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::Str("a\nb\r".to_owned()),
+            span: test_span(),
+        });
+        let spanned = module.to_text_spanned();
+        assert_eq!(spanned.text, module.to_text());
+        assert_eq!(spanned.lines.len(), spanned.text.lines().count());
+        assert!(
+            spanned.text.contains("!c0: str = \"a\\nb\\r\""),
+            "{}",
+            spanned.text
+        );
     }
 }
