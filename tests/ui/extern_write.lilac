@@ -1,0 +1,6 @@
+write: extern function (fd: @bit32, buf: ref @bit8, n: @bit_native) result: @bit_native
+
+main: function () nothing {
+    s: @byte_buffer = "hi\n"
+    n: @bit_native = write(0x1, @byte_buffer_ptr(s), @byte_buffer_len(s))
+}

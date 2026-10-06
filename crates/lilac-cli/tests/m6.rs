@@ -579,3 +579,59 @@ fn module_project_compiles_links_and_runs() {
 
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// A libc `write(1, ptr, len)` program compiles to host IR, links against the
+/// host C runtime with the toolchain `clang`, runs, and prints exactly the bytes
+/// of its `@byte_buffer` (`"hi\n"`). This exercises the extern C-ABI call end to
+/// end: `write`'s return value lands in its out place, and the pointer/length
+/// arguments come from the user-callable `@byte_buffer_ptr`/`@byte_buffer_len`
+/// intrinsics.
+#[test]
+fn libc_write_prints_bytes_to_stdout() {
+    let clang = clang();
+    let scratch = std::env::temp_dir().join(format!("lilac-m6-extern-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("creates scratch dir");
+
+    let output = lilac()
+        .args(["emit-llvm", "--mode=debug"])
+        .arg(ui("extern_write.lilac"))
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "emit-llvm failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ll = scratch.join("extern_write.ll");
+    std::fs::write(&ll, &output.stdout).expect("writes IR");
+
+    let exe = scratch.join("extern_write.exe");
+    let link = Command::new(&clang)
+        .arg(&ll)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("runs clang");
+    assert!(
+        link.status.success(),
+        "extern_write failed to link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("runs executable");
+    assert!(
+        run.status.success(),
+        "extern_write exited with {:?}; stderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // On Windows the linked C runtime's `write` is in text mode, so the `\n`
+    // the program wrote arrives as `\r\n` on the captured pipe; normalize it
+    // before asserting the program produced exactly `hi\n`.
+    let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, "hi\n", "stdout was {stdout:?}");
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
