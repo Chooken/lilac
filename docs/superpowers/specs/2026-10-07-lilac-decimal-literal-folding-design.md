@@ -116,7 +116,7 @@ pub enum Round { Trunc, HalfUp }
 #[derive(Clone, Copy, Debug)]
 pub struct Policy { pub scale: u32, pub round: Round }
 
-pub enum DecimalError { DivideByZero, ModuloByZero }
+pub enum DecimalError { DivideByZero, ModuloByZero, Malformed }
 
 /// Evaluates `lhs <op> rhs` exactly and renders the canonical result string.
 pub fn eval(op: Op, lhs: &str, rhs: &str, policy: Policy) -> Result<String, DecimalError>;
@@ -146,6 +146,11 @@ gains a `lilac-decimal` dependency.
   scale. `rhs == 0` → `DecimalError::ModuloByZero`.
 
 `scale = 0` is legal (integer division/modulo).
+
+`DecimalError::Malformed` is defensive: source operands are lexer-validated and
+`is_decimal_literal` re-checks the grammar, so a `Malformed` result is
+unreachable in the fold pass (which leaves the node unchanged). It exists so
+the public `eval` never panics on arbitrary strings.
 
 ### 3.4 Canonical rendering
 
