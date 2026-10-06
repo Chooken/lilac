@@ -62,6 +62,19 @@ pub struct Opts {
     /// Output format.
     pub error_format: ErrorFormat,
 }
+/// Retained analysis artifacts from the last compile (for editor tooling).
+#[derive(Clone, Debug)]
+pub struct Analysis {
+    /// Resolved namespaces and per-file scopes.
+    pub project: lilac_resolve::ResolvedProject,
+    /// Type table (for rendering types).
+    pub types: lilac_ty::Types,
+    /// Collected function/hook signatures.
+    pub sigs: lilac_typeck::Sigs,
+    /// Checked HIR (carries `uses`).
+    pub hir: lilac_hir::HirProgram,
+}
+
 /// Compilation session: source map + diagnostics + targets + options.
 ///
 /// Threaded explicitly through every pass (no globals, unlike the old Zig
@@ -89,6 +102,8 @@ pub struct Session {
     pub exports: HashSet<String>,
     /// Loaded project files: identity to path (empty outside project compiles).
     pub project_files: Vec<(FileId, PathBuf)>,
+    /// Retained analysis from the last compile (best-effort; editor tooling).
+    pub analysis: Option<Analysis>,
 }
 
 impl Default for Session {
@@ -107,6 +122,7 @@ impl Default for Session {
             warn_on_operator_type_change: true,
             exports: HashSet::new(),
             project_files: Vec::new(),
+            analysis: None,
         }
     }
 }
@@ -214,6 +230,13 @@ impl Session {
         &self.project_files
     }
 
+    /// Retained analysis from the last compile (populated best-effort, so it
+    /// survives a compile that later failed).
+    #[must_use]
+    pub fn analysis(&self) -> Option<&Analysis> {
+        self.analysis.as_ref()
+    }
+
     /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
     /// `fold` → inject runtime → `prune` → check live `@compile_error` →
     /// `verify`. Stops at the first failing pass. The live-error check runs
@@ -257,6 +280,12 @@ impl Session {
             &mut self.diags,
             self.warn_on_operator_type_change,
         );
+        self.analysis = Some(Analysis {
+            project: project.clone(),
+            types: types.clone(),
+            sigs: sigs.clone(),
+            hir: lilac_hir::HirProgram::default(),
+        });
         // Signature collection can reject a definition (`E020`/`E052`), leaving
         // some `DefId` without a signature. Stop before `check_bodies`, which
         // assumes every reachable definition has one (defense in depth against
@@ -265,6 +294,12 @@ impl Session {
             return Err(ErrorGuaranteed::new());
         }
         let hir = lilac_typeck::check_bodies(program, project, &sigs, &mut types, &mut self.diags);
+        self.analysis = Some(Analysis {
+            project: project.clone(),
+            types: types.clone(),
+            sigs: sigs.clone(),
+            hir: hir.clone(),
+        });
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
@@ -335,6 +370,22 @@ mod tests {
             .expect("hello should compile");
         assert_eq!(program.items.len(), 1);
         assert_eq!(session.render_diagnostics(), "");
+    }
+
+    #[test]
+    fn analysis_is_retained_on_a_type_error() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "bad.lilac",
+            "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n}\n",
+        );
+        assert!(result.is_err(), "the body has a type error");
+        let analysis = session.analysis().expect("partial analysis retained");
+        assert!(
+            !analysis.hir.uses.is_empty(),
+            "uses must survive the error: {:?}",
+            analysis.hir.uses
+        );
     }
 
     #[test]

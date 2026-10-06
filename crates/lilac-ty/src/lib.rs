@@ -79,7 +79,7 @@ pub struct FuncSig {
 }
 
 /// Type table (real interner lands in M1).
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Types {
     kinds: Vec<TypeKind>,
     objects: HashMap<DefId, TypeId>,
