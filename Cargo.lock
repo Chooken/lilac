@@ -358,6 +358,7 @@ dependencies = [
  "lilac-driver",
  "lilac-error",
  "lilac-hir",
+ "lilac-ir",
  "lilac-module",
  "lilac-resolve",
  "lilac-span",
