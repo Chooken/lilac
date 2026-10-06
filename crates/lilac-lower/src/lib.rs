@@ -1441,14 +1441,12 @@ impl Lower<'_> {
                 );
                 LirCallee::Reg(reg)
             }
-            HirCallee::Hook { name, def } => {
-                let name = self
-                    .func_names
-                    .get(def)
-                    .cloned()
-                    .unwrap_or_else(|| name.clone());
-                LirCallee::Func(name)
-            }
+            // Hooks and generic-instance calls both carry their per-call symbol
+            // in `name`; do not index `func_names` here, since every
+            // specialization shares its template `def` and the map keeps only
+            // the last-inserted instance. `symbol` re-applies the namespace
+            // rule (hooks stay bare; instances prefix by the template's ns).
+            HirCallee::Hook { name, def } => LirCallee::Func(self.symbol(*def, name, false)),
             HirCallee::Intrinsic { .. } => {
                 lilac_error::bug!(span, "intrinsic in general call path");
             }
@@ -1972,6 +1970,17 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(text.contains("GenObject.1..bit32.get.1..bit32"), "{text}");
         assert!(text.contains("GenObject.1..bit32.get.1..bit64"), "{text}");
+        // Both specializations share the template `DefId`, so the call site
+        // must resolve its own suffix rather than a def-keyed map that keeps
+        // only the last instance: assert each call target is distinct/correct.
+        assert!(
+            text.contains("call @GenObject.1..bit32.get.1..bit32"),
+            "{text}"
+        );
+        assert!(
+            text.contains("call @GenObject.1..bit32.get.1..bit64"),
+            "{text}"
+        );
     }
 
     #[test]
