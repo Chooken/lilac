@@ -199,6 +199,10 @@ fn an_edit_sends_lir_invalidated() {
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
     did_open(&client, &uri, "main: function () nothing {\n}\n");
     let _ = publish_for(&client, &uri);
+    // Drain the invalidation from the initial publish; otherwise the
+    // assertion below would be satisfied by the leftover message even if
+    // `did_change` were ignored entirely.
+    next_invalidation(&client);
 
     did_change(
         &client,
