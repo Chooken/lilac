@@ -156,7 +156,8 @@ pub fn check_bodies(
 /// The field token's span inside a member-access span (the AST keeps only the
 /// whole-access span; the field name is the trailing identifier).
 fn field_span(span: Span, field: &str) -> Span {
-    Span::new(span.hi.0 - field.len() as u32, span.hi.0, span.file)
+    let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+    Span::new(span.hi.0.saturating_sub(len), span.hi.0, span.file)
 }
 
 /// Collects object/enum layouts, descending into `private { … }` blocks so a
@@ -2641,6 +2642,7 @@ impl Checker<'_> {
         (left, right)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn check_call(
         &mut self,
         fctx: &mut FuncCtx,
@@ -4920,7 +4922,8 @@ impl Checker<'_> {
             id: want,
             is_ref: false,
         };
-        let tag = Span::new(span.lo.0, span.lo.0 + 1 + name.len() as u32, span.file);
+        let tag_len = 1u32.saturating_add(u32::try_from(name.len()).unwrap_or(u32::MAX));
+        let tag = Span::new(span.lo.0, span.lo.0.saturating_add(tag_len), span.file);
         if let Some(payload_ty) = payload {
             if args.len() != 1 {
                 self.diags.emit(
@@ -5464,7 +5467,7 @@ mod tests {
         let src = "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n";
         let (diags, hir) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");
-        let lo = src.rfind("pi").expect("use site") as u32;
+        let lo = u32::try_from(src.rfind("pi").expect("use site")).expect("fits");
         assert!(
             hir.uses
                 .iter()
@@ -5479,7 +5482,7 @@ mod tests {
         let src = "foo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
         let (diags, hir) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");
-        let lo = src.rfind("foo").expect("call") as u32;
+        let lo = u32::try_from(src.rfind("foo").expect("call")).expect("fits");
         assert!(
             hir.uses
                 .iter()
