@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
 use lilac_hir::{HirBlock, HirExpr, HirExprKind, HirStmt, NameSite};
+use lilac_ir::LirModule;
 use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject};
 use lilac_span::{FileId, Span};
 use lilac_ty::TypeRef;
@@ -33,6 +34,13 @@ pub struct AnalysisIndex {
     pub exprs: Vec<(Span, TypeRef)>,
 }
 
+/// The IR modules captured at each pipeline boundary during a compile.
+#[derive(Clone, Debug, Default)]
+pub struct LirStages {
+    /// Stage name → module as it stood at that boundary, in pipeline order.
+    pub modules: Vec<(&'static str, LirModule)>,
+}
+
 /// A retained compile: the session plus its derived index and URI maps.
 pub struct Retained {
     /// The last compile's session (owns the source map and analysis).
@@ -43,6 +51,8 @@ pub struct Retained {
     pub file_uris: HashMap<FileId, Url>,
     /// Document URI → `FileId`.
     pub uri_files: HashMap<Url, FileId>,
+    /// IR modules captured at each pipeline boundary.
+    pub stages: LirStages,
 }
 
 impl Retained {
@@ -53,6 +63,17 @@ impl Retained {
         file_uris: HashMap<FileId, Url>,
         uri_files: HashMap<Url, FileId>,
     ) -> Self {
+        Self::build_with_stages(session, file_uris, uri_files, LirStages::default())
+    }
+
+    /// Builds a retained compile that carries the captured IR stages.
+    #[must_use]
+    pub fn build_with_stages(
+        session: Session,
+        file_uris: HashMap<FileId, Url>,
+        uri_files: HashMap<Url, FileId>,
+        stages: LirStages,
+    ) -> Self {
         let index = session
             .analysis()
             .map_or_else(AnalysisIndex::default, build_index);
@@ -61,6 +82,7 @@ impl Retained {
             index,
             file_uris,
             uri_files,
+            stages,
         }
     }
 }
@@ -231,6 +253,28 @@ mod tests {
             HashMap::from([(FileId(0), uri.clone())]),
             HashMap::from([(uri, FileId(0))]),
         )
+    }
+
+    #[test]
+    fn retained_carries_captured_stages() {
+        let mut session = lilac_driver::Session::new();
+        let mut stages = LirStages::default();
+        let _ = session.compile_lir_with_stages(
+            "t.lilac",
+            "main: function () nothing {\n}\n",
+            &mut |name, lir| {
+                stages.modules.push((name, lir.clone()));
+            },
+        );
+        let uri = Url::parse("file:///c:/t.lilac").expect("uri");
+        let retained = Retained::build_with_stages(
+            session,
+            HashMap::from([(FileId(0), uri.clone())]),
+            HashMap::from([(uri, FileId(0))]),
+            stages,
+        );
+        let names: Vec<&str> = retained.stages.modules.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["lower", "fold", "runtime", "final"]);
     }
 
     #[test]
