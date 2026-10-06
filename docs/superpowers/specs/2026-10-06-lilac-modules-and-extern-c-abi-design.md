@@ -274,6 +274,11 @@ but namespaces reuse names, so every top-level item is emitted under a
 - **Extern declarations and hooks are exempt:** an `extern` keeps its unmangled
   C name (§8), and top-level hooks are unit-global (§7.2) so they carry no
   namespace prefix.
+- **User-defined type names are qualified the same way.** The type interner and
+  the `layouts`/`drops` maps are keyed by display name, so `A.Object` and
+  `B.Object` would otherwise merge; a type reference resolves through the
+  referring file's scope to the target's qualified name. Builtin types
+  (`@bit32`, `@byte_buffer`, …) are unqualified.
 
 ### 7.2 Cross-namespace hooks
 
