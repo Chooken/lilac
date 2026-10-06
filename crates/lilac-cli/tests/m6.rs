@@ -82,6 +82,28 @@ fn cross_namespace_same_named_hooks_do_not_ice() {
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
+/// A hook in a child namespace referencing an ancestor's type has the same
+/// resolved signature as the ancestor's own hook, so it must be `E020` — not
+/// silently accepted and then emitted twice as `E070`. Regression: `same_sig`
+/// qualified by the *referencing* namespace (`b.Base` vs `Base`).
+#[test]
+fn ancestor_type_hook_collision_is_e020_not_e070() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("FAILS_hook_ancestor_type"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "compiler panicked:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("error[E020]"), "stderr:\n{stderr}");
+    assert!(!stderr.contains("error[E070]"), "stderr:\n{stderr}");
+}
+
 /// A genuinely duplicate hook signature across namespaces is `E020`, and the
 /// driver must stop before checking bodies rather than ICE (defense in depth).
 #[test]

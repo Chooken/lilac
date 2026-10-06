@@ -1,0 +1,3 @@
+@h: function (value: ref Base) result: @bit32 {
+    result = value.x
+}

@@ -272,9 +272,9 @@ fn is_builtin_type(name: &str) -> bool {
     )
 }
 
-/// Namespace-qualifies a user type name for signature comparison (`a.Thing` ≠
-/// `b.Thing`, spec §7.1); builtins and the root namespace stay bare.
-fn qualify_type_name(name: &str, path: &str) -> String {
+/// Namespace-qualifies a user type name (`a.Thing` ≠ `b.Thing`, spec §7.1);
+/// builtins and the root namespace stay bare.
+fn qualify_own(name: &str, path: &str) -> String {
     if path.is_empty() || is_builtin_type(name) {
         name.to_owned()
     } else {
@@ -282,33 +282,125 @@ fn qualify_type_name(name: &str, path: &str) -> String {
     }
 }
 
-/// Signature key for overload uniqueness (names excluded, types included),
-/// qualifying user type names with the item's namespace path so two
-/// namespaces' same-named types do not collapse to one signature.
-fn ty_key(ty: &AstType, path: &str) -> String {
+/// Signature key for overload uniqueness (names excluded, types included).
+///
+/// `qualify` maps each syntactic type name to its fully-qualified key; the
+/// caller decides whether that is the item's own namespace path (per-file
+/// dedup) or the *referenced type's declaring* namespace ([`TypeResolver`], the
+/// unit-global hook set).
+fn ty_key(ty: &AstType, qualify: &dyn Fn(&str) -> String) -> String {
     if let Some(func) = &ty.func {
-        let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty, path)).collect();
-        let rs: Vec<String> = func.returns.iter().map(|r| ty_key(&r.ty, path)).collect();
+        let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty, qualify)).collect();
+        let rs: Vec<String> = func
+            .returns
+            .iter()
+            .map(|r| ty_key(&r.ty, qualify))
+            .collect();
         format!("function({})->({})", ps.join(","), rs.join(","))
     } else {
         let args: Vec<String> = ty
             .generic_args
             .iter()
-            .map(|arg| ty_key(arg, path))
+            .map(|arg| ty_key(arg, qualify))
             .collect();
-        format!(
-            "{}:{}:{:?}",
-            qualify_type_name(&ty.name, path),
-            ty.is_ref,
-            args
-        )
+        format!("{}:{}:{:?}", qualify(&ty.name), ty.is_ref, args)
     }
 }
 
-fn sig_key(params: &[Param], returns: &[Param], path: &str) -> String {
-    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty, path)).collect();
-    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty, path)).collect();
+fn sig_key(params: &[Param], returns: &[Param], qualify: &dyn Fn(&str) -> String) -> String {
+    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty, qualify)).collect();
+    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty, qualify)).collect();
     format!("({})->({})", ps.join(","), rs.join(","))
+}
+
+/// Resolves a hook-signature type name through the referencing file's visible
+/// scope to the **referenced type's declaring** namespace (spec §7.1).
+///
+/// Qualifying by the hook's own namespace (as an earlier fix did) is wrong: a
+/// type reached from an ancestor or an import would key differently in two
+/// namespaces that reference the *same* declaration, so a genuinely duplicate
+/// hook signature would escape `E020` and later collide as `E070`.
+struct TypeResolver<'a> {
+    files: &'a [FileScope],
+    namespaces: &'a [NamespaceData],
+}
+
+impl TypeResolver<'_> {
+    fn qualify(&self, file: FileId, hook_ns: NsId, name: &str) -> String {
+        if is_builtin_type(name) {
+            return name.to_owned();
+        }
+        if let Some(Lookup::One(item)) = self
+            .files
+            .iter()
+            .find(|scope| scope.file == file)
+            .and_then(|scope| scope.visible.get(name))
+        {
+            return qualify_own(name, self.path(item.ns));
+        }
+        // Unresolved or ambiguous (the latter is `E029` on use): fall back to
+        // the hook's own namespace so a generic parameter or other non-type
+        // name never gains a spurious cross-namespace collision.
+        qualify_own(name, self.path(hook_ns))
+    }
+
+    /// The dotted path of `ns` (`""` for the root or an unknown id).
+    fn path(&self, ns: NsId) -> &str {
+        self.namespaces
+            .get(usize::try_from(ns.0).unwrap_or(usize::MAX))
+            .map_or("", |data| data.path.as_str())
+    }
+}
+
+/// Unit-global hook signature equality: both sides qualify their type names by
+/// the referenced declaration's namespace, never the hook's own.
+fn same_sig_resolved(a: &ResItem, b: &ResItem, resolver: &TypeResolver) -> bool {
+    match (&a.kind, &b.kind) {
+        (
+            ResKind::Hook {
+                params: ap,
+                returns: ar,
+                ..
+            },
+            ResKind::Hook {
+                params: bp,
+                returns: br,
+                ..
+            },
+        ) => {
+            let qa = |name: &str| resolver.qualify(a.span.file, a.ns, name);
+            let qb = |name: &str| resolver.qualify(b.span.file, b.ns, name);
+            sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
+        }
+        _ => true,
+    }
+}
+
+/// Adds one hook overload to the unit-global set, rejecting an identical
+/// signature anywhere in the compilation unit (`E020`, spec §7.2).
+fn add_hook(
+    diags: &mut Diags,
+    hooks: &mut HashMap<String, Vec<ResItem>>,
+    name: &str,
+    item: ResItem,
+    resolver: &TypeResolver,
+) {
+    let overloads = hooks.entry(name.to_owned()).or_default();
+    if overloads
+        .iter()
+        .any(|previous| same_sig_resolved(previous, &item, resolver))
+    {
+        let previous_span = overloads
+            .first()
+            .map_or(item.span, |previous| previous.span);
+        diags.emit(
+            Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                .label(item.span, true, "redefined here")
+                .label(previous_span, false, "first defined here"),
+        );
+        return;
+    }
+    overloads.push(item);
 }
 
 struct Collector<'a> {
@@ -333,8 +425,12 @@ impl Collector<'_> {
             .map_or("", String::as_str)
     }
 
-    /// Signature equality for overload uniqueness (names excluded, types
-    /// included, qualified by each item's own namespace).
+    /// Per-file hook signature equality (names excluded, types included,
+    /// qualified by the item's own namespace).
+    ///
+    /// This only ever compares two hooks from one file/namespace, so the own
+    /// path is consistent for both and matches the referenced declaration's
+    /// namespace; the unit-global set uses [`same_sig_resolved`] instead.
     fn same_sig(&self, a: &ResItem, b: &ResItem) -> bool {
         match (&a.kind, &b.kind) {
             (
@@ -348,7 +444,13 @@ impl Collector<'_> {
                     returns: br,
                     ..
                 },
-            ) => sig_key(ap, ar, self.path_of(a.ns)) == sig_key(bp, br, self.path_of(b.ns)),
+            ) => {
+                let pa = self.path_of(a.ns);
+                let pb = self.path_of(b.ns);
+                let qa = |name: &str| qualify_own(name, pa);
+                let qb = |name: &str| qualify_own(name, pb);
+                sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
+            }
             _ => true,
         }
     }
@@ -403,27 +505,6 @@ impl Collector<'_> {
                 self.insert_overload(table, None, &member.name, resolved);
             }
         }
-    }
-
-    /// Adds one hook overload to the unit-global set, rejecting an identical
-    /// signature anywhere in the compilation unit (`E020`, spec §7.2).
-    fn add_hook(&mut self, hooks: &mut HashMap<String, Vec<ResItem>>, name: &str, item: ResItem) {
-        let overloads = hooks.entry(name.to_owned()).or_default();
-        if overloads
-            .iter()
-            .any(|previous| self.same_sig(previous, &item))
-        {
-            let previous_span = overloads
-                .first()
-                .map_or(item.span, |previous| previous.span);
-            self.diags.emit(
-                Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                    .label(item.span, true, "redefined here")
-                    .label(previous_span, false, "first defined here"),
-            );
-            return;
-        }
-        overloads.push(item);
     }
 
     fn insert(&mut self, scope: &mut HashMap<String, ResItem>, name: &str, item: ResItem) {
@@ -597,52 +678,47 @@ pub fn collect_project(
         data.parent = nearest_ancestor(&data.path, &by_path);
     }
 
-    let mut collector = Collector {
-        diags,
-        next: 0,
-        ns: NsId(0),
-        ns_paths: project
-            .namespaces
-            .iter()
-            .map(|ns| ns.path.clone())
-            .collect(),
-    };
-    let mut hooks: HashMap<String, Vec<ResItem>> = HashMap::new();
-    for file in &project.files {
-        let Some(program) = by_file.get(&(file.file.0 as usize)).copied() else {
-            continue;
+    let mut pending_hooks: Vec<(String, ResItem)> = Vec::new();
+    {
+        let mut collector = Collector {
+            diags,
+            next: 0,
+            ns: NsId(0),
+            ns_paths: project
+                .namespaces
+                .iter()
+                .map(|ns| ns.path.clone())
+                .collect(),
         };
-        let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
-        let module = collector.collect_program(program, ns);
-        if let Some(data) = namespaces.get_mut(usize::try_from(ns.0).unwrap_or(usize::MAX)) {
-            for (name, item) in module.items {
-                if matches!(item.kind, ResKind::Hook { .. }) {
-                    // Hook names are overload sets merged unit-globally by
-                    // `add_hook` below. The namespace keeps only the first
-                    // overload so `namespace_of`/lookup can still find it; a
-                    // same-name hook in another file must not be `E020` just
-                    // for sharing the namespace.
-                    data.items.entry(name).or_insert(item);
-                } else {
-                    collector.insert(&mut data.items, &name, item);
+        for file in &project.files {
+            let Some(program) = by_file.get(&(file.file.0 as usize)).copied() else {
+                continue;
+            };
+            let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
+            let module = collector.collect_program(program, ns);
+            if let Some(data) = namespaces.get_mut(usize::try_from(ns.0).unwrap_or(usize::MAX)) {
+                for (name, item) in module.items {
+                    if matches!(item.kind, ResKind::Hook { .. }) {
+                        // Hook names are overload sets merged unit-globally by
+                        // `add_hook` below. The namespace keeps only the first
+                        // overload so `namespace_of`/lookup can still find it; a
+                        // same-name hook in another file must not be `E020` just
+                        // for sharing the namespace.
+                        data.items.entry(name).or_insert(item);
+                    } else {
+                        collector.insert(&mut data.items, &name, item);
+                    }
+                }
+            }
+            // Defer the unit-global hook merge until every namespace's items
+            // and every file's visible scope exist: signature equality resolves
+            // each type name to its *declaring* namespace (spec §7.1).
+            for (name, overloads) in module.hooks {
+                for item in overloads {
+                    pending_hooks.push((name.clone(), item));
                 }
             }
         }
-        for (name, overloads) in module.hooks {
-            for item in overloads {
-                collector.add_hook(&mut hooks, &name, item);
-            }
-        }
-    }
-
-    let mut def_ns: HashMap<DefId, NsId> = HashMap::new();
-    for data in &namespaces {
-        for item in data.items.values() {
-            index_defs(item, &mut def_ns);
-        }
-    }
-    for item in hooks.values().flatten() {
-        index_defs(item, &mut def_ns);
     }
 
     let mut files = Vec::with_capacity(project.files.len());
@@ -654,6 +730,25 @@ pub fn collect_project(
             ns,
             visible,
         });
+    }
+
+    let resolver = TypeResolver {
+        files: &files,
+        namespaces: &namespaces,
+    };
+    let mut hooks: HashMap<String, Vec<ResItem>> = HashMap::new();
+    for (name, item) in pending_hooks {
+        add_hook(diags, &mut hooks, &name, item, &resolver);
+    }
+
+    let mut def_ns: HashMap<DefId, NsId> = HashMap::new();
+    for data in &namespaces {
+        for item in data.items.values() {
+            index_defs(item, &mut def_ns);
+        }
+    }
+    for item in hooks.values().flatten() {
+        index_defs(item, &mut def_ns);
     }
 
     ResolvedProject {
@@ -1221,6 +1316,61 @@ mod tests {
             ],
         );
         assert_eq!(e020_count(&diags), 1, "{diags:?}");
+    }
+
+    /// Regression: a type reached from an ancestor must key by its *declaring*
+    /// namespace, so root `@h(ref Base)` and child `b` `@h(ref Base)` are the
+    /// same signature (`E020`) rather than escaping to a later `E070`.
+    #[test]
+    fn ancestor_type_hook_is_e020_not_distinct() {
+        let (_, diags) = collect_project_src(
+            &["", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "Base: object {\n    x: @bit32\n}\n@h: function (value: ref Base) result: @bit32 {\n    result = value.x\n}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "gen.lilac",
+                    src: "@h: function (value: ref Base) result: @bit32 {\n    result = value.x\n}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020_count(&diags), 1, "{diags:?}");
+    }
+
+    /// Two namespaces that each declare their *own* same-named type keep
+    /// distinct hook signatures (no `E020`).
+    #[test]
+    fn own_type_hooks_are_distinct_across_namespaces() {
+        let (_, diags) = collect_project_src(
+            &["", "a", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    name: "main.lilac",
+                    src: "main: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    name: "a.lilac",
+                    src: "Thing: object {\n    x: @bit32\n}\n@h: function (value: ref Thing) result: @bit32 {\n    result = value.x\n}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    name: "b.lilac",
+                    src: "Thing: object {\n    x: @bit32\n}\n@h: function (value: ref Thing) result: @bit32 {\n    result = value.x\n}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020_count(&diags), 0, "{diags:?}");
     }
 
     #[test]

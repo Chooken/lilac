@@ -1,0 +1,12 @@
+using b
+
+Base: object {
+    x: @bit32
+}
+
+@h: function (value: ref Base) result: @bit32 {
+    result = value.x
+}
+
+main: function () nothing {
+}

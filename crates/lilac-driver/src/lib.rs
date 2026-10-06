@@ -151,8 +151,9 @@ impl Session {
     /// reachable through `using` via the injected [`Fs`] (the driver itself
     /// does no I/O). Returns the folded, verified module.
     ///
-    /// Sources are registered in `Project::files` order so the loader's
-    /// `FileId(index)` spans resolve against this session's [`SourceMap`].
+    /// The loader registers every source in this session's [`SourceMap`] as it
+    /// reads it and carries the returned [`FileId`] on each file, so its
+    /// `using`/`E025` spans resolve directly (no `FileId(index)` coincidence).
     pub fn compile_project(
         &mut self,
         root: &Path,
