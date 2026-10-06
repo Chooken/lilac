@@ -1,14 +1,15 @@
 lilac_ir = "0.3"
 target = "x86_64-unknown-none"
-!c0: str = "hi"
-extern @puts
-  in #byte_buffer %s
+extern @write
+  in #bit32 %fd
+  in ref #bit8 %buf
+  in #bit_native %n
+  out #bit_native %result
 function @main
 {
   $entry:
-    alloca #byte_buffer %tmp.1 : zeroed
-    &1: #byte_buffer = const !c0
-    copy &1 -> %tmp.1
-    call @puts (in %tmp.1) (out)
+    alloca #bit64 %w : zeroed
+    &1: #bit64 = addr.func @write
+    copy &1 -> %w
     return
 }

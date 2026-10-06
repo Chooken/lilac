@@ -1,5 +1,5 @@
-puts: extern function (s: @byte_buffer) nothing
+write: extern function (fd: @bit32, buf: ref @bit8, n: @bit_native) result: @bit_native
 
 main: function () nothing {
-    puts("hi")
+    w: function (@bit32, ref @bit8, @bit_native) @bit_native = write
 }

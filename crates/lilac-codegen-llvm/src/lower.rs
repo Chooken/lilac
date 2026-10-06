@@ -24,7 +24,7 @@ use inkwell::values::{
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
-use lilac_error::bug;
+use lilac_error::{bug, Diagnostic};
 use lilac_ir::{
     builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirDataKind, LirFunc, LirInst,
     LirModule, LirOperand, LirTerm,
@@ -98,17 +98,21 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// the module, in that fixed order. Every function is declared before any
     /// body is lowered so calls and `addr.func` may reference functions defined
     /// later, and the runtime is defined first so builtin calls reuse it.
-    pub(crate) fn run(&mut self) {
+    ///
+    /// An `extern` signature outside the supported C scalar/pointer set (or
+    /// with more than one out) is `E028`.
+    pub(crate) fn run(&mut self) -> Result<(), Diagnostic> {
         self.define_layouts();
         self.define_data();
         self.emit_runtime();
         for func in &self.lir.funcs {
-            self.declare_func(func);
+            self.declare_func(func)?;
         }
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
         self.emit_entry_wrapper();
+        Ok(())
     }
 
     /// Appends the C entry point when the LIR defines `main`: `i32 @main()`
@@ -273,22 +277,96 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// Declares one function as `define`-able `void @name(ptr %in0, …, ptr
-    /// %out0, …)` without lowering its body. Declaring every function up front
-    /// lets calls and `addr.func` reference functions defined later.
-    fn declare_func(&self, func: &LirFunc) {
+    /// Declares one function without lowering its body. Internal functions get
+    /// the pointer-place ABI `void @name(ptr %in0, …, ptr %out0, …)`; an
+    /// `extern` function gets its platform C signature under its **unmangled**
+    /// declared name. Declaring every function up front lets calls and
+    /// `addr.func` reference functions defined later.
+    fn declare_func(&self, func: &LirFunc) -> Result<(), Diagnostic> {
+        if func.is_extern {
+            let fn_type = self.extern_fn_type(func)?;
+            self.module.add_function(&func.name, fn_type, None);
+            return Ok(());
+        }
         let arity = func.ins.len() + func.outs.len();
         let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
         self.module.add_function(symbol(&func.name), fn_type, None);
+        Ok(())
+    }
+
+    /// The platform C signature of an `extern` function: every `in` maps to its
+    /// C type and the single `out` (if any) becomes the return value. A slot
+    /// outside [`Self::extern_c_type`]'s set, or more than one out, is `E028`.
+    fn extern_fn_type(&self, func: &LirFunc) -> Result<FunctionType<'ctx>, Diagnostic> {
+        let mut params = Vec::with_capacity(func.ins.len());
+        for (place, ty) in &func.ins {
+            let c_type = self.extern_c_type(ty).ok_or_else(|| {
+                Diagnostic::error(
+                    "E028",
+                    format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
+                )
+                .help("`extern` parameters must be a bit integer or `ref T`")
+            })?;
+            params.push(BasicMetadataTypeEnum::from(c_type));
+        }
+        let returns = match func.outs.as_slice() {
+            [] => None,
+            [(place, ty)] => Some(self.extern_c_type(ty).ok_or_else(|| {
+                Diagnostic::error(
+                    "E028",
+                    format!("`extern` return `{place}` has unsupported C type `{ty}`"),
+                )
+                .help("`extern` returns must be a bit integer or `ref T`")
+            })?),
+            _ => {
+                return Err(Diagnostic::error(
+                    "E028",
+                    format!(
+                        "`extern` function `{}` declares {} out places; at most one is allowed",
+                        func.name,
+                        func.outs.len()
+                    ),
+                ))
+            }
+        };
+        Ok(match returns {
+            Some(return_ty) => return_ty.fn_type(&params, false),
+            None => self.context.void_type().fn_type(&params, false),
+        })
+    }
+
+    /// Maps a LIR type to its platform C ABI type, or `None` when it is not one
+    /// of the supported by-value scalars or a reference (pointer).
+    fn extern_c_type(&self, ty: &str) -> Option<BasicTypeEnum<'ctx>> {
+        if ty.starts_with("ref ") {
+            return Some(self.ptr_type().into());
+        }
+        match ty {
+            "#bit8" => Some(self.context.i8_type().into()),
+            "#bit16" => Some(self.context.i16_type().into()),
+            "#bit32" => Some(self.context.i32_type().into()),
+            "#bit64" => Some(self.context.i64_type().into()),
+            "#bit_native" => Some(self.native.into()),
+            _ => None,
+        }
     }
 
     /// Lowers one function body: its signature places are bound to the incoming
     /// pointer arguments, then its blocks and terminators are emitted.
     fn lower_func(&self, func: &LirFunc) {
-        let Some(function) = self.module.get_function(symbol(&func.name)) else {
+        let name = if func.is_extern {
+            func.name.as_str()
+        } else {
+            symbol(&func.name)
+        };
+        let Some(function) = self.module.get_function(name) else {
             bug!(Span::dummy(), "function `@{}` was not declared", func.name);
         };
+
+        if func.is_extern {
+            return;
+        }
 
         let params = function.get_params();
         let mut state = FnState {
@@ -314,10 +392,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     .insert(place.clone(), value.into_pointer_value());
                 state.place_types.insert(place.clone(), ty.clone());
             }
-        }
-
-        if func.is_extern {
-            return;
         }
 
         let mut blocks: HashMap<&str, BasicBlock<'ctx>> = HashMap::new();

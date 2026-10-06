@@ -15,6 +15,7 @@ use inkwell::targets::{
 use inkwell::OptimizationLevel;
 
 use lilac_codegen::{Backend, OptLevel};
+use lilac_error::Emitter;
 use lilac_ir::LirModule;
 use lilac_target::is_64_bit_triple;
 
@@ -95,7 +96,10 @@ impl Backend for LlvmBackend {
         let context = Context::create();
         let (module, machine) = self.prepare_module(&context)?;
         let mut lower = lower::Lower::new(&context, module, lir, is_64_bit_triple(&self.triple));
-        lower.run();
+        if let Err(diagnostic) = lower.run() {
+            return Err(lilac_error::EmitterHuman::new()
+                .render(&diagnostic, &lilac_span::SourceMap::default()));
+        }
         let module = lower.into_module();
         module
             .verify()
@@ -235,6 +239,66 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// An `extern` function is declared with the platform C ABI — scalars by
+    /// value, `ref T` as `ptr`, the single out as the return type — instead of
+    /// the pointer-place ABI internal functions use, and emits no body.
+    #[test]
+    fn extern_decl_uses_c_signature() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(LirFunc {
+            name: "write".to_owned(),
+            ins: vec![
+                ("fd".to_owned(), "#bit32".to_owned()),
+                ("buf".to_owned(), "ref #bit8".to_owned()),
+                ("n".to_owned(), "#bit_native".to_owned()),
+            ],
+            outs: vec![("written".to_owned(), "#bit_native".to_owned())],
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let text = emit(&module);
+        assert!(text.contains("declare i64 @write(i32, ptr, i64)"), "{text}");
+        assert!(!text.contains("define i64 @write"), "{text}");
+    }
+
+    /// An `extern` parameter outside the scalar/pointer set is `E028`, not a
+    /// mis-compiled struct pointer.
+    #[test]
+    fn extern_aggregate_param_is_e028() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(LirFunc {
+            name: "puts".to_owned(),
+            ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+            outs: Vec::new(),
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let err = backend()
+            .emit_llvm(&module)
+            .expect_err("aggregate parameter must be E028");
+        assert!(err.contains("error[E028]"), "{err}");
+    }
+
+    /// An `extern` declaring more than one out place is `E028`.
+    #[test]
+    fn extern_multi_out_is_e028() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(LirFunc {
+            name: "pair".to_owned(),
+            ins: Vec::new(),
+            outs: vec![
+                ("a".to_owned(), "#bit32".to_owned()),
+                ("b".to_owned(), "#bit32".to_owned()),
+            ],
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let err = backend()
+            .emit_llvm(&module)
+            .expect_err("multiple outs must be E028");
+        assert!(err.contains("error[E028]"), "{err}");
     }
 
     #[test]
