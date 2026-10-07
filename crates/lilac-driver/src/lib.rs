@@ -285,7 +285,14 @@ impl Session {
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
-        let hir = lilac_typeck::check_bodies(program, project, &sigs, &mut types, &mut self.diags);
+        let hir = lilac_typeck::check_bodies(
+            program,
+            project,
+            &sigs,
+            &mut types,
+            &mut self.diags,
+            self.target.bit_native_width(),
+        );
         self.analysis = Some(Analysis {
             project: project.clone(),
             types: types.clone(),

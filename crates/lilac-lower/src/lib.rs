@@ -2075,7 +2075,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = lilac_typeck::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        let hir = lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         let lir = lower(&hir, &project, &types, &mut diags, "x86_64-unknown-none")
             .expect("test source lowers");
         (lir.to_text(), diags)

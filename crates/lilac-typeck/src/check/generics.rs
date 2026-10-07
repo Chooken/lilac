@@ -1075,7 +1075,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = crate::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = crate::check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        let hir = crate::check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         (diags, hir, types, sm)
     }
 

@@ -231,6 +231,13 @@ float types in the accepted list.
   `@bit64`); `@add`/… bodies call `@f_add_32`/`@f_add_64` …; `@negate` uses
   `@f_negate_32/64`; the `@conversion` from `@byte_buffer` uses `@as_float`
   producing `@fbit32/64`.
+  **Amendment (sub-project 2):** the `@bitN ↔ FloatN` reinterpret `@conversion`
+  pairs added to these objects are removed. The float objects expose only the
+  `@fbitN ↔ FloatN` value conversions (`@fbitN → FloatN` and
+  `FloatN → @fbitN`; the `@byte_buffer`/`@as_float` path above is itself
+  retired by the real-literals sub-project); bit↔float reinterpretation uses
+  the `@bits_to_fbit_N`/`@fbit_to_bits_N` intrinsics directly, and an integer
+  literal into a float object is `E043`, never a silent bitcast.
 - `bool.lilac` and the int comparison hooks use the suffixed comparison names
   with the right width.
 

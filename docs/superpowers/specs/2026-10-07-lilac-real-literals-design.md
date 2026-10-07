@@ -201,8 +201,13 @@ the point the binop is checked, so it sees the consumed width.
   with `@conversion(from: @bitN)` (`@bit_native` for `int.lilac`) that wraps
   the value (no `@as_int`); the comparison/arith hook bodies are unchanged.
 - `float32.lilac`, `float64.lilac`: replace the `@byte_buffer` conversions with
-  `@conversion(from: @fbit32)` / `@conversion(from: @fbit64)` (identity/wrap);
-  the `@bitN ↔ FloatN` pairs from sub-project 1 stay.
+  `@conversion(from: @fbit32)` / `@conversion(from: @fbit64)` (identity/wrap).
+  The `@bitN ↔ FloatN` reinterpret pairs from sub-project 1 do **not** stay:
+  the float objects expose only the `@fbitN ↔ FloatN` value conversions
+  (`@fbitN → FloatN` and `FloatN → @fbitN`), so an integer literal into a
+  float object is a clean `E043` (previously it grew to `@bitN` and silently
+  bitcast). Bit↔float reinterpretation is done with the
+  `@bits_to_fbit_N`/`@fbit_to_bits_N` intrinsics directly.
 - No string→number conversion is added (non-goal).
 
 ## 11. Testing

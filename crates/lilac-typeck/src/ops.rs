@@ -126,7 +126,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = collect_sigs(&project, &program, &mut types, &mut diags);
-        check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         diags
     }
 

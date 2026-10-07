@@ -106,6 +106,7 @@ pub fn check_bodies(
     sigs: &Sigs,
     types: &mut Types,
     diags: &mut Diags,
+    native_bits: u32,
 ) -> HirProgram {
     let mut checker = Checker {
         program,
@@ -114,6 +115,7 @@ pub fn check_bodies(
         sigs,
         types,
         diags,
+        native_bits,
         checked: HashSet::new(),
         fields: HashMap::new(),
         hir: Vec::new(),
@@ -248,6 +250,9 @@ struct Checker<'a> {
     sigs: &'a Sigs,
     types: &'a mut Types,
     diags: &'a mut Diags,
+    /// Native pointer width in bits (`lilac_target::Target::bit_native_width`),
+    /// so `@bit_native` literals range-check against the real target width.
+    native_bits: u32,
     checked: HashSet<DefId>,
     fields: HashMap<(String, String), AstType>,
     hir: Vec<HirFunc>,
@@ -965,17 +970,6 @@ fn is_bit(types: &Types, id: TypeId) -> bool {
     )
 }
 
-/// Width in bits of a bit container (callers guarantee `is_bit` first).
-fn bit_width(types: &Types, id: TypeId) -> u32 {
-    match types.kind(id) {
-        lilac_ty::TypeKind::Bit8 => 8,
-        lilac_ty::TypeKind::Bit16 => 16,
-        lilac_ty::TypeKind::Bit32 => 32,
-        lilac_ty::TypeKind::Bit64 | lilac_ty::TypeKind::BitNative => 64,
-        _ => lilac_error::bug!(Span::dummy(), "bit width of non-bit type"),
-    }
-}
-
 fn is_float(types: &Types, id: TypeId) -> bool {
     matches!(
         types.kind(id),
@@ -1108,6 +1102,73 @@ fn max_finite_float(width: u32) -> f64 {
     }
 }
 
+/// Well-formed error value for a failed literal fold (never lowered).
+fn poison_folded(span: Span) -> (TypeRef, HirExpr) {
+    (
+        TypeRef {
+            id: TypeId::ERROR,
+            is_ref: false,
+        },
+        poison_expr(span),
+    )
+}
+
+/// Whether a binop is literal-foldable arithmetic (`+ - * / %`).
+fn is_arithmetic(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+    )
+}
+
+/// Whether `expr` is a syntactically all-literal arithmetic subtree (a number,
+/// or a `+ - * / %` of two such). Pure: emits no diagnostics; used to pick the
+/// width anchor in `check_binop_sides`.
+fn is_foldable_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Number(..) => true,
+        Expr::BinOp { lhs, op, rhs, .. } if is_arithmetic(*op) => {
+            is_foldable_literal(lhs) && is_foldable_literal(rhs)
+        }
+        _ => false,
+    }
+}
+
+/// A folded literal value: an integer as sign plus magnitude, or a float.
+#[derive(Clone, Copy)]
+enum LiteralValue {
+    Int { negative: bool, magnitude: u128 },
+    Float(f64),
+}
+
+/// The result of folding an expression to a literal value.
+enum FoldedLiteral {
+    /// Not an all-literal arithmetic subtree: the operator keeps its hook.
+    NotLiteral,
+    /// A fully folded literal value.
+    Value(LiteralValue),
+    /// A fold error; the diagnostic was already emitted.
+    Error,
+}
+
+/// The signed `i128` value of an integer literal's sign plus magnitude.
+/// Callers guarantee the magnitude fits `u64`, so it fits `i128`.
+fn signed_value(negative: bool, magnitude: u128) -> i128 {
+    let value = i128::try_from(magnitude).unwrap_or(i128::MAX);
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+/// Parses a float literal's source bytes (underscores stripped); a malformed
+/// form reports `NaN`. The lexer only emits valid forms.
+fn parse_float_literal(bytes: &str) -> f64 {
+    let cleaned: String = bytes.chars().filter(|c| *c != '_').collect();
+    cleaned.parse::<f64>().unwrap_or(f64::NAN)
+}
+
 fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> ErrorGuaranteed {
     diags.emit(
         Diagnostic::error(
@@ -1119,6 +1180,20 @@ fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> Error
 }
 
 impl Checker<'_> {
+    /// Width in bits of a bit container (callers guarantee `is_bit` first).
+    /// `@bit_native` takes the target's native pointer width, so a literal for
+    /// it is range-checked against the real target (single pointer-width rule).
+    fn bit_width(&self, id: TypeId) -> u32 {
+        match self.types.kind(id) {
+            lilac_ty::TypeKind::Bit8 => 8,
+            lilac_ty::TypeKind::Bit16 => 16,
+            lilac_ty::TypeKind::Bit32 => 32,
+            lilac_ty::TypeKind::Bit64 => 64,
+            lilac_ty::TypeKind::BitNative => self.native_bits,
+            _ => lilac_error::bug!(Span::dummy(), "bit width of non-bit type"),
+        }
+    }
+
     /// The namespace-qualified name of an item declared in `file` (root adds no
     /// prefix), matching the type interner's `types.display`/`types.mangle`.
     fn qualify_local(&self, file: FileId, local: &str) -> String {
@@ -2920,7 +2995,7 @@ impl Checker<'_> {
             .filter(|id| is_bit(self.types, *id))
             .or_else(|| expected.and_then(|id| self.object_conversion_source(id, false)));
         if let Some(t) = constrained {
-            let width = bit_width(self.types, t);
+            let width = self.bit_width(t);
             if bits > width {
                 self.diags.emit(
                     Diagnostic::error(
@@ -3024,7 +3099,7 @@ impl Checker<'_> {
             .filter(|id| is_bit(self.types, *id))
             .or_else(|| expected.and_then(|id| self.object_conversion_source(id, false)));
         let (ty, width) = if let Some(t) = constrained {
-            let width = bit_width(self.types, t);
+            let width = self.bit_width(t);
             if fit > width {
                 self.diags.emit(
                     Diagnostic::error(
@@ -3053,11 +3128,11 @@ impl Checker<'_> {
         Some((ty, format!("0x{value:X}")))
     }
 
-    /// Folds an all-literal `+ - * / %` (design §7): when both operands are
-    /// `Expr::Number` of the same kind, they fold at i64/f64 and the result is
-    /// typed by the literal rules. A mixed int/float literal pair is `E010`.
-    /// Returns `None` for any other shape (including non-arithmetic operators
-    /// and any non-literal operand), so the operator keeps its hook resolution.
+    /// Folds an all-literal `+ - * / %` subtree bottom-up (design §7): an
+    /// operand subtree folds first, then a parent whose operands are both
+    /// literal values. Returns `None` when either operand is non-literal, so
+    /// the operator keeps its hook resolution and its sides are checked
+    /// normally.
     fn fold_literal_binop(
         &mut self,
         lhs: &Expr,
@@ -3066,209 +3141,285 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Option<(TypeRef, HirExpr)> {
-        if !matches!(
-            op,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-        ) {
+        if !is_arithmetic(op) {
             return None;
         }
-        let Expr::Number(left, _) = lhs else {
-            return None;
-        };
-        let Expr::Number(right, _) = rhs else {
-            return None;
-        };
-        if is_float_literal(left) != is_float_literal(right) {
-            self.diags.emit(
-                Diagnostic::error(
-                    "E010",
-                    "mismatched types: cannot mix an integer and a float literal",
-                )
-                .label(span, true, "mixed int/float operands".to_owned()),
-            );
-            return Some((
-                TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                },
-                poison_expr(span),
-            ));
+        let left = self.fold_literal_value(lhs);
+        let right = self.fold_literal_value(rhs);
+        if matches!(left, FoldedLiteral::Error) || matches!(right, FoldedLiteral::Error) {
+            return Some(poison_folded(span));
         }
-        if is_float_literal(left) {
-            Some(self.fold_float_binop(left, op, right, span, expected))
-        } else {
-            Some(self.fold_int_binop(left, op, right, span, expected))
+        let (FoldedLiteral::Value(left), FoldedLiteral::Value(right)) = (left, right) else {
+            return None;
+        };
+        match self.combine_literal_values(left, op, right, span) {
+            Some(value) => Some(self.type_folded_value(value, span, expected)),
+            None => Some(poison_folded(span)),
         }
     }
 
-    /// Folds two integer literals at 64-bit: the result is typed by §4 (grown
-    /// to the consumed width, `E060` on overflow) or, when negative, by §5
-    /// (two's-complement). Divide/modulo by zero is `E060`.
-    fn fold_int_binop(
-        &mut self,
-        left: &str,
-        op: BinOp,
-        right: &str,
-        span: Span,
-        expected: Option<TypeId>,
-    ) -> (TypeRef, HirExpr) {
-        let poison = (
-            TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            },
-            poison_expr(span),
-        );
-        let (Some(left_magnitude), Some(right_magnitude)) =
-            (integer_magnitude(left), integer_magnitude(right))
-        else {
-            self.diags
-                .emit(Diagnostic::error("E060", "invalid integer literal").label(
-                    span,
-                    true,
-                    "not a valid integer literal".to_owned(),
-                ));
-            return poison;
-        };
-        if left_magnitude > u128::from(u64::MAX) || right_magnitude > u128::from(u64::MAX) {
-            self.diags.emit(
-                Diagnostic::error("E060", "integer literal does not fit in 64 bits").label(
-                    span,
-                    true,
-                    "literal too large".to_owned(),
-                ),
-            );
-            return poison;
-        }
-        // The magnitudes are at most `u64::MAX`, and `u128` holds the full
-        // product of two `u64`-range values, so the arithmetic below cannot
-        // overflow; the 64-bit fit is enforced when the result is typed.
-        let mut negative = false;
-        let magnitude = match op {
-            BinOp::Add => left_magnitude + right_magnitude,
-            BinOp::Sub => {
-                if left_magnitude >= right_magnitude {
-                    left_magnitude - right_magnitude
+    /// Folds one expression to a literal value: a number literal, or a `+ - *
+    /// / %` `BinOp` whose operands both fold. `NotLiteral` when an operand is
+    /// not a literal (the operator keeps its hook); `Error` after emitting a
+    /// fold diagnostic (invalid/too-wide literal, mixed kinds, divide by zero,
+    /// or 64-bit overflow).
+    fn fold_literal_value(&mut self, expr: &Expr) -> FoldedLiteral {
+        match expr {
+            Expr::Number(bytes, span) => {
+                if is_float_literal(bytes) {
+                    FoldedLiteral::Value(LiteralValue::Float(parse_float_literal(bytes)))
+                } else if let Some(magnitude) = integer_magnitude(bytes) {
+                    if magnitude > u128::from(u64::MAX) {
+                        self.diags.emit(
+                            Diagnostic::error("E060", "integer literal does not fit in 64 bits")
+                                .label(*span, true, "literal too large".to_owned()),
+                        );
+                        FoldedLiteral::Error
+                    } else {
+                        FoldedLiteral::Value(LiteralValue::Int {
+                            negative: false,
+                            magnitude,
+                        })
+                    }
                 } else {
-                    negative = true;
-                    right_magnitude - left_magnitude
+                    self.diags
+                        .emit(Diagnostic::error("E060", "invalid integer literal").label(
+                            *span,
+                            true,
+                            "not a valid integer literal".to_owned(),
+                        ));
+                    FoldedLiteral::Error
                 }
             }
-            BinOp::Mul => left_magnitude * right_magnitude,
-            BinOp::Div | BinOp::Mod if right_magnitude == 0 => {
-                self.diags.emit(
-                    Diagnostic::error("E060", "division by zero in integer literal expression")
-                        .label(span, true, "divide by zero".to_owned()),
-                );
-                return poison;
+            Expr::BinOp { lhs, op, rhs, span } if is_arithmetic(*op) => {
+                let left = self.fold_literal_value(lhs);
+                let right = self.fold_literal_value(rhs);
+                if matches!(left, FoldedLiteral::Error) || matches!(right, FoldedLiteral::Error) {
+                    return FoldedLiteral::Error;
+                }
+                match (left, right) {
+                    (FoldedLiteral::Value(left), FoldedLiteral::Value(right)) => {
+                        match self.combine_literal_values(left, *op, right, *span) {
+                            Some(value) => FoldedLiteral::Value(value),
+                            None => FoldedLiteral::Error,
+                        }
+                    }
+                    _ => FoldedLiteral::NotLiteral,
+                }
             }
-            BinOp::Div => left_magnitude / right_magnitude,
-            BinOp::Mod => left_magnitude % right_magnitude,
-            _ => lilac_error::bug!(span, "non-arithmetic operator in integer literal fold"),
-        };
-        if negative {
-            let Some(fit) = signed_smallest_bit_width(magnitude) else {
-                self.diags.emit(
-                    Diagnostic::error("E060", "integer expression does not fit in 64 bits").label(
-                        span,
-                        true,
-                        "expression too large".to_owned(),
-                    ),
-                );
-                return poison;
-            };
-            let Some((ty, bytes)) = self.signed_int_literal_value(magnitude, fit, span, expected)
-            else {
-                return poison;
-            };
-            number_expr(ty, &bytes, span)
-        } else {
-            let bits = if magnitude == 0 {
-                0
-            } else {
-                u128::BITS - magnitude.leading_zeros()
-            };
-            let Some(ty) = self.resolve_int_literal_ty(bits, span, expected) else {
-                return poison;
-            };
-            number_expr(ty, &format!("0x{magnitude:X}"), span)
+            _ => FoldedLiteral::NotLiteral,
         }
     }
 
-    /// Folds two float literals at `f64`; the result is typed by §6 (default
-    /// `@fbit64`, pinned by an expected `@fbitN`, `E060` past the max finite).
-    /// A non-finite result (including divide/modulo by zero) is `E060`.
-    fn fold_float_binop(
+    /// Combines two folded literal values under an arithmetic operator at
+    /// 64-bit (design §7). A mixed int/float pair is `E010`; divide/modulo by
+    /// zero, a non-finite float result, and an integer result outside the
+    /// signed/unsigned 64-bit range are `E060`. Returns `None` after emitting.
+    fn combine_literal_values(
         &mut self,
-        left: &str,
+        left: LiteralValue,
         op: BinOp,
-        right: &str,
+        right: LiteralValue,
         span: Span,
-        expected: Option<TypeId>,
-    ) -> (TypeRef, HirExpr) {
-        let poison = (
-            TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            },
-            poison_expr(span),
-        );
-        let clean = |text: &str| -> String { text.chars().filter(|c| *c != '_').collect() };
-        let left_value = clean(left).parse::<f64>().unwrap_or(f64::NAN);
-        let right_value = clean(right).parse::<f64>().unwrap_or(f64::NAN);
-        let value = match op {
-            BinOp::Add => left_value + right_value,
-            BinOp::Sub => left_value - right_value,
-            BinOp::Mul => left_value * right_value,
-            BinOp::Div => left_value / right_value,
-            BinOp::Mod => left_value % right_value,
-            _ => lilac_error::bug!(span, "non-arithmetic operator in float literal fold"),
-        };
-        if let Some(t) = expected {
-            if is_bit(self.types, t) {
+    ) -> Option<LiteralValue> {
+        match (left, right) {
+            (LiteralValue::Float(left), LiteralValue::Float(right)) => {
+                let value = match op {
+                    BinOp::Add => left + right,
+                    BinOp::Sub => left - right,
+                    BinOp::Mul => left * right,
+                    BinOp::Div => left / right,
+                    BinOp::Mod => left % right,
+                    _ => lilac_error::bug!(span, "non-arithmetic operator in float literal fold"),
+                };
+                if value.is_finite() {
+                    Some(LiteralValue::Float(value))
+                } else {
+                    self.diags.emit(
+                        Diagnostic::error("E060", "float expression does not fit in @fbit64")
+                            .label(span, true, "expression out of range".to_owned()),
+                    );
+                    None
+                }
+            }
+            (
+                LiteralValue::Int {
+                    negative: left_negative,
+                    magnitude: left_magnitude,
+                },
+                LiteralValue::Int {
+                    negative: right_negative,
+                    magnitude: right_magnitude,
+                },
+            ) => {
+                let left = signed_value(left_negative, left_magnitude);
+                let right = signed_value(right_negative, right_magnitude);
+                let result = match op {
+                    BinOp::Add => left.checked_add(right),
+                    BinOp::Sub => left.checked_sub(right),
+                    BinOp::Mul => left.checked_mul(right),
+                    BinOp::Div | BinOp::Mod if right == 0 => {
+                        self.diags.emit(
+                            Diagnostic::error(
+                                "E060",
+                                "division by zero in integer literal expression",
+                            )
+                            .label(
+                                span,
+                                true,
+                                "divide by zero".to_owned(),
+                            ),
+                        );
+                        return None;
+                    }
+                    BinOp::Div => left.checked_div(right),
+                    BinOp::Mod => left.checked_rem(right),
+                    _ => {
+                        lilac_error::bug!(span, "non-arithmetic operator in integer literal fold")
+                    }
+                };
+                let Some(result) = result else {
+                    self.diags.emit(
+                        Diagnostic::error("E060", "integer expression does not fit in 64 bits")
+                            .label(span, true, "expression too large".to_owned()),
+                    );
+                    return None;
+                };
+                // Each operand fits 64 bits, and `checked_*` rejects an
+                // `i128` overflow, so `result` is in `±2^128`. Enforce the
+                // 64-bit range here so an intermediate overflow is `E060` even
+                // when a later operation would bring the value back in range.
+                let magnitude = result.unsigned_abs();
+                let negative = result < 0;
+                if (!negative && magnitude > u128::from(u64::MAX))
+                    || (negative && magnitude > 1u128 << 63)
+                {
+                    self.diags.emit(
+                        Diagnostic::error("E060", "integer expression does not fit in 64 bits")
+                            .label(span, true, "expression too large".to_owned()),
+                    );
+                    return None;
+                }
+                Some(LiteralValue::Int {
+                    negative,
+                    magnitude,
+                })
+            }
+            _ => {
                 self.diags.emit(
                     Diagnostic::error(
                         "E010",
-                        "mismatched types: expected an integer, found a float",
+                        "mismatched types: cannot mix an integer and a float literal",
                     )
-                    .label(span, true, "float expression here".to_owned()),
+                    .label(span, true, "mixed int/float operands".to_owned()),
                 );
-                return poison;
-            }
-            if is_float(self.types, t) && float_width(self.types, t) == 128 {
-                self.diags.emit(
-                    Diagnostic::error("E010", "`@fbit128` literals are not supported yet").label(
-                        span,
-                        true,
-                        "only 16/32/64-bit float literals can be typed".to_owned(),
-                    ),
-                );
-                return poison;
+                None
             }
         }
-        let target = match expected {
-            Some(t) if is_float(self.types, t) => t,
-            Some(t) => match self.object_conversion_source(t, true) {
-                Some(src) => src,
-                None => self.builtin_ty("@fbit64"),
-            },
-            None => self.builtin_ty("@fbit64"),
-        };
-        let width = float_width(self.types, target);
-        if !value.is_finite() || value.abs() > max_finite_float(width) {
-            self.diags.emit(
-                Diagnostic::error(
-                    "E060",
-                    format!(
-                        "float expression does not fit in {}",
-                        self.types.display(target)
-                    ),
-                )
-                .label(span, true, "expression out of range".to_owned()),
-            );
-            return poison;
+    }
+
+    /// Types a folded literal value by the literal rules: an integer grows to
+    /// the consumed bit type (or a user object's single `@conversion(from:
+    /// @bitN)` source), `E060` on overflow; a negative result uses the signed
+    /// two's-complement rule (design §5); a float defaults to `@fbit64`, pins
+    /// to an expected `@fbitN`, and is `E060` past the max finite.
+    fn type_folded_value(
+        &mut self,
+        value: LiteralValue,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        let poison = poison_folded(span);
+        match value {
+            LiteralValue::Int {
+                negative: true,
+                magnitude,
+            } => {
+                let Some(fit) = signed_smallest_bit_width(magnitude) else {
+                    self.diags.emit(
+                        Diagnostic::error("E060", "integer expression does not fit in 64 bits")
+                            .label(span, true, "expression too large".to_owned()),
+                    );
+                    return poison;
+                };
+                let Some((ty, bytes)) =
+                    self.signed_int_literal_value(magnitude, fit, span, expected)
+                else {
+                    return poison;
+                };
+                number_expr(ty, &bytes, span)
+            }
+            LiteralValue::Int {
+                negative: false,
+                magnitude,
+            } => {
+                let bits = if magnitude == 0 {
+                    0
+                } else {
+                    u128::BITS - magnitude.leading_zeros()
+                };
+                let Some(ty) = self.resolve_int_literal_ty(bits, span, expected) else {
+                    return poison;
+                };
+                number_expr(ty, &format!("0x{magnitude:X}"), span)
+            }
+            LiteralValue::Float(value) => {
+                if let Some(t) = expected {
+                    if is_bit(self.types, t) {
+                        self.diags.emit(
+                            Diagnostic::error(
+                                "E010",
+                                "mismatched types: expected an integer, found a float",
+                            )
+                            .label(
+                                span,
+                                true,
+                                "float expression here".to_owned(),
+                            ),
+                        );
+                        return poison;
+                    }
+                    if is_float(self.types, t) && float_width(self.types, t) == 128 {
+                        self.diags.emit(
+                            Diagnostic::error("E010", "`@fbit128` literals are not supported yet")
+                                .label(
+                                    span,
+                                    true,
+                                    "only 16/32/64-bit float literals can be typed".to_owned(),
+                                ),
+                        );
+                        return poison;
+                    }
+                }
+                let target = match expected {
+                    Some(t) if is_float(self.types, t) => t,
+                    Some(t) => match self.object_conversion_source(t, true) {
+                        Some(src) => src,
+                        None => self.builtin_ty("@fbit64"),
+                    },
+                    None => self.builtin_ty("@fbit64"),
+                };
+                let width = float_width(self.types, target);
+                if !value.is_finite() || value.abs() > max_finite_float(width) {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E060",
+                            format!(
+                                "float expression does not fit in {}",
+                                self.types.display(target)
+                            ),
+                        )
+                        .label(
+                            span,
+                            true,
+                            "expression out of range".to_owned(),
+                        ),
+                    );
+                    return poison;
+                }
+                number_expr(target, &format!("{value:?}"), span)
+            }
         }
-        number_expr(target, &format!("{value:?}"), span)
     }
 
     /// Types a float literal (`.` or exponent form): it defaults to `@fbit64`,
@@ -3539,8 +3690,8 @@ impl Checker<'_> {
         lhs: &Expr,
         rhs: &Expr,
     ) -> ((TypeRef, HirExpr), (TypeRef, HirExpr)) {
-        let left_lit = matches!(lhs, Expr::Number(..));
-        let right_lit = matches!(rhs, Expr::Number(..));
+        let left_lit = is_foldable_literal(lhs);
+        let right_lit = is_foldable_literal(rhs);
         if left_lit && right_lit {
             let left = self.check_expr(fctx, lhs, None);
             let right = self.check_expr(fctx, rhs, None);
@@ -6436,6 +6587,12 @@ mod tests {
     use lilac_ty::Types;
 
     fn check_src(src: &str) -> Diags {
+        check_src_native(src, 64)
+    }
+
+    /// Like [`check_src`], but with an explicit target native width so the
+    /// `@bit_native` literal path can be exercised at 32 bits.
+    fn check_src_native(src: &str, native_bits: u32) -> Diags {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -6451,7 +6608,14 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
-        check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        check_bodies(
+            &program,
+            &project,
+            &sigs,
+            &mut types,
+            &mut diags,
+            native_bits,
+        );
         diags
     }
 
@@ -6478,7 +6642,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         assert!(!diags.has_errors(), "{diags:?}");
         let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
         let value = match &main.body.stmts[0] {
@@ -6542,6 +6706,25 @@ mod tests {
     fn integer_literal_overflow_of_expected_width_is_e060() {
         let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
         assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn bit_native_literal_uses_target_width() {
+        // `@bit_native` is the target's pointer width, not always 64: a value
+        // needing 33 bits fits a 64-bit target but overflows a 32-bit one.
+        let src = "main: function () nothing {\n    x: @bit_native = 0x1_0000_0000\n}\n";
+        let diags = check_src_native(src, 64);
+        assert!(!diags.has_errors(), "64-bit: {diags:?}");
+        let diags = check_src_native(src, 32);
+        assert!(has_code(&diags, "E060"), "32-bit: {diags:?}");
+        // 32 bits exactly fits either target.
+        let src = "main: function () nothing {\n    x: @bit_native = 0xFFFF_FFFF\n}\n";
+        let diags = check_src_native(src, 32);
+        assert!(!diags.has_errors(), "32-bit: {diags:?}");
+        // A folded literal is range-checked at the native width too.
+        let src = "main: function () nothing {\n    x: @bit_native = 0xFFFF_FFFF + 0x1\n}\n";
+        let diags = check_src_native(src, 32);
+        assert!(has_code(&diags, "E060"), "32-bit fold: {diags:?}");
     }
 
     #[test]
@@ -6669,6 +6852,67 @@ mod tests {
             assert_eq!(ty, want_ty, "{src} type");
             assert_eq!(bytes, want_bytes, "{src} bytes");
         }
+    }
+
+    #[test]
+    fn nested_literal_fold() {
+        // Folding is bottom-up: `2 * 3 + 4` parses as `(2 * 3) + 4`, so the
+        // inner `*` must fold before the outer `+` (design §2/§7).
+        let source = "main: function () nothing {\n    2 * 3 + 4\n}\n";
+        let (ty, bytes) = literal_type_and_bytes(source);
+        assert_eq!(ty, "@bit8");
+        assert_eq!(bytes, "0xA");
+    }
+
+    #[test]
+    fn nested_literal_fold_grows_to_expected_width() {
+        let source = "main: function () nothing {\n    x: @bit32 = 2 * 3 + 4\n}\n";
+        let (ty, bytes) = literal_type_and_bytes(source);
+        assert_eq!(ty, "@bit32");
+        assert_eq!(bytes, "0xA");
+    }
+
+    #[test]
+    fn nested_literal_fold_negative_intermediate() {
+        // `(2 - 5) * 2` folds the negative intermediate, then types by §5.
+        let source = "main: function () nothing {\n    2 - 5 + 1\n}\n";
+        let (ty, bytes) = literal_type_and_bytes(source);
+        assert_eq!(ty, "@bit8");
+        assert_eq!(bytes, "0xFE");
+    }
+
+    #[test]
+    fn nested_literal_fold_overflow_is_e060() {
+        // `200 * 2` needs 9 bits: a nested overflow is still `E060`.
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = 200 * 2\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+        // An intermediate past 64 bits is `E060` even though `/ 2` would fit.
+        let diags =
+            check_src("main: function () nothing {\n    0xFFFF_FFFF_FFFF_FFFF * 2 / 2\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn nested_literal_fold_divide_by_zero_is_e060() {
+        let diags = check_src("main: function () nothing {\n    2 * (3 / 0)\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn nested_literal_fold_mixed_kind_is_e010() {
+        let diags = check_src("main: function () nothing {\n    2 * 3 + 4.0\n}\n");
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn foldable_literal_anchors_non_literal_width() {
+        // A non-literal operand anchors the width, so the all-literal subtree
+        // `(2 + 3)` must grow to `@bit32` (not its own `@bit8` fit) for the
+        // `@bit32` `@mul` hook to resolve.
+        let source = "@mul: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_mul_32(lhs, rhs)\n}\n\
+                      main: function () nothing {\n    x: @bit32 = 2\n    y: @bit32 = x * (2 + 3)\n}\n";
+        let diags = check_src(source);
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
@@ -6846,7 +7090,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         (diags, hir)
     }
 
@@ -7287,7 +7531,7 @@ mod tests {
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
         let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
         (hir, diags)
     }
 

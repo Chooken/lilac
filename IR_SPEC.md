@@ -199,8 +199,8 @@ call &f (in %a) (out %b)
 * Callee is a `@`-builtin **leaf** name (`call @ptr_add (in %base, %off) (out %s)`)
 * Only three target-specific leaves remain builtins, verified against the
   signature table below. They lower to the `.lilac.*` backend symbols shown.
-  `@as_int`, `@as_float`, `@size_of`, and `@compile_error` are fold-only
-  markers, never builtin calls (see `compile.error`)
+  `@size_of` and `@compile_error` are fold-only markers, never builtin calls
+  (see `compile.error`)
 
 | builtin | in-args | out | LLVM lowering |
 | --- | --- | --- | --- |
@@ -280,13 +280,11 @@ folding, or inside a function unreachable from `main` or an `--export` root, is
 dropped without diagnostic, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives is a live error, diagnosed after reachability pruning — never
-during verification (reaching the verifier is an internal error). The fold-required
-markers `@as_int`, `@as_float`, and `@size_of` are the same shape: the front-end
-emits a pre-fold node, the folder consumes it to a plain `const` (or `E060`), and
-a survivor reaching verification is an internal error, never a backend call.
-`@as_float` folds to the IEEE-754 bit pattern of its value at the target width
-(16/32/64) as an integer `const`, never a float literal. `@size_of` folding is
-best-effort in M3 (operand-type semantics not yet pinned).
+during verification (reaching the verifier is an internal error). The
+fold-required marker `@size_of` is the same shape: the front-end emits a
+pre-fold node, the folder consumes it to a plain `const` (or `E060`), and a
+survivor reaching verification is an internal error, never a backend call.
+`@size_of` folding is best-effort in M3 (operand-type semantics not yet pinned).
 
 ## Casts
 
@@ -343,8 +341,8 @@ Same width rule as integer arithmetic.
 * Ints: `0x1:#bit32`, `0b101:#bit8`; width suffix is required in canonical text.
 * Strings/numbers: `!c: str = "..."` / `!c: numlit = "10.5"` in `data`; a string
   literal is read with `&1: #byte_buffer = const !c` (data-backed buffer value).
-* Fold-required markers `@as_int`/`@as_float`/`@size_of` on constant operands
-  never appear in verified IR — they fold to `const`.
+* A fold-required marker `@size_of` on a constant operand never appears in
+  verified IR — it folds to `const`.
 
 ## Verification (`lilac-ir::verify`, runs before any backend)
 1. Header present with supported `lilac_ir` version; `target` resolves `@bit_native`.
@@ -354,8 +352,8 @@ Same width rule as integer arithmetic.
 5. `field .name` exists with index in bounds and matching type comment.
 6. Arithmetic/comparison widths match; `i.*`/`f.*` used on allowed widths only.
 7. `return` only when all `out` places are definitely assigned.
-8. No `branch.if` on a constant, no fold-required marker (`@as_int`/`@as_float`/
-   `@size_of`) or `compile.error` survivor. Violations are user-facing
+8. No `branch.if` on a constant, no fold-required marker (`@size_of`) or
+   `compile.error` survivor. Violations are user-facing
    `Diagnostic`s with HIR spans, never backend crashes.
 9. Types are concrete only: no generic declaration and no type parameter
    survives; every applied declaration is monomorphized to a mangle-named item.
