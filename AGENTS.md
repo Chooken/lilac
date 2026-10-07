@@ -97,6 +97,10 @@
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.
+- The `lilac/lir` request and `lilac/lirInvalidated` notification are the
+  IR-view protocol: the request serves a captured stage's rendered LIR text, and
+  the notification tells the client the view is stale. `lilac-ir` is now also a
+  `lilac-lsp` dependency (alongside the compiler crates).
 
 ## Gates
 
