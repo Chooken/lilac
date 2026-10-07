@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -35,9 +35,6 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
-        "emit-vm" => cmd_emit_vm(&args[1..]),
-        "run" => cmd_run(&args[1..]),
-        "disasm" => cmd_disasm(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
@@ -54,28 +51,14 @@ struct Common {
     file: String,
     check_only: bool,
     target_set: bool,
-    source: Option<String>,
-    debug: DebugOptions,
     dump_lir: Option<PathBuf>,
     session: Session,
-}
-
-/// `run`-only debugger flags, accepted here so the whole command line parses in
-/// one place. Task 12 wires them to the interactive `Debugger`; until then they
-/// are inert (a debug request still performs a plain run).
-#[derive(Default)]
-struct DebugOptions {
-    breaks: Vec<String>,
-    step: bool,
-    trace: bool,
 }
 
 fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitCode> {
     let mut file: Option<String> = None;
     let mut check_only = false;
     let mut target_set = false;
-    let mut source: Option<String> = None;
-    let mut debug = DebugOptions::default();
     let mut dump_lir: Option<PathBuf> = None;
     let mut session = Session::new();
     let mut index = 0;
@@ -132,8 +115,6 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 return Err(ExitCode::from(2));
             }
             session.exports.insert(name.to_owned());
-        } else if parse_run_flag(arg, &mut source, &mut debug)? {
-            // Handled by the run-only parser above.
         } else if arg.starts_with('-') {
             eprintln!("unknown flag: {arg}\n{}", usage());
             return Err(ExitCode::from(2));
@@ -153,8 +134,6 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         file,
         check_only,
         target_set,
-        source,
-        debug,
         dump_lir,
         session,
     })
@@ -193,37 +172,6 @@ fn parse_session_flag(arg: &str, session: &mut Session) -> Result<bool, ExitCode
             round: parsed,
             ..session.decimal
         };
-    } else {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-/// Parses the `run`-oriented flags `--source=`, `--break=`, `--step`, and
-/// `--trace`, returning `Ok(true)` when `arg` was one of them.
-///
-/// Kept out of [`parse_common`] to stay under the pedantic line budget.
-fn parse_run_flag(
-    arg: &str,
-    source: &mut Option<String>,
-    debug: &mut DebugOptions,
-) -> Result<bool, ExitCode> {
-    if let Some(path) = arg.strip_prefix("--source=") {
-        if path.is_empty() {
-            eprintln!("--source= needs a path\n{}", usage());
-            return Err(ExitCode::from(2));
-        }
-        *source = Some(path.to_owned());
-    } else if let Some(loc) = arg.strip_prefix("--break=") {
-        if loc.is_empty() {
-            eprintln!("--break= needs a location\n{}", usage());
-            return Err(ExitCode::from(2));
-        }
-        debug.breaks.push(loc.to_owned());
-    } else if arg == "--step" {
-        debug.step = true;
-    } else if arg == "--trace" {
-        debug.trace = true;
     } else {
         return Ok(false);
     }
@@ -426,13 +374,6 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
     } else {
         session.host
     };
-    if target.is_vm() {
-        eprintln!(
-            "emit-llvm requires a non-VM target (got `{}`)",
-            target.to_triple()
-        );
-        return ExitCode::from(2);
-    }
     session.target = target;
     let triple = target.to_triple();
     let (result, dump_err) =
@@ -483,264 +424,6 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
-    }
-}
-
-/// Emits canonical `.lbc` text for the VM target, or checks it with `--check`.
-///
-/// Unlike `emit-ir`/`emit-llvm`, `emit-vm` defaults to the canonical VM target
-/// (`lilacvm-unknown-none`) when no `--target=` is given; an explicit non-VM
-/// target is a usage error (exit 2), matching `emit-llvm`'s refusal of a VM
-/// target.
-fn cmd_emit_vm(args: &[String]) -> ExitCode {
-    let common = match parse_common(args, true) {
-        Ok(common) => common,
-        Err(code) => return code,
-    };
-    let mut session = common.session;
-    if common.target_set {
-        if !session.target.is_vm() {
-            eprintln!(
-                "emit-vm requires a VM target (got `{}`)",
-                session.target.to_triple()
-            );
-            return ExitCode::from(2);
-        }
-    } else {
-        session.target = match Target::parse(lilac_vm::VM_TARGET) {
-            Ok(target) => target,
-            Err(err) => {
-                eprintln!("internal error: cannot construct the VM target: {err}");
-                return ExitCode::from(1);
-            }
-        };
-    }
-    let (result, dump_err) =
-        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
-    let Ok(module) = result else {
-        eprint!("{}", session.render_diagnostics());
-        return ExitCode::from(1);
-    };
-    eprint!("{}", session.render_diagnostics());
-    if let Some(err) = &dump_err {
-        eprintln!("{err}");
-    }
-    let emitted = match lilac_vm::VmBackend.emit_bytecode(&module, &session.source_map) {
-        Ok(emitted) => emitted,
-        Err(err) => {
-            eprintln!("internal error: VM codegen failed: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    if common.check_only {
-        let snapshot = Path::new(&common.file).with_extension("lbc");
-        let Ok(expected) = std::fs::read_to_string(&snapshot) else {
-            eprintln!(
-                "cannot read snapshot {}; run emit-vm without --check to generate it",
-                snapshot.display()
-            );
-            return ExitCode::from(1);
-        };
-        if expected != emitted {
-            eprintln!(
-                "expected {} to match emit-vm output; re-run without --check to refresh it",
-                snapshot.display()
-            );
-            return ExitCode::from(1);
-        }
-        return if dump_err.is_some() {
-            ExitCode::from(1)
-        } else {
-            ExitCode::SUCCESS
-        };
-    }
-    print!("{emitted}");
-    if dump_err.is_some() {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// Compiles `file` to LIR, emits VM bytecode, and executes it on the bytecode
-/// interpreter.
-///
-/// Like `emit-vm`, `run` defaults to the canonical VM target
-/// (`lilacvm-unknown-none`) when no `--target=` is given and rejects an
-/// explicit non-VM target with exit 2. A normal return maps to its
-/// [`ExitCode`]; a VM runtime error prints to stderr and exits 1. `--export`
-/// roots survive reachability pruning exactly as in the other subcommands.
-fn cmd_run(args: &[String]) -> ExitCode {
-    let common = match parse_common(args, false) {
-        Ok(common) => common,
-        Err(code) => return code,
-    };
-    let mut session = common.session;
-    if common.target_set {
-        if !session.target.is_vm() {
-            eprintln!(
-                "run requires a VM target (got `{}`)",
-                session.target.to_triple()
-            );
-            return ExitCode::from(2);
-        }
-    } else {
-        session.target = match Target::parse(lilac_vm::VM_TARGET) {
-            Ok(target) => target,
-            Err(err) => {
-                eprintln!("internal error: cannot construct the VM target: {err}");
-                return ExitCode::from(1);
-            }
-        };
-    }
-    let (result, dump_err) =
-        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
-    let Ok(module) = result else {
-        eprint!("{}", session.render_diagnostics());
-        return ExitCode::from(1);
-    };
-    eprint!("{}", session.render_diagnostics());
-    if let Some(err) = &dump_err {
-        eprintln!("{err}");
-    }
-    let text = match lilac_vm::VmBackend.emit_bytecode(&module, &session.source_map) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("internal error: VM codegen failed: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    // A single `--export` names the entry to run (it is the `--export` root the
-    // reachability pass already preserved); with zero or multiple exports the
-    // default `main` entry is used.
-    let entry = if session.exports.len() == 1 {
-        session.exports.iter().next().map(String::as_str)
-    } else {
-        None
-    };
-    // A `--break`, `--step`, `--trace`, or `--source` request drops into the
-    // interactive debugger instead of the plain run.
-    let debug_requested = common.debug.step
-        || common.debug.trace
-        || !common.debug.breaks.is_empty()
-        || common.source.is_some();
-    if debug_requested {
-        return run_debugger(&text, entry, common.source.as_deref(), &common.debug.breaks);
-    }
-    match lilac_vm::run_lbc_with_entry(&text, entry) {
-        Ok(code) => exit_code(code),
-        Err(err) => {
-            eprintln!("{err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// Disassembles a canonical `.lbc` artifact: `lilac disasm <file.lbc>`.
-///
-/// The file is read and parsed with [`lilac_vm::Program::parse_text`] (which
-/// verifies it), then its canonical text is printed. An unreadable file or a
-/// parse/verify failure is a clean usage/data error (exit 2), never a panic.
-fn cmd_disasm(args: &[String]) -> ExitCode {
-    let mut file: Option<&str> = None;
-    for arg in args {
-        if arg.starts_with('-') {
-            eprintln!("unknown flag for disasm: {arg}\n{}", usage());
-            return ExitCode::from(2);
-        } else if file.is_none() {
-            file = Some(arg);
-        } else {
-            eprintln!("expected one file\n{}", usage());
-            return ExitCode::from(2);
-        }
-    }
-    let Some(file) = file else {
-        eprintln!("missing <file.lbc>\n{}", usage());
-        return ExitCode::from(2);
-    };
-    let text = match std::fs::read_to_string(file) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("cannot read {file}: {err}");
-            return ExitCode::from(2);
-        }
-    };
-    let program = match lilac_vm::Program::parse_text(&text) {
-        Ok(program) => program,
-        Err(err) => {
-            eprintln!("{file}: {err}");
-            return ExitCode::from(2);
-        }
-    };
-    if let Err(err) = program.verify() {
-        eprintln!("{file}: {err}");
-        return ExitCode::from(2);
-    }
-    print!("{}", program.to_text());
-    ExitCode::SUCCESS
-}
-
-/// Builds a [`lilac_vm::Debugger`] over emitted `.lbc` text and drives its REPL
-/// on the process's stdin/stdout.
-///
-/// `--source` text, when readable, overrides the line table's recorded path;
-/// otherwise the debugger reads the recorded file or falls back to
-/// disassembly. An invalid `--break` location is a usage error (exit 2); a VM
-/// runtime error is reported and exits 1.
-fn run_debugger(
-    text: &str,
-    entry: Option<&str>,
-    source_path: Option<&str>,
-    breaks: &[String],
-) -> ExitCode {
-    let program = match lilac_vm::Program::parse_text(text) {
-        Ok(program) => program,
-        Err(err) => {
-            eprintln!("internal error: cannot reparse emitted bytecode: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let machine = match lilac_vm::Machine::with_entry(&program, entry.unwrap_or("main")) {
-        Ok(machine) => machine,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let source = source_path.and_then(|path| std::fs::read_to_string(path).ok());
-    let mut debugger = lilac_vm::Debugger::new(machine, source);
-    for loc in breaks {
-        if let Err(err) = debugger.set_breakpoint(loc) {
-            eprintln!("invalid breakpoint `{loc}`: {err}");
-            return ExitCode::from(2);
-        }
-    }
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    match debugger.run_repl(stdin.lock(), &mut stdout) {
-        Ok(code) => exit_code(code),
-        Err(err) => {
-            eprintln!("{err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// Maps a VM exit code (`i32`) onto a process [`ExitCode`].
-///
-/// VM codes are a normal return (`0`) or the abort code (`101`), so they fit a
-/// `u8`; a negative or out-of-range code is an internal error reported as 1
-/// rather than silently wrapped.
-fn exit_code(code: i32) -> ExitCode {
-    match u8::try_from(code) {
-        Ok(value) => ExitCode::from(value),
-        Err(_) => ExitCode::from(1),
     }
 }
 

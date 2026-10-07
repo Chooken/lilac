@@ -1,3 +1,0 @@
-main: function () nothing {
-    x: @bit_native = @i_add(0x1, 0x2)
-}
