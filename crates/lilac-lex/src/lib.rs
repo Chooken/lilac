@@ -352,8 +352,31 @@ impl<'a> Lexer<'a> {
         while !self.at_eof() && (self.peek().is_ascii_digit() || self.peek() == b'_') {
             self.pos += 1;
         }
-        if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
+        if self.peek() == b'.' {
+            if !self.peek_at(1).is_ascii_digit() {
+                return Err(self.err(
+                    start,
+                    self.pos + 1,
+                    "unexpected character after number literal",
+                ));
+            }
             self.pos += 1;
+            while !self.at_eof() && (self.peek().is_ascii_digit() || self.peek() == b'_') {
+                self.pos += 1;
+            }
+        }
+        if self.peek() == b'e' || self.peek() == b'E' {
+            self.pos += 1;
+            if self.peek() == b'+' || self.peek() == b'-' {
+                self.pos += 1;
+            }
+            if !self.peek().is_ascii_digit() {
+                return Err(self.err(
+                    start,
+                    self.pos + 1,
+                    "unexpected character after number literal",
+                ));
+            }
             while !self.at_eof() && (self.peek().is_ascii_digit() || self.peek() == b'_') {
                 self.pos += 1;
             }
@@ -721,6 +744,23 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn exponent_float_forms() {
+        for src in ["3.14", "1e3", "1.5e-4", "2E10"] {
+            let tokens = tokens_of(src);
+            assert_eq!(tokens.len(), 2, "`{src}` should lex as one number and Eof");
+            assert_eq!(tokens[0].kind, TokenKind::Number);
+            assert_eq!(tokens[0].text, src);
+        }
+        for src in ["1.", "1e"] {
+            let mut sm = lilac_span::SourceMap::new();
+            let file = sm.add_file("test.lilac", src);
+            let errors: Vec<Diagnostic> = Lexer::new(src, file).filter_map(Result::err).collect();
+            assert!(!errors.is_empty(), "`{src}` should be a lex error");
+            assert!(errors.iter().all(|error| error.code == "E000"));
+        }
     }
 
     #[test]
