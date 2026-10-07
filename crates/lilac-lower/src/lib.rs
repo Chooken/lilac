@@ -88,9 +88,7 @@ pub fn lower(
 /// parameter or return that is neither a bit width nor `ref T`, more than one
 /// out place, or an `extern` named `main` (the unmangled C entry point the
 /// compiler emits). Each is `E028`, labelled at the offending slot (for `>1`
-/// out, at the extra slot; for `main`, at the declaration). The C ABI is
-/// LLVM-only, so the driver calls this only for non-VM targets; the VM keeps
-/// its clean runtime error for `extern`.
+/// out, at the extra slot; for `main`, at the declaration).
 pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diags) {
     for func in &hir.funcs {
         if !func.is_extern {

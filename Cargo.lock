@@ -246,7 +246,6 @@ name = "lilac-codegen"
 version = "0.2.0"
 dependencies = [
  "lilac-ir",
- "lilac-span",
 ]
 
 [[package]]
