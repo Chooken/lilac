@@ -2817,11 +2817,40 @@ impl Checker<'_> {
         self.check_int_literal(bytes, span, expected)
     }
 
+    /// The single `@conversion(from: <bit|fbit>)` source whose target is
+    /// `expected`, if exactly one exists. A numeric literal assigned to a
+    /// user object (e.g. `x: Int16 = 5`, `x: Float32 = 3.14`) grows to the
+    /// conversion's source width so the existing exact-width conversion applies
+    /// (never shrinks). Multiple candidates are ambiguous and yield `None`, so
+    /// the literal falls back to its smallest-fit type and the normal search.
+    fn object_conversion_source(&self, expected: TypeId, want_float: bool) -> Option<TypeId> {
+        let mut found: Option<TypeId> = None;
+        for conversion in &self.sigs.conversions {
+            if conversion.to != expected {
+                continue;
+            }
+            let matches = if want_float {
+                is_float(self.types, conversion.from)
+            } else {
+                is_bit(self.types, conversion.from)
+            };
+            if !matches {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(conversion.from);
+        }
+        found
+    }
+
     /// Types an integer literal (`0x`/`0b`/decimal): its natural type is the
     /// smallest `@bit8/16/32/64` holding its unsigned magnitude, grown (never
-    /// shrunk) to an expected bit type; a value past 64 bits, or past an
-    /// expected narrower type, is `E060`. A non-bit expected type does not
-    /// constrain it, and the normal conversion path applies.
+    /// shrunk) to an expected bit type, or to a user object's single
+    /// `@conversion(from: @bitN)` source width; a value past that width, or
+    /// past 64 bits, is `E060`. A non-bit expected type with no such conversion
+    /// does not constrain it, and the normal conversion path applies.
     fn check_int_literal(
         &mut self,
         bytes: &str,
@@ -2844,8 +2873,10 @@ impl Checker<'_> {
                 ));
             return poison;
         };
-        let expected_bit = expected.filter(|id| is_bit(self.types, *id));
-        let ty = match expected_bit {
+        let constrained = expected
+            .filter(|id| is_bit(self.types, *id))
+            .or_else(|| expected.and_then(|id| self.object_conversion_source(id, false)));
+        let ty = match constrained {
             Some(t) => {
                 let width = bit_width(self.types, t);
                 if bits > width {
@@ -2883,9 +2914,11 @@ impl Checker<'_> {
     }
 
     /// Types a float literal (`.` or exponent form): it defaults to `@fbit64`,
-    /// an expected `@fbit16/32/64` pins it (the value rounds to nearest-even
-    /// at codegen); a value past the target's max finite is `E060`, and a bit
-    /// expected type is `E010` (no implicit float→int).
+    /// an expected `@fbit16/32/64` (or a user object's single
+    /// `@conversion(from: @fbitN)` source) pins it (the value rounds to
+    /// nearest-even at codegen); a value past the target's max finite is
+    /// `E060`, a bit expected type is `E010` (no implicit float→int), and an
+    /// expected `@fbit128` is out of scope (`E010`).
     fn check_float_literal(
         &mut self,
         bytes: &str,
@@ -2910,10 +2943,24 @@ impl Checker<'_> {
                 );
                 return poison;
             }
+            if is_float(self.types, t) && float_width(self.types, t) == 128 {
+                self.diags.emit(
+                    Diagnostic::error("E010", "`@fbit128` literals are not supported yet").label(
+                        span,
+                        true,
+                        "only 16/32/64-bit float literals can be typed".to_owned(),
+                    ),
+                );
+                return poison;
+            }
         }
         let target = match expected {
-            Some(t) if is_float(self.types, t) && float_width(self.types, t) != 128 => t,
-            _ => self.builtin_ty("@fbit64"),
+            Some(t) if is_float(self.types, t) => t,
+            Some(t) => match self.object_conversion_source(t, true) {
+                Some(src) => src,
+                None => self.builtin_ty("@fbit64"),
+            },
+            None => self.builtin_ty("@fbit64"),
         };
         let width = float_width(self.types, target);
         let cleaned: String = bytes.chars().filter(|c| *c != '_').collect();
@@ -6148,6 +6195,49 @@ mod tests {
     fn float_literal_out_of_range_is_e060() {
         let diags = check_src("main: function () nothing {\n    x: @fbit16 = 100000.0\n}\n");
         assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    /// Numeric objects mirroring `lib/Standard`: one exact-width
+    /// `@conversion(from: <bit|fbit>)` per type, no widening pairs.
+    fn numeric_objects() -> &'static str {
+        "Int8: object { private { data: @bit8 } @conversion: function (from: @bit8) Int8 => Int8 { data = from } }\n\
+         Int16: object { private { data: @bit16 } @conversion: function (from: @bit16) Int16 => Int16 { data = from } }\n\
+         Int32: object { private { data: @bit32 } @conversion: function (from: @bit32) Int32 => Int32 { data = from } }\n\
+         Int64: object { private { data: @bit64 } @conversion: function (from: @bit64) Int64 => Int64 { data = from } }\n\
+         Int: object { private { data: @bit_native } @conversion: function (from: @bit_native) Int => Int { data = from } }\n\
+         Float32: object { private { data: @fbit32 } @conversion: function (from: @fbit32) Float32 => Float32 { data = from } }\n\
+         Float64: object { private { data: @fbit64 } @conversion: function (from: @fbit64) Float64 => Float64 { data = from } }\n"
+    }
+
+    #[test]
+    fn literal_grows_through_object_conversion() {
+        // A literal assigned to a numeric object grows to the object's single
+        // conversion source width (never shrinks), so the exact-width
+        // conversion applies: `Int16 = 5` uses `@bit16`, not `@bit8`.
+        let src = format!(
+            "{}main: function () nothing {{\n    a: Int8 = 5\n    b: Int16 = 5\n    c: Int32 = 5\n    d: Int64 = 5\n    e: Int = 5\n    f: Float32 = 3.14\n    g: Float64 = 3.14\n}}\n",
+            numeric_objects()
+        );
+        let diags = check_src(&src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn literal_overflow_through_object_is_e060() {
+        // `Int8`'s source is `@bit8`; `300` needs 9 bits, so it cannot shrink.
+        let src = format!(
+            "{}main: function () nothing {{\n    x: Int8 = 300\n}}\n",
+            numeric_objects()
+        );
+        let diags = check_src(&src);
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+        assert!(!has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn fbit128_literal_is_out_of_scope() {
+        let diags = check_src("main: function () nothing {\n    x: @fbit128 = 3.14\n}\n");
+        assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
     fn check_hir(src: &str) -> (Diags, lilac_hir::HirProgram) {

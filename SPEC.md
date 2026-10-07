@@ -5,7 +5,7 @@
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
 > intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than_8`,
-> `@as_int`, `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
+> `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
 > `@extend_zero`). Legacy camelCase spellings from earlier drafts and legacy
 > `tests/` files are renamed on port; the old Zig pass is not authoritative for
 > spelling.
@@ -25,10 +25,9 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 * **`@bit_native`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
 
 * **`@byte_buffer`**: A builtin view over bytes: length plus pointer to the first
-  byte. It is the type of number tokens (`5`), string literal payloads (`"hi"`),
-  and `data` consts — one shared currency for "known bytes". Meaning always comes
-  from use (left-to-right): `@as_int` reads digits, `String` construction reads
-  text. A `@byte_buffer` borrows; it never owns.
+  byte. It is the type of string literal payloads (`"hi"`) and `data` consts — a
+  shared currency for "known bytes". Meaning always comes from use (left-to-right):
+  `String` construction reads text. A `@byte_buffer` borrows; it never owns.
 * **`@format_args`**: A builtin fixed-capacity table of `@byte_buffer` pieces
   (at most 16; more is a compile error suggesting a split). It is the value of
   an f-string *before* consumption: static chunks reference `data` consts
@@ -53,25 +52,26 @@ Lilac does not implement move semantics. Value assignment and parameter passing 
 
 ## 2. Literals & Desugaring
 
-Literals are compiler-known bytes; their meaning comes from use. There is no
-mirror object to declare.
+String and char literals are compiler-known bytes; number literals are typed
+values (below). There is no mirror object to declare.
 
-Number literals split into two classes. Hex/bin literals (`0x…`, `0b…`) are
-`LitLiteral`s: their bits are fully known, so they take the expected (or
-unified) bit width and a value too wide for it is `E060`. Every decimal form
-(`5`, `10.5`, `0.54`) is a `NumberLiteral` typed `@byte_buffer` holding its
-source bytes, with no implicit conversion to a bit type — write `@as_int` /
-`@as_float` to read digits. Assigning a decimal literal directly to a bit type
-(`a: @bit8 = 5`) is therefore a failed conversion search (`E043`), not a
-mismatched-types error.
+Number literals are typed values, not `@byte_buffer`s. An integer literal —
+decimal (`5`), hex (`0x…`), or binary (`0b…`) — takes the smallest
+`@bit8/16/32/64` that holds its unsigned magnitude. An expected bit type, or a
+numeric object's single exact-width `@conversion(from: @bitN)`, grows the
+literal to that width (never shrinks); a value that does not fit, or one past 64
+bits, is `E060`. So `x: @bit8 = 5` and `x: Int16 = 5` both typecheck (the latter
+grows to `@bit16` for its conversion), while `x: @bit8 = 0x1FF` and
+`x: Int8 = 300` are `E060`.
 
-`@as_int()` / `@as_float()` on a constant literal are folded at compile time;
-the runtime-parse form is only a semantic model, never emitted code.
-`@as_float` folds to an `@fbit` value (the IEEE-754 bit pattern) at the target width (16/32/64).
-Out-of-range digits or values that do not fit the target width are compile errors.
-Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
-`@as_int` is a fold-time value error (`E060`), not a type error — the price of
-the shared representation.
+A float literal is a `.` or exponent form (`3.14`, `1e3`, `1.5e-4`, `2E10`). It
+defaults to `@fbit64`; an expected `@fbit16/32/64` (or a numeric object's
+`@conversion(from: @fbitN)`) pins it, and the value rounds to nearest-even at
+codegen. A value past the target's maximum finite value is `E060`. A float
+literal in a bit or integer slot is `E010` (no implicit float→int), and
+`@fbit128` literals are out of scope. Unary `-` is an operator, not part of the
+literal; reading digits from a runtime `@byte_buffer` is standard-library work,
+not a compiler intrinsic.
 
 Arithmetic between two decimal literals is folded exactly at parse time: a
 binary `+ - * / %` whose **both** operands are decimal literals becomes a
@@ -180,8 +180,8 @@ uncalled function, or an unused hook is silently dropped. The former camelCase
 alias `@compilerError` is no longer accepted.
 
 Folding runs after `=>` (inline) functions are substituted, so a conversion
-helper written as `=>` that wraps `@as_int` / `@as_float` folds exactly like a
-direct call. A block-body wrapper — including a hand-written parser — is still
+helper written as `=>` folds exactly like a direct call. A block-body wrapper —
+including a hand-written parser — is still
 attempted via best-effort call evaluation of pure bodies with bounded loops and
 all-constant arguments (`MAX_FOLD_STEPS = 100_000`, `MAX_CALL_DEPTH = 16`); if
 that fails the runtime call (and runtime parse) is kept. A missed fold costs
@@ -218,8 +218,6 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@f_greater_than_W`** | `(@fbitW, @fbitW): @bit8` | Float greater-than (IEEE-754). Returns `@bit8`. |
 | **`@fbit_to_bits_W`** | `(@fbitW): @bitW` | Reinterprets a float's bits as the same-width integer (`W` ∈ 16/32/64 only: `@bit128` does not exist). |
 | **`@bits_to_fbit_W`** | `(@bitW): @fbitW` | Reinterprets integer bits as the same-width float (`W` ∈ 16/32/64 only). |
-| **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Fold-required marker: consumed at compile time, never a runtime call; out-of-range or non-constant input is `E060`. |
-| **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Fold-required marker: consumed at compile time, never a runtime call; invalid or non-constant input is `E060`. |
 | **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bit_native`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
@@ -235,9 +233,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
 
-`@as_int`, `@as_float`, `@size_of`, and `@compile_error` are **fold-required
-markers**, not runtime builtin calls: the front-end emits a pre-fold node the
-constant folder must consume (or diagnose). A survivor reaching IR verification
+`@size_of` and `@compile_error` are **fold-required markers**, not runtime
+builtin calls: the front-end emits a pre-fold node the constant folder must
+consume (or diagnose). A survivor reaching IR verification
 is an internal error, exactly like a live `@compile_error`. Builtin calls that
 do reach IR are checked against the builtin signature table; `@load_u8` takes
 two in-args (`ref #bit8`, `#bit_native`) and yields `#bit8`, while `@store_u8`
@@ -745,6 +743,6 @@ $entry:
   return
 ```
 Assignment and member access use `copy` / `field .name` as defined in `IR_SPEC.md`.
-`@as_int` / `@as_float` / `@size_of` (fold-required markers) on constant
-operands, `branch.if` on constant conditions, and `compile.error` in dead
-branches never reach verified IR (see Compile-time folding above).
+`@size_of` (a fold-required marker) on constant operands, `branch.if` on
+constant conditions, and `compile.error` in dead branches never reach verified
+IR (see Compile-time folding above).
