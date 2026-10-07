@@ -164,7 +164,7 @@ pub struct FileScope {
 pub struct ResolvedProject {
     /// All namespaces; index 0 is the root.
     pub namespaces: Vec<NamespaceData>,
-    /// Unit-global top-level hook overload sets.
+    /// Unit-global hook overload sets (top-level and object-member).
     pub hooks: HashMap<String, Vec<ResItem>>,
     /// One visible scope per source file.
     pub files: Vec<FileScope>,
@@ -448,6 +448,60 @@ fn same_sig_resolved(a: &ResItem, b: &ResItem, resolver: &TypeResolver) -> bool 
             sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
         }
         _ => true,
+    }
+}
+
+/// Signature key for a single-file (root-namespace) hook.
+///
+/// The root namespace adds no prefix, so type names stay unqualified; a `self`
+/// type resolves to its owning object's name so member hooks of different
+/// objects do not collide.
+fn single_hook_key(item: &ResItem) -> Option<String> {
+    let ResKind::Hook {
+        params,
+        returns,
+        parent,
+        ..
+    } = &item.kind
+    else {
+        return None;
+    };
+    let qualify = |name: &str| -> String {
+        if name == "self" {
+            if let Some(parent) = parent {
+                return parent.name.clone();
+            }
+        }
+        name.to_owned()
+    };
+    Some(sig_key(params, returns, &qualify))
+}
+
+/// Deduplicates a single-file compilation's hooks, emitting `E020` on an
+/// identical root-namespace signature.
+///
+/// Folder mode dedups unit-globally in `collect_project` (via `add_hook`), so
+/// this runs only for the single-file entry point [`collect`].
+fn dedup_single_hooks(hooks: &mut HashMap<String, Vec<ResItem>>, diags: &mut Diags) {
+    for (name, overloads) in hooks.iter_mut() {
+        let mut kept: Vec<ResItem> = Vec::new();
+        for item in overloads.drain(..) {
+            let key = single_hook_key(&item);
+            if let Some(previous) = kept
+                .iter()
+                .find(|previous| single_hook_key(previous) == key)
+            {
+                let previous_span = previous.span;
+                diags.emit(
+                    Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                        .label(item.span, true, "redefined here")
+                        .label(previous_span, false, "first defined here"),
+                );
+            } else {
+                kept.push(item);
+            }
+        }
+        *overloads = kept;
     }
 }
 
@@ -739,7 +793,9 @@ impl Collector<'_> {
 ///
 /// `using` directives are not definitions and are skipped. Non-hook
 /// duplicates keep the first binding and report `E020`; hooks allow overloads
-/// with distinct signatures (identical ones still report `E020`).
+/// with distinct signatures (identical ones still report `E020`). Because a
+/// single file is one root namespace, member hooks are deduped here too
+/// (folder mode dedups unit-globally in [`collect_project`] instead).
 pub fn collect(program: &Program, diags: &mut Diags) -> Module {
     let mut collector = Collector {
         diags,
@@ -747,7 +803,9 @@ pub fn collect(program: &Program, diags: &mut Diags) -> Module {
         ns: NsId(0),
         ns_paths: vec![String::new()],
     };
-    collector.collect_program(program, NsId(0))
+    let mut module = collector.collect_program(program, NsId(0));
+    dedup_single_hooks(&mut module.hooks, diags);
+    module
 }
 
 /// Collects a whole loaded [`Project`] into a [`ResolvedProject`].
@@ -1217,6 +1275,29 @@ mod tests {
             diags.diagnostics().iter().any(|d| d.code == "E020"),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn single_file_identical_member_conversion_pair_is_e020() {
+        // Single-file mode (`collect`) must dedup member hooks by signature too,
+        // matching folder mode (`collect_project`).
+        let (_, diags) = resolve_src(
+            "Int64: object {\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n}\n",
+        );
+        assert_eq!(e020_count(&diags), 1);
+    }
+
+    #[test]
+    fn single_file_member_hooks_of_different_objects_do_not_collide() {
+        // `@on_drop(ref self)` keys by its parent, so two objects' drops are
+        // distinct signatures in single-file mode.
+        let (_, diags) = resolve_src(
+            "A: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n\
+             B: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]

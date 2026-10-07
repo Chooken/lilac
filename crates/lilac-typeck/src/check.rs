@@ -985,6 +985,28 @@ impl Checker<'_> {
             })
     }
 
+    /// Every resolved `name` hook owned by object `owner`, in declaration
+    /// order (member hooks overload by signature).
+    fn object_hooks(&self, owner: DefId, name: &str) -> Vec<ResItem> {
+        self.project
+            .hooks
+            .get(name)
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|hook| match &hook.kind {
+                        ResKind::Hook {
+                            parent: Some(parent),
+                            ..
+                        } => parent.def == owner,
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Resolves a syntactic type in the current body's environment.
     ///
     /// Generic parameter names of the enclosing declaration resolve to `Param`
@@ -2871,43 +2893,109 @@ impl Checker<'_> {
                     .label(span, true, "constructors need `@init`".to_owned()),
             ));
         }
-        let Some(hook) = self.object_hook(item.id, "@init") else {
+        let hooks = self.object_hooks(item.id, "@init");
+        if hooks.is_empty() {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
                     .label(span, true, "define `@init` or use `= { ... }`".to_owned()),
             ));
-        };
-        if self.private_member_denied(&hook, item.id, span) {
-            return Err(ErrorGuaranteed::new());
         }
-        let Some(sig) = self.func_sig(hook.id) else {
-            lilac_error::bug!(hook.span, "missing signature for `@init` hook");
-        };
         let qualified = qualify_name(self.project, item.id, name);
         let obj_ty = {
             let id = self.types.intern_object(item.id);
             self.types.set_object_name(item.id, &qualified);
             id
         };
+        let mut overloads: Vec<(DefId, FuncSig)> = Vec::with_capacity(hooks.len());
+        for hook in &hooks {
+            let Some(sig) = self.func_sig(hook.id) else {
+                lilac_error::bug!(hook.span, "missing signature for `@init` hook");
+            };
+            overloads.push((hook.id, sig));
+        }
+        let qual = format!("{qualified}.@init");
+        let Some((def, sig)) = self.select_hook_overload(fctx, &overloads, args) else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!("no overload of `{qual}` takes {} arguments", args.len()),
+                )
+                .label(span, true, "arity mismatch here".to_owned()),
+            ));
+        };
+        if let Some(hook) = hooks.iter().find(|hook| hook.id == def) {
+            if self.private_member_denied(hook, item.id, span) {
+                return Err(ErrorGuaranteed::new());
+            }
+        }
+        let shape_span = hooks
+            .iter()
+            .find(|hook| hook.id == def)
+            .map_or(span, |hook| hook.span);
         if sig.returns.len() != 1 || sig.returns[0].id != obj_ty {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", "`@init` must return exactly its object type").label(
-                    hook.span,
+                    shape_span,
                     true,
                     "bad `@init` shape".to_owned(),
                 ),
             ));
         }
-        let hir_args = self.check_args(fctx, &sig, args, span)?;
-        let hook_name = self.hook_name(&format!("{qualified}.@init"), hook.id);
+        let hir_args = self.check_hook_args(fctx, &sig, args, span)?;
+        let hook_name = self.hook_name(&qual, def);
         Ok(CallOutcome::Call(CheckedCall {
             outs: sig.returns.clone(),
             callee: HirCallee::Hook {
                 name: hook_name,
-                def: hook.id,
+                def,
             },
             args: hir_args,
         }))
+    }
+
+    /// Selects the overload whose arity and (probed) parameter types match
+    /// `args`, mirroring the exact-match rule of [`Self::check_hook_call`].
+    /// Returns `None` when no overload takes `args.len()` parameters.
+    fn select_hook_overload(
+        &mut self,
+        fctx: &mut FuncCtx,
+        overloads: &[(DefId, FuncSig)],
+        args: &[Expr],
+    ) -> Option<(DefId, FuncSig)> {
+        let arity_ok: Vec<(DefId, FuncSig)> = overloads
+            .iter()
+            .filter(|(_, sig)| sig.params.len() == args.len())
+            .cloned()
+            .collect();
+        let (first_def, first) = arity_ok.first().cloned()?;
+        if arity_ok.len() == 1 {
+            return Some((first_def, first));
+        }
+        let mut probed: Vec<Option<TypeRef>> = Vec::with_capacity(args.len());
+        for arg in args {
+            if matches!(arg, Expr::Number(..)) {
+                probed.push(None);
+                continue;
+            }
+            let (got, _) = self.check_expr(fctx, arg, None);
+            probed.push(if is_poison(got) { None } else { Some(got) });
+        }
+        Some(
+            arity_ok
+                .iter()
+                .find(|(_, sig)| {
+                    sig.params
+                        .iter()
+                        .zip(probed.iter())
+                        .all(|(param, got)| match got {
+                            None => true,
+                            Some(ty) if param.is_ref => ty.is_ref && ty.id == param.id,
+                            Some(ty) => ty.id == param.id,
+                        })
+                })
+                .cloned()
+                .unwrap_or((first_def, first)),
+        )
     }
 
     /// Selects a hook overload (exact first, arity-filtered) and checks the
@@ -2920,12 +3008,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CheckedCall, ErrorGuaranteed> {
-        let arity_ok: Vec<(DefId, FuncSig)> = overloads
-            .iter()
-            .filter(|(_, sig)| sig.params.len() == args.len())
-            .cloned()
-            .collect();
-        let Some((first_def, first)) = arity_ok.first().cloned() else {
+        let Some((def, sig)) = self.select_hook_overload(fctx, overloads, args) else {
             return Err(self.diags.emit(
                 Diagnostic::error(
                     "E022",
@@ -2934,49 +3017,11 @@ impl Checker<'_> {
                 .label(span, true, "arity mismatch here".to_owned()),
             ));
         };
-        if arity_ok.len() == 1 {
-            let hir_args = self.check_hook_args(fctx, &first, args, span)?;
-            let name = self.hook_name(name, first_def);
-            return Ok(CheckedCall {
-                outs: first.returns.clone(),
-                callee: HirCallee::Hook {
-                    name,
-                    def: first_def,
-                },
-                args: hir_args,
-            });
-        }
-        let mut probed: Vec<Option<TypeRef>> = Vec::with_capacity(args.len());
-        for arg in args {
-            if matches!(arg, Expr::Number(..)) {
-                probed.push(None);
-                continue;
-            }
-            let (got, _) = self.check_expr(fctx, arg, None);
-            probed.push(if is_poison(got) { None } else { Some(got) });
-        }
-        let winner = arity_ok
-            .iter()
-            .find(|(_, sig)| {
-                sig.params
-                    .iter()
-                    .zip(probed.iter())
-                    .all(|(param, got)| match got {
-                        None => true,
-                        Some(ty) if param.is_ref => ty.is_ref && ty.id == param.id,
-                        Some(ty) => ty.id == param.id,
-                    })
-            })
-            .cloned()
-            .unwrap_or((first_def, first));
-        let hir_args = self.check_hook_args(fctx, &winner.1, args, span)?;
-        let name = self.hook_name(name, winner.0);
+        let hir_args = self.check_hook_args(fctx, &sig, args, span)?;
+        let name = self.hook_name(name, def);
         Ok(CheckedCall {
-            outs: winner.1.returns.clone(),
-            callee: HirCallee::Hook {
-                name,
-                def: winner.0,
-            },
+            outs: sig.returns.clone(),
+            callee: HirCallee::Hook { name, def },
             args: hir_args,
         })
     }
@@ -5961,6 +6006,27 @@ mod tests {
             "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: @bit8 {\n        result = value\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
         );
         assert!(has_code(&diags, "E022"), "{diags:?}");
+    }
+
+    #[test]
+    fn factory_selects_init_overload_by_arity() {
+        // Member hooks overload: `Object(0x1)` must pick the 1-arg `@init`,
+        // not the 0-arg one, and `Object()` must pick the 0-arg one.
+        let diags = check_src(
+            "Object: object {\n    value: @bit8\n    @init: function () result: Object {\n        result = Object { value = 0x1 }\n    }\n    @init: function (value: @bit8) result: Object {\n        result = Object { value = value }\n    }\n}\nmain: function () nothing {\n    a: Object = Object()\n    b: Object = Object(0x1)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn factory_does_not_convert_arguments() {
+        // A factory is a hook, so its arguments match exactly: `Object(b)` with
+        // `b: @bit8` and an `@bit8 -> @bit32` conversion is `E010`, not a
+        // conversion.
+        let diags = check_src(
+            "Object: object {\n    value: @bit32\n    @init: function (value: @bit32) result: Object {\n        result = Object { value = value }\n    }\n}\n@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\nmain: function () nothing {\n    b: @bit8 = 0x2\n    c: Object = Object(b)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
     #[test]

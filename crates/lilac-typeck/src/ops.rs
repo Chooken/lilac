@@ -237,10 +237,7 @@ mod tests {
              @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
              main: function () nothing {\n    b: @bit8 = 0x2\n    z: @bit32 = @f(b)\n}\n",
         );
-        assert!(
-            has_code(&diags, "E010") || has_code(&diags, "E043"),
-            "{diags:?}"
-        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
     #[test]
@@ -331,6 +328,8 @@ mod tests {
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(sigs.conversions.len(), 3);
+        let funcs: std::collections::HashSet<_> = sigs.conversions.iter().map(|c| c.func).collect();
+        assert_eq!(funcs.len(), 3, "each conversion must name a distinct hook");
     }
 
     #[test]

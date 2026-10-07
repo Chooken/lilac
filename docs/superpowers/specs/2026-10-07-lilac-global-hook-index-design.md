@@ -177,9 +177,11 @@ members.
   keep today's fallback.
 - **`ResolvedProject::single`** is unchanged in shape; member hooks now arrive
   through `Module.hooks`.
-- **`index_defs`** already walks `hooks.values().flatten()`; because member
-  hooks now live there (and no longer in `members`), `def_ns` stays correct
-  with no extra pass.
+- **`index_defs`** does not itself recurse into `hooks`; both callers
+  (`collect_project` and `ResolvedProject::single`) follow their `index_defs`
+  walk of the namespace items with a separate `hooks.values().flatten()` pass.
+  Because member hooks now live there (and no longer in `members`), `def_ns`
+  stays correct.
 
 Resulting rule: **`E020` fires iff two hooks share name + qualified signature
 anywhere in the unit**, or two non-hook members share a name in one object, or
