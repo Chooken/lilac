@@ -566,6 +566,7 @@ mod tests {
             ("bbslot", "#byte_buffer"),
             ("adslot", "ref #bit32"),
             ("afslot", "#bit64"),
+            ("fslot", "#fbit32"),
         ] {
             alloca(&mut insts, place, ty);
         }
@@ -582,6 +583,7 @@ mod tests {
             ty: "#bit8".to_owned(),
             span: span(),
         });
+
         insts.push(LirInst::Const {
             dst: "bb".to_owned(),
             lit: "!c0".to_owned(),
@@ -617,6 +619,12 @@ mod tests {
             src: "r".to_owned(),
             dst: "ld".to_owned(),
             ty: "ref #bit32".to_owned(),
+            span: span(),
+        });
+        insts.push(LirInst::Load {
+            src: "fslot".to_owned(),
+            dst: "fcr".to_owned(),
+            ty: "#fbit32".to_owned(),
             span: span(),
         });
         insts.push(LirInst::Field {
@@ -689,10 +697,10 @@ mod tests {
             (ArithOp::FDiv, "fd"),
             (ArithOp::FMod, "fr"),
         ] {
-            arith(&mut insts, op, "cr", "cr", dst, "#bit32");
+            arith(&mut insts, op, "fcr", "fcr", dst, "#fbit32");
         }
         for (op, dst) in [(ArithOp::FLt, "fl"), (ArithOp::FGt, "fg")] {
-            arith(&mut insts, op, "cr", "cr", dst, "#bit8");
+            arith(&mut insts, op, "fcr", "fcr", dst, "#bit8");
         }
 
         module.funcs.push(LirFunc {

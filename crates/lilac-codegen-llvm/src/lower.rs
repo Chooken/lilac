@@ -15,8 +15,7 @@ use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{
-    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType,
-    StructType,
+    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StructType,
 };
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
@@ -955,10 +954,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Materializes a `const` literal: a data-symbol address (or `#byte_buffer`
-    /// wrapper), or an integer/pointer immediate.
+    /// wrapper), a decimal float immediate, or an integer/pointer immediate.
     fn const_value(&self, lit: &str, ty: &str) -> BasicValueEnum<'ctx> {
         if let Some(name) = lit.strip_prefix('!') {
             return self.data_const(name, ty);
+        }
+        if let BasicTypeEnum::FloatType(float_ty) = self.lir_type(ty) {
+            let value: f64 = lit
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| bug!(Span::dummy(), "invalid float const literal `{lit}`"));
+            return float_ty.const_float(value).into();
         }
         let value = parse_int(lit);
         match self.lir_type(ty) {
@@ -1015,8 +1021,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Lowers one arithmetic/comparison op. Integer ops work on bit containers
-    /// directly; float ops reinterpret the bit container as `float`/`double`,
-    /// apply the op, then reinterpret the result back.
+    /// directly; float ops work on real `half`/`float`/`double`/`fp128` values.
+    /// Float comparisons widen their `i1` result to `#bit8`.
     fn arith(
         &self,
         op: &ArithOp,
@@ -1070,43 +1076,30 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 self.widen_bool(cmp, ty, builder)
             }
             ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod => {
-                let left = reg_int(lhs, state);
-                let right = reg_int(rhs, state);
-                let float_ty = self.float_type(left.get_type().get_bit_width());
-                let left_f = bit_as_float(left, float_ty, builder);
-                let right_f = bit_as_float(right, float_ty, builder);
-                let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
-                    bug!(
-                        Span::dummy(),
-                        "`{op:?}` needs a bit-container type, found `{ty}`"
-                    );
-                };
+                let left = reg_float(lhs, state);
+                let right = reg_float(rhs, state);
+                if !matches!(self.lir_type(ty), BasicTypeEnum::FloatType(_)) {
+                    bug!(Span::dummy(), "`{op:?}` needs a float type, found `{ty}`");
+                }
                 let value = match op {
-                    ArithOp::FAdd => builder.build_float_add(left_f, right_f, ""),
-                    ArithOp::FSub => builder.build_float_sub(left_f, right_f, ""),
-                    ArithOp::FMul => builder.build_float_mul(left_f, right_f, ""),
-                    ArithOp::FDiv => builder.build_float_div(left_f, right_f, ""),
-                    _ => builder.build_float_rem(left_f, right_f, ""),
+                    ArithOp::FAdd => builder.build_float_add(left, right, ""),
+                    ArithOp::FSub => builder.build_float_sub(left, right, ""),
+                    ArithOp::FMul => builder.build_float_mul(left, right, ""),
+                    ArithOp::FDiv => builder.build_float_div(left, right, ""),
+                    _ => builder.build_float_rem(left, right, ""),
                 };
-                let bits = checked(value, "float arith");
-                checked(
-                    builder.build_bit_cast(bits, result_ty, ""),
-                    "float result bitcast",
-                )
+                checked(value, "float arith").into()
             }
             ArithOp::FLt | ArithOp::FGt => {
-                let left = reg_int(lhs, state);
-                let right = reg_int(rhs, state);
-                let float_ty = self.float_type(left.get_type().get_bit_width());
-                let left_f = bit_as_float(left, float_ty, builder);
-                let right_f = bit_as_float(right, float_ty, builder);
+                let left = reg_float(lhs, state);
+                let right = reg_float(rhs, state);
                 let predicate = if matches!(op, ArithOp::FLt) {
                     FloatPredicate::OLT
                 } else {
                     FloatPredicate::OGT
                 };
                 let cmp = checked(
-                    builder.build_float_compare(predicate, left_f, right_f, ""),
+                    builder.build_float_compare(predicate, left, right, ""),
                     "fcmp",
                 );
                 self.widen_bool(cmp, ty, builder)
@@ -1131,15 +1124,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             cmp.into()
         } else {
             checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool").into()
-        }
-    }
-
-    /// The float type for a bit width.
-    fn float_type(&self, bits: u32) -> FloatType<'ctx> {
-        match bits {
-            32 => self.context.f32_type(),
-            64 => self.context.f64_type(),
-            other => bug!(Span::dummy(), "no float type for `#bit{other}`"),
         }
     }
 
@@ -1308,11 +1292,15 @@ fn parse_int(text: &str) -> u64 {
     }
 }
 
-/// Reinterprets a bit container as a float of `float_ty`.
-fn bit_as_float<'ctx>(
-    value: IntValue<'ctx>,
-    float_ty: FloatType<'ctx>,
-    builder: &Builder<'ctx>,
-) -> FloatValue<'ctx> {
-    checked(builder.build_bit_cast(value, float_ty, ""), "float bitcast").into_float_value()
+/// Reads a register as a float value.
+fn reg_float<'ctx>(name: &str, state: &FnState<'ctx>) -> FloatValue<'ctx> {
+    match state.regs.get(name).copied() {
+        Some(BasicValueEnum::FloatValue(value)) => value,
+        Some(other) => bug!(
+            Span::dummy(),
+            "register `&{name}` is a `{}`, not a float",
+            other.get_type().print_to_string()
+        ),
+        None => bug!(Span::dummy(), "use of undefined register `&{name}`"),
+    }
 }

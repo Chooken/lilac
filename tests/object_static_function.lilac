@@ -1,8 +1,8 @@
 Object: object {
-    member: @bit8
+    member: @bit32
 
     add: function (num: @bit32) result: @bit32 {
-        result = @i_add(instance.member, num)
+        result = @i_add_32(instance.member, num)
     }
 }
 

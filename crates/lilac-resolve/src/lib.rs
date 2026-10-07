@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn hook_overload_defs_share_root_namespace() {
         let (module, file, diags) = resolve_with_file(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add(lhs, rhs)\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add_32(lhs, rhs)\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let overloads = module.hooks.get("@add").expect("has @add");
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn hook_overloads_with_distinct_sigs_pass() {
         let (module, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add(lhs, rhs)\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add_32(lhs, rhs)\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(module.hooks.get("@add").map(Vec::len), Some(2));
@@ -1202,7 +1202,7 @@ mod tests {
     #[test]
     fn identical_hook_sigs_emit_e020() {
         let (_, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add(lhs, rhs)\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n",
         );
         assert_eq!(e020_count(&diags), 1);
     }
@@ -1557,13 +1557,13 @@ mod tests {
                 Spec {
                     ns: 0,
                     name: "main.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
                 Spec {
                     ns: 1,
                     name: "util.lilac",
-                    src: "@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
                     usings: &[],
                 },
             ],
@@ -1583,13 +1583,13 @@ mod tests {
                 Spec {
                     ns: 0,
                     name: "main.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
                 Spec {
                     ns: 1,
                     name: "util.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
             ],
@@ -1666,7 +1666,7 @@ mod tests {
                 Spec {
                     ns: 1,
                     name: "util.lilac",
-                    src: "Obj: object {\n    member: @bit8\n}\n@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    src: "Obj: object {\n    member: @bit8\n}\n@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
                     usings: &[],
                 },
             ],
@@ -1699,13 +1699,13 @@ mod tests {
                 Spec {
                     ns: 0,
                     name: "a.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
                 Spec {
                     ns: 0,
                     name: "b.lilac",
-                    src: "@h: function (x: @bit32) result: @bit32 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
                     usings: &[],
                 },
             ],
@@ -1725,13 +1725,13 @@ mod tests {
                 Spec {
                     ns: 0,
                     name: "a.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
                 Spec {
                     ns: 0,
                     name: "b.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add(x, x)\n",
+                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
                     usings: &[],
                 },
             ],

@@ -82,15 +82,76 @@ pub struct Conversion {
     pub func: DefId,
 }
 
+/// Integer width named by a numeric intrinsic suffix (`@i_add_8` …).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IntWidth {
+    /// `_8`: `@bit8`.
+    W8,
+    /// `_16`: `@bit16`.
+    W16,
+    /// `_32`: `@bit32`.
+    W32,
+    /// `_64`: `@bit64`.
+    W64,
+    /// `_native`: `@bit_native`.
+    Native,
+}
+
+impl IntWidth {
+    /// The builtin type name this suffix names.
+    #[must_use]
+    pub fn builtin(self) -> &'static str {
+        match self {
+            IntWidth::W8 => "@bit8",
+            IntWidth::W16 => "@bit16",
+            IntWidth::W32 => "@bit32",
+            IntWidth::W64 => "@bit64",
+            IntWidth::Native => "@bit_native",
+        }
+    }
+}
+
+/// Float width named by a numeric intrinsic suffix (`@f_add_16` …).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatWidth {
+    /// `_16`: `@fbit16`.
+    W16,
+    /// `_32`: `@fbit32`.
+    W32,
+    /// `_64`: `@fbit64`.
+    W64,
+    /// `_128`: `@fbit128`.
+    W128,
+}
+
+impl FloatWidth {
+    /// The builtin type name this suffix names.
+    #[must_use]
+    pub fn builtin(self) -> &'static str {
+        match self {
+            FloatWidth::W16 => "@fbit16",
+            FloatWidth::W32 => "@fbit32",
+            FloatWidth::W64 => "@fbit64",
+            FloatWidth::W128 => "@fbit128",
+        }
+    }
+}
+
 /// Compiler-known `@`-intrinsics (SPEC §3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intrinsic {
-    /// `i/f.add/sub/mul/div/mod`: same-`T` in, `T` out.
-    Arith,
-    /// `i/f.less/greater_than`: same-`T` in, `@bit8` out.
-    Cmp,
-    /// `i/f.negate`: `T` in, `T` out.
-    Negate,
+    /// `@i_add_W`/`@i_sub_W`/…: `(@bitW, @bitW): @bitW`.
+    ArithInt(IntWidth),
+    /// `@f_add_W`/…: `(@fbitW, @fbitW): @fbitW`.
+    ArithFloat(FloatWidth),
+    /// `@i_less_than_W`/`@i_less_than_u_W`/…: `(@bitW, @bitW): @bit8`.
+    CmpInt(IntWidth),
+    /// `@f_less_than_W`/`@f_greater_than_W`: `(@fbitW, @fbitW): @bit8`.
+    CmpFloat(FloatWidth),
+    /// `@i_negate_W`: `(@bitW): @bitW`.
+    NegateInt(IntWidth),
+    /// `@f_negate_W`: `(@fbitW): @fbitW`.
+    NegateFloat(FloatWidth),
     /// Parses `@byte_buffer` digits as an integer (folds in M3).
     AsInt,
     /// Parses `@byte_buffer` digits as a float (folds in M3).
@@ -125,14 +186,60 @@ pub enum Intrinsic {
     CompileError,
 }
 
+/// Classifies a width-suffixed numeric intrinsic (`@i_add_8`, `@f_negate_64`,
+/// …). The leading `i`/`f` selects the signedness side; the trailing `_W`
+/// selects the exact width. An unknown op, suffix, or width is not an
+/// intrinsic.
+fn numeric_intrinsic(name: &str) -> Option<Intrinsic> {
+    let (is_float, rest) = if let Some(rest) = name.strip_prefix("@i_") {
+        (false, rest)
+    } else {
+        let rest = name.strip_prefix("@f_")?;
+        (true, rest)
+    };
+    let (op, width) = rest.rsplit_once('_')?;
+    if is_float {
+        let width = match width {
+            "16" => FloatWidth::W16,
+            "32" => FloatWidth::W32,
+            "64" => FloatWidth::W64,
+            "128" => FloatWidth::W128,
+            _ => return None,
+        };
+        match op {
+            "add" | "sub" | "mul" | "div" | "mod" => Some(Intrinsic::ArithFloat(width)),
+            "negate" => Some(Intrinsic::NegateFloat(width)),
+            "less_than" | "greater_than" => Some(Intrinsic::CmpFloat(width)),
+            _ => None,
+        }
+    } else {
+        let width = match width {
+            "8" => IntWidth::W8,
+            "16" => IntWidth::W16,
+            "32" => IntWidth::W32,
+            "64" => IntWidth::W64,
+            "native" => IntWidth::Native,
+            _ => return None,
+        };
+        match op {
+            "add" | "sub" | "mul" | "div" | "div_u" | "mod" | "mod_u" => {
+                Some(Intrinsic::ArithInt(width))
+            }
+            "negate" => Some(Intrinsic::NegateInt(width)),
+            "less_than" | "less_than_u" | "greater_than" | "greater_than_u" => {
+                Some(Intrinsic::CmpInt(width))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Looks up a compiler-known intrinsic by `@`-name.
 pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
+    if let Some(intrinsic) = numeric_intrinsic(name) {
+        return Some(intrinsic);
+    }
     match name {
-        "@i_add" | "@i_sub" | "@i_mul" | "@i_div" | "@i_div_u" | "@i_mod" | "@i_mod_u"
-        | "@f_add" | "@f_sub" | "@f_mul" | "@f_div" | "@f_mod" => Some(Intrinsic::Arith),
-        "@i_less_than" | "@i_less_than_u" | "@i_greater_than" | "@i_greater_than_u"
-        | "@f_less_than" | "@f_greater_than" => Some(Intrinsic::Cmp),
-        "@i_negate" | "@f_negate" => Some(Intrinsic::Negate),
         "@as_int" => Some(Intrinsic::AsInt),
         "@as_float" => Some(Intrinsic::AsFloat),
         "@size_of" => Some(Intrinsic::SizeOf),
@@ -906,28 +1013,47 @@ mod tests {
 
     #[test]
     fn intrinsics_resolve_by_name() {
-        assert!(matches!(lookup_intrinsic("@i_add"), Some(Intrinsic::Arith)));
-        assert!(matches!(lookup_intrinsic("@f_add"), Some(Intrinsic::Arith)));
         assert!(matches!(
-            lookup_intrinsic("@i_less_than"),
-            Some(Intrinsic::Cmp)
+            lookup_intrinsic("@i_add_8"),
+            Some(Intrinsic::ArithInt(IntWidth::W8))
         ));
         assert!(matches!(
-            lookup_intrinsic("@i_less_than_u"),
-            Some(Intrinsic::Cmp)
+            lookup_intrinsic("@i_add_native"),
+            Some(Intrinsic::ArithInt(IntWidth::Native))
         ));
         assert!(matches!(
-            lookup_intrinsic("@i_greater_than_u"),
-            Some(Intrinsic::Cmp)
+            lookup_intrinsic("@f_add_32"),
+            Some(Intrinsic::ArithFloat(FloatWidth::W32))
         ));
         assert!(matches!(
-            lookup_intrinsic("@i_div_u"),
-            Some(Intrinsic::Arith)
+            lookup_intrinsic("@i_less_than_64"),
+            Some(Intrinsic::CmpInt(IntWidth::W64))
         ));
         assert!(matches!(
-            lookup_intrinsic("@i_mod_u"),
-            Some(Intrinsic::Arith)
+            lookup_intrinsic("@i_less_than_u_16"),
+            Some(Intrinsic::CmpInt(IntWidth::W16))
         ));
+        assert!(matches!(
+            lookup_intrinsic("@i_greater_than_u_8"),
+            Some(Intrinsic::CmpInt(IntWidth::W8))
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_div_u_32"),
+            Some(Intrinsic::ArithInt(IntWidth::W32))
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@i_mod_u_native"),
+            Some(Intrinsic::ArithInt(IntWidth::Native))
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@f_negate_128"),
+            Some(Intrinsic::NegateFloat(FloatWidth::W128))
+        ));
+        // The unsuffixed names are gone, and bogus widths are not intrinsics.
+        assert_eq!(lookup_intrinsic(&["@i", "_add"].concat()), None);
+        assert_eq!(lookup_intrinsic(&["@f", "_add"].concat()), None);
+        assert_eq!(lookup_intrinsic("@i_add_128"), None);
+        assert_eq!(lookup_intrinsic("@f_add_native"), None);
         assert_eq!(lookup_intrinsic("@nope"), None);
     }
 

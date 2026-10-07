@@ -1,1 +1,1 @@
-@h: function (x: @bit8) result: @bit8 => @i_add(x, x)
+@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)

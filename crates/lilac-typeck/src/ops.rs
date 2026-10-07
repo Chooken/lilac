@@ -223,7 +223,7 @@ mod tests {
         // `@add(@bit32,@bit32)` + a `@bit8 -> @bit32` conversion: `b + a`
         // (b:@bit8, a:@bit32) must NOT convert `b`; it is E043.
         let diags = check_src(
-            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 { result = @i_add(lhs, rhs) }\n\
+            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 { result = @i_add_32(lhs, rhs) }\n\
              @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
              main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = b + a\n}\n",
         );
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn hook_call_does_not_convert_arguments() {
         let diags = check_src(
-            "@f: function (x: @bit32) @bit32 => @i_add(x, 0x1)\n\
+            "@f: function (x: @bit32) @bit32 => @i_add_32(x, 0x1)\n\
              @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
              main: function () nothing {\n    b: @bit8 = 0x2\n    z: @bit32 = @f(b)\n}\n",
         );
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn binop_anchors_left() {
         let diags = check_src(
-            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add(lhs, rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = a + b\n    w: @bit32 = b + a\n}\n",
+            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add_32(lhs, rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = a + b\n    w: @bit32 = b + a\n}\n",
         );
         assert_eq!(
             diags
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn exact_match_beats_conversion() {
         let diags = check_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @i_add(lhs, rhs)\n}\n@add: function (lhs: @bit8, rhs: @bit32) result: @bit32 {\n    result = @i_add(@truncate(lhs), rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    x: @bit8 = 0x1\n    y: @bit8 = 0x2\n    z: @bit8 = x + y\n}\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @i_add_8(lhs, rhs)\n}\n@add: function (lhs: @bit8, rhs: @bit32) result: @bit32 {\n    result = @i_add_32(@truncate(lhs), rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    x: @bit8 = 0x1\n    y: @bit8 = 0x2\n    z: @bit8 = x + y\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn binop_literal_takes_sibling_width() {
         let diags = check_src(
-            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    z: @bit32 = a + 0x2\n    w: @bit32 = 0x3 + a\n}\n",
+            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add_32(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    z: @bit32 = a + 0x2\n    w: @bit32 = 0x3 + a\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn direct_hook_call_picks_exact_overload() {
         let diags = check_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @i_add(lhs, rhs)\n}\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = 0x2\n    z: @bit32 = @add(a, b)\n}\n",
+            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @i_add_8(lhs, rhs)\n}\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add_32(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = 0x2\n    z: @bit32 = @add(a, b)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -350,7 +350,7 @@ mod tests {
     fn member_operator_resolves() {
         let diags = check_src(
             "Int64: object {\n    data: @bit64\n\
-             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add(lhs.data, rhs.data) }\n}\n\
+             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add_64(lhs.data, rhs.data) }\n}\n\
              main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
@@ -384,8 +384,8 @@ mod tests {
     fn method_and_hook_with_same_base_name_coexist() {
         let diags = check_src(
             "Int64: object {\n    data: @bit64\n\
-             add: function (self, x: @bit64) result: @bit64 { result = @i_add(x, self.data) }\n\
-             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add(lhs.data, rhs.data) }\n}\n\
+             add: function (self, x: @bit64) result: @bit64 { result = @i_add_64(x, self.data) }\n\
+             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add_64(lhs.data, rhs.data) }\n}\n\
              main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n    c: @bit64 = a.add(0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");

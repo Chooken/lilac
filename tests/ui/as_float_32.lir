@@ -4,9 +4,9 @@ target = "x86_64-unknown-none"
 function @main
 {
   $entry:
-    alloca #bit32 %float : zeroed
+    alloca #fbit32 %float : zeroed
     &1: #byte_buffer = const !c0
-    &2: #bit32 = const 0x40a80000
+    &2: #fbit32 = const 5.25
     copy &2 -> %float
     return
 }

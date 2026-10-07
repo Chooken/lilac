@@ -7,9 +7,9 @@ target triple = "x86_64-unknown-none"
 
 define void @.lilac.main() {
 entry:
-  %float = alloca i16, align 2
-  store i16 0, ptr %float, align 2
-  store i16 17728, ptr %float, align 2
+  %float = alloca half, align 2
+  store half 0xH0000, ptr %float, align 2
+  store half 0xH4540, ptr %float, align 2
   ret void
 }
 

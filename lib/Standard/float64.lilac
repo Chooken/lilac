@@ -1,23 +1,23 @@
 Float64: object {
     
     private {
-        data: @bit64
+        data: @fbit64
     }
 
-    @add: function (lhs: Float64, rhs: Float64) Float64 => @f_add(lhs.data, rhs.data)
-    @sub: function (lhs: Float64, rhs: Float64) Float64 => @f_sub(lhs.data, rhs.data)
-    @mul: function (lhs: Float64, rhs: Float64) Float64 => @f_mul(lhs.data, rhs.data)
-    @div: function (lhs: Float64, rhs: Float64) Float64 => @f_div(lhs.data, rhs.data)
-    @mod: function (lhs: Float64, rhs: Float64) Float64 => @f_mod(lhs.data, rhs.data)
+    @add: function (lhs: Float64, rhs: Float64) Float64 => @f_add_64(lhs.data, rhs.data)
+    @sub: function (lhs: Float64, rhs: Float64) Float64 => @f_sub_64(lhs.data, rhs.data)
+    @mul: function (lhs: Float64, rhs: Float64) Float64 => @f_mul_64(lhs.data, rhs.data)
+    @div: function (lhs: Float64, rhs: Float64) Float64 => @f_div_64(lhs.data, rhs.data)
+    @mod: function (lhs: Float64, rhs: Float64) Float64 => @f_mod_64(lhs.data, rhs.data)
 
-    @less_than: function (lhs: Float64, rhs: Float64) Bool => @f_less_than(lhs.data, rhs.data)
-    @greater_than: function (lhs: Float64, rhs: Float64) Bool =>  @f_greater_than(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_less_than(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_greater_than(lhs.data, rhs.data)
+    @less_than: function (lhs: Float64, rhs: Float64) Bool => @f_less_than_64(lhs.data, rhs.data)
+    @greater_than: function (lhs: Float64, rhs: Float64) Bool =>  @f_greater_than_64(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_less_than_64(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_greater_than_64(lhs.data, rhs.data)
 
-    @negate: function (value: Float64) Float64 => @f_negate(value.data)
+    @negate: function (value: Float64) Float64 => @f_negate_64(value.data)
 
     @conversion: function(from: @byte_buffer) Float64 => Float64 { data = @as_float(from) }
-    @conversion: function(from: @bit64) Float64 => Float64 { data = from }
-    @conversion: function(from: Float64) @bit64 => from.data
+    @conversion: function(from: @fbit64) Float64 => Float64 { data = from }
+    @conversion: function(from: Float64) @fbit64 => from.data
 }

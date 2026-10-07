@@ -1429,10 +1429,9 @@ impl Verifier<'_> {
         }
     }
 
-    /// Checks arithmetic widths. Every op needs a bit-container result; float
-    /// arithmetic/comparison additionally needs `#bit32`/`#bit64` operands,
-    /// because the backend reinterprets operand bits as an LLVM `float`/`double`
-    /// (and ICEs on narrower containers).
+    /// Checks arithmetic widths. Integer ops need bit-container operands and
+    /// result; float ops need `#fbit16/32/64/128` operands (real float
+    /// containers), with a `#bit8` result for float comparisons.
     fn check_arith_width(
         &mut self,
         op: &ArithOp,
@@ -1442,7 +1441,33 @@ impl Verifier<'_> {
         regs: &HashMap<&str, RegDef>,
         span: Span,
     ) {
-        if !matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native") {
+        fn is_bit_container(ty: &str) -> bool {
+            matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native")
+        }
+        fn is_fbit_container(ty: &str) -> bool {
+            matches!(ty, "#fbit16" | "#fbit32" | "#fbit64" | "#fbit128")
+        }
+        let is_float_arith = matches!(
+            op,
+            ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod
+        );
+        let is_float_cmp = matches!(op, ArithOp::FLt | ArithOp::FGt);
+        if is_float_cmp {
+            if ty != "#bit8" {
+                self.error(
+                    format!("`{}` needs a `#bit8` result, found `{ty}`", print_op(op)),
+                    span,
+                );
+            }
+        } else if is_float_arith {
+            if !is_fbit_container(ty) {
+                self.error(
+                    format!("`{}` needs a float type, found `{ty}`", print_op(op)),
+                    span,
+                );
+                return;
+            }
+        } else if !is_bit_container(ty) {
             self.error(
                 format!(
                     "`{}` needs a bit-container type, found `{ty}`",
@@ -1452,25 +1477,15 @@ impl Verifier<'_> {
             );
             return;
         }
-        let is_float = matches!(
-            op,
-            ArithOp::FAdd
-                | ArithOp::FSub
-                | ArithOp::FMul
-                | ArithOp::FDiv
-                | ArithOp::FMod
-                | ArithOp::FLt
-                | ArithOp::FGt
-        );
-        if !is_float {
+        if !(is_float_arith || is_float_cmp) {
             return;
         }
         for reg in [lhs, rhs] {
             if let Some(def) = regs.get(reg) {
-                if !matches!(def.ty.as_str(), "#bit32" | "#bit64") {
+                if !is_fbit_container(def.ty.as_str()) {
                     self.error(
                         format!(
-                            "`{}` needs `#bit32` or `#bit64` operands, found `{}` in `&{reg}`",
+                            "`{}` needs float operands, found `{}` in `&{reg}`",
                             print_op(op),
                             def.ty
                         ),
@@ -1952,31 +1967,38 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_float_arith_on_narrow_operands() {
-        for (op, lhs_ty) in [
-            (ArithOp::FAdd, "#bit8"),
-            (ArithOp::FLt, "#bit16"),
+    fn verify_rejects_float_arith_on_bit_operands() {
+        for (op, result_ty) in [
+            (ArithOp::FAdd, "#bit32"),
+            (ArithOp::FLt, "#bit8"),
             (ArithOp::FGt, "#bit8"),
         ] {
-            let result_ty = if matches!(op, ArithOp::FLt | ArithOp::FGt) {
-                "#bit8"
-            } else {
-                lhs_ty
-            };
-            let module = module_with_arith(op, lhs_ty, "#bit32", result_ty);
+            let label = format!("{op:?}");
+            let module = module_with_arith(op, "#bit32", "#bit32", result_ty);
             let mut diags = lilac_error::Diags::new();
-            assert!(verify(&module, &mut diags).is_err(), "{lhs_ty}");
-            assert_eq!(e070_count(&diags), 1, "{lhs_ty}: {:?}", diags.diagnostics());
+            assert!(verify(&module, &mut diags).is_err(), "{label}");
+            assert!(
+                e070_count(&diags) >= 1,
+                "{label}: {:?}",
+                diags.diagnostics()
+            );
+            let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+            assert!(
+                msgs.iter().any(|m| m.contains("float")),
+                "{label}: {msgs:?}"
+            );
         }
     }
 
     #[test]
-    fn verify_accepts_float_arith_on_supported_operands() {
+    fn verify_accepts_float_arith_on_fbit_operands() {
         for (op, ty) in [
-            (ArithOp::FAdd, "#bit32"),
-            (ArithOp::FDiv, "#bit64"),
-            (ArithOp::FLt, "#bit32"),
-            (ArithOp::FGt, "#bit64"),
+            (ArithOp::FAdd, "#fbit16"),
+            (ArithOp::FAdd, "#fbit32"),
+            (ArithOp::FDiv, "#fbit64"),
+            (ArithOp::FMod, "#fbit128"),
+            (ArithOp::FLt, "#fbit32"),
+            (ArithOp::FGt, "#fbit64"),
         ] {
             let result_ty = if matches!(op, ArithOp::FLt | ArithOp::FGt) {
                 "#bit8"

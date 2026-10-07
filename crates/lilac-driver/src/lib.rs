@@ -636,7 +636,7 @@ mod tests {
         let module = session
             .compile_lir_with_stages(
                 "s.lilac",
-                "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+                "main: function () nothing {\n    x: @bit_native = @i_add_native(0x1, 0x2)\n}\n",
                 &mut |stage, lir| texts.push((stage, lir.to_text())),
             )
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));

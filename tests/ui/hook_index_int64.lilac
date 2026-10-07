@@ -3,12 +3,12 @@ Int64: object {
         data: @bit64
     }
 
-    @add: function (lhs: Int64, rhs: Int64) Int64 => @i_add(lhs.data, rhs.data)
-    @sub: function (lhs: Int64, rhs: Int64) Int64 => @i_sub(lhs.data, rhs.data)
-    @mul: function (lhs: Int64, rhs: Int64) Int64 => @i_mul(lhs.data, rhs.data)
-    @div: function (lhs: Int64, rhs: Int64) Int64 => @i_div(lhs.data, rhs.data)
-    @mod: function (lhs: Int64, rhs: Int64) Int64 => @i_mod(lhs.data, rhs.data)
-    @negate: function (value: Int64) Int64 => @i_negate(value.data)
+    @add: function (lhs: Int64, rhs: Int64) Int64 => @i_add_64(lhs.data, rhs.data)
+    @sub: function (lhs: Int64, rhs: Int64) Int64 => @i_sub_64(lhs.data, rhs.data)
+    @mul: function (lhs: Int64, rhs: Int64) Int64 => @i_mul_64(lhs.data, rhs.data)
+    @div: function (lhs: Int64, rhs: Int64) Int64 => @i_div_64(lhs.data, rhs.data)
+    @mod: function (lhs: Int64, rhs: Int64) Int64 => @i_mod_64(lhs.data, rhs.data)
+    @negate: function (value: Int64) Int64 => @i_negate_64(value.data)
 
     @conversion: function (from: @byte_buffer) Int64 => Int64 { data = @as_int(from) }
     @conversion: function (from: @bit64) Int64 => Int64 { data = from }

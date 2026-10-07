@@ -974,6 +974,27 @@ fn bit_width(types: &Types, id: TypeId) -> u32 {
     }
 }
 
+fn is_float(types: &Types, id: TypeId) -> bool {
+    matches!(
+        types.kind(id),
+        lilac_ty::TypeKind::FBit16
+            | lilac_ty::TypeKind::FBit32
+            | lilac_ty::TypeKind::FBit64
+            | lilac_ty::TypeKind::FBit128
+    )
+}
+
+/// Width in bits of a float container (callers guarantee `is_float` first).
+fn float_width(types: &Types, id: TypeId) -> u32 {
+    match types.kind(id) {
+        lilac_ty::TypeKind::FBit16 => 16,
+        lilac_ty::TypeKind::FBit32 => 32,
+        lilac_ty::TypeKind::FBit64 => 64,
+        lilac_ty::TypeKind::FBit128 => 128,
+        _ => lilac_error::bug!(Span::dummy(), "float width of non-float type"),
+    }
+}
+
 /// True for every non-decimal literal, whose bits are fully known. Today that
 /// is exactly the `0x`/`0X`/`0b`/`0B` forms the lexer produces, so this is the
 /// complement of [`lilac_decimal::is_decimal_literal`]; a future non-decimal
@@ -4250,96 +4271,6 @@ impl Checker<'_> {
         Ok(())
     }
 
-    /// Unifies same-width bit operands (literals take the width from siblings
-    /// or the expected type); returns the unified width plus every argument's
-    /// HIR in order.
-    fn unify_width(
-        &mut self,
-        fctx: &mut FuncCtx,
-        args: &[Expr],
-        expected: Option<TypeId>,
-        span: Span,
-    ) -> Result<(TypeId, Vec<HirExpr>), ErrorGuaranteed> {
-        let mut width = match expected {
-            Some(t) if is_bit(self.types, t) => Some(t),
-            _ => None,
-        };
-        let mut checked: Vec<Option<(TypeRef, HirExpr)>> = vec![None; args.len()];
-        let mut failed = false;
-        for (index, arg) in args.iter().enumerate() {
-            if matches!(arg, Expr::Number(bytes, _) if is_lit_literal(bytes)) {
-                continue;
-            }
-            let (got, hir) = self.check_expr(fctx, arg, None);
-            if is_poison(got) {
-                failed = true;
-                continue;
-            }
-            if !is_bit(self.types, got.id) {
-                self.diags.emit(
-                    Diagnostic::error(
-                        "E010",
-                        format!(
-                            "mismatched types: expected a bit container, found {}",
-                            self.types.display(got.id),
-                        ),
-                    )
-                    .label(arg.span(), true, "not a bit container".to_owned()),
-                );
-                failed = true;
-                continue;
-            }
-            if width.is_none() {
-                width = Some(got.id);
-            }
-            checked[index] = Some((got, hir));
-        }
-        let Some(width) = width else {
-            self.diags.emit(
-                Diagnostic::error("E024", "cannot infer the width here").label(
-                    span,
-                    true,
-                    "annotate the binding".to_owned(),
-                ),
-            );
-            return Err(ErrorGuaranteed::new());
-        };
-        let mut hir_args = Vec::with_capacity(args.len());
-        for (index, arg) in args.iter().enumerate() {
-            if let Some((got, hir)) = checked[index].take() {
-                if got.id != width {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            "E010",
-                            format!(
-                                "mismatched widths: expected {}, found {}",
-                                self.types.display(width),
-                                self.types.display(got.id),
-                            ),
-                        )
-                        .label(
-                            arg.span(),
-                            true,
-                            "width mismatch here".to_owned(),
-                        ),
-                    );
-                    failed = true;
-                }
-                hir_args.push(hir);
-            } else {
-                let (got, hir) = self.check_expr(fctx, arg, Some(width));
-                if !is_poison(got) && got.id != width {
-                    failed = true;
-                }
-                hir_args.push(hir);
-            }
-        }
-        if failed {
-            return Err(ErrorGuaranteed::new());
-        }
-        Ok((width, hir_args))
-    }
-
     fn check_intrinsic(
         &mut self,
         fctx: &mut FuncCtx,
@@ -4350,9 +4281,12 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         let (outs, hir_args) = match intrinsic {
-            Intrinsic::Arith | Intrinsic::Cmp | Intrinsic::Negate => {
-                self.arith_out(fctx, intrinsic, args, span, expected)?
-            }
+            Intrinsic::ArithInt(_)
+            | Intrinsic::ArithFloat(_)
+            | Intrinsic::CmpInt(_)
+            | Intrinsic::CmpFloat(_)
+            | Intrinsic::NegateInt(_)
+            | Intrinsic::NegateFloat(_) => self.numeric_out(fctx, intrinsic, name, args, span)?,
             Intrinsic::AsInt | Intrinsic::AsFloat | Intrinsic::Truncate | Intrinsic::ExtendZero => {
                 self.converting_out(fctx, intrinsic, args, span, expected)?
             }
@@ -4416,42 +4350,64 @@ impl Checker<'_> {
         }))
     }
 
-    fn arith_out(
+    /// Checks a width-suffixed numeric intrinsic against its exact signature:
+    /// every argument is checked against its one parameter type (literals adopt
+    /// that width) and the result is the exact result type. A mismatch is
+    /// `E010`; there is no width unification or conversion.
+    fn numeric_out(
         &mut self,
         fctx: &mut FuncCtx,
         intrinsic: Intrinsic,
+        name: &str,
         args: &[Expr],
         span: Span,
-        expected: Option<TypeId>,
     ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
-        let value = |id: TypeId| TypeRef { id, is_ref: false };
-        if intrinsic == Intrinsic::Negate {
-            self.expect_arity(span, "@negate", args, 1)?;
-        }
-        let operand_expected = if intrinsic == Intrinsic::Cmp {
-            None
-        } else {
-            expected
+        let (param_name, result_name, arity) = match intrinsic {
+            Intrinsic::ArithInt(width) => (width.builtin(), width.builtin(), 2),
+            Intrinsic::NegateInt(width) => (width.builtin(), width.builtin(), 1),
+            Intrinsic::CmpInt(width) => (width.builtin(), "@bit8", 2),
+            Intrinsic::ArithFloat(width) => (width.builtin(), width.builtin(), 2),
+            Intrinsic::NegateFloat(width) => (width.builtin(), width.builtin(), 1),
+            Intrinsic::CmpFloat(width) => (width.builtin(), "@bit8", 2),
+            _ => lilac_error::bug!(span, "numeric_out on a non-numeric intrinsic"),
         };
-        let (width, hir_args) = self.unify_width(fctx, args, operand_expected, span)?;
-        if args.is_empty() {
-            let what = if intrinsic == Intrinsic::Cmp {
-                "comparison"
-            } else {
-                "arithmetic"
-            };
-            return Err(self.diags.emit(
-                Diagnostic::error("E022", format!("{what} needs operand values")).label(
-                    span,
-                    true,
-                    "arity mismatch here".to_owned(),
-                ),
-            ));
+        let param = self.builtin_ty(param_name);
+        let result = self.builtin_ty(result_name);
+        self.expect_arity(span, name, args, arity)?;
+        let mut hir_args = Vec::with_capacity(args.len());
+        let mut failed = false;
+        for arg in args {
+            let (got, hir) = self.check_expr(fctx, arg, Some(param));
+            if !is_poison(got) && got.id != param {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E010",
+                        format!(
+                            "mismatched types: expected {}, found {}",
+                            self.types.display(param),
+                            self.types.display(got.id),
+                        ),
+                    )
+                    .label(
+                        arg.span(),
+                        true,
+                        "wrong operand type here".to_owned(),
+                    ),
+                );
+                failed = true;
+            }
+            hir_args.push(hir);
         }
-        if intrinsic == Intrinsic::Cmp {
-            return Ok((vec![value(self.builtin_ty("@bit8"))], hir_args));
+        if failed {
+            return Err(ErrorGuaranteed::new());
         }
-        Ok((vec![value(width)], hir_args))
+        Ok((
+            vec![TypeRef {
+                id: result,
+                is_ref: false,
+            }],
+            hir_args,
+        ))
     }
 
     fn converting_out(
@@ -4463,11 +4419,11 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
-        let (name, want_buffer) = match intrinsic {
-            Intrinsic::AsInt => ("@as_int", true),
-            Intrinsic::AsFloat => ("@as_float", true),
-            Intrinsic::Truncate => ("@truncate", false),
-            _ => ("@extend_zero", false),
+        let (name, want_buffer, want_float) = match intrinsic {
+            Intrinsic::AsInt => ("@as_int", true, false),
+            Intrinsic::AsFloat => ("@as_float", true, true),
+            Intrinsic::Truncate => ("@truncate", false, false),
+            _ => ("@extend_zero", false, false),
         };
         self.expect_arity(span, name, args, 1)?;
         let (got, hir) = self.check_expr(fctx, &args[0], None);
@@ -4496,14 +4452,43 @@ impl Checker<'_> {
                 return Err(ErrorGuaranteed::new());
             }
         }
-        match expected {
-            Some(t) if is_bit(self.types, t) => Ok((vec![value(t)], vec![hir])),
-            _ => {
-                Err(self.diags.emit(
-                    Diagnostic::error("E024", format!("`{name}` needs an expected bit type"))
-                        .label(span, true, "annotate the binding".to_owned()),
-                ))
+        // `@as_float` produces a real `@fbit16/32/64` value (128 folding is
+        // deferred); the other conversions produce a bit container.
+        let result = match expected {
+            Some(t) if want_float && is_float(self.types, t) => {
+                if float_width(self.types, t) == 128 {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            "E010",
+                            "`@as_float` to `@fbit128` is not supported yet".to_owned(),
+                        )
+                        .label(
+                            span,
+                            true,
+                            "only 16/32/64-bit floats can fold".to_owned(),
+                        ),
+                    ));
+                }
+                Some(t)
             }
+            Some(t) if !want_float && is_bit(self.types, t) => Some(t),
+            _ => None,
+        };
+        if let Some(t) = result {
+            Ok((vec![value(t)], vec![hir]))
+        } else {
+            let want = if want_float {
+                "an expected @fbit16/32/64 type"
+            } else {
+                "an expected bit type"
+            };
+            Err(self.diags.emit(
+                Diagnostic::error("E024", format!("`{name}` needs {want}")).label(
+                    span,
+                    true,
+                    "annotate the binding".to_owned(),
+                ),
+            ))
         }
     }
 
@@ -6063,7 +6048,7 @@ mod tests {
 
     #[test]
     fn local_and_intrinsic_uses_are_skipped() {
-        let src = "pi: @bit8 = 0x1\nmain: function () nothing {\n    x: @bit8 = pi\n    y: @bit8 = @i_add(x, 0x1)\n}\n";
+        let src = "pi: @bit8 = 0x1\nmain: function () nothing {\n    x: @bit8 = pi\n    y: @bit8 = @i_add_8(x, 0x1)\n}\n";
         let (diags, hir) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");
         let texts: Vec<&str> = hir
@@ -6165,14 +6150,37 @@ mod tests {
     #[test]
     fn cmp_operands_ignore_expected_result_width() {
         // Return position expects `@bit8`; operands are `@bit32`.
-        let diags = check_src("f: function (a: @bit32, b: @bit32) @bit8 => @i_less_than(a, b)\n");
+        let diags =
+            check_src("f: function (a: @bit32, b: @bit32) @bit8 => @i_less_than_32(a, b)\n");
         assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
-    fn cmp_unanchored_literals_is_e024() {
-        let diags = check_src("f: function () @bit8 => @i_less_than(0x1, 0x2)\n");
-        assert!(has_code(&diags, "E024"), "{diags:?}");
+    fn width_suffixed_numeric_intrinsics() {
+        // An exact-width integer add typechecks; literals adopt the width.
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit8 = @i_add_8(0x1, 0x2)\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        // A width mismatch is `E010`, with no auto-unification.
+        let diags = check_src(
+            "main: function () nothing {\n    a: @bit16 = 0x1\n    b: @bit16 = 0x2\n    x: @bit16 = @i_add_8(a, b)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+        // Float ops require real `@fbit32` operands, not integer containers.
+        let diags = check_src(
+            "main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = 0x2\n    x: @fbit32 = @f_add_32(a, b)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn old_unsuffixed_intrinsics_are_gone() {
+        // The unsuffixed names are gone. The name is assembled so this source
+        // itself does not contain the retired spelling.
+        let old = ["@i", "_add"].concat();
+        let src = format!("main: function () nothing {{\n    x: @bit8 = {old}(0x1, 0x2)\n}}\n");
+        let diags = check_src(&src);
+        assert!(diags.has_errors(), "{diags:?}");
     }
 
     #[test]
@@ -6237,7 +6245,7 @@ mod tests {
 
     #[test]
     fn decimal_in_arith_is_e010() {
-        let diags = check_src("main: function () nothing {\n    x: @bit32 = @i_add(5, 6)\n}\n");
+        let diags = check_src("main: function () nothing {\n    x: @bit32 = @i_add_32(5, 6)\n}\n");
         assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
@@ -6328,7 +6336,7 @@ mod tests {
     #[test]
     fn func_value_call_checks() {
         let diags = check_src(
-            "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @i_add(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @i_add(value, 0x2)\n}\n",
+            "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -6346,7 +6354,7 @@ mod tests {
     #[test]
     fn static_call_checks() {
         let diags = check_src(
-            "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @i_add(instance.member, num)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
+            "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @i_add_32(instance.member, num)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
@@ -6493,7 +6501,7 @@ mod tests {
 
     #[test]
     fn inline_substituted_nonrecursive() {
-        let src = "addOne: function (value: @bit32) @bit32 => @i_add(value, 0x1)\nmain: function () nothing {\n    variable: @bit32 = addOne(0x1)\n}\n";
+        let src = "addOne: function (value: @bit32) @bit32 => @i_add_32(value, 0x1)\nmain: function () nothing {\n    variable: @bit32 = addOne(0x1)\n}\n";
         let (hir, diags) = check_hir_src(src);
         assert!(!diags.has_errors(), "{diags:?}");
         let main = hir
@@ -6510,13 +6518,13 @@ mod tests {
         let lilac_hir::HirCallee::Intrinsic { name } = callee else {
             panic!("expected intrinsic call, got {callee:?}");
         };
-        assert_eq!(name, "@i_add");
+        assert_eq!(name, "@i_add_32");
         assert_eq!(args.len(), 2);
     }
 
     #[test]
     fn inline_or_body_checks_and_inlines() {
-        let src = "leq: function (a: @bit8, b: @bit8) @bit8 => (a == b) or @i_less_than(a, b)\n\
+        let src = "leq: function (a: @bit8, b: @bit8) @bit8 => (a == b) or @i_less_than_8(a, b)\n\
                    main: function () nothing {\n    r: @bit8 = leq(0x1, 0x2)\n}\n";
         let (diags, _) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");

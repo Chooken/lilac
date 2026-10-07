@@ -185,7 +185,7 @@ fn lir_request_returns_the_final_module() {
     let (client, handle) = start_server();
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n";
+    let text = "main: function () nothing {\n    x: @bit_native = @i_add_native(0x1, 0x2)\n}\n";
     did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
@@ -204,12 +204,12 @@ fn lir_request_returns_the_final_module() {
         "dummy (compiler-generated runtime) spans must be omitted"
     );
 
-    // The final module folds `@i_add(0x1, 0x2)` into a constant, so the live
+    // The final module folds `@i_add_native(0x1, 0x2)` into a constant, so the live
     // `i.add` instruction only survives in the `lower` stage. Bind that
     // instruction's physical line to the exact byte range of its source
     // expression: an off-by-one line map or a swapped span field would
     // otherwise pass the suite unnoticed.
-    let expr = "@i_add(0x1, 0x2)";
+    let expr = "@i_add_native(0x1, 0x2)";
     let lo = text.find(expr).expect("expression offset") as u64;
     let hi = lo + expr.len() as u64;
     let lower = lir_request(&client, &uri, "lower");
@@ -293,7 +293,7 @@ fn lir_request_falls_back_for_a_file_outside_the_project() {
     let sub = dir.join("scratch");
     std::fs::create_dir_all(&sub).expect("mkdir");
     let main = sub.join("main.lilac");
-    let text = "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n";
+    let text = "main: function () nothing {\n    x: @bit_native = @i_add_native(0x1, 0x2)\n}\n";
     std::fs::write(&main, text).expect("write");
     let root = Url::from_directory_path(&dir).expect("root uri");
     let main_uri = vscode_file_uri(&main);

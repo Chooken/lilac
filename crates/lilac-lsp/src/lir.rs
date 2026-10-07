@@ -60,7 +60,7 @@ mod tests {
         let mut stages = LirStages::default();
         let _ = session.compile_lir_with_stages(
             "t.lilac",
-            "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+            "main: function () nothing {\n    x: @bit_native = @i_add_native(0x1, 0x2)\n}\n",
             &mut |name, lir| stages.modules.push((name, lir.clone())),
         );
         let uri = Url::parse("file:///c:/t.lilac").expect("uri");

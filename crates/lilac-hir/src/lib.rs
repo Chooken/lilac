@@ -284,7 +284,7 @@ pub enum HirCallee {
     },
     /// Compiler intrinsic by `@`-name.
     Intrinsic {
-        /// Intrinsic name (`@i_add`, `@compile_error`, …).
+        /// Intrinsic name (`@i_add_8`, `@compile_error`, …).
         name: String,
     },
 }

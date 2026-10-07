@@ -599,7 +599,7 @@ mod tests {
         let (result, dump_err) = compile_with_dumps(
             &mut session,
             "s.lilac",
-            "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
+            "main: function () nothing {\n    x: @bit_native = @i_add_native(0x1, 0x2)\n}\n",
             Some(&dir),
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());

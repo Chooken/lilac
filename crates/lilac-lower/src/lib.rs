@@ -357,29 +357,70 @@ fn fresh_reg(fs: &mut FuncState) -> String {
     format!("{}", fs.regs)
 }
 
+/// Splits a width-suffixed numeric intrinsic name (`@i_add_8`, `@f_div_64`)
+/// into its signedness side (`true` for `@f_`) and its op spelling with the
+/// trailing `_W` removed, or `None` when the name is not a well-formed numeric
+/// intrinsic. Only the widths the intrinsic table accepts are recognized.
+fn split_numeric_intrinsic(name: &str) -> Option<(bool, &str)> {
+    let (is_float, rest) = if let Some(rest) = name.strip_prefix("@i_") {
+        (false, rest)
+    } else {
+        let rest = name.strip_prefix("@f_")?;
+        (true, rest)
+    };
+    let (op, width) = rest.rsplit_once('_')?;
+    let valid = if is_float {
+        matches!(width, "16" | "32" | "64" | "128")
+    } else {
+        matches!(width, "8" | "16" | "32" | "64" | "native")
+    };
+    valid.then_some((is_float, op))
+}
+
 /// Maps an arithmetic intrinsic name (signed/unsigned integer and float) to
 /// its `ArithOp`, or `None` for a non-arithmetic intrinsic.
 fn arith_op_for(name: &str) -> Option<ArithOp> {
-    Some(match name {
-        "@i_add" => ArithOp::IAdd,
-        "@i_sub" => ArithOp::ISub,
-        "@i_mul" => ArithOp::IMul,
-        "@i_div" => ArithOp::IDiv,
-        "@i_div_u" => ArithOp::IDivU,
-        "@i_mod" => ArithOp::IMod,
-        "@i_mod_u" => ArithOp::IModU,
-        "@f_add" => ArithOp::FAdd,
-        "@f_sub" => ArithOp::FSub,
-        "@f_mul" => ArithOp::FMul,
-        "@f_div" => ArithOp::FDiv,
-        "@f_mod" => ArithOp::FMod,
-        "@i_less_than" => ArithOp::ILt,
-        "@i_less_than_u" => ArithOp::ILtU,
-        "@i_greater_than" => ArithOp::IGt,
-        "@i_greater_than_u" => ArithOp::IGtU,
-        "@f_less_than" => ArithOp::FLt,
-        "@f_greater_than" => ArithOp::FGt,
-        _ => return None,
+    let (is_float, op) = split_numeric_intrinsic(name)?;
+    Some(if is_float {
+        match op {
+            "add" => ArithOp::FAdd,
+            "sub" => ArithOp::FSub,
+            "mul" => ArithOp::FMul,
+            "div" => ArithOp::FDiv,
+            "mod" => ArithOp::FMod,
+            "less_than" => ArithOp::FLt,
+            "greater_than" => ArithOp::FGt,
+            _ => return None,
+        }
+    } else {
+        match op {
+            "add" => ArithOp::IAdd,
+            "sub" => ArithOp::ISub,
+            "mul" => ArithOp::IMul,
+            "div" => ArithOp::IDiv,
+            "div_u" => ArithOp::IDivU,
+            "mod" => ArithOp::IMod,
+            "mod_u" => ArithOp::IModU,
+            "less_than" => ArithOp::ILt,
+            "less_than_u" => ArithOp::ILtU,
+            "greater_than" => ArithOp::IGt,
+            "greater_than_u" => ArithOp::IGtU,
+            _ => return None,
+        }
+    })
+}
+
+/// The `ArithOp` (subtract from zero) for a width-suffixed negate intrinsic
+/// (`@i_negate_8`/`@f_negate_32`), or `None` for anything else.
+fn negate_op_for(name: &str) -> Option<ArithOp> {
+    let (is_float, op) = split_numeric_intrinsic(name)?;
+    if op != "negate" {
+        return None;
+    }
+    Some(if is_float {
+        ArithOp::FSub
+    } else {
+        ArithOp::ISub
     })
 }
 
@@ -1601,42 +1642,42 @@ impl Lower<'_> {
             );
             return Ok(dst);
         }
-        match name {
-            "@i_negate" | "@f_negate" => {
-                if args.len() != 1 {
-                    lilac_error::bug!(span, "negate without one operand");
-                }
-                let value = self.eval_reg(fs, &args[0])?;
-                let ty = lir_ty(self.types, result_ty);
-                let zero = fresh_reg(fs);
-                emit(
-                    fs,
-                    LirInst::Const {
-                        dst: zero.clone(),
-                        lit: "0x0".to_owned(),
-                        ty: ty.clone(),
-                        span,
-                    },
-                );
-                let dst = fresh_reg(fs);
-                let op = if name == "@i_negate" {
-                    ArithOp::ISub
-                } else {
-                    ArithOp::FSub
-                };
-                emit(
-                    fs,
-                    LirInst::Arith {
-                        op,
-                        lhs: zero,
-                        rhs: value,
-                        dst: dst.clone(),
-                        ty,
-                        span,
-                    },
-                );
-                Ok(dst)
+        if let Some(op) = negate_op_for(name) {
+            if args.len() != 1 {
+                lilac_error::bug!(span, "negate without one operand");
             }
+            let value = self.eval_reg(fs, &args[0])?;
+            let ty = lir_ty(self.types, result_ty);
+            let zero_lit = if ty.starts_with("#fbit") {
+                "0.0".to_owned()
+            } else {
+                "0x0".to_owned()
+            };
+            let zero = fresh_reg(fs);
+            emit(
+                fs,
+                LirInst::Const {
+                    dst: zero.clone(),
+                    lit: zero_lit,
+                    ty: ty.clone(),
+                    span,
+                },
+            );
+            let dst = fresh_reg(fs);
+            emit(
+                fs,
+                LirInst::Arith {
+                    op,
+                    lhs: zero,
+                    rhs: value,
+                    dst: dst.clone(),
+                    ty,
+                    span,
+                },
+            );
+            return Ok(dst);
+        }
+        match name {
             "@truncate" => self.lower_convert(fs, args, result_ty, span, ConvertOp::Trunc),
             "@extend_zero" => self.lower_convert(fs, args, result_ty, span, ConvertOp::ExtendZero),
             "@as_int" | "@as_float" | "@size_of" => {
@@ -2057,7 +2098,7 @@ mod tests {
     #[test]
     fn lower_unsigned_intrinsics_map_to_unsigned_ops() {
         let (text, diags) = lower_src(
-            "main: function () nothing {\n    a: @bit32 = 0x8\n    b: @bit32 = 0x2\n    q: @bit32 = @i_div_u(a, b)\n    r: @bit32 = @i_mod_u(a, b)\n    if @i_less_than_u(a, b) {\n        q = 0x1\n    }\n    if @i_greater_than_u(a, b) {\n        r = 0x1\n    }\n}\n",
+            "main: function () nothing {\n    a: @bit32 = 0x8\n    b: @bit32 = 0x2\n    q: @bit32 = @i_div_u_32(a, b)\n    r: @bit32 = @i_mod_u_32(a, b)\n    if @i_less_than_u_32(a, b) {\n        q = 0x1\n    }\n    if @i_greater_than_u_32(a, b) {\n        r = 0x1\n    }\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         for op in ["i.div.u", "i.mod.u", "i.cmp.lt.u", "i.cmp.gt.u"] {

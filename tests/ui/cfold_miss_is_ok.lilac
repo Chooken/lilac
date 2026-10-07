@@ -1,5 +1,5 @@
 add_one: function (x: @bit32) result: @bit32 {
-    result = @i_add(x, 0x1)
+    result = @i_add_32(x, 0x1)
 }
 
 main: function (n: @bit32) nothing {

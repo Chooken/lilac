@@ -4,10 +4,10 @@ parse: function (buf: @byte_buffer) result: @bit_native {
     len: @bit_native = @byte_buffer_len(buf)
     ptr: ref @bit8 = @byte_buffer_ptr(buf)
     loop {
-        if @i_less_than(i, len) {
+        if @i_less_than_native(i, len) {
             c: @bit_native = @extend_zero(@load_u8(ptr, i))
-            acc = @i_add(acc, c)
-            i = @i_add(i, 0x1)
+            acc = @i_add_native(acc, c)
+            i = @i_add_native(i, 0x1)
         } else {
             break
         }

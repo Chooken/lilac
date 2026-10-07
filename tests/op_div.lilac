@@ -1,5 +1,5 @@
 @div: function (lhs: @bit32, rhs: @bit32) result: @bit32 {
-    result = @i_div(lhs, rhs)
+    result = @i_div_32(lhs, rhs)
 }
 
 main: function () nothing {

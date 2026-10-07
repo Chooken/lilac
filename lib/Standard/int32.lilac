@@ -4,18 +4,18 @@ Int32: object {
         data: @bit32
     }
 
-    @add: function (lhs: Int32, rhs: Int32) Int32 => @i_add(lhs.data, rhs.data)
-    @sub: function (lhs: Int32, rhs: Int32) Int32 => @i_sub(lhs.data, rhs.data)
-    @mul: function (lhs: Int32, rhs: Int32) Int32 => @i_mul(lhs.data, rhs.data)
-    @div: function (lhs: Int32, rhs: Int32) Int32 => @i_div(lhs.data, rhs.data)
-    @mod: function (lhs: Int32, rhs: Int32) Int32 => @i_mod(lhs.data, rhs.data)
+    @add: function (lhs: Int32, rhs: Int32) Int32 => @i_add_32(lhs.data, rhs.data)
+    @sub: function (lhs: Int32, rhs: Int32) Int32 => @i_sub_32(lhs.data, rhs.data)
+    @mul: function (lhs: Int32, rhs: Int32) Int32 => @i_mul_32(lhs.data, rhs.data)
+    @div: function (lhs: Int32, rhs: Int32) Int32 => @i_div_32(lhs.data, rhs.data)
+    @mod: function (lhs: Int32, rhs: Int32) Int32 => @i_mod_32(lhs.data, rhs.data)
 
-    @less_than: function (lhs: Int32, rhs: Int32) Bool => @i_less_than(lhs.data, rhs.data)
-    @greater_than: function (lhs: Int32, rhs: Int32) Bool =>  @i_greater_than(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_less_than(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_greater_than(lhs.data, rhs.data)
+    @less_than: function (lhs: Int32, rhs: Int32) Bool => @i_less_than_32(lhs.data, rhs.data)
+    @greater_than: function (lhs: Int32, rhs: Int32) Bool =>  @i_greater_than_32(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_less_than_32(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_greater_than_32(lhs.data, rhs.data)
 
-    @negate: function (value: Int32) Int32 => @i_negate(value.data)
+    @negate: function (value: Int32) Int32 => @i_negate_32(value.data)
 
     @conversion: function(from: @byte_buffer) Int32 => Int32 { data = @as_int(from) }
     @conversion: function(from: @bit32) Int32 => Int32 { data = from }
