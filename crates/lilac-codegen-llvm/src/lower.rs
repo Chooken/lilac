@@ -205,7 +205,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "#bit32" => self.context.i32_type().into(),
             "#bit64" => self.context.i64_type().into(),
             "#bit_native" => self.native.into(),
-            "#ptr" => self.ptr_type().into(),
             "#str" | "#numlit" => bug!(
                 Span::dummy(),
                 "data-only type `{ty}` has no LLVM value type"
@@ -961,7 +960,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             self.context
                 .const_struct(&[len_value.into(), ptr.into()], false)
                 .into()
-        } else if ty.starts_with("ref ") || ty == "#ptr" {
+        } else if ty.starts_with("ref ") {
             ptr.into()
         } else {
             // The LIR verifier's `check_const_lit` accepts `#byte_buffer`,

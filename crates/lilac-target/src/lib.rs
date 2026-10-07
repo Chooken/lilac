@@ -23,8 +23,6 @@ pub enum Arch {
     Wasm32,
     /// 64-bit WebAssembly.
     Wasm64,
-    /// The Lilac bytecode virtual machine.
-    LilacVm,
 }
 
 impl Arch {
@@ -40,7 +38,6 @@ impl Arch {
             "riscv64" => Some(Self::Riscv64),
             "wasm32" => Some(Self::Wasm32),
             "wasm64" => Some(Self::Wasm64),
-            "lilacvm" => Some(Self::LilacVm),
             _ => None,
         }
     }
@@ -57,17 +54,13 @@ impl Arch {
             Self::Riscv64 => "riscv64",
             Self::Wasm32 => "wasm32",
             Self::Wasm64 => "wasm64",
-            Self::LilacVm => "lilacvm",
         }
     }
 
     /// Returns whether pointers on this architecture are 64 bits wide.
     #[must_use]
     pub fn is_64_bit(self) -> bool {
-        matches!(
-            self,
-            Self::X86_64 | Self::Aarch64 | Self::Riscv64 | Self::Wasm64 | Self::LilacVm
-        )
+        matches!(self, Self::X86_64 | Self::Aarch64 | Self::Riscv64 | Self::Wasm64)
     }
 }
 
@@ -314,12 +307,6 @@ impl Target {
         }
     }
 
-    /// Returns whether this target uses the Lilac bytecode virtual machine.
-    #[must_use]
-    pub fn is_vm(&self) -> bool {
-        self.arch == Arch::LilacVm
-    }
-
     /// Returns the native pointer width in bits for this target.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {
@@ -494,7 +481,6 @@ mod tests {
             (Arch::Riscv64, 64),
             (Arch::Wasm32, 32),
             (Arch::Wasm64, 64),
-            (Arch::LilacVm, 64),
         ];
         for (arch, width) in expected {
             let t = Target {
@@ -513,20 +499,6 @@ mod tests {
         }
         assert_eq!(is_64_bit_triple("riscv64-unknown-none"), true);
         assert_eq!(is_64_bit_triple("riscv32-unknown-none"), false);
-    }
-
-    #[test]
-    fn lilacvm_arch_round_trips() {
-        let t = Target::parse("lilacvm-unknown-none").expect("valid");
-        assert_eq!(t.arch, Arch::LilacVm);
-        assert_eq!(t.to_triple(), "lilacvm-unknown-none");
-        assert!(t.is_vm());
-        assert_eq!(t.bit_native_width(), 64);
-    }
-
-    #[test]
-    fn non_vm_targets_report_false() {
-        assert!(!Target::parse("x86_64-unknown-none").expect("valid").is_vm());
     }
 
     #[test]

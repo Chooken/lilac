@@ -309,12 +309,10 @@ impl Session {
         }
         // The `extern` C ABI is LLVM-only: validate its signatures here (with
         // the offending slot's span) so `E028` is an ordinary diagnostic, not a
-        // backend failure. The VM keeps its clean runtime error for `extern`.
-        if !self.target.is_vm() {
-            lilac_lower::check_extern_signatures(&hir, &types, &mut self.diags);
-            if self.diags.has_errors() {
-                return Err(ErrorGuaranteed::new());
-            }
+        // backend failure.
+        lilac_lower::check_extern_signatures(&hir, &types, &mut self.diags);
+        if self.diags.has_errors() {
+            return Err(ErrorGuaranteed::new());
         }
         let triple = self.target.to_triple();
         let mut lir = lilac_lower::lower(&hir, project, &types, &mut self.diags, &triple)?;
