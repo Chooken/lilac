@@ -205,6 +205,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "#bit32" => self.context.i32_type().into(),
             "#bit64" => self.context.i64_type().into(),
             "#bit_native" => self.native.into(),
+            "#fbit16" => self.context.f16_type().into(),
+            "#fbit32" => self.context.f32_type().into(),
+            "#fbit64" => self.context.f64_type().into(),
+            "#fbit128" => self.context.f128_type().into(),
             "#str" | "#numlit" => bug!(
                 Span::dummy(),
                 "data-only type `{ty}` has no LLVM value type"
@@ -494,19 +498,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirInst::Convert {
                 op, src, dst, ty, ..
             } => {
-                let source = reg_int(src, state);
-                let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
-                    bug!(Span::dummy(), "`convert` to non-integer type `{ty}`");
-                };
-                let value = match op {
-                    ConvertOp::Trunc => {
-                        checked(builder.build_int_truncate(source, result_ty, ""), "trunc")
-                    }
-                    ConvertOp::ExtendZero => {
-                        checked(builder.build_int_z_extend(source, result_ty, ""), "zext")
-                    }
-                };
-                state.regs.insert(dst.clone(), value.into());
+                self.lower_convert(op, src, dst, ty, builder, state);
             }
             LirInst::Arith {
                 op,
@@ -530,6 +522,39 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 "instruction `{inst:?}` is a post-fold marker and must not reach codegen"
             ),
         }
+    }
+
+    /// Lowers one `convert`. `trunc`/`extend.zero` change an integer's width;
+    /// `bitcast` reinterprets between an integer and a float of the same width
+    /// (e.g. `#bit32` <-> `#fbit32`).
+    fn lower_convert(
+        &self,
+        op: &ConvertOp,
+        src: &str,
+        dst: &str,
+        ty: &str,
+        builder: &Builder<'ctx>,
+        state: &mut FnState<'ctx>,
+    ) {
+        let value = match op {
+            ConvertOp::Trunc | ConvertOp::ExtendZero => {
+                let source = reg_int(src, state);
+                let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
+                    bug!(Span::dummy(), "`convert` to non-integer type `{ty}`");
+                };
+                if matches!(op, ConvertOp::Trunc) {
+                    checked(builder.build_int_truncate(source, result_ty, ""), "trunc").into()
+                } else {
+                    checked(builder.build_int_z_extend(source, result_ty, ""), "zext").into()
+                }
+            }
+            ConvertOp::Bitcast => {
+                let source = self.operand(&LirOperand::Reg(src.to_owned()), None, builder, state);
+                let result_ty = self.lir_type(ty);
+                checked(builder.build_bit_cast(source, result_ty, ""), "bitcast")
+            }
+        };
+        state.regs.insert(dst.to_owned(), value);
     }
 
     /// Allocates a zeroed place of `ty` and binds it under `place`.

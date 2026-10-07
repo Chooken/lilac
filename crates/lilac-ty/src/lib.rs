@@ -35,6 +35,14 @@ pub enum TypeKind {
     Bit64,
     /// `@bit_native` word-sized container.
     BitNative,
+    /// `@fbit16` half-precision float.
+    FBit16,
+    /// `@fbit32` single-precision float.
+    FBit32,
+    /// `@fbit64` double-precision float.
+    FBit64,
+    /// `@fbit128` quad-precision float.
+    FBit128,
     /// `@byte_buffer` borrowed byte view.
     ByteBuffer,
     /// `@format_args` fixed-capacity piece table.
@@ -90,7 +98,7 @@ pub struct Types {
 }
 
 impl Types {
-    /// Table with the 8 builtin types pre-interned.
+    /// Table with the 12 builtin types pre-interned.
     pub fn new() -> Self {
         let mut table = Self::default();
         table.kinds.extend([
@@ -99,6 +107,10 @@ impl Types {
             TypeKind::Bit32,
             TypeKind::Bit64,
             TypeKind::BitNative,
+            TypeKind::FBit16,
+            TypeKind::FBit32,
+            TypeKind::FBit64,
+            TypeKind::FBit128,
             TypeKind::ByteBuffer,
             TypeKind::FormatArgs,
             TypeKind::Unknown,
@@ -114,9 +126,13 @@ impl Types {
             "@bit32" => 2,
             "@bit64" => 3,
             "@bit_native" => 4,
-            "@byte_buffer" => 5,
-            "@format_args" => 6,
-            "unknown" => 7,
+            "@fbit16" => 5,
+            "@fbit32" => 6,
+            "@fbit64" => 7,
+            "@fbit128" => 8,
+            "@byte_buffer" => 9,
+            "@format_args" => 10,
+            "unknown" => 11,
             _ => return None,
         };
         Some(TypeId(id))
@@ -220,6 +236,10 @@ impl Types {
             TypeKind::Bit32 => ".bit32".to_owned(),
             TypeKind::Bit64 => ".bit64".to_owned(),
             TypeKind::BitNative => ".bit_native".to_owned(),
+            TypeKind::FBit16 => ".fbit16".to_owned(),
+            TypeKind::FBit32 => ".fbit32".to_owned(),
+            TypeKind::FBit64 => ".fbit64".to_owned(),
+            TypeKind::FBit128 => ".fbit128".to_owned(),
             TypeKind::ByteBuffer => ".byte_buffer".to_owned(),
             TypeKind::FormatArgs => ".format_args".to_owned(),
             TypeKind::Unknown => ".unknown".to_owned(),
@@ -303,6 +323,10 @@ impl Types {
             TypeKind::Bit32 => "@bit32".to_owned(),
             TypeKind::Bit64 => "@bit64".to_owned(),
             TypeKind::BitNative => "@bit_native".to_owned(),
+            TypeKind::FBit16 => "@fbit16".to_owned(),
+            TypeKind::FBit32 => "@fbit32".to_owned(),
+            TypeKind::FBit64 => "@fbit64".to_owned(),
+            TypeKind::FBit128 => "@fbit128".to_owned(),
             TypeKind::ByteBuffer => "@byte_buffer".to_owned(),
             TypeKind::FormatArgs => "@format_args".to_owned(),
             TypeKind::Unknown => "unknown".to_owned(),
@@ -348,6 +372,21 @@ static POISON_KIND: TypeKind = TypeKind::Error;
 mod tests {
     use super::*;
     use lilac_resolve::DefId;
+
+    #[test]
+    fn float_builtins_intern_parse_mangle_and_display() {
+        let types = Types::new();
+        for (name, mangle, display) in [
+            ("@fbit16", ".fbit16", "@fbit16"),
+            ("@fbit32", ".fbit32", "@fbit32"),
+            ("@fbit64", ".fbit64", "@fbit64"),
+            ("@fbit128", ".fbit128", "@fbit128"),
+        ] {
+            let id = types.builtin(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(types.mangle(id), mangle);
+            assert_eq!(types.display(id), display);
+        }
+    }
 
     #[test]
     fn builtins_resolve_by_name() {

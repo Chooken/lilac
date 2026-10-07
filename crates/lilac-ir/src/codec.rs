@@ -177,6 +177,7 @@ fn put_convert(w: &mut impl Write, op: &ConvertOp) -> io::Result<()> {
     let tag = match op {
         ConvertOp::Trunc => 0,
         ConvertOp::ExtendZero => 1,
+        ConvertOp::Bitcast => 2,
     };
     put_u8(w, tag)
 }
@@ -580,6 +581,7 @@ fn get_convert(r: &mut impl Read) -> Result<ConvertOp, CodecError> {
     Ok(match get_u8(r)? {
         0 => ConvertOp::Trunc,
         1 => ConvertOp::ExtendZero,
+        2 => ConvertOp::Bitcast,
         _ => return Err(CodecError::Malformed("invalid ConvertOp tag")),
     })
 }
@@ -1029,8 +1031,8 @@ mod tests {
         assert_eq!(a.content_hash(), a.content_hash());
     }
 
-    /// Builds a module exercising every `LirInst` and `LirTerm` variant, both
-    /// `ConvertOp`s, all 19 `ArithOp`s, all three `LirCallee`s, both
+    /// Builds a module exercising every `LirInst` and `LirTerm` variant, all
+    /// three `ConvertOp`s, all 19 `ArithOp`s, all three `LirCallee`s, both
     /// `LirDataKind`s, and a layout.
     #[allow(clippy::too_many_lines)]
     fn all_variants_module() -> LirModule {
@@ -1121,6 +1123,13 @@ mod tests {
                 src: "r0".to_owned(),
                 dst: "r8".to_owned(),
                 ty: "#bit64".to_owned(),
+                span,
+            },
+            LirInst::Convert {
+                op: ConvertOp::Bitcast,
+                src: "r0".to_owned(),
+                dst: "r8b".to_owned(),
+                ty: "#fbit32".to_owned(),
                 span,
             },
             LirInst::FieldAddr {

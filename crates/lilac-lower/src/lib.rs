@@ -191,6 +191,10 @@ fn lir_ty(types: &Types, ty: TypeRef) -> String {
     let base = match types.kind(ty.id) {
         lilac_ty::TypeKind::Func { .. } => "#bit64".to_owned(),
         lilac_ty::TypeKind::Error => "#error".to_owned(),
+        lilac_ty::TypeKind::FBit16 => "#fbit16".to_owned(),
+        lilac_ty::TypeKind::FBit32 => "#fbit32".to_owned(),
+        lilac_ty::TypeKind::FBit64 => "#fbit64".to_owned(),
+        lilac_ty::TypeKind::FBit128 => "#fbit128".to_owned(),
         lilac_ty::TypeKind::Object(_) => format!("#{}", types.display(ty.id)),
         lilac_ty::TypeKind::Instance { .. } => format!("#{}", types.mangle(ty.id)),
         _ => {
@@ -2001,7 +2005,7 @@ mod tests {
     use lilac_lex::Lexer;
     use lilac_parse::Parser;
     use lilac_span::SourceMap;
-    use lilac_ty::Types;
+    use lilac_ty::{TypeRef, Types};
 
     fn lower_src(src: &str) -> (String, Diags) {
         let mut sm = SourceMap::new();
@@ -2023,6 +2027,21 @@ mod tests {
         let lir = lower(&hir, &project, &types, &mut diags, "x86_64-unknown-none")
             .expect("test source lowers");
         (lir.to_text(), diags)
+    }
+
+    #[test]
+    fn lir_ty_maps_float_builtins() {
+        let types = Types::new();
+        for (name, expected) in [
+            ("@fbit16", "#fbit16"),
+            ("@fbit32", "#fbit32"),
+            ("@fbit64", "#fbit64"),
+            ("@fbit128", "#fbit128"),
+        ] {
+            let id = types.builtin(name).expect("has fbit");
+            let ty = TypeRef { id, is_ref: false };
+            assert_eq!(lir_ty(&types, ty), expected, "{name}");
+        }
     }
 
     #[test]

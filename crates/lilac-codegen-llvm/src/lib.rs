@@ -1352,6 +1352,66 @@ mod tests {
     }
 
     #[test]
+    fn lir_type_maps_fbit_types() {
+        let context = inkwell::context::Context::create();
+        let module = context.create_module("fbits");
+        let lir = LirModule::new("x86_64-pc-windows-msvc");
+        let lower = crate::lower::Lower::new(&context, module, &lir, true);
+        for (ty, expected) in [
+            ("#fbit16", "half"),
+            ("#fbit32", "float"),
+            ("#fbit64", "double"),
+            ("#fbit128", "fp128"),
+        ] {
+            assert_eq!(
+                lower.lir_type(ty).print_to_string().to_string(),
+                expected,
+                "{ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowers_fbit_bitcast() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let insts = vec![
+            LirInst::CopyReg {
+                src: LirOperand::Place("x".to_owned()),
+                dst: "r0".to_owned(),
+                ty: "#bit32".to_owned(),
+                span: span(),
+            },
+            LirInst::Convert {
+                op: ConvertOp::Bitcast,
+                src: "r0".to_owned(),
+                dst: "r1".to_owned(),
+                ty: "#fbit32".to_owned(),
+                span: span(),
+            },
+            LirInst::CopyPlace {
+                src: LirOperand::Reg("r1".to_owned()),
+                dst: "out".to_owned(),
+                span: span(),
+            },
+        ];
+        module.funcs.push(LirFunc {
+            name: "cast".to_owned(),
+            ins: vec![("x".to_owned(), "#bit32".to_owned())],
+            outs: vec![("out".to_owned(), "#fbit32".to_owned())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts,
+                term: LirTerm::Return { span: span() },
+                span: span(),
+            }],
+        });
+        let text = emit(&module);
+        assert!(text.contains("bitcast i32"), "{text}");
+        assert!(text.contains("to float"), "{text}");
+    }
+
+    #[test]
     fn default_emit_llvm_is_unsupported() {
         struct Noop;
         impl lilac_codegen::Backend for Noop {

@@ -374,6 +374,8 @@ pub enum ConvertOp {
     Trunc,
     /// `extend.zero` (zero-extension).
     ExtendZero,
+    /// `bitcast` (same-width reinterpret, e.g. `@bit32` <-> `@fbit32`).
+    Bitcast,
 }
 
 /// A block terminator (exactly one per block).
@@ -654,6 +656,7 @@ fn print_inst(inst: &LirInst) -> String {
             let op = match op {
                 ConvertOp::Trunc => "trunc",
                 ConvertOp::ExtendZero => "extend.zero",
+                ConvertOp::Bitcast => "bitcast",
             };
             format!("&{dst}: {ty} = {op} &{src}")
         }
@@ -919,6 +922,10 @@ impl Verifier<'_> {
                 | "#bit32"
                 | "#bit64"
                 | "#bit_native"
+                | "#fbit16"
+                | "#fbit32"
+                | "#fbit64"
+                | "#fbit128"
                 | "#byte_buffer"
                 | "#format_args"
                 | "#str"
@@ -1688,6 +1695,20 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_ok());
         assert_eq!(e070_count(&diags), 0);
+    }
+
+    #[test]
+    fn verify_accepts_fbit_types() {
+        let module = LirModule::new("x86_64-unknown-none");
+        let mut diags = lilac_error::Diags::new();
+        let verifier = Verifier {
+            module: &module,
+            diags: &mut diags,
+            failed: false,
+        };
+        for ty in ["#fbit16", "#fbit32", "#fbit64", "#fbit128"] {
+            assert!(verifier.valid_type(ty), "{ty}");
+        }
     }
 
     #[test]
