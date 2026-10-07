@@ -168,10 +168,6 @@ pub enum Intrinsic {
     FbitToBits(FloatWidth),
     /// `@bits_to_fbit_W`: `(@bitW): @fbitW` (reinterpret bitcast).
     BitsToFbit(FloatWidth),
-    /// Parses `@byte_buffer` digits as an integer (folds in M3).
-    AsInt,
-    /// Parses `@byte_buffer` digits as a float (folds in M3).
-    AsFloat,
     /// Size in bytes as `@bit_native`.
     SizeOf,
     /// Narrows; target width comes from the expected type.
@@ -281,8 +277,6 @@ pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
         return Some(intrinsic);
     }
     match name {
-        "@as_int" => Some(Intrinsic::AsInt),
-        "@as_float" => Some(Intrinsic::AsFloat),
         "@size_of" => Some(Intrinsic::SizeOf),
         "@truncate" => Some(Intrinsic::Truncate),
         "@extend_zero" => Some(Intrinsic::ExtendZero),

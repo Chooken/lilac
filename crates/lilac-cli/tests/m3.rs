@@ -16,13 +16,6 @@ fn legacy(name: &str) -> String {
 }
 
 const PORTS: &[&str] = &[
-    "as_int_8.lilac",
-    "as_int_16.lilac",
-    "as_int_32.lilac",
-    "as_int_64.lilac",
-    "as_float_16.lilac",
-    "as_float_32.lilac",
-    "as_float_64.lilac",
     "string.lilac",
     "fstring.lilac",
     "cfold_call_eval.lilac",
@@ -73,11 +66,6 @@ fn fails_with(name: &str, code: &str) {
 #[test]
 fn fstring_missing_conversion_is_e043() {
     fails_with("FAILS_fstring_missing_conversion.lilac", "E043");
-}
-
-#[test]
-fn as_int_overflow_is_e060() {
-    fails_with("FAILS_as_int_overflow.lilac", "E060");
 }
 
 #[test]

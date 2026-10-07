@@ -1162,14 +1162,14 @@ mod tests {
     #[test]
     fn value_receiver_shows_required_signature() {
         // A value receiver of generic-param type renders `self: T`; the argument
-        // is probe-checked (a decimal literal is `@byte_buffer`) and the return
+        // is probe-checked (a decimal literal is `@bit8`) and the return
         // comes from the generic parameter.
         let src = "gen[T]: function (value: T) out: T {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[@bit32](0x1)\n}\n";
         let (diags, _, _, sm) = run(src);
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: ref T, @byte_buffer) -> T"),
+            rendered.contains("fn other(self: ref T, @bit8) -> T"),
             "missing value-receiver signature: {rendered}"
         );
     }
@@ -1197,7 +1197,7 @@ mod tests {
         let rendered = render_all(&diags, &sm);
         assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("fn other(self: ref T, @byte_buffer) -> Widget"),
+            rendered.contains("fn other(self: ref T, @bit8) -> Widget"),
             "concrete return not rendered concretely: {rendered}"
         );
     }

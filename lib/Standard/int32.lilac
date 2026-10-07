@@ -17,7 +17,6 @@ Int32: object {
 
     @negate: function (value: Int32) Int32 => @i_negate_32(value.data)
 
-    @conversion: function(from: @byte_buffer) Int32 => Int32 { data = @as_int(from) }
     @conversion: function(from: @bit32) Int32 => Int32 { data = from }
     @conversion: function(from: Int32) @bit32 => from.data
 }

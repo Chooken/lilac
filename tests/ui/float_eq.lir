@@ -1,21 +1,18 @@
 lilac_ir = "0.3"
 target = "x86_64-unknown-none"
-!c0: numlit = "5.25"
 function @main
 {
   $entry:
     alloca #fbit32 %a : zeroed
     alloca #fbit32 %b : zeroed
     alloca #bit8 %eq : zeroed
-    &1: #byte_buffer = const !c0
+    &1: #fbit32 = const 5.25
+    copy &1 -> %a
     &2: #fbit32 = const 5.25
-    copy &2 -> %a
-    &3: #byte_buffer = const !c0
-    &4: #fbit32 = const 5.25
-    copy &4 -> %b
-    &5: #fbit32 = copy %a
-    &6: #fbit32 = copy %b
-    &7: #bit8 = cmp.eql &5, &6
-    copy &7 -> %eq
+    copy &2 -> %b
+    &3: #fbit32 = copy %a
+    &4: #fbit32 = copy %b
+    &5: #bit8 = cmp.eql &3, &4
+    copy &5 -> %eq
     return
 }

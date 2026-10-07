@@ -17,7 +17,6 @@ Float64: object {
 
     @negate: function (value: Float64) Float64 => @f_negate_64(value.data)
 
-    @conversion: function(from: @byte_buffer) Float64 => Float64 { data = @as_float(from) }
     @conversion: function(from: @fbit64) Float64 => Float64 { data = from }
     @conversion: function(from: Float64) @fbit64 => from.data
     @conversion: function(from: @bit64) Float64 => Float64 { data = @bits_to_fbit_64(from) }

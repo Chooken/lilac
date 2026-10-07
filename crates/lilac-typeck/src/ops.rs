@@ -322,7 +322,7 @@ mod tests {
     fn member_conversions_all_enter_the_table() {
         let (_, _, _, sigs, diags) = check_src_sigs(
             "Int64: object {\n    data: @bit64\n\
-             @conversion: function (from: @byte_buffer) Int64 => Int64 { data = @as_int(from) }\n\
+             @conversion: function (from: @bit32) Int64 => Int64 { data = @extend_zero(from) }\n\
              @conversion: function (from: @bit64) Int64 => Int64 { data = from }\n\
              @conversion: function (from: Int64) @bit64 => from.data\n}\n",
         );

@@ -1006,38 +1006,82 @@ fn float_width(types: &Types, id: TypeId) -> u32 {
     }
 }
 
-/// True for every non-decimal literal, whose bits are fully known. Today that
-/// is exactly the `0x`/`0X`/`0b`/`0B` forms the lexer produces, so this is the
-/// complement of [`lilac_decimal::is_decimal_literal`]; a future non-decimal
-/// numeric form would also classify here and feed [`lit_bits`]. Decimals are
-/// `NumberLiteral`s typed as `@byte_buffer`.
-fn is_lit_literal(bytes: &str) -> bool {
-    !lilac_decimal::is_decimal_literal(bytes)
+/// Builds a checked number-literal HIR value at base type `id`.
+fn number_expr(id: TypeId, bytes: &str, span: Span) -> (TypeRef, HirExpr) {
+    let ty = TypeRef { id, is_ref: false };
+    (
+        ty,
+        HirExpr {
+            ty,
+            span,
+            kind: HirExprKind::Number {
+                bytes: bytes.to_owned(),
+            },
+        },
+    )
 }
 
-/// Number of significant bits of a hex/bin literal (with `_` separators),
-/// ignoring leading zeros; decimals (and malformed digits) return `None`.
-///
-/// Counting directly from the digit string keeps a literal wider than `u64`
-/// (e.g. `0x1_0000_0000_0000_0000`) faithful, so a `u64` parse overflow can no
-/// longer hide an out-of-range value from the `E060` check.
-fn lit_bits(bytes: &str) -> Option<u32> {
+/// Whether a number literal's source text names a float (`3.14`, `1e3`). A
+/// `0x`/`0b` form never is (`0xE` is an integer), so the prefix is checked
+/// first; otherwise a `.` or an exponent `e`/`E` makes it a float.
+fn is_float_literal(bytes: &str) -> bool {
+    let prefixed = bytes.starts_with("0x")
+        || bytes.starts_with("0X")
+        || bytes.starts_with("0b")
+        || bytes.starts_with("0B");
+    !prefixed && bytes.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+}
+
+/// Number of significant bits in an integer literal's magnitude, or `None`
+/// for empty digits. Decimal, hex, and binary forms are accepted (with `_`
+/// separators). A magnitude wider than `u128` (far past 64 bits) reports
+/// `128`, which trips every width check; counting via `u128` keeps a value
+/// past `u64` faithful instead of a wrapping parse.
+fn integer_bits(bytes: &str) -> Option<u32> {
     let digits = bytes.replace('_', "");
-    let (digit_bits, rest) = if let Some(hex) = digits
+    let (radix, body) = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        (4u32, hex)
+        (16, hex)
+    } else if let Some(bin) = digits
+        .strip_prefix("0b")
+        .or_else(|| digits.strip_prefix("0B"))
+    {
+        (2, bin)
     } else {
-        let bin = digits
-            .strip_prefix("0b")
-            .or_else(|| digits.strip_prefix("0B"))?;
-        (1u32, bin)
+        (10, digits.as_str())
     };
-    let rest = rest.trim_start_matches('0');
-    let lead = rest.chars().next()?.to_digit(16)?;
-    let len = u32::try_from(rest.len()).ok()?;
-    Some((len - 1) * digit_bits + (32 - lead.leading_zeros()))
+    if body.is_empty() {
+        return None;
+    }
+    let value = u128::from_str_radix(body, radix).unwrap_or(u128::MAX);
+    Some(if value == 0 {
+        0
+    } else {
+        u128::BITS - value.leading_zeros()
+    })
+}
+
+/// The smallest `@bitW` (8/16/32/64) whose unsigned range holds `bits`, or
+/// `None` when the magnitude needs more than 64 bits.
+fn smallest_bit_width(bits: u32) -> Option<u32> {
+    match bits {
+        0..=8 => Some(8),
+        9..=16 => Some(16),
+        17..=32 => Some(32),
+        33..=64 => Some(64),
+        _ => None,
+    }
+}
+
+/// Largest finite value representable by an `@fbitN` (16/32/64) container.
+fn max_finite_float(width: u32) -> f64 {
+    match width {
+        16 => 65504.0,
+        32 => f64::from(f32::MAX),
+        _ => f64::MAX,
+    }
 }
 
 fn deferred(diags: &mut Diags, span: Span, what: &str, milestone: &str) -> ErrorGuaranteed {
@@ -2767,6 +2811,23 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> (TypeRef, HirExpr) {
+        if is_float_literal(bytes) {
+            return self.check_float_literal(bytes, span, expected);
+        }
+        self.check_int_literal(bytes, span, expected)
+    }
+
+    /// Types an integer literal (`0x`/`0b`/decimal): its natural type is the
+    /// smallest `@bit8/16/32/64` holding its unsigned magnitude, grown (never
+    /// shrunk) to an expected bit type; a value past 64 bits, or past an
+    /// expected narrower type, is `E060`. A non-bit expected type does not
+    /// constrain it, and the normal conversion path applies.
+    fn check_int_literal(
+        &mut self,
+        bytes: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
         let poison = (
             TypeRef {
                 id: TypeId::ERROR,
@@ -2774,62 +2835,103 @@ impl Checker<'_> {
             },
             poison_expr(span),
         );
-        let number = |id: TypeId| {
-            let ty = TypeRef { id, is_ref: false };
-            (
-                ty,
-                HirExpr {
-                    ty,
+        let Some(bits) = integer_bits(bytes) else {
+            self.diags
+                .emit(Diagnostic::error("E060", "invalid integer literal").label(
                     span,
-                    kind: HirExprKind::Number {
-                        bytes: bytes.to_owned(),
-                    },
-                },
-            )
+                    true,
+                    "not a valid integer literal".to_owned(),
+                ));
+            return poison;
         };
-        if !is_lit_literal(bytes) {
-            return number(self.builtin_ty("@byte_buffer"));
-        }
-        match expected {
-            Some(t) if is_bit(self.types, t) => {
-                if let Some(bits) = lit_bits(bytes) {
-                    let width = bit_width(self.types, t);
-                    let max = if width == 64 {
-                        u64::MAX
-                    } else {
-                        (1u64 << width) - 1
-                    };
-                    if bits > width {
-                        self.diags.emit(
-                            Diagnostic::error(
-                                "E060",
-                                format!(
-                                    "value does not fit in {} (max 0x{max:x})",
-                                    self.types.display(t)
-                                ),
-                            )
-                            .label(
-                                span,
-                                true,
-                                "literal overflows".to_owned(),
+        let expected_bit = expected.filter(|id| is_bit(self.types, *id));
+        let ty = match expected_bit {
+            Some(t) => {
+                let width = bit_width(self.types, t);
+                if bits > width {
+                    self.diags.emit(
+                        Diagnostic::error(
+                            "E060",
+                            format!(
+                                "value needs {bits} bits but {} holds {width}",
+                                self.types.display(t)
                             ),
+                        )
+                        .label(span, true, "literal overflows".to_owned()),
+                    );
+                    return poison;
+                }
+                t
+            }
+            None => {
+                match smallest_bit_width(bits) {
+                    Some(8) => self.builtin_ty("@bit8"),
+                    Some(16) => self.builtin_ty("@bit16"),
+                    Some(32) => self.builtin_ty("@bit32"),
+                    Some(_) => self.builtin_ty("@bit64"),
+                    None => {
+                        self.diags.emit(
+                            Diagnostic::error("E060", "integer literal does not fit in 64 bits")
+                                .label(span, true, "literal too large".to_owned()),
                         );
                         return poison;
                     }
                 }
-                number(t)
             }
-            _ => {
+        };
+        number_expr(ty, bytes, span)
+    }
+
+    /// Types a float literal (`.` or exponent form): it defaults to `@fbit64`,
+    /// an expected `@fbit16/32/64` pins it (the value rounds to nearest-even
+    /// at codegen); a value past the target's max finite is `E060`, and a bit
+    /// expected type is `E010` (no implicit float→int).
+    fn check_float_literal(
+        &mut self,
+        bytes: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> (TypeRef, HirExpr) {
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        if let Some(t) = expected {
+            if is_bit(self.types, t) {
                 self.diags.emit(
-                    Diagnostic::error("E024", "number literal needs an expected bit type").label(
-                        span,
-                        true,
-                        "annotate the binding".to_owned(),
-                    ),
+                    Diagnostic::error(
+                        "E010",
+                        "mismatched types: expected an integer, found a float",
+                    )
+                    .label(span, true, "float literal here".to_owned()),
                 );
-                poison
+                return poison;
             }
         }
+        let target = match expected {
+            Some(t) if is_float(self.types, t) && float_width(self.types, t) != 128 => t,
+            _ => self.builtin_ty("@fbit64"),
+        };
+        let width = float_width(self.types, target);
+        let cleaned: String = bytes.chars().filter(|c| *c != '_').collect();
+        let value = cleaned.parse::<f64>().unwrap_or(f64::NAN);
+        if !value.is_finite() || value.abs() > max_finite_float(width) {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E060",
+                    format!(
+                        "float literal does not fit in {}",
+                        self.types.display(target)
+                    ),
+                )
+                .label(span, true, "literal out of range".to_owned()),
+            );
+            return poison;
+        }
+        number_expr(target, &cleaned, span)
     }
 
     fn check_call_expr(
@@ -3019,25 +3121,21 @@ impl Checker<'_> {
     }
 
     /// Checks both binop sides exactly once: non-literals first to anchor the
-    /// width, literals take the anchor (or report `E024` without one).
+    /// width, literals take the anchor. With two literals there is no anchor,
+    /// so each takes its own smallest-fit type (literal-only folding is a
+    /// later pass; until then the operator resolves by exact hook type).
     fn check_binop_sides(
         &mut self,
         fctx: &mut FuncCtx,
         lhs: &Expr,
         rhs: &Expr,
     ) -> ((TypeRef, HirExpr), (TypeRef, HirExpr)) {
-        let poison = (
-            TypeRef {
-                id: TypeId::ERROR,
-                is_ref: false,
-            },
-            poison_expr(lhs.span()),
-        );
         let left_lit = matches!(lhs, Expr::Number(..));
         let right_lit = matches!(rhs, Expr::Number(..));
         if left_lit && right_lit {
-            let _ = self.check_expr(fctx, lhs, None);
-            return (poison.clone(), poison);
+            let left = self.check_expr(fctx, lhs, None);
+            let right = self.check_expr(fctx, rhs, None);
+            return (left, right);
         }
         let left = if left_lit {
             None
@@ -4298,7 +4396,7 @@ impl Checker<'_> {
             | Intrinsic::CmpFloat(_)
             | Intrinsic::NegateInt(_)
             | Intrinsic::NegateFloat(_) => self.numeric_out(fctx, intrinsic, name, args, span)?,
-            Intrinsic::AsInt | Intrinsic::AsFloat | Intrinsic::Truncate | Intrinsic::ExtendZero => {
+            Intrinsic::Truncate | Intrinsic::ExtendZero => {
                 self.converting_out(fctx, intrinsic, args, span, expected)?
             }
             Intrinsic::FbitToBits(_) | Intrinsic::BitsToFbit(_) => {
@@ -4433,76 +4531,33 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
         let value = |id: TypeId| TypeRef { id, is_ref: false };
-        let (name, want_buffer, want_float) = match intrinsic {
-            Intrinsic::AsInt => ("@as_int", true, false),
-            Intrinsic::AsFloat => ("@as_float", true, true),
-            Intrinsic::Truncate => ("@truncate", false, false),
-            _ => ("@extend_zero", false, false),
+        let name = match intrinsic {
+            Intrinsic::Truncate => "@truncate",
+            _ => "@extend_zero",
         };
         self.expect_arity(span, name, args, 1)?;
         let (got, hir) = self.check_expr(fctx, &args[0], None);
-        if !is_poison(got) {
-            let ok = if want_buffer {
-                got.id == self.builtin_ty("@byte_buffer")
-            } else {
-                is_bit(self.types, got.id)
-            };
-            if !ok {
-                let (want, note) = if want_buffer {
-                    ("@byte_buffer".to_owned(), "digit buffer expected")
-                } else {
-                    ("a bit container".to_owned(), "not a bit container")
-                };
-                self.diags.emit(
-                    Diagnostic::error(
-                        "E010",
-                        format!(
-                            "mismatched types: expected {want}, found {}",
-                            self.types.display(got.id),
-                        ),
-                    )
-                    .label(args[0].span(), true, note.to_owned()),
-                );
-                return Err(ErrorGuaranteed::new());
-            }
+        if !is_poison(got) && !is_bit(self.types, got.id) {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: expected a bit container, found {}",
+                        self.types.display(got.id),
+                    ),
+                )
+                .label(args[0].span(), true, "not a bit container".to_owned()),
+            );
+            return Err(ErrorGuaranteed::new());
         }
-        // `@as_float` produces a real `@fbit16/32/64` value (128 folding is
-        // deferred); the other conversions produce a bit container.
-        let result = match expected {
-            Some(t) if want_float && is_float(self.types, t) => {
-                if float_width(self.types, t) == 128 {
-                    return Err(self.diags.emit(
-                        Diagnostic::error(
-                            "E010",
-                            "`@as_float` to `@fbit128` is not supported yet".to_owned(),
-                        )
-                        .label(
-                            span,
-                            true,
-                            "only 16/32/64-bit floats can fold".to_owned(),
-                        ),
-                    ));
-                }
-                Some(t)
+        match expected {
+            Some(t) if is_bit(self.types, t) => Ok((vec![value(t)], vec![hir])),
+            _ => {
+                Err(self.diags.emit(
+                    Diagnostic::error("E024", format!("`{name}` needs an expected bit type"))
+                        .label(span, true, "annotate the binding".to_owned()),
+                ))
             }
-            Some(t) if !want_float && is_bit(self.types, t) => Some(t),
-            _ => None,
-        };
-        if let Some(t) = result {
-            Ok((vec![value(t)], vec![hir]))
-        } else {
-            let want = if want_float {
-                "an expected @fbit16/32/64 type"
-            } else {
-                "an expected bit type"
-            };
-            Err(self.diags.emit(
-                Diagnostic::error("E024", format!("`{name}` needs {want}")).label(
-                    span,
-                    true,
-                    "annotate the binding".to_owned(),
-                ),
-            ))
         }
     }
 
@@ -5959,7 +6014,7 @@ impl Checker<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_bodies, is_lit_literal};
+    use super::check_bodies;
     use lilac_error::Diags;
     use lilac_lex::Lexer;
     use lilac_parse::Parser;
@@ -5990,22 +6045,109 @@ mod tests {
         diags.diagnostics().iter().any(|d| d.code == code)
     }
 
-    #[test]
-    fn is_lit_literal_handles_uppercase_prefixes() {
-        assert!(is_lit_literal("0X1"));
-        assert!(is_lit_literal("0B1"));
-        assert!(!is_lit_literal("5"));
-        assert!(!is_lit_literal("10.5"));
+    /// The checked type of the literal in `main`'s first statement: a bare
+    /// literal statement takes no expected type, while `x: T = lit` takes `T`.
+    fn literal_type(src: &str) -> String {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
+        let mut types = Types::new();
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
+        let value = match &main.body.stmts[0] {
+            lilac_hir::HirStmt::ExprStmt(value) | lilac_hir::HirStmt::Let { value, .. } => value,
+            other => panic!("expected a value statement, got {other:?}"),
+        };
+        types.display(value.ty.id)
     }
 
     #[test]
-    fn is_lit_literal_classifies_hex_bin_and_decimal() {
-        for text in ["0x1", "0X1", "0b1", "0B1"] {
-            assert!(is_lit_literal(text), "{text} is a fully-known bit literal");
+    fn integer_literal_types_by_smallest_fit() {
+        for (src, want) in [
+            ("0", "@bit8"),
+            ("0xFF", "@bit8"),
+            ("0x1FF", "@bit16"),
+            ("65535", "@bit16"),
+            ("65536", "@bit32"),
+            ("0xFFFF_FFFF", "@bit32"),
+            ("0x1_0000_0000", "@bit64"),
+        ] {
+            let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+            assert_eq!(literal_type(&source), want, "{src}");
         }
-        for text in ["5", "10.5"] {
-            assert!(!is_lit_literal(text), "{text} is a decimal literal");
+    }
+
+    #[test]
+    fn integer_literal_grows_to_expected_width() {
+        assert_eq!(
+            literal_type("main: function () nothing {\n    x: @bit32 = 0x1\n}\n"),
+            "@bit32"
+        );
+        assert_eq!(
+            literal_type("main: function () nothing {\n    x: @bit32 = 1\n}\n"),
+            "@bit32"
+        );
+        assert_eq!(
+            literal_type("main: function () nothing {\n    x: @bit8 = 0xFF\n}\n"),
+            "@bit8"
+        );
+    }
+
+    #[test]
+    fn integer_literal_over_64_bits_is_e060() {
+        let diags = check_src("main: function () nothing {\n    0x1_0000_0000_0000_0000\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit64 = 0x1_0000_0000_0000_0000\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn integer_literal_overflow_of_expected_width_is_e060() {
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = 0x1FF\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn float_literal_defaults_to_fbit64() {
+        for src in ["3.14", "1e3", "2E10", "1.5e-4"] {
+            let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+            assert_eq!(literal_type(&source), "@fbit64", "{src}");
         }
+    }
+
+    #[test]
+    fn float_literal_pins_to_expected_fbit() {
+        assert_eq!(
+            literal_type("main: function () nothing {\n    x: @fbit32 = 3.14\n}\n"),
+            "@fbit32"
+        );
+        let diags = check_src("main: function () nothing {\n    x: @fbit32 = 3.14\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn float_literal_in_bit_slot_is_e010() {
+        let diags = check_src("main: function () nothing {\n    x: @bit64 = 3.14\n}\n");
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn float_literal_out_of_range_is_e060() {
+        let diags = check_src("main: function () nothing {\n    x: @fbit16 = 100000.0\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
     }
 
     fn check_hir(src: &str) -> (Diags, lilac_hir::HirProgram) {
@@ -6169,9 +6311,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_literal_is_e024() {
+    fn bare_literal_is_typed_not_e024() {
         let diags = check_src("main: function () nothing {\n    0x1\n}\n");
-        assert!(has_code(&diags, "E024"), "{diags:?}");
+        assert!(!has_code(&diags, "E024"), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
@@ -6304,16 +6447,8 @@ mod tests {
     }
 
     #[test]
-    fn decimal_literal_is_byte_buffer_not_bit() {
+    fn decimal_literal_is_a_bit_value() {
         let diags = check_src("main: function () nothing {\n    x: @bit8 = 5\n}\n");
-        assert!(has_code(&diags, "E043"), "{diags:?}");
-        let msgs = messages(&diags);
-        assert!(msgs.iter().any(|m| m.contains("@byte_buffer")), "{msgs:?}");
-    }
-
-    #[test]
-    fn as_int_of_decimal_checks() {
-        let diags = check_src("main: function () nothing {\n    x: @bit8 = @as_int(5)\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
     }
 
@@ -6331,9 +6466,9 @@ mod tests {
     }
 
     #[test]
-    fn decimal_in_arith_is_e010() {
+    fn decimal_literals_adopt_intrinsic_width() {
         let diags = check_src("main: function () nothing {\n    x: @bit32 = @i_add_32(5, 6)\n}\n");
-        assert!(has_code(&diags, "E010"), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]

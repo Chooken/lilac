@@ -748,18 +748,15 @@ mod tests {
     }
 
     #[test]
-    fn folded_decimal_literal_lowers_to_numlit() {
+    fn folded_decimal_literal_lowers_to_const() {
         let mut s = Session::new();
         let lir = s
             .compile_lir(
                 "d.lilac",
-                "main: function () nothing {\n    x: @byte_buffer = 2 * 3\n}\n",
+                "main: function () nothing {\n    x: @bit8 = 2 * 3\n}\n",
             )
             .expect("compiles");
-        assert!(lir
-            .data
-            .iter()
-            .any(|d| matches!(&d.kind, lilac_ir::LirDataKind::NumLit(t) if t == "6")));
+        assert!(lir.to_text().contains("const 6"), "{}", lir.to_text());
     }
 
     #[test]

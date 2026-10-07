@@ -69,9 +69,9 @@ fn extern_arity_mismatch_is_diagnosed() {
 #[test]
 fn dce_removes_dead_after_fold() {
     // An uncalled helper has no path from `main` and is swept.
-    let source = "dead: function () @bit32 => @as_int(1)\n\
+    let source = "dead: function () @bit32 => 1\n\
                   main: function () nothing {\n\
-                      x: @bit32 = @as_int(2)\n\
+                      x: @bit32 = 2\n\
                   }\n";
     let mut session = lilac_driver::Session::new();
     let module = session

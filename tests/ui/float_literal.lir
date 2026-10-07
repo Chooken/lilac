@@ -1,0 +1,19 @@
+lilac_ir = "0.3"
+target = "x86_64-unknown-none"
+function @main
+{
+  $entry:
+    alloca #fbit64 %int_exp : zeroed
+    alloca #fbit64 %big_exp : zeroed
+    alloca #fbit64 %frac : zeroed
+    alloca #fbit32 %single : zeroed
+    &1: #fbit64 = const 1e3
+    copy &1 -> %int_exp
+    &2: #fbit64 = const 2E10
+    copy &2 -> %big_exp
+    &3: #fbit64 = const 1.5e-4
+    copy &3 -> %frac
+    &4: #fbit32 = const 3.14
+    copy &4 -> %single
+    return
+}

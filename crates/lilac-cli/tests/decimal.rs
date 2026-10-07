@@ -58,7 +58,7 @@ fn emit_ir(name: &str, src: &str, extra: &[&str]) -> String {
 fn default_scale_is_ten() {
     let ir = emit_ir(
         "default_scale",
-        "main: function () nothing {\n    x: @byte_buffer = 1 / 3\n}\n",
+        "main: function () nothing {\n    x: @fbit64 = 1 / 3\n}\n",
         &[],
     );
     assert!(ir.contains("0.3333333333"), "LIR:\n{ir}");
@@ -69,7 +69,7 @@ fn default_scale_is_ten() {
 fn scale_flag_changes_output() {
     let ir = emit_ir(
         "scale_flag",
-        "main: function () nothing {\n    x: @byte_buffer = 1 / 3\n}\n",
+        "main: function () nothing {\n    x: @fbit64 = 1 / 3\n}\n",
         &["--decimal-scale=3"],
     );
     assert!(ir.contains("0.333"), "LIR:\n{ir}");
@@ -84,7 +84,7 @@ fn scale_flag_changes_output() {
 fn half_up_flag_rounds() {
     let ir = emit_ir(
         "half_up",
-        "main: function () nothing {\n    x: @byte_buffer = 1 / 8\n}\n",
+        "main: function () nothing {\n    x: @fbit64 = 1 / 8\n}\n",
         &["--decimal-scale=2", "--decimal-round=half-up"],
     );
     assert!(ir.contains("0.13"), "LIR:\n{ir}");
@@ -96,7 +96,7 @@ fn half_up_flag_rounds() {
 fn division_by_zero_fails_with_e060() {
     let path = write_src(
         "div_zero",
-        "main: function () nothing {\n    x: @byte_buffer = 1 / 0\n}\n",
+        "main: function () nothing {\n    x: @fbit64 = 1 / 0\n}\n",
     );
     let output = lilac()
         .arg("check")
@@ -120,7 +120,7 @@ fn division_by_zero_fails_with_e060() {
 fn modulo_by_zero_fails_with_e060() {
     let path = write_src(
         "mod_zero",
-        "main: function () nothing {\n    x: @byte_buffer = 1 % 0\n}\n",
+        "main: function () nothing {\n    x: @fbit64 = 1 % 0\n}\n",
     );
     let output = lilac()
         .arg("check")

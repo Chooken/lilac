@@ -44,7 +44,7 @@ pub struct FoldValueError {
 
 /// Folds one function at a time: constant arithmetic, constant branch
 /// conditions (with dead-block pruning), fold-required intrinsics
-/// (`@as_int`/`@as_float`/`@size_of`), and dead `@compile_error` removal.
+/// (`@size_of`), and dead `@compile_error` removal.
 /// Still-live `@compile_error` sites are left in place for
 /// [`check_live_compile_errors`] (which the driver runs after reachability
 /// pruning); unfoldable intrinsics report `E060`.
@@ -183,7 +183,7 @@ fn parse_lit(lit: &str, ty: &str) -> ConstValue {
 }
 
 /// Width in bits for `#bitN`/`#fbitN` types (masking truncated results,
-/// sizing `@as_float` targets).
+/// sizing float constants).
 fn width_of(ty: &str) -> Option<u32> {
     match ty.strip_prefix("ref ").unwrap_or(ty) {
         "#bit8" => Some(8),
@@ -286,77 +286,23 @@ fn int_lit(value: &ConstValue) -> Option<String> {
     }
 }
 
-/// Evaluates a fold-required intrinsic over constant `args`. `width` is
-/// the result bit width (from the instruction's type).
+/// Evaluates a fold-required intrinsic over constant `args`. `_width` is
+/// the result bit width (from the instruction's type), kept for the
+/// signature's callers though `@size_of` derives its own width.
 ///
 /// # Errors
 ///
 /// Returns a [`FoldValueError`] (rendered as `E060`) when the operand is
-/// not the expected kind, contains bad digits, or overflows `width`.
+/// not the expected kind.
 pub fn eval_intrinsic(
     name: &str,
     args: &[ConstValue],
-    width: u32,
+    _width: u32,
 ) -> Result<ConstValue, FoldValueError> {
     match name {
-        "@as_int" => eval_as_int(args, width),
-        "@as_float" => eval_as_float(args, width),
         "@size_of" => eval_size_of(args),
         _ => Err(FoldValueError {
             message: format!("`{name}` is not a fold-required intrinsic"),
-        }),
-    }
-}
-
-fn eval_as_int(args: &[ConstValue], width: u32) -> Result<ConstValue, FoldValueError> {
-    let text = match args.first() {
-        Some(ConstValue::Bytes(bytes)) => {
-            std::str::from_utf8(bytes).map_err(|_| FoldValueError {
-                message: "`@as_int` operand is not valid UTF-8".to_owned(),
-            })?
-        }
-        _ => {
-            return Err(FoldValueError {
-                message: "`@as_int` requires a constant `@byte_buffer` operand".to_owned(),
-            })
-        }
-    };
-    let value = parse_int(text).ok_or_else(|| FoldValueError {
-        message: format!("`{text}` is not a valid integer literal"),
-    })?;
-    let max = if width >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width) - 1
-    };
-    if value > max {
-        return Err(FoldValueError {
-            message: format!("value does not fit in `#bit{width}` (max 0x{max:x})"),
-        });
-    }
-    Ok(ConstValue::Int(value, width))
-}
-
-fn eval_as_float(args: &[ConstValue], width: u32) -> Result<ConstValue, FoldValueError> {
-    let text = match args.first() {
-        Some(ConstValue::Bytes(bytes)) => {
-            std::str::from_utf8(bytes).map_err(|_| FoldValueError {
-                message: "`@as_float` operand is not valid UTF-8".to_owned(),
-            })?
-        }
-        _ => {
-            return Err(FoldValueError {
-                message: "`@as_float` requires a constant `@byte_buffer` operand".to_owned(),
-            })
-        }
-    };
-    let value = text.trim().parse::<f64>().map_err(|_| FoldValueError {
-        message: format!("`{text}` is not a valid float literal"),
-    })?;
-    match width {
-        16 | 32 | 64 => Ok(ConstValue::Float(value, width)),
-        _ => Err(FoldValueError {
-            message: "`@as_float` needs a 16/32/64-bit target".to_owned(),
         }),
     }
 }
@@ -1869,132 +1815,6 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:?}");
     }
 
-    fn e060_count(diags: &Diags) -> usize {
-        diags
-            .diagnostics()
-            .iter()
-            .filter(|diag| diag.code == "E060")
-            .count()
-    }
-
-    /// A function with `const !c0: numlit` followed by `name` folded
-    /// from its buffer at result type `ty`.
-    fn intrinsic_module(name: &str, payload: &str, ty: &str) -> LirModule {
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.data.push(LirData {
-            name: "c0".to_owned(),
-            kind: LirDataKind::NumLit(payload.to_owned()),
-            span: test_span(),
-        });
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![
-                    constant("1", "!c0", "#byte_buffer"),
-                    LirInst::FoldIntrinsic {
-                        name: name.to_owned(),
-                        arg: reg("1"),
-                        dst: "2".to_owned(),
-                        ty: ty.to_owned(),
-                        span: test_span(),
-                    },
-                ],
-                term: ret(),
-                span: test_span(),
-            }],
-        });
-        module
-    }
-
-    /// A function with a fold intrinsic over an untracked (non-constant)
-    /// register.
-    fn nonconstant_intrinsic_module() -> LirModule {
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![LirInst::FoldIntrinsic {
-                    name: "@as_int".to_owned(),
-                    arg: reg("7"),
-                    dst: "2".to_owned(),
-                    ty: "#bit8".to_owned(),
-                    span: test_span(),
-                }],
-                term: ret(),
-                span: test_span(),
-            }],
-        });
-        module
-    }
-
-    #[test]
-    fn as_int_folds_to_const() {
-        let mut module = intrinsic_module("@as_int", "5", "#bit8");
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let text = module.to_text();
-        assert!(text.contains("const 0x5"), "{text}");
-        assert!(text.contains("#bit8"), "{text}");
-        assert!(!text.contains("@as_int"), "{text}");
-    }
-
-    #[test]
-    fn as_int_bad_digits_is_e060() {
-        let mut module = intrinsic_module("@as_int", "hello", "#bit8");
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
-        assert_eq!(e060_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
-    fn as_int_overflow_is_e060() {
-        let mut module = intrinsic_module("@as_int", "0x1FF", "#bit8");
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
-        assert_eq!(e060_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
-    fn as_int_nonconstant_is_e060() {
-        let mut module = nonconstant_intrinsic_module();
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
-        assert_eq!(e060_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
-    fn as_float_folds_to_float_const_at_each_width() {
-        for ty in ["#fbit16", "#fbit32", "#fbit64"] {
-            let mut module = intrinsic_module("@as_float", "5.25", ty);
-            let mut diags = Diags::new();
-            assert!(fold(&mut module, &mut diags).is_ok(), "{ty}: {diags:?}");
-            let text = module.to_text();
-            assert!(
-                text.contains(&format!("&2: {ty} = const 5.25")),
-                "{ty}: {text}"
-            );
-            assert!(!text.contains("@as_float"), "{ty}: {text}");
-        }
-    }
-
-    #[test]
-    fn as_float_bad_width_is_e060() {
-        // `@fbit128` folding (quad precision) is deferred.
-        let mut module = intrinsic_module("@as_float", "5.25", "#fbit128");
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
-        assert_eq!(e060_count(&diags), 1, "{diags:?}");
-    }
-
     #[test]
     fn bitcast_reinterprets_bits_directly() {
         // `1.0f32` is `0x3f80_0000`; the reverse round-trips.
@@ -2023,52 +1843,6 @@ mod tests {
             eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 16), "#bit16"),
             ConstValue::Unknown
         ));
-    }
-
-    #[test]
-    fn bitcast_intrinsic_folds_constant_operand() {
-        // `@as_float("1.0")` folds to a `#fbit32` Float const; the enclosing
-        // `@fbit_to_bits_32` bitcast reinterprets its bits to `#bit32`.
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.data.push(LirData {
-            name: "c0".to_owned(),
-            kind: LirDataKind::NumLit("1.0".to_owned()),
-            span: test_span(),
-        });
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![
-                    constant("1", "!c0", "#byte_buffer"),
-                    LirInst::FoldIntrinsic {
-                        name: "@as_float".to_owned(),
-                        arg: reg("1"),
-                        dst: "2".to_owned(),
-                        ty: "#fbit32".to_owned(),
-                        span: test_span(),
-                    },
-                    LirInst::Convert {
-                        op: ConvertOp::Bitcast,
-                        src: "2".to_owned(),
-                        dst: "3".to_owned(),
-                        ty: "#bit32".to_owned(),
-                        span: test_span(),
-                    },
-                ],
-                term: ret(),
-                span: test_span(),
-            }],
-        });
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let text = module.to_text();
-        assert!(text.contains("const 0x3f800000"), "{text}");
-        assert!(!text.contains("bitcast"), "{text}");
     }
 
     #[test]

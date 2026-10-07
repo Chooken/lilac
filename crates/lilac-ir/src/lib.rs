@@ -350,11 +350,11 @@ pub enum LirInst {
         /// Call-site span.
         call_span: Span,
     },
-    /// Pre-fold marker for `@as_int`/`@as_float`/`@size_of` (name keeps the
-    /// `@`). Folding consumes it before verification; a survivor is an
-    /// internal error (reported as `E070`).
+    /// Pre-fold marker for `@size_of` (name keeps the `@`). Folding consumes
+    /// it before verification; a survivor is an internal error (reported as
+    /// `E070`).
     FoldIntrinsic {
-        /// Intrinsic name (`@as_int`, `@as_float`, or `@size_of`).
+        /// Intrinsic name (`@size_of`).
         name: String,
         /// Operand to fold (a register holding a constant).
         arg: LirOperand,
@@ -2214,7 +2214,7 @@ mod tests {
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::FoldIntrinsic {
-                    name: "@as_int".to_owned(),
+                    name: "@size_of".to_owned(),
                     arg: LirOperand::Reg("1".to_owned()),
                     dst: "2".to_owned(),
                     ty: "#bit8".to_owned(),
@@ -2225,7 +2225,7 @@ mod tests {
             }],
         });
         let text = module.to_text();
-        assert!(text.contains("@as_int"), "{text}");
+        assert!(text.contains("@size_of"), "{text}");
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1, "{diags:?}");

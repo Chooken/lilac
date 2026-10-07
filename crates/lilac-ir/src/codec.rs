@@ -1189,7 +1189,7 @@ mod tests {
             call_span: span,
         });
         insts.push(LirInst::FoldIntrinsic {
-            name: "@as_int".to_owned(),
+            name: "@size_of".to_owned(),
             arg: LirOperand::Reg("r0".to_owned()),
             dst: "r10".to_owned(),
             ty: "#bit8".to_owned(),

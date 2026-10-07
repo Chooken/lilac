@@ -424,7 +424,6 @@ name = "lilac-typeck"
 version = "0.2.0"
 dependencies = [
  "lilac-ast",
- "lilac-decimal",
  "lilac-error",
  "lilac-hir",
  "lilac-lex",

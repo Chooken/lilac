@@ -111,7 +111,7 @@ pub enum TokenKind {
     GtEq,
     /// `!` (e.g. `!const` data names).
     Bang,
-    /// `@` (`@bit32`, `@add`, `@as_int`, ...).
+    /// `@` (`@bit32`, `@add`, `@size_of`, ...).
     At,
     /// End of input (emitted once).
     Eof,

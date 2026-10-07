@@ -1,3 +1,0 @@
-main: function () nothing {
-    integer: @bit8 = @asInt8(5)
-}

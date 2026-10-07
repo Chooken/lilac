@@ -1,3 +1,0 @@
-main: function () nothing {
-    x: @bit8 = @as_int(256)
-}

@@ -1,3 +1,0 @@
-main: function () nothing {
-    float: @fbit64 = @as_float(5.25)
-}

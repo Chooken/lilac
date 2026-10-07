@@ -1,0 +1,6 @@
+main: function () nothing {
+    int_exp: @fbit64 = 1e3
+    big_exp: @fbit64 = 2E10
+    frac: @fbit64 = 1.5e-4
+    single: @fbit32 = 3.14
+}

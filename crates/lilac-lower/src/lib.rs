@@ -1693,9 +1693,7 @@ impl Lower<'_> {
         match name {
             "@truncate" => self.lower_convert(fs, args, result_ty, span, ConvertOp::Trunc),
             "@extend_zero" => self.lower_convert(fs, args, result_ty, span, ConvertOp::ExtendZero),
-            "@as_int" | "@as_float" | "@size_of" => {
-                self.lower_fold_intrinsic(fs, name, args, result_ty, span)
-            }
+            "@size_of" => self.lower_fold_intrinsic(fs, name, args, result_ty, span),
             "@byte_buffer_from" | "@byte_buffer_ptr" | "@byte_buffer_len" | "@format_args_new"
             | "@format_args_count" | "@format_args_piece" | "@load_u8" => {
                 self.lower_builtin_call(fs, name, args, result_ty, span, true)
@@ -1717,8 +1715,8 @@ impl Lower<'_> {
         }
     }
 
-    /// Emits a pre-fold marker for `@as_int`/`@as_float`/`@size_of` with
-    /// the single argument evaluated to a register.
+    /// Emits a pre-fold marker for `@size_of` with the single argument
+    /// evaluated to a register.
     fn lower_fold_intrinsic(
         &mut self,
         fs: &mut FuncState,
@@ -2220,12 +2218,18 @@ mod tests {
     }
 
     #[test]
-    fn lower_decimal_emits_numlit_data() {
-        let (text, diags) =
-            lower_src("main: function () nothing {\n    x: @bit8 = @as_int(5)\n}\n");
+    fn lower_decimal_emits_const() {
+        let (text, diags) = lower_src("main: function () nothing {\n    x: @bit8 = 5\n}\n");
         assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("numlit = \"5\""), "{text}");
-        assert!(text.contains("@as_int"), "{text}");
+        assert!(text.contains("#bit8 = const 5"), "{text}");
+        assert!(!text.contains("numlit ="), "{text}");
+    }
+
+    #[test]
+    fn lower_float_emits_const() {
+        let (text, diags) = lower_src("main: function () nothing {\n    x: @fbit64 = 3.14\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(text.contains("#fbit64 = const 3.14"), "{text}");
     }
 
     #[test]
