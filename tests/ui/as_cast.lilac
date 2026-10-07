@@ -7,5 +7,6 @@ main: function (v: @bit32) nothing {
     pinned: @bit16 = 0x1 as @bit16
     same: @bit16 = truncated as @bit16
     v_ref: ref @bit32 = ref v
-    round_trip: ref @bit32 = (v_ref as ref unknown) as ref @bit32
+    erased: ref unknown = v_ref as ref unknown
+    round_trip: ref @bit32 = erased as ref @bit32
 }

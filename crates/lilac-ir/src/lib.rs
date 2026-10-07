@@ -925,8 +925,10 @@ impl Verifier<'_> {
         }
     }
 
-    fn valid_type(&self, ty: &str) -> bool {
-        let base = ty.strip_prefix("ref ").unwrap_or(ty);
+    /// Whether a type spelling names a *sized* value: a scalar builtin or a
+    /// known layout. Bare `unknown` is unsized and never valid on its own;
+    /// `ref unknown` is handled by [`Self::valid_type`].
+    fn valid_base_type(&self, base: &str) -> bool {
         matches!(
             base,
             "#bit8"
@@ -943,6 +945,15 @@ impl Verifier<'_> {
                 | "#str"
                 | "#numlit"
         ) || self.module.layouts.contains_key(base)
+    }
+
+    fn valid_type(&self, ty: &str) -> bool {
+        match ty.strip_prefix("ref ") {
+            // `ref unknown` is the opaque pointer (`void*`). `unknown` itself
+            // has no size, so it is valid only behind a reference.
+            Some(base) => base == "#unknown" || self.valid_base_type(base),
+            None => self.valid_base_type(ty),
+        }
     }
 
     fn verify_func<'a>(&mut self, func: &'a LirFunc) {
@@ -2126,6 +2137,24 @@ mod tests {
     fn verifier_rejects_extern_unknown_type() {
         let mut module = extern_module();
         module.funcs[0].ins[0].1 = "#nope".to_owned();
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_err());
+        assert_eq!(e070_count(&diags), 1);
+    }
+
+    #[test]
+    fn verifier_accepts_ref_unknown() {
+        let mut module = extern_module();
+        module.funcs[0].outs = vec![("p".to_owned(), "ref #unknown".to_owned())];
+        let mut diags = lilac_error::Diags::new();
+        assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
+        assert_eq!(e070_count(&diags), 0);
+    }
+
+    #[test]
+    fn verifier_rejects_bare_unknown() {
+        let mut module = extern_module();
+        module.funcs[0].outs = vec![("p".to_owned(), "#unknown".to_owned())];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);

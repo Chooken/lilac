@@ -1,0 +1,18 @@
+malloc: extern function (size: @bit_native) result: ref unknown
+free: extern function (p: ref unknown) nothing
+
+Store: object {
+    Data: ref unknown
+}
+
+put: function (b: ref unknown, v: @bit8) nothing {
+    p: ref @bit8 = b as ref @bit8
+    @store_u8(p, 0x0, v)
+}
+
+main: function () nothing {
+    raw: ref unknown = malloc(0x8)
+    s: Store = Store {Data = raw}
+    put(s.Data, 0x2A)
+    free(s.Data)
+}

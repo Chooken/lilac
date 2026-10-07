@@ -60,6 +60,10 @@ LIR has no array type, so the table is spelled out as sixteen named fields.
 The verifier resolves `field`/`field.addr` against these layouts
 (`lilac_ir::builtin_layout`); the backend builds matching structs.
 
+The opaque type `#unknown` has no size and is valid only behind a reference:
+`ref #unknown` is the erased pointer (C `void*`), lowered to an LLVM `ptr`. A
+bare `#unknown` place is unsized and rejected by the verifier.
+
 Functions can be declared as:
 ```lilac-ir
 lilac_ir = "0.3"

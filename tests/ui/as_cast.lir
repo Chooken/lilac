@@ -19,6 +19,7 @@ function @main
     alloca #bit16 %pinned : zeroed
     alloca #bit16 %same : zeroed
     alloca ref #bit32 %v_ref : zeroed
+    alloca ref #unknown %erased : zeroed
     alloca ref #bit32 %round_trip : zeroed
     call @@conversion:bit32:bit16 (in %v) (out %tmp.1)
     copy %tmp.1 -> %truncated
@@ -27,6 +28,7 @@ function @main
     copy %truncated -> %same
     &2: ref #bit32 = addr %v
     copy &2 -> %v_ref
-    copy %v_ref -> %round_trip
+    copy %v_ref -> %erased
+    copy %erased -> %round_trip
     return
 }

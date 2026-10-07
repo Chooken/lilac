@@ -23,6 +23,8 @@ entry:
   store i16 0, ptr %same, align 2
   %v_ref = alloca ptr, align 8
   store ptr null, ptr %v_ref, align 8
+  %erased = alloca ptr, align 8
+  store ptr null, ptr %erased, align 8
   %round_trip = alloca ptr, align 8
   store ptr null, ptr %round_trip, align 8
   call void @"@conversion:bit32:bit16"(ptr %in0, ptr %tmp.1)
@@ -33,7 +35,9 @@ entry:
   store i16 %1, ptr %same, align 2
   store ptr %in0, ptr %v_ref, align 8
   %2 = load ptr, ptr %v_ref, align 8
-  store ptr %2, ptr %round_trip, align 8
+  store ptr %2, ptr %erased, align 8
+  %3 = load ptr, ptr %erased, align 8
+  store ptr %3, ptr %round_trip, align 8
   ret void
 }
 
