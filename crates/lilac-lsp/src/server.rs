@@ -15,9 +15,10 @@ use lsp_types::{
 };
 
 use crate::convert::to_lsp_diagnostic;
-use crate::documents::Documents;
+use crate::documents::{Document, Documents};
 use crate::fs::OverlayFs;
 use crate::index::{LirStages, Retained};
+use crate::roots::canonical_file_uri;
 
 /// Debounce window before recompiling after an edit.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -134,7 +135,7 @@ impl Server {
         };
         let position = params.text_document_position_params.position;
         let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.project.as_ref().or_else(|| self.per_file.get(uri));
+        let retained = self.per_file.get(uri).or(self.project.as_ref());
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -153,7 +154,7 @@ impl Server {
         };
         let position = params.text_document_position_params.position;
         let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.project.as_ref().or_else(|| self.per_file.get(uri));
+        let retained = self.per_file.get(uri).or(self.project.as_ref());
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -176,7 +177,7 @@ impl Server {
         let Some(stage) = params.get("stage").and_then(serde_json::Value::as_str) else {
             return serde_json::Value::Null;
         };
-        let retained = self.project.as_ref().or_else(|| self.per_file.get(&uri));
+        let retained = self.per_file.get(&uri).or(self.project.as_ref());
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -259,31 +260,24 @@ impl Server {
                 .iter()
                 .map(|(id, uri)| (uri.clone(), *id))
                 .collect();
+            let project_uris: HashSet<Url> = file_uris.values().cloned().collect();
             new_project = Some(Retained::build_with_stages(
                 session, file_uris, uri_files, stages,
             ));
+
+            // Fallback: an open `.lilac` file that is not part of the project
+            // (e.g. the workspace folder is not the project root) is compiled
+            // standalone so diagnostics, hover, definition, and the IR view
+            // still work for it.
+            for (uri, document) in self.documents.iter() {
+                if project_uris.contains(uri) || project_uris.contains(&canonical_file_uri(uri)) {
+                    continue;
+                }
+                compile_standalone(uri, document, &mut by_uri, &mut new_per_file);
+            }
         } else {
             for (uri, document) in self.documents.iter() {
-                let mut session = Session::new();
-                let name = document.path.to_string_lossy().into_owned();
-                let mut stages = LirStages::default();
-                let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {
-                    stages.modules.push((name, lir.clone()));
-                });
-                let entry = by_uri.entry(uri.clone()).or_default();
-                for diagnostic in session.diags.diagnostics() {
-                    if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
-                        (file == FileId(0)).then(|| uri.clone())
-                    }) {
-                        entry.push(lsp);
-                    }
-                }
-                let file_uris = HashMap::from([(FileId(0), uri.clone())]);
-                let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
-                new_per_file.insert(
-                    uri.clone(),
-                    Retained::build_with_stages(session, file_uris, uri_files, stages),
-                );
+                compile_standalone(uri, document, &mut by_uri, &mut new_per_file);
             }
         }
 
@@ -333,6 +327,37 @@ impl Server {
                 }));
         }
     }
+}
+
+/// Compiles one open document standalone (single-file mode) and records its
+/// diagnostics and retained compile, so hover/definition/IR work for it even
+/// when it is not part of the project.
+fn compile_standalone(
+    uri: &Url,
+    document: &Document,
+    by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
+    per_file: &mut HashMap<Url, Retained>,
+) {
+    let mut session = Session::new();
+    let name = document.path.to_string_lossy().into_owned();
+    let mut stages = LirStages::default();
+    let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {
+        stages.modules.push((name, lir.clone()));
+    });
+    let entry = by_uri.entry(uri.clone()).or_default();
+    for diagnostic in session.diags.diagnostics() {
+        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
+            (file == FileId(0)).then(|| uri.clone())
+        }) {
+            entry.push(lsp);
+        }
+    }
+    let file_uris = HashMap::from([(FileId(0), uri.clone())]);
+    let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
+    per_file.insert(
+        uri.clone(),
+        Retained::build_with_stages(session, file_uris, uri_files, stages),
+    );
 }
 
 /// The file of a diagnostic's primary label (else its first label).

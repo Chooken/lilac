@@ -44,6 +44,51 @@ fn initialize(client: &Connection) {
         .expect("initialized");
 }
 
+fn initialize_root(client: &Connection, root: &Url) {
+    let id = RequestId::from(1);
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "initialize".to_owned(),
+            params: serde_json::json!({
+                "capabilities": {},
+                "workspaceFolders": [{ "uri": root.as_str(), "name": "ws" }],
+            }),
+        }))
+        .expect("initialize");
+    read_response(client, &id);
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "initialized".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("initialized");
+}
+
+/// A `file:` URI formatted the way `VSCode` sends it on Windows.
+fn vscode_file_uri(path: &std::path::Path) -> Url {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let drive = normalized[..1].to_lowercase();
+    let rest = normalized[1..].replace(':', "%3A");
+    Url::parse(&format!("file:///{drive}{rest}")).expect("vscode uri")
+}
+
+fn wait_any_publish(client: &Connection) {
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no publish: {err}"),
+        }
+    }
+}
+
 fn shutdown(client: &Connection) {
     let id = RequestId::from(2);
     client
@@ -238,4 +283,36 @@ fn an_edit_sends_lir_invalidated() {
 
     shutdown(&client);
     handle.join().expect("server thread");
+}
+
+#[test]
+fn lir_request_falls_back_for_a_file_outside_the_project() {
+    // The workspace root has no `.lilac` files, so the project is empty and the
+    // open file must fall back to a standalone compile whose IR contains `main`.
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-lir-fb-{}", std::process::id()));
+    let sub = dir.join("scratch");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    let main = sub.join("main.lilac");
+    let text = "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n";
+    std::fs::write(&main, text).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = vscode_file_uri(&main);
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, text);
+    wait_any_publish(&client);
+
+    let value = lir_request(&client, &main_uri, "final");
+    assert!(
+        value["text"]
+            .as_str()
+            .expect("text")
+            .contains("function @main"),
+        "{value}"
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
 }

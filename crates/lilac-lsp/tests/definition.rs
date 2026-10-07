@@ -246,6 +246,66 @@ fn definition_in_project_mode_with_vscode_style_uri() {
 }
 
 #[test]
+fn definition_uses_the_lilac_json_root() {
+    // The workspace root is `dir`, but `lilac.json` points the project at
+    // `dir/proj`. Cross-file definition proves the project (not a per-file
+    // fallback) compiled, since a standalone `main.lilac` could not resolve
+    // `helper` in `lib.lilac`.
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-def-cfg-{}", std::process::id()));
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    std::fs::write(proj.join("lib.lilac"), "helper: function () nothing {\n}\n").expect("lib");
+    let main = proj.join("main.lilac");
+    let text = "main: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&main, text).expect("main");
+    std::fs::write(dir.join("lilac.json"), r#"{ "root": "proj" }"#).expect("config");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = vscode_file_uri(&main);
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, text);
+    wait_any_publish(&client);
+
+    let location = definition_at(&client, &main_uri, 1, 5).expect("definition");
+    assert!(
+        location.uri.path().ends_with("lib.lilac"),
+        "{}",
+        location.uri
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn definition_falls_back_for_a_file_outside_the_project() {
+    // The workspace root has no `.lilac` files, so the project is empty and the
+    // open file must fall back to a standalone compile.
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-def-fb-{}", std::process::id()));
+    let sub = dir.join("scratch");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    let main = sub.join("main.lilac");
+    let text = "foo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+    std::fs::write(&main, text).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = vscode_file_uri(&main);
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, text);
+    wait_any_publish(&client);
+
+    let location = definition_at(&client, &main_uri, 3, 5).expect("definition");
+    assert_eq!(location.range.start.line, 0);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn definition_survives_a_type_error() {
     let (client, handle) = start_server();
     initialize(&client);
