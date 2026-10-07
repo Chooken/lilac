@@ -1449,6 +1449,59 @@ mod tests {
         assert!(text.contains("to float"), "{text}");
     }
 
+    /// `==` on two `@fbit32` operands is strict bit-equality: the operands are
+    /// bitcast to `i32` and compared with `icmp`, never `fcmp`.
+    #[test]
+    fn lowers_float_eq_as_bit_equality() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let insts = vec![
+            LirInst::CopyReg {
+                src: LirOperand::Place("a".to_owned()),
+                dst: "r0".to_owned(),
+                ty: "#fbit32".to_owned(),
+                span: span(),
+            },
+            LirInst::CopyReg {
+                src: LirOperand::Place("b".to_owned()),
+                dst: "r1".to_owned(),
+                ty: "#fbit32".to_owned(),
+                span: span(),
+            },
+            LirInst::Arith {
+                op: ArithOp::Eq,
+                lhs: "r0".to_owned(),
+                rhs: "r1".to_owned(),
+                dst: "r2".to_owned(),
+                ty: "#bit8".to_owned(),
+                span: span(),
+            },
+            LirInst::CopyPlace {
+                src: LirOperand::Reg("r2".to_owned()),
+                dst: "out".to_owned(),
+                span: span(),
+            },
+        ];
+        module.funcs.push(LirFunc {
+            name: "feq".to_owned(),
+            ins: vec![
+                ("a".to_owned(), "#fbit32".to_owned()),
+                ("b".to_owned(), "#fbit32".to_owned()),
+            ],
+            outs: vec![("out".to_owned(), "#bit8".to_owned())],
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts,
+                term: LirTerm::Return { span: span() },
+                span: span(),
+            }],
+        });
+        let text = emit(&module);
+        assert!(text.contains("bitcast float"), "{text}");
+        assert!(text.contains("icmp eq i32"), "{text}");
+        assert!(!text.contains("fcmp"), "{text}");
+    }
+
     #[test]
     fn default_emit_llvm_is_unsupported() {
         struct Noop;

@@ -85,10 +85,10 @@ pub fn lower(
 }
 
 /// Diagnoses `extern` declarations the platform C ABI cannot represent: a
-/// parameter or return that is neither a bit width nor `ref T`, more than one
-/// out place, or an `extern` named `main` (the unmangled C entry point the
-/// compiler emits). Each is `E028`, labelled at the offending slot (for `>1`
-/// out, at the extra slot; for `main`, at the declaration).
+/// parameter or return that is neither a C scalar (bit integer or float) nor
+/// `ref T`, more than one out place, or an `extern` named `main` (the unmangled
+/// C entry point the compiler emits). Each is `E028`, labelled at the offending
+/// slot (for `>1` out, at the extra slot; for `main`, at the declaration).
 pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diags) {
     for func in &hir.funcs {
         if !func.is_extern {
@@ -135,7 +135,7 @@ fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
                     format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
                 )
                 .label(param.span, true, "not a C ABI type")
-                .help("`extern` parameters must be a bit integer or `ref T`"),
+                .help("`extern` parameters must be a bit integer, a float, or `ref T`"),
             );
         }
     }
@@ -163,7 +163,7 @@ fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
                     format!("`extern` return `{place}` has unsupported C type `{ty}`"),
                 )
                 .label(ret.span, true, "not a C ABI type")
-                .help("`extern` returns must be a bit integer or `ref T`"),
+                .help("`extern` returns must be a bit integer, a float, or `ref T`"),
             );
         }
     }

@@ -4,13 +4,13 @@
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
-> intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than`,
+> intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than_8`,
 > `@as_int`, `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
 > `@extend_zero`). Legacy camelCase spellings from earlier drafts and legacy
 > `tests/` files are renamed on port; the old Zig pass is not authoritative for
 > spelling.
 
-Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions such as strings, dynamic arrays, floating-point types, optionals, and mutability guards are deliberately excluded from the compiler and implemented within the standard library.
+Lilac is an ultra-lean systems programming language designed around compiler minimalism. The core compiler implements only raw bit containers, control flow, functions, generics, and the foundational building blocks required to define custom types. High-level abstractions such as strings, dynamic arrays, high-level floating-point wrappers, optionals, and mutability guards are deliberately excluded from the compiler and implemented within the standard library.
 
 ## 1. Core Types & Memory Model
 
@@ -18,7 +18,9 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 ### Primitive Bit Containers
 
-* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's complement integer, an IEEE-754 float, or arbitrary data depends on the intrinsic function invoked (e.g., `@i_add` vs. `@f_add`).
+* **`@bit8`**, **`@bit16`**, **`@bit32`**, **`@bit64`**: Fixed-width raw memory containers. Whether a container represents a two's complement integer or arbitrary data depends on the intrinsic function invoked (e.g., `@i_add_8`); the matching `@fbit` container is the float-bearing counterpart.
+
+* **`@fbit16`**, **`@fbit32`**, **`@fbit64`**, **`@fbit128`**: Fixed-width raw containers holding an IEEE-754 value of the matching width (binary16/32/64/128), interpreted as such by the `@f_*` intrinsics. Like the integer containers they are plain memory; the `@fbit_to_bits_W`/`@bits_to_fbit_W` reinterpret casts exist only at 16/32/64 because the language has no `@bit128`.
 
 * **`@bit_native`**: A container sized to the target architecture's native word length (equivalent to `usize`/`uintptr_t`).
 
@@ -65,7 +67,7 @@ mismatched-types error.
 
 `@as_int()` / `@as_float()` on a constant literal are folded at compile time;
 the runtime-parse form is only a semantic model, never emitted code.
-`@as_float` folds to the IEEE-754 bit pattern at the target width (16/32/64).
+`@as_float` folds to an `@fbit` value (the IEEE-754 bit pattern) at the target width (16/32/64).
 Out-of-range digits or values that do not fit the target width are compile errors.
 Passing a non-numeric buffer (e.g. built via `@byte_buffer_from("hello")`) to
 `@as_int` is a fold-time value error (`E060`), not a type error — the price of
@@ -106,7 +108,7 @@ values of length greater than one.
 
 * Numbers: `0x…` hex, `0b…` binary, otherwise decimal int or float (`10.5`).
   `_` separators allowed between digits (`0xFF_FF`). No sign is part of the
-  literal: unary `-` is always an operator (`@negate` / `@i_sub`-family folding).
+  literal: unary `-` is always an operator (`@negate` / `@i_sub_W`-family folding).
 * Strings: `"…"` with escapes `\"`, `\\`, `\n`, and `\xHH` only. Anything else
   after `\` is a lex error.
 * Chars: `'…'` holds exactly one scalar. Empty or multi-scalar char literals are
@@ -190,28 +192,32 @@ written as `=>`.
 
 Intrinsics represent the sole mechanisms for raw arithmetic, float manipulation, and bit-level introspection.
 
+Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@bit`/`@fbit` container of that width and `_native` selects `@bit_native`. Below, `W` is any suffix valid for that family (integer widths 8/16/32/64/native; float widths 16/32/64/128) and `@bitW`/`@fbitW` the matching container.
+
 | Intrinsic | Signature | Description |
 | --- | --- | --- |
-| **`@i_add`** | `(lhs, rhs)` | Integer addition using standard two's-complement logic. |
-| **`@i_sub`** / **`@f_sub`** | `(lhs, rhs)` | Integer subtraction. |
-| **`@i_mul`** / **`@f_mul`** | `(lhs, rhs)` | Integer multiplication. |
-| **`@i_div`** / **`@f_div`** | `(lhs, rhs)` | Integer division. |
-| **`@i_mod`** / **`@f_mod`** | `(lhs, rhs)` | Integer modulo. |
-| **`@i_div_u`** | `(lhs, rhs)` | Unsigned integer division. |
-| **`@i_mod_u`** | `(lhs, rhs)` | Unsigned integer modulo. |
-| **`@f_add`** | `(lhs, rhs)` | Floating-point addition using IEEE-754 bit interpretation. |
-| **`@f_sub`** | `(lhs, rhs)` | Floating-point subtraction using IEEE-754 bit interpretation. |
-| **`@f_mul`** | `(lhs, rhs)` | Floating-point multiplication using IEEE-754 bit interpretation. |
-| **`@f_div`** | `(lhs, rhs)` | Floating-point division using IEEE-754 bit interpretation. |
-| **`@f_mod`** | `(lhs, rhs)` | Floating-point modulo using IEEE-754 bit interpretation. |
-| **`@i_less_than`** | `(lhs, rhs)` | Integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
-| **`@i_greater_than`** | `(lhs, rhs)` | Integer greater-than (two's-complement). Returns `@bit8`. |
-| **`@i_less_than_u`** | `(lhs, rhs)` | Unsigned integer less-than. Returns `@bit8` (`0x0` false, otherwise true). |
-| **`@i_greater_than_u`** | `(lhs, rhs)` | Unsigned integer greater-than. Returns `@bit8`. |
-| **`@f_less_than`** | `(lhs, rhs)` | Float less-than (IEEE-754). Returns `@bit8`. |
-| **`@f_greater_than`** | `(lhs, rhs)` | Float greater-than (IEEE-754). Returns `@bit8`. |
-| **`@i_negate`** | `(value)` | Integer two's-complement negation. |
-| **`@f_negate`** | `(value)` | Float negation (IEEE-754 sign flip). |
+| **`@i_add_W`** | `(@bitW, @bitW): @bitW` | Integer addition using standard two's-complement logic. |
+| **`@i_sub_W`** | `(@bitW, @bitW): @bitW` | Integer subtraction. |
+| **`@i_mul_W`** | `(@bitW, @bitW): @bitW` | Integer multiplication. |
+| **`@i_div_W`** | `(@bitW, @bitW): @bitW` | Signed integer division. |
+| **`@i_div_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer division. |
+| **`@i_mod_W`** | `(@bitW, @bitW): @bitW` | Signed integer modulo. |
+| **`@i_mod_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer modulo. |
+| **`@i_negate_W`** | `(@bitW): @bitW` | Integer two's-complement negation. |
+| **`@i_less_than_W`** | `(@bitW, @bitW): @bit8` | Signed integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
+| **`@i_greater_than_W`** | `(@bitW, @bitW): @bit8` | Signed integer greater-than. Returns `@bit8`. |
+| **`@i_less_than_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer less-than. Returns `@bit8`. |
+| **`@i_greater_than_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer greater-than. Returns `@bit8`. |
+| **`@f_add_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point addition using IEEE-754 bit interpretation. |
+| **`@f_sub_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point subtraction. |
+| **`@f_mul_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point multiplication. |
+| **`@f_div_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point division. |
+| **`@f_mod_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point modulo. |
+| **`@f_negate_W`** | `(@fbitW): @fbitW` | Float negation (IEEE-754 sign flip). |
+| **`@f_less_than_W`** | `(@fbitW, @fbitW): @bit8` | Float less-than (IEEE-754). Returns `@bit8`. |
+| **`@f_greater_than_W`** | `(@fbitW, @fbitW): @bit8` | Float greater-than (IEEE-754). Returns `@bit8`. |
+| **`@fbit_to_bits_W`** | `(@fbitW): @bitW` | Reinterprets a float's bits as the same-width integer (`W` ∈ 16/32/64 only: `@bit128` does not exist). |
+| **`@bits_to_fbit_W`** | `(@bitW): @fbitW` | Reinterprets integer bits as the same-width float (`W` ∈ 16/32/64 only). |
 | **`@as_int`** | `(bits)` | Parses a `@byte_buffer` holding digits as an integer. Fold-required marker: consumed at compile time, never a runtime call; out-of-range or non-constant input is `E060`. |
 | **`@as_float`** | `(bits)` | Parses a `@byte_buffer` holding digits as a float. Fold-required marker: consumed at compile time, never a runtime call; invalid or non-constant input is `E060`. |
 | **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bit_native`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
@@ -306,7 +312,7 @@ To make a standard conditional loop this is a way:
 
 ```lilac
 val: @bit8 = 0x0
-loop if @i_less_than(val, 0x1) {
+loop if @i_less_than_8(val, 0x1) {
     // do work
 } else break
 ```
@@ -537,7 +543,7 @@ Inlined functions may omit the return name but are restricted to a single output
 
 ```lilac
 inlined_const: @bit64 => 0x0
-inlined_func: function (val: @bit8) @bit8 => @i_add(val, 0x1)
+inlined_func: function (val: @bit8) @bit8 => @i_add_8(val, 0x1)
 ```
 
 ## 8. Operators, Conversions & RAII Hooks
@@ -559,14 +565,14 @@ instantiations are ordinary concrete bindings.
 Binary and unary operators desugar directly into function calls. For example, `a += b` desugars to `a = @add(a, b)`.
 
 Operators never fall back to intrinsics implicitly: `a < b` requires a matching
-`@less_than(lhs, rhs)` binding for the operand types, even when `@i_less_than`
+`@less_than(lhs, rhs)` binding for the operand types, even when `@i_less_than_8`
 would apply. The standard library provides these bindings once per bit width;
 without them only the explicit intrinsic form works:
 
 ```lilac
-@add: function (lhs: @bit8, rhs: @bit8) @bit8 => @i_add(lhs, rhs)
+@add: function (lhs: @bit8, rhs: @bit8) @bit8 => @i_add_8(lhs, rhs)
 @less_than: function (lhs: @bit32, rhs: @bit32) result: @bit8 {
-    result = @i_less_than(lhs, rhs)
+    result = @i_less_than_32(lhs, rhs)
 }
 ```
 

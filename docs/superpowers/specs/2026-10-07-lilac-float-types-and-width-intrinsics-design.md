@@ -152,10 +152,14 @@ parameter width through the existing expected-type path.
 
 ## 6. fbit↔bit casts
 
-New intrinsics (exact signatures), per width `W` ∈ `16`,`32`,`64`,`128`:
+New intrinsics (exact signatures), per width `W` ∈ `16`,`32`,`64`:
 
 - `@fbit_to_bits_W(@fbitW): @bitW`
 - `@bits_to_fbit_W(@bitW): @fbitW`
+
+`@fbit128` has no cast pair: the language has no `@bit128` integer container, so
+only the six casts at 16/32/64 exist (`@fbit_to_bits_128`/`@bits_to_fbit_128`
+are unresolved names).
 
 They are **reinterpret** casts (IEEE-754 bits ↔ integer bits), lowered to an
 LLVM `bitcast` between the float type and the integer type of the same width.

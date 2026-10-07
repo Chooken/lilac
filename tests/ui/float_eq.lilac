@@ -1,0 +1,7 @@
+f: function (a: @fbit32, b: @fbit32) @bit8 => (a == b)
+
+main: function () nothing {
+    a: @fbit32 = @as_float(5.25)
+    b: @fbit32 = @as_float(5.25)
+    eq: @bit8 = f(a, b)
+}

@@ -318,7 +318,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     "E028",
                     format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
                 )
-                .help("`extern` parameters must be a bit integer or `ref T`")
+                .help("`extern` parameters must be a bit integer, a float, or `ref T`")
             })?;
             params.push(BasicMetadataTypeEnum::from(c_type));
         }
@@ -329,7 +329,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     "E028",
                     format!("`extern` return `{place}` has unsupported C type `{ty}`"),
                 )
-                .help("`extern` returns must be a bit integer or `ref T`")
+                .help("`extern` returns must be a bit integer, a float, or `ref T`")
             })?),
             _ => {
                 return Err(Diagnostic::error(
@@ -1063,11 +1063,22 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 };
                 checked(value, "integer arith").into()
             }
-            ArithOp::Eq | ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt | ArithOp::IGtU => {
+            ArithOp::Eq => {
+                // `==` is strict bit-equality (SPEC §8) even for floats, so a
+                // float operand is reinterpreted to the same-width integer and
+                // compared with `icmp eq`; `fcmp` would compare values.
+                let left = self.eq_operand(lhs, builder, state);
+                let right = self.eq_operand(rhs, builder, state);
+                let cmp = checked(
+                    builder.build_int_compare(IntPredicate::EQ, left, right, ""),
+                    "icmp",
+                );
+                self.widen_bool(cmp, ty, builder)
+            }
+            ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt | ArithOp::IGtU => {
                 let left = reg_int(lhs, state);
                 let right = reg_int(rhs, state);
                 let predicate = match op {
-                    ArithOp::Eq => IntPredicate::EQ,
                     ArithOp::ILt => IntPredicate::SLT,
                     ArithOp::ILtU => IntPredicate::ULT,
                     ArithOp::IGtU => IntPredicate::UGT,
@@ -1128,6 +1139,52 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             cmp.into()
         } else {
             checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool").into()
+        }
+    }
+
+    /// Reads an `==` operand as an integer for strict bit-equality. A float
+    /// register is reinterpreted to the same-width integer first, so `==`
+    /// compares bits uniformly (SPEC §8) rather than using `fcmp`.
+    fn eq_operand(
+        &self,
+        name: &str,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> IntValue<'ctx> {
+        match state.regs.get(name).copied() {
+            Some(BasicValueEnum::IntValue(value)) => value,
+            Some(BasicValueEnum::FloatValue(value)) => {
+                let int_ty = self.int_type_of_width(value.get_type().get_bit_width());
+                match checked(builder.build_bit_cast(value, int_ty, ""), "float bitcast") {
+                    BasicValueEnum::IntValue(bits) => bits,
+                    other => bug!(
+                        Span::dummy(),
+                        "float bitcast produced a `{}`",
+                        other.get_type().print_to_string()
+                    ),
+                }
+            }
+            Some(other) => bug!(
+                Span::dummy(),
+                "register `&{name}` is a `{}`, not comparable",
+                other.get_type().print_to_string()
+            ),
+            None => bug!(Span::dummy(), "use of undefined register `&{name}`"),
+        }
+    }
+
+    /// The integer type of `width` bits (16/32/64/128), used to reinterpret a
+    /// float operand for bit-equality.
+    fn int_type_of_width(&self, width: u32) -> IntType<'ctx> {
+        match width {
+            16 => self.context.i16_type(),
+            32 => self.context.i32_type(),
+            64 => self.context.i64_type(),
+            128 => self.context.i128_type(),
+            _ => bug!(
+                Span::dummy(),
+                "no integer type for a {width}-bit float operand"
+            ),
         }
     }
 
