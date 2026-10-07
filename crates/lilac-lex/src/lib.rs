@@ -65,6 +65,8 @@ pub enum TokenKind {
     KwOr,
     /// `return`.
     KwReturn,
+    /// `as` (postfix cast).
+    KwAs,
     /// `:`.
     Colon,
     /// `,`.
@@ -286,6 +288,7 @@ impl<'a> Lexer<'a> {
             "and" => TokenKind::KwAnd,
             "or" => TokenKind::KwOr,
             "return" => TokenKind::KwReturn,
+            "as" => TokenKind::KwAs,
             _ => TokenKind::Ident,
         };
         Token::new(kind, word, start, self.pos, self.file)
@@ -806,6 +809,31 @@ mod tests {
         assert_eq!(
             texts,
             vec!["main", ":", "function", "(", ")", "nothing", ""]
+        );
+    }
+
+    #[test]
+    fn kw_as_is_reserved() {
+        let tokens = tokens_of("as");
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![TokenKind::KwAs, TokenKind::Eof]
+        );
+        assert_eq!(tokens[0].text, "as");
+
+        let kinds: Vec<TokenKind> = tokens_of("as = 1")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::KwAs,
+                TokenKind::Eq,
+                TokenKind::Number,
+                TokenKind::Eof,
+            ],
+            "`as` must no longer lex as `Ident`"
         );
     }
 }
