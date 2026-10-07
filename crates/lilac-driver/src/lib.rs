@@ -18,8 +18,6 @@ use lilac_span::{FileId, SourceMap, Span};
 
 pub use lilac_target::Target;
 
-pub use lilac_decimal::{Policy as DecimalPolicy, Round as DecimalRound};
-
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ErrorFormat {
@@ -104,8 +102,6 @@ pub struct Session {
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Retained analysis from the last compile (best-effort; editor tooling).
     pub analysis: Option<Analysis>,
-    /// Policy for folding decimal-literal arithmetic (`+ - * / %`).
-    pub decimal: lilac_decimal::Policy,
 }
 
 impl Default for Session {
@@ -124,10 +120,6 @@ impl Default for Session {
             exports: HashSet::new(),
             project_files: Vec::new(),
             analysis: None,
-            decimal: lilac_decimal::Policy {
-                scale: 10,
-                round: lilac_decimal::Round::Trunc,
-            },
         }
     }
 }
@@ -220,8 +212,7 @@ impl Session {
                 self.diags.emit(error);
             }
             let mut parser = Parser::new(tokens, file);
-            let mut program = parser.parse_program(&mut self.diags)?;
-            lilac_decimal::fold(&mut program, self.decimal, &mut self.diags);
+            let program = parser.parse_program(&mut self.diags)?;
             merged.items.extend(program.items.iter().cloned());
             programs.push((file, program));
         }
@@ -243,15 +234,13 @@ impl Session {
         self.analysis.as_ref()
     }
 
-    /// Lex → parse → decimal-AST `fold` → `collect` → `collect_sigs` →
-    /// `check_bodies` → `lower` → LIR const `fold` (`lilac-const`) → inject
-    /// runtime → `prune` → check live `@compile_error` → `verify`. Stops at the
-    /// first failing pass. The first fold is [`lilac_decimal::fold`] over the
-    /// parsed AST (it folds `+ - * / %` of decimal literals and emits `E060`);
-    /// it is distinct from the later `lilac-const` fold, which collapses LIR
-    /// constants. The live-error check runs after `prune` so errors in
-    /// functions unreachable from `main` or an `--export` root are silent.
-    /// `on_stage` fires at each reached boundary (see
+    /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
+    /// LIR const `fold` (`lilac-const`) → inject runtime → `prune` → check live
+    /// `@compile_error` → `verify`. Stops at the first failing pass. Literal-only
+    /// arithmetic folds in typeck (`lilac-typeck`), not here; the `lilac-const`
+    /// fold collapses LIR constants. The live-error check runs after `prune` so
+    /// errors in functions unreachable from `main` or an `--export` root are
+    /// silent. `on_stage` fires at each reached boundary (see
     /// [`Session::compile_lir_with_stages`]).
     fn run_pipeline(
         &mut self,
@@ -265,8 +254,7 @@ impl Session {
             self.diags.emit(error);
         }
         let mut parser = Parser::new(tokens, file);
-        let mut program = parser.parse_program(&mut self.diags)?;
-        lilac_decimal::fold(&mut program, self.decimal, &mut self.diags);
+        let program = parser.parse_program(&mut self.diags)?;
         let module = lilac_resolve::collect(&program, &mut self.diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let lir = self.finish_pipeline(&program, &project, on_stage)?;
@@ -737,18 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn session_decimal_defaults() {
-        assert_eq!(
-            Session::new().decimal,
-            lilac_decimal::Policy {
-                scale: 10,
-                round: lilac_decimal::Round::Trunc
-            }
-        );
-    }
-
-    #[test]
-    fn folded_decimal_literal_lowers_to_const() {
+    fn folded_literal_lowers_to_const() {
         let mut s = Session::new();
         let lir = s
             .compile_lir(
@@ -756,7 +733,7 @@ mod tests {
                 "main: function () nothing {\n    x: @bit8 = 2 * 3\n}\n",
             )
             .expect("compiles");
-        assert!(lir.to_text().contains("const 6"), "{}", lir.to_text());
+        assert!(lir.to_text().contains("const 0x6"), "{}", lir.to_text());
     }
 
     #[test]

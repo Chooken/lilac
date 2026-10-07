@@ -73,20 +73,16 @@ literal in a bit or integer slot is `E010` (no implicit float→int), and
 literal; reading digits from a runtime `@byte_buffer` is standard-library work,
 not a compiler intrinsic.
 
-Arithmetic between two decimal literals is folded exactly at parse time: a
-binary `+ - * / %` whose **both** operands are decimal literals becomes a
-single folded decimal literal, so `2 * 3 + 4` is the literal `10` and nothing
-is evaluated at run time. `+ - *` are exact. `/` divides to the session scale
-(default `10` fractional digits) and truncates toward zero unless
-`--decimal-round=half-up` is set, which rounds halves away from zero;
-`--decimal-scale=N` (0–1000) sets the scale. `%` is the floored remainder
-(`a % b = a - b·floor(a/b)`), taking the divisor's sign. A folded result is
-rendered in canonical form: no leading zeros, no trailing fractional zeros, no
-bare `.`, and never `-0` (so `6 / 3` is `3`, not `3.0`). A decimal `x / 0` or
-`x % 0` is a fold-time value error (`E060`: `division by zero` / `modulo by
-zero`). These are the only operators folded; comparisons and logical operators
-are never folded, and any operand that is not a decimal literal (an identifier,
-a hex/bin literal) leaves the operation for ordinary type checking.
+Arithmetic between two literals of the same kind is folded at compile time: a
+binary `+ - * / %` whose **both** operands are integer literals folds at 64-bit,
+and whose both operands are float literals folds at `f64`. The result is a
+single literal typed by the rules above, so `2 * 3 + 4` is the literal `10` and
+nothing is evaluated at run time; an integer result that does not fit the
+consumed width is `E060`, and so is a division or modulo by zero (or any
+non-finite float result). A mixed integer/float literal pair is `E010`. These
+are the only operators folded; comparisons and logical operators are never
+folded, and any operand that is not a literal (an identifier, a string) leaves
+the operation for ordinary type checking (its `@add`/`@sub`/… hook).
 
 String literals (`"hi"`) have type `@byte_buffer` backed by a `data` const, with
 no heap allocation: `data !cN: str = "hi"` plus `const !cN:#byte_buffer`, a
