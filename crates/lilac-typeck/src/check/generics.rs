@@ -5,18 +5,18 @@
 //! by `(DefId, Vec<TypeRef>)`. Failed instances poison silently on later
 //! references; growing/recursive chains are bounded by [`MAX_DEPTH`] (`E051`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lilac_ast::{Expr, Item, ItemKind, Type as AstType};
 use lilac_error::{Diagnostic, ErrorGuaranteed, CHAIN_FRAME_PREFIX};
-use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc};
+use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc, TempId};
 use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind};
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    deferred, find_item, is_poison, qualify_name, subst_ident, CallOutcome, CheckedBody,
-    CheckedCall, Checker, FuncCtx,
+    collect_temps, find_item, is_poison, qualify_name, rename_temps_in_expr, rename_temps_in_stmts,
+    subst_ident, subst_stmts, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -533,16 +533,11 @@ impl Checker<'_> {
                 prelude,
                 value,
             } => {
-                // Task 3 (generic inline preludes) will emit `prelude` at each
-                // generic call site; until then a generic body with control
-                // flow keeps the M3 deferral instead of caching a temp-bearing
-                // value with no prelude (which would ICE in lowering).
-                if prelude.is_empty() {
-                    self.instance_inline
-                        .insert((def, args.to_vec()), (param_names, value));
-                } else {
-                    let _ = deferred(self.diags, item.span, "control flow in `=>` bodies", "M3");
-                }
+                // A generic `=>` body may carry control flow; its prelude is
+                // re-expanded at each call site (`check_generic_func_call`),
+                // exactly like the concrete path.
+                self.instance_inline
+                    .insert((def, args.to_vec()), (param_names, prelude, value));
             }
             CheckedBody::Rejected => {}
         }
@@ -602,14 +597,29 @@ impl Checker<'_> {
         };
         let instance_name = instance.name.clone();
         let instance_def = instance.def;
-        if let Some((param_names, body)) = self.instance_inline.get(&key).cloned() {
+        if let Some((param_names, prelude, body)) = self.instance_inline.get(&key).cloned() {
             if sig.returns.len() != 1 {
                 return Err(ErrorGuaranteed::new());
             }
             let hir_args = self.check_args(fctx, &sig, args, span)?;
             let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
-            let expanded = subst_ident(&body, &map);
-            return Ok(CallOutcome::Inline(expanded, sig.returns[0]));
+            let value = subst_ident(&body, &map);
+            let prelude = subst_stmts(&prelude, &map);
+            let temps: HashSet<TempId> = collect_temps(&prelude, &value);
+            // Allocate fresh temps in a stable (id-sorted) order so a program's
+            // generated HIR/LIR is byte-identical across runs.
+            let mut ordered: Vec<TempId> = temps.into_iter().collect();
+            ordered.sort_unstable_by_key(|temp| temp.0);
+            let ren: HashMap<TempId, TempId> = ordered
+                .into_iter()
+                .map(|temp| (temp, self.fresh_temp()))
+                .collect();
+            let prelude = rename_temps_in_stmts(&prelude, &ren);
+            let value = rename_temps_in_expr(&value, &ren);
+            if let Some(top) = fctx.blocks.last_mut() {
+                top.extend(prelude);
+            }
+            return Ok(CallOutcome::Inline(value, sig.returns[0]));
         }
         let hir_args = self.check_args(fctx, &sig, args, span)?;
         Ok(CallOutcome::Call(CheckedCall {
@@ -1440,16 +1450,13 @@ mod tests {
     }
 
     #[test]
-    fn generic_inline_control_flow_defers() {
-        // A generic `=>` body with control flow must emit the M3 deferral, not
-        // cache a temp-bearing inline body (which would ICE in lowering).
+    fn generic_inline_control_flow_checks() {
+        // A generic `=>` body with control flow now carries a statement prelude
+        // that each instantiation expands, so it checks cleanly (no `E030`).
         let (diags, _, _) = check(
             "pick[T]: function (x: T, c: @bit8) T => if c x else x\n\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
         );
-        assert!(
-            diags.diagnostics().iter().any(|d| d.code == "E030"),
-            "{diags:?}"
-        );
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]

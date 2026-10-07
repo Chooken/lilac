@@ -17,6 +17,10 @@ use super::{lookup_intrinsic, lookup_one, qualify_name, resolve_type, Intrinsic,
 mod generics;
 use generics::FuncInstance;
 
+/// A checked `=>` body cached for call-site expansion: parameter names,
+/// control-flow prelude, and value HIR.
+type InlineBody = (Vec<String>, Vec<HirStmt>, HirExpr);
+
 /// One checked call: overload selected, arguments checked.
 struct CheckedCall {
     /// Return-slot types.
@@ -252,7 +256,7 @@ struct Checker<'a> {
     /// Checked `=>` bodies by function: parameter names, control-flow prelude,
     /// and value HIR. Inline functions never reach `hir` (every call
     /// substitutes them).
-    inline_bodies: HashMap<DefId, (Vec<String>, Vec<HirStmt>, HirExpr)>,
+    inline_bodies: HashMap<DefId, InlineBody>,
     /// Functions currently being checked (rejects recursive `=>` calls).
     in_progress: HashSet<DefId>,
     /// Fresh value temporaries for desugared control flow.
@@ -267,8 +271,9 @@ struct Checker<'a> {
     current_params: Vec<String>,
     /// Concrete arguments substituting `current_params` in the current body.
     current_args: Vec<TypeRef>,
-    /// Specialized `=>` bodies by instance key (generic inline functions).
-    instance_inline: HashMap<(DefId, Vec<TypeRef>), (Vec<String>, HirExpr)>,
+    /// Specialized `=>` bodies by instance key (generic inline functions):
+    /// parameter names, control-flow prelude, and value HIR.
+    instance_inline: HashMap<(DefId, Vec<TypeRef>), InlineBody>,
     /// Concrete object instances, keyed by `(base DefId, args)`.
     object_instances: HashMap<(DefId, Vec<TypeRef>), TypeRef>,
     /// Object instantiation keys that failed; a later reference stays silent.
@@ -3398,8 +3403,10 @@ impl Checker<'_> {
     }
 
     /// Expands a call to an `=>` function by substituting the checked
-    /// arguments for its parameters (textual substitution: an argument used
-    /// twice evaluates twice). Recursive `=>` calls cannot inline.
+    /// arguments for its parameters. A control-flow-bearing argument is
+    /// evaluated once: its prelude is emitted once and its `Temp` substituted
+    /// (only a pure, prelude-free argument used twice evaluates twice).
+    /// Recursive `=>` calls cannot inline.
     fn check_inline_call(
         &mut self,
         fctx: &mut FuncCtx,
