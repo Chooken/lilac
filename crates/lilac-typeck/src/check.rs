@@ -1032,12 +1032,11 @@ fn is_float_literal(bytes: &str) -> bool {
     !prefixed && bytes.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
 }
 
-/// Number of significant bits in an integer literal's magnitude, or `None`
-/// for empty digits. Decimal, hex, and binary forms are accepted (with `_`
-/// separators). A magnitude wider than `u128` (far past 64 bits) reports
-/// `128`, which trips every width check; counting via `u128` keeps a value
-/// past `u64` faithful instead of a wrapping parse.
-fn integer_bits(bytes: &str) -> Option<u32> {
+/// The unsigned magnitude of an integer literal, or `None` for empty digits.
+/// Decimal, hex, and binary forms are accepted (with `_` separators). A
+/// magnitude wider than `u128` (far past 64 bits) reports `u128::MAX`, which
+/// trips every width check.
+fn integer_magnitude(bytes: &str) -> Option<u128> {
     let digits = bytes.replace('_', "");
     let (radix, body) = if let Some(hex) = digits
         .strip_prefix("0x")
@@ -1055,7 +1054,15 @@ fn integer_bits(bytes: &str) -> Option<u32> {
     if body.is_empty() {
         return None;
     }
-    let value = u128::from_str_radix(body, radix).unwrap_or(u128::MAX);
+    Some(u128::from_str_radix(body, radix).unwrap_or(u128::MAX))
+}
+
+/// Number of significant bits in an integer literal's magnitude, or `None`
+/// for empty digits. A magnitude wider than `u128` (far past 64 bits) reports
+/// `128`, which trips every width check; counting via `u128` keeps a value
+/// past `u64` faithful instead of a wrapping parse.
+fn integer_bits(bytes: &str) -> Option<u32> {
+    let value = integer_magnitude(bytes)?;
     Some(if value == 0 {
         0
     } else {
@@ -1072,6 +1079,23 @@ fn smallest_bit_width(bits: u32) -> Option<u32> {
         17..=32 => Some(32),
         33..=64 => Some(64),
         _ => None,
+    }
+}
+
+/// The smallest `@bitW` (8/16/32/64) whose **signed** range holds `-magnitude`
+/// (i.e. `magnitude <= 2^(W-1)`), or `None` when it needs more than 64 signed
+/// bits. This is the mirror of [`smallest_bit_width`].
+fn signed_smallest_bit_width(magnitude: u128) -> Option<u32> {
+    if magnitude <= 1u128 << 7 {
+        Some(8)
+    } else if magnitude <= 1u128 << 15 {
+        Some(16)
+    } else if magnitude <= 1u128 << 31 {
+        Some(32)
+    } else if magnitude <= 1u128 << 63 {
+        Some(64)
+    } else {
+        None
     }
 }
 
@@ -2913,6 +2937,85 @@ impl Checker<'_> {
         number_expr(ty, bytes, span)
     }
 
+    /// Folds a `@negate` applied to a single integer literal into a
+    /// two's-complement constant (design §5): the value is the literal's
+    /// magnitude negated in the smallest **signed** width that holds it, grown
+    /// (never shrunk) to an expected bit type or a user object's single
+    /// `@conversion(from: @bitN)` source. An expected narrower width, or a
+    /// magnitude past the signed 64-bit range, is `E060`. Returns `None` when
+    /// the argument is not an integer literal (a float literal or a non-literal
+    /// keeps the `@negate` hook).
+    fn fold_negative_literal(
+        &mut self,
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Option<(TypeRef, HirExpr)> {
+        if args.len() != 1 {
+            return None;
+        }
+        let Expr::Number(bytes, lit_span) = &args[0] else {
+            return None;
+        };
+        if is_float_literal(bytes) {
+            return None;
+        }
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        let Some(magnitude) = integer_magnitude(bytes) else {
+            self.diags
+                .emit(Diagnostic::error("E060", "invalid integer literal").label(
+                    *lit_span,
+                    true,
+                    "not a valid integer literal".to_owned(),
+                ));
+            return Some(poison);
+        };
+        let Some(fit) = signed_smallest_bit_width(magnitude) else {
+            self.diags.emit(
+                Diagnostic::error("E060", "negative integer literal does not fit in 64 bits")
+                    .label(*lit_span, true, "literal too large".to_owned()),
+            );
+            return Some(poison);
+        };
+        let constrained = expected
+            .filter(|id| is_bit(self.types, *id))
+            .or_else(|| expected.and_then(|id| self.object_conversion_source(id, false)));
+        let (ty, width) = if let Some(t) = constrained {
+            let width = bit_width(self.types, t);
+            if fit > width {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E060",
+                        format!(
+                            "value needs {fit} bits but {} holds {width}",
+                            self.types.display(t)
+                        ),
+                    )
+                    .label(*lit_span, true, "literal overflows".to_owned()),
+                );
+                return Some(poison);
+            }
+            (t, width)
+        } else {
+            let ty = match fit {
+                8 => self.builtin_ty("@bit8"),
+                16 => self.builtin_ty("@bit16"),
+                32 => self.builtin_ty("@bit32"),
+                _ => self.builtin_ty("@bit64"),
+            };
+            (ty, fit)
+        };
+        let mask = (1u128 << width) - 1;
+        let value = ((1u128 << width) - magnitude) & mask;
+        Some(number_expr(ty, &format!("0x{value:X}"), span))
+    }
+
     /// Types a float literal (`.` or exponent form): it defaults to `@fbit64`,
     /// an expected `@fbit16/32/64` (or a user object's single
     /// `@conversion(from: @fbitN)` source) pins it (the value rounds to
@@ -3222,6 +3325,11 @@ impl Checker<'_> {
     ) -> Result<CallOutcome, ErrorGuaranteed> {
         match callee {
             Expr::Ident(name, name_span) => {
+                if name == "@negate" && generic_args.is_empty() {
+                    if let Some((ty, hir)) = self.fold_negative_literal(args, span, expected) {
+                        return Ok(CallOutcome::Inline(hir, ty));
+                    }
+                }
                 if let Some(local_ty) = fctx.locals.get(name).copied() {
                     if !generic_args.is_empty() {
                         return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
@@ -6092,9 +6200,10 @@ mod tests {
         diags.diagnostics().iter().any(|d| d.code == code)
     }
 
-    /// The checked type of the literal in `main`'s first statement: a bare
-    /// literal statement takes no expected type, while `x: T = lit` takes `T`.
-    fn literal_type(src: &str) -> String {
+    /// The checked type and source bytes of the literal in `main`'s first
+    /// statement: a bare literal statement takes no expected type, while
+    /// `x: T = lit` takes `T`.
+    fn literal_type_and_bytes(src: &str) -> (String, String) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -6117,7 +6226,16 @@ mod tests {
             lilac_hir::HirStmt::ExprStmt(value) | lilac_hir::HirStmt::Let { value, .. } => value,
             other => panic!("expected a value statement, got {other:?}"),
         };
-        types.display(value.ty.id)
+        let bytes = match &value.kind {
+            lilac_hir::HirExprKind::Number { bytes } => bytes.clone(),
+            other => panic!("expected a number literal, got {other:?}"),
+        };
+        (types.display(value.ty.id), bytes)
+    }
+
+    /// The checked type of the literal in `main`'s first statement.
+    fn literal_type(src: &str) -> String {
+        literal_type_and_bytes(src).0
     }
 
     #[test]
@@ -6197,6 +6315,84 @@ mod tests {
         assert!(has_code(&diags, "E060"), "{diags:?}");
     }
 
+    #[test]
+    fn negative_literal_folds_to_twos_complement() {
+        // Each is pinned to the signed-smallest-fit width so the folded value
+        // is exactly the two's-complement bit pattern at that width.
+        for (src, want_ty, want_bytes) in [
+            ("-1", "@bit8", "0xFF"),
+            ("-128", "@bit8", "0x80"),
+            ("-129", "@bit16", "0xFF7F"),
+            ("-32768", "@bit16", "0x8000"),
+            ("-32769", "@bit32", "0xFFFF7FFF"),
+            ("-0x8000_0000_0000_0000", "@bit64", "0x8000000000000000"),
+        ] {
+            let source = format!("main: function () nothing {{\n    x: {want_ty} = {src}\n}}\n");
+            let (ty, bytes) = literal_type_and_bytes(&source);
+            assert_eq!(ty, want_ty, "{src} type");
+            assert_eq!(bytes, want_bytes, "{src} bytes");
+        }
+    }
+
+    #[test]
+    fn negative_literal_grows_to_expected_width() {
+        for (src, want_ty, want_bytes) in [
+            ("x: @bit16 = -1", "@bit16", "0xFFFF"),
+            ("x: @bit64 = -1", "@bit64", "0xFFFFFFFFFFFFFFFF"),
+            ("x: @bit32 = -129", "@bit32", "0xFFFFFF7F"),
+        ] {
+            let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+            let (ty, bytes) = literal_type_and_bytes(&source);
+            assert_eq!(ty, want_ty, "{src} type");
+            assert_eq!(bytes, want_bytes, "{src} bytes");
+        }
+    }
+
+    #[test]
+    fn negative_literal_overflow_is_e060() {
+        // A signed value that does not fit the expected width.
+        let diags = check_src("main: function () nothing {\n    x: @bit8 = -129\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+        // `@i_less_than_8` constrains `-1` to `@bit8`; `-129` needs 16.
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit8 = @i_less_than_8(-129, 0)\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+        // Past the signed 64-bit range.
+        let diags =
+            check_src("main: function () nothing {\n    x: @bit64 = -0x8000_0000_0000_0001\n}\n");
+        assert!(has_code(&diags, "E060"), "{diags:?}");
+    }
+
+    #[test]
+    fn negative_literal_folds_in_signed_comparison() {
+        // `@i_less_than_8` types its operands as `@bit8`; `-1` must fold to
+        // `@bit8` (`0xFF`) for the signed comparison to type-check.
+        let src = "main: function () nothing {\n    x: @bit8 = @i_less_than_8(-1, 0)\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
+        let value = match &main.body.stmts[0] {
+            lilac_hir::HirStmt::Let { value, .. } => value,
+            other => panic!("expected a let, got {other:?}"),
+        };
+        let lilac_hir::HirExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected a call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirExprKind::Number { bytes } = &args[0].kind else {
+            panic!("expected a folded number, got {:?}", args[0].kind);
+        };
+        assert_eq!(bytes, "0xFF");
+    }
+
+    #[test]
+    fn negate_on_non_literal_is_unchanged() {
+        // `@negate` on a non-literal still resolves the user hook.
+        let src = "@negate: function (value: @bit32) result: @bit32 {\n    result = @i_negate_32(value)\n}\n\
+                   main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = -a\n}\n";
+        let diags = check_src(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
     /// Numeric objects mirroring `lib/Standard`: one exact-width
     /// `@conversion(from: <bit|fbit>)` per type, no widening pairs.
     fn numeric_objects() -> &'static str {
@@ -6263,6 +6459,26 @@ mod tests {
     fn fbit128_literal_is_out_of_scope() {
         let diags = check_src("main: function () nothing {\n    x: @fbit128 = 3.14\n}\n");
         assert!(has_code(&diags, "E010"), "{diags:?}");
+    }
+
+    #[test]
+    fn negative_literal_grows_through_object_conversion() {
+        // A folded negative literal assigned to a numeric object grows to the
+        // object's single `@conversion(from: @bitN)` source width, exactly as
+        // a positive integer literal does (§4/§5).
+        let src = format!(
+            "{}main: function () nothing {{\n    a: Int8 = -1\n    b: Int16 = -1\n    c: Int32 = -1\n    d: Int64 = -1\n    e: Int = -1\n}}\n",
+            numeric_objects()
+        );
+        let diags = check_src(&src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        // `Int8`'s source is `@bit8`; `-129` needs a signed 16-bit width.
+        let src = format!(
+            "{}main: function () nothing {{\n    x: Int8 = -129\n}}\n",
+            numeric_objects()
+        );
+        let diags = check_src(&src);
+        assert!(has_code(&diags, "E060"), "{diags:?}");
     }
 
     fn check_hir(src: &str) -> (Diags, lilac_hir::HirProgram) {
