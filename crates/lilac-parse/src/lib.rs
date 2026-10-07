@@ -2004,6 +2004,7 @@ mod tests {
             c: @bit8 = p + q as T\n\
             d: @bit8 = x as A as B\n\
             e: ref @bit8 = x as ref @bit8\n\
+            g: @bit8 = f(x) as T\n\
         }\n";
         let stmts = main_stmts(src);
 
@@ -2072,5 +2073,20 @@ mod tests {
         assert!(ty.is_ref);
         assert_eq!(ty.name, "@bit8");
         assert!(matches!(**inner, Expr::Ident(ref name, _) if name == "x"));
+
+        // `f(x) as T` -> `Cast(Call(f, [x]), T)`.
+        let Stmt::Let { value, .. } = &stmts[5] else {
+            panic!("expected let, got {:?}", stmts[5]);
+        };
+        let Expr::Cast(inner, ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        let Expr::Call { callee, args, .. } = &**inner else {
+            panic!("expected call, got {inner:?}");
+        };
+        assert!(matches!(**callee, Expr::Ident(ref name, _) if name == "f"));
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0], Expr::Ident(ref name, _) if name == "x"));
+        assert_eq!(ty.name, "T");
     }
 }

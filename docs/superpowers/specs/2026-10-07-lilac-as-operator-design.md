@@ -109,9 +109,11 @@ SPEC.md, docs/errors/*             # document `as`
 2. Otherwise, check the operand with `T` as its expected type
    (`check_expr(operand, Some(T))`). A literal operand therefore pins/grows to
    `T` (sub-project 2); a typed operand is checked against `T`.
-3. If the operand's resulting type is already `T` (ignoring the `ref` flag
-   exactly as `expect_type` does), the cast is identity: return the operand
-   HIR with type `T`.
+3. If the operand's resulting type is exactly `T` and **both are non-`ref`**,
+   the cast is identity: return the operand HIR with type `T`. (The `ref`
+   cases are §6's exception when one side is `ref unknown`; any other `ref`
+   mismatch, including `ref T as T`, is `E010` — a `ref` never silently
+   becomes a non-`ref` value.)
 4. Otherwise, resolve exactly one `@conversion` from the operand's type to `T`
    via the existing machinery (`ops::convert` + `convert_if_needed`). Success
    yields the `@conversion` call HIR typed `T`; failure is `E043`.

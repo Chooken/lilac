@@ -7846,6 +7846,16 @@ mod tests {
     }
 
     #[test]
+    fn as_cast_ref_to_nonref_is_e010() {
+        // `ref T as T` is not the §6 exception (ref-to-ref only): a `ref`
+        // never silently becomes a non-`ref` value, so this is `E010`.
+        let diags =
+            check_src("main: function (p: ref @bit8) nothing {\n    q: @bit8 = p as @bit8\n}\n");
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+        assert!(!has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
     fn as_cast_is_usable_as_operator_operand() {
         // `as` converts where the operator would otherwise reject the operand.
         let (hir, diags) = check_hir_src(
