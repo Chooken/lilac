@@ -69,11 +69,10 @@ pub(crate) struct BinopMiss {
     pub rhs: TypeId,
 }
 
-/// Resolves a binary-operator call: exact `(lhs, rhs)` overload first, then
-/// one directed conversion of the right side toward the left. Never converts
-/// the left side, never chains. Hook signatures with `ref` params or arity
-/// other than 2-in/1-out do not participate. Returns the winning overload's
-/// identity with its signature.
+/// Resolves a binary-operator call by exact `(lhs, rhs)` match only: operands
+/// are never converted. Hook signatures with `ref` params or arity other than
+/// 2-in/1-out do not participate. Returns the winning overload's identity with
+/// its signature.
 pub(crate) fn resolve_binop(
     sigs: &Sigs,
     hook: &str,
@@ -97,18 +96,6 @@ pub(crate) fn resolve_binop(
         .find(|(_, sig)| shaped(sig) && sig.params[0].id == lhs && sig.params[1].id == rhs)
     {
         return Ok((*def, sig.clone()));
-    }
-    if sigs
-        .conversions
-        .iter()
-        .any(|c| c.from == rhs && c.to == lhs)
-    {
-        if let Some((def, sig)) = overloads
-            .iter()
-            .find(|(_, sig)| shaped(sig) && sig.params[0].id == lhs && sig.params[1].id == lhs)
-        {
-            return Ok((*def, sig.clone()));
-        }
     }
     Err(miss())
 }
@@ -232,6 +219,40 @@ mod tests {
     }
 
     #[test]
+    fn operator_does_not_convert_operands() {
+        // `@add(@bit32,@bit32)` + a `@bit8 -> @bit32` conversion: `b + a`
+        // (b:@bit8, a:@bit32) must NOT convert `b`; it is E043.
+        let diags = check_src(
+            "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 { result = @i_add(lhs, rhs) }\n\
+             @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
+             main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = b + a\n}\n",
+        );
+        assert!(has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn hook_call_does_not_convert_arguments() {
+        let diags = check_src(
+            "@f: function (x: @bit32) @bit32 => @i_add(x, 0x1)\n\
+             @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
+             main: function () nothing {\n    b: @bit8 = 0x2\n    z: @bit32 = @f(b)\n}\n",
+        );
+        assert!(
+            has_code(&diags, "E010") || has_code(&diags, "E043"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn typed_context_still_converts() {
+        let diags = check_src(
+            "@conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n\
+             main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
     fn binop_anchors_left() {
         let diags = check_src(
             "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add(lhs, rhs)\n}\n@conversion: function (from: @bit8) to: @bit32 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = a + b\n    w: @bit32 = b + a\n}\n",
@@ -242,7 +263,7 @@ mod tests {
                 .iter()
                 .filter(|d| d.code == "E043")
                 .count(),
-            1,
+            2,
             "{diags:?}"
         );
     }

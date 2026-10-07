@@ -608,19 +608,20 @@ Resolution order (normative):
 
 1. **Exact match first.** `b: @bit8 = a` with `a: @bit8` copies directly, even if
    a `@conversion(from: @bit32) to: @bit8` exists. `a + b` with `@add(a, b)`
-   defined calls it directly, even if `@add(a, a)` plus a `b -> a` conversion
-   also exists. Conversions never steal an exact match.
-2. **Single directed conversion on mismatch.** `b: @bit8 = a` with `a: @bit32`
-   tries exactly one `@conversion(from: @bit32) to: @bit8` step. Call arguments
-   behave the same way (parameter type is the anchor). No transitive chains in v1
-   (`u32 -> u16 -> u8` does not chain); chain requests are future work with a
-   cycle guard.
-3. **Binops anchor on the left.** `a + b` tries exact `@add(typeof(a), typeof(b))`
-   first; on failure it tries converting the right side toward the left
-   (`b -> typeof(a)`, retry `@add(a, a)`). It never converts the left side nor
-   both sides in v1, so `a + b` and `b + a` cannot both claim the same call.
-   If the single-sided retry still fails, the error reports the exact pair tried
-   plus the one conversion attempted (see `E043`).
+   defined calls it directly. Conversions never steal an exact match.
+2. **Single directed conversion in typed contexts.** `b: @bit8 = a` with
+   `a: @bit32` tries exactly one `@conversion(from: @bit32) to: @bit8` step.
+   Ordinary call arguments behave the same way (parameter type is the anchor).
+   No transitive chains in v1 (`u32 -> u16 -> u8` does not chain); chain requests
+   are future work with a cycle guard.
+3. **Operators and direct hook calls match exactly.** `a + b` requires an exact
+   `@add(typeof(a), typeof(b))` overload; no operand conversion is attempted, so
+   a miss is `E043` naming the exact pair. A direct `@hook(a)` call likewise
+   requires an exact overload: a non-`ref` argument whose type is not the
+   parameter type is `E010`. Numeric literals still take the parameter/operand
+   type (literal typing, not conversion). Typed contexts (let/assign/return,
+   f-string holes) and ordinary function-call arguments still convert as in
+   step 2.
 
 `==` never converts: equality is always direct bit-equality.
 

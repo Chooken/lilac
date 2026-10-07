@@ -2513,7 +2513,6 @@ impl Checker<'_> {
                         is_ref: false,
                     };
                     let name = self.hook_name(hook, def);
-                    let right_hir = self.convert_if_needed(right, left.id, right_hir);
                     return (
                         ty,
                         HirExpr {
@@ -2531,18 +2530,16 @@ impl Checker<'_> {
                         Diagnostic::error(
                             "E043",
                             format!(
-                                "no {} for ({}, {}); no conversion from {} to {}",
+                                "no {} for ({}, {})",
                                 miss.hook,
                                 self.types.display(miss.lhs),
                                 self.types.display(miss.rhs),
-                                self.types.display(miss.rhs),
-                                self.types.display(miss.lhs),
                             ),
                         )
                         .label(
                             span,
                             true,
-                            "operator and conversion search failed".to_owned(),
+                            "no exact operator overload".to_owned(),
                         ),
                     );
                     return poison;
@@ -2938,7 +2935,7 @@ impl Checker<'_> {
             ));
         };
         if arity_ok.len() == 1 {
-            let hir_args = self.check_args(fctx, &first, args, span)?;
+            let hir_args = self.check_hook_args(fctx, &first, args, span)?;
             let name = self.hook_name(name, first_def);
             return Ok(CheckedCall {
                 outs: first.returns.clone(),
@@ -2972,7 +2969,7 @@ impl Checker<'_> {
             })
             .cloned()
             .unwrap_or((first_def, first));
-        let hir_args = self.check_args(fctx, &winner.1, args, span)?;
+        let hir_args = self.check_hook_args(fctx, &winner.1, args, span)?;
         let name = self.hook_name(name, winner.0);
         Ok(CheckedCall {
             outs: winner.1.returns.clone(),
@@ -3691,6 +3688,67 @@ impl Checker<'_> {
         }
         self.expect_type(got, param.id, span, arg.span())?;
         Ok(self.convert_if_needed(got, param.id, hir))
+    }
+
+    /// Checks one hook-call argument without inserting a `@conversion`:
+    /// a non-`ref` argument whose type is not the parameter type is `E010`.
+    /// Numeric literals still take the parameter type (`check_expr`).
+    fn check_hook_arg(
+        &mut self,
+        fctx: &mut FuncCtx,
+        arg: &Expr,
+        param: TypeRef,
+        span: Span,
+    ) -> Result<HirExpr, ErrorGuaranteed> {
+        let (got, hir) = self.check_expr(fctx, arg, Some(param.id));
+        if is_poison(got) {
+            return Err(ErrorGuaranteed::new());
+        }
+        if param.is_ref && !got.is_ref {
+            return Err(self.mismatch(param, got, span, arg.span()));
+        }
+        if got.id != param.id {
+            return Err(self.mismatch(param, got, span, arg.span()));
+        }
+        Ok(hir)
+    }
+
+    /// [`check_args`] for a hook call: matches each argument exactly, never
+    /// converting. Ordinary calls keep the converting `check_args` path.
+    fn check_hook_args(
+        &mut self,
+        fctx: &mut FuncCtx,
+        sig: &FuncSig,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
+        if args.len() != sig.params.len() {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!(
+                        "wrong number of arguments: expected {}, found {}",
+                        sig.params.len(),
+                        args.len(),
+                    ),
+                )
+                .label(span, true, "arity mismatch here".to_owned()),
+            ));
+        }
+        let mut hir_args = Vec::with_capacity(args.len());
+        let mut failed = false;
+        for (arg, param) in args.iter().zip(sig.params.iter()) {
+            if let Ok(hir) = self.check_hook_arg(fctx, arg, *param, span) {
+                hir_args.push(hir);
+            } else {
+                failed = true;
+                hir_args.push(poison_expr(arg.span()));
+            }
+        }
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok(hir_args)
     }
 
     fn check_args(
