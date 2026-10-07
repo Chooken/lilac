@@ -1604,7 +1604,7 @@ impl Verifier<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lilac_span::Span;
+    use lilac_span::{FileId, Span};
 
     fn test_span() -> Span {
         Span::dummy()
@@ -2310,6 +2310,75 @@ mod tests {
             .expect("terminator line");
         assert_eq!(spanned.lines[inst_line], Some(test_span()));
         assert_eq!(spanned.lines[term_line], Some(test_span()));
+    }
+
+    /// Every construct carries its *own* distinct, non-dummy span, so a
+    /// swapped `inst_span`/`term_span` field or an off-by-one in
+    /// `physical_lines` cannot pass: the instruction line must carry the
+    /// instruction's bytes, the terminator line the terminator's, and the
+    /// block-label line the block's.
+    #[test]
+    fn spanned_lines_carry_their_own_distinct_spans() {
+        let block_span = Span::new(100, 400, FileId(0));
+        let const1_span = Span::new(110, 120, FileId(0));
+        let const2_span = Span::new(130, 140, FileId(0));
+        let arith_span = Span::new(150, 170, FileId(0));
+        let term_span = Span::new(380, 390, FileId(0));
+
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    LirInst::Const {
+                        dst: "1".to_owned(),
+                        lit: "0x1".to_owned(),
+                        ty: "#bit_native".to_owned(),
+                        span: const1_span,
+                    },
+                    LirInst::Const {
+                        dst: "2".to_owned(),
+                        lit: "0x2".to_owned(),
+                        ty: "#bit_native".to_owned(),
+                        span: const2_span,
+                    },
+                    LirInst::Arith {
+                        op: ArithOp::IAdd,
+                        lhs: "1".to_owned(),
+                        rhs: "2".to_owned(),
+                        dst: "3".to_owned(),
+                        ty: "#bit_native".to_owned(),
+                        span: arith_span,
+                    },
+                ],
+                term: LirTerm::Return { span: term_span },
+                span: block_span,
+            }],
+        });
+
+        let spanned = module.to_text_spanned();
+        let lines: Vec<&str> = spanned.text.lines().collect();
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no line containing `{needle}` in:\n{}", spanned.text))
+        };
+        let label_line = find("$entry:");
+        let const1_line = find("const 0x1");
+        let const2_line = find("const 0x2");
+        let arith_line = find("i.add");
+        let term_line = find("return");
+
+        assert_eq!(spanned.lines[label_line], Some(block_span));
+        assert_eq!(spanned.lines[const1_line], Some(const1_span));
+        assert_eq!(spanned.lines[const2_line], Some(const2_span));
+        assert_eq!(spanned.lines[arith_line], Some(arith_span));
+        assert_eq!(spanned.lines[term_line], Some(term_span));
     }
 
     #[test]

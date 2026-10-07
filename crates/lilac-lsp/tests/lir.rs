@@ -140,11 +140,8 @@ fn lir_request_returns_the_final_module() {
     let (client, handle) = start_server();
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    did_open(
-        &client,
-        &uri,
-        "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n",
-    );
+    let text = "main: function () nothing {\n    x: @bit_native = @i_add(0x1, 0x2)\n}\n";
+    did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
     let value = lir_request(&client, &uri, "final");
@@ -160,6 +157,34 @@ fn lir_request_returns_the_final_module() {
             .iter()
             .all(|row| row[1].as_u64() != Some(u64::from(u32::MAX))),
         "dummy (compiler-generated runtime) spans must be omitted"
+    );
+
+    // The final module folds `@i_add(0x1, 0x2)` into a constant, so the live
+    // `i.add` instruction only survives in the `lower` stage. Bind that
+    // instruction's physical line to the exact byte range of its source
+    // expression: an off-by-one line map or a swapped span field would
+    // otherwise pass the suite unnoticed.
+    let expr = "@i_add(0x1, 0x2)";
+    let lo = text.find(expr).expect("expression offset") as u64;
+    let hi = lo + expr.len() as u64;
+    let lower = lir_request(&client, &uri, "lower");
+    let lower_text = lower["text"].as_str().expect("lower text");
+    let lower_lines: Vec<&str> = lower_text.lines().collect();
+    let arith_line = lower_lines
+        .iter()
+        .position(|line| line.contains("i.add"))
+        .expect("i.add line");
+    let arith_row = lower["spans"]
+        .as_array()
+        .expect("lower spans")
+        .iter()
+        .find(|row| row[0].as_u64() == Some(arith_line as u64))
+        .expect("span row for the i.add line");
+    assert_eq!(
+        arith_row,
+        &serde_json::json!([arith_line as u64, 0, lo, hi]),
+        "line {arith_line} `{}` must carry its expression's span",
+        lower_lines[arith_line]
     );
 
     shutdown(&client);
