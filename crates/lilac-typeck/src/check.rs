@@ -2156,6 +2156,7 @@ impl Checker<'_> {
         let ResKind::Object {
             members,
             generic_params,
+            ..
         } = &item.kind
         else {
             self.diags.emit(
@@ -3356,6 +3357,7 @@ impl Checker<'_> {
         let ResKind::Object {
             members,
             generic_params,
+            ..
         } = &type_item.kind
         else {
             return Err(self.diags.emit(

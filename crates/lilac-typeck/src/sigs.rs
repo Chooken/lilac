@@ -521,6 +521,7 @@ fn collect_item(
             let ResKind::Object {
                 members: resolved_members,
                 generic_params: resolved_params,
+                ..
             } = &resolved.kind
             else {
                 return;
@@ -684,6 +685,18 @@ pub fn collect_sigs(
         .collect();
     for (name, overloads) in &top_hooks {
         for overload in overloads {
+            // Bridge until Task 3: member hooks are still collected from the AST
+            // walk through `members`, so skip the copies that now also live in
+            // the unit-global index (they carry an owning `HookParent`).
+            if matches!(
+                &overload.kind,
+                ResKind::Hook {
+                    parent: Some(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
             ctx.file = overload.span.file;
             collect_hook_sig(name, overload, None, &mut ctx);
         }

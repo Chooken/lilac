@@ -47,6 +47,19 @@ pub struct ResItem {
     pub ns: NsId,
 }
 
+/// The object that owns a member hook, so `self` resolves to `ref Parent`.
+#[derive(Clone, Debug)]
+pub struct HookParent {
+    /// The parent object's local name.
+    pub name: String,
+    /// The parent object's definition id.
+    pub def: DefId,
+    /// The parent object's namespace.
+    pub ns: NsId,
+    /// The parent object's generic parameter names (empty when concrete).
+    pub generics: Vec<String>,
+}
+
 /// Definition kinds tracked for typeck.
 #[derive(Clone, Debug)]
 pub enum ResKind {
@@ -73,11 +86,16 @@ pub enum ResKind {
         params: Vec<Param>,
         /// Declared return slots (for signature collection).
         returns: Vec<Param>,
+        /// Owning object for a member hook (`None` at top level).
+        parent: Option<HookParent>,
     },
     /// `name: object { ... }` with collected members.
     Object {
-        /// Member name → definition.
+        /// Non-hook member name → definition (fields and methods, plus the
+        /// first hook of each name as a Task 3 bridge).
         members: HashMap<String, ResItem>,
+        /// Hook name → this object's overloads in declaration order.
+        hooks: HashMap<String, Vec<ResItem>>,
         /// Declared generic parameter names, in declaration order.
         generic_params: Vec<String>,
     },
@@ -344,6 +362,21 @@ impl TypeResolver<'_> {
         qualify_own(name, self.path(hook_ns))
     }
 
+    /// Qualifies one hook-signature type name, mapping `self` to the hook's
+    /// owning object (so `@on_drop(ref self)` keys by its parent type).
+    fn qualify_hook(&self, item: &ResItem, name: &str) -> String {
+        if name == "self" {
+            if let ResKind::Hook {
+                parent: Some(parent),
+                ..
+            } = &item.kind
+            {
+                return qualify_own(&parent.name, self.path(parent.ns));
+            }
+        }
+        self.qualify(item.span.file, item.ns, name)
+    }
+
     /// The dotted path of `ns` (`""` for the root or an unknown id).
     fn path(&self, ns: NsId) -> &str {
         self.namespaces
@@ -368,8 +401,8 @@ fn same_sig_resolved(a: &ResItem, b: &ResItem, resolver: &TypeResolver) -> bool 
                 ..
             },
         ) => {
-            let qa = |name: &str| resolver.qualify(a.span.file, a.ns, name);
-            let qb = |name: &str| resolver.qualify(b.span.file, b.ns, name);
+            let qa = |name: &str| resolver.qualify_hook(a, name);
+            let qb = |name: &str| resolver.qualify_hook(b, name);
             sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
         }
         _ => true,
@@ -471,7 +504,7 @@ impl Collector<'_> {
                 self.collect_top_level(items, Visibility::Private, module);
                 continue;
             }
-            let Some(mut resolved) = self.item(item) else {
+            let Some(mut resolved) = self.item(item, &mut module.hooks) else {
                 continue;
             };
             resolved.vis = if matches!(resolved.kind, ResKind::Hook { .. }) {
@@ -487,22 +520,50 @@ impl Collector<'_> {
     /// Collects one object's members, flattening nested `private` blocks and
     /// marking their members [`Visibility::Private`] (spec §5). Object-member
     /// hooks follow member visibility like any other member (spec §7.2).
+    ///
+    /// Hook members record their owning object on `hooks` (this object's
+    /// overloads, in order) and on `file_hooks` (which reaches `Module.hooks`
+    /// and the unit-global merge). Only the first occurrence of each name is
+    /// kept in `table` as a Task 3 bridge; `E020` for hooks is decided
+    /// unit-globally by qualified signature (`add_hook`), never by name here.
     fn collect_members(
         &mut self,
         items: &[Item],
         vis: Visibility,
         table: &mut HashMap<String, ResItem>,
+        hooks: &mut HashMap<String, Vec<ResItem>>,
+        file_hooks: &mut HashMap<String, Vec<ResItem>>,
+        parent: &HookParent,
     ) {
         for member in items {
             if let ItemKind::Private { items } = &member.kind {
-                self.collect_members(items, Visibility::Private, table);
+                self.collect_members(items, Visibility::Private, table, hooks, file_hooks, parent);
                 continue;
             }
-            if let Some(mut resolved) = self.item(member) {
-                resolved.vis = vis;
-                // Member scope tracks no overload sets: same-name members
-                // always report E020, hooks included.
-                self.insert_overload(table, None, &member.name, resolved);
+            let Some(mut resolved) = self.item(member, file_hooks) else {
+                continue;
+            };
+            resolved.vis = vis;
+            if matches!(resolved.kind, ResKind::Hook { .. }) {
+                if let ResKind::Hook {
+                    parent: hook_parent,
+                    ..
+                } = &mut resolved.kind
+                {
+                    *hook_parent = Some(parent.clone());
+                }
+                let name = member.name.clone();
+                hooks
+                    .entry(name.clone())
+                    .or_default()
+                    .push(resolved.clone());
+                file_hooks
+                    .entry(name.clone())
+                    .or_default()
+                    .push(resolved.clone());
+                table.entry(name).or_insert(resolved);
+            } else {
+                self.insert(table, &member.name, resolved);
             }
         }
     }
@@ -520,7 +581,11 @@ impl Collector<'_> {
         scope.insert(name.to_owned(), item);
     }
 
-    fn item(&mut self, item: &Item) -> Option<ResItem> {
+    fn item(
+        &mut self,
+        item: &Item,
+        file_hooks: &mut HashMap<String, Vec<ResItem>>,
+    ) -> Option<ResItem> {
         let id = self.fresh();
         let kind = match &item.kind {
             ItemKind::Func(decl) => {
@@ -534,6 +599,7 @@ impl Collector<'_> {
                         generic_params,
                         params,
                         returns,
+                        parent: None,
                     }
                 } else {
                     ResKind::Func {
@@ -550,9 +616,24 @@ impl Collector<'_> {
                 generic_params,
             } => {
                 let mut table = HashMap::new();
-                self.collect_members(members, Visibility::Public, &mut table);
+                let mut hooks = HashMap::new();
+                let parent = HookParent {
+                    name: item.name.clone(),
+                    def: id,
+                    ns: self.ns,
+                    generics: generic_params.clone(),
+                };
+                self.collect_members(
+                    members,
+                    Visibility::Public,
+                    &mut table,
+                    &mut hooks,
+                    file_hooks,
+                    &parent,
+                );
                 ResKind::Object {
                     members: table,
+                    hooks,
                     generic_params: generic_params.clone(),
                 }
             }
@@ -878,6 +959,30 @@ mod tests {
         (module, diags)
     }
 
+    /// Resolves one source as a one-file project and returns the first object.
+    fn resolve_object(src: &'static str) -> (ResItem, Diags) {
+        let (project, diags) = resolve_project(src);
+        let object = project
+            .all_items()
+            .find(|(_, item)| matches!(item.kind, ResKind::Object { .. }))
+            .map(|(_, item)| item.clone())
+            .expect("test source declares an object");
+        (object, diags)
+    }
+
+    /// Resolves one source as a one-file project.
+    fn resolve_project(src: &'static str) -> (ResolvedProject, Diags) {
+        collect_project_src(
+            &[""],
+            &[Spec {
+                ns: 0,
+                name: "test.lilac",
+                src,
+                usings: &[],
+            }],
+        )
+    }
+
     fn e020_count(diags: &Diags) -> usize {
         diags
             .diagnostics()
@@ -1046,6 +1151,60 @@ mod tests {
             panic!("expected object, got {:?}", object.kind);
         };
         assert_eq!(generic_params, &["T".to_owned()]);
+    }
+
+    #[test]
+    fn object_hook_overloads_by_signature() {
+        let (object, diags) = resolve_object(
+            "Int64: object {\n\
+             @conversion: function (from: @byte_buffer) Int64 => Int64 { data = 0x0 }\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
+             @conversion: function (from: Int64) @bit64 => from.data\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let ResKind::Object { hooks, .. } = &object.kind else {
+            panic!("object");
+        };
+        assert_eq!(hooks["@conversion"].len(), 3);
+    }
+
+    #[test]
+    fn identical_conversion_pair_is_e020() {
+        let (_, diags) = resolve_object(
+            "Int64: object {\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n}\n",
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E020"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn member_hook_records_parent_and_self_keys_by_parent() {
+        // `@on_drop(ref self)` in two different objects must not collide, and each
+        // hook's parent must be its own object.
+        let (project, diags) = resolve_project(
+            "A: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n\
+             B: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let drops = &project.hooks["@on_drop"];
+        assert_eq!(drops.len(), 2);
+        let parents: Vec<_> = drops
+            .iter()
+            .filter_map(|d| match &d.kind {
+                ResKind::Hook {
+                    parent: Some(p), ..
+                } => Some(p.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            parents.contains(&"A".to_owned()) && parents.contains(&"B".to_owned()),
+            "{parents:?}"
+        );
     }
 
     struct Spec {
