@@ -38,7 +38,7 @@ fn check_ports_clean() {
 #[test]
 fn lir_snapshots_stable() {
     // Every `*.lir` snapshot under `tests/ui`, not just the M4 `PORTS`, so a
-    // stale non-generic snapshot (e.g. `op_bit_mixed_ok.lir`) is caught.
+    // stale non-generic snapshot (e.g. `references.lir`) is caught.
     let mut snapshots: Vec<std::path::PathBuf> = std::fs::read_dir("../../tests/ui")
         .expect("reads tests/ui")
         .filter_map(Result::ok)

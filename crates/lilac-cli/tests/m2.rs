@@ -1,5 +1,5 @@
 //! M2 UI tests: control-flow ports check clean, `.lir` snapshots
-//! byte-stable, FAILS pins hold their codes, fold/W020 fixtures silent.
+//! byte-stable, FAILS pins hold their codes, fold fixtures silent.
 
 use std::process::Command;
 
@@ -144,29 +144,6 @@ fn object_setter_alt_is_e001() {
         stderr.contains("use `= Type { ... }` to construct a struct value"),
         "stderr:\n{stderr}"
     );
-}
-
-#[test]
-fn op_warn_is_warning_only() {
-    let output = lilac()
-        .args(["check", &ui("op_type_change_warn.lilac")])
-        .output()
-        .expect("runs lilac");
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("warning[W020]"), "stderr:\n{stderr}");
-    assert!(!stderr.contains("error["), "stderr:\n{stderr}");
-}
-
-#[test]
-fn op_mixed_silent() {
-    let output = lilac()
-        .args(["check", &ui("op_bit_mixed_ok.lilac")])
-        .output()
-        .expect("runs lilac");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr:\n{stderr}");
-    assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
 #[test]

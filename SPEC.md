@@ -586,25 +586,13 @@ Short-circuit `and` / `or` are builtin control flow, not overloadable hooks:
 they evaluate left to right over bit containers and never resolve an operator
 binding.
 
-#### Operator type-change lint (`W020`, on by default)
+#### Operator hooks
 
-Arithmetic operators should preserve types: `@add/@sub/@mul/@div/@mod` expect
-`lhs == rhs == output`, and `@negate` expects `value == output` (compared by base
-type, ignoring `ref`).
-
-* If every type involved is a `@bit` variant (`@bit8/16/32/64/Native`), mixed
-  shapes stay silent — mixed-width bit algebra and `@less_than(@bit32, @bit32)
-  -> @bit8` are legitimate and conversion/folding handles them.
-* Otherwise any change warns. `@add(Matrix, Matrix) -> @bit32` warns even though
-  it resolves; comparisons keep their designed shape `(T, T) -> @bit8` and only
-  warn when violated (inputs differ from each other, or output is not `@bit8`).
-  Generic `T` counts as non-bit; `@add(T, T) -> T` is silent, `@add(T, T) -> @bit8`
-  warns unless it is a comparison hook.
-
-A warning never blocks compilation. It suggests a named method or an explicit
-`@conversion` when a silent type change was probably not intended. The existing
-`nothing`/multi-return shape warnings stay as-is; this lint covers the remaining
-case the `warnOnOperatorTypeChange` setting was reserved for.
+Operator, `@conversion`, and RAII (`@init`/`@on_drop`) hooks are globally
+indexed by `(name, signature)`: each declaration is a distinct overload keyed by
+its parameter/return shape, so mixed-width bit algebra and custom-type operators
+coexist in one table. `@add(Matrix, Matrix) -> @bit32` simply binds the `Matrix`
+overload; there is no operator-shape lint.
 
 ### Type Conversions
 

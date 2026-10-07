@@ -97,8 +97,6 @@ pub struct Session {
     pub optimize: OptimizeMode,
     /// Cache directory (reserved for the post-v1 content cache).
     pub cache_dir: Option<PathBuf>,
-    /// Warns `W020` on operator shape changes (silenced by `--allow`).
-    pub warn_on_operator_type_change: bool,
     /// Extra reachability roots (`--export=<name>`): functions to keep alive
     /// even when nothing calls them, so a library can expose entry points.
     pub exports: HashSet<String>,
@@ -111,9 +109,9 @@ pub struct Session {
 }
 
 impl Default for Session {
-    /// Session with the real build host, the canonical default target,
-    /// human errors, and operator-type-change warnings on. Kept identical to
-    /// [`Session::new`] so neither construction path surprises the other.
+    /// Session with the real build host, the canonical default target, and
+    /// human errors. Kept identical to [`Session::new`] so neither construction
+    /// path surprises the other.
     fn default() -> Self {
         Self {
             source_map: SourceMap::default(),
@@ -123,7 +121,6 @@ impl Default for Session {
             opts: Opts::default(),
             optimize: OptimizeMode::default(),
             cache_dir: None,
-            warn_on_operator_type_change: true,
             exports: HashSet::new(),
             project_files: Vec::new(),
             analysis: None,
@@ -286,13 +283,7 @@ impl Session {
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
         let mut types = lilac_ty::Types::new();
-        let sigs = lilac_typeck::collect_sigs(
-            project,
-            program,
-            &mut types,
-            &mut self.diags,
-            self.warn_on_operator_type_change,
-        );
+        let sigs = lilac_typeck::collect_sigs(project, program, &mut types, &mut self.diags);
         self.analysis = Some(Analysis {
             project: project.clone(),
             types: types.clone(),
@@ -513,18 +504,6 @@ mod tests {
         assert_eq!(session.render_diagnostics(), "");
     }
 
-    const MATRIX_ADD: &str = "Matrix: object {\n    value: @bit32\n}\n@add: function (lhs: Matrix, rhs: Matrix) result: @bit32 {\n    result = 0x0\n}\nmain: function () nothing {\n}\n";
-
-    #[test]
-    fn warnings_do_not_fail_check() {
-        let mut session = Session::new();
-        let result = session.compile_source("warn.lilac", MATRIX_ADD);
-        assert!(result.is_ok(), "{}", session.render_diagnostics());
-        let rendered = session.render_diagnostics();
-        assert!(rendered.contains("warning[W020]"), "{rendered}");
-        assert!(!rendered.contains("error["), "{rendered}");
-    }
-
     #[test]
     fn generic_inline_control_flow_defers_without_ice() {
         // Regression: a generic `=>` body with control flow must defer (`E030`)
@@ -537,15 +516,6 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(session.render_diagnostics().contains("error[E030]"));
-    }
-
-    #[test]
-    fn allow_flag_silences_w020() {
-        let mut session = Session::new();
-        session.warn_on_operator_type_change = false;
-        let result = session.compile_source("warn.lilac", MATRIX_ADD);
-        assert!(result.is_ok(), "{}", session.render_diagnostics());
-        assert_eq!(session.render_diagnostics(), "");
     }
 
     #[test]

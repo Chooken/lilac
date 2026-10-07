@@ -387,7 +387,6 @@ struct SigCtx<'a> {
     types: &'a mut Types,
     diags: &'a mut Diags,
     sigs: &'a mut Sigs,
-    warn_op_change: bool,
 }
 
 /// Registers a function or member-method signature. Generic declarations are
@@ -430,63 +429,6 @@ fn collect_hook_sig(
         return;
     }
     register(name, item, parent, &[], true, ctx);
-}
-
-/// Warns `W020` when a user hook changes an operator's shape: arithmetic
-/// stays silent only for all-by-value `@bit` signatures, comparisons only
-/// for `(T, T) -> @bit8`.
-fn check_op_shape(
-    name: &str,
-    sig: &FuncSig,
-    span: lilac_span::Span,
-    types: &Types,
-    diags: &mut Diags,
-) {
-    let arithmetic = matches!(name, "@add" | "@sub" | "@mul" | "@div" | "@mod" | "@negate");
-    let comparison = matches!(
-        name,
-        "@less_than" | "@greater_than" | "@less_than_or_equal" | "@greater_than_or_equal"
-    );
-    if !arithmetic && !comparison {
-        return;
-    }
-    let is_bit = |id: TypeId| {
-        matches!(
-            types.kind(id),
-            lilac_ty::TypeKind::Bit8
-                | lilac_ty::TypeKind::Bit16
-                | lilac_ty::TypeKind::Bit32
-                | lilac_ty::TypeKind::Bit64
-                | lilac_ty::TypeKind::BitNative
-        )
-    };
-    let bit8 = types.builtin("@bit8");
-    let silent = if arithmetic {
-        sig.params
-            .iter()
-            .all(|param| !param.is_ref && is_bit(param.id))
-            && sig
-                .returns
-                .iter()
-                .all(|slot| !slot.is_ref && is_bit(slot.id))
-    } else {
-        sig.params.len() == 2
-            && !sig.params[0].is_ref
-            && !sig.params[1].is_ref
-            && sig.params[0].id == sig.params[1].id
-            && sig.returns.len() == 1
-            && !sig.returns[0].is_ref
-            && Some(sig.returns[0].id) == bit8
-    };
-    if !silent {
-        diags.emit(
-            Diagnostic::warning("W020", format!("operator `{name}` changes type shape")).label(
-                span,
-                true,
-                "custom shape here".to_owned(),
-            ),
-        );
-    }
 }
 
 fn register(
@@ -535,9 +477,6 @@ fn register(
             .entry(name.to_owned())
             .or_default()
             .push((item.id, sig.clone()));
-        if ctx.warn_op_change {
-            check_op_shape(name, &sig, item.span, ctx.types, ctx.diags);
-        }
         if name == "@conversion" {
             let shaped = sig.params.len() == 1
                 && sig.returns.len() == 1
@@ -722,14 +661,12 @@ fn validate_raii_hook(
 /// Collects every signature in definition order.
 ///
 /// Generic funcs/hooks are stored as templates (`Param` slots); hooks that
-/// declare their own generic parameters report `E052`. `warn_op_change`
-/// enables the `W020` operator-shape lint.
+/// declare their own generic parameters report `E052`.
 pub fn collect_sigs(
     project: &ResolvedProject,
     program: &Program,
     types: &mut Types,
     diags: &mut Diags,
-    warn_op_change: bool,
 ) -> Sigs {
     let mut sigs = Sigs::default();
     let mut ctx = SigCtx {
@@ -738,7 +675,6 @@ pub fn collect_sigs(
         types,
         diags,
         sigs: &mut sigs,
-        warn_op_change,
     };
     collect_top_items(&program.items, &mut ctx);
     let top_hooks: Vec<(String, Vec<ResItem>)> = project
@@ -765,10 +701,6 @@ mod tests {
     use lilac_span::{FileId, SourceMap, Span};
 
     fn sigs_of(src: &str) -> (Sigs, Types, ResolvedProject, Diags) {
-        sigs_of_warn(src, true)
-    }
-
-    fn sigs_of_warn(src: &str, warn_op_change: bool) -> (Sigs, Types, ResolvedProject, Diags) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("test.lilac", src);
         let (tokens, lex_errors) = Lexer::lex_all(src, file);
@@ -783,7 +715,7 @@ mod tests {
         let module = lilac_resolve::collect(&program, &mut diags);
         let project = ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = collect_sigs(&project, &program, &mut types, &mut diags, warn_op_change);
+        let sigs = collect_sigs(&project, &program, &mut types, &mut diags);
         (sigs, types, project, diags)
     }
 
@@ -1021,52 +953,5 @@ mod tests {
             lookup_intrinsic("@compile_error"),
             Some(Intrinsic::CompileError)
         );
-    }
-
-    fn matrix_add_src() -> &'static str {
-        "Matrix: object {\n    value: @bit32\n}\n@add: function (lhs: Matrix, rhs: Matrix) result: @bit32 {\n    result = 0x0\n}\n"
-    }
-
-    #[test]
-    fn op_change_warns_matrix() {
-        let (_, _, _, diags) = sigs_of_warn(matrix_add_src(), true);
-        assert_eq!(code_count(&diags, "W020"), 1);
-        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
-        assert!(msgs.iter().any(|m| m.contains("@add")), "{msgs:?}");
-    }
-
-    #[test]
-    fn op_change_suppressed_by_flag() {
-        let (_, _, _, diags) = sigs_of_warn(matrix_add_src(), false);
-        assert_eq!(code_count(&diags, "W020"), 0);
-    }
-
-    #[test]
-    fn op_bit_mixed_silent() {
-        let (_, _, _, diags) = sigs_of_warn(
-            "@add: function (lhs: @bit8, rhs: @bit32) result: @bit32 {\n    result = rhs\n}\n",
-            true,
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(code_count(&diags, "W020"), 0);
-    }
-
-    #[test]
-    fn cmp_shape_silent() {
-        let (_, _, _, diags) = sigs_of_warn(
-            "Matrix: object {\n    value: @bit32\n}\n@less_than: function (lhs: Matrix, rhs: Matrix) result: @bit8 {\n    result = 0x1\n}\n",
-            true,
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(code_count(&diags, "W020"), 0);
-    }
-
-    #[test]
-    fn cmp_shape_change_warns() {
-        let (_, _, _, diags) = sigs_of_warn(
-            "Matrix: object {\n    value: @bit32\n}\n@less_than: function (lhs: Matrix, rhs: Matrix) result: @bit32 {\n    result = 0x0\n}\n",
-            true,
-        );
-        assert_eq!(code_count(&diags, "W020"), 1);
     }
 }

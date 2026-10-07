@@ -5436,7 +5436,7 @@ mod tests {
         let module = lilac_resolve::collect(&program, &mut diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
         check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         diags
     }
@@ -5478,7 +5478,7 @@ mod tests {
         let module = lilac_resolve::collect(&program, &mut diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
         let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (diags, hir)
     }
@@ -5860,7 +5860,7 @@ mod tests {
         let module = lilac_resolve::collect(&program, &mut diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let mut types = Types::new();
-        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags, true);
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
         let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         (hir, diags)
     }

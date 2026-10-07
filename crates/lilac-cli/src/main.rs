@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--allow operator-type-change] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-vm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac run <file-or-dir> [--source=<path>] [--break=<loc>]... [--step] [--trace] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--decimal-scale=N] [--decimal-round=trunc|half-up] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac disasm <file.lbc>"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -103,21 +103,6 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             }
         } else if *arg == "--verbose" {
             session.opts.verbose = true;
-        } else if *arg == "--allow" {
-            index += 1;
-            if args.get(index).map(String::as_str) == Some("operator-type-change") {
-                session.warn_on_operator_type_change = false;
-            } else {
-                eprintln!("unknown --allow value; want `--allow operator-type-change`");
-                return Err(ExitCode::from(2));
-            }
-        } else if let Some(allowed) = arg.strip_prefix("--allow=") {
-            if allowed == "operator-type-change" {
-                session.warn_on_operator_type_change = false;
-            } else {
-                eprintln!("unknown --allow={allowed}");
-                return Err(ExitCode::from(2));
-            }
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
         } else if let Some(mode) = arg.strip_prefix("--mode=") {
