@@ -60,7 +60,10 @@ impl Arch {
     /// Returns whether pointers on this architecture are 64 bits wide.
     #[must_use]
     pub fn is_64_bit(self) -> bool {
-        matches!(self, Self::X86_64 | Self::Aarch64 | Self::Riscv64 | Self::Wasm64)
+        matches!(
+            self,
+            Self::X86_64 | Self::Aarch64 | Self::Riscv64 | Self::Wasm64
+        )
     }
 }
 
