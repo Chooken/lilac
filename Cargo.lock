@@ -239,7 +239,6 @@ dependencies = [
  "lilac-ir",
  "lilac-module",
  "lilac-span",
- "lilac-vm",
 ]
 
 [[package]]
@@ -434,17 +433,6 @@ dependencies = [
  "lilac-resolve",
  "lilac-span",
  "lilac-ty",
-]
-
-[[package]]
-name = "lilac-vm"
-version = "0.2.0"
-dependencies = [
- "lilac-codegen",
- "lilac-driver",
- "lilac-error",
- "lilac-ir",
- "lilac-span",
 ]
 
 [[package]]
