@@ -229,7 +229,7 @@ impl Server {
         let mut new_per_file: HashMap<Url, Retained> = HashMap::new();
 
         if let Some(root) = self.root.clone() {
-            let mut session = Session::new();
+            let mut session = new_session();
             let mut fs = OverlayFs { overlay: &overlay };
             let mut stages = LirStages::default();
             let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
@@ -329,6 +329,14 @@ impl Server {
     }
 }
 
+/// A compiler session for editor use: the CLI's `max_errors` cap (10) is for
+/// terminals, but an editor wants the full diagnostic list, so lift it here.
+fn new_session() -> Session {
+    let mut session = Session::new();
+    session.diags.max_errors = usize::MAX;
+    session
+}
+
 /// Compiles one open document standalone (single-file mode) and records its
 /// diagnostics and retained compile, so hover/definition/IR work for it even
 /// when it is not part of the project.
@@ -338,7 +346,7 @@ fn compile_standalone(
     by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
     per_file: &mut HashMap<Url, Retained>,
 ) {
-    let mut session = Session::new();
+    let mut session = new_session();
     let name = document.path.to_string_lossy().into_owned();
     let mut stages = LirStages::default();
     let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {

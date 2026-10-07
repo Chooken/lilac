@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId};
@@ -177,6 +178,60 @@ fn unknown_name_is_e021() {
     assert!(has_code(&params, "E021"), "{:?}", params.diagnostics);
     shutdown(&client);
     handle.join().expect("server thread");
+}
+
+#[test]
+fn publishes_all_errors_past_the_cli_cap() {
+    // The CLI caps error-level diagnostics at 10; the editor must show them all.
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    let mut src = String::from("main: function () nothing {\n");
+    for i in 1..=15 {
+        let _ = writeln!(src, "    x{i}: @bit8 = nope{i}");
+    }
+    src.push_str("}\n");
+    did_open(&client, &uri, &src);
+    let params = publish_for(&client, &uri);
+    let e021 = params
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(code)) if code == "E021"))
+        .count();
+    assert_eq!(e021, 15, "{:?}", params.diagnostics);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn publishes_all_project_errors_past_the_cli_cap() {
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let main = dir.join("main.lilac");
+    let mut src = String::from("main: function () nothing {\n");
+    for i in 1..=15 {
+        let _ = writeln!(src, "    x{i}: @bit8 = nope{i}");
+    }
+    src.push_str("}\n");
+    std::fs::write(&main, &src).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+
+    let (client, handle) = start_server();
+    initialize(&client, Some(&root));
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, &src);
+    let params = publish_for(&client, &uri);
+    let e021 = params
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(code)) if code == "E021"))
+        .count();
+    assert_eq!(e021, 15, "{:?}", params.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
