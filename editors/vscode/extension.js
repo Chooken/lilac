@@ -20,6 +20,7 @@ const LIR_SCHEME = "lilac-lir";
 const HIGHLIGHT_MS = 2500;
 const GENERATED_HOVER = "compiler-generated (no source)";
 const OPEN_SOURCE_COMMAND = "lilac.openLirSource";
+const LIR_STAGES = ["lower", "fold", "runtime", "final"];
 
 let client;
 
@@ -81,15 +82,9 @@ async function provideLirText(uri) {
     }
 }
 
-async function showLir() {
-    const editor = window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "lilac") {
-        window.showWarningMessage("Open a Lilac source file to show its IR.");
-        return;
-    }
-    const sourceUri = editor.document.uri;
+async function openLirDocument(sourceUri, stage) {
     const sourceKey = sourceUri.toString();
-    const uri = lirUriFor(sourceUri, "final");
+    const uri = lirUriFor(sourceUri, stage);
     openLirDocs.set(uri.toString(), { sourceUri: sourceKey, uri });
     sourceEmitter(sourceKey);
     const document = await workspace.openTextDocument(uri);
@@ -98,6 +93,68 @@ async function showLir() {
         preview: false,
     });
     await languages.setTextDocumentLanguage(document, "lilac-ir");
+}
+
+async function showLir() {
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "lilac") {
+        window.showWarningMessage("Open a Lilac source file to show its IR.");
+        return;
+    }
+    try {
+        await openLirDocument(editor.document.uri, "final");
+    } catch {
+    }
+}
+
+async function lirStageAvailable(sourceKey, stage) {
+    if (!client) {
+        return false;
+    }
+    try {
+        const payload = await client.sendRequest("lilac/lir", {
+            uri: sourceKey,
+            stage,
+        });
+        return payload !== null && payload !== undefined;
+    } catch {
+        return false;
+    }
+}
+
+async function selectLirStage() {
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "lilac") {
+        window.showWarningMessage("Open a Lilac source file to select its IR stage.");
+        return;
+    }
+    const sourceUri = editor.document.uri;
+    const sourceKey = sourceUri.toString();
+    let available;
+    try {
+        available = await Promise.all(
+            LIR_STAGES.map((stage) => lirStageAvailable(sourceKey, stage))
+        );
+    } catch {
+        return;
+    }
+    const items = LIR_STAGES.map((stage, index) => {
+        const item = { label: stage, stage, available: available[index] };
+        if (!available[index]) {
+            item.description = "unavailable";
+        }
+        return item;
+    });
+    const picked = await window.showQuickPick(items, {
+        placeHolder: "Select the IR stage to show",
+    });
+    if (!picked || !picked.available) {
+        return;
+    }
+    try {
+        await openLirDocument(sourceUri, picked.stage);
+    } catch {
+    }
 }
 
 function visibleEditorFor(uri) {
@@ -358,6 +415,9 @@ async function activate(context) {
         })
     );
     context.subscriptions.push(commands.registerCommand("lilac.showLir", showLir));
+    context.subscriptions.push(
+        commands.registerCommand("lilac.selectLirStage", selectLirStage)
+    );
     context.subscriptions.push(lirChange);
     context.subscriptions.push(
         workspace.onDidCloseTextDocument((document) => {
