@@ -1138,7 +1138,7 @@ impl Parser {
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<Expr, ErrorGuaranteed> {
-        let mut expr = self.parse_unary(diags)?;
+        let mut expr = self.parse_cast(diags)?;
         loop {
             let op = match self.peek().kind {
                 TokenKind::Star => BinOp::Mul,
@@ -1147,7 +1147,7 @@ impl Parser {
                 _ => break,
             };
             self.bump();
-            let rhs = self.parse_unary(diags)?;
+            let rhs = self.parse_cast(diags)?;
             let span = join_spans(expr.span(), rhs.span());
             expr = Expr::BinOp {
                 lhs: Box::new(expr),
@@ -1155,6 +1155,16 @@ impl Parser {
                 rhs: Box::new(rhs),
                 span,
             };
+        }
+        Ok(expr)
+    }
+
+    fn parse_cast(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
+        let mut expr = self.parse_unary(diags)?;
+        while self.peek().kind == TokenKind::KwAs {
+            self.bump();
+            let ty = self.parse_type(diags)?;
+            expr = Expr::Cast(Box::new(expr), ty);
         }
         Ok(expr)
     }
@@ -1246,11 +1256,6 @@ impl Parser {
                         ));
                     }
                     expr = self.finish_call(diags, expr, generic_args)?;
-                }
-                TokenKind::KwAs => {
-                    self.bump();
-                    let ty = self.parse_type(diags)?;
-                    expr = Expr::Cast(Box::new(expr), ty);
                 }
                 _ => break,
             }
@@ -2005,6 +2010,7 @@ mod tests {
             d: @bit8 = x as A as B\n\
             e: ref @bit8 = x as ref @bit8\n\
             g: @bit8 = f(x) as T\n\
+            h: @bit8 = -x as T\n\
         }\n";
         let stmts = main_stmts(src);
 
@@ -2088,5 +2094,21 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert!(matches!(args[0], Expr::Ident(ref name, _) if name == "x"));
         assert_eq!(ty.name, "T");
+
+        // `-x as T` -> `Cast(@negate(x), T)`: `as` is looser than unary minus,
+        // so the cast applies to the negated value.
+        let Stmt::Let { value, .. } = &stmts[6] else {
+            panic!("expected let, got {:?}", stmts[6]);
+        };
+        let Expr::Cast(inner, ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        assert_eq!(ty.name, "T");
+        let Expr::Call { callee, args, .. } = &**inner else {
+            panic!("expected negate call, got {inner:?}");
+        };
+        assert!(matches!(**callee, Expr::Ident(ref name, _) if name == "@negate"));
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0], Expr::Ident(ref name, _) if name == "x"));
     }
 }
