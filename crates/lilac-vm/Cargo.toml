@@ -7,11 +7,6 @@ edition.workspace = true
 name = "lilac-vm"
 path = "src/bin/lilac-vm.rs"
 
-[features]
-# Bench-only tree-walking baseline. Never enabled for a shipped build; the
-# integration bench links the lib without `cfg(test)`, so the gate lives here.
-bench-baseline = []
-
 [dependencies]
 lilac-codegen = { path = "../lilac-codegen" }
 lilac-error = { path = "../lilac-error" }

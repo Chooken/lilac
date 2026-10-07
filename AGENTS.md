@@ -110,6 +110,4 @@ Run before committing:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo clippy --release -p lilac-vm --all-targets --features bench-baseline -- -D warnings
-cargo test --release -p lilac-vm --features bench-baseline
 ```
