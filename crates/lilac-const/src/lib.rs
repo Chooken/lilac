@@ -526,7 +526,8 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
     }
 }
 
-/// Evaluates width conversions over constants.
+/// Evaluates width conversions over constants. A `Bitcast` reinterprets the
+/// bits of a float at 32/64 bits (16/128-bit folding is a best-effort miss).
 fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &str) -> ConstValue {
     let width = width_of(ty).unwrap_or(64);
     let mask = if width >= 64 {
@@ -537,8 +538,35 @@ fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &str) -> ConstValue {
     match (op, value) {
         (ConvertOp::Trunc, ConstValue::Int(value, _)) => ConstValue::Int(value & mask, width),
         (ConvertOp::ExtendZero, ConstValue::Int(value, _)) => ConstValue::Int(*value, width),
+        (ConvertOp::Bitcast, ConstValue::Float(value, _)) => float_bits(*value, width),
+        (ConvertOp::Bitcast, ConstValue::Int(bits, _)) => bits_float(*bits, width),
         _ => ConstValue::Unknown,
     }
+}
+
+/// The IEEE-754 bit pattern of a float constant at `width` bits (32/64 only;
+/// half/quad folding is deferred). The narrowing to `f32` is the bitcast's
+/// whole point, so a lossy-looking cast is intended.
+#[allow(clippy::cast_possible_truncation)]
+fn float_bits(value: f64, width: u32) -> ConstValue {
+    match width {
+        32 => ConstValue::Int(u64::from((value as f32).to_bits()), 32),
+        64 => ConstValue::Int(value.to_bits(), 64),
+        _ => ConstValue::Unknown,
+    }
+}
+
+/// Reinterprets an integer bit pattern as a float at `width` bits (32/64 only).
+fn bits_float(bits: u64, width: u32) -> ConstValue {
+    if width == 64 {
+        return ConstValue::Float(f64::from_bits(bits), 64);
+    }
+    if width == 32 {
+        return u32::try_from(bits).map_or(ConstValue::Unknown, |bits| {
+            ConstValue::Float(f64::from(f32::from_bits(bits)), 32)
+        });
+    }
+    ConstValue::Unknown
 }
 
 /// The constants a `call` evaluated to, paired with the static out types
@@ -1965,6 +1993,82 @@ mod tests {
         let mut diags = Diags::new();
         assert!(fold(&mut module, &mut diags).is_err(), "{diags:?}");
         assert_eq!(e060_count(&diags), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn bitcast_reinterprets_bits_directly() {
+        // `1.0f32` is `0x3f80_0000`; the reverse round-trips.
+        let bits = eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 32), "#bit32");
+        assert!(
+            matches!(bits, ConstValue::Int(value, 32) if value == 0x3f80_0000),
+            "{bits:?}"
+        );
+        let back = eval_convert(
+            &ConvertOp::Bitcast,
+            &ConstValue::Int(0x3f80_0000, 32),
+            "#fbit32",
+        );
+        assert!(
+            matches!(back, ConstValue::Float(value, 32) if value.to_bits() == 1.0f64.to_bits()),
+            "{back:?}"
+        );
+        // 64-bit doubles round-trip too.
+        let ints = eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 64), "#bit64");
+        assert!(
+            matches!(ints, ConstValue::Int(value, 64) if value == 0x3ff0_0000_0000_0000),
+            "{ints:?}"
+        );
+        // 16/128-bit folding is a best-effort miss.
+        assert!(matches!(
+            eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 16), "#bit16"),
+            ConstValue::Unknown
+        ));
+    }
+
+    #[test]
+    fn bitcast_intrinsic_folds_constant_operand() {
+        // `@as_float("1.0")` folds to a `#fbit32` Float const; the enclosing
+        // `@fbit_to_bits_32` bitcast reinterprets its bits to `#bit32`.
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.data.push(LirData {
+            name: "c0".to_owned(),
+            kind: LirDataKind::NumLit("1.0".to_owned()),
+            span: test_span(),
+        });
+        module.funcs.push(LirFunc {
+            name: "main".to_owned(),
+            ins: Vec::new(),
+            outs: Vec::new(),
+            is_extern: false,
+            blocks: vec![LirBlock {
+                label: "entry".to_owned(),
+                insts: vec![
+                    constant("1", "!c0", "#byte_buffer"),
+                    LirInst::FoldIntrinsic {
+                        name: "@as_float".to_owned(),
+                        arg: reg("1"),
+                        dst: "2".to_owned(),
+                        ty: "#fbit32".to_owned(),
+                        span: test_span(),
+                    },
+                    LirInst::Convert {
+                        op: ConvertOp::Bitcast,
+                        src: "2".to_owned(),
+                        dst: "3".to_owned(),
+                        ty: "#bit32".to_owned(),
+                        span: test_span(),
+                    },
+                ],
+                term: ret(),
+                span: test_span(),
+            }],
+        });
+        let mut diags = Diags::new();
+        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let text = module.to_text();
+        assert!(text.contains("const 0x3f800000"), "{text}");
+        assert!(!text.contains("bitcast"), "{text}");
     }
 
     #[test]

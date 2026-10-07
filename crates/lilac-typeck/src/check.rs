@@ -12,7 +12,9 @@ use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind, ResolvedProject,
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
-use super::{lookup_intrinsic, lookup_one, qualify_name, resolve_type, Intrinsic, Sigs};
+use super::{
+    lookup_intrinsic, lookup_one, qualify_name, resolve_type, FloatWidth, Intrinsic, Sigs,
+};
 
 mod generics;
 use generics::FuncInstance;
@@ -982,6 +984,15 @@ fn is_float(types: &Types, id: TypeId) -> bool {
             | lilac_ty::TypeKind::FBit64
             | lilac_ty::TypeKind::FBit128
     )
+}
+
+/// The `@bitW` container a float reinterpret cast pairs with. `@fbit128` has
+/// no bit container, so the lookup never yields such a cast (internal error).
+fn bit_container(width: FloatWidth, span: Span) -> &'static str {
+    match width.int_builtin() {
+        Some(name) => name,
+        None => lilac_error::bug!(span, "float bitcast width without a bit container"),
+    }
 }
 
 /// Width in bits of a float container (callers guarantee `is_float` first).
@@ -4290,6 +4301,9 @@ impl Checker<'_> {
             Intrinsic::AsInt | Intrinsic::AsFloat | Intrinsic::Truncate | Intrinsic::ExtendZero => {
                 self.converting_out(fctx, intrinsic, args, span, expected)?
             }
+            Intrinsic::FbitToBits(_) | Intrinsic::BitsToFbit(_) => {
+                self.bitcast_out(fctx, intrinsic, name, args, span)?
+            }
             Intrinsic::LoadU8 | Intrinsic::StoreU8 | Intrinsic::Memcpy => {
                 self.mem_intrinsic(fctx, intrinsic, args, span)?
             }
@@ -4490,6 +4504,49 @@ impl Checker<'_> {
                 ),
             ))
         }
+    }
+
+    /// Checks a float reinterpret cast against its exact signature: the single
+    /// operand must be exactly the source type, and the result is exactly the
+    /// destination type (no conversion, no widening). A mismatch is `E010`.
+    fn bitcast_out(
+        &mut self,
+        fctx: &mut FuncCtx,
+        intrinsic: Intrinsic,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<(Vec<TypeRef>, Vec<HirExpr>), ErrorGuaranteed> {
+        let (src_name, dst_name) = match intrinsic {
+            Intrinsic::FbitToBits(width) => (width.builtin(), bit_container(width, span)),
+            Intrinsic::BitsToFbit(width) => (bit_container(width, span), width.builtin()),
+            _ => lilac_error::bug!(span, "bitcast_out on a non-cast intrinsic"),
+        };
+        let src = self.builtin_ty(src_name);
+        let dst = self.builtin_ty(dst_name);
+        self.expect_arity(span, name, args, 1)?;
+        let (got, hir) = self.check_expr(fctx, &args[0], Some(src));
+        if !is_poison(got) && got.id != src {
+            self.diags.emit(
+                Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: expected {}, found {}",
+                        self.types.display(src),
+                        self.types.display(got.id),
+                    ),
+                )
+                .label(args[0].span(), true, "wrong operand type here".to_owned()),
+            );
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok((
+            vec![TypeRef {
+                id: dst,
+                is_ref: false,
+            }],
+            vec![hir],
+        ))
     }
 
     fn mem_intrinsic(
@@ -6181,6 +6238,36 @@ mod tests {
         let src = format!("main: function () nothing {{\n    x: @bit8 = {old}(0x1, 0x2)\n}}\n");
         let diags = check_src(&src);
         assert!(diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn bitcast_intrinsics_round_trip() {
+        // `@fbit_to_bits_W(@bits_to_fbit_W(x))` typechecks at every width that
+        // has a bit container (`@bit16/32/64`).
+        for (w, bit, fbit) in [
+            ("16", "@bit16", "@fbit16"),
+            ("32", "@bit32", "@fbit32"),
+            ("64", "@bit64", "@fbit64"),
+        ] {
+            let diags = check_src(&format!(
+                "main: function () nothing {{\n    x: {bit} = 0x1\n    f: {fbit} = @bits_to_fbit_{w}(x)\n    y: {bit} = @fbit_to_bits_{w}(f)\n}}\n"
+            ));
+            assert!(!diags.has_errors(), "{w}: {diags:?}");
+        }
+    }
+
+    #[test]
+    fn bitcast_wrong_source_is_e010() {
+        // `@bits_to_fbit_32` needs an `@bit32` operand.
+        let diags = check_src(
+            "main: function (x: @bit16) nothing {\n    f: @fbit32 = @bits_to_fbit_32(x)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+        // `@fbit_to_bits_64` needs an `@fbit64` operand.
+        let diags = check_src(
+            "main: function (f: @fbit32) nothing {\n    y: @bit64 = @fbit_to_bits_64(f)\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
     }
 
     #[test]

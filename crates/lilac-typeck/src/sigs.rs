@@ -135,6 +135,18 @@ impl FloatWidth {
             FloatWidth::W128 => "@fbit128",
         }
     }
+
+    /// The same-width integer container (`@bitW`) a float reinterpret cast
+    /// pairs with. `None` for `@fbit128`, which has no bit container today.
+    #[must_use]
+    pub fn int_builtin(self) -> Option<&'static str> {
+        match self {
+            FloatWidth::W16 => Some("@bit16"),
+            FloatWidth::W32 => Some("@bit32"),
+            FloatWidth::W64 => Some("@bit64"),
+            FloatWidth::W128 => None,
+        }
+    }
 }
 
 /// Compiler-known `@`-intrinsics (SPEC §3).
@@ -152,6 +164,10 @@ pub enum Intrinsic {
     NegateInt(IntWidth),
     /// `@f_negate_W`: `(@fbitW): @fbitW`.
     NegateFloat(FloatWidth),
+    /// `@fbit_to_bits_W`: `(@fbitW): @bitW` (reinterpret bitcast).
+    FbitToBits(FloatWidth),
+    /// `@bits_to_fbit_W`: `(@bitW): @fbitW` (reinterpret bitcast).
+    BitsToFbit(FloatWidth),
     /// Parses `@byte_buffer` digits as an integer (folds in M3).
     AsInt,
     /// Parses `@byte_buffer` digits as a float (folds in M3).
@@ -234,9 +250,34 @@ fn numeric_intrinsic(name: &str) -> Option<Intrinsic> {
     }
 }
 
+/// Classifies a float reinterpret cast (`@fbit_to_bits_W`/`@bits_to_fbit_W`).
+///
+/// The prefix selects the direction and the trailing `_W` the exact width.
+/// Only 16/32/64 are recognized: `@fbit128` has no `@bit128` container to pair
+/// with, so an unknown prefix/width (including `_128`) is not an intrinsic.
+fn bitcast_intrinsic(name: &str) -> Option<Intrinsic> {
+    let (variant, width): (fn(FloatWidth) -> Intrinsic, &str) =
+        if let Some(width) = name.strip_prefix("@fbit_to_bits_") {
+            (Intrinsic::FbitToBits, width)
+        } else {
+            let width = name.strip_prefix("@bits_to_fbit_")?;
+            (Intrinsic::BitsToFbit, width)
+        };
+    let width = match width {
+        "16" => FloatWidth::W16,
+        "32" => FloatWidth::W32,
+        "64" => FloatWidth::W64,
+        _ => return None,
+    };
+    Some(variant(width))
+}
+
 /// Looks up a compiler-known intrinsic by `@`-name.
 pub fn lookup_intrinsic(name: &str) -> Option<Intrinsic> {
     if let Some(intrinsic) = numeric_intrinsic(name) {
+        return Some(intrinsic);
+    }
+    if let Some(intrinsic) = bitcast_intrinsic(name) {
         return Some(intrinsic);
     }
     match name {
@@ -1049,6 +1090,21 @@ mod tests {
             lookup_intrinsic("@f_negate_128"),
             Some(Intrinsic::NegateFloat(FloatWidth::W128))
         ));
+        assert!(matches!(
+            lookup_intrinsic("@fbit_to_bits_32"),
+            Some(Intrinsic::FbitToBits(FloatWidth::W32))
+        ));
+        assert!(matches!(
+            lookup_intrinsic("@bits_to_fbit_64"),
+            Some(Intrinsic::BitsToFbit(FloatWidth::W64))
+        ));
+        // `@fbit128` has no `@bit128` container, so the 128-bit casts do not
+        // resolve; bogus widths (8/native) do not either.
+        assert_eq!(lookup_intrinsic("@fbit_to_bits_128"), None);
+        assert_eq!(lookup_intrinsic("@bits_to_fbit_128"), None);
+        assert_eq!(lookup_intrinsic("@fbit_to_bits_8"), None);
+        assert_eq!(lookup_intrinsic("@bits_to_fbit_native"), None);
+        assert_eq!(lookup_intrinsic("@fbit_to_bits"), None);
         // The unsuffixed names are gone, and bogus widths are not intrinsics.
         assert_eq!(lookup_intrinsic(&["@i", "_add"].concat()), None);
         assert_eq!(lookup_intrinsic(&["@f", "_add"].concat()), None);

@@ -20,4 +20,6 @@ Float32: object {
     @conversion: function(from: @byte_buffer) Float32 => Float32 { data = @as_float(from) }
     @conversion: function(from: @fbit32) Float32 => Float32 { data = from }
     @conversion: function(from: Float32) @fbit32 => from.data
+    @conversion: function(from: @bit32) Float32 => Float32 { data = @bits_to_fbit_32(from) }
+    @conversion: function(from: Float32) @bit32 => @fbit_to_bits_32(from.data)
 }

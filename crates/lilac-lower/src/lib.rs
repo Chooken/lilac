@@ -410,6 +410,16 @@ fn arith_op_for(name: &str) -> Option<ArithOp> {
     })
 }
 
+/// Whether `name` is one of the float reinterpret casts
+/// (`@fbit_to_bits_W`/`@bits_to_fbit_W`), all of which lower to a `bitcast`.
+/// Only 16/32/64 exist (`@fbit128` has no `@bit128` container), mirroring the
+/// typeck table.
+fn is_bitcast_intrinsic(name: &str) -> bool {
+    name.strip_prefix("@fbit_to_bits_")
+        .or_else(|| name.strip_prefix("@bits_to_fbit_"))
+        .is_some_and(|width| matches!(width, "16" | "32" | "64"))
+}
+
 /// The `ArithOp` (subtract from zero) for a width-suffixed negate intrinsic
 /// (`@i_negate_8`/`@f_negate_32`), or `None` for anything else.
 fn negate_op_for(name: &str) -> Option<ArithOp> {
@@ -1676,6 +1686,9 @@ impl Lower<'_> {
                 },
             );
             return Ok(dst);
+        }
+        if is_bitcast_intrinsic(name) {
+            return self.lower_convert(fs, args, result_ty, span, ConvertOp::Bitcast);
         }
         match name {
             "@truncate" => self.lower_convert(fs, args, result_ty, span, ConvertOp::Trunc),
