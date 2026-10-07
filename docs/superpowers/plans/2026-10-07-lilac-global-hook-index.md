@@ -34,6 +34,10 @@
 **Files:**
 - Modify: `crates/lilac-typeck/src/sigs.rs` (`SigCtx`, `collect_sigs`, `register`, tests)
 - Modify: `crates/lilac-driver/src/lib.rs:100-101,115-116,126,289-295,516-549`
+- Modify: `crates/lilac-lower/src/lib.rs:2023` (drop the trailing `true` from `collect_sigs`)
+- Modify: `crates/lilac-typeck/src/check.rs:5439,5481,5863` (drop the trailing `true`)
+- Modify: `crates/lilac-typeck/src/check/generics.rs:1063` (drop the trailing `true`)
+- Modify: `crates/lilac-typeck/src/ops.rs:141,165` (drop the trailing `true`)
 - Modify: `crates/lilac-cli/src/main.rs:15,106-120`
 - Modify: `crates/lilac-cli/tests/m2.rs:149-170`
 - Delete: `docs/errors/W020.md`
@@ -49,6 +53,8 @@
 Remove `check_op_shape` (`sigs.rs:435-490`), `SigCtx.warn_op_change` (field + doc), the `if ctx.warn_op_change { check_op_shape(…) }` block in `register` (`sigs.rs:538-540`), and the `warn_op_change` parameter of `collect_sigs` (and its doc mention). In `sigs.rs` tests, drop `matrix_add_src`, `op_change_warns_matrix`, `op_change_suppressed_by_flag`, `op_bit_mixed_silent`, `cmp_shape_silent`, `cmp_shape_change_warns`; collapse the `sigs_of`/`sigs_of_warn` helpers into a single `sigs_of(src)` calling `collect_sigs(project, program, &mut types, &mut diags)`.
 
 In `driver/lib.rs`: delete the `warn_on_operator_type_change` field (100-101), its `Default` initializer (126), the doc phrase (115-116), the `self.warn_on_operator_type_change` argument at the `collect_sigs` call (289-295), the `MATRIX_ADD` const and the `warnings_do_not_fail_check` (516-526) and `allow_flag_silences_w020` (542-549) tests.
+
+Update **every** `collect_sigs` call site to drop the trailing `true`: `lilac-driver/src/lib.rs`, `lilac-lower/src/lib.rs`, `lilac-typeck/src/check.rs` (three), `lilac-typeck/src/check/generics.rs`, `lilac-typeck/src/ops.rs` (two), and the `sigs.rs` tests.
 
 In `cli/main.rs`: remove the `--allow` (106-113) and `--allow=` (114-120) arms and the `--allow operator-type-change` text from the usage string (15).
 
@@ -76,7 +82,8 @@ git commit -m "typeck: remove the W020 operator-shape lint"
 
 **Files:**
 - Modify: `crates/lilac-resolve/src/lib.rs` (`ResKind`, `HookParent`, `ResolvedProject`, `Collector`, `same_sig_resolved`, `TypeResolver`, tests)
-- Modify: `crates/lilac-typeck/src/sigs.rs` (`collect_sigs` bridge only)
+- Modify: `crates/lilac-typeck/src/sigs.rs` (`collect_sigs` bridge; add `..` to the `ResKind::Object` destructure at `:582`)
+- Modify: `crates/lilac-typeck/src/check.rs:2156,3356` (add `..` to the `ResKind::Object` destructures — the enum gains a field)
 
 **Interfaces:**
 - Produces:
@@ -150,7 +157,7 @@ Expected: FAIL (compilation: no `hooks` field, no `parent` field) — or the fir
 
 - [ ] **Step 3: Implement the resolve data model and collection**
 
-- Add `HookParent` and the `ResKind::Hook.parent` / `ResKind::Object.hooks` fields; update every construction/destructuring site (`item()`, `collect_members`). Destructures that use `..` need no change.
+- Add `HookParent` and the `ResKind::Hook.parent` / `ResKind::Object.hooks` fields. Update the two field-complete constructors in resolve `item()` (`ResKind::Hook` at `:532`, `ResKind::Object` at `:554`) and add `..` to the non-exhaustive destructures `sigs.rs:582`, `check.rs:2156`, `check.rs:3356`. Destructures that already use `..` need no change.
 - `Collector` threads a `&mut HashMap<String, Vec<ResItem>>` hook accumulator into `item`/`collect_members` so member hooks reach `Module.hooks` (see `collect_program`/`collect_top_level`).
 - Give `collect_members` the object's identity: change its signature to
   `fn collect_members(&mut self, items: &[Item], vis: Visibility, table: &mut HashMap<String, ResItem>, hooks: &mut HashMap<String, Vec<ResItem>>, file_hooks: &mut HashMap<String, Vec<ResItem>>, parent: &HookParent)`.
@@ -184,7 +191,6 @@ git commit -m "resolve: collect object-member hooks into the unit-global hook in
 - Modify: `crates/lilac-typeck/src/sigs.rs` (`collect_sigs`, `collect_item`, `flat_members`, `validate_raii_hook`)
 - Modify: `crates/lilac-typeck/src/check.rs` (`@init`, `@on_drop`, `check_member`/`check_item`, `find_item`, `find_parent_name`)
 - Modify: `crates/lilac-typeck/src/check/generics.rs` (`res_item`, `member_name`, `function_name`, `instantiate_object` member loop)
-- Modify: `crates/lilac-typeck/src/ops.rs` (test helper call sites)
 
 **Interfaces:**
 - Produces (in `lilac-resolve`):
