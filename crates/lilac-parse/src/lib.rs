@@ -1247,6 +1247,11 @@ impl Parser {
                     }
                     expr = self.finish_call(diags, expr, generic_args)?;
                 }
+                TokenKind::KwAs => {
+                    self.bump();
+                    let ty = self.parse_type(diags)?;
+                    expr = Expr::Cast(Box::new(expr), ty);
+                }
                 _ => break,
             }
         }
@@ -1972,5 +1977,100 @@ mod tests {
             "{:?}",
             diags.diagnostics()
         );
+    }
+
+    /// The statements of `main`'s block body, asserting a clean parse.
+    fn main_stmts(src: &str) -> Vec<Stmt> {
+        let (program, diags, _) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        block.stmts.clone()
+    }
+
+    #[test]
+    fn as_cast_parses_postfix_left_associative() {
+        let src = "main: function () nothing {\n\
+            a: @bit8 = x as T\n\
+            b: @bit8 = o.f as T\n\
+            c: @bit8 = p + q as T\n\
+            d: @bit8 = x as A as B\n\
+            e: ref @bit8 = x as ref @bit8\n\
+        }\n";
+        let stmts = main_stmts(src);
+
+        // `x as T` -> `Cast(Ident(x), T)`.
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("expected let, got {:?}", stmts[0]);
+        };
+        let Expr::Cast(inner, ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        assert!(matches!(**inner, Expr::Ident(ref name, _) if name == "x"));
+        assert_eq!(ty.name, "T");
+        assert!(!ty.is_ref);
+
+        // `o.f as T` -> `Cast(Member(o, f), T)`.
+        let Stmt::Let { value, .. } = &stmts[1] else {
+            panic!("expected let, got {:?}", stmts[1]);
+        };
+        let Expr::Cast(inner, ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        let Expr::Member { obj, field, .. } = &**inner else {
+            panic!("expected member, got {inner:?}");
+        };
+        assert!(matches!(**obj, Expr::Ident(ref name, _) if name == "o"));
+        assert_eq!(field, "f");
+        assert_eq!(ty.name, "T");
+
+        // `p + q as T` -> `Add(p, Cast(q, T))`: `as` is postfix and binds
+        // tighter than `+`.
+        let Stmt::Let { value, .. } = &stmts[2] else {
+            panic!("expected let, got {:?}", stmts[2]);
+        };
+        let Expr::BinOp { lhs, op, rhs, .. } = value else {
+            panic!("expected binop, got {value:?}");
+        };
+        assert_eq!(*op, BinOp::Add);
+        assert!(matches!(**lhs, Expr::Ident(ref name, _) if name == "p"));
+        let Expr::Cast(inner, ty) = &**rhs else {
+            panic!("expected cast on the right, got {rhs:?}");
+        };
+        assert!(matches!(**inner, Expr::Ident(ref name, _) if name == "q"));
+        assert_eq!(ty.name, "T");
+
+        // `x as A as B` -> `Cast(Cast(x, A), B)` (left-associative).
+        let Stmt::Let { value, .. } = &stmts[3] else {
+            panic!("expected let, got {:?}", stmts[3]);
+        };
+        let Expr::Cast(outer_inner, outer_ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        assert_eq!(outer_ty.name, "B");
+        let Expr::Cast(inner_inner, inner_ty) = &**outer_inner else {
+            panic!("expected nested cast, got {outer_inner:?}");
+        };
+        assert_eq!(inner_ty.name, "A");
+        assert!(matches!(**inner_inner, Expr::Ident(ref name, _) if name == "x"));
+
+        // `x as ref @bit8` parses a `ref` target type.
+        let Stmt::Let { value, .. } = &stmts[4] else {
+            panic!("expected let, got {:?}", stmts[4]);
+        };
+        let Expr::Cast(inner, ty) = value else {
+            panic!("expected cast, got {value:?}");
+        };
+        assert!(ty.is_ref);
+        assert_eq!(ty.name, "@bit8");
+        assert!(matches!(**inner, Expr::Ident(ref name, _) if name == "x"));
     }
 }

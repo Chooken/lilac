@@ -365,6 +365,8 @@ pub enum Expr {
         /// Whole-expression span (`ref` through value).
         span: Span,
     },
+    /// `expr as T` (postfix cast; `T` is the operand's expected type).
+    Cast(Box<Expr>, Type),
 }
 
 /// Binary operators and their `@` hook names.
@@ -434,6 +436,10 @@ impl Expr {
             | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
             | Self::FString { span, .. } => *span,
+            Self::Cast(operand, ty) => {
+                let start = operand.span();
+                Span::new(start.lo.0, ty.span.hi.0, start.file)
+            }
         }
     }
 }
@@ -623,6 +629,7 @@ pub fn walk_expr<V: Visitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::RefOf { value, .. } => visitor.visit_expr(value),
+        Expr::Cast(operand, _) => visitor.visit_expr(operand),
     }
 }
 
@@ -793,6 +800,7 @@ pub fn walk_expr_mut<V: MutVisitor + ?Sized>(visitor: &mut V, expr: &mut Expr) {
             }
         }
         Expr::RefOf { value, .. } => visitor.visit_expr_mut(value),
+        Expr::Cast(operand, _) => visitor.visit_expr_mut(operand),
     }
 }
 

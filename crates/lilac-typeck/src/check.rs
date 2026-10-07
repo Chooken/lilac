@@ -340,6 +340,16 @@ fn poison_expr(span: Span) -> HirExpr {
     }
 }
 
+/// Retypes a checked expression, preserving its shape. The identity and
+/// `ref unknown` casts emit no instruction, so only the static type changes.
+fn retype(hir: HirExpr, ty: TypeRef, span: Span) -> HirExpr {
+    HirExpr {
+        ty,
+        span,
+        kind: hir.kind,
+    }
+}
+
 /// Pushes one statement into the innermost open block.
 fn push_stmt(fctx: &mut FuncCtx, stmt: HirStmt, span: Span) {
     match fctx.blocks.last_mut() {
@@ -2240,6 +2250,79 @@ impl Checker<'_> {
         }
     }
 
+    /// Checks `operand as T` (spec §5/§6). `T` is threaded as the operand's
+    /// expected type: a literal therefore pins/grows to `T` with no conversion,
+    /// a redundant cast is identity, and any other typed operand takes exactly
+    /// one `@conversion` (else `E043`). The builtin `ref unknown` <-> any
+    /// `ref T` cast is a retype handled before the expected-type path, so a
+    /// pointer cast is never mistaken for a `ref` mismatch.
+    fn check_cast(
+        &mut self,
+        fctx: &mut FuncCtx,
+        operand: &Expr,
+        target_ty: &AstType,
+    ) -> (TypeRef, HirExpr) {
+        let target = self.resolve_ty(target_ty);
+        let span = operand.span();
+        let poison = (
+            TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            poison_expr(span),
+        );
+        if is_poison(target) {
+            let _ = self.check_expr(fctx, operand, None);
+            return poison;
+        }
+        if target.is_ref {
+            // A ref target is checked without an expected type so the §6
+            // exception sees the operand's actual `ref unknown`/`ref T`.
+            let (got, hir) = self.check_expr(fctx, operand, None);
+            if is_poison(got) {
+                return poison;
+            }
+            let unknown = self.builtin_ty("unknown");
+            let pointer_cast =
+                got.is_ref && (got.id == unknown || target.id == unknown || got.id == target.id);
+            if pointer_cast {
+                return (target, retype(hir, target, span));
+            }
+            self.mismatch(target, got, target_ty.span, span);
+            return poison;
+        }
+        // A non-ref target threads `T` as the operand's expected type; a
+        // literal pins/grows here, and a typed operand is checked against `T`.
+        let (got, hir) = self.check_expr(fctx, operand, Some(target.id));
+        if is_poison(got) {
+            return poison;
+        }
+        if got.id == target.id && !got.is_ref {
+            return (target, retype(hir, target, span));
+        }
+        if got.is_ref {
+            // A ref operand to a non-ref target is a ref mismatch, not the §6
+            // exception: `E010`, consistent with `expect_type`.
+            self.mismatch(target, got, target_ty.span, span);
+            return poison;
+        }
+        if super::ops::convert(
+            self.types,
+            self.diags,
+            self.sigs,
+            got,
+            target.id,
+            target_ty.span,
+            span,
+        )
+        .is_err()
+        {
+            return poison;
+        }
+        let converted = self.convert_if_needed(got, target.id, hir);
+        (target, retype(converted, target, span))
+    }
+
     /// Checks `obj.field` reads (method calls go through `check_call`).
     fn check_member_read(
         &mut self,
@@ -2558,6 +2641,7 @@ impl Checker<'_> {
                 self.check_literal(expr, expected)
             }
             Expr::RefOf { value, span } => self.check_ref_of(fctx, value, *span),
+            Expr::Cast(operand, target) => self.check_cast(fctx, operand, target),
             Expr::Member { obj, field, span } => {
                 self.check_member_read(fctx, obj, field, *span, expected)
             }
@@ -7638,6 +7722,152 @@ mod tests {
         };
         let lilac_hir::HirExprKind::Call { callee, .. } = &value.kind else {
             panic!("expected conversion call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirCallee::Hook { name, .. } = callee else {
+            panic!("expected hook call, got {callee:?}");
+        };
+        assert!(name.contains("@conversion"), "{name}");
+    }
+
+    #[test]
+    fn as_cast_conversion_wraps_call() {
+        // `a as @bit16` (`a: @bit8`) emits the same one-step `@conversion`
+        // call the implicit path emits.
+        let (hir, diags) = check_hir_src(
+            "@conversion: function (from: @bit8) to: @bit16 {\n    to = @extend_zero(from)\n}\nmain: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit16 = a as @bit16\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[1] else {
+            panic!("expected let, got {:?}", main.body.stmts[1]);
+        };
+        let HirExprKind::Call { callee, .. } = &value.kind else {
+            panic!("expected conversion call, got {:?}", value.kind);
+        };
+        let lilac_hir::HirCallee::Hook { name, .. } = callee else {
+            panic!("expected hook call, got {callee:?}");
+        };
+        assert!(name.contains("@conversion"), "{name}");
+    }
+
+    #[test]
+    fn as_cast_without_conversion_is_e043() {
+        let diags = check_src(
+            "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit16 = a as @bit16\n}\n",
+        );
+        assert!(has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn as_cast_literal_pins_to_target() {
+        assert_eq!(
+            literal_type("main: function () nothing {\n    0x1 as @bit16\n}\n"),
+            "@bit16"
+        );
+        assert_eq!(
+            literal_type("main: function () nothing {\n    3.14 as @fbit32\n}\n"),
+            "@fbit32"
+        );
+    }
+
+    #[test]
+    fn as_cast_redundant_is_identity() {
+        let (hir, diags) = check_hir_src(
+            "main: function () nothing {\n    x: @bit16 = 0x1\n    y: @bit16 = x as @bit16\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[1] else {
+            panic!("expected let, got {:?}", main.body.stmts[1]);
+        };
+        assert!(
+            matches!(value.kind, HirExprKind::Ident { .. }),
+            "identity cast must not emit a conversion call: {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn as_cast_ref_unknown_is_builtin() {
+        // `ref unknown` <-> any `ref T`, both directions, with no hook: the
+        // operand is retyped in place (still an `Ident`, never poison).
+        let (hir, diags) = check_hir_src(
+            "main: function (p: ref unknown) nothing {\n    q: ref @bit8 = p as ref @bit8\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[0] else {
+            panic!("expected let, got {:?}", main.body.stmts[0]);
+        };
+        assert!(
+            matches!(value.kind, HirExprKind::Ident { .. }),
+            "ref-unknown cast must retype the operand: {:?}",
+            value.kind
+        );
+        let (hir, diags) = check_hir_src(
+            "main: function (p: ref @bit8) nothing {\n    q: ref unknown = p as ref unknown\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[0] else {
+            panic!("expected let, got {:?}", main.body.stmts[0]);
+        };
+        assert!(
+            matches!(value.kind, HirExprKind::Ident { .. }),
+            "ref-unknown cast must retype the operand: {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn as_cast_ref_mismatch_is_e010() {
+        // A non-`unknown` ref mismatch is not the §6 exception.
+        let diags = check_src(
+            "main: function (p: ref @bit8) nothing {\n    q: ref @bit16 = p as ref @bit16\n}\n",
+        );
+        assert!(has_code(&diags, "E010"), "{diags:?}");
+        assert!(!has_code(&diags, "E043"), "{diags:?}");
+    }
+
+    #[test]
+    fn as_cast_is_usable_as_operator_operand() {
+        // `as` converts where the operator would otherwise reject the operand.
+        let (hir, diags) = check_hir_src(
+            "@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 { result = @i_add_32(lhs, rhs) }\nmain: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit32 = 0x2\n    c: @bit32 = a as @bit32 + b\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("has main");
+        let HirStmt::Let { value, .. } = &main.body.stmts[2] else {
+            panic!("expected let, got {:?}", main.body.stmts[2]);
+        };
+        let HirExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected add call, got {:?}", value.kind);
+        };
+        let HirExprKind::Call { callee, .. } = &args[0].kind else {
+            panic!(
+                "expected conversion on the cast operand, got {:?}",
+                args[0].kind
+            );
         };
         let lilac_hir::HirCallee::Hook { name, .. } = callee else {
             panic!("expected hook call, got {callee:?}");
