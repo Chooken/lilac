@@ -34,10 +34,13 @@ enum CheckedBody {
     Extern,
     /// A checked `{ ... }` block.
     Block(HirBlock),
-    /// A checked `=>` body: parameter names plus the value (inlined at calls).
+    /// A checked `=>` body: parameter names, control-flow prelude, and value
+    /// (inlined at calls).
     Inline {
         /// Parameter names in order (for call-site substitution).
         param_names: Vec<String>,
+        /// Statements the body's control flow produced (emitted at each call).
+        prelude: Vec<HirStmt>,
         /// Checked body value.
         value: HirExpr,
     },
@@ -246,9 +249,10 @@ struct Checker<'a> {
     consts: Vec<HirConst>,
     /// Drop hooks by type display name (mangled `@on_drop` callees).
     drops: HashMap<String, String>,
-    /// Checked `=>` bodies by function: parameter names plus the value HIR.
-    /// Inline functions never reach `hir` (every call substitutes them).
-    inline_bodies: HashMap<DefId, (Vec<String>, HirExpr)>,
+    /// Checked `=>` bodies by function: parameter names, control-flow prelude,
+    /// and value HIR. Inline functions never reach `hir` (every call
+    /// substitutes them).
+    inline_bodies: HashMap<DefId, (Vec<String>, Vec<HirStmt>, HirExpr)>,
     /// Functions currently being checked (rejects recursive `=>` calls).
     in_progress: HashSet<DefId>,
     /// Fresh value temporaries for desugared control flow.
@@ -518,9 +522,9 @@ fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) ->
     rec(&program.items, &top_scope, def, None)
 }
 
-/// Whether HIR contains a branch-join temp: control flow inside a value
-/// that must stay straight-line (module constants and `=>` bodies fold in
-/// M3, so they stay `E030` here).
+/// Whether HIR contains a branch-join temp: control flow inside a value that
+/// must stay straight-line. Module constants still fold in M3, so they stay
+/// `E030` here; `=>` bodies carry their control flow as a prelude instead.
 fn has_temp(expr: &HirExpr) -> bool {
     match &expr.kind {
         HirExprKind::Temp(_) => true,
@@ -599,6 +603,347 @@ fn subst_ident(expr: &HirExpr, map: &HashMap<String, HirExpr>) -> HirExpr {
         ty: expr.ty,
         span: expr.span,
         kind,
+    }
+}
+
+/// Substitutes `=>` parameters in a checked block (see [`subst_stmts`]).
+fn subst_block(block: &HirBlock, map: &HashMap<String, HirExpr>) -> HirBlock {
+    HirBlock {
+        stmts: subst_stmts(&block.stmts, map),
+        span: block.span,
+    }
+}
+
+/// Substitutes `=>` parameters in a statement sequence, recursing into every
+/// embedded expression and nested block (the prelude counterpart of
+/// [`subst_ident`]).
+fn subst_stmts(stmts: &[HirStmt], map: &HashMap<String, HirExpr>) -> Vec<HirStmt> {
+    stmts.iter().map(|stmt| subst_stmt(stmt, map)).collect()
+}
+
+fn subst_stmt(stmt: &HirStmt, map: &HashMap<String, HirExpr>) -> HirStmt {
+    match stmt {
+        HirStmt::Let {
+            name,
+            ty,
+            value,
+            span,
+        } => HirStmt::Let {
+            name: name.clone(),
+            ty: *ty,
+            value: subst_ident(value, map),
+            span: *span,
+        },
+        HirStmt::MultiLet {
+            bindings,
+            value,
+            span,
+        } => HirStmt::MultiLet {
+            bindings: bindings.clone(),
+            value: subst_ident(value, map),
+            span: *span,
+        },
+        HirStmt::Assign {
+            target,
+            value,
+            span,
+        } => HirStmt::Assign {
+            target: subst_ident(target, map),
+            value: subst_ident(value, map),
+            span: *span,
+        },
+        HirStmt::ExprStmt(expr) => HirStmt::ExprStmt(subst_ident(expr, map)),
+        HirStmt::Return { span } => HirStmt::Return { span: *span },
+        HirStmt::Break { span } => HirStmt::Break { span: *span },
+        HirStmt::If {
+            cond,
+            then,
+            els,
+            out,
+            span,
+        } => HirStmt::If {
+            cond: subst_ident(cond, map),
+            then: subst_block(then, map),
+            els: subst_block(els, map),
+            out: *out,
+            span: *span,
+        },
+        HirStmt::Loop { body, span } => HirStmt::Loop {
+            body: subst_block(body, map),
+            span: *span,
+        },
+        HirStmt::Match {
+            scrutinee,
+            arms,
+            els,
+            out,
+            span,
+        } => HirStmt::Match {
+            scrutinee: subst_ident(scrutinee, map),
+            arms: arms
+                .iter()
+                .map(|arm| HirArm {
+                    pattern: arm.pattern.clone(),
+                    capture: arm.capture.clone(),
+                    body: subst_block(&arm.body, map),
+                })
+                .collect(),
+            els: subst_block(els, map),
+            out: *out,
+            span: *span,
+        },
+    }
+}
+
+/// Resolves a temp through a renaming, defaulting to itself when absent.
+fn renamed_temp(temp: TempId, map: &HashMap<TempId, TempId>) -> TempId {
+    map.get(&temp).copied().unwrap_or(temp)
+}
+
+/// Alpha-renames every branch-join temp in a value expression (see
+/// [`rename_temps_in_stmts`]).
+fn rename_temps_in_expr(expr: &HirExpr, map: &HashMap<TempId, TempId>) -> HirExpr {
+    let kind = match &expr.kind {
+        HirExprKind::Temp(temp) => HirExprKind::Temp(renamed_temp(*temp, map)),
+        HirExprKind::Call { callee, args } => HirExprKind::Call {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|arg| rename_temps_in_expr(arg, map))
+                .collect(),
+        },
+        HirExprKind::EqEq { lhs, rhs } => HirExprKind::EqEq {
+            lhs: Box::new(rename_temps_in_expr(lhs, map)),
+            rhs: Box::new(rename_temps_in_expr(rhs, map)),
+        },
+        HirExprKind::Member { obj, field } => HirExprKind::Member {
+            obj: Box::new(rename_temps_in_expr(obj, map)),
+            field: field.clone(),
+        },
+        HirExprKind::RefOf { value } => HirExprKind::RefOf {
+            value: Box::new(rename_temps_in_expr(value, map)),
+        },
+        HirExprKind::StructLit { fields } => HirExprKind::StructLit {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    value: rename_temps_in_expr(&field.value, map),
+                    span: field.span,
+                })
+                .collect(),
+        },
+        HirExprKind::Variant {
+            def,
+            variant,
+            payload,
+        } => HirExprKind::Variant {
+            def: *def,
+            variant: variant.clone(),
+            payload: payload
+                .as_ref()
+                .map(|value| Box::new(rename_temps_in_expr(value, map))),
+        },
+        HirExprKind::Ident { .. }
+        | HirExprKind::Tag { .. }
+        | HirExprKind::Number { .. }
+        | HirExprKind::Str { .. }
+        | HirExprKind::Char { .. }
+        | HirExprKind::CompileError { .. }
+        | HirExprKind::Poison => expr.kind.clone(),
+    };
+    HirExpr {
+        ty: expr.ty,
+        span: expr.span,
+        kind,
+    }
+}
+
+/// Alpha-renames every branch-join temp in a statement sequence, recursing
+/// into nested blocks and covering the `out` slot of `if`/`match` joins.
+fn rename_temps_in_stmts(stmts: &[HirStmt], map: &HashMap<TempId, TempId>) -> Vec<HirStmt> {
+    stmts
+        .iter()
+        .map(|stmt| rename_temps_in_stmt(stmt, map))
+        .collect()
+}
+
+fn rename_temps_in_block(block: &HirBlock, map: &HashMap<TempId, TempId>) -> HirBlock {
+    HirBlock {
+        stmts: rename_temps_in_stmts(&block.stmts, map),
+        span: block.span,
+    }
+}
+
+fn rename_temps_in_stmt(stmt: &HirStmt, map: &HashMap<TempId, TempId>) -> HirStmt {
+    match stmt {
+        HirStmt::Let {
+            name,
+            ty,
+            value,
+            span,
+        } => HirStmt::Let {
+            name: name.clone(),
+            ty: *ty,
+            value: rename_temps_in_expr(value, map),
+            span: *span,
+        },
+        HirStmt::MultiLet {
+            bindings,
+            value,
+            span,
+        } => HirStmt::MultiLet {
+            bindings: bindings.clone(),
+            value: rename_temps_in_expr(value, map),
+            span: *span,
+        },
+        HirStmt::Assign {
+            target,
+            value,
+            span,
+        } => HirStmt::Assign {
+            target: rename_temps_in_expr(target, map),
+            value: rename_temps_in_expr(value, map),
+            span: *span,
+        },
+        HirStmt::ExprStmt(expr) => HirStmt::ExprStmt(rename_temps_in_expr(expr, map)),
+        HirStmt::Return { span } => HirStmt::Return { span: *span },
+        HirStmt::Break { span } => HirStmt::Break { span: *span },
+        HirStmt::If {
+            cond,
+            then,
+            els,
+            out,
+            span,
+        } => HirStmt::If {
+            cond: rename_temps_in_expr(cond, map),
+            then: rename_temps_in_block(then, map),
+            els: rename_temps_in_block(els, map),
+            out: out.map(|temp| renamed_temp(temp, map)),
+            span: *span,
+        },
+        HirStmt::Loop { body, span } => HirStmt::Loop {
+            body: rename_temps_in_block(body, map),
+            span: *span,
+        },
+        HirStmt::Match {
+            scrutinee,
+            arms,
+            els,
+            out,
+            span,
+        } => HirStmt::Match {
+            scrutinee: rename_temps_in_expr(scrutinee, map),
+            arms: arms
+                .iter()
+                .map(|arm| HirArm {
+                    pattern: arm.pattern.clone(),
+                    capture: arm.capture.clone(),
+                    body: rename_temps_in_block(&arm.body, map),
+                })
+                .collect(),
+            els: rename_temps_in_block(els, map),
+            out: out.map(|temp| renamed_temp(temp, map)),
+            span: *span,
+        },
+    }
+}
+
+/// Every distinct branch-join temp in a prelude plus its value (the coverage
+/// of [`rename_temps_in_stmts`] / [`rename_temps_in_expr`]).
+fn collect_temps(prelude: &[HirStmt], value: &HirExpr) -> HashSet<TempId> {
+    let mut temps = HashSet::new();
+    for stmt in prelude {
+        collect_stmt_temps(stmt, &mut temps);
+    }
+    collect_expr_temps(value, &mut temps);
+    temps
+}
+
+fn collect_expr_temps(expr: &HirExpr, temps: &mut HashSet<TempId>) {
+    match &expr.kind {
+        HirExprKind::Temp(temp) => {
+            temps.insert(*temp);
+        }
+        HirExprKind::Call { args, .. } => {
+            for arg in args {
+                collect_expr_temps(arg, temps);
+            }
+        }
+        HirExprKind::EqEq { lhs, rhs } => {
+            collect_expr_temps(lhs, temps);
+            collect_expr_temps(rhs, temps);
+        }
+        HirExprKind::Member { obj, .. } => collect_expr_temps(obj, temps),
+        HirExprKind::RefOf { value } => collect_expr_temps(value, temps),
+        HirExprKind::StructLit { fields } => {
+            for field in fields {
+                collect_expr_temps(&field.value, temps);
+            }
+        }
+        HirExprKind::Variant { payload, .. } => {
+            if let Some(payload) = payload {
+                collect_expr_temps(payload, temps);
+            }
+        }
+        HirExprKind::Ident { .. }
+        | HirExprKind::Tag { .. }
+        | HirExprKind::Number { .. }
+        | HirExprKind::Str { .. }
+        | HirExprKind::Char { .. }
+        | HirExprKind::CompileError { .. }
+        | HirExprKind::Poison => {}
+    }
+}
+
+fn collect_stmt_temps(stmt: &HirStmt, temps: &mut HashSet<TempId>) {
+    match stmt {
+        HirStmt::Let { value, .. } | HirStmt::MultiLet { value, .. } => {
+            collect_expr_temps(value, temps);
+        }
+        HirStmt::Assign { target, value, .. } => {
+            collect_expr_temps(target, temps);
+            collect_expr_temps(value, temps);
+        }
+        HirStmt::ExprStmt(expr) => collect_expr_temps(expr, temps),
+        HirStmt::Return { .. } | HirStmt::Break { .. } => {}
+        HirStmt::If {
+            cond,
+            then,
+            els,
+            out,
+            ..
+        } => {
+            collect_expr_temps(cond, temps);
+            collect_block_temps(then, temps);
+            collect_block_temps(els, temps);
+            if let Some(temp) = out {
+                temps.insert(*temp);
+            }
+        }
+        HirStmt::Loop { body, .. } => collect_block_temps(body, temps),
+        HirStmt::Match {
+            scrutinee,
+            arms,
+            els,
+            out,
+            ..
+        } => {
+            collect_expr_temps(scrutinee, temps);
+            for arm in arms {
+                collect_block_temps(&arm.body, temps);
+            }
+            collect_block_temps(els, temps);
+            if let Some(temp) = out {
+                temps.insert(*temp);
+            }
+        }
+    }
+}
+
+fn collect_block_temps(block: &HirBlock, temps: &mut HashSet<TempId>) {
+    for stmt in &block.stmts {
+        collect_stmt_temps(stmt, temps);
     }
 }
 
@@ -1134,16 +1479,16 @@ impl Checker<'_> {
                     let span = expr.span();
                     let _ = self.expect_type(got, sig.returns[0].id, span, span);
                     let value = self.convert_if_needed(got, sig.returns[0].id, value);
-                    if has_temp(&value) {
-                        let _ = deferred(self.diags, span, "control flow in `=>` bodies", "M3");
-                        CheckedBody::Rejected
-                    } else {
-                        if let Some((name, _, _)) = fctx.slots.first() {
-                            fctx.assigned.insert(name.clone());
-                        }
-                        let param_names: Vec<String> =
-                            decl.params.iter().map(|param| param.name.clone()).collect();
-                        CheckedBody::Inline { param_names, value }
+                    let prelude = std::mem::take(&mut fctx.blocks[0]);
+                    if let Some((name, _, _)) = fctx.slots.first() {
+                        fctx.assigned.insert(name.clone());
+                    }
+                    let param_names: Vec<String> =
+                        decl.params.iter().map(|param| param.name.clone()).collect();
+                    CheckedBody::Inline {
+                        param_names,
+                        prelude,
+                        value,
                     }
                 } else {
                     self.diags.emit(
@@ -1252,8 +1597,13 @@ impl Checker<'_> {
                 body,
                 span: item.span,
             }),
-            CheckedBody::Inline { param_names, value } => {
-                self.inline_bodies.insert(resolved.id, (param_names, value));
+            CheckedBody::Inline {
+                param_names,
+                prelude,
+                value,
+            } => {
+                self.inline_bodies
+                    .insert(resolved.id, (param_names, prelude, value));
             }
             CheckedBody::Rejected => {}
         }
@@ -2977,7 +3327,7 @@ impl Checker<'_> {
                 probed.push(None);
                 continue;
             }
-            let (got, _) = self.check_expr(fctx, arg, None);
+            let (got, _, _) = self.check_nested(fctx, arg, None);
             probed.push(if is_poison(got) { None } else { Some(got) });
         }
         Some(
@@ -3084,7 +3434,7 @@ impl Checker<'_> {
             self.current_args = saved_args;
             self.in_progress.remove(&def);
         }
-        let Some((param_names, body_hir)) = self.inline_bodies.get(&def).cloned() else {
+        let Some((param_names, prelude, body_hir)) = self.inline_bodies.get(&def).cloned() else {
             return Err(ErrorGuaranteed::new());
         };
         let Some(sig) = self.func_sig(def) else {
@@ -3095,8 +3445,23 @@ impl Checker<'_> {
         }
         let hir_args = self.check_args(fctx, &sig, args, span)?;
         let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
-        let expanded = subst_ident(&body_hir, &map);
-        Ok(CallOutcome::Inline(expanded, sig.returns[0]))
+        let value = subst_ident(&body_hir, &map);
+        let prelude = subst_stmts(&prelude, &map);
+        let temps: HashSet<TempId> = collect_temps(&prelude, &value);
+        // Allocate fresh temps in a stable (id-sorted) order so a program's
+        // generated HIR/LIR is byte-identical across runs.
+        let mut ordered: Vec<TempId> = temps.into_iter().collect();
+        ordered.sort_unstable_by_key(|temp| temp.0);
+        let ren: HashMap<TempId, TempId> = ordered
+            .into_iter()
+            .map(|temp| (temp, self.fresh_temp()))
+            .collect();
+        let prelude = rename_temps_in_stmts(&prelude, &ren);
+        let value = rename_temps_in_expr(&value, &ren);
+        if let Some(top) = fctx.blocks.last_mut() {
+            top.extend(prelude);
+        }
+        Ok(CallOutcome::Inline(value, sig.returns[0]))
     }
 
     /// Calls `recv.field(args)` on a value: injects `ref` receiver as `self`.
@@ -5970,7 +6335,7 @@ mod tests {
         assert!(has_code(&diags, "E022"), "{diags:?}");
     }
 
-    use lilac_hir::{HirExprKind, HirProgram, HirStmt};
+    use lilac_hir::{HirExprKind, HirProgram, HirStmt, TempId};
 
     fn check_hir_src(src: &str) -> (HirProgram, Diags) {
         let mut sm = SourceMap::new();
@@ -6123,6 +6488,118 @@ mod tests {
         };
         assert_eq!(name, "@i_add");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn inline_or_body_checks_and_inlines() {
+        let src = "leq: function (a: @bit8, b: @bit8) @bit8 => (a == b) or @i_less_than(a, b)\n\
+                   main: function () nothing {\n    r: @bit8 = leq(0x1, 0x2)\n}\n";
+        let (diags, _) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn inline_if_value_body_checks_and_inlines() {
+        // Value-`if` branches are expressions: `if c a else b` (no braces).
+        let src = "pick: function (a: @bit8, b: @bit8) @bit8 => if a b else a\n\
+                   main: function () nothing {\n    r: @bit8 = pick(0x1, 0x2)\n}\n";
+        let (diags, _) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn inline_two_or_bodies_use_distinct_temps() {
+        let src = "or2: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+                   use2: function (p: @bit8, q: @bit8, r: @bit8, s: @bit8) @bit8 => or2(p, q) or or2(r, s)\n\
+                   main: function () nothing {\n    x: @bit8 = use2(0x1, 0x2, 0x3, 0x4)\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
+        let outs: Vec<TempId> = main
+            .body
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                HirStmt::If { out: Some(t), .. } => Some(*t),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            outs.len() >= 2,
+            "expected two inlined `or` joins, got {outs:?}"
+        );
+        let unique: std::collections::HashSet<TempId> = outs.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            outs.len(),
+            "inlined joins must use distinct temps: {outs:?}"
+        );
+    }
+
+    #[test]
+    fn inline_call_as_or_operand_places_prelude_in_branch() {
+        // `a or inner(b, c)`: `inner`'s prelude must land in the outer `or`'s
+        // branch block, not the outer block. `outer` is itself an inline body
+        // and never reaches `hir`; it is expanded into `main`, so the outer
+        // `or` join is inspected there.
+        let src = "inner: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+                   outer: function (a: @bit8, b: @bit8, c: @bit8) @bit8 => a or inner(b, c)\n\
+                   main: function () nothing {\n    r: @bit8 = outer(0x1, 0x2, 0x3)\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
+        let outer_if = main
+            .body
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                HirStmt::If {
+                    out: Some(t),
+                    then,
+                    els,
+                    ..
+                } => Some((*t, then, els)),
+                _ => None,
+            })
+            .expect("outer `or` join");
+        let nested = |block: &lilac_hir::HirBlock| {
+            block
+                .stmts
+                .iter()
+                .any(|s| matches!(s, HirStmt::If { out: Some(_), .. }))
+        };
+        assert!(
+            nested(outer_if.1) || nested(outer_if.2),
+            "inner prelude must be nested inside the outer `or` branch"
+        );
+    }
+
+    #[test]
+    fn inline_control_flow_in_constant_is_e030() {
+        let src = "or2: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+                   c: @bit8 = or2(0x1, 0x2)\n";
+        let diags = check_src(src);
+        assert!(has_code(&diags, "E030"), "{diags:?}");
+    }
+
+    #[test]
+    fn overloaded_hook_probe_does_not_double_emit_prelude() {
+        // Two same-arity overloads force `select_hook_overload` to probe the
+        // argument; the inline `or` prelude must be emitted exactly once.
+        let src = "@pick: function (x: @bit8) @bit8 => x\n\
+                   @pick: function (x: @bit16) @bit16 => x\n\
+                   or2: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+                   main: function () nothing {\n    r: @bit8 = @pick(or2(0x1, 0x2))\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let main = hir.funcs.iter().find(|f| f.name == "main").expect("main");
+        let joins = main
+            .body
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, HirStmt::If { out: Some(_), .. }))
+            .count();
+        assert_eq!(joins, 1, "the inline `or` prelude must be emitted once");
     }
 
     #[test]

@@ -15,8 +15,8 @@ use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    find_item, is_poison, qualify_name, subst_ident, CallOutcome, CheckedBody, CheckedCall,
-    Checker, FuncCtx,
+    deferred, find_item, is_poison, qualify_name, subst_ident, CallOutcome, CheckedBody,
+    CheckedCall, Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -528,9 +528,21 @@ impl Checker<'_> {
                 body,
                 span: item.span,
             }),
-            CheckedBody::Inline { param_names, value } => {
-                self.instance_inline
-                    .insert((def, args.to_vec()), (param_names, value));
+            CheckedBody::Inline {
+                param_names,
+                prelude,
+                value,
+            } => {
+                // Task 3 (generic inline preludes) will emit `prelude` at each
+                // generic call site; until then a generic body with control
+                // flow keeps the M3 deferral instead of caching a temp-bearing
+                // value with no prelude (which would ICE in lowering).
+                if prelude.is_empty() {
+                    self.instance_inline
+                        .insert((def, args.to_vec()), (param_names, value));
+                } else {
+                    let _ = deferred(self.diags, item.span, "control flow in `=>` bodies", "M3");
+                }
             }
             CheckedBody::Rejected => {}
         }
