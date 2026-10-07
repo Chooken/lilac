@@ -127,7 +127,8 @@ fn inline_or_body_checks_and_inlines() {
 
 #[test]
 fn inline_if_value_body_checks_and_inlines() {
-    let src = "pick: function (a: @bit8, b: @bit8) @bit8 => if a { b } else { a }\n\
+    // Value-`if` branches are expressions: `if c a else b` (no braces).
+    let src = "pick: function (a: @bit8, b: @bit8) @bit8 => if a b else a\n\
                main: function () nothing {\n    r: @bit8 = pick(0x1, 0x2)\n}\n";
     let (diags, _) = check_hir(src);
     assert!(!diags.has_errors(), "{diags:?}");
@@ -330,19 +331,19 @@ Add to the `mod tests` in `crates/lilac-typeck/src/check/generics.rs` (use its e
 
 ```rust
 #[test]
-fn generic_inline_or_body_checks() {
-    let src = "or2: function [T](a: T, b: T) T => a or b\n\
-               main: function () nothing {\n    x: @bit8 = or2[@bit8](0x1, 0x2)\n}\n";
+fn generic_inline_control_flow_checks() {
+    let src = "pick[T]: function (x: T, c: @bit8) T => if c x else x\n\
+               main: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n";
     let diags = check_src(src);
     assert!(!diags.has_errors(), "{diags:?}");
 }
 ```
 
-(Adjust the generic call spelling to the grammar if needed — explicit `[@bit8]` per SPEC §7.)
+(Generic declaration syntax is `name[T]: function …`; instantiation is `name[@type](…)`. Value-`if` is `if c x else x`.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p lilac-typeck generic_inline_or_body_checks`
+Run: `cargo test -p lilac-typeck generic_inline_control_flow_checks`
 Expected: FAIL with `E030`.
 
 - [ ] **Step 3: Store the prelude for instances**
@@ -355,18 +356,27 @@ In the generic inline path (`check/generics.rs:593`), mirror Task 2 Step 7: fetc
 
 - [ ] **Step 5: Run the test**
 
-Run: `cargo test -p lilac-typeck generic_inline_or_body_checks`
+Run: `cargo test -p lilac-typeck generic_inline_control_flow_checks`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full suite**
+- [ ] **Step 6: Update the pinned driver regression test**
 
-Run: `cargo test -p lilac-typeck`
+`crates/lilac-driver/src/lib.rs:507` `generic_inline_control_flow_defers_without_ice`
+asserts the generic `=>` body defers with `E030` (a guard against the lowering
+`use of unassigned join temp` panic). Now that generic inline bodies carry a
+prelude, rename it (e.g. `generic_inline_control_flow_inlines`) and assert the
+opposite: `session.compile_lir(...)` succeeds and `render_diagnostics()` is
+empty for the same source.
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `cargo test -p lilac-typeck; cargo test -p lilac-driver`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/lilac-typeck/src/check.rs crates/lilac-typeck/src/check/generics.rs
+git add crates/lilac-typeck/src/check.rs crates/lilac-typeck/src/check/generics.rs crates/lilac-driver/src/lib.rs
 git commit -m "typeck: generic inline bodies carry a statement prelude too"
 ```
 
