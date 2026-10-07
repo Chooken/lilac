@@ -6235,6 +6235,31 @@ mod tests {
     }
 
     #[test]
+    fn float_literal_into_float_object_compiles() {
+        // `@fbitN -> FloatN` is the value conversion; a float literal pins to it.
+        let src = format!(
+            "{}main: function () nothing {{\n    f: Float32 = 3.14\n    g: Float64 = 3.14\n}}\n",
+            numeric_objects()
+        );
+        let diags = check_src(&src);
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn integer_literal_into_float_object_is_not_a_bitcast() {
+        // The float objects expose no `@bitN` conversion, so an integer literal
+        // cannot silently reinterpret its bits; it is a clean conversion miss.
+        for ty in ["Float32", "Float64"] {
+            let src = format!(
+                "{}main: function () nothing {{\n    x: {ty} = 3\n}}\n",
+                numeric_objects()
+            );
+            let diags = check_src(&src);
+            assert!(has_code(&diags, "E043"), "{ty}: {diags:?}");
+        }
+    }
+
+    #[test]
     fn fbit128_literal_is_out_of_scope() {
         let diags = check_src("main: function () nothing {\n    x: @fbit128 = 3.14\n}\n");
         assert!(has_code(&diags, "E010"), "{diags:?}");

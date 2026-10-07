@@ -19,6 +19,4 @@ Float64: object {
 
     @conversion: function(from: @fbit64) Float64 => Float64 { data = from }
     @conversion: function(from: Float64) @fbit64 => from.data
-    @conversion: function(from: @bit64) Float64 => Float64 { data = @bits_to_fbit_64(from) }
-    @conversion: function(from: Float64) @bit64 => @fbit_to_bits_64(from.data)
 }

@@ -18,6 +18,21 @@ fn standard_dir() -> PathBuf {
         .join("Standard")
 }
 
+/// The float objects expose only the `@fbitN -> FloatN` value conversion; the
+/// `@bitN <-> FloatN` reinterpret pairs are removed, so an integer literal
+/// cannot silently bitcast into a float (the intrinsics remain available).
+#[test]
+fn float_objects_do_not_expose_bit_reinterpret_conversions() {
+    let standard = standard_dir();
+    for file in ["float32.lilac", "float64.lilac"] {
+        let text = std::fs::read_to_string(standard.join(file)).expect("reads stdlib file");
+        assert!(
+            !text.contains("@bits_to_fbit") && !text.contains("@fbit_to_bits"),
+            "`{file}` must not wrap the reinterpret intrinsics in `@conversion`"
+        );
+    }
+}
+
 #[test]
 fn standard_library_checks_and_emits() {
     let standard = standard_dir();
