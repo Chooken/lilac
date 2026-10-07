@@ -691,8 +691,7 @@ unmangled and equals the declared name; calls typecheck only against the
 declared signature (a wrong declaration is user error and is diagnosed
 nowhere — declare carefully); libraries to link (`link = ["c"]`) are declared
 in the package manifest, never in code. No overloads, no calling-convention
-annotations in v1. The C ABI is LLVM-only: on the VM target a call to an
-`extern` stays a clean runtime error (`docs/VM_SPEC.md` §5).
+  annotations in v1.
 
 ### export (reserved)
 
@@ -713,30 +712,6 @@ thing Lilac cannot express in itself — is sourced through `extern` (platform
 context-switch helpers or a tiny C shim via the build script), never through a
 compiler intrinsic. `await` syntax is explicitly deferred: if ever added, it
 desugars to existing constructs the way f-strings do.
-
-## 10. Targets & the bytecode VM (informative)
-
-Targets are toolchain configuration, not language semantics: a target triple
-fixes `@bit_native`'s width (via the single `Arch::is_64_bit` rule). The default
-remains `x86_64-unknown-none` for `check`/`emit-ir`; `emit-vm`/`run` default to
-the VM target (`lilacvm-unknown-none`); `emit-llvm` defaults to the host (an
-explicit `--target=` still wins). The compiler also ships a **second backend**.
-The triple **`lilacvm-unknown-none`** selects the bytecode VM
-(`crates/lilac-vm`), which lowers verified LIR to a portable `.lbc` text
-artifact and interprets it with no frontend and no LLVM:
-
-```text
-lilac emit-vm <file> [--check]   # canonical .lbc for the VM target
-lilac run <file>                 # compile and execute on the VM
-lilac-vm <file.lbc>              # standalone runner (no frontend, no LLVM)
-```
-
-`emit-vm` and `lilac run` reject a non-VM `--target`, and `emit-llvm` rejects
-the VM target. The VM's ISA, `.lbc` format, memory model,
-entry/panic/`extern` behavior, and debugger are specified in `docs/VM_SPEC.md`.
-The repeatable `--export=<name>` roots already seed reachability; when exactly
-one export is given, `lilac run` also uses it as the VM entry point (otherwise
-the entry is `main`).
 
 ## Lilac to IR (informative; `IR_SPEC.md` is normative)
 

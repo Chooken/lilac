@@ -34,20 +34,6 @@
   to `Arch::is_64_bit`) to pick `@bit_native`'s LLVM width. Because both funnel
   through `Arch::is_64_bit`, their widths cannot drift.
 
-## Bytecode VM (M5c)
-
-- `lilac-vm` is a **second backend**: it lowers verified LIR to canonical `.lbc`
-  text and interprets it, without linking LLVM. The VM and its runner never
-  depend on `inkwell`/`llvm-sys`, which stay confined to `lilac-codegen-llvm`.
-- The VM target is `lilacvm-unknown-none` (`Arch::LilacVm`, 64-bit). Selecting
-  it selects the VM backend; the single pointer-width rule in `lilac-target`
-  now covers `Arch::LilacVm` as well.
-- The executed code is a compact `u32` word stream (`Func.code`, M5c.1) with a
-  wide-operand escape and call-site/operand pools; the typed `Instr` enum is
-  compile-time IR only. The ISA, word layout, opcode table, calling convention,
-  `.lbc` format, memory model, entry/panic/`extern` behavior, and debugger are
-  documented in `docs/VM_SPEC.md`.
-
 ## Folder modules and visibility (M6a)
 
 - `lilac-module` is the folder loader: it discovers the root folder, reads every
@@ -76,12 +62,10 @@
 - `extern` declarations and calls use the platform C ABI on the LLVM backend:
   bit integers by value, `ref T` → pointer, 0 outs = `void`, 1 out = the C
   return value, and an unmangled symbol equal to the declared name. `>1` out or
-  an unsupported param/return is `E028`. The VM is untouched: a call to an
-  `extern` stays a clean runtime error (the C ABI is LLVM-only).
+  an unsupported param/return is `E028`.
 - `E028` is validated pre-codegen in the driver via
-  `lilac_lower::check_extern_signatures` (non-VM targets only), so
-  `check`/`emit-llvm` report it as an ordinary diagnostic rather than a backend
-  failure. `lilac_ir::is_c_abi_type` is the single accept-set shared by that
+  `lilac_lower::check_extern_signatures`, so `check`/`emit-llvm` report it as an
+  ordinary diagnostic rather than a backend failure. `lilac_ir::is_c_abi_type` is the single accept-set shared by that
   frontend check and `lilac-codegen-llvm`'s signature lowering, so they cannot
   drift.
 
