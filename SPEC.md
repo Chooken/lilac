@@ -632,6 +632,49 @@ Resolution order (normative):
 
 `==` never converts: equality is always direct bit-equality.
 
+### Explicit casts with `as`
+
+`expr as T` is a postfix cast, the explicit form of the one-step `@conversion`
+path, usable in any expression position (including an operator operand, where
+the implicit path does not apply). `as` is a **reserved keyword** and cannot be
+an identifier. It is left-associative, binds tighter than binary operators and
+looser than `.`/call/index: `a.b as T` is `(a.b) as T`, `f(x) as T` is
+`(f(x)) as T`, `a + b as T` is `a + (b as T)`, and `x as A as B` is
+`(x as A) as B` (two independent single-step casts).
+
+`as T` supplies `T` as the operand's expected type, so the same one-step,
+exact-match rule as the implicit path applies:
+
+- a **literal** operand pins/grows to `T` with no conversion (`0x1 as @bit16`
+  is `@bit16`; `5 as Int8` grows then converts; `3.14 as @fbit32` pins);
+- a **typed** operand already exactly `T` is an identity no-op;
+- otherwise exactly one `@conversion` from the operand's type to `T` is
+  resolved (never a chain); a miss is `E043`.
+
+The single builtin exception is the **`ref unknown` ↔ any `ref T`** cast, in
+both directions: it is a no-op pointer retype with no `@conversion`.
+`as ref unknown` is the only way to make a type-erased pointer from a concrete
+`ref`, and `as ref T` is the way to recover one. Any other `ref` mismatch —
+including `ref T as T` — is `E010`, consistent with the implicit path.
+
+```lilac
+@conversion: function (from: @bit32) to: @bit16 {
+    to = @truncate(from)
+}
+
+main: function (v: @bit32) nothing {
+    a: @bit16 = v as @bit16                          // one @conversion
+    b: @bit16 = 0x1 as @bit16                        // literal pins, no conversion
+    c: @bit16 = a as @bit16                          // identity (already @bit16)
+    p: ref @bit32 = ref v
+    q: ref @bit32 = (p as ref unknown) as ref @bit32 // no-op pointer round-trip
+}
+```
+
+`as` and the implicit path share one conversion mechanism (`ops::convert`);
+neither chains, both are exact-match, and a change to conversion rules applies
+to both.
+
 ### Resource Management (RAII)
 
 Memory lifecycle events trigger specific compiler hooks if defined for a type.
