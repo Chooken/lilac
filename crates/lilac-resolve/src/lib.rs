@@ -91,8 +91,7 @@ pub enum ResKind {
     },
     /// `name: object { ... }` with collected members.
     Object {
-        /// Non-hook member name → definition (fields and methods, plus the
-        /// first hook of each name as a Task 3 bridge).
+        /// Non-hook member name → definition (fields and methods).
         members: HashMap<String, ResItem>,
         /// Hook name → this object's overloads in declaration order.
         hooks: HashMap<String, Vec<ResItem>>,
@@ -242,6 +241,49 @@ fn index_defs(item: &ResItem, index: &mut HashMap<DefId, NsId>) {
     if let ResKind::Object { members, .. } = &item.kind {
         for member in members.values() {
             index_defs(member, index);
+        }
+    }
+}
+
+/// Pairs each flattened AST member (descending into `private`) with its
+/// resolved item: non-hooks by name, hooks by name + declaration order.
+///
+/// `object` must be the [`ResKind::Object`] resolved from the same `ast`. A
+/// hook name maps to its overloads in declaration order, so the k-th AST hook
+/// of a name pairs with the k-th resolved overload (the order
+/// `collect_members` recorded).
+pub fn flat_member_pairs<'a>(ast: &'a [Item], object: &'a ResKind) -> Vec<(&'a Item, ResItem)> {
+    let ResKind::Object { members, hooks, .. } = object else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    flatten_member_pairs(ast, members, hooks, &mut seen, &mut pairs);
+    pairs
+}
+
+/// Recursive worker for [`flat_member_pairs`]: `seen` counts hook occurrences
+/// per name so same-name overloads pair up in declaration order.
+fn flatten_member_pairs<'a>(
+    items: &'a [Item],
+    members: &'a HashMap<String, ResItem>,
+    hooks: &'a HashMap<String, Vec<ResItem>>,
+    seen: &mut HashMap<&'a str, usize>,
+    out: &mut Vec<(&'a Item, ResItem)>,
+) {
+    for member in items {
+        if let ItemKind::Private { items } = &member.kind {
+            flatten_member_pairs(items, members, hooks, seen, out);
+            continue;
+        }
+        if let Some(overloads) = hooks.get(&member.name) {
+            let index = seen.entry(member.name.as_str()).or_insert(0);
+            if let Some(resolved) = overloads.get(*index) {
+                out.push((member, resolved.clone()));
+                *index += 1;
+            }
+        } else if let Some(resolved) = members.get(&member.name) {
+            out.push((member, resolved.clone()));
         }
     }
 }
@@ -523,9 +565,9 @@ impl Collector<'_> {
     ///
     /// Hook members record their owning object on `hooks` (this object's
     /// overloads, in order) and on `file_hooks` (which reaches `Module.hooks`
-    /// and the unit-global merge). Only the first occurrence of each name is
-    /// kept in `table` as a Task 3 bridge; `E020` for hooks is decided
-    /// unit-globally by qualified signature (`add_hook`), never by name here.
+    /// and the unit-global merge); they are not object `members`. `E020` for
+    /// hooks is decided unit-globally by qualified signature (`add_hook`),
+    /// never by name here.
     fn collect_members(
         &mut self,
         items: &[Item],
@@ -557,11 +599,7 @@ impl Collector<'_> {
                     .entry(name.clone())
                     .or_default()
                     .push(resolved.clone());
-                file_hooks
-                    .entry(name.clone())
-                    .or_default()
-                    .push(resolved.clone());
-                table.entry(name).or_insert(resolved);
+                file_hooks.entry(name.clone()).or_default().push(resolved);
             } else {
                 self.insert(table, &member.name, resolved);
             }

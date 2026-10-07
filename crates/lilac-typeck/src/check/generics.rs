@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use lilac_ast::{Expr, Item, ItemKind, Type as AstType};
 use lilac_error::{Diagnostic, ErrorGuaranteed, CHAIN_FRAME_PREFIX};
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc};
-use lilac_resolve::{DefId, ResItem, ResKind};
+use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind};
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
@@ -135,17 +135,10 @@ impl Checker<'_> {
         let mangled = self.types.mangle(id);
         self.layouts.insert(mangled.clone(), layout);
 
-        let resolved_members = match &resolved.kind {
-            ResKind::Object { members, .. } => members.clone(),
-            _ => std::collections::HashMap::new(),
-        };
         let mut failed = false;
         let mut drop_hook = None;
-        for member in members {
+        for (member, member_resolved) in flat_member_pairs(members, &resolved.kind) {
             let ItemKind::Func(decl) = &member.kind else {
-                continue;
-            };
-            let Some(member_resolved) = resolved_members.get(&member.name) else {
                 continue;
             };
             // In-body hooks are templates until the parent instance exists; the
@@ -702,10 +695,15 @@ impl Checker<'_> {
     /// The source member name of a method/associated function.
     fn member_name(&self, def: DefId) -> String {
         for (_, item) in self.project.all_items() {
-            if let ResKind::Object { members, .. } = &item.kind {
+            if let ResKind::Object { members, hooks, .. } = &item.kind {
                 for (member_name, member) in members {
                     if member.id == def {
                         return member_name.clone();
+                    }
+                }
+                for (hook_name, overloads) in hooks {
+                    if overloads.iter().any(|hook| hook.id == def) {
+                        return hook_name.clone();
                     }
                 }
             }
@@ -773,10 +771,15 @@ impl Checker<'_> {
             if item.id == def {
                 return Some(item.clone());
             }
-            if let ResKind::Object { members, .. } = &item.kind {
+            if let ResKind::Object { members, hooks, .. } = &item.kind {
                 for member in members.values() {
                     if member.id == def {
                         return Some(member.clone());
+                    }
+                }
+                for hook in hooks.values().flatten() {
+                    if hook.id == def {
+                        return Some(hook.clone());
                     }
                 }
             }
@@ -790,10 +793,15 @@ impl Checker<'_> {
             if item.id == def {
                 return name.to_owned();
             }
-            if let ResKind::Object { members, .. } = &item.kind {
+            if let ResKind::Object { members, hooks, .. } = &item.kind {
                 for (member_name, member) in members {
                     if member.id == def {
                         return format!("{name}.{member_name}");
+                    }
+                }
+                for (hook_name, overloads) in hooks {
+                    if overloads.iter().any(|hook| hook.id == def) {
+                        return format!("{name}.{hook_name}");
                     }
                 }
             }
@@ -1489,6 +1497,26 @@ mod tests {
 
     #[test]
     fn generic_box_on_drop_registers() {
+        let (diags, hir, types) = check(
+            "GenBox[T]: object {\n    value: T\n    @on_drop: function (from: ref GenBox[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n    box: GenBox[@bit32] = GenBox {\n        value = 0x0\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(
+            hir.drops.get("GenBox.1..bit32").map(String::as_str),
+            Some("GenBox.1..bit32.@on_drop"),
+            "drops: {:?}",
+            hir.drops
+        );
+        assert!(
+            names(&hir).contains(&"GenBox.1..bit32.@on_drop"),
+            "missing monomorphized on_drop: {:?}",
+            names(&hir)
+        );
+        assert_no_param(&types, &hir);
+    }
+
+    #[test]
+    fn generic_object_member_on_drop_instantiates() {
         let (diags, hir, types) = check(
             "GenBox[T]: object {\n    value: T\n    @on_drop: function (from: ref GenBox[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n    box: GenBox[@bit32] = GenBox {\n        value = 0x0\n    }\n}\n",
         );

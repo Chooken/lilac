@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use lilac_ast::{Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
-use lilac_resolve::{DefId, Lookup, ResItem, ResKind, ResolvedProject};
+use lilac_resolve::{flat_member_pairs, DefId, Lookup, ResItem, ResKind, ResolvedProject};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
@@ -514,12 +514,8 @@ fn collect_item(
             ResKind::Hook { .. } => {}
             _ => collect_func(&item.name, resolved, parent, ctx),
         },
-        ItemKind::Object {
-            members,
-            generic_params,
-        } => {
+        ItemKind::Object { members, .. } => {
             let ResKind::Object {
-                members: resolved_members,
                 generic_params: resolved_params,
                 ..
             } = &resolved.kind
@@ -527,19 +523,13 @@ fn collect_item(
                 return;
             };
             let member_parent = Some((item.name.as_str(), resolved.id, resolved_params.as_slice()));
-            let mut flat = Vec::new();
-            flat_members(members, resolved_members, &mut flat);
-            for (member, resolved_member) in &flat {
+            // Hooks are collected unit-globally in `collect_sigs`; this walk
+            // only recurses into non-hook members (methods and nested objects).
+            for (member, resolved_member) in flat_member_pairs(members, &resolved.kind) {
                 if matches!(resolved_member.kind, ResKind::Hook { .. }) {
-                    collect_hook_sig(&member.name, resolved_member, member_parent, ctx);
-                } else {
-                    collect_item(member, resolved_member, member_parent, ctx);
+                    continue;
                 }
-            }
-            if generic_params.is_empty() {
-                for (member, resolved_member) in &flat {
-                    validate_raii_hook(member, resolved_member, &item.name, resolved.id, ctx);
-                }
+                collect_item(member, &resolved_member, member_parent, ctx);
             }
         }
         ItemKind::Enum { .. }
@@ -568,55 +558,33 @@ fn collect_top_items(items: &[Item], ctx: &mut SigCtx) {
     }
 }
 
-/// Flattens an object's member AST paired with the resolution, descending into
-/// nested `private { … }` blocks (a private member is an ordinary member whose
-/// visibility resolve recorded).
-fn flat_members<'a>(
-    items: &'a [Item],
-    resolved: &'a HashMap<String, ResItem>,
-    out: &mut Vec<(&'a Item, &'a ResItem)>,
-) {
-    for member in items {
-        if let ItemKind::Private { items } = &member.kind {
-            flat_members(items, resolved, out);
-            continue;
-        }
-        if let Some(resolved_member) = resolved.get(&member.name) {
-            out.push((member, resolved_member));
-        }
-    }
-}
-
 /// Validates `@init`/`@on_drop` member-hook shapes at declaration (SPEC §8
 /// RAII): factories take plain parameters and return their object, drops
 /// take exactly one `ref Self` and return nothing. Generic parents skip
 /// validation (M4 owns generics).
-fn validate_raii_hook(
-    member: &Item,
-    resolved_member: &ResItem,
-    parent_name: &str,
-    parent_def: DefId,
-    ctx: &mut SigCtx,
-) {
-    if member.name != "@init" && member.name != "@on_drop" {
+fn validate_raii_hook(resolved: &ResItem, parent_name: &str, parent_def: DefId, ctx: &mut SigCtx) {
+    let name = resolved.name.as_str();
+    if name != "@init" && name != "@on_drop" {
         return;
     }
-    let ResKind::Hook { generic: false, .. } = &resolved_member.kind else {
+    let ResKind::Hook {
+        generic: false,
+        params,
+        ..
+    } = &resolved.kind
+    else {
         return;
     };
-    let ItemKind::Func(decl) = &member.kind else {
-        return;
-    };
-    let Some(sig) = ctx.sigs.hooks.get(&member.name).and_then(|overloads| {
+    let Some(sig) = ctx.sigs.hooks.get(name).and_then(|overloads| {
         overloads
             .iter()
-            .find(|(id, _)| *id == resolved_member.id)
+            .find(|(id, _)| *id == resolved.id)
             .map(|(_, sig)| sig.clone())
     }) else {
         return;
     };
-    if member.name == "@init" {
-        for param in &decl.params {
+    if name == "@init" {
+        for param in params {
             if param.ty.name == "self" {
                 ctx.diags.emit(
                     Diagnostic::error("E022", "`@init` can't have `self` as a parameter").label(
@@ -633,13 +601,13 @@ fn validate_raii_hook(
         if !(sig.returns.len() == 1 && sig.returns[0].id == parent_id && !sig.returns[0].is_ref) {
             ctx.diags.emit(
                 Diagnostic::error("E022", "`@init` must return exactly its object type").label(
-                    member.span,
+                    resolved.span,
                     true,
                     "bad `@init` shape".to_owned(),
                 ),
             );
         }
-    } else if member.name == "@on_drop" {
+    } else if name == "@on_drop" {
         let parent_id = ctx.types.intern_object(parent_def);
         let qualified = qualify_name(ctx.project, parent_def, parent_name);
         ctx.types.set_object_name(parent_def, &qualified);
@@ -653,7 +621,7 @@ fn validate_raii_hook(
                     "E022",
                     "`@on_drop` needs exactly one `ref Self` parameter and no returns",
                 )
-                .label(member.span, true, "bad `@on_drop` shape".to_owned()),
+                .label(resolved.span, true, "bad `@on_drop` shape".to_owned()),
             );
         }
     }
@@ -678,27 +646,31 @@ pub fn collect_sigs(
         sigs: &mut sigs,
     };
     collect_top_items(&program.items, &mut ctx);
-    let top_hooks: Vec<(String, Vec<ResItem>)> = project
+    let hook_entries: Vec<(String, ResItem)> = project
         .hooks
         .iter()
-        .map(|(name, overloads)| (name.clone(), overloads.clone()))
+        .flat_map(|(name, overloads)| {
+            overloads
+                .iter()
+                .map(|overload| (name.clone(), overload.clone()))
+        })
         .collect();
-    for (name, overloads) in &top_hooks {
-        for overload in overloads {
-            // Bridge until Task 3: member hooks are still collected from the AST
-            // walk through `members`, so skip the copies that now also live in
-            // the unit-global index (they carry an owning `HookParent`).
-            if matches!(
-                &overload.kind,
-                ResKind::Hook {
-                    parent: Some(_),
-                    ..
-                }
-            ) {
-                continue;
+    for (name, overload) in &hook_entries {
+        ctx.file = overload.span.file;
+        let parent = match &overload.kind {
+            ResKind::Hook {
+                parent: Some(parent),
+                ..
+            } => Some((parent.name.as_str(), parent.def, parent.generics.as_slice())),
+            _ => None,
+        };
+        collect_hook_sig(name, overload, parent, &mut ctx);
+        if let Some((parent_name, parent_def, parent_generics)) = parent {
+            // Generic parents are templates: their hooks specialize with the
+            // instance (`M4`), so declaration-shape validation waits.
+            if parent_generics.is_empty() {
+                validate_raii_hook(overload, parent_name, parent_def, &mut ctx);
             }
-            ctx.file = overload.span.file;
-            collect_hook_sig(name, overload, None, &mut ctx);
         }
     }
     sigs

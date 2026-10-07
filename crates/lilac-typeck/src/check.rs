@@ -8,7 +8,7 @@ use lilac_hir::{
     HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
     HirPattern, HirProgram, HirStmt, NameSite, TempId,
 };
-use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject, Visibility};
+use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind, ResolvedProject, Visibility};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
 
@@ -429,8 +429,10 @@ type ItemLookup<'a> = Option<(&'a Item, ResItem, Option<(String, DefId)>)>;
 /// Finds the enclosing object's name for a member definition, if any.
 fn find_parent_name(project: &ResolvedProject, def: DefId) -> Option<String> {
     for (item_name, item) in project.all_items() {
-        if let ResKind::Object { members, .. } = &item.kind {
-            if members.values().any(|member| member.id == def) {
+        if let ResKind::Object { members, hooks, .. } = &item.kind {
+            let in_members = members.values().any(|member| member.id == def);
+            let in_hooks = hooks.values().flatten().any(|hook| hook.id == def);
+            if in_members || in_hooks {
                 return Some(qualify_name(project, item.id, item_name));
             }
         }
@@ -466,12 +468,27 @@ fn find_item<'a>(program: &'a Program, project: &ResolvedProject, def: DefId) ->
                 ItemKind::Object { members, .. },
                 ResKind::Object {
                     members: resolved_members,
+                    hooks,
                     ..
                 },
             ) = (&ast.kind, &resolved.kind)
             {
                 let grandparent = Some((ast.name.clone(), resolved.id));
-                let member_scope = |member: &Item| resolved_members.get(&member.name).cloned();
+                // Hooks pair by (name, declaration order): a per-name counter
+                // advances as `rec` visits the flattened members.
+                let seen = std::cell::RefCell::new(HashMap::<String, usize>::new());
+                let member_scope = |member: &Item| -> Option<ResItem> {
+                    if let Some(overloads) = hooks.get(&member.name) {
+                        let mut seen = seen.borrow_mut();
+                        let index = seen.entry(member.name.clone()).or_insert(0);
+                        let resolved = overloads.get(*index).cloned();
+                        if resolved.is_some() {
+                            *index += 1;
+                        }
+                        return resolved;
+                    }
+                    resolved_members.get(&member.name).cloned()
+                };
                 if let Some(found) = rec(members, &member_scope, def, grandparent) {
                     return Some(found);
                 }
@@ -879,38 +896,12 @@ impl Checker<'_> {
         }
     }
 
-    /// Checks one object member, flattening `private { … }` blocks so a private
-    /// member body is checked in its object's context.
-    fn check_member(
-        &mut self,
-        member: &Item,
-        resolved_members: &HashMap<String, ResItem>,
-        owner: &Item,
-        owner_def: DefId,
-    ) {
-        if let ItemKind::Private { items } = &member.kind {
-            for inner in items {
-                self.check_member(inner, resolved_members, owner, owner_def);
-            }
-            return;
-        }
-        if let Some(member_resolved) = resolved_members.get(&member.name) {
-            let parent = Some((owner.name.clone(), owner_def));
-            self.check_item(member, member_resolved, parent);
-        }
-    }
-
     fn check_item(&mut self, item: &Item, resolved: &ResItem, parent: Option<(String, DefId)>) {
         self.file = item.span.file;
         match &item.kind {
             ItemKind::Func(decl) => self.check_func(item, resolved, decl, parent),
             ItemKind::Object { members, .. } => {
-                if let ResKind::Object {
-                    members: resolved_members,
-                    generic_params,
-                    ..
-                } = &resolved.kind
-                {
+                if let ResKind::Object { generic_params, .. } = &resolved.kind {
                     if !generic_params.is_empty() {
                         // A generic object body is a template: members (methods,
                         // in-body hooks) carry `Param` slots and are specialized
@@ -919,16 +910,22 @@ impl Checker<'_> {
                         // trip the verifier (`E070`), so skip the whole body.
                         return;
                     }
-                    for member in members {
-                        self.check_member(member, resolved_members, item, resolved.id);
+                    for (member, member_resolved) in flat_member_pairs(members, &resolved.kind) {
+                        let parent = Some((item.name.clone(), resolved.id));
+                        self.check_item(member, &member_resolved, parent);
                     }
-                    if let Some(drop) = resolved_members.get("@on_drop") {
-                        if matches!(drop.kind, ResKind::Hook { .. })
-                            && self.func_sig(drop.id).is_some()
-                        {
-                            let owner = self.qualify_local(item.span.file, &item.name);
-                            let name = self.hook_name(&format!("{owner}.@on_drop"), drop.id);
-                            self.drops.insert(owner, name);
+                    if let Some(drop) = self.object_hook(resolved.id, "@on_drop") {
+                        if let Some(sig) = self.func_sig(drop.id) {
+                            let parent_id = self.types.intern_object(resolved.id);
+                            let shaped = sig.params.len() == 1
+                                && sig.params[0].is_ref
+                                && sig.params[0].id == parent_id
+                                && sig.returns.is_empty();
+                            if shaped {
+                                let owner = self.qualify_local(item.span.file, &item.name);
+                                let name = self.hook_name(&format!("{owner}.@on_drop"), drop.id);
+                                self.drops.insert(owner, name);
+                            }
                         }
                     }
                 }
@@ -970,6 +967,22 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// The resolved `name` hook owned by object `owner`, if any. Hooks live in
+    /// the unit-global index, so ownership is matched by `HookParent::def`.
+    fn object_hook(&self, owner: DefId, name: &str) -> Option<ResItem> {
+        self.project
+            .hooks
+            .get(name)?
+            .iter()
+            .find_map(|hook| match &hook.kind {
+                ResKind::Hook {
+                    parent: Some(parent),
+                    ..
+                } if parent.def == owner => Some(hook.clone()),
+                _ => None,
+            })
     }
 
     /// Resolves a syntactic type in the current body's environment.
@@ -2855,25 +2868,16 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<CallOutcome, ErrorGuaranteed> {
-        let ResKind::Object { members, .. } = &item.kind else {
+        if !matches!(&item.kind, ResKind::Object { .. }) {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
                     .label(span, true, "constructors need `@init`".to_owned()),
             ));
-        };
-        let Some(hook) = members.get("@init").cloned() else {
+        }
+        let Some(hook) = self.object_hook(item.id, "@init") else {
             return Err(self.diags.emit(
                 Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
                     .label(span, true, "define `@init` or use `= { ... }`".to_owned()),
-            ));
-        };
-        let ResKind::Hook { .. } = &hook.kind else {
-            return Err(self.diags.emit(
-                Diagnostic::error("E022", "`@init` must be a hook".to_owned()).label(
-                    hook.span,
-                    true,
-                    "declared here".to_owned(),
-                ),
             ));
         };
         if self.private_member_denied(&hook, item.id, span) {

@@ -121,7 +121,7 @@ mod tests {
     use lilac_span::SourceMap;
     use lilac_ty::Types;
 
-    use super::super::{check_bodies, collect_sigs};
+    use super::super::{check_bodies, collect_sigs, Sigs};
 
     fn check_src(src: &str) -> Diags {
         let mut sm = SourceMap::new();
@@ -141,6 +141,35 @@ mod tests {
         let sigs = collect_sigs(&project, &program, &mut types, &mut diags);
         check_bodies(&program, &project, &sigs, &mut types, &mut diags);
         diags
+    }
+
+    /// Like [`check_src`], but also returns the parsed program, type table,
+    /// resolved project, and collected signatures.
+    fn check_src_sigs(
+        src: &str,
+    ) -> (
+        lilac_ast::Program,
+        Types,
+        lilac_resolve::ResolvedProject,
+        Sigs,
+        Diags,
+    ) {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("test source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
+        let mut types = Types::new();
+        let sigs = collect_sigs(&project, &program, &mut types, &mut diags);
+        (program, types, project, sigs, diags)
     }
 
     fn has_code(diags: &Diags, code: &str) -> bool {
@@ -267,6 +296,77 @@ mod tests {
     fn direct_hook_call_picks_exact_overload() {
         let diags = check_src(
             "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 {\n    result = @i_add(lhs, rhs)\n}\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 {\n    result = @i_add(lhs, rhs)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit32 = 0x2\n    z: @bit32 = @add(a, b)\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn member_conversions_all_enter_the_table() {
+        let (_, _, _, sigs, diags) = check_src_sigs(
+            "Int64: object {\n    data: @bit64\n\
+             @conversion: function (from: @byte_buffer) Int64 => Int64 { data = @as_int(from) }\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = from }\n\
+             @conversion: function (from: Int64) @bit64 => from.data\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(sigs.conversions.len(), 3);
+    }
+
+    #[test]
+    fn every_hook_overload_body_is_checked() {
+        // The second conversion references an unknown name: it must be reported.
+        let diags = check_src(
+            "Int64: object {\n    data: @bit64\n\
+             @conversion: function (from: @bit64) Int64 => Int64 { data = from }\n\
+             @conversion: function (from: @byte_buffer) Int64 => Int64 { data = @nope(from) }\n}\n",
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E021"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn member_operator_resolves() {
+        let diags = check_src(
+            "Int64: object {\n    data: @bit64\n\
+             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add(lhs.data, rhs.data) }\n}\n\
+             main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn cross_scope_identical_conversion_pair_is_e020() {
+        // The member hook is collected first, then the identical top-level hook
+        // is checked against the shared hook set (dedup by signature).
+        let diags = check_src(
+            "Int64: object {\n    data: @bit64\n\
+             @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n}\n\
+             @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n",
+        );
+        assert!(has_code(&diags, "E020"), "{diags:?}");
+    }
+
+    #[test]
+    fn private_member_conversion_resolves() {
+        let diags = check_src(
+            "Int64: object {\n    data: @bit64\n\
+             private {\n\
+             @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n\
+             }\n}\n\
+             main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn method_and_hook_with_same_base_name_coexist() {
+        let diags = check_src(
+            "Int64: object {\n    data: @bit64\n\
+             add: function (self, x: @bit64) result: @bit64 { result = @i_add(x, self.data) }\n\
+             @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add(lhs.data, rhs.data) }\n}\n\
+             main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n    c: @bit64 = a.add(0x2)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }
