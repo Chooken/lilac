@@ -14,7 +14,7 @@ const {
     workspace,
 } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
-const { forward, byteToPosition } = require("./lirMap");
+const { forward, byteToPosition, positionToByte, reverse } = require("./lirMap");
 
 const LIR_SCHEME = "lilac-lir";
 const HIGHLIGHT_MS = 2500;
@@ -309,6 +309,111 @@ function registerHoverProvider(context) {
     );
 }
 
+function cachedLirEntry(sourceKey) {
+    let fallback;
+    for (const entry of lirPayloads.values()) {
+        if (entry.sourceUri !== sourceKey || !entry.payload) {
+            continue;
+        }
+        if (entry.stage === "final") {
+            return entry;
+        }
+        if (!fallback) {
+            fallback = entry;
+        }
+    }
+    return fallback;
+}
+
+async function lirPayloadForSource(sourceKey) {
+    const cached = cachedLirEntry(sourceKey);
+    if (cached) {
+        return cached.payload;
+    }
+    if (!client) {
+        return null;
+    }
+    const uri = lirUriFor(Uri.parse(sourceKey), "final");
+    try {
+        const payload = await client.sendRequest("lilac/lir", {
+            uri: sourceKey,
+            stage: "final",
+        });
+        if (payload) {
+            lirPayloads.set(uri.toString(), {
+                sourceUri: sourceKey,
+                stage: "final",
+                payload,
+            });
+            return payload;
+        }
+    } catch {
+    }
+    return null;
+}
+
+function fileIdFor(files, documentUri) {
+    const target = documentUri.toString();
+    let fallback;
+    for (const [id, uri] of Object.entries(files)) {
+        if (typeof uri !== "string") {
+            continue;
+        }
+        if (uri === target) {
+            return Number(id);
+        }
+        if (fallback === undefined && uri.toLowerCase() === target.toLowerCase()) {
+            fallback = Number(id);
+        }
+    }
+    return fallback;
+}
+
+function lirLinesFor(payload, lines) {
+    const all = (payload.text || "").split("\n");
+    return lines
+        .filter((line) => line >= 0 && line < all.length)
+        .map((line) => all[line]);
+}
+
+function registerSourceHoverProvider(context) {
+    const provider = {
+        async provideHover(document, position) {
+            try {
+                if (!document || document.languageId !== "lilac") {
+                    return undefined;
+                }
+                const sourceKey = document.uri.toString();
+                const payload = await lirPayloadForSource(sourceKey);
+                if (!payload) {
+                    return undefined;
+                }
+                const fileId = fileIdFor(payload.files || {}, document.uri);
+                if (fileId === undefined) {
+                    return undefined;
+                }
+                const byte = positionToByte(document.getText(), position);
+                const lines = reverse(payload.spans || [], fileId, byte);
+                if (lines.length === 0) {
+                    return undefined;
+                }
+                const lirLines = lirLinesFor(payload, lines);
+                if (lirLines.length === 0) {
+                    return undefined;
+                }
+                const markdown = new MarkdownString();
+                markdown.appendCodeblock(lirLines.join("\n"), "lilac");
+                return new Hover(markdown, lineRange(document, position.line));
+            } catch {
+                return undefined;
+            }
+        },
+    };
+    context.subscriptions.push(
+        languages.registerHoverProvider({ language: "lilac" }, provider)
+    );
+}
+
 function linkCommand(fileUri, lo, hi) {
     return {
         command: OPEN_SOURCE_COMMAND,
@@ -378,6 +483,7 @@ function registerLirProviders(context) {
     });
     context.subscriptions.push(sourceHighlightType);
     registerHoverProvider(context);
+    registerSourceHoverProvider(context);
     registerLinkProvider(context);
     context.subscriptions.push(
         commands.registerCommand(OPEN_SOURCE_COMMAND, openLirSource)
