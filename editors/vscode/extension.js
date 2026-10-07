@@ -188,6 +188,11 @@ function refreshLir() {
             setTimeout(() => restoreTopLine(editor, topLine), 0);
         }
     }
+    for (const key of lirPayloads.keys()) {
+        if (!openLirDocs.has(key)) {
+            lirPayloads.delete(key);
+        }
+    }
 }
 
 function sourceDocumentFor(uriString) {
