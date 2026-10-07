@@ -263,6 +263,36 @@ mod tests {
         assert!(!text.contains("define i64 @write"), "{text}");
     }
 
+    /// An `extern` with float parameter/return types uses the platform C ABI
+    /// float types (`double`/`float`); the float types are in the accept-set.
+    /// An aggregate parameter is still `E028`.
+    #[test]
+    fn extern_float_types_use_c_signature() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs.push(LirFunc {
+            name: "scale".to_owned(),
+            ins: vec![("x".to_owned(), "#fbit64".to_owned())],
+            outs: vec![("out".to_owned(), "#fbit32".to_owned())],
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let text = emit(&module);
+        assert!(text.contains("declare float @scale(double)"), "{text}");
+
+        let mut bad = LirModule::new("x86_64-pc-windows-msvc");
+        bad.funcs.push(LirFunc {
+            name: "puts".to_owned(),
+            ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+            outs: Vec::new(),
+            is_extern: true,
+            blocks: Vec::new(),
+        });
+        let err = backend()
+            .emit_llvm(&bad)
+            .expect_err("aggregate parameter must stay E028");
+        assert!(err.contains("error[E028]"), "{err}");
+    }
+
     /// A call to an `extern` uses the platform C ABI: scalar `in` places are
     /// loaded and passed by value, `ref T` places pass their pointer, and the
     /// single return is stored into the out place — not the internal

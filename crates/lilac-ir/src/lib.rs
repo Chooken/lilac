@@ -801,14 +801,26 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
 }
 
 /// Whether a LIR type spelling is representable in the platform C ABI used by
-/// `extern`: a bit width by value, or any `ref T` (an opaque pointer).
+/// `extern`: a bit or float width by value, or any `ref T` (an opaque pointer).
 ///
 /// This is the single source of truth for the `extern` accept-set, shared by
 /// the `E028` frontend validation (`lilac-lower`) and the LLVM signature
 /// lowering (`lilac-codegen-llvm`), so the two cannot drift.
 #[must_use]
 pub fn is_c_abi_type(ty: &str) -> bool {
-    ty.starts_with("ref ") || matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native")
+    ty.starts_with("ref ")
+        || matches!(
+            ty,
+            "#bit8"
+                | "#bit16"
+                | "#bit32"
+                | "#bit64"
+                | "#bit_native"
+                | "#fbit16"
+                | "#fbit32"
+                | "#fbit64"
+                | "#fbit128"
+        )
 }
 
 /// Fixed layout of `#format_args`: a count plus sixteen named pieces. LIR has

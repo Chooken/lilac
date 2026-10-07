@@ -367,6 +367,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "#bit32" => Some(self.context.i32_type().into()),
             "#bit64" => Some(self.context.i64_type().into()),
             "#bit_native" => Some(self.native.into()),
+            "#fbit16" => Some(self.context.f16_type().into()),
+            "#fbit32" => Some(self.context.f32_type().into()),
+            "#fbit64" => Some(self.context.f64_type().into()),
+            "#fbit128" => Some(self.context.f128_type().into()),
             _ => None,
         }
     }
