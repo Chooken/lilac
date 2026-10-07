@@ -18,6 +18,8 @@
   pair anywhere in the unit is `E020`.
 - `@init` / `@on_drop` are found by querying the index by signature
   ("is there an `@init` returning `Object`?"), not by object membership.
+- Operators and direct hook calls resolve by exact type match; no operand or
+  argument `@conversion` is applied.
 - `W020` no longer exists — no lint, no flag, no diagnostic.
 
 **Constraints**
@@ -36,6 +38,8 @@
 - A `@conversion`, operator, or RAII hook behaves the same at top level and
   inside an object.
 - `lilac check` never emits `W020`, and `--allow operator-type-change` is gone.
+- `a + b` with no exact `@add(lhs, rhs)` is `E043` even when an operand
+  conversion exists; `b: @bit8 = a` (a typed context) still converts.
 - The `Standard` int64 pattern (operators + three conversions) checks cleanly
   once the user's intrinsic names are corrected (`@i_add`, not `@iadd`).
 
@@ -45,6 +49,8 @@
 - Transitive conversion chains, operator overloading across `ref`, or new hooks.
 - Changing hook *bodies*, `ref` semantics, or the `Sigs` lookup algorithms.
 - Multi-root projects or editor-side hook UI.
+- Converting ordinary function-call arguments (that stays anchored on the
+  parameter type).
 
 ### 1.1 Decisions locked during brainstorming
 
@@ -58,6 +64,10 @@
    conversions; identical signatures anywhere are `E020`.
 5. **RAII is included**: `self` resolves to `ref Parent`, so the parent type is
    part of the signature and `@init`/`@on_drop` are looked up globally.
+6. **Operators and direct hook calls are direct-match only.** No operand or
+   argument conversions: `a + b` requires an exact `@add(lhs, rhs)`, and a
+   direct `@hook(a, b)` requires an exact overload. Ordinary function calls and
+   typed contexts (let / assignment / return / f-string holes) still convert.
 
 ## 2. Problem
 
@@ -193,9 +203,23 @@ of an object maps to the k-th `@conversion` in the global index for that parent.
 A small helper resolves this pairing; it replaces `resolved_members.get(name)`
 at the hook sites. Non-hook members keep pairing by name.
 
-**Operators / conversions (`ops.rs`).** Unchanged: `resolve_binop` and
-`convert` already read `Sigs.hooks` / `Sigs.conversions`, which now contain
-member hooks.
+**Operators / conversions (`ops.rs`).** `resolve_binop` reads
+`Sigs.hooks` / `Sigs.conversions`, which now contain member hooks, and becomes
+**exact-match only**: it returns the overload with `params == (lhs, rhs)` and
+drops the "convert the right side toward the left, then retry" step. A miss is
+`E043` (message no longer mentions a conversion). The operator HIR no longer
+wraps the right operand in a conversion (`check.rs` drops the
+`convert_if_needed(right, left.id, …)` call; the matched overload already
+accepts the operand type). `convert` itself is unchanged — it still serves typed
+contexts.
+
+**Direct hook calls (`check_hook_call`).** Overload selection stays exact
+(probed argument types), and the chosen overload's arguments are checked
+**without** inserting a `@conversion`: a non-`ref` argument whose type is not
+the parameter type is a mismatch (`E010`) rather than a conversion. Numeric
+literals still take the parameter type (literal typing, not conversion). The
+shared `check_arg`/`check_args` used by ordinary functions keeps its converting
+behavior.
 
 **RAII lookup (`check.rs`).**
 - `@init`: replace `members.get("@init")` with a search of `Sigs.hooks["@init"]`

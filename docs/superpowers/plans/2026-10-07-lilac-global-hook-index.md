@@ -20,6 +20,7 @@
 
 ## Review Focus
 
+- **Operand/argument conversion regression.** `a + b` and a direct `@hook(a)` must not insert a `@conversion`; a mismatched operand/argument is an error, while `x: T = value` (typed context) still converts. Tests: Task 4 step 1.
 - **Cross-scope duplicate signatures.** Two identical `@conversion(from,to)` pairs — same object, two different objects, or top-level vs member — must all report `E020` (dedup is unit-global, not per object). Tests: Task 2 step 1, Task 3 step 6.
 - **`private` member hooks.** A hook inside `private { … }` must still resolve for operators/conversions (visibility does not gate resolution) while `private` still gates direct RAII access. Tests: Task 3 step 6.
 - **Generic objects with in-body hooks.** A `@on_drop`/`@conversion` inside `GenObj[T]` must still instantiate/specialize and must not leak `Param` into HIR. Tests: Task 3 step 6.
@@ -270,7 +271,84 @@ git commit -m "typeck: collect and pair hooks through the global hook index"
 
 ---
 
-### Task 4: LSP symbols, docs, and the stdlib integration test
+### Task 4: Direct-match operators and hooks (no operand/argument conversion)
+
+**Files:**
+- Modify: `crates/lilac-typeck/src/ops.rs` (`resolve_binop`, tests)
+- Modify: `crates/lilac-typeck/src/check.rs` (operator HIR arm at `:2495-2536`, `check_hook_call`/`check_arg` at `:2913`, `:3672`)
+- Modify: `SPEC.md` §8 (resolution order)
+
+**Interfaces:**
+- Produces: `ops::resolve_binop(sigs, hook, lhs, rhs) -> Result<(DefId, FuncSig), BinopMiss>` returns only an exact `(lhs, rhs)` overload; the `BinopMiss` no longer implies a conversion attempt.
+- Produces: hook-call argument checking that does not insert conversions (an exact-arg path or a flag on `check_arg`).
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `crates/lilac-typeck/src/ops.rs` tests:
+
+```rust
+#[test]
+fn operator_does_not_convert_operands() {
+    // `@add(@bit32,@bit32)` + a `@bit8 -> @bit32` conversion: `b + a`
+    // (b:@bit8, a:@bit32) must NOT convert `b`; it is E043.
+    let diags = check_src(
+        "@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 { result = @i_add(lhs, rhs) }\n\
+         @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
+         main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = 0x2\n    z: @bit32 = b + a\n}\n",
+    );
+    assert!(has_code(&diags, "E043"), "{diags:?}");
+}
+
+#[test]
+fn hook_call_does_not_convert_arguments() {
+    let diags = check_src(
+        "@f: function (x: @bit32) @bit32 => @i_add(x, 0x1)\n\
+         @conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\n\
+         main: function () nothing {\n    b: @bit8 = 0x2\n    z: @bit32 = @f(b)\n}\n",
+    );
+    assert!(has_code(&diags, "E010") || has_code(&diags, "E043"), "{diags:?}");
+}
+
+#[test]
+fn typed_context_still_converts() {
+    let diags = check_src(
+        "@conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n\
+         main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cargo test -p lilac-typeck operator_does_not_convert_operands hook_call_does_not_convert_arguments typed_context_still_converts`
+Expected: the first two FAIL (currently the conversion succeeds); the third PASSES already.
+
+- [ ] **Step 3: Implement exact-match resolution**
+
+- `ops.rs` `resolve_binop`: keep only the exact `(lhs, rhs)` search; delete the `conversions.iter().any(...)` retry. Update the `BinopMiss` doc.
+- `check.rs` operator arm (`:2495-2536`): drop `let right_hir = self.convert_if_needed(right, left.id, right_hir);` (use `right_hir` directly) and remove the "; no conversion from … to …" clause from the `E043` message.
+- `check_hook_call` (`:2913`) / `check_arg` (`:3672`): check hook arguments without conversion — an argument whose non-`ref` type is not the parameter type is `E010` (reuse `mismatch`); do not call `convert_if_needed`. Keep `check_expr(fctx, arg, Some(param.id))` so numeric literals take the parameter type. Ordinary function calls keep the converting `check_arg`/`check_args` path.
+
+- [ ] **Step 4: Update the spec text and affected tests**
+
+In `SPEC.md` §8 "Type Conversions", rewrite resolution steps 2–3: no conversion is attempted for operator operands or hook-call arguments; typed contexts and ordinary call arguments still convert. Update `binop_anchors_left` (now two `E043`) and any other test that relied on operand conversion.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cargo test --workspace`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A
+git commit -m "typeck: operators and hook calls match exactly (no operand conversion)"
+```
+
+---
+
+### Task 5: LSP symbols, docs, and the stdlib integration test
 
 **Files:**
 - Modify: `crates/lilac-lsp/src/index.rs` (`add_def`)
@@ -312,5 +390,5 @@ git commit -m "lsp: index member hooks; docs: global hook model; stdlib integrat
 
 ## Self-Review Notes
 
-- **Spec coverage:** §4 data model → Task 2; §5 collection/dedup → Task 2; §6 typeck/lookup → Task 3; §7 W020 removal → Task 1; §8 docs → Tasks 1, 4; §9 testing → each task; LSP → Task 4.
+- **Spec coverage:** §4 data model → Task 2; §5 collection/dedup → Task 2; §6 typeck/lookup → Task 3; §6 direct-match operators/hooks → Task 4; §7 W020 removal → Task 1; §8 docs → Tasks 1, 4, 5; §9 testing → each task; LSP → Task 5.
 - **Deferred detail:** the exact per-object `hooks` field vs a global-scan pairing is fixed here as `ResKind::Object.hooks` (spec §4 says only that `members` holds fields and methods; the extra grouping is an implementation aid and does not change resolution).
