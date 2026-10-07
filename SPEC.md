@@ -439,7 +439,10 @@ importer sees an unresolved name (`E021`, not a privacy error), while the
 defining namespace and its descendants still see them. Inside an `object` it
 marks members *object-private*: the member is found but inaccessible from outside
 the object, which is `E026`. A private declaration still occupies its name (a
-private/public clash is `E020`), and `private` does not gate top-level hooks.
+private/public clash is `E020`), and `private` does not gate hook resolution:
+hooks are unit-global and scope-independent, so a `private` member hook is still
+found for operators and `@conversion`, while `private` still gates direct RAII
+access (such as a `@init` constructor call) from outside the object.
 
 **Collisions.** A same-named declaration in one namespace is `E020`, first
 binding wins. A local (or ancestor-reached) name shadows an imported one. If two
@@ -453,9 +456,10 @@ every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
 prefix, so single-file programs stay byte-identical and `main` stays `main`.
 User-defined type names and generic instances are qualified the same way, so
 same-named types in different namespaces stay distinct, while builtin types are
-never qualified. Two exceptions carry no prefix: top-level hooks are unit-global
-(one overload set per hook name for the whole compilation unit) and `extern`
-symbols keep their unmangled declared name (§9).
+never qualified. Two exceptions carry no prefix: hooks are unit-global (one
+signature-keyed overload table for the whole compilation unit, whether declared
+at top level or inside an object) and `extern` symbols keep their unmangled
+declared name (§9).
 
 A namespace is loaded from a directory argument on the command line: a directory
 selects project mode (that folder is the root namespace). A file argument keeps
@@ -591,8 +595,11 @@ binding.
 Operator, `@conversion`, and RAII (`@init`/`@on_drop`) hooks are globally
 indexed by `(name, signature)`: each declaration is a distinct overload keyed by
 its parameter/return shape, so mixed-width bit algebra and custom-type operators
-coexist in one table. `@add(Matrix, Matrix) -> @bit32` simply binds the `Matrix`
-overload; there is no operator-shape lint.
+coexist in one table. The index is unit-global and scope-independent — a
+top-level hook and an object-member hook share the same table — and the same
+name with the same qualified signature anywhere in the unit is `E020`.
+`@add(Matrix, Matrix) -> @bit32` simply binds the `Matrix` overload; there is no
+operator-shape lint.
 
 ### Type Conversions
 

@@ -170,6 +170,20 @@ fn unused_hook_compile_error_silent() {
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
+/// The `Standard` int64 shape — operators plus three distinct `@conversion`
+/// pairs, all as object-member hooks — checks cleanly through the unit-global
+/// hook index (no operand conversion, no `W020`).
+#[test]
+fn hook_index_int64_checks_clean() {
+    let output = lilac()
+        .args(["check", &ui("hook_index_int64.lilac")])
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
+}
+
 /// The same hook, invoked by a live `@on_drop`, reports `E031`.
 #[test]
 fn used_hook_compile_error_is_e031() {

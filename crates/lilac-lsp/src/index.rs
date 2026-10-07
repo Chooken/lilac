@@ -95,6 +95,18 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
     }
     for overloads in analysis.project.hooks.values() {
         for item in overloads {
+            // Member hooks are indexed through their object's `hooks` walk so
+            // they keep their owner-qualified name; only top-level hooks are
+            // recorded from the unit-global set here.
+            if matches!(
+                &item.kind,
+                ResKind::Hook {
+                    parent: Some(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
             add_def(&analysis.project, item, None, &mut defs);
         }
     }
@@ -140,9 +152,14 @@ fn add_def(
             span: item.span,
         },
     );
-    if let ResKind::Object { members, .. } = &item.kind {
+    if let ResKind::Object { members, hooks, .. } = &item.kind {
         for member in members.values() {
             add_def(project, member, Some(&qualified), defs);
+        }
+        for overloads in hooks.values() {
+            for hook in overloads {
+                add_def(project, hook, Some(&qualified), defs);
+            }
         }
     }
 }
@@ -293,5 +310,28 @@ mod tests {
             .any(|d| d.name == "main" && d.kind == "function"));
         assert!(!retained.index.uses.is_empty());
         assert!(!retained.index.exprs.is_empty());
+    }
+
+    #[test]
+    fn index_qualifies_member_hooks_by_owner() {
+        let retained = retained(
+            "Int64: object {\n    data: @bit64\n\
+             @add: function (lhs: Int64, rhs: Int64) Int64 => lhs\n}\n\
+             main: function () nothing {\n}\n",
+        );
+        assert!(
+            retained
+                .index
+                .defs
+                .values()
+                .any(|d| d.name == "@add" && d.qualified == "Int64.@add" && d.kind == "hook"),
+            "{:?}",
+            retained
+                .index
+                .defs
+                .values()
+                .map(|d| &d.qualified)
+                .collect::<Vec<_>>()
+        );
     }
 }
