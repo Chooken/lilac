@@ -197,6 +197,54 @@ fn definition_crosses_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `file:` URI formatted the way `VSCode` sends it on Windows: lowercase drive
+/// letter and a percent-encoded colon (`file:///c%3A/...`).
+fn vscode_file_uri(path: &std::path::Path) -> Url {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let drive = normalized[..1].to_lowercase();
+    let rest = normalized[1..].replace(':', "%3A");
+    Url::parse(&format!("file:///{drive}{rest}")).expect("vscode uri")
+}
+
+/// Waits for any `publishDiagnostics` (the server publishes under its own URI
+/// format, which may differ from the client's).
+fn wait_any_publish(client: &Connection) {
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no publish: {err}"),
+        }
+    }
+}
+
+#[test]
+fn definition_in_project_mode_with_vscode_style_uri() {
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-def-vsc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let main = dir.join("main.lilac");
+    let text = "foo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+    std::fs::write(&main, text).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = vscode_file_uri(&main);
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, text);
+    wait_any_publish(&client);
+
+    let location = definition_at(&client, &main_uri, 3, 5).expect("definition");
+    assert_eq!(location.range.start.line, 0);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn definition_survives_a_type_error() {
     let (client, handle) = start_server();

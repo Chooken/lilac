@@ -24,6 +24,19 @@ pub fn root_from_params(params: &InitializeParams) -> Option<PathBuf> {
     params.root_uri.as_ref().and_then(url_to_path)
 }
 
+/// Canonicalizes a `file:` URI to the server's stored form — the result of
+/// [`Url::from_file_path`] on the decoded path. A client spells Windows file
+/// URIs as `file:///c%3A/...` (lowercase drive, percent-encoded colon) while
+/// the server stores `file:///C:/...`; this makes the two compare equal.
+/// Non-`file:` URIs are returned unchanged.
+#[must_use]
+pub fn canonical_file_uri(uri: &Url) -> Url {
+    uri.to_file_path()
+        .ok()
+        .and_then(|path| Url::from_file_path(path).ok())
+        .unwrap_or_else(|| uri.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,11 +10,12 @@ use lsp_types::{
 
 use crate::convert::{byte_offset, span_range};
 use crate::index::{AnalysisIndex, Retained};
+use crate::roots::canonical_file_uri;
 
 /// Hover for the item or expression at `position`, if any.
 #[must_use]
 pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover> {
-    let file = *retained.uri_files.get(uri)?;
+    let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
     let byte = byte_offset(&source.src, position)?;
     let index = &retained.index;
@@ -46,7 +47,7 @@ pub fn definition(
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
-    let file = *retained.uri_files.get(uri)?;
+    let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
     let byte = byte_offset(&source.src, position)?;
     let site = smallest_use(&retained.index, file, byte)?;
@@ -57,6 +58,18 @@ pub fn definition(
         uri: target.clone(),
         range,
     }))
+}
+
+/// Resolves a client document URI to its `FileId`, tolerating the client's
+/// `file:` spelling (`VSCode` sends `file:///c%3A/...`; the server stores
+/// `file:///C:/...`). The raw key is tried first so single-file mode, whose
+/// map is keyed by the `didOpen` URI, keeps working.
+fn file_for(retained: &Retained, uri: &Url) -> Option<FileId> {
+    retained
+        .uri_files
+        .get(uri)
+        .or_else(|| retained.uri_files.get(&canonical_file_uri(uri)))
+        .copied()
 }
 
 /// The smallest resolved use whose span contains `byte`.
