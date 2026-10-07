@@ -4039,7 +4039,12 @@ impl Checker<'_> {
         if intrinsic == Intrinsic::Negate {
             self.expect_arity(span, "@negate", args, 1)?;
         }
-        let (width, hir_args) = self.unify_width(fctx, args, expected, span)?;
+        let operand_expected = if intrinsic == Intrinsic::Cmp {
+            None
+        } else {
+            expected
+        };
+        let (width, hir_args) = self.unify_width(fctx, args, operand_expected, span)?;
         if args.is_empty() {
             let what = if intrinsic == Intrinsic::Cmp {
                 "comparison"
@@ -5766,6 +5771,19 @@ mod tests {
             .collect();
         assert_eq!(e010.len(), 1, "{diags:?}");
         assert_eq!(e010[0].labels.len(), 2, "{diags:?}");
+    }
+
+    #[test]
+    fn cmp_operands_ignore_expected_result_width() {
+        // Return position expects `@bit8`; operands are `@bit32`.
+        let diags = check_src("f: function (a: @bit32, b: @bit32) @bit8 => @i_less_than(a, b)\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+    }
+
+    #[test]
+    fn cmp_unanchored_literals_is_e024() {
+        let diags = check_src("f: function () @bit8 => @i_less_than(0x1, 0x2)\n");
+        assert!(has_code(&diags, "E024"), "{diags:?}");
     }
 
     #[test]
