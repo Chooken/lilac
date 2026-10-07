@@ -1,0 +1,4 @@
+
+CString: object {
+    data: ref Int8
+}

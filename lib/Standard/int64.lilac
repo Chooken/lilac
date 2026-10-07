@@ -1,0 +1,23 @@
+Int64: object {
+    
+    private {
+        data: @bit64
+    }
+
+    @add: function (lhs: Int64, rhs: Int64) Int64 => @i_add(lhs.data, rhs.data)
+    @sub: function (lhs: Int64, rhs: Int64) Int64 => @i_sub(lhs.data, rhs.data)
+    @mul: function (lhs: Int64, rhs: Int64) Int64 => @i_mul(lhs.data, rhs.data)
+    @div: function (lhs: Int64, rhs: Int64) Int64 => @i_div(lhs.data, rhs.data)
+    @mod: function (lhs: Int64, rhs: Int64) Int64 => @i_mod(lhs.data, rhs.data)
+
+    @less_than: function (lhs: Int64, rhs: Int64) Bool => @i_less_than(lhs.data, rhs.data)
+    @greater_than: function (lhs: Int64, rhs: Int64) Bool =>  @i_greater_than(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int64, rhs: Int64) Bool => (lhs == rhs) or @i_less_than(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int64, rhs: Int64) Bool => (lhs == rhs) or @i_greater_than(lhs.data, rhs.data)
+
+    @negate: function (value: Int64) Int64 => @i_negate(value.data)
+
+    @conversion: function(from: @byte_buffer) Int64 => Int64 { data = @as_int(from) }
+    @conversion: function(from: @bit64) Int64 => Int64 { data = from }
+    @conversion: function(from: Int64) @bit64 => from.data
+}

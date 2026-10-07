@@ -1,0 +1,64 @@
+
+sinf: extern function(in: Float32) result: Float32
+cosf: extern function(in: Float32) result: Float32
+tanf: extern function(in: Float32) result: Float32
+
+asinf: extern function(in: Float32) result: Float32
+acosf: extern function(in: Float32) result: Float32
+atanf: extern function(in: Float32) result: Float32
+
+sinhf: extern function(in: Float32) result: Float32
+coshf: extern function(in: Float32) result: Float32
+tanhf: extern function(in: Float32) result: Float32
+
+asinhf: extern function(in: Float32) result: Float32
+acoshf: extern function(in: Float32) result: Float32
+atanhf: extern function(in: Float32) result: Float32
+
+atan2f: extern function(y: Float32, x: Float32) result: Float32
+
+
+expf: extern function(in: Float32) result: Float32
+exp2f: extern function(in: Float32) result: Float32
+expm1f: extern function(in: Float32) result: Float32
+
+logf: extern function(in: Float32) result: Float32
+log2f: extern function(in: Float32) result: Float32
+log10f: extern function(in: Float32) result: Float32
+log1pf: extern function(in: Float32) result: Float32
+
+powf: extern function(x: Float32, y: Float32) result: Float32
+
+sqrtf: extern function(in: Float32) result: Float32
+cbrtf: extern function(in: Float32) result: Float32
+
+hypotf: extern function(x: Float32, y: Float32) result: Float32
+
+
+ceilf: extern function(in: Float32) result: Float32
+floorf: extern function(in: Float32) result: Float32
+truncf: extern function(in: Float32) result: Float32
+roundf: extern function(in: Float32) result: Float32
+
+rintf: extern function(in: Float32) result: Float32
+nearbyintf: extern function(in: Float32) result: Float32
+
+llroundf: extern function(x: Float32) result: Int64
+
+fmodf: extern function(x: Float32, y: Float32) result: Float32
+remainderf: extern function(x: Float32, y: Float32) result: Float32
+fabsf: extern function(x: Float32) result: Float32
+fminf: extern function(x: Float32, y: Float32) result: Float32
+fmaxf: extern function(x: Float32, y: Float32) result: Float32
+fmaf: extern function(x: Float32, y: Float32, z: Float32) result: Float32
+copysignf: extern function(x: Float32, y: Float32) result: Float32
+
+
+ldexpf: extern function(x: Float32, exp: Int) result: Float32
+frexpf: extern function(x: Float32, exp: ref Int) result: Float32
+modff: extern function(x: Float32, iptr: ref Int) result: Float32
+
+
+erff: extern function(in: Float32) result: Float32
+erfcf: extern function(in: Float32) result: Float32
+tgammaf: extern function(in: Float32) result: Float32

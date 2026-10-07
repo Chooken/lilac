@@ -1,0 +1,23 @@
+Int: object {
+    
+    private {
+        data: @bit_native
+    }
+
+    @add: function (lhs: Int, rhs: Int) Int => @i_add(lhs.data, rhs.data)
+    @sub: function (lhs: Int, rhs: Int) Int => @i_sub(lhs.data, rhs.data)
+    @mul: function (lhs: Int, rhs: Int) Int => @i_mul(lhs.data, rhs.data)
+    @div: function (lhs: Int, rhs: Int) Int => @i_div(lhs.data, rhs.data)
+    @mod: function (lhs: Int, rhs: Int) Int => @i_mod(lhs.data, rhs.data)
+
+    @less_than: function (lhs: Int, rhs: Int) Bool => @i_less_than(lhs.data, rhs.data)
+    @greater_than: function (lhs: Int, rhs: Int) Bool =>  @i_greater_than(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int, rhs: Int) Bool => (lhs == rhs) or @i_less_than(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int, rhs: Int) Bool => (lhs == rhs) or @i_greater_than(lhs.data, rhs.data)
+
+    @negate: function (value: Int) Int => @i_negate(value.data)
+
+    @conversion: function(from: @byte_buffer) Int => Int { data = @as_int(from) }
+    @conversion: function(from: @bit_native) Int => Int { data = from }
+    @conversion: function(from: Int) @bit_native => from.data
+}

@@ -1,0 +1,23 @@
+Int16: object {
+    
+    private {
+        data: @bit16
+    }
+
+    @add: function (lhs: Int16, rhs: Int16) Int16 => @i_add(lhs.data, rhs.data)
+    @sub: function (lhs: Int16, rhs: Int16) Int16 => @i_sub(lhs.data, rhs.data)
+    @mul: function (lhs: Int16, rhs: Int16) Int16 => @i_mul(lhs.data, rhs.data)
+    @div: function (lhs: Int16, rhs: Int16) Int16 => @i_div(lhs.data, rhs.data)
+    @mod: function (lhs: Int16, rhs: Int16) Int16 => @i_mod(lhs.data, rhs.data)
+
+    @less_than: function (lhs: Int16, rhs: Int16) Bool => @i_less_than(lhs.data, rhs.data)
+    @greater_than: function (lhs: Int16, rhs: Int16) Bool =>  @i_greater_than(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int16, rhs: Int16) Bool => (lhs == rhs) or @i_less_than(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int16, rhs: Int16) Bool => (lhs == rhs) or @i_greater_than(lhs.data, rhs.data)
+
+    @negate: function (value: Int16) Int16 => @i_negate(value.data)
+
+    @conversion: function(from: @byte_buffer) Int16 => Int16 { data = @as_int(from) }
+    @conversion: function(from: @bit16) Int16 => Int16 { data = from }
+    @conversion: function(from: Int16) @bit16 => from.data
+}
