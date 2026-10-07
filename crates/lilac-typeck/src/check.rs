@@ -3402,11 +3402,41 @@ impl Checker<'_> {
         name
     }
 
+    /// Expands a stored `=>` body at a call site. The body's own branch-join
+    /// temps are renamed to fresh ids *before* the checked arguments are
+    /// substituted: a substituted argument may itself be a `Temp` whose
+    /// defining prelude the caller already emitted under its original id, so
+    /// renaming after substitution would desynchronize the definition and
+    /// lowering would see a `use of unassigned join temp`. Renaming is
+    /// id-sorted for reproducible generated HIR/LIR.
+    fn expand_inline_body(
+        &mut self,
+        prelude: &[HirStmt],
+        body: &HirExpr,
+        param_names: Vec<String>,
+        hir_args: Vec<HirExpr>,
+    ) -> (Vec<HirStmt>, HirExpr) {
+        let temps: HashSet<TempId> = collect_temps(prelude, body);
+        let mut ordered: Vec<TempId> = temps.into_iter().collect();
+        ordered.sort_unstable_by_key(|temp| temp.0);
+        let ren: HashMap<TempId, TempId> = ordered
+            .into_iter()
+            .map(|temp| (temp, self.fresh_temp()))
+            .collect();
+        let prelude = rename_temps_in_stmts(prelude, &ren);
+        let body = rename_temps_in_expr(body, &ren);
+        let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
+        let prelude = subst_stmts(&prelude, &map);
+        let body = subst_ident(&body, &map);
+        (prelude, body)
+    }
+
     /// Expands a call to an `=>` function by substituting the checked
     /// arguments for its parameters. A control-flow-bearing argument is
-    /// evaluated once: its prelude is emitted once and its `Temp` substituted
-    /// (only a pure, prelude-free argument used twice evaluates twice).
-    /// Recursive `=>` calls cannot inline.
+    /// evaluated once: its prelude is emitted once and its `Temp` substituted.
+    /// A prelude-free argument (pure or impure) is textually substituted into
+    /// each use, so an argument used twice is evaluated twice. Recursive `=>`
+    /// calls cannot inline.
     fn check_inline_call(
         &mut self,
         fctx: &mut FuncCtx,
@@ -3451,20 +3481,7 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         let hir_args = self.check_args(fctx, &sig, args, span)?;
-        let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
-        let value = subst_ident(&body_hir, &map);
-        let prelude = subst_stmts(&prelude, &map);
-        let temps: HashSet<TempId> = collect_temps(&prelude, &value);
-        // Allocate fresh temps in a stable (id-sorted) order so a program's
-        // generated HIR/LIR is byte-identical across runs.
-        let mut ordered: Vec<TempId> = temps.into_iter().collect();
-        ordered.sort_unstable_by_key(|temp| temp.0);
-        let ren: HashMap<TempId, TempId> = ordered
-            .into_iter()
-            .map(|temp| (temp, self.fresh_temp()))
-            .collect();
-        let prelude = rename_temps_in_stmts(&prelude, &ren);
-        let value = rename_temps_in_expr(&value, &ren);
+        let (prelude, value) = self.expand_inline_body(&prelude, &body_hir, param_names, hir_args);
         if let Some(top) = fctx.blocks.last_mut() {
             top.extend(prelude);
         }

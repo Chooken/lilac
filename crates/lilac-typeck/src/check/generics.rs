@@ -5,18 +5,15 @@
 //! by `(DefId, Vec<TypeRef>)`. Failed instances poison silently on later
 //! references; growing/recursive chains are bounded by [`MAX_DEPTH`] (`E051`).
 
-use std::collections::{HashMap, HashSet};
-
 use lilac_ast::{Expr, Item, ItemKind, Type as AstType};
 use lilac_error::{Diagnostic, ErrorGuaranteed, CHAIN_FRAME_PREFIX};
-use lilac_hir::{HirBlock, HirCallee, HirExpr, HirFunc, TempId};
+use lilac_hir::{HirBlock, HirCallee, HirFunc};
 use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind};
 use lilac_span::Span;
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef};
 
 use super::{
-    collect_temps, find_item, is_poison, qualify_name, rename_temps_in_expr, rename_temps_in_stmts,
-    subst_ident, subst_stmts, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
+    find_item, is_poison, qualify_name, CallOutcome, CheckedBody, CheckedCall, Checker, FuncCtx,
 };
 
 /// One monomorphized function instance (`(DefId, args)` identity).
@@ -602,20 +599,7 @@ impl Checker<'_> {
                 return Err(ErrorGuaranteed::new());
             }
             let hir_args = self.check_args(fctx, &sig, args, span)?;
-            let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
-            let value = subst_ident(&body, &map);
-            let prelude = subst_stmts(&prelude, &map);
-            let temps: HashSet<TempId> = collect_temps(&prelude, &value);
-            // Allocate fresh temps in a stable (id-sorted) order so a program's
-            // generated HIR/LIR is byte-identical across runs.
-            let mut ordered: Vec<TempId> = temps.into_iter().collect();
-            ordered.sort_unstable_by_key(|temp| temp.0);
-            let ren: HashMap<TempId, TempId> = ordered
-                .into_iter()
-                .map(|temp| (temp, self.fresh_temp()))
-                .collect();
-            let prelude = rename_temps_in_stmts(&prelude, &ren);
-            let value = rename_temps_in_expr(&value, &ren);
+            let (prelude, value) = self.expand_inline_body(&prelude, &body, param_names, hir_args);
             if let Some(top) = fctx.blocks.last_mut() {
                 top.extend(prelude);
             }

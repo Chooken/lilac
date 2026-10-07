@@ -4,7 +4,7 @@
 
 **Goal:** Make inline `=>` bodies accept control flow (short-circuit `and`/`or`, `if`-expressions), stop `Cmp` from seeding operand width from its `@bit8` result, fix `lib/Standard`'s intrinsic typos, add the stdlib as a CLI test, and remove the VM integration/bench tests.
 
-**Architecture:** An inline `=>` body is checked once into HIR; its control-flow statements are captured as a `prelude` alongside the value. At each call site the expander substitutes the parameters and alpha-renames the body's temps to fresh ones, then emits the prelude into the caller's current block before the value is used — no HIR-shape, lowering, or backend changes. Separately, `arith_out` forwards the expected type into operand unification only for `Arith`/`Negate`, never `Cmp`.
+**Architecture:** An inline `=>` body is checked once into HIR; its control-flow statements are captured as a `prelude` alongside the value. At each call site the expander alpha-renames the body's temps to fresh ones and then substitutes the parameters, then emits the prelude into the caller's current block before the value is used — no HIR-shape, lowering, or backend changes. Separately, `arith_out` forwards the expected type into operand unification only for `Arith`/`Negate`, never `Cmp`.
 
 **Tech Stack:** Rust (std-only), workspace crates `lilac-typeck`, `lilac-hir`, `lilac-cli`, `lilac-vm`; CLI integration tests use `std::process::Command`.
 
@@ -262,18 +262,25 @@ fn rename_temps_in_stmts(stmts: &[HirStmt], map: &HashMap<TempId, TempId>) -> Ve
 
 Add a collector that returns every `TempId` in a prelude+value (same coverage), so the expander can allocate one fresh temp per distinct id.
 
-- [ ] **Step 7: Expand with substitution, renaming, and emission**
+- [ ] **Step 7: Expand with renaming, substitution, and emission**
 
 Rewrite `check_inline_call` (`check.rs:3053`). After `let Some((param_names, prelude, body_hir)) = self.inline_bodies.get(&def).cloned() else { … }` and `let hir_args = self.check_args(...)?;`:
 
 ```rust
+// Rename the *un-substituted* body's temps first, then substitute: a
+// substituted argument may itself be a `Temp` whose defining prelude the
+// caller already emitted under its original id, so renaming after
+// substitution would desynchronize the definition.
+let temps: HashSet<TempId> = collect_temps(&prelude, &body_hir);
+let mut ordered: Vec<TempId> = temps.into_iter().collect();
+ordered.sort_unstable_by_key(|t| t.0);
+let ren: HashMap<TempId, TempId> =
+    ordered.into_iter().map(|t| (t, self.fresh_temp())).collect();
+let prelude = rename_temps_in_stmts(&prelude, &ren);
+let body_hir = rename_temps_in_expr(&body_hir, &ren);
 let map: HashMap<String, HirExpr> = param_names.into_iter().zip(hir_args).collect();
 let value = subst_ident(&body_hir, &map);
 let prelude = subst_stmts(&prelude, &map);
-let temps: HashSet<TempId> = collect_temps(&prelude, &value);
-let ren: HashMap<TempId, TempId> = temps.into_iter().map(|t| (t, self.fresh_temp())).collect();
-let prelude = rename_temps_in_stmts(&prelude, &ren);
-let value = rename_temps_in_expr(&value, &ren);
 if let Some(top) = fctx.blocks.last_mut() {
     top.extend(prelude);
 }
@@ -352,7 +359,7 @@ In `check/generics.rs` where an inline instance is cached (`instance_inline.inse
 
 - [ ] **Step 4: Expand instances like the concrete path**
 
-In the generic inline path (`check/generics.rs:593`), mirror Task 2 Step 7: fetch `(param_names, prelude, body)`, `check_args`, substitute params into prelude+value, allocate fresh temps and rename, emit the prelude into `fctx.blocks.last_mut()`, and return `CallOutcome::Inline(value, sig.returns[0])`.
+In the generic inline path (`check/generics.rs:593`), mirror Task 2 Step 7: fetch `(param_names, prelude, body)`, `check_args`, allocate fresh temps and rename the body first, then substitute params into prelude+value, emit the prelude into `fctx.blocks.last_mut()`, and return `CallOutcome::Inline(value, sig.returns[0])`.
 
 - [ ] **Step 5: Run the test**
 

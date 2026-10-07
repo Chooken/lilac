@@ -520,6 +520,32 @@ mod tests {
     }
 
     #[test]
+    fn concrete_inline_control_flow_arguments_inline() {
+        // Regression: a *concrete* `=>` callee whose argument itself carries
+        // control flow (a value-`if` or an inline `or`) must have its own body
+        // temps renamed *before* substitution, so the argument's already-emitted
+        // prelude keeps its temp id and lowering does not ICE with `use of
+        // unassigned join temp`.
+        for src in [
+            // value-`if` argument
+            "pick: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+             main: function () nothing {\n    c: @bit8 = 0x1\n    r: @bit8 = pick(if c 0x1 else 0x2, 0x3)\n}\n",
+            // inline `or` argument
+            "or2: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+             main: function () nothing {\n    c: @bit8 = 0x1\n    r: @bit8 = or2(c or c, 0x3)\n}\n",
+            // nested inline calls: `inner`'s value is `outer`'s argument
+            "inner: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
+             outer: function (a: @bit8) @bit8 => a or a\n\
+             main: function () nothing {\n    r: @bit8 = outer(inner(0x1, 0x2))\n}\n",
+        ] {
+            let mut session = Session::new();
+            let result = session.compile_lir("inline_cf.lilac", src);
+            assert!(result.is_ok(), "{}", session.render_diagnostics());
+            assert_eq!(session.render_diagnostics(), "");
+        }
+    }
+
+    #[test]
     fn e010_shows_both_sides() {
         let mut session = Session::new();
         let result = session.compile_source(

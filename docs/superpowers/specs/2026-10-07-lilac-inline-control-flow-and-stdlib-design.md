@@ -180,14 +180,20 @@ no control flow yields an empty prelude and behaves exactly as before.
 1. Fetch `(param_names, prelude, value)`.
 2. Check the call arguments (`check_args`) and build the
    `param name -> arg HIR` map.
-3. **Substitute** params in the prelude *and* the value. `subst_ident` is
-   generalized to walk `HirStmt` (recursing into nested `HirBlock`s and every
-   embedded `HirExpr`) as well as `HirExpr`.
-4. **Rename temps.** Allocate one fresh `TempId` (`fresh_temp`) per distinct
-   temp in the body and rewrite every occurrence: `HirExprKind::Temp`, and the
-   `out: Option<TempId>` slot of `HirStmt::If` and `HirStmt::Match`. This makes
-   each expansion independent, so two inlined copies of the same body in one
-   expression (`f( a or b, c or d )`) use distinct join temps.
+3. **Rename the body's temps, then substitute.** Allocate one fresh `TempId`
+   (`fresh_temp`) per distinct temp in the *un-substituted* body and rewrite
+   every occurrence: `HirExprKind::Temp`, and the `out: Option<TempId>` slot of
+   `HirStmt::If` and `HirStmt::Match`. Renaming before substitution is
+   essential: an argument may itself be a `Temp` whose defining prelude the
+   caller already emitted under its original id, so renaming after
+   substitution would desynchronize the definition (`use of unassigned join
+   temp` in lowering). Renaming the body first makes each expansion
+   independent — two inlined copies of the same body in one expression
+   (`f( a or b, c or d )`) use distinct join temps — while argument temps pass
+   through untouched.
+4. **Substitute** params in the renamed prelude *and* the value. `subst_ident`
+   is generalized to walk `HirStmt` (recursing into nested `HirBlock`s and
+   every embedded `HirExpr`) as well as `HirExpr`.
 5. Return `CallOutcome::Inline(InlineBody { prelude, value, ty })`.
 
 **Emission.** Every `CallOutcome::Inline` consumer pushes the prelude into the
