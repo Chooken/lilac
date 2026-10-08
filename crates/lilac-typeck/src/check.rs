@@ -6,7 +6,7 @@ use lilac_ast::{BinOp, Expr, Item, ItemKind, Program, Stmt, Type as AstType};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_hir::{
     HirArm, HirBlock, HirCallee, HirConst, HirExpr, HirExprKind, HirField, HirFunc, HirParam,
-    HirPattern, HirProgram, HirStmt, NameSite, TempId,
+    HirPattern, HirProgram, HirStmt, NameSite, SemanticKind, SemanticSite, TempId,
 };
 use lilac_resolve::{flat_member_pairs, DefId, ResItem, ResKind, ResolvedProject, Visibility};
 use lilac_span::{FileId, Span};
@@ -137,6 +137,7 @@ pub fn check_bodies(
         reported_failures: HashSet::new(),
         enclosing_object: None,
         uses: Vec::new(),
+        semantics: Vec::new(),
     };
     checker.collect_fields(&program.items);
     checker.check_items(&program.items);
@@ -161,6 +162,7 @@ pub fn check_bodies(
         layouts,
         drops: checker.drops,
         uses: checker.uses,
+        semantics: checker.semantics,
     }
 }
 
@@ -169,6 +171,13 @@ pub fn check_bodies(
 fn field_span(span: Span, field: &str) -> Span {
     let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
     Span::new(span.hi.0.saturating_sub(len), span.hi.0, span.file)
+}
+
+/// The leading name token's span inside a slot/statement span. `let`/`param`
+/// spans begin at the name, so the name occupies the first `name.len()` bytes.
+fn name_span(span: Span, name: &str) -> Span {
+    let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+    Span::new(span.lo.0, span.lo.0.saturating_add(len), span.file)
 }
 
 /// Collects object/enum layouts, descending into `private { … }` blocks so a
@@ -207,6 +216,7 @@ fn collect_layouts(
                         checker.file,
                         checker.diags,
                         &[],
+                        &mut checker.semantics,
                     )
                 });
                 entries.push((variant.name.clone(), payload));
@@ -236,6 +246,7 @@ fn collect_layout_fields(
                 checker.file,
                 checker.diags,
                 &[],
+                &mut checker.semantics,
             );
             fields.push((member.name.clone(), Some(field_ty)));
         }
@@ -297,6 +308,9 @@ struct Checker<'a> {
     enclosing_object: Option<DefId>,
     /// Resolved item uses recorded for the editor (hover / go-to-definition).
     uses: Vec<NameSite>,
+    /// Non-item semantic-token sites recorded for the editor (locals,
+    /// parameters, body/signature type names, builtins).
+    semantics: Vec<SemanticSite>,
 }
 
 struct FuncCtx {
@@ -1590,7 +1604,15 @@ impl Checker<'_> {
 
     /// Resolves a syntactic type against the current project/file scope.
     fn resolve_in_scope(&mut self, ty: &AstType, params: &[String]) -> TypeRef {
-        resolve_type(ty, self.types, self.project, self.file, self.diags, params)
+        resolve_type(
+            ty,
+            self.types,
+            self.project,
+            self.file,
+            self.diags,
+            params,
+            &mut self.semantics,
+        )
     }
 
     /// The concrete type bound to a generic parameter name in the current
@@ -1638,6 +1660,7 @@ impl Checker<'_> {
         }
         for (param, ty) in decl.params.iter().zip(sig.params.iter()) {
             if !param.name.is_empty() {
+                self.record_semantic(name_span(param.span, &param.name), SemanticKind::Param);
                 fctx.locals.insert(param.name.clone(), *ty);
             }
         }
@@ -1965,6 +1988,7 @@ impl Checker<'_> {
                     self.file,
                     self.diags,
                     &params,
+                    &mut self.semantics,
                 );
                 return Ok(self.types.substitute(resolved, &args));
             }
@@ -2065,6 +2089,9 @@ impl Checker<'_> {
                 value,
                 span,
             } => {
+                if !name.is_empty() {
+                    self.record_semantic(name_span(*span, name), SemanticKind::Local);
+                }
                 let declared = self.resolve_ty(ty);
                 let expected = if is_poison(declared) {
                     None
@@ -2092,7 +2119,17 @@ impl Checker<'_> {
                 bindings,
                 value,
                 span,
-            } => self.check_multilet(fctx, bindings, value, *span),
+            } => {
+                for binding in bindings {
+                    if !binding.name.is_empty() {
+                        self.record_semantic(
+                            name_span(binding.span, &binding.name),
+                            SemanticKind::Local,
+                        );
+                    }
+                }
+                self.check_multilet(fctx, bindings, value, *span);
+            }
             Stmt::Assign {
                 target,
                 value,
@@ -2660,6 +2697,9 @@ impl Checker<'_> {
                     },
                     DefId::ERROR,
                 ));
+                if fctx.locals.contains_key(name) {
+                    self.record_semantic(*span, SemanticKind::Local);
+                }
                 self.record_use(*span, def);
                 let hir_name = if name == "self" && fctx.locals.contains_key("self") {
                     "instance".to_owned()
@@ -3926,6 +3966,7 @@ impl Checker<'_> {
                     Ok(None) => {}
                 }
                 if let Some(intrinsic) = lookup_intrinsic(name) {
+                    self.record_semantic(*name_span, SemanticKind::BuiltinFunc);
                     if !generic_args.is_empty() {
                         return Err(self.emit_generic_arity(span, name, 0, generic_args.len()));
                     }
@@ -5458,6 +5499,14 @@ impl Checker<'_> {
     fn record_use(&mut self, span: Span, def: DefId) {
         if def != DefId::ERROR {
             self.uses.push(NameSite { span, def });
+        }
+    }
+
+    /// Records a non-item semantic-token site (locals, parameters, type names,
+    /// builtins). Dummy spans are skipped; the driver dedups and sorts.
+    fn record_semantic(&mut self, span: Span, kind: SemanticKind) {
+        if !span.is_dummy() {
+            self.semantics.push(SemanticSite { span, kind });
         }
     }
 
@@ -7333,6 +7382,81 @@ mod tests {
         assert!(
             !texts.iter().any(|text| text.starts_with('@')),
             "intrinsic recorded: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_sites_record_non_item_names() {
+        let src = "Obj: object {\n    v: @bit8\n}\nmain: function (p: @bit32) result: @bit32 {\n    x: Obj = Obj {\n        v = 0x1\n    }\n    y: @bit32 = p\n    z: @bit8 = x.v\n    result = @i_add_32(y, y)\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let has = |lo: usize, kind: lilac_hir::SemanticKind| {
+            hir.semantics
+                .iter()
+                .any(|site| site.span.lo.0 as usize == lo && site.kind == kind)
+        };
+        // The item names (`main`, the object `Obj`, the field `v`) are the
+        // index's job, not this source's.
+        for lo in [
+            src.find("main").expect("main"),
+            src.find("Obj").expect("Obj declaration"),
+            src.find("v: @bit8").expect("field declaration"),
+        ] {
+            assert!(
+                hir.semantics
+                    .iter()
+                    .all(|site| site.span.lo.0 as usize != lo),
+                "item name at {lo} must not be a semantic site: {:?}",
+                hir.semantics
+            );
+        }
+        // Local declaration + use.
+        let x_decl = src.find("x: Obj").expect("x declaration");
+        assert!(
+            has(x_decl, lilac_hir::SemanticKind::Local),
+            "{:?}",
+            hir.semantics
+        );
+        let x_use = src.rfind("x.v").expect("x use");
+        assert!(
+            has(x_use, lilac_hir::SemanticKind::Local),
+            "{:?}",
+            hir.semantics
+        );
+        // Parameter declaration + use (a use of a parameter is still a local
+        // name use).
+        let p_decl = src.find("p: @bit32").expect("p parameter");
+        assert!(
+            has(p_decl, lilac_hir::SemanticKind::Param),
+            "{:?}",
+            hir.semantics
+        );
+        let p_use = src.find("= p\n").expect("p use") + 2;
+        assert!(
+            has(p_use, lilac_hir::SemanticKind::Local),
+            "{:?}",
+            hir.semantics
+        );
+        // A user type reference (the object used as a type).
+        let obj_use = x_decl + 3;
+        assert!(
+            has(obj_use, lilac_hir::SemanticKind::UserType),
+            "{:?}",
+            hir.semantics
+        );
+        // A builtin type name in body position.
+        let builtin_ty = src.find("y: @bit32").expect("y declaration") + 3;
+        assert!(
+            has(builtin_ty, lilac_hir::SemanticKind::BuiltinType),
+            "{:?}",
+            hir.semantics
+        );
+        // A builtin call name.
+        let builtin_fn = src.find("@i_add_32").expect("intrinsic call");
+        assert!(
+            has(builtin_fn, lilac_hir::SemanticKind::BuiltinFunc),
+            "{:?}",
+            hir.semantics
         );
     }
 

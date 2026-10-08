@@ -73,6 +73,23 @@ pub struct Analysis {
     pub sigs: lilac_typeck::Sigs,
     /// Checked HIR (carries `uses`).
     pub hir: lilac_hir::HirProgram,
+    /// Non-item semantic-token sites (locals, parameters, type names,
+    /// builtins), assembled from the signature and body passes, deduped by
+    /// `(span, kind)` and sorted by `(file, lo)`.
+    pub semantics: Vec<lilac_hir::SemanticSite>,
+}
+
+/// Merges the signature and body semantic-token sources: dedup by
+/// `(span, kind)` and sort by `(file, lo)` for a deterministic list.
+fn merge_semantics(
+    signature: &[lilac_hir::SemanticSite],
+    body: &[lilac_hir::SemanticSite],
+) -> Vec<lilac_hir::SemanticSite> {
+    let mut sites: Vec<lilac_hir::SemanticSite> =
+        signature.iter().chain(body.iter()).copied().collect();
+    sites.sort_by_key(|site| (site.span.file.0, site.span.lo.0));
+    sites.dedup_by(|a, b| a.span == b.span && a.kind == b.kind);
+    sites
 }
 
 /// Compilation session: source map + diagnostics + targets + options.
@@ -289,6 +306,7 @@ impl Session {
         self.analysis = Some(Analysis {
             project: project.clone(),
             types: types.clone(),
+            semantics: merge_semantics(&sigs.semantics, &[]),
             sigs: sigs.clone(),
             hir: lilac_hir::HirProgram::default(),
         });
@@ -313,6 +331,7 @@ impl Session {
         self.analysis = Some(Analysis {
             project: project.clone(),
             types: types.clone(),
+            semantics: merge_semantics(&sigs.semantics, &hir.semantics),
             sigs: sigs.clone(),
             hir: hir.clone(),
         });
@@ -465,6 +484,35 @@ mod tests {
         assert!(result.is_ok(), "{:?}", session.render_diagnostics());
         let analysis = session.analysis().expect("analysis retained");
         assert!(!analysis.hir.uses.is_empty(), "{:?}", analysis.hir.uses);
+    }
+
+    #[test]
+    fn semantic_analysis_populated_on_success_and_type_error() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "ok.lilac",
+            "main: function () nothing {\n    x: @bit32 = 0x1\n    y: @bit32 = x\n}\n",
+        );
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        let analysis = session.analysis().expect("analysis retained");
+        assert!(
+            !analysis.semantics.is_empty(),
+            "semantics must be populated: {:?}",
+            analysis.semantics
+        );
+
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "bad.lilac",
+            "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n}\n",
+        );
+        assert!(result.is_err(), "the body has a type error");
+        let analysis = session.analysis().expect("partial analysis retained");
+        assert!(
+            !analysis.semantics.is_empty(),
+            "semantics must survive the error: {:?}",
+            analysis.semantics
+        );
     }
 
     #[test]

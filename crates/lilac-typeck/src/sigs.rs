@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use lilac_ast::{Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
+use lilac_hir::{SemanticKind, SemanticSite};
 use lilac_resolve::{flat_member_pairs, DefId, Lookup, ResItem, ResKind, ResolvedProject};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeRef, Types};
@@ -69,6 +70,9 @@ pub struct Sigs {
     pub hooks: HashMap<String, Vec<(DefId, FuncSig)>>,
     /// `@conversion` bindings in definition order.
     pub conversions: Vec<Conversion>,
+    /// Signature type-reference sites (user/builtin type names), for the
+    /// editor's semantic-token source.
+    pub semantics: Vec<SemanticSite>,
 }
 
 /// One `@conversion(from → to)` binding.
@@ -309,6 +313,7 @@ pub fn resolve_type(
     file: FileId,
     diags: &mut Diags,
     params: &[String],
+    sites: &mut Vec<SemanticSite>,
 ) -> TypeRef {
     // An empty-name `Type` is the parser's poison sentinel (a user type name is
     // never empty). The syntax error is already reported, so poison silently:
@@ -322,11 +327,15 @@ pub fn resolve_type(
     if let Some(func) = &ty.func {
         let mut param_tys = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            param_tys.push(resolve_type(&param.ty, types, project, file, diags, params));
+            param_tys.push(resolve_type(
+                &param.ty, types, project, file, diags, params, sites,
+            ));
         }
         let mut return_tys = Vec::with_capacity(func.returns.len());
         for slot in &func.returns {
-            return_tys.push(resolve_type(&slot.ty, types, project, file, diags, params));
+            return_tys.push(resolve_type(
+                &slot.ty, types, project, file, diags, params, sites,
+            ));
         }
         let id = types.intern_func(param_tys, return_tys);
         return TypeRef {
@@ -334,8 +343,22 @@ pub fn resolve_type(
             is_ref: ty.is_ref,
         };
     }
+    // Record the type's identifier as a semantic site, classified by its
+    // syntactic name (`@`-prefixed builtins vs user types). A function type
+    // returned above and a poison name is skipped.
+    if !ty.name_span.is_dummy() {
+        let kind = if ty.name.starts_with('@') {
+            SemanticKind::BuiltinType
+        } else {
+            SemanticKind::UserType
+        };
+        sites.push(SemanticSite {
+            span: ty.name_span,
+            kind,
+        });
+    }
     if !ty.generic_args.is_empty() {
-        return resolve_applied(ty, types, project, file, diags, params);
+        return resolve_applied(ty, types, project, file, diags, params, sites);
     }
     if let Some(index) = params.iter().position(|name| name == &ty.name) {
         let id = types.intern_param(u32::try_from(index).unwrap_or(u32::MAX), &ty.name);
@@ -409,6 +432,7 @@ fn resolve_applied(
     file: FileId,
     diags: &mut Diags,
     params: &[String],
+    sites: &mut Vec<SemanticSite>,
 ) -> TypeRef {
     let poison = TypeRef {
         id: TypeId::ERROR,
@@ -444,7 +468,7 @@ fn resolve_applied(
     let args = ty
         .generic_args
         .iter()
-        .map(|arg| resolve_type(arg, types, project, file, diags, params))
+        .map(|arg| resolve_type(arg, types, project, file, diags, params, sites))
         .collect();
     let name = qualify_name(project, item.id, &ty.name);
     types.set_object_name(item.id, &name);
@@ -529,6 +553,7 @@ fn collect_param(
         ctx.file,
         ctx.diags,
         params,
+        &mut ctx.sigs.semantics,
     )
 }
 
@@ -910,6 +935,7 @@ mod tests {
             FileId(0),
             &mut diags,
             &[],
+            &mut Vec::new(),
         );
         assert_eq!(resolved.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 1);
@@ -920,6 +946,7 @@ mod tests {
             FileId(0),
             &mut diags,
             &[],
+            &mut Vec::new(),
         );
         assert_eq!(bare.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 2);
@@ -942,7 +969,15 @@ mod tests {
     fn generic_type_arg_interns_instance() {
         let (_, mut types, project, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
         let ty = applied_type("GenObj", vec![named_type("@bit32")]);
-        let resolved = resolve_type(&ty, &mut types, &project, FileId(0), &mut diags, &[]);
+        let resolved = resolve_type(
+            &ty,
+            &mut types,
+            &project,
+            FileId(0),
+            &mut diags,
+            &[],
+            &mut Vec::new(),
+        );
         assert!(!resolved.is_ref);
         assert!(
             matches!(types.kind(resolved.id), lilac_ty::TypeKind::Instance { .. }),
@@ -958,7 +993,15 @@ mod tests {
     fn generic_arg_arity_is_e044() {
         let (_, mut types, project, mut diags) = sigs_of("GenObj[T]: object { value: T }\n");
         let ty = applied_type("GenObj", vec![named_type("@bit8"), named_type("@bit16")]);
-        let resolved = resolve_type(&ty, &mut types, &project, FileId(0), &mut diags, &[]);
+        let resolved = resolve_type(
+            &ty,
+            &mut types,
+            &project,
+            FileId(0),
+            &mut diags,
+            &[],
+            &mut Vec::new(),
+        );
         assert_eq!(resolved.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E044"), 1);
     }
@@ -976,6 +1019,7 @@ mod tests {
             FileId(0),
             &mut diags,
             &params,
+            &mut Vec::new(),
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(types.display(resolved.id), "T");

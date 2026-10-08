@@ -24,6 +24,34 @@ pub struct HirProgram {
     pub drops: HashMap<String, String>,
     /// Resolved item uses (for editor hover / go-to-definition).
     pub uses: Vec<NameSite>,
+    /// Non-item semantic-token sites (locals, parameters, type names,
+    /// builtins). Item names come from `uses`; this source never duplicates
+    /// them.
+    pub semantics: Vec<SemanticSite>,
+}
+
+/// What a non-item semantic-token site names.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SemanticKind {
+    /// A local binding (declaration and each use).
+    Local,
+    /// A parameter's declaration name.
+    Param,
+    /// A user object/enum name in type position.
+    UserType,
+    /// A builtin type name (`@bit8`, `unknown`, …).
+    BuiltinType,
+    /// A compiler-known intrinsic call name (`@i_add_8`, `@load_u8`, …).
+    BuiltinFunc,
+}
+
+/// One semantic-token site: a name token's span and what it is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SemanticSite {
+    /// The name token's span.
+    pub span: Span,
+    /// What the name is.
+    pub kind: SemanticKind,
 }
 
 /// One resolved item use: the name token's span and what it resolved to.
