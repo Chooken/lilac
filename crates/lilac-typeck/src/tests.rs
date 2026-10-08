@@ -1316,7 +1316,7 @@ fn bare_generic_object_static_is_e044() {
 #[test]
 fn generic_inline_control_flow_checks() {
     // A generic `=>` body with control flow now carries a statement prelude
-    // that each instantiation expands, so it checks cleanly (no `E030`).
+    // that each instantiation expands, so it checks cleanly.
     let (diags, _, _) = check(
         "pick[T]: function (x: T, c: @bit8) T => if c then x else x\n\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
     );

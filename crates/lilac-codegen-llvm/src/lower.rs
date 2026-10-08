@@ -1,8 +1,8 @@
 //! LIR → LLVM lowering: types, layouts, data globals, places, instructions, and
 //! terminators.
 //!
-//! M5b Tasks 1–4 cover the type map, named layouts, data globals, the pointer
-//! calling convention, zero-initialized `alloca` places, every value / memory /
+//! Covers the type map, named layouts, data globals, the pointer calling
+//! convention, zero-initialized `alloca` places, every value / memory /
 //! conversion / constant / arithmetic instruction, direct/indirect/builtin
 //! calls, `drop`, and control flow (`branch`, `branch.if`, `return`, `panic`,
 //! `unreachable`). Builtin calls use the value ABI and reuse the runtime

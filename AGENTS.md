@@ -42,11 +42,17 @@
   is one namespace and its files merge. `E025` is the module-load error: a
   missing/not-a-directory `using` target, an unreadable root folder, or an
   unreadable file.
-- `lilac-resolve::ResolvedProject` replaces the single global `Module`: each
-  namespace's items plus one `FileScope` per file (its visible-name map, already
-  filtered by visibility and reach). `collect_project` builds it; typeck and
-  lowering thread the `FileId`/`ResolvedProject` and look names up through the
-  file's scope (`E029` on an ambiguous use).
+- `lilac-resolve::resolve` builds one definition table (`Resolved`): every
+  item, member, field and variant is a `Def` addressed by `DefId`, namespaces
+  are `NsId`s, and each file has a `FileScope` (its visible-name map, already
+  filtered by visibility and reach). Typeck and lowering look names up through
+  `Resolved::lookup` with the file's id (`E029` on an ambiguous use).
+- Libraries: `--lib=Name=dir` (CLI) / `lilac.libraries` (LSP
+  `initializationOptions`) mount `dir` as the top-level namespace `Name`;
+  `Session.libraries` carries them into `lilac_module::load_with_status`.
+  `using *.A` is relative to the importing file's namespace. `lib/Standard`
+  is only usable mounted (`--lib=Standard=lib/Standard`); the run test
+  `tests/run/stdlib` exercises all of it.
 - Visibility reach is ancestor-public + descendant-private (Rust's rule). A
   top-level `private { … }` excludes an item from `using` (importers see it as
   unresolved, not `E026`); an object-member `private { … }` gates external access
@@ -85,6 +91,20 @@
   IR-view protocol: the request serves a captured stage's rendered LIR text, and
   the notification tells the client the view is stale. `lilac-ir` is now also a
   `lilac-lsp` dependency (alongside the compiler crates).
+
+## Pipeline
+
+lex → parse → `lilac-module` load → `lilac-resolve` → `lilac-typeck` (a
+worklist of `(def, type args)` instances emitting HIR directly) →
+`lilac-lower` (HIR → LIR, including the ownership model: copies, moves,
+drops, drop/copy glue) → `lilac-const` fold → runtime injection → DCE →
+live `@compile_error` check → verify → backend. `Session::run` in
+`lilac-driver` is the only orchestration.
+
+Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
+the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`,
+`// pending:` and `// lib:` directives. Add a run test for every bug fix that
+changes generated code.
 
 ## Gates
 

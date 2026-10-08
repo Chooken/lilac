@@ -21,7 +21,7 @@ pub const MAX_FOLD_STEPS: u64 = 100_000;
 /// Recursion cap (`MAX_CALL_DEPTH`).
 pub const MAX_CALL_DEPTH: u32 = 16;
 
-/// Constant values (the full lattice lands in M3).
+/// Constant values.
 #[derive(Clone, Debug)]
 pub enum ConstValue {
     /// Not constant (left as a runtime value).
@@ -48,13 +48,21 @@ pub struct FoldValueError {
 /// bounded call evaluation: a `call` whose `in` places are all constant is
 /// interpreted under [`MAX_FOLD_STEPS`]/[`MAX_CALL_DEPTH`]; a miss leaves the
 /// runtime call in place. Live `@compile_error` sites are reported later by
-/// [`check_live_compile_errors`].
-pub fn fold(module: &mut LirModule) {
-    fold_with_fuel(module, MAX_FOLD_STEPS, MAX_CALL_DEPTH);
+/// [`check_live_compile_errors`], which takes the returned [`FoldReport`].
+pub fn fold(module: &mut LirModule) -> FoldReport {
+    fold_with_fuel(module, MAX_FOLD_STEPS, MAX_CALL_DEPTH)
+}
+
+/// What folding could not decide.
+#[derive(Clone, Debug, Default)]
+pub struct FoldReport {
+    /// Functions where a call evaluation ran out of steps or depth, so a
+    /// branch it guards may have stayed live.
+    pub exhausted: HashSet<String>,
 }
 
 /// Folding with an injectable fuel/depth budget (tests exercise exhaustion).
-fn fold_with_fuel(module: &mut LirModule, fuel: u64, depth: u32) {
+fn fold_with_fuel(module: &mut LirModule, fuel: u64, depth: u32) -> FoldReport {
     let data: HashMap<String, Vec<u8>> = module
         .data
         .iter()
@@ -68,10 +76,17 @@ fn fold_with_fuel(module: &mut LirModule, fuel: u64, depth: u32) {
         max_depth: depth,
         fresh: 0,
         escaped: HashSet::new(),
+        exhausted: false,
     };
+    let mut report = FoldReport::default();
     for func in &mut module.funcs {
+        folder.exhausted = false;
         folder.fold_func(func);
+        if folder.exhausted {
+            report.exhausted.insert(func.name.clone());
+        }
     }
+    report
 }
 
 /// Reports `E031` for every still-live `@compile_error` in `module`.
@@ -86,6 +101,7 @@ fn fold_with_fuel(module: &mut LirModule, fuel: u64, depth: u32) {
 /// Returns [`ErrorGuaranteed`] when at least one live site was reported.
 pub fn check_live_compile_errors(
     module: &LirModule,
+    report: &FoldReport,
     diags: &mut Diags,
 ) -> Result<(), ErrorGuaranteed> {
     let mut failed = false;
@@ -99,11 +115,16 @@ pub fn check_live_compile_errors(
                 } = inst
                 {
                     failed = true;
-                    diags.emit(
-                        Diagnostic::error("E031", msg.clone())
-                            .label(*msg_span, true, "message here".to_owned())
-                            .label(*call_span, false, "evaluated here".to_owned()),
-                    );
+                    let mut diagnostic = Diagnostic::error("E031", msg.clone())
+                        .label(*msg_span, true, "message here".to_owned())
+                        .label(*call_span, false, "evaluated here".to_owned());
+                    if report.exhausted.contains(&func.name) {
+                        diagnostic = diagnostic.note(
+                            "constant folding hit its step/depth limit in this function, \
+                             so the condition guarding this call may be undecided",
+                        );
+                    }
+                    diags.emit(diagnostic);
                 }
             }
         }
@@ -123,6 +144,9 @@ struct Folder<'a> {
     fresh: u64,
     /// Places of the current function whose address is taken.
     escaped: HashSet<String>,
+    /// Set when a call evaluation in the current function ran out of fuel or
+    /// depth.
+    exhausted: bool,
 }
 
 /// Places whose address is taken (`addr`, `field.addr`): writes through the
@@ -537,6 +561,8 @@ struct FoldedCall {
 enum Eval {
     /// Leave the call in place.
     Miss,
+    /// Out of steps or depth (also leaves the call; recorded for `E031`).
+    Exhausted,
 }
 
 impl Folder<'_> {
@@ -798,6 +824,10 @@ impl Folder<'_> {
             Ok(None) | Err(Eval::Miss) => {
                 Self::miss_call(callee, ins, outs, span, consts, insts);
             }
+            Err(Eval::Exhausted) => {
+                self.exhausted = true;
+                Self::miss_call(callee, ins, outs, span, consts, insts);
+            }
         }
     }
 
@@ -1029,7 +1059,7 @@ impl Evaluator<'_> {
     /// values of its `out` places under `Eval::Miss` on any unsupported op.
     fn run_func(&mut self, name: &str, args: &[ConstValue]) -> Result<Vec<ConstValue>, Eval> {
         if self.depth >= self.max_depth {
-            return Err(Eval::Miss);
+            return Err(Eval::Exhausted);
         }
         let Some(func) = self.funcs.iter().find(|func| func.name == name) else {
             return Err(Eval::Miss);
@@ -1091,10 +1121,10 @@ impl Evaluator<'_> {
         }
     }
 
-    /// Decrements the fuel budget, missing when exhausted.
+    /// Decrements the fuel budget.
     fn step(&mut self) -> Result<(), Eval> {
         if self.steps == 0 {
-            return Err(Eval::Miss);
+            return Err(Eval::Exhausted);
         }
         self.steps -= 1;
         Ok(())
@@ -1670,9 +1700,9 @@ mod tests {
         let mut diags = Diags::new();
         // Folding no longer decides E031; the module-level check does, so a
         // caller that already pruned unreachable functions can run it.
-        fold(&mut module);
+        let report = fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
-        assert!(check_live_compile_errors(&module, &mut diags).is_err());
+        assert!(check_live_compile_errors(&module, &report, &mut diags).is_err());
         let errors: Vec<_> = diags
             .diagnostics()
             .iter()
@@ -1723,14 +1753,14 @@ mod tests {
     fn pruned_compile_error_is_silent() {
         let mut module = dead_error_module();
         let mut diags = Diags::new();
-        fold(&mut module);
+        let report = fold(&mut module);
         assert!(!diags.has_errors(), "fold must not report E031: {diags:?}");
         lilac_ir::prune_unreachable(&mut module, &std::collections::HashSet::new());
         assert!(
             module.funcs.iter().all(|f| f.name != "dead"),
             "dead function must be pruned"
         );
-        assert!(check_live_compile_errors(&module, &mut diags).is_ok());
+        assert!(check_live_compile_errors(&module, &report, &mut diags).is_ok());
         assert!(!diags.has_errors(), "{diags:?}");
     }
 
@@ -1954,12 +1984,16 @@ mod tests {
     fn fuel_exhaustion_stays_call() {
         let mut module = parser_module(true);
         let _diags = Diags::new();
-        fold_with_fuel(&mut module, 2, 16);
+        let report = fold_with_fuel(&mut module, 2, 16);
         assert!(
             module.to_text().contains("call @parse"),
             "{}",
             module.to_text()
         );
+        // The miss is recorded so a live `@compile_error` here can say why.
+        assert!(!report.exhausted.is_empty(), "{report:?}");
+        let report = fold(&mut parser_module(true));
+        assert!(report.exhausted.is_empty(), "{report:?}");
     }
 
     /// A two-function module where `@wipe` mutates its `@byte_buffer` param

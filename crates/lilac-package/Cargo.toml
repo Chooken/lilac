@@ -1,7 +1,0 @@
-[package]
-name = "lilac-package"
-version.workspace = true
-edition.workspace = true
-
-[lints]
-workspace = true

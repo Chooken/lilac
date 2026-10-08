@@ -1,6 +1,6 @@
 # The Lilac Programming Language Specification
 
-> Version: 0.6-draft (M6b extern C ABI: scalars by value, `ref T` → pointer, single return). Status: draft, normative for the Rust rewrite.
+> Version: 0.7-draft (ownership and drop order, `@bit8` conditions, library mounting, `=>` as always-inline functions). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
@@ -46,9 +46,35 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac. This eliminates read before write bugs and guarantees deterministic padding bits, ensuring 100% reliability for bit equality checks.
 
-### Copy Semantics
+### Ownership: copies, moves and drops
 
-Lilac does not implement move semantics. Value assignment and parameter passing always execute a **fast bitwise copy** by default. Custom copy behavior (such as deep copying or reference counting) is implemented via RAII hooks.
+Every value has exactly one owner (a local, a field, an out slot, or a
+statement temporary). The rules are mechanical, with no move intrinsic and no
+borrow checker:
+
+* **Reading a place copies; a fresh value moves.** Reading an existing place
+  (a variable, a field, a dereferenced `ref`) into a new owner (`b: T = a`, a
+  by-value argument, a field initializer) makes a copy: the type's `@on_copy`
+  if it has one, otherwise a field-wise copy that runs each field's own copy
+  (a plain bitwise copy when nothing inside has a hook). A fresh value (a
+  call result, a literal, a struct literal) is moved into its owner without a
+  copy.
+* **By-value parameters:** the caller passes a fresh copy and the callee owns
+  (and drops) it.
+* **Drops:** locals are dropped in reverse declaration order when their block
+  ends, including on `return` and `break`. Statement temporaries are dropped at
+  the end of their statement. Dropping an object runs its `@on_drop` first,
+  then drops its fields in declaration order; dropping an enum drops its live
+  payload. A type therefore only manages what it allocated itself.
+* **Assignment** (`place = value`) evaluates `value`, runs
+  `@on_override(ref place, ref value)` if defined, drops the old value, then
+  moves the new one in. Assigning a function's own out slot is
+  initialization: `@on_override` is skipped (so a guarded type can still be
+  returned) but the previous value is still dropped.
+
+A value with no hooks anywhere inside it is copied and dropped bitwise, at no
+cost. Ownership transfer between owners (e.g. a heap `Box`) is ordinary code:
+copy the handle out, then reset the source (`self.value = .None`).
 
 ## 2. Literals & Desugaring
 
@@ -156,17 +182,13 @@ Consumption is driven by the expected type (left-to-right, no inference, no
 special result-type rule):
 
 1. A type with `@conversion(from: @format_args)` (e.g. `String`) converts —
-   allocation, if any, happens inside that user-land conversion.
-2. A handler type with structural `append_literal(@byte_buffer)` / `append[T](T)`
-   methods streams instead: the desugar emits piecewise appends into the handler
-   value, formatting each hole straight into the destination with zero temp
-   buffers. The handler type comes from context (a parameter, a binding); only
-   the structural method shapes are fixed, never a nominal stdlib type.
-3. Expected `@format_args` keeps the value itself.
-4. No expected type checks the value as `@format_args` and drops it.
+   allocation, if any, happens inside that user-land conversion. Streaming
+   sinks are ordinary library code over `@format_args_count`/`_piece`.
+2. Expected `@format_args` keeps the value itself.
+3. No expected type checks the value as `@format_args` and drops it.
 
 The compiler names zero standard library entities anywhere in this path — only
-builtins, conversions, and structural shapes. Whether an f-string allocates is
+builtins and conversions. Whether an f-string allocates is
 therefore the caller's explicit choice of sink, never hidden sugar behavior.
 
 ### Compile-time folding
@@ -177,14 +199,14 @@ global dead-code elimination, so a `@compile_error` inside a dead branch, an
 uncalled function, or an unused hook is silently dropped. The former camelCase
 alias `@compilerError` is no longer accepted.
 
-Folding runs after `=>` (inline) functions are substituted, so a conversion
-helper written as `=>` folds exactly like a direct call. A block-body wrapper —
-including a hand-written parser — is still
-attempted via best-effort call evaluation of pure bodies with bounded loops and
-all-constant arguments (`MAX_FOLD_STEPS = 100_000`, `MAX_CALL_DEPTH = 16`); if
-that fails the runtime call (and runtime parse) is kept. A missed fold costs
-performance only, never correctness. Tiny conversions that must be zero-cost are
-written as `=>`.
+A call whose arguments are all constant — whether to a `=>` function or a
+block body, including a hand-written parser — is folded by best-effort
+evaluation of pure bodies with bounded loops (`MAX_FOLD_STEPS = 100_000`,
+`MAX_CALL_DEPTH = 16`); if that fails the runtime call (and runtime parse) is
+kept. A missed fold costs performance only, never correctness — except that a
+`@compile_error` guarded by an undecided condition stays live. When that
+happens because evaluation hit the step or depth limit, the `E031` says so in a
+note.
 
 ## 3. Compiler Intrinsics
 
@@ -206,6 +228,10 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@i_greater_than_W`** | `(@bitW, @bitW): @bit8` | Signed integer greater-than. Returns `@bit8`. |
 | **`@i_less_than_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer less-than. Returns `@bit8`. |
 | **`@i_greater_than_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer greater-than. Returns `@bit8`. |
+| **`@i_less_than_or_equal_W`** | `(@bitW, @bitW): @bit8` | Signed integer less-or-equal. Returns `@bit8`. |
+| **`@i_greater_than_or_equal_W`** | `(@bitW, @bitW): @bit8` | Signed integer greater-or-equal. Returns `@bit8`. |
+| **`@i_less_than_or_equal_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer less-or-equal. Returns `@bit8`. |
+| **`@i_greater_than_or_equal_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer greater-or-equal. Returns `@bit8`. |
 | **`@f_add_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point addition using IEEE-754 bit interpretation. |
 | **`@f_sub_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point subtraction. |
 | **`@f_mul_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point multiplication. |
@@ -214,9 +240,11 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@f_negate_W`** | `(@fbitW): @fbitW` | Float negation (IEEE-754 sign flip). |
 | **`@f_less_than_W`** | `(@fbitW, @fbitW): @bit8` | Float less-than (IEEE-754). Returns `@bit8`. |
 | **`@f_greater_than_W`** | `(@fbitW, @fbitW): @bit8` | Float greater-than (IEEE-754). Returns `@bit8`. |
+| **`@f_less_than_or_equal_W`** | `(@fbitW, @fbitW): @bit8` | Float less-or-equal (IEEE-754; false when either is NaN). Returns `@bit8`. |
+| **`@f_greater_than_or_equal_W`** | `(@fbitW, @fbitW): @bit8` | Float greater-or-equal (IEEE-754). Returns `@bit8`. |
 | **`@fbit_to_bits_W`** | `(@fbitW): @bitW` | Reinterprets a float's bits as the same-width integer (`W` ∈ 16/32/64 only: `@bit128` does not exist). |
 | **`@bits_to_fbit_W`** | `(@bitW): @fbitW` | Reinterprets integer bits as the same-width float (`W` ∈ 16/32/64 only). |
-| **`@size_of`** | `(value)` | Returns the size of a type or variable in bytes as a `@bit_native`. Fold-required marker; folding is best-effort in M3 (operand-type semantics not yet pinned). |
+| **`@size_of`** | `(T)` or `(value)` | The size in bytes of a type, or of a value's type, as a `@bit_native` constant (target C layout: fields in order, each aligned, padded to the largest alignment). Inside a generic body it is the size of the instantiated type. |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
 | **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
@@ -231,10 +259,11 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
 
-`@size_of` and `@compile_error` are **fold-required markers**, not runtime
-builtin calls: the front-end emits a pre-fold node the constant folder must
-consume (or diagnose). A survivor reaching IR verification
-is an internal error, exactly like a live `@compile_error`. Builtin calls that
+`@size_of` is computed during lowering and is always a constant.
+`@compile_error` is a **fold-required marker**, not a runtime builtin call: it
+must be removed by folding (dead branch) or DCE (unreachable function), or it
+is reported as `E031`; a survivor reaching IR verification is an internal
+error. Builtin calls that
 do reach IR are checked against the builtin signature table; `@load_u8` takes
 two in-args (`ref #bit8`, `#bit_native`) and yields `#bit8`, while `@store_u8`
 takes three in-args (`ref #bit8`, `#bit_native`, `#bit8`) and yields nothing.
@@ -257,7 +286,11 @@ val1: @bit8, val2: @bit16 = multi_func()
 
 ### Control Flow
 
-Conditional statements evaluate expressions as boolean based on strict non-zero testing against `@bit8` (`0x0` is false; any other value is true). Non-`@bit8` types must be explicitly or implicitly converted to `@bit8` before evaluation.
+A condition (`if`, value `if`, `and`/`or` operands) is a `@bit8` tested for
+non-zero (`0x0` is false; any other value is true). A condition of any other
+type must have exactly one `@conversion` to `@bit8` (so a library `Bool`
+works); otherwise it is `E010`. Wider containers are never tested implicitly:
+compare explicitly (`@i_less_than_32(i, n)`, `x == 0x0`).
 
 If expressions take a value to conditionally call code:
 
@@ -295,8 +328,8 @@ status: @bit8 = if 0x0 then 0x0 else 0x1
 
 Value capturing from multi-return functions:
 A call condition may bind one of the callee's out-slots by name with
-`-> name: Type`. The call's first out-slot must be a bit container and is
-tested for non-zero; the named slot must match a declared out-slot (`E022`
+`-> name: Type`. The call's first out-slot is the condition (same rule as
+above); the named slot must match a declared out-slot (`E022`
 otherwise) and is scoped to the `then` block:
 
 ```lilac
@@ -350,9 +383,11 @@ match enum_val {
 }
 ```
 
-Arm patterns are bare tags (`.Some`); a payload binds with `-> name: Type`,
-and a single statement arm shortens to `=>`. Match is statements-only in M2:
-using a `match` as a value is rejected with `E001`.
+Arm patterns are tags (`.Some` or `Enum.Some`); a payload binds with
+`-> name: Type`, and a single statement arm shortens to `=>`. Match is a
+statement: using a `match` as a value is rejected with `E001`. Because an arm
+starts with `.`, a `.` at the start of a line never continues the previous
+line's expression as a member access.
 
 ```lilac
 match number {
@@ -377,6 +412,9 @@ counter: @bit32 = 0x0
 user: Object {}
 custom_user: Object(0x1, "Lilac") // Invokes @init with custom params
 ```
+
+Redeclaring a name in the same block is `E020`; a nested block may shadow
+an outer local (or a global) until it ends.
 
 The base language enforces no concept of mutability. Read-only variables and immutability guards are implemented in user-land using the `@on_override` compiler hook.
 
@@ -486,6 +524,12 @@ selects project mode (that folder is the root namespace). A file argument keeps
 single-file mode, so the file's parent folder is **not** treated as a project
 root and contributes no sibling files.
 
+**Libraries.** `--lib=Name=dir` (repeatable; the editor setting is
+`lilac.libraries`) mounts `dir` as the top-level namespace `Name`:
+`using Name` loads `dir`, and `using Name.A` loads `dir/A`. A library is an
+ordinary folder tree; its own files reach its subfolders with `using *.A` (or
+`using Name.A`), so it works wherever it is mounted.
+
 ### Enums
 
 Enums are the single tagged-data type: a closed set of named variants,
@@ -504,9 +548,17 @@ OptionalBit32: enum {
 }
 ```
 
-Values construct from bare tags (`.None`) or tag calls with payloads
-(`.Some(0x1)`); `match` arms test tags with `.Tag` patterns and bind
-payloads via `-> name: Type`.
+Values construct as `Enum.Variant` / `Enum.Variant(payload)`, with the
+arguments of a generic enum spelled on the enum (`Optional[@bit32].Some(0x1)`),
+or as a bare `.Variant` / `.Variant(payload)` when the expected type names the
+enum. `match` arms test tags with `.Tag` patterns and bind payloads via
+`-> name: Type`.
+
+The tag is the smallest `@bitN` that holds the variant count (`@bit8` up to
+256 variants), followed by one slot per payload. Like every value, an enum
+starts zeroed, which is its **first** variant (with a zero payload). A type
+that contains itself by value, directly or through other fields and
+payloads, is `E053`; store the recursive part behind a `ref`.
 
 An enum body may also declare members exactly like an object: methods
 (`name: function (self) ... { }` or `=> expr`), hooks (`@name: ...`) and
@@ -562,6 +614,11 @@ A top-level hook may not be generic: a blanket `@add[T](T, T)` stays `E052`.
 ### Inline Declarations
 
 Inlined functions may omit the return name but are restricted to a single output type. The `=>` operator directly binds the expression output.
+
+A `=> expr` body is exactly `{ out = expr }` on an ordinary function marked
+always-inline: arguments are evaluated once, recursion is allowed (the
+recursive call is simply not inlined), and constant arguments fold like any
+other call.
 
 ```lilac
 inlined_const: @bit64 => 0x0
@@ -699,8 +756,7 @@ main: function (v: @bit32) nothing {
 }
 ```
 
-`as` and the implicit path share one conversion mechanism (`ops::convert`);
-neither chains, both are exact-match, and a change to conversion rules applies
+`as` and the implicit path share one conversion mechanism; neither chains, both are exact-match, and a change to conversion rules applies
 to both.
 
 ### Resource Management (RAII)
@@ -710,9 +766,9 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 | Hook | Signature | Invocation Trigger & Behavior Rules | Desugar |
 | --- | --- | --- | --- |
 | **`@init`** | `(...params) Type` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`. | `variable: Type(...params)` -> `variable: Type = @init(...params)` |
-| **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing variable's value is overwritten. **Rule:** The `@on_drop` hook is automatically invoked on `prev` immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) @on_drop(ref variable) variable = new` |
-| **`@on_copy`** | `(ref Type) new_copy` | Called when a value is copied. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
-| **`@on_drop`** | `(ref Type) nothing` | Called when a value exits scope or a reference is freed. Used for resource deallocation and cleanup. | `variable: Type()` -> `variable: Type() defer @on_drop(ref variable)` |
+| **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing place's value is overwritten (not when a function assigns its own out slot). **Rule:** The value in `prev` is dropped immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) drop(variable) variable = new` |
+| **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1). You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
+| **`@on_drop`** | `(ref Type) nothing` | Called when the owner of a value goes away (§1), before the value's fields are dropped. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type()` -> `variable: Type() defer drop(variable)` |
 
 Example of defining custom constructors and RAII rules
 
@@ -750,8 +806,10 @@ malloc: extern function (size: @bit_native) ptr: ref @bit8
 ```
 
 Rules: an `extern` uses the platform C ABI. Each parameter maps to its C type:
-a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) by value, and
-any `ref T` to an opaque pointer. A single return slot becomes the C return
+a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) or float
+(`@fbitN`) by value, any `ref T` to an opaque pointer, and an object with a
+single field of one of those types (a transparent wrapper such as a library
+`CInt` or `FILE`) as that field. A single return slot becomes the C return
 value; no return slot is `void`. More than one out, or a parameter/return
 outside that set (an aggregate such as `@byte_buffer`, say), is `E028`,
 validated before codegen so it reports as an ordinary diagnostic. An `extern`
@@ -810,6 +868,5 @@ $entry:
   return
 ```
 Assignment and member access use `copy` / `field .name` as defined in `IR_SPEC.md`.
-`@size_of` (a fold-required marker) on constant operands, `branch.if` on
-constant conditions, and `compile.error` in dead branches never reach verified
-IR (see Compile-time folding above).
+`branch.if` on constant conditions and `compile.error` in dead branches never
+reach verified IR (see Compile-time folding above).

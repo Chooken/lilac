@@ -16,24 +16,19 @@
 
 # Sections
 
-Data sections hold constant declarations. String literals and the source bytes
-of decimal number literals lower to `data` consts (`!c: str = "..."` /
-`!c: numlit = "..."`); a string literal is then read as a data-backed buffer
-value with `const !c:#byte_buffer`, never a call to the
-`.lilac.byte_buffer_from` runtime function. Hex/bin literals are `const`
-registers typed directly, not data. f-strings lower to `@format_args`
-construction plus conversions/calls and introduce no new instruction shapes
-(see `SPEC.md`).
+Data sections hold constant declarations: the bytes of string literals
+(`!c: str = "..."`). A string literal is read as a data-backed buffer value
+with `const !c:#byte_buffer`, never a call to the `.lilac.byte_buffer_from`
+runtime function. Number literals are `const` registers typed directly, not
+data. f-strings lower to `@format_args` construction plus conversions/calls
+and introduce no new instruction shapes (see `SPEC.md`).
 ```lilac-ir
 data {
     !c0: str = "String",
-    !c1: numlit = "0.54",
 }
 ```
 
-String const bytes are UTF-8. `"` escapes as `\22` and `\` as `\5C`.
-`{{` / `}}` from f-string source are already resolved to `{` / `}` before
-lowering, so they never appear as escapes here.
+String const bytes are raw bytes: printable ASCII and newlines print as is, `"` and `\` are escaped with a backslash, and any other byte prints as `\xHH` (one byte, as in source).
 
 Types are defined as like (members carry their field names in layout order;
 sections print sorted by type name for deterministic snapshots):
@@ -81,6 +76,11 @@ function @func_name
 `target` fixes `@bit_native` width. Every block starts with `$label:` and ends
 with exactly one terminator (`return | branch | branch.if | panic | unreachable`).
 
+`inline function @f` marks a function lowered from a `=>` body: backends must
+inline it at every call site where they can (LLVM `alwaysinline`, honored at
+`-O0` too). It is otherwise an ordinary function; a recursive call is simply
+left as a call.
+
 Foreign symbols are declared without a body; calls to them verify like
 ordinary calls (arity and `in/out` types from the declaration). Backends emit
 native external calls; link libraries come from the package manifest.
@@ -111,7 +111,11 @@ carry a deterministic, collision-free, arity-tagged mangle:
 Each argument is mangled recursively; builtins gain a leading `.`, `ref X`
 becomes `ref..X`, and a nested instance is its own mangled form. Examples:
 `gen_function.1..bit32`, `GenObject.1..bit32` (with methods such as
-`GenObject.1..bit32.get`), and `GenObj.1.GenObj.1..bit32`. The arity tag
+`GenObject.1..bit32.get`), and `GenObj.1.GenObj.1..bit32`. A function's
+own generic arguments follow its name the same way
+(`CAllocator.create.1..bit32`), and a hook's symbol always ends in its
+signature (`GenBox.1..bit32.@on_drop:ref_GenBox[bit32]`) so overloads stay
+distinct. The arity tag
 keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
 `.` is reserved: Lilac identifiers are `[A-Za-z_][A-Za-z0-9_]*`, so no user
 name contains it and every generated segment is unambiguous. Builtin type
@@ -130,8 +134,11 @@ verifier rejects two functions with the same name (`E070`), so a residual
 mangle collision or a user/prelude clash cannot reach a backend.
 
 A `drop %x` marker records that a place is destroyed; it does not itself run
-the destructor. Where the type declares an `@on_drop`, the `call @…@on_drop`
-that invokes it precedes the marker, so the hook observes live memory.
+the destructor. Where the type needs dropping, the call that does it (the
+type's `@on_drop`, or the generated `.lilac.drop.<T>` glue that runs
+`@on_drop` and then drops each field) precedes the marker, so the hook
+observes live memory. Field-wise copies use `.lilac.copy.<T>` glue the same
+way.
 
 # Instructions
 
@@ -146,14 +153,22 @@ alloca #type %name : zeroed
 ```
 Legacy text `allocate #, %` means the same as `alloca`.
 
-### addr / addr.func / load
-* `addr %var -> &r` takes a place address; `addr.func @f -> &r` takes a function
-  address with pointee signature checked by the verifier; `load ref %x -> &r`
-  dereferences a `ref` place.
+`zero %x` re-zeroes a place (a function's out slots at entry, a struct
+literal's temporary before its fields are written):
 ```lilac-ir
-addr %variable -> &1
-addr.func @name -> &2
-load ref %ptr -> &3
+zero %out
+```
+
+### addr / addr.func / load
+* `&r: ref #t = addr %var` takes a place address; `addr.func @f` takes a
+  function address with pointee signature checked by the verifier;
+  `&r: #t = load %p` reads the value that the pointer in `ref` place `%p`
+  points to. `load` always follows the pointer, even when `#t` is itself a
+  `ref` (reading an `Optional[ref T]` payload through the slot's address).
+  Plain operand reads of a `ref` place (`copy %p`) yield the pointer.
+```lilac-ir
+&1: ref #bit32 = addr %variable
+&2: #bit32 = load %ptr
 ```
 
 ### copy / const
@@ -249,16 +264,15 @@ branch.if [%, &], [$, &], [$, &]?
 A compile-time folding pass runs before verification. `branch.if` on a constant
 condition is replaced with `branch` to the live target, so verified IR never
 contains `branch.if` on a constant. Dead successors left unreachable are removed.
-`=>` inline functions are substituted before this pass; remaining `call`s with
-all-constant arguments to pure functions with bounded loops may additionally be folded,
-otherwise they are kept as runtime calls.
+`call`s with all-constant arguments to pure functions with bounded loops may
+additionally be folded, otherwise they are kept as runtime calls.
 
 ### return
 ```lilac-ir
 return
 ```
 `return` requires every `out` place assigned at least once in its function
-(textual rule, flow-insensitive).
+(textual rule, flow-insensitive; `zero %out` counts).
 
 ### unreachable
 ```lilac-ir
@@ -284,11 +298,8 @@ folding, or inside a function unreachable from `main` or an `--export` root, is
 dropped without diagnostic, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives is a live error, diagnosed after reachability pruning — never
-during verification (reaching the verifier is an internal error). The
-fold-required marker `@size_of` is the same shape: the front-end emits a
-pre-fold node, the folder consumes it to a plain `const` (or `E060`), and a
-survivor reaching verification is an internal error, never a backend call.
-`@size_of` folding is best-effort in M3 (operand-type semantics not yet pinned).
+during verification (reaching the verifier is an internal error). `@size_of`
+never reaches LIR: lowering computes it from the layouts as a `const`.
 
 ## Casts
 
@@ -319,14 +330,15 @@ field %obj .name -> &1  // idx 2, #bit32
 ```
 
 ## Comparisons
-* ```cmp.eql #type, &a, &b -> &r```
-* ```i.cmp.gt &a, &b -> &r``` / ```i.cmp.lt &a, &b -> &r```
-* ```i.cmp.gt.u &a, &b -> &r``` / ```i.cmp.lt.u &a, &b -> &r``` (`icmp ugt`/`icmp ult`)
-* ```f.cmp.gt &a, &b -> &r``` / ```f.cmp.lt &a, &b -> &r```
-Result is `@bit8` (`0x0` false, otherwise true). Widths of inputs must match;
-`i.*` vs `f.*` selects two's-complement vs IEEE-754 interpretation. The
-unsigned `i.cmp.lt.u` entered with the runtime-in-LIR work; `i.cmp.gt.u`
-completes the unsigned comparison set.
+* ```&r: #bit8 = cmp.eql &a, &b``` — bit equality of any two same-typed
+  operands (integers, floats, pointers, and aggregates, which compare their
+  zero-padded bytes).
+* ```i.cmp.lt``` / ```i.cmp.gt``` / ```i.cmp.le``` / ```i.cmp.ge``` (signed)
+* ```i.cmp.lt.u``` / ```i.cmp.gt.u``` / ```i.cmp.le.u``` / ```i.cmp.ge.u``` (unsigned)
+* ```f.cmp.lt``` / ```f.cmp.gt``` / ```f.cmp.le``` / ```f.cmp.ge``` (IEEE-754
+  ordered: false when either operand is NaN)
+Result is `#bit8` (`0x0` false, otherwise true). Input types must match;
+`i.*` vs `f.*` selects two's-complement vs IEEE-754 interpretation.
 
 ## Integer Arithmetic
 * ```i.add &a, &b -> &r``` / ```i.sub``` / ```i.mul``` / ```i.div``` / ```i.mod```
@@ -343,10 +355,9 @@ Same width rule as integer arithmetic.
 
 ## Literals (canonical text)
 * Ints: `0x1:#bit32`, `0b101:#bit8`; width suffix is required in canonical text.
-* Strings/numbers: `!c: str = "..."` / `!c: numlit = "10.5"` in `data`; a string
-  literal is read with `&1: #byte_buffer = const !c` (data-backed buffer value).
-* A fold-required marker `@size_of` on a constant operand never appears in
-  verified IR — it folds to `const`.
+* Floats: `&1: #fbit64 = const 1.5` (source spelling; the register type fixes the width).
+* Strings: `!c: str = "..."` in `data`; a string literal is read with
+  `&1: #byte_buffer = const !c` (data-backed buffer value).
 
 ## Verification (`lilac-ir::verify`, runs before any backend)
 1. Header present with supported `lilac_ir` version; `target` resolves `@bit_native`.
@@ -354,10 +365,10 @@ Same width rule as integer arithmetic.
 3. Every block ends in exactly one terminator; all branch targets exist.
 4. `call` arity and `in/out` types match callee signature.
 5. `field .name` exists with index in bounds and matching type comment.
-6. Arithmetic/comparison widths match; `i.*`/`f.*` used on allowed widths only.
+6. Arithmetic/comparison operand types match; `i.*` takes bit containers and
+   `f.*` float containers (`cmp.eql` takes any matching pair).
 7. `return` only when all `out` places are definitely assigned.
-8. No `branch.if` on a constant, no fold-required marker (`@size_of`) or
-   `compile.error` survivor. Violations are user-facing
+8. No `branch.if` on a constant and no `compile.error` survivor. Violations are user-facing
    `Diagnostic`s with HIR spans, never backend crashes.
 9. Types are concrete only: no generic declaration and no type parameter
    survives; every applied declaration is monomorphized to a mangle-named item.

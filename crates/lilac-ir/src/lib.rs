@@ -1,4 +1,4 @@
-//! Stable Lilac IR v2 types (printer + verifier land in M2).
+//! Lilac IR types, printer and verifier.
 //!
 //! This crate is the stability boundary: frontend crates build it, backend
 //! crates consume it, and nothing else links LLVM.

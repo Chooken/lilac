@@ -1,6 +1,20 @@
 # Compiler Fix & Simplification Plan
 
-> Status: in progress (2026-10-08). Source: the compiler review of the same date.
+> Status: phases 0–7 done (2026-10-08) except 6.6 (typed LIR, optional) and
+> archiving `docs/superpowers` (left for the owner). Source: the compiler
+> review of the same date.
+>
+> Decisions made while implementing (all in `SPEC.md`):
+> - Assigning a function's own out slot skips `@on_override` (it is
+>   initialization; the old value is still dropped), so a guarded type such as
+>   `Const[T]` can be returned.
+> - A `.` at the start of a line is never a member access (it starts the next
+>   `.Tag` match arm).
+> - Recursive `=>` functions are legal (always-inline is a hint LLVM drops for
+>   recursion); the old recursion `E022` is gone.
+> - Legacy `tests/*.lilac` that no longer parse were deleted; the rest are
+>   checked by `legacy_programs_check_clean`. `lilac-build`/`lilac-package`
+>   stubs and the unemitted `E030`/`E040`/`E041` docs were removed.
 > Goal: make `lib/Standard` compile and run, fix the confirmed bugs, and cut
 > the compiler down to something one person can hold in their head.
 > `SPEC.md` stays normative; every phase lists the spec edits it needs.

@@ -257,7 +257,7 @@ pub trait Emitter {
 /// `rustc`-style human output with snippets and carets.
 #[derive(Debug, Default)]
 pub struct EmitterHuman {
-    /// Reserved for color support (M6); currently always plain text.
+    /// Reserved for color support; currently always plain text.
     pub color: bool,
     /// Show every instantiation-chain frame (default elides past 5).
     pub verbose: bool,
@@ -358,7 +358,7 @@ impl Emitter for EmitterHuman {
     }
 }
 
-/// Newline-delimited JSON, one object per diagnostic (M6 `--error-format=json`).
+/// Newline-delimited JSON, one object per diagnostic (`--error-format=json`).
 #[derive(Debug, Default)]
 pub struct EmitterJson;
 
@@ -414,7 +414,7 @@ impl Emitter for EmitterJson {
     }
 }
 
-/// Minimal JSON string escaper (no `serde` dependency in M0).
+/// Minimal JSON string escaper (the compiler crates stay `serde`-free).
 #[must_use]
 pub fn escape_json(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());

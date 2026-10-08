@@ -14,7 +14,7 @@ fn lower_src(src: &str) -> (String, Diags) {
     assert!(!diags.has_errors(), "{diags:?}");
     let mut lir = lower(&checked.hir, &res, &types, "x86_64-unknown-none", 8);
     let text = lir.to_text();
-    lilac_const::fold(&mut lir);
+    let _ = lilac_const::fold(&mut lir);
     let mut verify_diags = Diags::new();
     assert!(
         lilac_ir::verify(&lir, &mut verify_diags).is_ok() || text.contains("@compile_error"),

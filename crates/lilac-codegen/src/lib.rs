@@ -1,7 +1,7 @@
 //! The `Backend` trait: the frontend never imports LLVM directly.
 //!
 //! Mirrors `rustc_codegen_ssa`: backends implement one trait, the driver picks
-//! with `--backend=` (LLVM in M5, others later).
+//! with `--backend=` (LLVM today).
 
 use lilac_ir::LirModule;
 
@@ -33,7 +33,7 @@ pub trait Backend {
     /// Lowers a verified module to the target.
     fn codegen(&self, module: &LirModule) -> Result<(), String>;
 
-    /// Emits textual LLVM IR for a verified module (M5b).
+    /// Emits textual LLVM IR for a verified module.
     ///
     /// Backends that do not produce LLVM IR keep the default error, which names
     /// the backend so a `--backend=` mismatch is diagnosable.

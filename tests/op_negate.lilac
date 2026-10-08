@@ -1,8 +1,0 @@
-@negate: function (value: @bit32) result: @bit32 {
-    result = @inegate(value)
-}
-
-main: function () nothing {
-    a: @bit32 = 0x1
-    b: @bit8 = -a
-}

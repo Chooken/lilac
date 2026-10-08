@@ -73,6 +73,57 @@ fn lir_snapshots_stable() {
     }
 }
 
+/// Legacy `tests/*.lilac` programs that still check cleanly.
+const LEGACY_CLEAN: &[&str] = &[
+    "match.lilac",
+    "match_else.lilac",
+    "match_enum_2.lilac",
+    "match_return_value.lilac",
+    "object_declaration.lilac",
+    "object_member.lilac",
+    "object_setter.lilac",
+    "op_add.lilac",
+    "op_div.lilac",
+    "op_mod.lilac",
+    "op_mul.lilac",
+    "op_sub.lilac",
+    "raii_init_decl.lilac",
+    "raii_init_use.lilac",
+    "raii_on_copy_decl.lilac",
+    "raii_on_copy_use.lilac",
+    "raii_on_drop_decl.lilac",
+    "raii_on_drop_if.lilac",
+    "raii_on_drop_use.lilac",
+    "raii_on_override_decl.lilac",
+    "raii_on_override_use.lilac",
+];
+
+#[test]
+fn legacy_programs_check_clean() {
+    for name in LEGACY_CLEAN {
+        let output = lilac()
+            .args(["check", &legacy(name)])
+            .output()
+            .expect("runs lilac");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{name} stderr:
+{stderr}"
+        );
+    }
+}
+
+#[test]
+fn unknown_type_is_e023() {
+    fails_with("FAILS_unknown_type.lilac", "E023");
+}
+
+#[test]
+fn unknown_variable_is_e021() {
+    fails_with("FAILS_unknown_variable.lilac", "E021");
+}
+
 fn fails_with(name: &str, code: &str) {
     let output = lilac()
         .args(["check", &legacy(name)])

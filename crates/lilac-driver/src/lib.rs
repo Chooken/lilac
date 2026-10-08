@@ -1,8 +1,6 @@
-//! Driver: `Session` plus pass orchestration.
-//!
-//! M0 runs lex + parse only. Later milestones insert passes here without
-//! changing the shape: each pass is
-//! `fn run(ctxt: &mut Ctxt, unit: &Unit) -> Result<(), ErrorGuaranteed>`.
+//! Driver: `Session` plus the one pipeline (`Session::run`): module load,
+//! parse, resolve, check, lower, fold, runtime injection, DCE, the live
+//! `@compile_error` check, and verification.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -100,7 +98,7 @@ pub struct Session {
     pub target: Target,
     /// Flags.
     pub opts: Opts,
-    /// Optimization level (read by the M5b LLVM pipeline; inert until then).
+    /// Optimization level (read by the LLVM backend).
     pub optimize: OptimizeMode,
     /// Cache directory (reserved for the post-v1 content cache).
     pub cache_dir: Option<PathBuf>,
@@ -265,14 +263,14 @@ impl Session {
         let triple = self.target.to_triple();
         let mut lir = lilac_lower::lower(&checked.hir, &resolved, &types, &triple, ptr_bytes);
         on_stage("lower", &lir);
-        lilac_const::fold(&mut lir);
+        let report = lilac_const::fold(&mut lir);
         on_stage("fold", &lir);
         lir.funcs.extend(lilac_ir::runtime::build_runtime(
             self.target.bit_native_width() / 8,
         ));
         on_stage("runtime", &lir);
         lilac_ir::prune_unreachable(&mut lir, &self.exports);
-        lilac_const::check_live_compile_errors(&lir, &mut self.diags)?;
+        lilac_const::check_live_compile_errors(&lir, &report, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
@@ -534,10 +532,7 @@ mod tests {
 
     #[test]
     fn generic_inline_control_flow_inlines() {
-        // Regression: a generic `=>` body with control flow carries a statement
-        // prelude that each instantiation expands; it now lowers cleanly
-        // instead of deferring (`E030`) or panicking in lowering (`use of
-        // unassigned join temp`).
+        // Regression: a generic `=>` body with control flow lowers cleanly.
         let mut session = Session::new();
         let result = session.compile_lir(
             "gen.lilac",
