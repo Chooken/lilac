@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add semantic highlighting: map the language server's semantic token types to
+  standard TextMate scopes so themes color functions, types, enums, fields,
+  variants, variables, and parameters.
+
 ## 0.3.0
 
 - Add a live LIR view: `lilac.showLir` opens the current project's LIR in a

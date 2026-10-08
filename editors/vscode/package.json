@@ -44,6 +44,20 @@
         "path": "./syntaxes/lilac-ir.tmLanguage.json"
       }
     ],
+    "semanticTokenScopes": [
+      {
+        "language": "lilac",
+        "scopes": {
+          "function": ["entity.name.function"],
+          "type": ["entity.name.type"],
+          "enum": ["entity.name.type.enum"],
+          "property": ["variable.other.property"],
+          "enumMember": ["variable.other.enummember"],
+          "variable": ["variable.other"],
+          "parameter": ["variable.parameter"]
+        }
+      }
+    ],
     "configuration": {
       "title": "Lilac",
       "properties": {
@@ -56,7 +70,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/lirMap.test.js && node scripts/run-grammar-tests.mjs \"test/*.test\"",
+    "test": "node --test test/lirMap.test.js test/semanticTokenScopes.test.js && node scripts/run-grammar-tests.mjs \"test/*.test\"",
     "package": "vsce package"
   },
   "dependencies": {
