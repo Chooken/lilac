@@ -322,6 +322,51 @@ fn definition_survives_a_type_error() {
 }
 
 #[test]
+fn definition_survives_a_syntax_error() {
+    // A syntax error in one item must not clear the index: the valid `foo`
+    // declaration and its call site in `main` still resolve.
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "broken: function ( {\n}\nfoo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let location = definition_at(&client, &uri, 5, 5).expect("definition");
+    assert_eq!(location.uri, uri);
+    assert_eq!(location.range.start.line, 2);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn definition_survives_a_syntax_error_in_project() {
+    // Same as above, but through the project compile path (`main` declares a
+    // valid `foo` and calls it, with a sibling syntax error in the folder).
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-def-syn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let main = dir.join("main.lilac");
+    let text = "broken: function ( {\n}\nfoo: function () nothing {\n}\nmain: function () nothing {\n    foo()\n}\n";
+    std::fs::write(&main, text).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root uri");
+    let main_uri = Url::from_file_path(&main).expect("uri");
+
+    let (client, handle) = start_server();
+    initialize_root(&client, &root);
+    did_open(&client, &main_uri, text);
+    let _ = publish_for(&client, &main_uri);
+
+    let location = definition_at(&client, &main_uri, 5, 5).expect("definition");
+    assert_eq!(location.range.start.line, 2);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn definition_on_a_member_field() {
     let (client, handle) = start_server();
     initialize(&client);

@@ -156,6 +156,28 @@ fn hover_on_whitespace_is_null() {
 }
 
 #[test]
+fn hover_survives_a_syntax_error() {
+    // A syntax error in one item must not clear the index: the valid `foo`
+    // declaration still backs the signature hover at its call site.
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "broken: function ( {\n}\nfoo: function (value: @bit8) result: @bit32 {\n    result = 0x1\n    return\n}\nmain: function () nothing {\n    x: @bit32 = foo(0x1)\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let line = 7; // "    x: @bit32 = foo(0x1)"
+    let character = 17; // inside "foo"
+    let hover = hover_at(&client, &uri, line, character).expect("hover present");
+    let contents = format!("{:?}", hover.contents);
+    assert!(contents.contains("foo"), "{contents}");
+    assert!(contents.contains("@bit32"), "{contents}");
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
 fn hover_on_a_const_use_shows_its_type() {
     let (client, handle) = start_server();
     initialize(&client);

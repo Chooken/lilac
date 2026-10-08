@@ -331,9 +331,12 @@ impl Server {
 
 /// A compiler session for editor use: the CLI's `max_errors` cap (10) is for
 /// terminals, but an editor wants the full diagnostic list, so lift it here.
+/// The session also analyzes tolerantly so hover/definition keep working while
+/// the buffer has syntax or type errors.
 fn new_session() -> Session {
     let mut session = Session::new();
     session.diags.max_errors = usize::MAX;
+    session.retain_partial_analysis = true;
     session
 }
 
