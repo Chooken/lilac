@@ -1,4 +1,4 @@
-lilac_ir = "0.3"
+lilac_ir = "0.4"
 target = "x86_64-unknown-none"
 type #Number {
     tag: #bit8,

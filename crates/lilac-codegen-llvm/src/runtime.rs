@@ -4,11 +4,13 @@
 //! (`.lilac.*` functions built by `lilac_ir::runtime` and lowered through the
 //! normal pointer-ABI function path), so the backend defines only the
 //! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`),
-//! `@lilac_abort` (`llvm.trap` + `unreachable`), and `@syscall` (the Linux
-//! system-call instruction, as inline assembly). Each uses the value ABI from
+//! `@lilac_abort` (`llvm.trap` + `unreachable`), `@syscall` (the Linux
+//! system-call instruction, as inline assembly), and `@trace_head` (the
+//! address of the shadow-stack head global). Each uses the value ABI from
 //! `lilac_ir::builtin_sig`.
 
 use inkwell::builder::Builder;
+use inkwell::module::Linkage;
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
@@ -40,6 +42,26 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@syscall") {
         syscall(lower);
     }
+    if used.contains("@trace_head") {
+        trace_head(lower);
+    }
+}
+
+/// `@trace_head() -> ref ref #.lilac.frame`: the address of the shadow-stack
+/// head (`lilac_ir::trace`), a zeroed pointer-sized internal global.
+fn trace_head(lower: &Lower<'_, '_>) {
+    let ptr = lower.ptr_type();
+    let slot = lower
+        .module()
+        .add_global(ptr, None, ".lilac.trace_head.slot");
+    slot.set_linkage(Linkage::Internal);
+    slot.set_initializer(&ptr.const_null());
+    let function = lower.runtime_fn(".lilac.trace_head", ptr.fn_type(&[], false));
+    let builder = entry(lower, function);
+    checked(
+        builder.build_return(Some(&slot.as_pointer_value())),
+        "return trace head",
+    );
 }
 
 /// Reads the `index`th parameter of a runtime function, raising an ICE when absent.

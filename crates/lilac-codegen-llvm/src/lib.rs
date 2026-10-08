@@ -1179,6 +1179,34 @@ mod tests {
         assert!(!text.contains("@lilac_abort"), "{text}");
     }
 
+    /// `@trace_head` resolves to the emitted `.lilac.trace_head`, which
+    /// returns a zeroed internal pointer global.
+    #[test]
+    fn trace_head_builtin_returns_the_slot() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut insts = vec![LirInst::Alloca {
+            ty: lilac_ir::LirTy::trace_frame().to_ref().to_ref(),
+            place: "head".to_owned(),
+            span: span(),
+        }];
+        call(
+            &mut insts,
+            LirCallee::Builtin("@trace_head".to_owned()),
+            &[],
+            &["head"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(
+            text.contains("@.lilac.trace_head.slot = internal global ptr null"),
+            "{text}"
+        );
+        assert!(text.contains("define ptr @.lilac.trace_head()"), "{text}");
+        assert!(text.contains("call ptr @.lilac.trace_head()"), "{text}");
+    }
+
     /// The builtin aggregate LLVM types come from `builtin_layout`: a
     /// `{ iNative, ptr }` `#byte_buffer` and a 17-field `#format_args` (a count
     /// plus sixteen named pieces, no array).

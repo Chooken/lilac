@@ -94,6 +94,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.context
     }
 
+    /// The LLVM module being populated.
+    pub(crate) fn module(&self) -> &Module<'ctx> {
+        &self.module
+    }
+
     /// The target's architecture, when the triple parses.
     pub(crate) fn arch(&self) -> Option<Arch> {
         self.arch
@@ -233,11 +238,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// IR is deterministic. Opaque shells are created first so fields may refer
     /// to any layout regardless of name order.
     ///
-    /// The builtin aggregates `#byte_buffer`/`#format_args` never appear in
-    /// `module.layouts`, so they are built here from `builtin_layout`, resolving
-    /// `#byte_buffer` before `#format_args` (which embeds it sixteen times).
+    /// The builtin aggregates `#byte_buffer`/`#format_args`/`#.lilac.frame`
+    /// never appear in `module.layouts`, so they are built here from
+    /// `builtin_layout`, resolving `#byte_buffer` first (the other two embed
+    /// it).
     fn define_layouts(&mut self) {
-        for ty in [LirTy::byte_buffer(), LirTy::format_args()] {
+        for ty in [
+            LirTy::byte_buffer(),
+            LirTy::format_args(),
+            LirTy::trace_frame(),
+        ] {
             let Some(layout) = builtin_layout(&ty) else {
                 continue;
             };
@@ -1303,6 +1313,7 @@ fn builtin_symbol(name: &str) -> &str {
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
         "@syscall" => ".lilac.syscall",
+        "@trace_head" => ".lilac.trace_head",
         other => other.strip_prefix('@').unwrap_or(other),
     }
 }

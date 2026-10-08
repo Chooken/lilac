@@ -33,6 +33,13 @@ impl LirTy {
         Self::Named("format_args".to_owned())
     }
 
+    /// `#.lilac.frame`: one shadow-stack record (`prev`, `site`; see
+    /// [`crate::trace`]). The leading `.` keeps it apart from user types.
+    #[must_use]
+    pub fn trace_frame() -> Self {
+        Self::Named(".lilac.frame".to_owned())
+    }
+
     /// `ref #unknown`, the opaque pointer.
     #[must_use]
     pub fn opaque_ref() -> Self {

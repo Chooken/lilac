@@ -17,6 +17,7 @@ use lilac_span::Span;
 mod codec;
 mod dce;
 pub mod runtime;
+pub mod trace;
 mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
@@ -25,7 +26,7 @@ pub use runtime::{build_runtime, entry_point, Entry, Syscalls, System};
 pub use ty::LirTy;
 
 /// IR version header; bump on any normative IR change.
-pub const LILAC_IR_VERSION: &str = "0.3";
+pub const LILAC_IR_VERSION: &str = "0.4";
 
 /// An IR module: versioned header plus data, functions, and layouts.
 #[derive(Clone, Debug)]
@@ -841,6 +842,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
         ),
         "@lilac_abort" => (vec![], vec![]),
         "@syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
+        "@trace_head" => (vec![], vec![LirTy::trace_frame().to_ref().to_ref()]),
         _ => return None,
     };
     Some(BuiltinSig { ins, outs })
@@ -857,8 +859,9 @@ pub fn is_c_abi_type(ty: &LirTy) -> bool {
     !matches!(ty, LirTy::Named(_))
 }
 
-/// Fixed field layouts of the builtin aggregate types (`#byte_buffer`, and
-/// `#format_args`: a count plus sixteen pieces, since LIR has no arrays).
+/// Fixed field layouts of the builtin aggregate types (`#byte_buffer`,
+/// `#format_args`: a count plus sixteen pieces, since LIR has no arrays, and
+/// `#.lilac.frame`: a shadow-stack record, see [`trace`]).
 /// These never appear in `module.layouts`, so the verifier and the backend
 /// both consult this table.
 #[must_use]
@@ -873,6 +876,10 @@ pub fn builtin_layout(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
                 .chain((0..16).map(|index| (format!("p{index}"), LirTy::byte_buffer())))
                 .collect(),
         ),
+        ".lilac.frame" => Some(vec![
+            ("prev".to_owned(), LirTy::trace_frame().to_ref()),
+            ("site".to_owned(), LirTy::byte_buffer()),
+        ]),
         _ => None,
     }
 }
@@ -1731,7 +1738,7 @@ mod tests {
     #[test]
     fn printer_emits_canonical() {
         let text = canonical_module().to_text();
-        let expected = "lilac_ir = \"0.3\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
+        let expected = "lilac_ir = \"0.4\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
         assert_eq!(text, expected);
     }
 
