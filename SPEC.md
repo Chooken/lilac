@@ -198,7 +198,11 @@ Two rules decide whether a `@compile_error(msg)` is an error:
 1. **Reachability.** A `@compile_error` is `E031` exactly when the function
    containing it is reachable from the program's roots (`main`, `--export`
    names) after generic instantiation. One in an uncalled function or an
-   unused hook is silently dropped.
+   unused hook is silently dropped. The `E031` diagnostic notes one shortest
+   call chain from a root, innermost first, in stack-trace form
+   (`at Holder[@bit32].make (main.lilac:5:9)`); compiler glue frames are
+   hidden, and a frame that only takes the next function's address is marked
+   `[address taken]`.
 2. **Constant conditions.** An `if` (statement or value), an `and`/`or`
    operand, or a `match` whose condition or scrutinee is a *constant
    expression* has only its live arm compiled. The dead arm's calls never

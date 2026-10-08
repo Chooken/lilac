@@ -167,7 +167,7 @@ worklist of `(def, type args)` instances emitting HIR directly) →
 drops, drop/copy glue, and constant conditions: only the live arm of an
 `if`/`and`/`or`/`match` on a constant expression is lowered) → runtime
 injection → DCE →
-stack-trace instrumentation (when on) → live `@compile_error` check →
+live `@compile_error` check → stack-trace instrumentation (when on) →
 verify → backend. `Session::run` in `lilac-driver` is the only
 orchestration.
 
@@ -193,6 +193,11 @@ bug fix that changes generated code.
   a builtin layout). `lilac build` turns it on in debug and
   `--stack-traces=on|off` overrides; `check`/`emit-*` leave it off unless
   asked, so IR dumps stay readable.
+- `E031` notes a compile-time call chain in the same form: `prune_unreachable`
+  walks breadth-first and returns a `Reach` (each function's first caller
+  edge), and `check_live_compile_errors` renders `Reach::chain` with
+  `site_text`, hiding `trace::is_hidden` (`.lilac.*`) frames. It runs right
+  after DCE, before `trace::instrument`.
 - `SourceMap::location` (`file:line:col`) and `trace::site_text` (the `at`
   line) are the only formatters. Source-map file names are namespace display
   paths (`Checks/checks.lilac`, `Standard/Io/io.lilac`); a root-namespace
