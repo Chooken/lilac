@@ -340,6 +340,33 @@ fn poison_expr(span: Span) -> HirExpr {
     }
 }
 
+/// Whether a collected signature has concrete types on every slot. A signature
+/// carrying a poison (`TypeId::ERROR`) parameter or return cannot be checked;
+/// the tolerant path poisons that definition's body instead.
+fn signature_usable(sig: &FuncSig) -> bool {
+    sig.params
+        .iter()
+        .chain(sig.returns.iter())
+        .all(|slot| slot.id != TypeId::ERROR)
+}
+
+/// HIR slots for a definition whose signature was not collected: every slot is
+/// poison. This HIR is retained for the editor only and never lowered (errors
+/// exist whenever a signature is missing).
+fn poison_slots(slots: &[lilac_ast::Param]) -> Vec<HirParam> {
+    slots
+        .iter()
+        .map(|slot| HirParam {
+            name: slot.name.clone(),
+            ty: TypeRef {
+                id: TypeId::ERROR,
+                is_ref: false,
+            },
+            span: slot.span,
+        })
+        .collect()
+}
+
 /// Retypes a checked expression, preserving its shape. The identity and
 /// `ref unknown` casts emit no instruction, so only the static type changes.
 fn retype(hir: HirExpr, ty: TypeRef, span: Span) -> HirExpr {
@@ -1733,9 +1760,6 @@ impl Checker<'_> {
             return;
         }
         self.in_progress.insert(resolved.id);
-        let Some(sig) = self.func_sig(resolved.id) else {
-            lilac_error::bug!(item.span, "missing signature for checked function");
-        };
         // Emitted (LIR) names: member functions qualify with their object,
         // hooks mangle with their signature (overloads share the source name).
         let hir_name = match &resolved.kind {
@@ -1764,6 +1788,34 @@ impl Checker<'_> {
                 }
                 None => item.name.clone(),
             },
+        };
+        // Tolerant mode reaches body checking with errors present. A definition
+        // whose signature could not be collected (its item or one of its types
+        // was an error) is poisoned rather than `bug!`-panicking. Errors exist,
+        // so this HIR is never lowered or verified.
+        let Some(sig) = self.func_sig(resolved.id).filter(signature_usable) else {
+            let body = if decl.is_extern {
+                HirBlock {
+                    stmts: Vec::new(),
+                    span: item.span,
+                }
+            } else {
+                HirBlock {
+                    stmts: vec![HirStmt::ExprStmt(poison_expr(item.span))],
+                    span: item.span,
+                }
+            };
+            self.hir.push(HirFunc {
+                def: resolved.id,
+                name: hir_name,
+                params: poison_slots(&decl.params),
+                returns: poison_slots(&decl.returns),
+                is_extern: decl.is_extern,
+                body,
+                span: item.span,
+            });
+            self.in_progress.remove(&resolved.id);
+            return;
         };
         let (outcome, params, returns) = self.check_func_body(decl, &sig, parent);
         match outcome {
@@ -8284,5 +8336,76 @@ mod tests {
         let diags = check_src(src);
         assert!(has_code(&diags, "E026"), "{diags:?}");
         assert!(!has_code(&diags, "E021"), "{diags:?}");
+    }
+
+    #[test]
+    fn tolerant_check_poisons_signatureless_definition() {
+        // A definition whose signature could not be collected (tolerant mode
+        // reaches `check_bodies` with errors present) is poisoned rather than
+        // `bug!`-panicking, and a sibling definition still yields checked HIR
+        // with name/type sites.
+        let src = "helper: function () nothing {\n}\nmain: function () nothing {\n    other()\n}\nother: function () nothing {\n}\n";
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser.parse_program(&mut diags).expect("source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
+        let mut types = Types::new();
+        let mut sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let helper = project
+            .all_items()
+            .find(|(name, _)| *name == "helper")
+            .map(|(_, item)| item.id)
+            .expect("helper resolved");
+        sigs.funcs.remove(&helper);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
+        assert!(
+            !hir.uses.is_empty(),
+            "the sibling call site still yields uses"
+        );
+    }
+
+    #[test]
+    fn tolerant_check_poisons_poison_signature() {
+        // A signature whose type failed to parse is recorded with poison slots
+        // and is not usable: its body is poisoned rather than checked.
+        let src =
+            "broken: function (x: ) nothing {\n    other()\n}\nother: function () nothing {\n}\n";
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser.parse_program(&mut diags).expect("source parses");
+        let module = lilac_resolve::collect(&program, &mut diags);
+        let project = lilac_resolve::ResolvedProject::single(module, file);
+        let mut types = Types::new();
+        let sigs = super::super::collect_sigs(&project, &program, &mut types, &mut diags);
+        let hir = check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
+        let broken = hir
+            .funcs
+            .iter()
+            .find(|f| f.name == "broken")
+            .expect("the poisoned definition still has HIR");
+        assert_eq!(broken.params[0].ty.id, lilac_ty::TypeId::ERROR);
+        assert!(
+            matches!(
+                broken.body.stmts.as_slice(),
+                [lilac_hir::HirStmt::ExprStmt(value)]
+                    if matches!(value.kind, lilac_hir::HirExprKind::Poison)
+            ),
+            "the body is the poison sentinel: {:?}",
+            broken.body.stmts
+        );
     }
 }

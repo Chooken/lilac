@@ -310,6 +310,15 @@ pub fn resolve_type(
     diags: &mut Diags,
     params: &[String],
 ) -> TypeRef {
+    // An empty-name `Type` is the parser's poison sentinel (a user type name is
+    // never empty). The syntax error is already reported, so poison silently:
+    // no `E023` cascade.
+    if ty.name.is_empty() {
+        return TypeRef {
+            id: TypeId::ERROR,
+            is_ref: false,
+        };
+    }
     if let Some(func) = &ty.func {
         let mut param_tys = Vec::with_capacity(func.params.len());
         for param in &func.params {
@@ -689,6 +698,10 @@ fn collect_top_items(items: &[Item], ctx: &mut SigCtx) {
     for item in items {
         if let ItemKind::Private { items } = &item.kind {
             collect_top_items(items, ctx);
+            continue;
+        }
+        // A recovered error item defines nothing: no name lookup, no signature.
+        if matches!(item.kind, ItemKind::Error) {
             continue;
         }
         let file = item.span.file;
@@ -1115,5 +1128,28 @@ mod tests {
             lookup_intrinsic("@compile_error"),
             Some(Intrinsic::CompileError)
         );
+    }
+
+    #[test]
+    fn error_item_and_poison_type_are_silent() {
+        // One good item, one signature whose type failed to parse (the poison
+        // `Type`, empty name), and one recovered item (`ItemKind::Error`). The
+        // good signature is collected; neither the poison type nor the error
+        // item emits `E023`.
+        let (sigs, _types, project, diags) = sigs_of(
+            "good: function (x: @bit8) result: @bit8 {\n    result = x\n}\nbroken: function (x: ) nothing {\n}\nbad: function (\n",
+        );
+        assert_eq!(code_count(&diags, "E023"), 0, "{diags:?}");
+        let good = item(&project, "good");
+        assert!(
+            sigs.funcs.contains_key(&good.id),
+            "the good signature is collected"
+        );
+        let broken = item(&project, "broken");
+        let sig = sigs
+            .funcs
+            .get(&broken.id)
+            .expect("a poison-typed signature is still recorded");
+        assert_eq!(sig.params[0].id, TypeId::ERROR);
     }
 }

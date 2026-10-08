@@ -678,6 +678,12 @@ impl Collector<'_> {
         item: &Item,
         file_hooks: &mut HashMap<String, Vec<ResItem>>,
     ) -> Option<ResItem> {
+        // A recovered `ItemKind::Error` defines nothing. Skip it *before*
+        // allocating a `DefId` so an error item never shifts the ids of the
+        // definitions that survive (the tolerant passes share these ids).
+        if matches!(item.kind, ItemKind::Error) {
+            return None;
+        }
         let id = self.fresh();
         let kind = match &item.kind {
             ItemKind::Func(decl) => {
@@ -1879,5 +1885,26 @@ mod tests {
             resolved.namespace_of(one(&resolved, FileId(2), "deep_item").id),
             Some(NsId(2))
         );
+    }
+
+    #[test]
+    fn error_item_defines_nothing_and_keeps_ids_stable() {
+        // A recovered broken item is an `ItemKind::Error`: it defines nothing,
+        // emits no diagnostic, and must not consume a `DefId` (so the tolerant
+        // passes see stable ids for the items that do survive).
+        let (module, diags) = resolve_src("bad: 1\ngood: function () nothing {}\n");
+        assert!(
+            !diags
+                .diagnostics()
+                .iter()
+                .any(|d| matches!(d.code, "E020" | "E023")),
+            "{diags:?}"
+        );
+        assert_eq!(module.items.len(), 1, "only the good item is defined");
+        let good = module
+            .items
+            .get("good")
+            .expect("the good item is collected");
+        assert_eq!(good.id, DefId(0), "an error item must not consume a DefId");
     }
 }
