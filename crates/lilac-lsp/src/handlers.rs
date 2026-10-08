@@ -1,7 +1,5 @@
 //! Editor request handlers: hover, go-to-definition, and semantic tokens.
 
-use std::collections::HashSet;
-
 use lilac_hir::{NameSite, SemanticKind};
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
@@ -10,7 +8,7 @@ use lsp_types::{
     Range, SemanticToken, SemanticTokens, Url,
 };
 
-use crate::convert::{byte_offset, span_range};
+use crate::convert::{byte_offset, line_len_utf16, span_range};
 use crate::index::{AnalysisIndex, Retained};
 use crate::roots::canonical_file_uri;
 
@@ -182,14 +180,16 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
     };
     let sources = &retained.session.source_map;
 
-    // A span in `semantics` is the more specific source; an item use at the
-    // same span (a `.Variant` tag, which resolves to its owning enum) must not
-    // also color as the item.
-    let semantic_spans: HashSet<(FileId, u32, u32)> = retained
+    // A span in `semantics` is the more specific source; an item use that
+    // overlaps one (a `.Variant` tag, which resolves to its owning enum) must
+    // not also color as the item. Overlap (not just equality) handles the tag,
+    // whose semantic span is the tag token inside the larger `.Tag` use span.
+    let semantic_ranges: Vec<(u32, u32)> = retained
         .index
         .semantics
         .iter()
-        .map(|site| (site.span.file, site.span.lo.0, site.span.hi.0))
+        .filter(|site| site.span.file == file)
+        .map(|site| (site.span.lo.0, site.span.hi.0))
         .collect();
 
     let mut raw: Vec<(Range, u32, u32)> = Vec::new();
@@ -203,7 +203,9 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
     }
     for site in &retained.index.uses {
         if site.span.file != file
-            || semantic_spans.contains(&(site.span.file, site.span.lo.0, site.span.hi.0))
+            || semantic_ranges
+                .iter()
+                .any(|&(lo, hi)| site.span.lo.0 < hi && lo < site.span.hi.0)
         {
             continue;
         }
@@ -224,6 +226,14 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
         }
     }
 
+    let source = sources.file(file).map_or("", |known| known.src.as_str());
+    encode(raw, source)
+}
+
+/// Sorts `raw` by start, drops overlaps, and delta-encodes it as LSP
+/// `SemanticTokens`. Multi-line spans are clamped to their first line (a
+/// semantic token may not cross a newline); lengths are UTF-16 code units.
+fn encode(mut raw: Vec<(Range, u32, u32)>, src: &str) -> SemanticTokens {
     raw.sort_by_key(|(range, token_type, modifiers)| {
         (
             range.start.line,
@@ -239,7 +249,10 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
     let mut occupied: Option<(u32, u32)> = None;
     let mut last_line = 0u32;
     let mut last_start = 0u32;
-    for (range, token_type, modifiers) in raw {
+    for (mut range, token_type, modifiers) in raw {
+        if range.end.line != range.start.line {
+            range.end = Position::new(range.start.line, line_len_utf16(src, range.start.line));
+        }
         let start = (range.start.line, range.start.character);
         let end = (range.end.line, range.end.character);
         // Keep only non-empty tokens that do not overlap the previous one.
@@ -294,5 +307,39 @@ fn semantic_type(kind: SemanticKind) -> (u32, u32) {
         SemanticKind::Variant => (TOKEN_ENUM_MEMBER, 0),
         SemanticKind::BuiltinType => (TOKEN_TYPE, MODIFIER_DEFAULT_LIBRARY),
         SemanticKind::BuiltinFunc => (TOKEN_FUNCTION, MODIFIER_DEFAULT_LIBRARY),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lilac_span::SourceMap;
+
+    #[test]
+    fn encode_clamps_a_newline_crossing_span() {
+        let src = "abc\ndef\n";
+        let mut sources = SourceMap::new();
+        let file = sources.add_file("main.lilac", src);
+        let (range, token_type) =
+            colored(&sources, Span::new(0, 7, file), "object").expect("range");
+        let tokens = encode(vec![(range, token_type, 0)], src);
+        assert_eq!(tokens.data.len(), 1);
+        assert_eq!(tokens.data[0].length, 3); // "abc", not the part past the newline
+        assert_eq!(tokens.data[0].delta_line, 0);
+        assert_eq!(tokens.data[0].delta_start, 0);
+    }
+
+    #[test]
+    fn encode_measures_utf16_lengths() {
+        let src = "éfoo\n"; // 'é' is 2 bytes but one UTF-16 code unit
+        let mut sources = SourceMap::new();
+        let file = sources.add_file("main.lilac", src);
+        let (range, token_type) =
+            colored(&sources, Span::new(2, 5, file), "object").expect("range");
+        assert_eq!(range.start, Position::new(0, 1));
+        assert_eq!(range.end, Position::new(0, 4));
+        let tokens = encode(vec![(range, token_type, 0)], src);
+        assert_eq!(tokens.data.len(), 1);
+        assert_eq!(tokens.data[0].length, 3); // "foo"
     }
 }

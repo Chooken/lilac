@@ -265,10 +265,14 @@ fn full_returns_tokens_for_every_kind() {
         ),
         (ENUM_MEMBER, 0, 3)
     );
-    let variant_use = token_after(&decoded, FIXTURE, ".Red", 0);
+    let variant_use = token_after(&decoded, FIXTURE, ".Red", 1);
     assert_eq!(
-        (variant_use.token_type, variant_use.modifiers),
-        (ENUM_MEMBER, 0)
+        (
+            variant_use.token_type,
+            variant_use.modifiers,
+            variant_use.length
+        ),
+        (ENUM_MEMBER, 0, 3)
     );
 
     // Field declaration and member access.
@@ -339,15 +343,47 @@ fn variant_declaration_and_use_are_enum_members() {
     let decl = token_after(&decoded, text, "Red\n", 0);
     assert_eq!((decl.token_type, decl.length), (ENUM_MEMBER, 3));
 
-    // The `.Variant` use colors as `enumMember`, not as the owning enum.
-    let use_token = token_after(&decoded, text, ".Red", 0);
-    assert_eq!(use_token.token_type, ENUM_MEMBER);
+    // The `.Variant` use colors the tag token as `enumMember`, not as the
+    // owning enum, and never colors the leading dot.
+    let use_token = token_after(&decoded, text, ".Red", 1);
+    assert_eq!((use_token.token_type, use_token.length), (ENUM_MEMBER, 3));
     let (line, character) = position(text, text.find(".Red").expect(".Red"));
     assert!(
         decoded.iter().all(|token| !(token.line == line
             && token.character == character
             && token.token_type == ENUM)),
         "a `.Variant` use must not color as `enum`: {decoded:?}"
+    );
+    assert!(
+        decoded
+            .iter()
+            .all(|token| !(token.line == line && token.character == character)),
+        "a `.Variant` use must not color the leading dot: {decoded:?}"
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn payloaded_variant_colors_name_and_payload_type_separately() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "Optional: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let decoded = decode(&semantic_tokens_at(&client, &uri));
+
+    // The variant name is `enumMember` and does not swallow the type token.
+    let some = token_after(&decoded, text, "Some: @bit32", 0);
+    assert_eq!((some.token_type, some.length), (ENUM_MEMBER, 4));
+    // The payload type keeps its own `type` + `defaultLibrary` token.
+    let payload = token_after(&decoded, text, "Some: @bit32", 6);
+    assert_eq!(
+        (payload.token_type, payload.modifiers, payload.length),
+        (TYPE, DEFAULT_LIBRARY, 6)
     );
 
     shutdown(&client);

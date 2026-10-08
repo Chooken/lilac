@@ -83,8 +83,10 @@ pub struct EnumVariant {
     pub name: String,
     /// Payload type (`None` for payload-less variants).
     pub payload: Option<Type>,
-    /// Name span.
+    /// Whole-variant span (`name` through the payload type, if any).
     pub span: Span,
+    /// Span of the variant name token alone, for semantic tokens.
+    pub name_span: Span,
 }
 
 /// `function (params) returns body`: named multi-return slots, bare `return`.

@@ -549,11 +549,13 @@ impl Parser {
             } else {
                 None
             };
-            let end = payload.as_ref().map_or(ident.span, |ty| ty.span);
+            let name_span = ident.span;
+            let end = payload.as_ref().map_or(name_span, |ty| ty.span);
             variants.push(EnumVariant {
                 name: ident.text,
                 payload,
-                span: join_spans(ident.span, end),
+                span: join_spans(name_span, end),
+                name_span,
             });
             if self.peek().kind == TokenKind::Comma {
                 self.bump();

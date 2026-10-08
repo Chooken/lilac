@@ -343,11 +343,12 @@ pub fn resolve_type(
             is_ref: ty.is_ref,
         };
     }
-    // Record the type's identifier as a semantic site, classified by its
-    // syntactic name (`@`-prefixed builtins vs user types). A function type
-    // returned above and a poison name is skipped.
+    // Record the type's identifier as a semantic site, classified as a builtin
+    // when the name is a known builtin type (`@bit32`, `unknown`, …) and a user
+    // type otherwise. A function type returned above and a poison name is
+    // skipped.
     if !ty.name_span.is_dummy() {
-        let kind = if ty.name.starts_with('@') {
+        let kind = if types.builtin(&ty.name).is_some() {
             SemanticKind::BuiltinType
         } else {
             SemanticKind::UserType
@@ -709,11 +710,11 @@ fn collect_item(
             }
         }
         ItemKind::Enum { variants, .. } => {
-            // Variant declarations color as `enumMember`; each `ast::EnumVariant`
-            // carries its own name span.
+            // Variant declarations color as `enumMember`; record only the name
+            // token so the payload type keeps its own site.
             for variant in variants {
                 ctx.sigs.semantics.push(SemanticSite {
-                    span: variant.span,
+                    span: variant.name_span,
                     kind: SemanticKind::Variant,
                 });
             }
@@ -959,6 +960,35 @@ mod tests {
         );
         assert_eq!(bare.id, TypeId::ERROR);
         assert_eq!(code_count(&diags, "E023"), 2);
+    }
+
+    #[test]
+    fn unknown_type_reference_is_a_builtin() {
+        let (sigs, _, _, diags) = sigs_of("main: function (p: ref unknown) nothing {\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(
+            sigs.semantics
+                .iter()
+                .any(|site| site.kind == SemanticKind::BuiltinType),
+            "{:?}",
+            sigs.semantics
+        );
+    }
+
+    #[test]
+    fn payloaded_variant_records_only_its_name() {
+        let src = "Optional: enum {\n    Some: @bit32\n}\n";
+        let (sigs, _, _, diags) = sigs_of(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let variant = sigs
+            .semantics
+            .iter()
+            .find(|site| site.kind == SemanticKind::Variant)
+            .expect("a variant declaration site");
+        assert_eq!(
+            &src[variant.span.lo.0 as usize..variant.span.hi.0 as usize],
+            "Some"
+        );
     }
 
     #[test]

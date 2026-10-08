@@ -2731,9 +2731,11 @@ impl Checker<'_> {
                 if let lilac_ty::TypeKind::Object(def) = self.types.kind(ty.id) {
                     self.record_use(*span, *def);
                 }
-                // The use resolves to the owning enum; color the tag itself as
-                // its variant (`enumMember`), not as the enum type.
-                self.record_semantic(*span, SemanticKind::Variant);
+                // The use resolves to the owning enum; color only the tag token
+                // (not the leading dot) as its variant (`enumMember`), not as
+                // the enum type. The whole `.Tag` item use is suppressed by the
+                // LSP merge in favor of this more specific site.
+                self.record_semantic(field_span(*span, name), SemanticKind::Variant);
                 let hir = HirExpr {
                     ty,
                     span: *span,
@@ -7470,6 +7472,23 @@ mod tests {
         let builtin_fn = src.find("@i_add_32").expect("intrinsic call");
         assert!(
             has(builtin_fn, lilac_hir::SemanticKind::BuiltinFunc),
+            "{:?}",
+            hir.semantics
+        );
+    }
+
+    #[test]
+    fn bare_tag_semantic_site_is_the_tag_token() {
+        let src = "E: enum {\n    A\n    B\n}\nmain: function () nothing {\n    x: E = .A\n}\n";
+        let (diags, hir) = check_hir(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let dot = src.rfind(".A").expect(".A");
+        assert!(
+            hir.semantics.iter().any(|site| {
+                site.kind == lilac_hir::SemanticKind::Variant
+                    && site.span.lo.0 as usize == dot + 1
+                    && site.span.hi.0 as usize == dot + 2
+            }),
             "{:?}",
             hir.semantics
         );

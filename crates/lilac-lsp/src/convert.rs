@@ -52,6 +52,26 @@ pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
     Some(line_end)
 }
 
+/// UTF-16 code-unit length of `line` in `src`, excluding the newline.
+///
+/// Returns `0` when the line does not exist.
+#[must_use]
+pub(crate) fn line_len_utf16(src: &str, line: u32) -> u32 {
+    let mut start = 0usize;
+    let mut current = 0u32;
+    while current < line {
+        let Some(newline) = src[start..].find('\n') else {
+            return 0;
+        };
+        start += newline + 1;
+        current += 1;
+    }
+    let end = src[start..]
+        .find('\n')
+        .map_or(src.len(), |offset| start + offset);
+    u32::try_from(src[start..end].chars().map(char::len_utf16).sum::<usize>()).unwrap_or(u32::MAX)
+}
+
 /// LSP range for a span, or `None` when it is dummy or its file is unknown.
 pub(crate) fn span_range(sources: &SourceMap, span: Span) -> Option<Range> {
     if span.is_dummy() {
