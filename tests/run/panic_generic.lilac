@@ -1,0 +1,16 @@
+// expect-exit: 101
+// expect-stderr: panic: no value
+// expect-stderr:   at Holder[@bit32].make (panic_generic.lilac:10:9)
+// expect-stderr:   at main (panic_generic.lilac:15:25)
+
+Holder[T]: object {
+    value: T
+
+    make: function (v: T) out: Holder[T] {
+        @panic("no value")
+    }
+}
+
+main: function () nothing {
+    h: Holder[@bit32] = Holder[@bit32].make(0x3)
+}

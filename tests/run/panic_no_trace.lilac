@@ -1,0 +1,9 @@
+// expect-exit: 101
+// build-arg: --stack-traces=off
+// expect-stderr: panic: stop
+// expect-stderr:   at main (panic_no_trace.lilac:8:5)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+
+main: function () nothing {
+    @panic("stop")
+}

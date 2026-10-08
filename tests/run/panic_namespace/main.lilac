@@ -1,0 +1,10 @@
+// expect-exit: 101
+// expect-stderr: panic: requirement failed
+// expect-stderr:   at Checks.require (Checks/checks.lilac:4:9)
+// expect-stderr:   at main (main.lilac:9:5)
+
+using Checks
+
+main: function () nothing {
+    require(0x0)
+}

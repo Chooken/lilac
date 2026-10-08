@@ -1,0 +1,24 @@
+// expect-stdout: before
+// expect-exit: 101
+// expect-stderr: panic: index 3 is out of range
+// expect-stderr:   at check (panic.lilac:13:9)
+// expect-stderr:   at middle (panic.lilac:18:5)
+// expect-stderr:   at main (panic.lilac:23:5)
+// lib: Standard=lib/Standard
+
+using Standard.Io
+
+check: function (index: @bit32) nothing {
+    if @i_greater_than_or_equal_u_32(index, 0x3) {
+        @panic("index 3 is out of range")
+    }
+}
+
+middle: function () nothing {
+    check(0x3)
+}
+
+main: function () nothing {
+    print_line("before")
+    middle()
+}

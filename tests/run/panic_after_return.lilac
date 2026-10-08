@@ -1,0 +1,18 @@
+// expect-exit: 101
+// expect-stderr: panic: late
+// expect-stderr:   at main (panic_after_return.lilac:17:5)
+
+// Recursion through two return paths: an early `return` at zero, and the
+// fall-through end of the body.
+deep: function (n: @bit32) nothing {
+    if @i_less_than_u_32(n, 0x1) {
+        return
+    }
+    deep(@i_sub_32(n, 0x1))
+}
+
+main: function () nothing {
+    deep(0x5)
+    deep(0x0)
+    @panic("late")
+}

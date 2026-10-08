@@ -1,0 +1,6 @@
+// Panics when `ok` is zero.
+require: function (ok: @bit32) nothing {
+    if @i_less_than_u_32(ok, 0x1) {
+        @panic("requirement failed")
+    }
+}

@@ -11,6 +11,8 @@
 //!
 //! - `// expect-stdout: <line>` — one expected stdout line (repeatable; lines
 //!   are joined with `\n`, and the program's `\r\n` is normalized to `\n`).
+//! - `// expect-stderr: <line>` — one expected stderr line, like
+//!   `expect-stdout`. With none, stderr is not checked.
 //! - `// expect-exit: <n>` — the expected exit code (default `0`).
 //! - `// expect-error: <code>` — the program must fail `lilac check` with this
 //!   diagnostic code; nothing is linked or run.
@@ -20,6 +22,11 @@
 //! - `// lib: <Name>=<dir>` — mounts a library (`--lib`); `<dir>` is relative
 //!   to the repository root (repeatable).
 //! - `// libc` — builds with `--libc` (the program uses `Standard.C`).
+//! - `// build-arg: <flag>` — an extra `lilac build` flag (repeatable).
+//!
+//! `lilac` runs in `tests/run` and is given the program's bare name, so
+//! source locations (in diagnostics and stack traces) read the same on every
+//! machine.
 //!
 //! A program is a single `*.lilac` file or a folder project, whose header is
 //! read from its `main.lilac`.
@@ -50,6 +57,8 @@ struct Toolchain {
 #[derive(Default)]
 struct Expect {
     stdout: Vec<String>,
+    stderr: Vec<String>,
+    build_args: Vec<String>,
     exit: i32,
     error: Option<String>,
     pending: Option<String>,
@@ -68,6 +77,12 @@ fn parse_header(text: &str) -> Expect {
             expect
                 .stdout
                 .push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        } else if let Some(rest) = comment.strip_prefix("expect-stderr:") {
+            expect
+                .stderr
+                .push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        } else if let Some(rest) = comment.strip_prefix("build-arg:") {
+            expect.build_args.push(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("expect-exit:") {
             expect.exit = rest.trim().parse().expect("expect-exit is an integer");
         } else if let Some(rest) = comment.strip_prefix("expect-error:") {
@@ -108,11 +123,13 @@ fn run_one(
     scratch: &Path,
 ) -> Result<(), String> {
     let name = source.file_stem().unwrap().to_string_lossy().into_owned();
+    let file = source.file_name().expect("program has a name");
     if let Some(code) = &expect.error {
         let out = lilac()
+            .current_dir(run_dir())
             .arg("check")
             .args(&expect.libs)
-            .arg(source)
+            .arg(file)
             .output()
             .expect("runs lilac");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -128,11 +145,13 @@ fn run_one(
     let exe = scratch.join(format!("{name}.exe"));
     let mut build = lilac();
     build
+        .current_dir(run_dir())
         .args(["build", "-q", "-o"])
         .arg(&exe)
         .arg(format!("--build-dir={}", scratch.join("build").display()))
         .args(&expect.libs)
-        .arg(source)
+        .args(&expect.build_args)
+        .arg(file)
         .env("LILAC_LINKER", &toolchain.clang);
     match &toolchain.sysroot {
         Some(sysroot) if !expect.libc => build.env("LILAC_SYSROOT", sysroot),
@@ -156,6 +175,15 @@ fn run_one(
         return Err(format!(
             "stdout mismatch:\n got: {stdout:?}\nwant: {want:?}"
         ));
+    }
+    if !expect.stderr.is_empty() {
+        let stderr = String::from_utf8_lossy(&run.stderr).replace("\r\n", "\n");
+        let want = expect.stderr.join("\n") + "\n";
+        if stderr != want {
+            return Err(format!(
+                "stderr mismatch:\n got: {stderr:?}\nwant: {want:?}"
+            ));
+        }
     }
     if run.status.code() != Some(expect.exit) {
         return Err(format!(
