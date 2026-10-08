@@ -1,0 +1,8 @@
+LIBRARY kernel32.dll
+EXPORTS
+    ExitProcess
+    GetProcessHeap
+    GetStdHandle
+    HeapAlloc
+    HeapFree
+    WriteFile

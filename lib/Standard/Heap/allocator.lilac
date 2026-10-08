@@ -1,13 +1,13 @@
-using Standard.C
+// The heap allocator, over the OS (no C library).
 
-CAllocator: object {
+Allocator: object {
 
     // A zeroed allocation, so the first assignment drops a zero value.
     create[T]: function() allocation: ref T {
-        allocation = calloc(0x1, @size_of(T)) as ref T
+        allocation = @os_alloc(@size_of(T)) as ref T
     }
 
     destroy[T]: function(allocation: ref T) nothing {
-        free(allocation as ref unknown)
+        @os_free(allocation as ref unknown)
     }
 }

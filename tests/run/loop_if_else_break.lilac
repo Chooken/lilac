@@ -1,6 +1,7 @@
 // expect-exit: 5
+// lib: Standard=lib/Standard
 
-exit: extern function (code: @bit32) nothing
+using Standard.Process
 
 main: function () nothing {
     i: @bit32 = 0x0

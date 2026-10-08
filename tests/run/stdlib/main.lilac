@@ -1,4 +1,5 @@
 // lib: Standard=lib/Standard
+// libc
 // expect-stdout: OK
 // Uses every `Standard` type so the whole library is instantiated, checked
 // and emitted. Prints `OK` and exits 0 when every computed check matched.

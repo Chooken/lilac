@@ -1,0 +1,33 @@
+// lib: Standard=lib/Standard
+// expect-stdout: Hello, world
+// expect-stdout: é!
+// expect-exit: 5
+// Standard.Io, Standard.Process and Box (over Standard.Heap.Allocator),
+// with no C library.
+
+using Standard
+using Standard.Io
+using Standard.Process
+
+Noisy: object {
+    char: @bit32
+
+    // `Box.create` assigns into zeroed memory, dropping a zero `Noisy`
+    // first, so zero prints nothing.
+    @on_drop: function (self) nothing {
+        if @i_greater_than_u_32(self.char, 0x0) {
+            print_char(self.char)
+        }
+    }
+}
+
+main: function () nothing {
+    print("Hello, ")
+    print_line("world")
+    print_error_line("to stderr")
+    {
+        b: Box[Noisy] = Box[Noisy].create(Noisy { char = 0xE9 })
+    }
+    print_line("!")
+    exit(0x5)
+}

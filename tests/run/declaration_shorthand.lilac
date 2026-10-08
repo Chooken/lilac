@@ -1,6 +1,7 @@
 // expect-exit: 6
+// lib: Standard=lib/Standard
 
-exit: extern function (code: @bit32) nothing
+using Standard.Process
 
 Pair: object {
     a: @bit32

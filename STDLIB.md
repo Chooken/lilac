@@ -288,6 +288,12 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 
 ### 3.5 `Standard.Io`
 
+> **Today:** `print`, `print_line`, `print_char` (a code point, as UTF-8),
+> `print_byte`, `print_error` and `print_error_line`, over the compiler's
+> `@os_write`. `Standard.Process.exit` and `Standard.Heap.Allocator` likewise
+> sit on `@os_exit` and `@os_alloc`/`@os_free`, not on `Standard.C`. The
+> inventory below is the target design.
+
 | Type | Purpose | Key methods |
 |---|---|---|
 | `File` | OS file handle (`@on_drop` closes) | `open(path, mode) Result[File, IoError]`, `create`, `read(buf) Result[@bit_native, IoError]`, `read_to_string() Result[String, IoError]`, `write(bytes)`, `write_str`, `write_all`, `seek(off, whence)`, `size() Result[@bit_native, IoError]`, `flush`, `close` |
@@ -308,6 +314,11 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 ---
 
 ### 3.6 `Standard.C` (platform layer — libc FFI)
+
+> **Being phased out.** Programs no longer link a C library by default; the
+> compiler's OS layer (`@os_*`) replaces it piece by piece, and code that
+> still uses `Standard.C` builds with `lilac build --libc`. See
+> `docs/build-command-plan.md`.
 
 The single non-portable namespace. Everything here is either a raw `extern`
 declaration or a thin wrapper over one. Above this line the library is

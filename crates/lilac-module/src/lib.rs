@@ -124,7 +124,57 @@ pub fn load_with_status(
             true,
         );
     };
-    load_from(root, root_entries, None, libraries, fs, sources, diags)
+    load_from(
+        root,
+        root_entries,
+        None,
+        None,
+        libraries,
+        fs,
+        sources,
+        diags,
+    )
+}
+
+/// Loads one source file as the root namespace's only file, plus everything
+/// its `using`s reach (mounted libraries, or folders next to the file). The
+/// file's siblings are not part of it; `name` is the path it was read from
+/// and its name in diagnostics.
+pub fn load_file(
+    name: &str,
+    src: &str,
+    libraries: &[(String, PathBuf)],
+    fs: &mut dyn Fs,
+    sources: &mut SourceMap,
+    diags: &mut Diags,
+) -> (Project, bool) {
+    let path = PathBuf::from(name);
+    let root = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let file = RootFile {
+        name,
+        src,
+        path: &path,
+    };
+    load_from(
+        &root,
+        Vec::new(),
+        Some(file),
+        None,
+        libraries,
+        fs,
+        sources,
+        diags,
+    )
+}
+
+/// A root file read before loading ([`load_file`]).
+struct RootFile<'a> {
+    name: &'a str,
+    src: &'a str,
+    path: &'a Path,
 }
 
 /// Loads one namespace (`Standard.Heap`) and everything it `using`s, with an
@@ -141,6 +191,7 @@ pub fn load_namespace(
     load_from(
         root,
         Vec::new(),
+        None,
         Some(namespace),
         libraries,
         fs,
@@ -150,11 +201,14 @@ pub fn load_namespace(
 }
 
 /// The `using` fixpoint, starting from the root namespace's `root_entries`
-/// and, when given, the namespace `seed`. Reaching a namespace also reaches
-/// its ancestors, so ancestor reach never depends on what else was imported.
+/// (or the already-read `root_file`) and, when given, the namespace `seed`.
+/// Reaching a namespace also reaches its ancestors, so ancestor reach never
+/// depends on what else was imported.
+#[allow(clippy::too_many_arguments)]
 fn load_from(
     root: &Path,
     root_entries: Vec<PathBuf>,
+    root_file: Option<RootFile<'_>>,
     seed: Option<&str>,
     libraries: &[(String, PathBuf)],
     fs: &mut dyn Fs,
@@ -185,6 +239,20 @@ fn load_from(
         }
     }
 
+    if let Some(file) = root_file {
+        let name = file.name.to_owned();
+        failed |= loader.add_file(
+            &mut files,
+            0,
+            name,
+            file.path,
+            file.src.to_owned(),
+            fs,
+            sources,
+            diags,
+        );
+    }
+
     while let Some(ns) = loader.queue.pop_front() {
         let mut file_paths: Vec<PathBuf> = loader.listings[ns]
             .iter()
@@ -202,32 +270,7 @@ fn load_from(
                 return (loader.project(files), true);
             };
             let name = file_name_str(&path);
-            let file_id = sources.add_file(&name, &src);
-            let usings = scan_usings(&src, file_id, &loader.namespaces[ns].path);
-            let index = files.len();
-            files.push(FileUnit {
-                name,
-                path: path.clone(),
-                file: file_id,
-                ns,
-                src,
-                usings: usings.iter().map(|(path, _)| path.clone()).collect(),
-                using_spans: usings.iter().map(|(_, span)| *span).collect(),
-            });
-            loader.namespaces[ns].files.push(index);
-
-            for (target_path, span) in usings {
-                if !loader.reach(&target_path, fs) {
-                    diags.emit(
-                        Diagnostic::error(
-                            "E025",
-                            format!("cannot find module folder `{target_path}`"),
-                        )
-                        .label(span, true, "imported here"),
-                    );
-                    failed = true;
-                }
-            }
+            failed |= loader.add_file(&mut files, ns, name, &path, src, fs, sources, diags);
         }
     }
 
@@ -247,6 +290,47 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
+    /// Adds one read file to namespace `ns` and reaches its `using`s.
+    /// Returns whether a `using` target was missing (`E025`).
+    #[allow(clippy::too_many_arguments)]
+    fn add_file(
+        &mut self,
+        files: &mut Vec<FileUnit>,
+        ns: usize,
+        name: String,
+        path: &Path,
+        src: String,
+        fs: &mut dyn Fs,
+        sources: &mut SourceMap,
+        diags: &mut Diags,
+    ) -> bool {
+        let file_id = sources.add_file(&name, &src);
+        let usings = scan_usings(&src, file_id, &self.namespaces[ns].path);
+        let index = files.len();
+        files.push(FileUnit {
+            name,
+            path: path.to_path_buf(),
+            file: file_id,
+            ns,
+            src,
+            usings: usings.iter().map(|(path, _)| path.clone()).collect(),
+            using_spans: usings.iter().map(|(_, span)| *span).collect(),
+        });
+        self.namespaces[ns].files.push(index);
+
+        let mut failed = false;
+        for (target_path, span) in usings {
+            if !self.reach(&target_path, fs) {
+                diags.emit(
+                    Diagnostic::error("E025", format!("cannot find module folder `{target_path}`"))
+                        .label(span, true, "imported here"),
+                );
+                failed = true;
+            }
+        }
+        failed
+    }
+
     /// Queues the namespace at dotted `path` and its ancestors (each once).
     /// Returns `false` when `path`'s own folder cannot be listed; a missing
     /// ancestor folder (a library's parent) is skipped.
@@ -757,6 +841,31 @@ mod tests {
             .map(|ns| ns.path.as_str())
             .collect();
         assert_eq!(paths, ["", "Std", "Std.C"]);
+    }
+
+    /// A single file loads the libraries it `using`s, but not its siblings.
+    #[test]
+    fn single_file_loads_its_libraries_not_its_siblings() {
+        let root = Path::new("/w");
+        let mut fs = MemFs::new();
+        fs.add(root, "app/main.lilac", "using Std.Io\n");
+        fs.add(root, "app/sibling.lilac", "x: function () nothing {\n}\n");
+        fs.add(root, "std/Io/io.lilac", "print: function () nothing {\n}\n");
+        let libraries = vec![("Std".to_owned(), join_rel(root, "std"))];
+        let main = join_rel(root, "app/main.lilac");
+        let mut sources = SourceMap::default();
+        let mut diags = Diags::default();
+        let (project, failed) = load_file(
+            &main.display().to_string(),
+            "using Std.Io\n",
+            &libraries,
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
+        assert!(!failed, "{:?}", diags.diagnostics());
+        let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, [main.display().to_string().as_str(), "io.lilac"]);
     }
 
     #[test]

@@ -1,6 +1,10 @@
-//! Run tests: every `tests/run/*.lilac` is built with `lilac build --libc`
-//! (linking through the toolchain `clang`, passed as `LILAC_LINKER`),
+//! Run tests: every `tests/run/*.lilac` is built with `lilac build`,
 //! executed, and compared against its header.
+//!
+//! Programs build natively (no C library) on Windows, with a development
+//! sysroot assembled from `toolchain/` and the LLVM tree's `lld` (see
+//! `support::sysroot`). Elsewhere, and for `// libc` programs, they build
+//! with `--libc`, linking through the toolchain `clang` (as `LILAC_LINKER`).
 //!
 //! Header comments (any order, before or between items):
 //!
@@ -14,12 +18,15 @@
 //!   when the fix lands.
 //! - `// lib: <Name>=<dir>` — mounts a library (`--lib`); `<dir>` is relative
 //!   to the repository root (repeatable).
+//! - `// libc` — builds with `--libc` (the program uses `Standard.C`).
 //!
 //! A program is a single `*.lilac` file or a folder project, whose header is
 //! read from its `main.lilac`.
 //!
-//! Programs print with `extern putchar` and set the exit code with
-//! `extern exit`.
+//! Programs print with `Standard.Io` and set the exit code with
+//! `Standard.Process.exit`.
+
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,23 +39,11 @@ fn run_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/run")
 }
 
-/// Locates the toolchain `clang`: `%LLVM_SYS_181_PREFIX%\bin\clang[.exe]`, else
-/// `clang` on `PATH`. `None` when neither runs.
-fn clang() -> Option<PathBuf> {
-    if let Ok(prefix) = std::env::var("LLVM_SYS_181_PREFIX") {
-        let name = if cfg!(windows) { "clang.exe" } else { "clang" };
-        let candidate = Path::new(&prefix).join("bin").join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    let path = PathBuf::from("clang");
-    Command::new(&path)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|_| path)
+/// How programs are linked.
+struct Toolchain {
+    clang: PathBuf,
+    /// The native sysroot; `None` builds every program with `--libc`.
+    sysroot: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -58,6 +53,7 @@ struct Expect {
     error: Option<String>,
     pending: Option<String>,
     libs: Vec<String>,
+    libc: bool,
 }
 
 fn parse_header(text: &str) -> Expect {
@@ -75,6 +71,8 @@ fn parse_header(text: &str) -> Expect {
             expect.exit = rest.trim().parse().expect("expect-exit is an integer");
         } else if let Some(rest) = comment.strip_prefix("expect-error:") {
             expect.error = Some(rest.trim().to_owned());
+        } else if comment.trim_end() == "libc" {
+            expect.libc = true;
         } else if let Some(rest) = comment.strip_prefix("pending:") {
             expect.pending = Some(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("lib:") {
@@ -102,7 +100,12 @@ fn programs() -> Vec<PathBuf> {
 }
 
 /// Compiles, links and runs one program; `Err` describes the first mismatch.
-fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Result<(), String> {
+fn run_one(
+    source: &Path,
+    expect: &Expect,
+    toolchain: &Toolchain,
+    scratch: &Path,
+) -> Result<(), String> {
     let name = source.file_stem().unwrap().to_string_lossy().into_owned();
     if let Some(code) = &expect.error {
         let out = lilac()
@@ -122,15 +125,19 @@ fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Resu
     }
 
     let exe = scratch.join(format!("{name}.exe"));
-    let out = lilac()
-        .args(["build", "--libc", "-q", "-o"])
+    let mut build = lilac();
+    build
+        .args(["build", "-q", "-o"])
         .arg(&exe)
         .arg(format!("--build-dir={}", scratch.join("build").display()))
         .args(&expect.libs)
         .arg(source)
-        .env("LILAC_LINKER", clang)
-        .output()
-        .expect("runs lilac");
+        .env("LILAC_LINKER", &toolchain.clang);
+    match &toolchain.sysroot {
+        Some(sysroot) if !expect.libc => build.env("LILAC_SYSROOT", sysroot),
+        _ => build.arg("--libc"),
+    };
+    let out = build.output().expect("runs lilac");
     if !out.status.success() {
         return Err(format!(
             "build failed:\n{}",
@@ -160,10 +167,20 @@ fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Resu
 }
 
 fn run_all(pending: bool) {
-    let Some(clang) = clang() else {
+    let Some(clang) = support::clang() else {
         eprintln!("skipping run tests: no clang (set LLVM_SYS_181_PREFIX)");
         return;
     };
+    let sysroot = if cfg!(windows) {
+        let Some(sysroot) = support::sysroot() else {
+            eprintln!("skipping run tests: no lld in LLVM_SYS_181_PREFIX");
+            return;
+        };
+        Some(sysroot)
+    } else {
+        None
+    };
+    let toolchain = Toolchain { clang, sysroot };
     let scratch = std::env::temp_dir().join(format!(
         "lilac-run-{}-{}",
         std::process::id(),
@@ -184,7 +201,7 @@ fn run_all(pending: bool) {
             continue;
         }
         ran += 1;
-        if let Err(why) = run_one(&source, &expect, &clang, &scratch) {
+        if let Err(why) = run_one(&source, &expect, &toolchain, &scratch) {
             let note = expect
                 .pending
                 .as_deref()

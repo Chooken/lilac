@@ -1,6 +1,7 @@
 // expect-exit: 9
+// lib: Standard=lib/Standard
 
-exit: extern function (code: @bit32) nothing
+using Standard.Process
 
 Maybe[T]: enum {
     Some: T

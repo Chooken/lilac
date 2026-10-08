@@ -115,7 +115,7 @@ Why this fits Lilac:
 ### Install layout
 
 ```
-lilac(.exe)
+bin/lilac(.exe)
 lib/lilac/bin/lld(.exe)                       one binary, run as `lld -flavor <link|gnu|darwin>`
 lib/lilac/x86_64-pc-windows-msvc/kernel32.lib
 lib/lilac/aarch64-apple-macos/libSystem.tbd
@@ -362,6 +362,32 @@ when its step *starts*:
   decides whether to skip.
 
 ## Step 2: native runtime on Windows (the default becomes native)
+
+**Status: done.** Differences from the outline below:
+
+- The OS layer is reached through four intrinsics, `@os_write`, `@os_exit`,
+  `@os_alloc` and `@os_free`, which call the runtime's `.lilac.*`
+  functions. `.lilac.start` is LIR too (`lilac_ir::entry_point`), so the
+  backend's native work is only the C-runtime replacements: `memcpy`,
+  `memmove`, `memset`, and on Windows `_fltused` and `__chkstk`.
+- Under `--libc` on Windows, `.lilac.exit` calls the C library's `exit` so
+  C `stdio` buffers flush. On Linux and macOS the OS layer calls the C
+  library for now (`write`, `calloc`/`free`, `exit`), so `--libc` builds
+  there use `Standard.Io` unchanged; steps 3 and 4 replace that.
+- On an OS-less target (`check`'s default `x86_64-unknown-none`) the four
+  `.lilac.*` functions are `extern` declarations, so libraries using
+  `Standard.Io` still check.
+- `Standard.Io` is `print`, `print_line`, `print_char` (a code point as
+  UTF-8, since character literals are `@bit32`), `print_byte`,
+  `print_error` and `print_error_line`. `Heap/c_allocator` is replaced by
+  `Heap/allocator` (`Allocator`), and `Box` uses it: phase-out item 1 is
+  done, and item 2 has started.
+- A file argument now loads the libraries its `using`s name
+  (`lilac_module::load_file`), so single-file programs can use
+  `Standard.Io`.
+- The install layout puts `lilac` in `bin/`, so `<exe dir>/../lib/lilac` is
+  the sysroot. `toolchain/README.md` has the `llvm-lib` commands for the
+  checked-in stubs (both x64 and arm64).
 
 - **The OS layer in `lilac-ir::runtime`.** `build_runtime` takes the target
   OS. On Windows it adds:

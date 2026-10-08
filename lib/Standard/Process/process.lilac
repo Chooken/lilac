@@ -1,0 +1,6 @@
+// Ending the process.
+
+// Ends the process with `code`. Does not return.
+exit: function (code: @bit32) nothing {
+    @os_exit(code)
+}

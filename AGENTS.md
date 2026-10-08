@@ -88,17 +88,41 @@
   and `-o` override it.
 - `Target::link_info` in `lilac-target` is the single table of per-OS link
   facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
+- **Native mode is the default** (`Entry::Native`, Windows only so far;
+  Linux and macOS exit 2 asking for `--libc`). It links with the sysroot's
+  `lld` and `toolchain/` import stubs (`kernel32.lib`), no C library: the
+  sysroot is `LILAC_SYSROOT`, else `<exe dir>/../lib/lilac`
+  (`scripts/package.sh` builds that layout). The program is entered at
+  `.lilac.start` (`lilac_ir::entry_point`: calls `main`, then exits 0), and
+  the backend defines `memcpy`/`memmove`/`memset` (marked `no-builtins`),
+  plus `_fltused` and `__chkstk` on Windows (`lilac-codegen-llvm`'s
+  `native.rs`).
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
   else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`). It is the
-  permanent opt-in for static C libraries. Native mode (the sysroot's `lld`,
-  found via `LILAC_SYSROOT` or `<exe dir>/../lib/lilac`, with `.lilac.start`)
-  is not implemented yet; see `docs/build-command-plan.md`.
+  permanent opt-in for static C libraries, and how code using `Standard.C`
+  builds while that is phased out. Shared C libraries work in native mode
+  (an `extern` plus `--link-arg=`); free their memory with their own free
+  function, and note a native exit skips C `atexit`/`stdio` flushing.
+- **The OS layer** is the `@os_write`/`@os_exit`/`@os_alloc`/`@os_free`
+  intrinsics, which call the runtime's `.lilac.write`/`.exit`/`.alloc`/`.free`.
+  Those are LIR (`lilac_ir::runtime`, chosen by `System`): `kernel32` calls
+  on Windows (with the C library's `exit` under `--libc`, so `stdio`
+  flushes), the C library on Linux and macOS for now, and bare `extern`
+  declarations on OS-less targets. The driver's `Session.entry` picks
+  the entry; a runtime `extern` the program already declares is not
+  duplicated. `Standard.Io`, `Standard.Process` and `Standard.Heap.Allocator`
+  sit on these.
 - `build` sets `Session.require_entry` (no root `main` is `E032`) and
   `Session.progress`, a `Stage`/`StageEvent` callback. The driver only calls
   it; timing and printing stay in `lilac-cli` (`progress.rs`), so the driver
   stays I/O-free.
-- Run tests build with `lilac build --libc -q -o …`, with `LILAC_LINKER` set
-  to the toolchain `clang`.
+- A file argument is compiled with `Session::compile_file_with_stages`
+  (`lilac_module::load_file`): the file is the root namespace's only file,
+  and its `using`s load mounted libraries (and folders next to it).
+- Run tests build natively on Windows, with a development sysroot assembled
+  under cargo's test scratch folder from `toolchain/` and
+  `$LLVM_SYS_181_PREFIX/bin/lld` (`tests/support`); `// libc` programs and
+  other hosts use `--libc` with `LILAC_LINKER` set to the toolchain `clang`.
 
 ## Language server (lilac-lsp)
 

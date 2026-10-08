@@ -25,6 +25,7 @@ use inkwell::values::{
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
+use lilac_codegen::Entry;
 use lilac_error::{bug, Diagnostic};
 use lilac_ir::{
     builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirFunc, LirInst, LirModule,
@@ -102,7 +103,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ///
     /// An `extern` signature outside the supported C scalar/pointer set (or
     /// with more than one out) is `E028`.
-    pub(crate) fn run(&mut self) -> Result<(), Diagnostic> {
+    pub(crate) fn run(&mut self, entry: Entry) -> Result<(), Diagnostic> {
         self.define_layouts();
         self.define_data();
         self.emit_runtime();
@@ -112,7 +113,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
-        self.emit_entry_wrapper();
+        if entry == Entry::CMain {
+            self.emit_entry_wrapper();
+        }
         Ok(())
     }
 

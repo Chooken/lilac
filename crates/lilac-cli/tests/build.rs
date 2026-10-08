@@ -1,32 +1,22 @@
 //! `lilac build`: the build folder, progress output, and failure modes.
 //!
 //! Every case runs in its own temporary folder. Cases that link use
-//! `--libc` with the toolchain `clang` (as `LILAC_LINKER`) and are skipped
-//! when it is missing.
+//! `--libc` with the toolchain `clang` (as `LILAC_LINKER`), or the native
+//! development sysroot, and are skipped when it is missing.
+
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use support::clang;
+
 const HELLO: &str = "putchar: extern function (c: @bit32) result: @bit32\n\
                      main: function () nothing {\n    r: @bit32 = putchar('H')\n    r = putchar(0xA)\n}\n";
 
-/// Locates the toolchain `clang`, as `tests/run.rs` does.
-fn clang() -> Option<PathBuf> {
-    if let Ok(prefix) = std::env::var("LLVM_SYS_181_PREFIX") {
-        let name = if cfg!(windows) { "clang.exe" } else { "clang" };
-        let candidate = Path::new(&prefix).join("bin").join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    let path = PathBuf::from("clang");
-    Command::new(&path)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|_| path)
-}
+/// Prints through the OS layer, so it builds natively.
+const NATIVE_HELLO: &str = "main: function () nothing {\n    s: @byte_buffer = \"Hi\\n\"\n    \
+                            @os_write(0x1, @byte_buffer_ptr(s), @byte_buffer_len(s))\n    @os_exit(0x3)\n}\n";
 
 /// A fresh temporary folder for one case.
 fn scratch(case: &str) -> PathBuf {
@@ -272,15 +262,74 @@ fn missing_linker_is_a_clear_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Until the native runtime lands, a build without `--libc` says to use it.
+/// A native build links with the sysroot's `lld` and needs no C library.
 #[test]
-fn native_mode_points_at_libc() {
+fn native_build_runs_without_libc() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(sysroot) = support::sysroot() else {
+        eprintln!("skipping: no lld");
+        return;
+    };
     let dir = scratch("native");
-    std::fs::write(dir.join("hello.lilac"), HELLO).expect("writes source");
-    let out = build(&dir, &["-q", "hello.lilac"], None);
+    std::fs::write(dir.join("hi.lilac"), NATIVE_HELLO).expect("writes source");
+    for mode in ["--mode=debug", "--release"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
+        command
+            .args(["build", mode, "hi.lilac"])
+            .current_dir(&dir)
+            .env("NO_COLOR", "1")
+            .env("LILAC_SYSROOT", &sysroot);
+        let out = command.output().expect("runs lilac");
+        let err = stderr(&out);
+        assert!(out.status.success(), "{err}");
+        assert!(err.contains("Linking hi.exe (lld)"), "{err}");
+    }
+    for mode in ["debug", "release"] {
+        let run = Command::new(dir.join("build").join(mode).join("hi.exe"))
+            .output()
+            .expect("runs hi");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "Hi\n");
+        assert_eq!(run.status.code(), Some(3));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A native build with no sysroot says where it looked.
+#[test]
+fn missing_sysroot_is_a_clear_error() {
+    if !cfg!(windows) {
+        return;
+    }
+    let dir = scratch("no-sysroot");
+    std::fs::write(dir.join("hi.lilac"), NATIVE_HELLO).expect("writes source");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
+    command
+        .args(["build", "-q", "hi.lilac"])
+        .current_dir(&dir)
+        .env("LILAC_SYSROOT", dir.join("missing"));
+    let out = command.output().expect("runs lilac");
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
-    assert!(err.contains("use --libc"), "{err}");
+    assert!(err.contains("LILAC_SYSROOT"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Linux and macOS have no native runtime yet: building for them without
+/// `--libc` is a usage error.
+#[test]
+fn native_mode_elsewhere_points_at_libc() {
+    let dir = scratch("native-elsewhere");
+    std::fs::write(dir.join("hello.lilac"), HELLO).expect("writes source");
+    let out = build(
+        &dir,
+        &["-q", "--target=x86_64-unknown-linux-gnu", "hello.lilac"],
+        None,
+    );
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("build with --libc"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

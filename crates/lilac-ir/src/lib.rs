@@ -21,7 +21,7 @@ mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::prune_unreachable;
-pub use runtime::build_runtime;
+pub use runtime::{build_runtime, entry_point, Entry, System};
 pub use ty::LirTy;
 
 /// IR version header; bump on any normative IR change.

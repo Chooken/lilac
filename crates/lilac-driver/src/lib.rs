@@ -7,11 +7,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
-use lilac_ir::LirModule;
+use lilac_ir::{LirModule, System};
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
 
-pub use lilac_target::{LinkFlavor, LinkInfo, Target};
+pub use lilac_ir::Entry;
+pub use lilac_target::{LinkFlavor, LinkInfo, Os, Target};
 
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -185,6 +186,10 @@ pub struct Session {
     /// Whether the program must have an entry point (`lilac build`): a
     /// non-`extern` `main` in the root namespace, else `E032`.
     pub require_entry: bool,
+    /// How the program enters. [`Entry::Native`] (`lilac build` without
+    /// `--libc`) adds the `.lilac.start` entry and exits through the OS
+    /// rather than the C library.
+    pub entry: Entry,
     /// Called at the start and end of each pipeline [`Stage`].
     pub progress: Option<Progress>,
 }
@@ -208,6 +213,7 @@ impl Default for Session {
             analysis: None,
             retain_partial_analysis: false,
             require_entry: false,
+            entry: Entry::CMain,
             progress: None,
         }
     }
@@ -272,6 +278,41 @@ impl Session {
             &mut self.source_map,
             &mut self.diags,
         );
+        self.run_loaded(&project, failed, on_stage)
+    }
+
+    /// Compiles one source file (`name`, already read as `src`) as the root
+    /// namespace's only file, loading what its `using`s reach (mounted
+    /// libraries, or folders next to it) through `fs`. This is how the CLI
+    /// compiles a file argument.
+    pub fn compile_file_with_stages(
+        &mut self,
+        name: &str,
+        src: &str,
+        fs: &mut dyn Fs,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        self.project_files.clear();
+        self.report(Stage::Load, StageEvent::Begin);
+        let (project, failed) = lilac_module::load_file(
+            name,
+            src,
+            &self.libraries,
+            fs,
+            &mut self.source_map,
+            &mut self.diags,
+        );
+        self.run_loaded(&project, failed, on_stage)
+    }
+
+    /// Records a loaded project's files, ends the Load stage, and runs the
+    /// pipeline unless loading failed.
+    fn run_loaded(
+        &mut self,
+        project: &lilac_module::Project,
+        failed: bool,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
         self.project_files = project
             .files
             .iter()
@@ -286,7 +327,7 @@ impl Session {
         if failed {
             return Err(ErrorGuaranteed::new());
         }
-        self.run(&project, on_stage)
+        self.run(project, on_stage)
     }
 
     /// Checks the namespace `namespace` (typically a mounted library folder)
@@ -419,13 +460,15 @@ impl Session {
         on_stage("fold", &lir);
         self.report(Stage::Fold, DONE);
         self.report(Stage::Runtime, StageEvent::Begin);
-        lir.funcs.extend(lilac_ir::runtime::build_runtime(
-            self.target.bit_native_width() / 8,
-        ));
+        self.inject_runtime(&mut lir);
         on_stage("runtime", &lir);
         self.report(Stage::Runtime, DONE);
         self.report(Stage::Prune, StageEvent::Begin);
-        lilac_ir::prune_unreachable(&mut lir, &self.exports);
+        let mut roots = self.exports.clone();
+        if self.entry == Entry::Native && has_entry(&lir) {
+            roots.insert(".lilac.start".to_owned());
+        }
+        lilac_ir::prune_unreachable(&mut lir, &roots);
         self.report(
             Stage::Prune,
             StageEvent::End {
@@ -467,6 +510,42 @@ impl Session {
             );
         }
         out
+    }
+}
+
+impl Session {
+    /// Appends the runtime for the target's OS layer and entry, plus the
+    /// native `.lilac.start` when the program has a `main`. A runtime
+    /// `extern` the program already declares (say, the C library's `exit`)
+    /// is not declared twice.
+    fn inject_runtime(&self, lir: &mut LirModule) {
+        let system = match self.target.os {
+            Os::Windows => System::Windows,
+            Os::Linux | Os::Macos => System::Libc,
+            Os::None | Os::Unknown => System::None,
+        };
+        let runtime =
+            lilac_ir::build_runtime(self.target.bit_native_width() / 8, system, self.entry);
+        for func in runtime {
+            let declared = func.is_extern
+                && lir
+                    .funcs
+                    .iter()
+                    .any(|other| other.is_extern && other.name == func.name);
+            if !declared {
+                lir.funcs.push(func);
+            }
+        }
+        if self.entry == Entry::Native {
+            if let Some(main) = lir
+                .funcs
+                .iter()
+                .find(|func| func.name == "main" && !func.is_extern)
+            {
+                let start = lilac_ir::entry_point(main);
+                lir.funcs.push(start);
+            }
+        }
     }
 }
 

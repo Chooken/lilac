@@ -258,8 +258,18 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
+| **`@os_write`** | `(fd, data, len)` | Writes `len` bytes (`@bit_native`) from `ref @bit8` to standard stream `fd` (`@bit32`: 1 is stdout, 2 is stderr). |
+| **`@os_exit`** | `(code)` | Ends the process with exit code `code` (`@bit32`). Does not return. |
+| **`@os_alloc`** | `(size)` | Allocates `size` zeroed bytes (`@bit_native`) on the heap. Returns `ref unknown`. |
+| **`@os_free`** | `(ptr)` | Frees `ref unknown` memory from `@os_alloc`. |
 
 `@size_of` is computed during lowering and is always a constant.
+The `@os_*` intrinsics are the OS layer: the compiler implements them per
+target with the operating system's own interface (`kernel32` on Windows), so
+programs do not depend on a C library. `Standard.Io`, `Standard.Process` and
+`Standard.Heap.Allocator` are built on them. On a target with no operating
+system they are left for the platform to define, and a program that uses one
+fails to link without it.
 `@compile_error` is a **fold-required marker**, not a runtime builtin call: it
 must be removed by folding (dead branch) or DCE (unreachable function), or it
 is reported as `E031`; a survivor reaching IR verification is an internal

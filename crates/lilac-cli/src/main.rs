@@ -175,12 +175,16 @@ fn compile_with_dumps(
     src: &str,
     dump_dir: Option<&Path>,
 ) -> (Result<LirModule, ErrorGuaranteed>, Option<String>) {
+    let mut fs = StdFs;
     let Some(dir) = dump_dir else {
-        return (session.compile_lir(file, src), None);
+        return (
+            session.compile_file_with_stages(file, src, &mut fs, &mut |_, _| {}),
+            None,
+        );
     };
     if let Err(err) = std::fs::create_dir_all(dir) {
         return (
-            session.compile_lir(file, src),
+            session.compile_file_with_stages(file, src, &mut fs, &mut |_, _| {}),
             Some(format!(
                 "cannot create LIR dump directory {}: {err}",
                 dir.display()
@@ -193,7 +197,7 @@ fn compile_with_dumps(
         .unwrap_or("module")
         .to_owned();
     let mut io_error: Option<String> = None;
-    let result = session.compile_lir_with_stages(file, src, &mut |stage, lir| {
+    let result = session.compile_file_with_stages(file, src, &mut fs, &mut |stage, lir| {
         if io_error.is_some() {
             return;
         }

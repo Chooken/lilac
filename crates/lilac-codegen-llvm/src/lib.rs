@@ -20,6 +20,7 @@ use lilac_ir::LirModule;
 use lilac_target::is_64_bit_triple;
 
 mod lower;
+mod native;
 mod runtime;
 
 /// LLVM backend for a fixed target triple and optimization level.
@@ -84,16 +85,21 @@ impl LlvmBackend {
         context: &'ctx Context,
         lir: &LirModule,
         reloc: RelocMode,
+        entry: Entry,
         on_step: &mut dyn FnMut(CodegenStep),
     ) -> Result<(Module<'ctx>, TargetMachine), String> {
         let (module, machine) = self.prepare_module(context, reloc)?;
         on_step(CodegenStep::Lower);
         let mut lower = lower::Lower::new(context, module, lir, is_64_bit_triple(&self.triple));
-        if let Err(diagnostic) = lower.run() {
+        if let Err(diagnostic) = lower.run(entry) {
             return Err(lilac_error::EmitterHuman::new()
                 .render(&diagnostic, &lilac_span::SourceMap::default()));
         }
+        let native = lower.native_int();
         let module = lower.into_module();
+        if entry == Entry::Native {
+            native::define(context, &module, &self.triple, native);
+        }
         on_step(CodegenStep::Verify);
         module
             .verify()
@@ -130,11 +136,9 @@ impl Backend for LlvmBackend {
         entry: Entry,
         on_step: &mut dyn FnMut(CodegenStep),
     ) -> Result<Vec<u8>, String> {
-        if entry == Entry::Native {
-            return Err("the native entry point is not implemented yet; use --libc".to_owned());
-        }
         let context = Context::create();
-        let (module, machine) = self.build_module(&context, lir, self.object_reloc(), on_step)?;
+        let (module, machine) =
+            self.build_module(&context, lir, self.object_reloc(), entry, on_step)?;
         on_step(CodegenStep::Emit);
         let buffer = machine
             .write_to_memory_buffer(&module, FileType::Object)
@@ -144,7 +148,8 @@ impl Backend for LlvmBackend {
 
     fn emit_llvm(&self, lir: &LirModule) -> Result<String, String> {
         let context = Context::create();
-        let (module, _) = self.build_module(&context, lir, RelocMode::Default, &mut |_| {})?;
+        let (module, _) =
+            self.build_module(&context, lir, RelocMode::Default, Entry::CMain, &mut |_| {})?;
         Ok(module.print_to_string().to_string())
     }
 }
@@ -1216,7 +1221,7 @@ mod tests {
     #[test]
     fn format_args_bounds_checks_are_unsigned() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.funcs = lilac_ir::runtime::build_runtime(8);
+        module.funcs = lilac_ir::runtime::build_runtime(8, lilac_ir::System::None, Entry::CMain);
         let text = emit(&module);
         for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
             let body = text
@@ -1595,17 +1600,59 @@ mod tests {
         assert!(steps.contains(&CodegenStep::Optimize));
     }
 
-    /// The native entry point arrives with the native runtime.
+    /// The native IR for `triple`, as `emit_object` builds it.
+    fn native_ir(triple: &str) -> String {
+        let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
+        let context = inkwell::context::Context::create();
+        let (module, _) = backend
+            .build_module(
+                &context,
+                &main_module(triple),
+                inkwell::targets::RelocMode::Default,
+                Entry::Native,
+                &mut |_| {},
+            )
+            .expect("builds");
+        module.print_to_string().to_string()
+    }
+
+    /// A native object has no C `main` wrapper and defines what LLVM may call
+    /// in place of the C runtime; Windows adds `_fltused` and `__chkstk`.
     #[test]
-    fn native_entry_is_not_yet_supported() {
-        let err = backend()
+    fn native_entry_defines_its_own_support() {
+        let windows = native_ir("x86_64-pc-windows-msvc");
+        assert!(!windows.contains("define i32 @main()"), "{windows}");
+        for symbol in ["@memcpy(", "@memmove(", "@memset("] {
+            assert!(
+                windows.contains(&format!("define ptr {symbol}")),
+                "{symbol}"
+            );
+        }
+        assert!(windows.contains("\"no-builtins\""), "{windows}");
+        assert!(windows.contains("@_fltused = global i32 0"), "{windows}");
+        assert!(windows.contains("__chkstk:"), "{windows}");
+        let arm = native_ir("aarch64-pc-windows-msvc");
+        assert!(arm.contains("ldr xzr"), "{arm}");
+        let linux = native_ir("x86_64-unknown-linux-gnu");
+        assert!(
+            !linux.contains("_fltused") && !linux.contains("__chkstk"),
+            "{linux}"
+        );
+        assert!(linux.contains("define ptr @memcpy("), "{linux}");
+    }
+
+    /// `Entry::Native` emits a COFF object (linking and running it is covered
+    /// by the CLI's build and run tests).
+    #[test]
+    fn native_entry_emits_an_object() {
+        let bytes = backend()
             .emit_object(
                 &main_module("x86_64-pc-windows-msvc"),
                 Entry::Native,
                 &mut |_| {},
             )
-            .expect_err("native entry");
-        assert!(err.contains("--libc"), "{err}");
+            .expect("native object");
+        assert_eq!(bytes.get(..2), Some(&[0x64, 0x86][..]));
     }
 
     /// Every target is initialized, not just the host: emitting for a triple

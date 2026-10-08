@@ -1,8 +1,9 @@
 // expect-exit: 7
 // A `ref` enum payload is read back as the pointer it stores, not the
 // address of the payload slot.
+// lib: Standard=lib/Standard
 
-exit: extern function (code: @bit32) nothing
+using Standard.Process
 
 Maybe[T]: enum {
     Some: T

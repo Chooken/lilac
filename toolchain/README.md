@@ -1,0 +1,21 @@
+# Toolchain stubs
+
+`lilac build` links natively with `lld` and these stubs, so programs need no
+C toolchain or SDK. `scripts/package.sh` copies each `<triple>/` folder into
+the install's `lib/lilac/`; the tests assemble a development sysroot from it.
+
+## Windows: `kernel32.lib`
+
+An import library for the `kernel32.dll` functions the runtime calls, built
+from `windows/kernel32.def`. After editing the `.def`, regenerate both with
+the LLVM tree's `llvm-lib`:
+
+```
+llvm-lib /def:toolchain/windows/kernel32.def /machine:x64 /out:toolchain/x86_64-pc-windows-msvc/kernel32.lib
+llvm-lib /def:toolchain/windows/kernel32.def /machine:arm64 /out:toolchain/aarch64-pc-windows-msvc/kernel32.lib
+```
+
+`llvm-lib` also writes a `kernel32.exp` next to each; delete it.
+
+A program that calls other `kernel32` functions through `extern` passes its
+own import library with `--link-arg=`.

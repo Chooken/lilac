@@ -1,6 +1,7 @@
 // expect-exit: 8
+// lib: Standard=lib/Standard
 
-exit: extern function (code: @bit32) nothing
+using Standard.Process
 
 set: function (r: ref @bit32, v: @bit32) nothing {
     r = v

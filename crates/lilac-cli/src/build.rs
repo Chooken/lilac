@@ -12,8 +12,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lilac_codegen::{Backend as _, Entry};
-use lilac_driver::{ErrorFormat, LinkInfo, Progress, Session};
+use lilac_codegen::Backend as _;
+use lilac_driver::{Entry, ErrorFormat, LinkInfo, Os, Progress, Session, Target};
 use lilac_error::Level;
 
 use crate::link;
@@ -116,6 +116,12 @@ pub fn layout(
     }
 }
 
+/// Whether the native runtime (no C library) supports `target` yet. Linux
+/// and macOS follow in later steps; until then they build with `--libc`.
+fn native_supported(target: Target) -> bool {
+    target.os == Os::Windows
+}
+
 /// The program name: the file stem, or the project folder's name.
 fn program_name(input: &Path, is_dir: bool) -> String {
     let named = if is_dir {
@@ -163,6 +169,12 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         eprintln!("error: `lilac build` cannot link executables for `{triple}`");
         return ExitCode::from(2);
     };
+    if !flags.libc && !native_supported(session.target) {
+        eprintln!(
+            "error: the native runtime is not available for `{triple}` yet; build with --libc"
+        );
+        return ExitCode::from(2);
+    }
     let verbosity = if flags.quiet || session.opts.error_format == ErrorFormat::Json {
         Verbosity::Quiet
     } else if flags.timings {
@@ -184,6 +196,11 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         &format!("{name} ({}) [{mode}, {triple}]", input.display()),
     );
     session.require_entry = true;
+    session.entry = if flags.libc {
+        Entry::CMain
+    } else {
+        Entry::Native
+    };
     let hook = reporter.clone();
     session.progress = Some(Progress::new(move |stage, event| hook.stage(stage, event)));
     let (result, dump_err) =
@@ -229,16 +246,11 @@ fn emit_and_link(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    let entry = if flags.libc {
-        Entry::CMain
-    } else {
-        Entry::Native
-    };
     let opt = crate::opt_level(session.optimize);
     let opt_name = format!("{opt:?}");
     let object_name = file_name(&paths.obj);
     let backend = lilac_codegen_llvm::LlvmBackend::new(&session.target.to_triple(), opt);
-    let bytes = backend.emit_object(module, entry, &mut |step| {
+    let bytes = backend.emit_object(module, session.entry, &mut |step| {
         reporter.codegen(step, &opt_name, &object_name);
     })?;
     write_file(&paths.obj, &bytes)?;
@@ -321,7 +333,6 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lilac_driver::Target;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
@@ -410,6 +421,15 @@ mod tests {
                 .join("debug")
                 .join("app.exe")
         );
+    }
+
+    #[test]
+    fn native_runtime_is_windows_only_for_now() {
+        let target = |triple| Target::parse(triple).expect("triple");
+        assert!(native_supported(target("x86_64-pc-windows-msvc")));
+        assert!(native_supported(target("aarch64-pc-windows-msvc")));
+        assert!(!native_supported(target("x86_64-unknown-linux-gnu")));
+        assert!(!native_supported(target("aarch64-apple-darwin")));
     }
 
     #[test]

@@ -212,7 +212,9 @@ fn a_library_file_checks_clean_and_highlights_generic_bodies() {
     for name in [
         "box.lilac",
         "int32.lilac",
-        "Heap/c_allocator.lilac",
+        "Heap/allocator.lilac",
+        "Io/io.lilac",
+        "Process/process.lilac",
         "C/io.lilac",
     ] {
         let path = lib.join(name);

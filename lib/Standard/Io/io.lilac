@@ -1,0 +1,51 @@
+// Writing bytes to the standard output and error streams, through the OS
+// (no C library).
+
+print: function (text: @byte_buffer) nothing {
+    @os_write(0x1, @byte_buffer_ptr(text), @byte_buffer_len(text))
+}
+
+print_line: function (text: @byte_buffer) nothing {
+    print(text)
+    print("\n")
+}
+
+print_byte: function (byte: @bit8) nothing {
+    b: @bit8 = byte
+    @os_write(0x1, ref b, 0x1)
+}
+
+// Writes the code point `c` (a character literal such as 'H') as UTF-8.
+print_char: function (c: @bit32) nothing {
+    if @i_less_than_u_32(c, 0x80) {
+        print_byte(@truncate(c))
+    } else if @i_less_than_u_32(c, 0x800) {
+        print_byte(@truncate(@i_add_32(0xC0, @i_div_u_32(c, 0x40))))
+        print_continuation(c, 0x1)
+    } else if @i_less_than_u_32(c, 0x10000) {
+        print_byte(@truncate(@i_add_32(0xE0, @i_div_u_32(c, 0x1000))))
+        print_continuation(c, 0x40)
+        print_continuation(c, 0x1)
+    } else {
+        print_byte(@truncate(@i_add_32(0xF0, @i_div_u_32(c, 0x40000))))
+        print_continuation(c, 0x1000)
+        print_continuation(c, 0x40)
+        print_continuation(c, 0x1)
+    }
+}
+
+private {
+    // One UTF-8 continuation byte: six bits of `c / scale`.
+    print_continuation: function (c: @bit32, scale: @bit32) nothing {
+        print_byte(@truncate(@i_add_32(0x80, @i_mod_u_32(@i_div_u_32(c, scale), 0x40))))
+    }
+}
+
+print_error: function (text: @byte_buffer) nothing {
+    @os_write(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+}
+
+print_error_line: function (text: @byte_buffer) nothing {
+    print_error(text)
+    print_error("\n")
+}

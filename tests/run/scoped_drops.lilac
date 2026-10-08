@@ -1,12 +1,13 @@
 // expect-stdout: dddd!
+// lib: Standard=lib/Standard
 
-putchar: extern function (c: @bit32) result: @bit32
+using Standard.Io
 
 Noisy: object {
     tag: @bit32
 
     @on_drop: function (self) nothing {
-        r: @bit32 = putchar('d')
+        print_char('d')
     }
 }
 
@@ -21,6 +22,6 @@ main: function () nothing {
     {
         m: Noisy = Noisy { tag = 0x9 }
     }
-    r: @bit32 = putchar('!')
-    r = putchar(0xA)
+    print_char('!')
+    print_char(0xA)
 }

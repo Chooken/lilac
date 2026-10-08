@@ -2,14 +2,15 @@
 // Drop order: a by-value parameter is dropped by the callee, `return`
 // drops live locals, an object drops itself before its fields (in
 // declaration order), and locals drop in reverse declaration order.
+// lib: Standard=lib/Standard
 
-putchar: extern function (c: @bit32) result: @bit32
+using Standard.Io
 
 Inner: object {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        r: @bit32 = putchar(self.c)
+        print_char(self.c)
     }
 }
 
@@ -18,7 +19,7 @@ Outer: object {
     b: Inner
 
     @on_drop: function (self) nothing {
-        r: @bit32 = putchar('O')
+        print_char('O')
     }
 }
 
@@ -36,7 +37,7 @@ main: function () nothing {
         o: Outer = Outer { a = Inner { c = 'a' }, b = Inner { c = 'b' } }
         take(Inner { c = 'p' })
         early()
-        r: @bit32 = putchar('|')
+        print_char('|')
     }
-    r: @bit32 = putchar(0xA)
+    print_char(0xA)
 }

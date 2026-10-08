@@ -3,6 +3,7 @@
 //! Mirrors `rustc_codegen_ssa`: backends implement one trait, the driver picks
 //! with `--backend=` (LLVM today).
 
+pub use lilac_ir::Entry;
 use lilac_ir::LirModule;
 
 /// Optimization level for the LLVM pipeline (LLVM's `O0`..`O3`, `Os`).
@@ -23,17 +24,6 @@ pub enum OptLevel {
     O3,
     /// Optimize for size.
     Os,
-}
-
-/// How a program enters: which entry symbol the backend emits around the
-/// Lilac `main` (`.lilac.main`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Entry {
-    /// A C `i32 main()` wrapper, entered through the C runtime's startup code
-    /// (`--libc` builds and `emit-llvm`).
-    CMain,
-    /// Lilac's own process entry, `.lilac.start`, with no C runtime.
-    Native,
 }
 
 /// A step of object emission, reported to [`Backend::emit_object`]'s

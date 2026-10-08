@@ -9,7 +9,7 @@ Box[T]: object {
     create: function(data: T) box: Box[T] {
 
         // Allocate (zeroed) and move the data in.
-        ptr: ref T = CAllocator.create[T]()
+        ptr: ref T = Allocator.create[T]()
         ptr = data
 
         // Put it in a box.
@@ -32,7 +32,7 @@ Box[T]: object {
 
     @on_drop: function(self) nothing {
         if self.value.unwrap() -> value: ref T {
-            CAllocator.destroy[T](value)
+            Allocator.destroy[T](value)
         }
     }
 }

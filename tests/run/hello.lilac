@@ -1,12 +1,13 @@
 // expect-stdout: Hi
 // expect-exit: 3
+// lib: Standard=lib/Standard
 
-putchar: extern function (c: @bit32) result: @bit32
-exit: extern function (code: @bit32) nothing
+using Standard.Io
+using Standard.Process
 
 main: function () nothing {
-    r: @bit32 = putchar('H')
-    r = putchar('i')
-    r = putchar(0xA)
+    print_char('H')
+    print_char('i')
+    print_char(0xA)
     exit(0x3)
 }
