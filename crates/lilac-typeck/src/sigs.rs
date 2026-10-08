@@ -708,8 +708,17 @@ fn collect_item(
                 collect_item(member, &resolved_member, member_parent, ctx);
             }
         }
-        ItemKind::Enum { .. }
-        | ItemKind::Using { .. }
+        ItemKind::Enum { variants, .. } => {
+            // Variant declarations color as `enumMember`; each `ast::EnumVariant`
+            // carries its own name span.
+            for variant in variants {
+                ctx.sigs.semantics.push(SemanticSite {
+                    span: variant.span,
+                    kind: SemanticKind::Variant,
+                });
+            }
+        }
+        ItemKind::Using { .. }
         | ItemKind::Private { .. }
         | ItemKind::Const { .. }
         | ItemKind::Field { .. }

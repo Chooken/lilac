@@ -39,6 +39,8 @@ pub enum SemanticKind {
     Param,
     /// A user object/enum name in type position.
     UserType,
+    /// An enum variant (declaration name and each `.Variant` use).
+    Variant,
     /// A builtin type name (`@bit8`, `unknown`, …).
     BuiltinType,
     /// A compiler-known intrinsic call name (`@i_add_8`, `@load_u8`, …).

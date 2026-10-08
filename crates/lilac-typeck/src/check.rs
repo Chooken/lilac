@@ -2731,6 +2731,9 @@ impl Checker<'_> {
                 if let lilac_ty::TypeKind::Object(def) = self.types.kind(ty.id) {
                     self.record_use(*span, *def);
                 }
+                // The use resolves to the owning enum; color the tag itself as
+                // its variant (`enumMember`), not as the enum type.
+                self.record_semantic(*span, SemanticKind::Variant);
                 let hir = HirExpr {
                     ty,
                     span: *span,

@@ -181,7 +181,9 @@ fn token_after(tokens: &[Decoded], text: &str, key: &str, offset: usize) -> Deco
 
 const FUNCTION: u32 = 0;
 const TYPE: u32 = 1;
+const ENUM: u32 = 2;
 const PROPERTY: u32 = 3;
+const ENUM_MEMBER: u32 = 4;
 const VARIABLE: u32 = 5;
 const PARAMETER: u32 = 6;
 const DEFAULT_LIBRARY: u32 = 1 << 0;
@@ -224,7 +226,7 @@ fn initialize_advertises_the_semantic_tokens_legend() {
     handle.join().expect("server thread");
 }
 
-const FIXTURE: &str = "Obj: object {\n    member: @bit8\n}\npi: @bit32 = 0x2A\nfoo: function (p: @bit32) result: @bit32 {\n    result = p\n    return\n}\nmain: function () nothing {\n    x: @bit32 = pi\n    v: Obj = Obj {\n        member = 0x1\n    }\n    y: @bit8 = v.member\n    z: @bit32 = foo(x)\n    w: @bit32 = @i_add_32(z, 0x1)\n}\n";
+const FIXTURE: &str = "Colour: enum {\n    Red\n    Green\n}\nObj: object {\n    member: @bit8\n}\npi: @bit32 = 0x2A\nfoo: function (p: @bit32) result: @bit32 {\n    result = p\n    return\n}\nmain: function () nothing {\n    x: @bit32 = pi\n    v: Obj = Obj {\n        member = 0x1\n    }\n    y: @bit8 = v.member\n    z: @bit32 = foo(x)\n    w: @bit32 = @i_add_32(z, 0x1)\n    c: Colour = .Red\n}\n";
 
 #[test]
 fn full_returns_tokens_for_every_kind() {
@@ -250,6 +252,24 @@ fn full_returns_tokens_for_every_kind() {
     assert_eq!((ty.token_type, ty.modifiers, ty.length), (TYPE, 0, 3));
     let obj_decl = token_after(&decoded, FIXTURE, "Obj: object", 0);
     assert_eq!((obj_decl.token_type, obj_decl.modifiers), (TYPE, 0));
+
+    // Enum declaration, a variant declaration, and a `.Variant` use.
+    let enum_decl = token_after(&decoded, FIXTURE, "Colour: enum", 0);
+    assert_eq!((enum_decl.token_type, enum_decl.modifiers), (ENUM, 0));
+    let variant_decl = token_after(&decoded, FIXTURE, "Red\n", 0);
+    assert_eq!(
+        (
+            variant_decl.token_type,
+            variant_decl.modifiers,
+            variant_decl.length
+        ),
+        (ENUM_MEMBER, 0, 3)
+    );
+    let variant_use = token_after(&decoded, FIXTURE, ".Red", 0);
+    assert_eq!(
+        (variant_use.token_type, variant_use.modifiers),
+        (ENUM_MEMBER, 0)
+    );
 
     // Field declaration and member access.
     let field = token_after(&decoded, FIXTURE, "member: @bit8", 0);
@@ -299,6 +319,55 @@ fn full_returns_tokens_for_every_kind() {
         ),
         (FUNCTION, DEFAULT_LIBRARY, 9)
     );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn variant_declaration_and_use_are_enum_members() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "Colour: enum {\n    Red\n    Green\n}\nmain: function () nothing {\n    c: Colour = .Red\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let decoded = decode(&semantic_tokens_at(&client, &uri));
+
+    // The variant declaration colors as `enumMember`.
+    let decl = token_after(&decoded, text, "Red\n", 0);
+    assert_eq!((decl.token_type, decl.length), (ENUM_MEMBER, 3));
+
+    // The `.Variant` use colors as `enumMember`, not as the owning enum.
+    let use_token = token_after(&decoded, text, ".Red", 0);
+    assert_eq!(use_token.token_type, ENUM_MEMBER);
+    let (line, character) = position(text, text.find(".Red").expect(".Red"));
+    assert!(
+        decoded.iter().all(|token| !(token.line == line
+            && token.character == character
+            && token.token_type == ENUM)),
+        "a `.Variant` use must not color as `enum`: {decoded:?}"
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn variant_declaration_nested_in_an_object_is_an_enum_member() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "Outer: object {\n    Kind: enum {\n        Alpha\n        Beta\n    }\n    value: @bit8\n}\nmain: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let decoded = decode(&semantic_tokens_at(&client, &uri));
+    let alpha = token_after(&decoded, text, "Alpha\n", 0);
+    assert_eq!((alpha.token_type, alpha.length), (ENUM_MEMBER, 5));
+    let beta = token_after(&decoded, text, "Beta\n", 0);
+    assert_eq!(beta.token_type, ENUM_MEMBER);
 
     shutdown(&client);
     handle.join().expect("server thread");

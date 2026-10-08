@@ -1,5 +1,7 @@
 //! Editor request handlers: hover, go-to-definition, and semantic tokens.
 
+use std::collections::HashSet;
+
 use lilac_hir::{NameSite, SemanticKind};
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
@@ -17,6 +19,7 @@ const TOKEN_FUNCTION: u32 = 0;
 const TOKEN_TYPE: u32 = 1;
 const TOKEN_ENUM: u32 = 2;
 const TOKEN_PROPERTY: u32 = 3;
+const TOKEN_ENUM_MEMBER: u32 = 4;
 const TOKEN_VARIABLE: u32 = 5;
 const TOKEN_PARAMETER: u32 = 6;
 
@@ -179,6 +182,16 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
     };
     let sources = &retained.session.source_map;
 
+    // A span in `semantics` is the more specific source; an item use at the
+    // same span (a `.Variant` tag, which resolves to its owning enum) must not
+    // also color as the item.
+    let semantic_spans: HashSet<(FileId, u32, u32)> = retained
+        .index
+        .semantics
+        .iter()
+        .map(|site| (site.span.file, site.span.lo.0, site.span.hi.0))
+        .collect();
+
     let mut raw: Vec<(Range, u32, u32)> = Vec::new();
     for info in retained.index.defs.values() {
         if info.name_span.file != file {
@@ -189,7 +202,9 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
         }
     }
     for site in &retained.index.uses {
-        if site.span.file != file {
+        if site.span.file != file
+            || semantic_spans.contains(&(site.span.file, site.span.lo.0, site.span.hi.0))
+        {
             continue;
         }
         let Some(info) = retained.index.defs.get(&site.def) else {
@@ -276,6 +291,7 @@ fn semantic_type(kind: SemanticKind) -> (u32, u32) {
         SemanticKind::Local => (TOKEN_VARIABLE, 0),
         SemanticKind::Param => (TOKEN_PARAMETER, 0),
         SemanticKind::UserType => (TOKEN_TYPE, 0),
+        SemanticKind::Variant => (TOKEN_ENUM_MEMBER, 0),
         SemanticKind::BuiltinType => (TOKEN_TYPE, MODIFIER_DEFAULT_LIBRARY),
         SemanticKind::BuiltinFunc => (TOKEN_FUNCTION, MODIFIER_DEFAULT_LIBRARY),
     }
