@@ -4103,10 +4103,12 @@ impl Checker<'_> {
         };
         let mut overloads: Vec<(DefId, FuncSig)> = Vec::with_capacity(hooks.len());
         for hook in &hooks {
-            let Some(sig) = self.func_sig(hook.id) else {
-                lilac_error::bug!(hook.span, "missing signature for `@init` hook");
-            };
-            overloads.push((hook.id, sig));
+            // A hook whose signature was rejected earlier is skipped rather
+            // than panicking; an all-skipped `overloads` then reports `E022`
+            // through `select_hook_overload`.
+            if let Some(sig) = self.func_sig(hook.id) {
+                overloads.push((hook.id, sig));
+            }
         }
         let qual = format!("{qualified}.@init");
         let Some((def, sig)) = self.select_hook_overload(fctx, &overloads, args) else {
@@ -4226,7 +4228,9 @@ impl Checker<'_> {
     /// Overloads that collide here were already rejected as `E020` dupes.
     fn hook_name(&self, qual: &str, def: DefId) -> String {
         let Some(sig) = self.func_sig(def) else {
-            lilac_error::bug!(Span::dummy(), "missing signature for hook name");
+            // A missing signature means the hook was rejected earlier; fall
+            // back to the bare qualified name rather than panicking.
+            return qual.to_owned();
         };
         let mut name = qual.to_owned();
         for param in sig.params.iter().chain(sig.returns.iter()) {

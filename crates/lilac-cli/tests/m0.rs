@@ -74,6 +74,29 @@ fn check_broken_item_recovers_without_extra_errors() {
 }
 
 #[test]
+fn check_malformed_call_keeps_following_item() {
+    // Critical: a malformed call argument must not consume the enclosing `}`
+    // as its closing paren (which would lose the following item and cascade a
+    // second E001). Strict mode sees exactly one diagnostic.
+    let output = lilac()
+        .args(["check", &ui("FAILS_call_recovery.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("error[").count(),
+        1,
+        "exactly one diagnostic:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("-->").count(),
+        1,
+        "exactly one diagnostic span:\n{stderr}"
+    );
+}
+
+#[test]
 fn check_broken_lex_fails_with_e000() {
     let output = lilac()
         .args(["check", &ui("fails_lex.lilac")])

@@ -227,7 +227,11 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         let Some(template) = self.func_sig(def) else {
-            lilac_error::bug!(use_span, "instantiate_func on an unknown function");
+            // A missing signature means the definition was rejected earlier;
+            // poison this instantiation (and memoize the failure) rather than
+            // panicking, so the tolerant editor path cannot crash.
+            self.failed.insert(key);
+            return Err(ErrorGuaranteed::new());
         };
         let sig = FuncSig {
             params: template

@@ -1143,21 +1143,53 @@ impl Parser {
             let name = self.bump();
             self.bump();
             let ty = self.parse_type(diags);
+            let mut poisoned = ty.name.is_empty();
             let mut bindings = vec![LetBinding {
                 name: name.text,
                 span: join_spans(name.span, ty.span),
                 ty,
             }];
             while self.peek().kind == TokenKind::Comma {
+                if poisoned {
+                    break;
+                }
                 self.bump();
                 let next = self.expect(diags, TokenKind::Ident, "binding name")?;
                 self.expect(diags, TokenKind::Colon, "`:` after binding name")?;
                 let next_ty = self.parse_type(diags);
+                poisoned = next_ty.name.is_empty();
                 bindings.push(LetBinding {
                     name: next.text,
                     span: join_spans(next.span, next_ty.span),
                     ty: next_ty,
                 });
+            }
+            if poisoned {
+                // A poison type already reported the syntax error. Continue
+                // only when a real `=` and a present initializer follow, so the
+                // binding survives tolerantly; never run a follow-on
+                // expectation that would cascade a second diagnostic at the
+                // same span.
+                if self.peek().kind == TokenKind::Eq && starts_expression(self.peek_at(1).kind) {
+                    self.bump();
+                    let value = self.parse_expr_recover(diags)?;
+                    let span = join_spans(bindings[0].span, value.span());
+                    if bindings.len() == 1 {
+                        let only = bindings.remove(0);
+                        return Ok(Stmt::Let {
+                            name: only.name,
+                            ty: only.ty,
+                            value,
+                            span,
+                        });
+                    }
+                    return Ok(Stmt::MultiLet {
+                        bindings,
+                        value,
+                        span,
+                    });
+                }
+                return Err(ErrorGuaranteed::new());
             }
             if self.peek().kind == TokenKind::LBrace {
                 let span = self.peek().span;
@@ -1505,9 +1537,17 @@ impl Parser {
                 }
             }
         }
-        let close = self.bump();
+        // Only consume an actual `)`. Recovery may have stopped at the
+        // enclosing block's `}` (or a stray `]`): consuming it as the call's
+        // close would corrupt every following item. Synthesize the close span
+        // instead and leave the delimiter for the enclosing parser.
+        let close_span = if self.peek().kind == TokenKind::RParen {
+            self.bump().span
+        } else {
+            self.prev_span()
+        };
         Ok(Expr::Call {
-            span: join_spans(callee_span, close.span),
+            span: join_spans(callee_span, close_span),
             callee: Box::new(callee),
             generic_args,
             args,
@@ -1743,18 +1783,15 @@ fn starts_type(kind: TokenKind) -> bool {
     )
 }
 
-/// Whether a token can start a statement (a block-recovery boundary).
+/// Whether a token can start a statement (a block-recovery boundary): every
+/// token that can begin an expression-statement, plus the non-expression
+/// statement keywords.
 fn starts_stmt(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Ident
-            | TokenKind::At
-            | TokenKind::KwIf
-            | TokenKind::KwLoop
-            | TokenKind::KwMatch
-            | TokenKind::KwReturn
-            | TokenKind::KwBreak
-    )
+    starts_expression(kind)
+        || matches!(
+            kind,
+            TokenKind::KwLoop | TokenKind::KwReturn | TokenKind::KwBreak
+        )
 }
 
 #[cfg(test)]
@@ -2581,5 +2618,72 @@ mod tests {
             matches!(value, Expr::Error { .. }),
             "the malformed initializer is an `Expr::Error`: {value:?}"
         );
+    }
+
+    /// The E001 diagnostics in `diags`, for exact-count assertions.
+    fn e001(diags: &Diags) -> Vec<&lilac_error::Diagnostic> {
+        diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E001")
+            .collect()
+    }
+
+    #[test]
+    fn malformed_call_keeps_following_item() {
+        // A call argument failure must not consume the enclosing block's `}`
+        // as the call's closing paren: exactly one E001 and the following item
+        // survives (Critical 1).
+        let src = "main: function () nothing { f(ref) }\nfoo: function () nothing {\n}\n";
+        let (program, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "the malformed call records the failure");
+        assert_eq!(
+            program.items.len(),
+            2,
+            "the item survives: {:?}",
+            program.items
+        );
+        assert!(
+            matches!(&program.items[1].kind, ItemKind::Func(_)),
+            "the following item is intact: {:?}",
+            program.items[1].kind
+        );
+        let errors = e001(&diags);
+        assert_eq!(errors.len(), 1, "exactly one E001: {errors:?}");
+    }
+
+    #[test]
+    fn poison_type_before_non_eq_is_single_diagnostic() {
+        // `x: ]` leaves `]` where the `=` is expected. The recovered type must
+        // not cascade a second "expected `=`" diagnostic at the same span
+        // (Critical 2).
+        let src = "main: function () nothing {\n    x: ]\n}\n";
+        let (_, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "the type failure is recorded");
+        let errors = e001(&diags);
+        assert_eq!(errors.len(), 1, "exactly one E001: {errors:?}");
+    }
+
+    #[test]
+    fn broken_statement_keeps_parenthesized_sibling() {
+        // A broken statement must not skip past a following `(`-led statement:
+        // the sibling survives and strict mode sees a single diagnostic
+        // (Important 3).
+        let src = "main: function () nothing {\n    x: ]\n    (y)\n}\n";
+        let (program, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "the broken statement records the failure");
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        assert!(
+            matches!(block.stmts.last(), Some(Stmt::ExprStmt(_))),
+            "the `(y)` sibling is an expression statement: {:?}",
+            block.stmts
+        );
+        let errors = e001(&diags);
+        assert_eq!(errors.len(), 1, "exactly one E001: {errors:?}");
     }
 }
