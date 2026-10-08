@@ -226,7 +226,8 @@ fn hook_index_int64_checks_clean() {
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
-/// The same hook, invoked by a live `@on_drop`, reports `E031`.
+/// The same hook, invoked by a live `@on_drop`, reports `E031`; the chain
+/// hides the `.lilac.drop.*` glue between the hook and `main`.
 #[test]
 fn used_hook_compile_error_is_e031() {
     let output = lilac()
@@ -236,6 +237,36 @@ fn used_hook_compile_error_is_e031() {
     assert!(!output.status.success(), "should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E031]"), "stderr:\n{stderr}");
+    assert!(stderr.contains("at Object.@on_drop ("), "stderr:\n{stderr}");
+    assert!(stderr.contains("at main"), "stderr:\n{stderr}");
+    assert!(!stderr.contains(".lilac."), "stderr:\n{stderr}");
+}
+
+/// A `@compile_error` in a generic body names the live instance and the
+/// shortest call chain to it.
+#[test]
+fn generic_compile_error_chain_names_the_instance() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_compile_error_generic_chain.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let frames = [
+        "at Holder[@bit32].make (",
+        "FAILS_compile_error_generic_chain.lilac:5:9)",
+        "at helper (",
+        "FAILS_compile_error_generic_chain.lilac:10:25)",
+        "at main (",
+        "FAILS_compile_error_generic_chain.lilac:14:5)",
+    ];
+    let mut rest = stderr.as_ref();
+    for frame in frames {
+        let at = rest
+            .find(frame)
+            .unwrap_or_else(|| panic!("missing `{frame}` in order:\n{stderr}"));
+        rest = &rest[at + frame.len()..];
+    }
 }
 
 /// By default an unreachable `api` is swept from `export_entry.lilac`.

@@ -1,0 +1,15 @@
+Holder[T]: object {
+    value: T
+
+    make: function (v: T) out: Holder[T] {
+        @compile_error("no holders")
+    }
+}
+
+helper: function () nothing {
+    h: Holder[@bit32] = Holder[@bit32].make(0x3)
+}
+
+main: function () nothing {
+    helper()
+}
