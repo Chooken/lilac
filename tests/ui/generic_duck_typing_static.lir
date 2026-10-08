@@ -7,8 +7,8 @@ function @main
   $entry:
     alloca #bit32 %result : zeroed
     alloca #bit32 %tmp.1 : zeroed
-    &cf.2: #bit32 = const 0x2
-    copy &cf.2 -> %tmp.1
+    &cf.1: #bit32 = const 0x2
+    copy &cf.1 -> %tmp.1
     copy %tmp.1 -> %result
     return
 }

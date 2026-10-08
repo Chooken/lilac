@@ -120,6 +120,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,

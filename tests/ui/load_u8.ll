@@ -19,42 +19,62 @@ entry:
   store { i64, ptr } zeroinitializer, ptr %s, align 8
   %p = alloca ptr, align 8
   store ptr null, ptr %p, align 8
-  %tmp.1 = alloca ptr, align 8
-  store ptr null, ptr %tmp.1, align 8
+  %tmp.1 = alloca { i64, ptr }, align 8
+  store { i64, ptr } zeroinitializer, ptr %tmp.1, align 8
+  %tmp.2 = alloca ptr, align 8
+  store ptr null, ptr %tmp.2, align 8
   %c = alloca i8, align 1
   store i8 0, ptr %c, align 1
-  %tmp.2 = alloca i64, align 8
-  store i64 0, ptr %tmp.2, align 8
-  %tmp.3 = alloca i8, align 1
-  store i8 0, ptr %tmp.3, align 1
+  %tmp.3 = alloca ptr, align 8
+  store ptr null, ptr %tmp.3, align 8
+  %tmp.4 = alloca i64, align 8
+  store i64 0, ptr %tmp.4, align 8
+  %tmp.5 = alloca i8, align 1
+  store i8 0, ptr %tmp.5, align 1
   %cell = alloca i8, align 1
   store i8 0, ptr %cell, align 1
   %q = alloca ptr, align 8
   store ptr null, ptr %q, align 8
-  %tmp.4 = alloca i64, align 8
-  store i64 0, ptr %tmp.4, align 8
+  %tmp.6 = alloca ptr, align 8
+  store ptr null, ptr %tmp.6, align 8
+  %tmp.7 = alloca i64, align 8
+  store i64 0, ptr %tmp.7, align 8
+  %tmp.8 = alloca i8, align 1
+  store i8 0, ptr %tmp.8, align 1
   %d = alloca i8, align 1
   store i8 0, ptr %d, align 1
-  %tmp.5 = alloca i64, align 8
-  store i64 0, ptr %tmp.5, align 8
-  %tmp.6 = alloca i8, align 1
-  store i8 0, ptr %tmp.6, align 1
+  %tmp.9 = alloca ptr, align 8
+  store ptr null, ptr %tmp.9, align 8
+  %tmp.10 = alloca i64, align 8
+  store i64 0, ptr %tmp.10, align 8
+  %tmp.11 = alloca i8, align 1
+  store i8 0, ptr %tmp.11, align 1
   store { i64, ptr } { i64 5, ptr @c0 }, ptr %s, align 8
-  call void @.lilac.byte_buffer_ptr(ptr %s, ptr %tmp.1)
-  %0 = load ptr, ptr %tmp.1, align 8
-  store ptr %0, ptr %p, align 8
-  store i64 0, ptr %tmp.2, align 8
-  call void @.lilac.load_u8(ptr %p, ptr %tmp.2, ptr %tmp.3)
-  %1 = load i8, ptr %tmp.3, align 1
-  store i8 %1, ptr %c, align 1
+  %0 = load { i64, ptr }, ptr %s, align 8
+  store { i64, ptr } %0, ptr %tmp.1, align 8
+  call void @.lilac.byte_buffer_ptr(ptr %tmp.1, ptr %tmp.2)
+  %1 = load ptr, ptr %tmp.2, align 8
+  store ptr %1, ptr %p, align 8
+  %2 = load ptr, ptr %p, align 8
+  store ptr %2, ptr %tmp.3, align 8
+  store i64 0, ptr %tmp.4, align 8
+  call void @.lilac.load_u8(ptr %tmp.3, ptr %tmp.4, ptr %tmp.5)
+  %3 = load i8, ptr %tmp.5, align 1
+  store i8 %3, ptr %c, align 1
   store i8 0, ptr %cell, align 1
   store ptr %cell, ptr %q, align 8
-  store i64 0, ptr %tmp.4, align 8
-  call void @.lilac.store_u8(ptr %q, ptr %tmp.4, ptr %c)
-  store i64 0, ptr %tmp.5, align 8
-  call void @.lilac.load_u8(ptr %q, ptr %tmp.5, ptr %tmp.6)
-  %2 = load i8, ptr %tmp.6, align 1
-  store i8 %2, ptr %d, align 1
+  %4 = load ptr, ptr %q, align 8
+  store ptr %4, ptr %tmp.6, align 8
+  store i64 0, ptr %tmp.7, align 8
+  %5 = load i8, ptr %c, align 1
+  store i8 %5, ptr %tmp.8, align 1
+  call void @.lilac.store_u8(ptr %tmp.6, ptr %tmp.7, ptr %tmp.8)
+  %6 = load ptr, ptr %q, align 8
+  store ptr %6, ptr %tmp.9, align 8
+  store i64 0, ptr %tmp.10, align 8
+  call void @.lilac.load_u8(ptr %tmp.9, ptr %tmp.10, ptr %tmp.11)
+  %7 = load i8, ptr %tmp.11, align 1
+  store i8 %7, ptr %d, align 1
   ret void
 }
 

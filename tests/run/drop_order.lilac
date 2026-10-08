@@ -1,0 +1,42 @@
+// expect-stdout: pr|Oabx
+// Drop order: a by-value parameter is dropped by the callee, `return`
+// drops live locals, an object drops itself before its fields (in
+// declaration order), and locals drop in reverse declaration order.
+
+putchar: extern function (c: @bit32) result: @bit32
+
+Inner: object {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        r: @bit32 = putchar(self.c)
+    }
+}
+
+Outer: object {
+    a: Inner
+    b: Inner
+
+    @on_drop: function (self) nothing {
+        r: @bit32 = putchar('O')
+    }
+}
+
+take: function (v: Inner) nothing {
+}
+
+early: function () nothing {
+    k: Inner = Inner { c = 'r' }
+    return
+}
+
+main: function () nothing {
+    {
+        x: Inner = Inner { c = 'x' }
+        o: Outer = Outer { a = Inner { c = 'a' }, b = Inner { c = 'b' } }
+        take(Inner { c = 'p' })
+        early()
+        r: @bit32 = putchar('|')
+    }
+    r: @bit32 = putchar(0xA)
+}

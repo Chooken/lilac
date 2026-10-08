@@ -1507,7 +1507,9 @@ impl Parser {
         let mut expr = self.parse_primary(diags)?;
         loop {
             match self.peek().kind {
-                TokenKind::Dot => {
+                // A `.` on a new line starts the next match arm (`.Tag`), not
+                // a member access.
+                TokenKind::Dot if !self.peek().newline_before => {
                     self.bump();
                     let field = self.expect(diags, TokenKind::Ident, "field name after `.`")?;
                     let span = join_spans(expr.span(), field.span);

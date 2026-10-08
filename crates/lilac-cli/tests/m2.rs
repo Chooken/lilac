@@ -92,11 +92,6 @@ fn function_multi_returns_is_e022() {
 }
 
 #[test]
-fn function_multi_returns_2_is_e027() {
-    fails_with("FAILS_function_multi_returns_2.lilac", "E027");
-}
-
-#[test]
 fn function_returns_is_e043() {
     fails_with("FAILS_function_returns.lilac", "E043");
 }

@@ -15,6 +15,8 @@ entry:
   store ptr null, ptr %tmp.1, align 8
   %tmp.2 = alloca i64, align 8
   store i64 0, ptr %tmp.2, align 8
+  %tmp.3 = alloca ptr, align 8
+  store ptr null, ptr %tmp.3, align 8
   store i64 16, ptr %tmp.2, align 8
   %0 = load i64, ptr %tmp.2, align 8
   %1 = call ptr @malloc(i64 %0)
@@ -22,7 +24,9 @@ entry:
   %2 = load ptr, ptr %tmp.1, align 8
   store ptr %2, ptr %p, align 8
   %3 = load ptr, ptr %p, align 8
-  call void @free(ptr %3)
+  store ptr %3, ptr %tmp.3, align 8
+  %4 = load ptr, ptr %tmp.3, align 8
+  call void @free(ptr %4)
   ret void
 }
 

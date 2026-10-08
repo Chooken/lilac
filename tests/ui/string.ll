@@ -11,19 +11,27 @@ entry:
   store { i64, ptr } zeroinitializer, ptr %s, align 8
   %n = alloca i64, align 8
   store i64 0, ptr %n, align 8
-  %tmp.1 = alloca i64, align 8
-  store i64 0, ptr %tmp.1, align 8
+  %tmp.1 = alloca { i64, ptr }, align 8
+  store { i64, ptr } zeroinitializer, ptr %tmp.1, align 8
+  %tmp.2 = alloca i64, align 8
+  store i64 0, ptr %tmp.2, align 8
   %p = alloca ptr, align 8
   store ptr null, ptr %p, align 8
-  %tmp.2 = alloca ptr, align 8
-  store ptr null, ptr %tmp.2, align 8
+  %tmp.3 = alloca { i64, ptr }, align 8
+  store { i64, ptr } zeroinitializer, ptr %tmp.3, align 8
+  %tmp.4 = alloca ptr, align 8
+  store ptr null, ptr %tmp.4, align 8
   store { i64, ptr } { i64 5, ptr @c0 }, ptr %s, align 8
-  store i64 5, ptr %tmp.1, align 8
-  %0 = load i64, ptr %tmp.1, align 8
-  store i64 %0, ptr %n, align 8
-  call void @.lilac.byte_buffer_ptr(ptr %s, ptr %tmp.2)
-  %1 = load ptr, ptr %tmp.2, align 8
-  store ptr %1, ptr %p, align 8
+  %0 = load { i64, ptr }, ptr %s, align 8
+  store { i64, ptr } %0, ptr %tmp.1, align 8
+  store i64 5, ptr %tmp.2, align 8
+  %1 = load i64, ptr %tmp.2, align 8
+  store i64 %1, ptr %n, align 8
+  %2 = load { i64, ptr }, ptr %s, align 8
+  store { i64, ptr } %2, ptr %tmp.3, align 8
+  call void @.lilac.byte_buffer_ptr(ptr %tmp.3, ptr %tmp.4)
+  %3 = load ptr, ptr %tmp.4, align 8
+  store ptr %3, ptr %p, align 8
   ret void
 }
 

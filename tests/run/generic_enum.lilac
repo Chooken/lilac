@@ -1,4 +1,3 @@
-// pending: phase 4 (generic enums drop their parameters)
 // expect-exit: 9
 
 exit: extern function (code: @bit32) nothing

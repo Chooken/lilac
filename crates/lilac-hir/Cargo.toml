@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 lilac-span = { path = "../lilac-span" }
-lilac-ast = { path = "../lilac-ast" }
 lilac-resolve = { path = "../lilac-resolve" }
 lilac-ty = { path = "../lilac-ty" }
 

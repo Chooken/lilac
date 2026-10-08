@@ -12,9 +12,9 @@ lilac-resolve = { path = "../lilac-resolve" }
 lilac-ty = { path = "../lilac-ty" }
 
 [dev-dependencies]
-lilac-lex = { path = "../lilac-lex" }
-lilac-parse = { path = "../lilac-parse" }
+lilac-module = { path = "../lilac-module" }
 lilac-typeck = { path = "../lilac-typeck" }
+lilac-const = { path = "../lilac-const" }
 
 [lints]
 workspace = true

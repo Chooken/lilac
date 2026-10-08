@@ -1,4 +1,3 @@
-// pending: phase 2 (static methods get an implicit zeroed `instance` binding)
 // expect-error: E021
 
 Obj: object {

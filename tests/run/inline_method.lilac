@@ -1,4 +1,3 @@
-// pending: phase 3 (`=>` methods and static functions ICE)
 // expect-exit: 7
 
 exit: extern function (code: @bit32) nothing

@@ -91,7 +91,7 @@ pub fn load(
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> Result<Project, ErrorGuaranteed> {
-    let (project, failed) = load_with_status(root, fs, sources, diags);
+    let (project, failed) = load_with_status(root, &[], fs, sources, diags);
     if failed {
         Err(ErrorGuaranteed::new())
     } else {
@@ -101,9 +101,11 @@ pub fn load(
 
 /// Like [`load`], but returns the (possibly partial) project together with a
 /// `failed` flag instead of an error, so callers can still map the files read
-/// before a bad `using`.
+/// before a bad `using`. `libraries` mounts each `(name, dir)` as the
+/// top-level namespace `name` (`using name.X` loads `dir/X`).
 pub fn load_with_status(
     root: &Path,
+    libraries: &[(String, PathBuf)],
     fs: &mut dyn Fs,
     sources: &mut SourceMap,
     diags: &mut Diags,
@@ -178,7 +180,7 @@ pub fn load_with_status(
                 if ns_by_path.contains_key(&target_path) {
                     continue;
                 }
-                let target_dir = resolve_dir(root, &target_path);
+                let target_dir = resolve_dir(root, libraries, &target_path);
                 if let Ok(entries) = fs.list_dir(&target_dir) {
                     let new_ns = namespaces.len();
                     namespaces.push(Namespace {
@@ -213,6 +215,57 @@ pub fn load_with_status(
     )
 }
 
+/// Lexes and parses every file of `project` (diagnostics into `diags`).
+/// Returns each file's AST and whether any construct failed to parse. With
+/// `stop_at_failure`, parsing stops after the first file that failed.
+pub fn parse_all(
+    project: &Project,
+    diags: &mut Diags,
+    stop_at_failure: bool,
+) -> (Vec<(FileId, lilac_ast::Program)>, bool) {
+    let mut programs = Vec::with_capacity(project.files.len());
+    let mut failed = false;
+    for unit in &project.files {
+        let (tokens, lex_errors) = Lexer::lex_all(&unit.src, unit.file);
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, unit.file);
+        if let Ok(program) = parser.parse_program(diags) {
+            programs.push((unit.file, program));
+        }
+        failed |= parser.had_errors();
+        if failed && stop_at_failure {
+            break;
+        }
+    }
+    (programs, failed)
+}
+
+/// A one-file project: `src` is the whole root namespace (single-file mode, and
+/// tests). Its `using`s are recorded but cannot load anything.
+pub fn single_file(name: &str, src: &str, sources: &mut SourceMap) -> Project {
+    let file = sources.add_file(name, src);
+    let usings = scan_usings(src, file, "");
+    Project {
+        root: PathBuf::from("."),
+        namespaces: vec![Namespace {
+            path: String::new(),
+            dir: PathBuf::from("."),
+            files: vec![0],
+        }],
+        files: vec![FileUnit {
+            name: name.to_owned(),
+            path: PathBuf::from(name),
+            file,
+            ns: 0,
+            src: src.to_owned(),
+            usings: usings.iter().map(|(path, _)| path.clone()).collect(),
+            using_spans: usings.iter().map(|(_, span)| *span).collect(),
+        }],
+    }
+}
+
 /// Whether `path` names a `*.lilac` source file.
 fn is_lilac_file(path: &Path) -> bool {
     path.extension().and_then(OsStr::to_str) == Some("lilac")
@@ -226,10 +279,16 @@ fn file_name_str(path: &Path) -> String {
         .to_owned()
 }
 
-/// Resolves a dotted namespace path below `root`.
-fn resolve_dir(root: &Path, dotted: &str) -> PathBuf {
-    let mut dir = root.to_path_buf();
-    for segment in dotted.split('.') {
+/// Resolves a dotted namespace path: below a mounted library when its first
+/// segment names one (`Standard.C` -> `<lib>/C`), else below `root`.
+fn resolve_dir(root: &Path, libraries: &[(String, PathBuf)], dotted: &str) -> PathBuf {
+    let mut segments = dotted.split('.');
+    let first = segments.next().unwrap_or_default();
+    let mut dir = match libraries.iter().find(|(name, _)| name == first) {
+        Some((_, dir)) => dir.clone(),
+        None => root.join(first),
+    };
+    for segment in segments {
         dir.push(segment);
     }
     dir
@@ -532,6 +591,29 @@ mod tests {
             .find(|file| file.name == "box.lilac")
             .expect("box file");
         assert_eq!(boxed.usings, ["lib.heap"]);
+    }
+
+    #[test]
+    fn mounted_library_resolves_outside_the_root() {
+        let root = PathBuf::from("proj");
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "using Std.Heap\n");
+        fs.add(&lib, "Heap/alloc.lilac", "using *.Raw\n");
+        fs.add(&lib, "Heap/Raw/raw.lilac", "raw: function () nothing {}\n");
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Std.Heap", "Std.Heap.Raw"]);
     }
 
     #[test]

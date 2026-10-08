@@ -1,28 +1,31 @@
-//! Name resolution: `DefId`, scopes, folder-modules (real pass lands in M1).
+//! Name resolution: the definition table, namespaces, and per-file scopes.
+//!
+//! Every declaration in the compilation unit becomes one [`Def`] in a single
+//! table indexed by [`DefId`]: top-level items, object/enum members (fields,
+//! methods, member hooks), and enum variants. Later passes look definitions up
+//! by id instead of walking the AST, and each `Def` carries the AST it needs
+//! (a function's declaration, a field's type, a constant's initializer).
+//!
+//! Each file gets a [`FileScope`]: the names it can see, already filtered by
+//! visibility and namespace reach (spec §6). Hooks (`@name`) are not scoped:
+//! they live in the unit-global [`Resolved::hooks`] list and typeck resolves
+//! them by signature. Duplicate *names* are `E020` here; duplicate hook
+//! *signatures* are `E020` in typeck, where types are known.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use lilac_ast::{Item, ItemKind, Param, Program, Type as AstType};
+use lilac_ast::{Expr, FuncDecl, Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
 use lilac_module::Project;
 use lilac_span::{FileId, Span};
 
-/// Identity of one namespace in a [`ResolvedProject`] (index into its
-/// `namespaces` list; `NsId(0)` is the root).
+/// Identity of one namespace (`NsId(0)` is the root).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NsId(pub u32);
 
-/// Declared visibility of a definition.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Visibility {
-    /// Visible to importers (and, by namespace reach, to descendants).
-    Public,
-    /// Visible only within the declaring namespace and its descendants.
-    Private,
-}
-
-/// HIR-level definition identity, stable across passes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Identity of one definition: an index into [`Resolved::defs`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct DefId(pub u32);
 
 impl DefId {
@@ -30,261 +33,395 @@ impl DefId {
     pub const ERROR: Self = Self(u32::MAX);
 }
 
-/// One collected definition.
+/// Declared visibility of a definition.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    /// Visible to importers (and, by namespace reach, to descendants).
+    Public,
+    /// Top level: excluded from `using`. Member: inaccessible outside the
+    /// owning type (`E026`).
+    Private,
+}
+
+/// What a definition is, with the AST later passes need.
 #[derive(Clone, Debug)]
-pub struct ResItem {
-    /// Stable identity.
-    pub id: DefId,
-    /// Local (unqualified) declared name.
+pub enum DefKind {
+    /// `name: function ...` (also `extern` and `=>` functions, and methods).
+    Func(Rc<FuncDecl>),
+    /// `@name: function ...` (operator, conversion, or RAII hook).
+    Hook(Rc<FuncDecl>),
+    /// `name: object { ... }`.
+    Object,
+    /// `name: enum { ... }`.
+    Enum,
+    /// `member: Type` inside an object.
+    Field(AstType),
+    /// `Variant` / `Variant: Type` inside an enum.
+    Variant(Option<AstType>),
+    /// `name: Type = expr` / `name: Type => expr` module constant.
+    Const {
+        /// Declared type.
+        ty: AstType,
+        /// Initializer (inlined at every use).
+        value: Rc<Expr>,
+    },
+}
+
+/// One definition.
+#[derive(Clone, Debug)]
+pub struct Def {
+    /// Local (unqualified) declared name (`@add` for hooks).
     pub name: String,
     /// What was defined.
-    pub kind: ResKind,
-    /// Definition span.
+    pub kind: DefKind,
+    /// Owning object or enum, for members and variants.
+    pub parent: Option<DefId>,
+    /// Declaring namespace.
+    pub ns: NsId,
+    /// Declaring file.
+    pub file: FileId,
+    /// Whole-declaration span.
     pub span: Span,
+    /// Span of the declared name token.
+    pub name_span: Span,
     /// Declared visibility.
     pub vis: Visibility,
-    /// Owning namespace.
-    pub ns: NsId,
+    /// The definition's own generic parameters (`T` in `Box[T]`, `f[T]`).
+    pub generic_params: Vec<String>,
+    /// Object/enum members by name: fields, methods, and variants (not hooks).
+    pub members: HashMap<String, DefId>,
+    /// Object/enum member hooks, in declaration order.
+    pub hooks: Vec<DefId>,
+    /// Object fields, or enum variants, in declaration order.
+    pub slots: Vec<DefId>,
 }
 
-/// The object that owns a member hook, so `self` resolves to `ref Parent`.
-#[derive(Clone, Debug)]
-pub struct HookParent {
-    /// The parent object's local name.
-    pub name: String,
-    /// The parent object's definition id.
-    pub def: DefId,
-    /// The parent object's namespace.
-    pub ns: NsId,
-    /// The parent object's generic parameter names (empty when concrete).
-    pub generics: Vec<String>,
+impl Def {
+    /// The function declaration of a function or hook.
+    #[must_use]
+    pub fn func(&self) -> Option<&Rc<FuncDecl>> {
+        match &self.kind {
+            DefKind::Func(decl) | DefKind::Hook(decl) => Some(decl),
+            _ => None,
+        }
+    }
+
+    /// Whether this is an object or an enum.
+    #[must_use]
+    pub fn is_type(&self) -> bool {
+        matches!(self.kind, DefKind::Object | DefKind::Enum)
+    }
 }
 
-/// Definition kinds tracked for typeck.
-#[derive(Clone, Debug)]
-pub enum ResKind {
-    /// `name: function ...` (or `extern`, which has no body).
-    Func {
-        /// Foreign declaration without a body.
-        is_extern: bool,
-        /// Whether it declares generic parameters (bodies check in M4).
-        generic: bool,
-        /// Declared generic parameter names, in declaration order.
-        generic_params: Vec<String>,
-        /// Declared parameters (for signature collection).
-        params: Vec<Param>,
-        /// Declared return slots (for signature collection).
-        returns: Vec<Param>,
-    },
-    /// `@`-named hook (`@add`, `@conversion`, ...).
-    Hook {
-        /// Whether it declares generic parameters (rejected with `E052`).
-        generic: bool,
-        /// Declared generic parameter names, in declaration order.
-        generic_params: Vec<String>,
-        /// Declared parameters (for signature collection).
-        params: Vec<Param>,
-        /// Declared return slots (for signature collection).
-        returns: Vec<Param>,
-        /// Owning object for a member hook (`None` at top level).
-        parent: Option<HookParent>,
-    },
-    /// `name: object { ... }` with collected members.
-    Object {
-        /// Non-hook member name → definition (fields and methods).
-        members: HashMap<String, ResItem>,
-        /// Hook name → this object's overloads in declaration order.
-        hooks: HashMap<String, Vec<ResItem>>,
-        /// Declared generic parameter names, in declaration order.
-        generic_params: Vec<String>,
-    },
-    /// `name: enum { ... }` with variant names and payloads in order.
-    Enum {
-        /// Variants in declaration order.
-        variants: Vec<EnumMember>,
-    },
-    /// `name: Type = expr` module constant.
-    Const,
-    /// `member: Type` bare object field.
-    Field,
-}
-
-/// One enum variant: `One` or `Some: @bit32` (payload).
-#[derive(Clone, Debug)]
-pub struct EnumMember {
-    /// Variant name.
-    pub name: String,
-    /// Payload type (`None` for payload-less variants).
-    pub payload: Option<AstType>,
-}
-
-/// One namespace unit: top-level names of a file.
-#[derive(Clone, Debug, Default)]
-pub struct Module {
-    /// Top-level name → definition (first binding wins on duplicates).
-    pub items: HashMap<String, ResItem>,
-    /// Hook name → every overload in definition order.
-    pub hooks: HashMap<String, Vec<ResItem>>,
-}
-
-/// The result of resolving one name: a single binding, or several equally
-/// visible ones (reported as `E029` on use).
+/// The result of resolving one name in a file.
 #[derive(Clone, Debug)]
 pub enum Lookup {
     /// Exactly one visible binding.
-    One(ResItem),
-    /// Import-vs-import collision; the spans are the competing `using` sites.
+    One(DefId),
+    /// Import-vs-import collision (`E029` on use); the spans are the competing
+    /// `using` directives.
     Ambiguous(Vec<Span>),
 }
 
-/// One namespace's own definitions.
+/// One namespace: a folder.
 #[derive(Clone, Debug)]
-pub struct NamespaceData {
+pub struct Namespace {
     /// Dotted path from the root (`""` for the root).
     pub path: String,
-    /// Enclosing namespace (`None` for the root).
+    /// Nearest loaded ancestor (`None` for the root).
     pub parent: Option<NsId>,
-    /// Name → definition (first binding wins on duplicates).
-    pub items: HashMap<String, ResItem>,
+    /// Top-level non-hook definitions by name.
+    pub items: HashMap<String, DefId>,
 }
 
-/// One source file's namespace and the bindings it can see.
+/// One file's namespace and the names it can see.
 #[derive(Clone, Debug)]
 pub struct FileScope {
-    /// The file this scope belongs to.
+    /// The file.
     pub file: FileId,
-    /// The namespace the file is declared in.
+    /// Its namespace.
     pub ns: NsId,
-    /// Name → binding, already filtered by visibility and reach.
+    /// Visible names, already filtered by visibility and reach.
     pub visible: HashMap<String, Lookup>,
 }
 
-/// A whole compilation unit's resolved namespaces and per-file scopes.
-#[derive(Clone, Debug)]
-pub struct ResolvedProject {
-    /// All namespaces; index 0 is the root.
-    pub namespaces: Vec<NamespaceData>,
-    /// Unit-global hook overload sets (top-level and object-member).
-    pub hooks: HashMap<String, Vec<ResItem>>,
-    /// One visible scope per source file.
-    pub files: Vec<FileScope>,
-    /// Owning namespace of every collected definition (top-level items,
-    /// object members, and every hook overload).
-    def_ns: HashMap<DefId, NsId>,
+/// A resolved compilation unit.
+#[derive(Clone, Debug, Default)]
+pub struct Resolved {
+    /// Every definition, indexed by [`DefId`].
+    pub defs: Vec<Def>,
+    /// Every namespace, indexed by [`NsId`].
+    pub namespaces: Vec<Namespace>,
+    /// One scope per file.
+    pub files: HashMap<FileId, FileScope>,
+    /// Every hook definition (top-level and member), in declaration order.
+    pub hooks: Vec<DefId>,
 }
 
-impl ResolvedProject {
-    /// Wraps a single-file [`Module`] as a one-namespace project.
-    pub fn single(module: Module, file: FileId) -> Self {
-        let visible = module
-            .items
-            .iter()
-            .map(|(name, item)| (name.clone(), Lookup::One(item.clone())))
-            .collect();
-        let root = NamespaceData {
-            path: String::new(),
-            parent: None,
-            items: module.items,
-        };
-        let mut def_ns = HashMap::new();
-        for item in root.items.values() {
-            index_defs(item, &mut def_ns);
-        }
-        for item in module.hooks.values().flatten() {
-            index_defs(item, &mut def_ns);
-        }
-        Self {
-            namespaces: vec![root],
-            hooks: module.hooks,
-            files: vec![FileScope {
-                file,
-                ns: NsId(0),
-                visible,
-            }],
-            def_ns,
-        }
+impl Resolved {
+    /// The definition `id` names.
+    #[must_use]
+    pub fn def(&self, id: DefId) -> &Def {
+        &self.defs[id.0 as usize]
+    }
+
+    /// Every definition id, in declaration order.
+    pub fn ids(&self) -> impl Iterator<Item = DefId> {
+        (0..self.defs.len()).map(|index| DefId(u32::try_from(index).unwrap_or(u32::MAX)))
     }
 
     /// The binding `name` denotes in `file`, if any.
+    #[must_use]
     pub fn lookup(&self, file: FileId, name: &str) -> Option<&Lookup> {
-        self.files
-            .iter()
-            .find(|scope| scope.file == file)
-            .and_then(|scope| scope.visible.get(name))
+        self.files.get(&file)?.visible.get(name)
     }
 
-    /// Every top-level item across the project as `(local name, item)`.
-    pub fn all_items(&self) -> impl Iterator<Item = (&str, &ResItem)> {
-        self.namespaces
-            .iter()
-            .flat_map(|ns| ns.items.iter().map(|(name, item)| (name.as_str(), item)))
-    }
-
-    /// The namespace `def` was declared in, if the project collected it.
-    pub fn namespace_of(&self, def: DefId) -> Option<NsId> {
-        self.def_ns.get(&def).copied()
-    }
-
-    /// The dotted path of `ns` from the root (`""` for the root namespace).
+    /// The dotted path of `ns` (`""` for the root).
+    #[must_use]
     pub fn namespace_path(&self, ns: NsId) -> &str {
-        let index = usize::try_from(ns.0).unwrap_or(usize::MAX);
         self.namespaces
-            .get(index)
+            .get(ns.0 as usize)
             .map_or("", |data| data.path.as_str())
     }
-}
 
-/// Records `item` and, recursively, its object members under the namespace
-/// they carry in [`ResItem::ns`].
-fn index_defs(item: &ResItem, index: &mut HashMap<DefId, NsId>) {
-    index.insert(item.id, item.ns);
-    if let ResKind::Object { members, .. } = &item.kind {
-        for member in members.values() {
-            index_defs(member, index);
+    /// The fully qualified source name: namespace path, owning types, then the
+    /// local name (`A.B.Object.method`; root items stay bare).
+    #[must_use]
+    pub fn qualified_name(&self, id: DefId) -> String {
+        let def = self.def(id);
+        let prefix = match def.parent {
+            Some(parent) => self.qualified_name(parent),
+            None => self.namespace_path(def.ns).to_owned(),
+        };
+        if prefix.is_empty() {
+            def.name.clone()
+        } else {
+            format!("{prefix}.{}", def.name)
         }
+    }
+
+    /// A member of type `owner` by name (fields, methods, variants).
+    #[must_use]
+    pub fn member(&self, owner: DefId, name: &str) -> Option<DefId> {
+        self.def(owner).members.get(name).copied()
     }
 }
 
-/// Pairs each flattened AST member (descending into `private`) with its
-/// resolved item: non-hooks by name, hooks by name + declaration order.
-///
-/// `object` must be the [`ResKind::Object`] resolved from the same `ast`. A
-/// hook name maps to its overloads in declaration order, so the k-th AST hook
-/// of a name pairs with the k-th resolved overload (the order
-/// `collect_members` recorded).
-pub fn flat_member_pairs<'a>(ast: &'a [Item], object: &'a ResKind) -> Vec<(&'a Item, ResItem)> {
-    let ResKind::Object { members, hooks, .. } = object else {
-        return Vec::new();
+/// Resolves a loaded project. `programs` pairs each file with its AST.
+pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Diags) -> Resolved {
+    let mut resolved = Resolved {
+        namespaces: project
+            .namespaces
+            .iter()
+            .map(|ns| Namespace {
+                path: ns.path.clone(),
+                parent: None,
+                items: HashMap::new(),
+            })
+            .collect(),
+        ..Resolved::default()
     };
-    let mut pairs = Vec::new();
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    flatten_member_pairs(ast, members, hooks, &mut seen, &mut pairs);
-    pairs
+    let by_path: HashMap<String, NsId> = resolved
+        .namespaces
+        .iter()
+        .enumerate()
+        .map(|(index, ns)| (ns.path.clone(), ns_id(index)))
+        .collect();
+    for ns in &mut resolved.namespaces {
+        ns.parent = nearest_ancestor(&ns.path, &by_path);
+    }
+
+    let asts: HashMap<FileId, &Program> = programs.iter().map(|(file, p)| (*file, p)).collect();
+    for unit in &project.files {
+        let Some(program) = asts.get(&unit.file) else {
+            continue;
+        };
+        let mut collector = Collector {
+            resolved: &mut resolved,
+            diags,
+            ns: ns_id(unit.ns),
+            file: unit.file,
+        };
+        collector.top_level(&program.items, Visibility::Public);
+    }
+
+    for unit in &project.files {
+        let ns = ns_id(unit.ns);
+        let visible = compute_visible(&resolved, ns, &unit.usings, &unit.using_spans, &by_path);
+        resolved.files.insert(
+            unit.file,
+            FileScope {
+                file: unit.file,
+                ns,
+                visible,
+            },
+        );
+    }
+    resolved
 }
 
-/// Recursive worker for [`flat_member_pairs`]: `seen` counts hook occurrences
-/// per name so same-name overloads pair up in declaration order.
-fn flatten_member_pairs<'a>(
-    items: &'a [Item],
-    members: &'a HashMap<String, ResItem>,
-    hooks: &'a HashMap<String, Vec<ResItem>>,
-    seen: &mut HashMap<&'a str, usize>,
-    out: &mut Vec<(&'a Item, ResItem)>,
-) {
-    for member in items {
-        if let ItemKind::Private { items } = &member.kind {
-            flatten_member_pairs(items, members, hooks, seen, out);
-            continue;
+fn ns_id(index: usize) -> NsId {
+    NsId(u32::try_from(index).unwrap_or(u32::MAX))
+}
+
+fn duplicate(diags: &mut Diags, name: &str, span: Span, previous: Span) {
+    diags.emit(
+        Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+            .label(span, true, "redefined here")
+            .label(previous, false, "first defined here"),
+    );
+}
+
+/// The leading `len(name)` bytes of a declaration span (declarations start at
+/// their name).
+fn leading_name_span(span: Span, name: &str) -> Span {
+    let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+    Span::new(span.lo.0, span.lo.0.saturating_add(len), span.file)
+}
+
+struct Collector<'a> {
+    resolved: &'a mut Resolved,
+    diags: &'a mut Diags,
+    ns: NsId,
+    file: FileId,
+}
+
+impl Collector<'_> {
+    fn push(&mut self, def: Def) -> DefId {
+        let id = DefId(u32::try_from(self.resolved.defs.len()).unwrap_or(u32::MAX));
+        if matches!(def.kind, DefKind::Hook(_)) {
+            self.resolved.hooks.push(id);
         }
-        if let Some(overloads) = hooks.get(&member.name) {
-            let index = seen.entry(member.name.as_str()).or_insert(0);
-            if let Some(resolved) = overloads.get(*index) {
-                out.push((member, resolved.clone()));
-                *index += 1;
+        self.resolved.defs.push(def);
+        id
+    }
+
+    fn new_def(&self, name: &str, kind: DefKind, span: Span, vis: Visibility) -> Def {
+        Def {
+            name: name.to_owned(),
+            kind,
+            parent: None,
+            ns: self.ns,
+            file: self.file,
+            span,
+            name_span: leading_name_span(span, name),
+            vis,
+            generic_params: Vec::new(),
+            members: HashMap::new(),
+            hooks: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    /// Collects a file's top level; `private { }` marks its items private
+    /// (top-level hooks stay public: `private` never gates hooks).
+    fn top_level(&mut self, items: &[Item], vis: Visibility) {
+        for item in items {
+            if let ItemKind::Private { items } = &item.kind {
+                self.top_level(items, Visibility::Private);
+                continue;
             }
-        } else if let Some(resolved) = members.get(&member.name) {
-            out.push((member, resolved.clone()));
+            let is_hook = item.name.starts_with('@');
+            let vis = if is_hook { Visibility::Public } else { vis };
+            let Some(id) = self.item(item, vis, None) else {
+                continue;
+            };
+            if is_hook {
+                continue;
+            }
+            let ns = self.ns.0 as usize;
+            if let Some(previous) = self.resolved.namespaces[ns].items.get(&item.name) {
+                let previous = self.resolved.def(*previous).span;
+                duplicate(self.diags, &item.name, item.span, previous);
+            } else {
+                self.resolved.namespaces[ns]
+                    .items
+                    .insert(item.name.clone(), id);
+            }
         }
+    }
+
+    /// Collects one item (and its members); `None` for non-definitions.
+    fn item(&mut self, item: &Item, vis: Visibility, parent: Option<DefId>) -> Option<DefId> {
+        let kind = match &item.kind {
+            ItemKind::Func(decl) if item.name.starts_with('@') => {
+                DefKind::Hook(Rc::new(decl.clone()))
+            }
+            ItemKind::Func(decl) => DefKind::Func(Rc::new(decl.clone())),
+            ItemKind::Object { .. } => DefKind::Object,
+            ItemKind::Enum { .. } => DefKind::Enum,
+            ItemKind::Field { ty } => DefKind::Field(ty.clone()),
+            ItemKind::Const { ty, value, .. } => DefKind::Const {
+                ty: ty.clone(),
+                value: Rc::new(value.clone()),
+            },
+            ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
+        };
+        let mut def = self.new_def(&item.name, kind, item.span, vis);
+        def.parent = parent;
+        def.generic_params = match &item.kind {
+            ItemKind::Func(decl) => decl.generic_params.clone(),
+            ItemKind::Object { generic_params, .. } | ItemKind::Enum { generic_params, .. } => {
+                generic_params.clone()
+            }
+            _ => Vec::new(),
+        };
+        let id = self.push(def);
+        match &item.kind {
+            ItemKind::Object { members, .. } => self.members(id, members, Visibility::Public),
+            ItemKind::Enum {
+                variants, members, ..
+            } => {
+                for variant in variants {
+                    let mut def = self.new_def(
+                        &variant.name,
+                        DefKind::Variant(variant.payload.clone()),
+                        variant.span,
+                        Visibility::Public,
+                    );
+                    def.name_span = variant.name_span;
+                    def.parent = Some(id);
+                    let variant_id = self.push(def);
+                    self.add_member(id, &variant.name, variant_id, variant.span);
+                    self.resolved.defs[id.0 as usize].slots.push(variant_id);
+                }
+                self.members(id, members, Visibility::Public);
+            }
+            _ => {}
+        }
+        Some(id)
+    }
+
+    /// Collects a type's members, flattening `private { }` blocks.
+    fn members(&mut self, owner: DefId, items: &[Item], vis: Visibility) {
+        for item in items {
+            if let ItemKind::Private { items } = &item.kind {
+                self.members(owner, items, Visibility::Private);
+                continue;
+            }
+            let Some(id) = self.item(item, vis, Some(owner)) else {
+                continue;
+            };
+            match self.resolved.def(id).kind {
+                DefKind::Hook(_) => self.resolved.defs[owner.0 as usize].hooks.push(id),
+                DefKind::Field(_) => {
+                    self.resolved.defs[owner.0 as usize].slots.push(id);
+                    self.add_member(owner, &item.name, id, item.span);
+                }
+                _ => self.add_member(owner, &item.name, id, item.span),
+            }
+        }
+    }
+
+    fn add_member(&mut self, owner: DefId, name: &str, id: DefId, span: Span) {
+        if let Some(previous) = self.resolved.def(owner).members.get(name) {
+            let previous = self.resolved.def(*previous).span;
+            duplicate(self.diags, name, span, previous);
+            return;
+        }
+        self.resolved.defs[owner.0 as usize]
+            .members
+            .insert(name.to_owned(), id);
     }
 }
 
@@ -294,15 +431,10 @@ fn parent_path(path: &str) -> Option<&str> {
     if path.is_empty() {
         return None;
     }
-    Some(match path.rfind('.') {
-        Some(index) => &path[..index],
-        None => "",
-    })
+    Some(path.rfind('.').map_or("", |index| &path[..index]))
 }
 
-/// The nearest ancestor folder present in the compilation unit; `None` only
-/// for the root. Missing intermediate folders are skipped, so a lone `a.b`
-/// still reaches the root.
+/// The nearest ancestor folder present in the unit; `None` only for the root.
 fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId> {
     let mut candidate = parent_path(path);
     while let Some(candidate_path) = candidate {
@@ -314,687 +446,35 @@ fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId>
     None
 }
 
-/// Whether `name` is a builtin type spelling that must stay unqualified.
-///
-/// Kept in sync with `lilac_ty::Types::builtin` (which cannot be used here:
-/// `lilac-ty` depends on this crate).
-fn is_builtin_type(name: &str) -> bool {
-    matches!(
-        name,
-        "@bit8"
-            | "@bit16"
-            | "@bit32"
-            | "@bit64"
-            | "@bit_native"
-            | "@byte_buffer"
-            | "@format_args"
-            | "unknown"
-    )
-}
-
-/// Namespace-qualifies a user type name (`a.Thing` ≠ `b.Thing`, spec §7.1);
-/// builtins and the root namespace stay bare.
-fn qualify_own(name: &str, path: &str) -> String {
-    if path.is_empty() || is_builtin_type(name) {
-        name.to_owned()
-    } else {
-        format!("{path}.{name}")
-    }
-}
-
-/// Signature key for overload uniqueness (names excluded, types included).
-///
-/// `qualify` maps each syntactic type name to its fully-qualified key; the
-/// caller decides whether that is the item's own namespace path (per-file
-/// dedup) or the *referenced type's declaring* namespace ([`TypeResolver`], the
-/// unit-global hook set).
-fn ty_key(ty: &AstType, qualify: &dyn Fn(&str) -> String) -> String {
-    if let Some(func) = &ty.func {
-        let ps: Vec<String> = func.params.iter().map(|p| ty_key(&p.ty, qualify)).collect();
-        let rs: Vec<String> = func
-            .returns
-            .iter()
-            .map(|r| ty_key(&r.ty, qualify))
-            .collect();
-        format!("function({})->({})", ps.join(","), rs.join(","))
-    } else {
-        let args: Vec<String> = ty
-            .generic_args
-            .iter()
-            .map(|arg| ty_key(arg, qualify))
-            .collect();
-        format!("{}:{}:{:?}", qualify(&ty.name), ty.is_ref, args)
-    }
-}
-
-fn sig_key(params: &[Param], returns: &[Param], qualify: &dyn Fn(&str) -> String) -> String {
-    let ps: Vec<String> = params.iter().map(|p| ty_key(&p.ty, qualify)).collect();
-    let rs: Vec<String> = returns.iter().map(|r| ty_key(&r.ty, qualify)).collect();
-    format!("({})->({})", ps.join(","), rs.join(","))
-}
-
-/// Resolves a hook-signature type name through the referencing file's visible
-/// scope to the **referenced type's declaring** namespace (spec §7.1).
-///
-/// Qualifying by the hook's own namespace (as an earlier fix did) is wrong: a
-/// type reached from an ancestor or an import would key differently in two
-/// namespaces that reference the *same* declaration, so a genuinely duplicate
-/// hook signature would escape `E020` and later collide as `E070`.
-struct TypeResolver<'a> {
-    files: &'a [FileScope],
-    namespaces: &'a [NamespaceData],
-}
-
-impl TypeResolver<'_> {
-    fn qualify(&self, file: FileId, hook_ns: NsId, name: &str) -> String {
-        if is_builtin_type(name) {
-            return name.to_owned();
-        }
-        if let Some(Lookup::One(item)) = self
-            .files
-            .iter()
-            .find(|scope| scope.file == file)
-            .and_then(|scope| scope.visible.get(name))
-        {
-            return qualify_own(name, self.path(item.ns));
-        }
-        // Unresolved or ambiguous (the latter is `E029` on use): fall back to
-        // the hook's own namespace so a generic parameter or other non-type
-        // name never gains a spurious cross-namespace collision.
-        qualify_own(name, self.path(hook_ns))
-    }
-
-    /// Qualifies one hook-signature type name, mapping `self` to the hook's
-    /// owning object (so `@on_drop(ref self)` keys by its parent type).
-    fn qualify_hook(&self, item: &ResItem, name: &str) -> String {
-        if name == "self" {
-            if let ResKind::Hook {
-                parent: Some(parent),
-                ..
-            } = &item.kind
-            {
-                return qualify_own(&parent.name, self.path(parent.ns));
-            }
-        }
-        self.qualify(item.span.file, item.ns, name)
-    }
-
-    /// The dotted path of `ns` (`""` for the root or an unknown id).
-    fn path(&self, ns: NsId) -> &str {
-        self.namespaces
-            .get(usize::try_from(ns.0).unwrap_or(usize::MAX))
-            .map_or("", |data| data.path.as_str())
-    }
-}
-
-/// Unit-global hook signature equality: both sides qualify their type names by
-/// the referenced declaration's namespace, never the hook's own.
-fn same_sig_resolved(a: &ResItem, b: &ResItem, resolver: &TypeResolver) -> bool {
-    match (&a.kind, &b.kind) {
-        (
-            ResKind::Hook {
-                params: ap,
-                returns: ar,
-                ..
-            },
-            ResKind::Hook {
-                params: bp,
-                returns: br,
-                ..
-            },
-        ) => {
-            let qa = |name: &str| resolver.qualify_hook(a, name);
-            let qb = |name: &str| resolver.qualify_hook(b, name);
-            sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
-        }
-        _ => true,
-    }
-}
-
-/// Signature key for a single-file (root-namespace) hook.
-///
-/// The root namespace adds no prefix, so type names stay unqualified; a `self`
-/// type resolves to its owning object's name so member hooks of different
-/// objects do not collide.
-fn single_hook_key(item: &ResItem) -> Option<String> {
-    let ResKind::Hook {
-        params,
-        returns,
-        parent,
-        ..
-    } = &item.kind
-    else {
-        return None;
-    };
-    let qualify = |name: &str| -> String {
-        if name == "self" {
-            if let Some(parent) = parent {
-                return parent.name.clone();
-            }
-        }
-        name.to_owned()
-    };
-    Some(sig_key(params, returns, &qualify))
-}
-
-/// Deduplicates a single-file compilation's hooks, emitting `E020` on an
-/// identical root-namespace signature.
-///
-/// Folder mode dedups unit-globally in `collect_project` (via `add_hook`), so
-/// this runs only for the single-file entry point [`collect`].
-fn dedup_single_hooks(hooks: &mut HashMap<String, Vec<ResItem>>, diags: &mut Diags) {
-    for (name, overloads) in hooks.iter_mut() {
-        let mut kept: Vec<ResItem> = Vec::new();
-        for item in overloads.drain(..) {
-            let key = single_hook_key(&item);
-            if let Some(previous) = kept
-                .iter()
-                .find(|previous| single_hook_key(previous) == key)
-            {
-                let previous_span = previous.span;
-                diags.emit(
-                    Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                        .label(item.span, true, "redefined here")
-                        .label(previous_span, false, "first defined here"),
-                );
-            } else {
-                kept.push(item);
-            }
-        }
-        *overloads = kept;
-    }
-}
-
-/// Adds one hook overload to the unit-global set, rejecting an identical
-/// signature anywhere in the compilation unit (`E020`, spec §7.2).
-fn add_hook(
-    diags: &mut Diags,
-    hooks: &mut HashMap<String, Vec<ResItem>>,
-    name: &str,
-    item: ResItem,
-    resolver: &TypeResolver,
-) {
-    let overloads = hooks.entry(name.to_owned()).or_default();
-    if overloads
-        .iter()
-        .any(|previous| same_sig_resolved(previous, &item, resolver))
-    {
-        let previous_span = overloads
-            .first()
-            .map_or(item.span, |previous| previous.span);
-        diags.emit(
-            Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                .label(item.span, true, "redefined here")
-                .label(previous_span, false, "first defined here"),
-        );
-        return;
-    }
-    overloads.push(item);
-}
-
-struct Collector<'a> {
-    diags: &'a mut Diags,
-    next: u32,
-    ns: NsId,
-    /// Namespace path by [`NsId`] (index), for signature qualification.
-    ns_paths: Vec<String>,
-}
-
-impl Collector<'_> {
-    fn fresh(&mut self) -> DefId {
-        let id = DefId(self.next);
-        self.next += 1;
-        id
-    }
-
-    /// The dotted path of `ns` (`""` for the root or an unknown id).
-    fn path_of(&self, ns: NsId) -> &str {
-        self.ns_paths
-            .get(usize::try_from(ns.0).unwrap_or(usize::MAX))
-            .map_or("", String::as_str)
-    }
-
-    /// Per-file hook signature equality (names excluded, types included,
-    /// qualified by the item's own namespace).
-    ///
-    /// This only ever compares two hooks from one file/namespace, so the own
-    /// path is consistent for both and matches the referenced declaration's
-    /// namespace; the unit-global set uses [`same_sig_resolved`] instead.
-    fn same_sig(&self, a: &ResItem, b: &ResItem) -> bool {
-        match (&a.kind, &b.kind) {
-            (
-                ResKind::Hook {
-                    params: ap,
-                    returns: ar,
-                    ..
-                },
-                ResKind::Hook {
-                    params: bp,
-                    returns: br,
-                    ..
-                },
-            ) => {
-                let pa = self.path_of(a.ns);
-                let pb = self.path_of(b.ns);
-                let qa = |name: &str| qualify_own(name, pa);
-                let qb = |name: &str| qualify_own(name, pb);
-                sig_key(ap, ar, &qa) == sig_key(bp, br, &qb)
-            }
-            _ => true,
-        }
-    }
-
-    /// Collects one file's top-level definitions. Flattens top-level `private`
-    /// blocks, marking their items [`Visibility::Private`] (top-level hooks
-    /// stay public: `private` does not gate them, spec §7.2).
-    fn collect_program(&mut self, program: &Program, ns: NsId) -> Module {
-        self.ns = ns;
-        let mut module = Module::default();
-        self.collect_top_level(&program.items, Visibility::Public, &mut module);
-        module
-    }
-
-    fn collect_top_level(&mut self, items: &[Item], vis: Visibility, module: &mut Module) {
-        for item in items {
-            if let ItemKind::Private { items } = &item.kind {
-                self.collect_top_level(items, Visibility::Private, module);
-                continue;
-            }
-            let Some(mut resolved) = self.item(item, &mut module.hooks) else {
-                continue;
-            };
-            resolved.vis = if matches!(resolved.kind, ResKind::Hook { .. }) {
-                Visibility::Public
-            } else {
-                vis
-            };
-            let name = item.name.clone();
-            self.insert_overload(&mut module.items, Some(&mut module.hooks), &name, resolved);
-        }
-    }
-
-    /// Collects one object's members, flattening nested `private` blocks and
-    /// marking their members [`Visibility::Private`] (spec §5). Object-member
-    /// hooks follow member visibility like any other member (spec §7.2).
-    ///
-    /// Hook members record their owning object on `hooks` (this object's
-    /// overloads, in order) and on `file_hooks` (which reaches `Module.hooks`
-    /// and the unit-global merge); they are not object `members`. `E020` for
-    /// hooks is decided unit-globally by qualified signature (`add_hook`),
-    /// never by name here.
-    fn collect_members(
-        &mut self,
-        items: &[Item],
-        vis: Visibility,
-        table: &mut HashMap<String, ResItem>,
-        hooks: &mut HashMap<String, Vec<ResItem>>,
-        file_hooks: &mut HashMap<String, Vec<ResItem>>,
-        parent: &HookParent,
-    ) {
-        for member in items {
-            if let ItemKind::Private { items } = &member.kind {
-                self.collect_members(items, Visibility::Private, table, hooks, file_hooks, parent);
-                continue;
-            }
-            let Some(mut resolved) = self.item(member, file_hooks) else {
-                continue;
-            };
-            resolved.vis = vis;
-            if matches!(resolved.kind, ResKind::Hook { .. }) {
-                if let ResKind::Hook {
-                    parent: hook_parent,
-                    ..
-                } = &mut resolved.kind
-                {
-                    *hook_parent = Some(parent.clone());
-                }
-                let name = member.name.clone();
-                hooks
-                    .entry(name.clone())
-                    .or_default()
-                    .push(resolved.clone());
-                file_hooks.entry(name.clone()).or_default().push(resolved);
-            } else {
-                self.insert(table, &member.name, resolved);
-            }
-        }
-    }
-
-    fn insert(&mut self, scope: &mut HashMap<String, ResItem>, name: &str, item: ResItem) {
-        if let Some(previous) = scope.get(name) {
-            let previous_span = previous.span;
-            self.diags.emit(
-                Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                    .label(item.span, true, "redefined here")
-                    .label(previous_span, false, "first defined here"),
-            );
-            return;
-        }
-        scope.insert(name.to_owned(), item);
-    }
-
-    fn item(
-        &mut self,
-        item: &Item,
-        file_hooks: &mut HashMap<String, Vec<ResItem>>,
-    ) -> Option<ResItem> {
-        // A recovered `ItemKind::Error` defines nothing. Skip it *before*
-        // allocating a `DefId` so an error item never shifts the ids of the
-        // definitions that survive (the tolerant passes share these ids).
-        if matches!(item.kind, ItemKind::Error) {
-            return None;
-        }
-        let id = self.fresh();
-        let kind = match &item.kind {
-            ItemKind::Func(decl) => {
-                let generic_params = decl.generic_params.clone();
-                let generic = !generic_params.is_empty();
-                let params = decl.params.clone();
-                let returns = decl.returns.clone();
-                if item.name.starts_with('@') {
-                    ResKind::Hook {
-                        generic,
-                        generic_params,
-                        params,
-                        returns,
-                        parent: None,
-                    }
-                } else {
-                    ResKind::Func {
-                        is_extern: decl.is_extern,
-                        generic,
-                        generic_params,
-                        params,
-                        returns,
-                    }
-                }
-            }
-            ItemKind::Object {
-                members,
-                generic_params,
-            } => {
-                let mut table = HashMap::new();
-                let mut hooks = HashMap::new();
-                let parent = HookParent {
-                    name: item.name.clone(),
-                    def: id,
-                    ns: self.ns,
-                    generics: generic_params.clone(),
-                };
-                self.collect_members(
-                    members,
-                    Visibility::Public,
-                    &mut table,
-                    &mut hooks,
-                    file_hooks,
-                    &parent,
-                );
-                ResKind::Object {
-                    members: table,
-                    hooks,
-                    generic_params: generic_params.clone(),
-                }
-            }
-            ItemKind::Enum { variants, .. } => ResKind::Enum {
-                variants: variants
-                    .iter()
-                    .map(|v| EnumMember {
-                        name: v.name.clone(),
-                        payload: v.payload.clone(),
-                    })
-                    .collect(),
-            },
-            ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
-            ItemKind::Const { .. } => ResKind::Const,
-            ItemKind::Field { .. } => ResKind::Field,
-        };
-        Some(ResItem {
-            id,
-            name: item.name.clone(),
-            kind,
-            span: item.span,
-            vis: Visibility::Public,
-            ns: self.ns,
-        })
-    }
-
-    /// Inserts into a scope, allowing hook overloads with distinct signatures.
-    /// Identical hook signatures (and any non-hook redefinition) report `E020`.
-    fn insert_overload(
-        &mut self,
-        scope: &mut HashMap<String, ResItem>,
-        hooks: Option<&mut HashMap<String, Vec<ResItem>>>,
-        name: &str,
-        item: ResItem,
-    ) {
-        if matches!(item.kind, ResKind::Hook { .. }) {
-            if let Some(hooks) = hooks {
-                let overloads = hooks.entry(name.to_owned()).or_default();
-                if overloads
-                    .iter()
-                    .any(|previous| self.same_sig(previous, &item))
-                {
-                    let previous_span = overloads
-                        .first()
-                        .map_or(item.span, |previous| previous.span);
-                    self.diags.emit(
-                        Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                            .label(item.span, true, "redefined here")
-                            .label(previous_span, false, "first defined here"),
-                    );
-                    return;
-                }
-                let first = overloads.is_empty();
-                overloads.push(item.clone());
-                if !first {
-                    return;
-                }
-            }
-        }
-        self.insert(scope, name, item);
-    }
-}
-
-/// Collects every top-level (and object-member) definition.
-///
-/// `using` directives are not definitions and are skipped. Non-hook
-/// duplicates keep the first binding and report `E020`; hooks allow overloads
-/// with distinct signatures (identical ones still report `E020`). Because a
-/// single file is one root namespace, member hooks are deduped here too
-/// (folder mode dedups unit-globally in [`collect_project`] instead).
-pub fn collect(program: &Program, diags: &mut Diags) -> Module {
-    let mut collector = Collector {
-        diags,
-        next: 0,
-        ns: NsId(0),
-        ns_paths: vec![String::new()],
-    };
-    let mut module = collector.collect_program(program, NsId(0));
-    dedup_single_hooks(&mut module.hooks, diags);
-    module
-}
-
-/// Collects a whole loaded [`Project`] into a [`ResolvedProject`].
-///
-/// `programs` pairs each file's [`FileId`] with its parsed [`Program`]. By the
-/// loader's contract (`lilac-module`) a file's `FileId` equals its index in
-/// `Project::files`, so this maps each program to its declared namespace.
-///
-/// Each namespace merges its files' top-level items (a cross-file duplicate is
-/// `E020`, first binding wins); top-level hooks go into one unit-global overload
-/// set (`E020` on an identical signature anywhere). Every file then gets a
-/// `visible` scope: its own namespace's items (public and private), its
-/// ancestors' items (public by ancestor reach, private by descendant reach),
-/// then each `using`d namespace's **public** items — local names shadowing
-/// imports, and an import-vs-import collision recorded as [`Lookup::Ambiguous`].
-pub fn collect_project(
-    project: &Project,
-    programs: &[(FileId, Program)],
-    diags: &mut Diags,
-) -> ResolvedProject {
-    let mut by_file: HashMap<usize, &Program> = HashMap::new();
-    for (file, program) in programs {
-        by_file.insert(file.0 as usize, program);
-    }
-
-    let mut namespaces: Vec<NamespaceData> = project
-        .namespaces
-        .iter()
-        .map(|ns| NamespaceData {
-            path: ns.path.clone(),
-            parent: None,
-            items: HashMap::new(),
-        })
-        .collect();
-    let by_path: HashMap<String, NsId> = project
-        .namespaces
-        .iter()
-        .enumerate()
-        .map(|(index, ns)| {
-            (
-                ns.path.clone(),
-                NsId(u32::try_from(index).unwrap_or(u32::MAX)),
-            )
-        })
-        .collect();
-    for data in &mut namespaces {
-        data.parent = nearest_ancestor(&data.path, &by_path);
-    }
-
-    let mut pending_hooks: Vec<(String, ResItem)> = Vec::new();
-    {
-        let mut collector = Collector {
-            diags,
-            next: 0,
-            ns: NsId(0),
-            ns_paths: project
-                .namespaces
-                .iter()
-                .map(|ns| ns.path.clone())
-                .collect(),
-        };
-        for file in &project.files {
-            let Some(program) = by_file.get(&(file.file.0 as usize)).copied() else {
-                continue;
-            };
-            let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
-            let module = collector.collect_program(program, ns);
-            if let Some(data) = namespaces.get_mut(usize::try_from(ns.0).unwrap_or(usize::MAX)) {
-                for (name, item) in module.items {
-                    if matches!(item.kind, ResKind::Hook { .. }) {
-                        // Hook names are overload sets merged unit-globally by
-                        // `add_hook` below. The namespace keeps only the first
-                        // overload so `namespace_of`/lookup can still find it; a
-                        // same-name hook in another file must not be `E020` just
-                        // for sharing the namespace.
-                        data.items.entry(name).or_insert(item);
-                    } else {
-                        collector.insert(&mut data.items, &name, item);
-                    }
-                }
-            }
-            // Defer the unit-global hook merge until every namespace's items
-            // and every file's visible scope exist: signature equality resolves
-            // each type name to its *declaring* namespace (spec §7.1).
-            for (name, overloads) in module.hooks {
-                for item in overloads {
-                    pending_hooks.push((name.clone(), item));
-                }
-            }
-        }
-    }
-
-    let mut files = Vec::with_capacity(project.files.len());
-    for file in &project.files {
-        let ns = NsId(u32::try_from(file.ns).unwrap_or(u32::MAX));
-        let visible = compute_visible(&namespaces, ns, &file.usings, &file.using_spans, &by_path);
-        files.push(FileScope {
-            file: file.file,
-            ns,
-            visible,
-        });
-    }
-
-    let resolver = TypeResolver {
-        files: &files,
-        namespaces: &namespaces,
-    };
-    let mut hooks: HashMap<String, Vec<ResItem>> = HashMap::new();
-    for (name, item) in pending_hooks {
-        add_hook(diags, &mut hooks, &name, item, &resolver);
-    }
-
-    let mut def_ns: HashMap<DefId, NsId> = HashMap::new();
-    for data in &namespaces {
-        for item in data.items.values() {
-            index_defs(item, &mut def_ns);
-        }
-    }
-    for item in hooks.values().flatten() {
-        index_defs(item, &mut def_ns);
-    }
-
-    ResolvedProject {
-        namespaces,
-        hooks,
-        files,
-        def_ns,
-    }
-}
-
-/// The namespace at `ns`, or `None` for an out-of-range id.
-fn namespace_at(namespaces: &[NamespaceData], ns: NsId) -> Option<&NamespaceData> {
-    namespaces.get(usize::try_from(ns.0).unwrap_or(usize::MAX))
-}
-
-/// Inserts `ns`'s items into `visible`, marking each name as locally bound.
-fn add_local(
-    namespaces: &[NamespaceData],
-    ns: NsId,
-    visible: &mut HashMap<String, Lookup>,
-    local: &mut HashSet<String>,
-) {
-    let Some(data) = namespace_at(namespaces, ns) else {
-        return;
-    };
-    for (name, item) in &data.items {
-        visible.insert(name.clone(), Lookup::One(item.clone()));
-        local.insert(name.clone());
-    }
-}
-
-/// Builds the per-file `visible` map for a file in `ns` with `usings`.
-///
-/// `using_spans` runs parallel to `usings`; an import-vs-import collision is
-/// recorded as [`Lookup::Ambiguous`] carrying the two **`using` directive**
-/// spans (spec §10: the reference plus both import sites).
+/// Builds a file's visible names: its ancestors' and its own namespace's items
+/// (any visibility; descendant reach), then each `using`d namespace's public
+/// items. Local names shadow imports; two imports of one name are ambiguous.
 fn compute_visible(
-    namespaces: &[NamespaceData],
+    resolved: &Resolved,
     ns: NsId,
     usings: &[String],
     using_spans: &[Span],
     by_path: &HashMap<String, NsId>,
 ) -> HashMap<String, Lookup> {
-    let mut visible: HashMap<String, Lookup> = HashMap::new();
-    let mut local: HashSet<String> = HashSet::new();
-
-    let mut ancestors: Vec<NsId> = Vec::new();
-    let mut current = namespace_at(namespaces, ns).and_then(|data| data.parent);
+    let mut visible = HashMap::new();
+    let mut chain = vec![ns];
+    let mut current = resolved.namespaces[ns.0 as usize].parent;
     while let Some(ancestor) = current {
-        if ancestors.contains(&ancestor) {
+        if chain.contains(&ancestor) {
             break;
         }
-        ancestors.push(ancestor);
-        current = namespace_at(namespaces, ancestor).and_then(|data| data.parent);
+        chain.push(ancestor);
+        current = resolved.namespaces[ancestor.0 as usize].parent;
     }
-    ancestors.reverse();
-    for ancestor in ancestors {
-        add_local(namespaces, ancestor, &mut visible, &mut local);
+    for ns in chain.iter().rev() {
+        for (name, id) in &resolved.namespaces[ns.0 as usize].items {
+            visible.insert(name.clone(), Lookup::One(*id));
+        }
     }
-    add_local(namespaces, ns, &mut visible, &mut local);
+    let local: HashSet<String> = visible.keys().cloned().collect();
 
-    let mut imported: HashMap<String, Vec<(ResItem, Span)>> = HashMap::new();
-    let mut seen: HashSet<NsId> = HashSet::new();
+    let mut imported: HashMap<String, Vec<(DefId, Span)>> = HashMap::new();
+    let mut seen = HashSet::new();
     for (index, using) in usings.iter().enumerate() {
         let Some(&target) = by_path.get(using.as_str()) else {
             continue;
@@ -1002,26 +482,17 @@ fn compute_visible(
         if !seen.insert(target) {
             continue;
         }
-        let Some(data) = namespace_at(namespaces, target) else {
-            continue;
-        };
         let site = using_spans.get(index).copied().unwrap_or_else(Span::dummy);
-        for (name, item) in &data.items {
-            if item.vis != Visibility::Public || local.contains(name) {
-                continue;
+        for (name, id) in &resolved.namespaces[target.0 as usize].items {
+            if resolved.def(*id).vis == Visibility::Public && !local.contains(name) {
+                imported.entry(name.clone()).or_default().push((*id, site));
             }
-            imported
-                .entry(name.clone())
-                .or_default()
-                .push((item.clone(), site));
         }
     }
-    for items in imported.values_mut() {
-        items.sort_by_key(|(item, _)| (item.span.file.0, item.span.lo.0));
-    }
-    for (name, items) in imported {
-        if let [(item, _)] = items.as_slice() {
-            visible.insert(name, Lookup::One(item.clone()));
+    for (name, mut items) in imported {
+        items.sort_by_key(|(id, _)| *id);
+        if let [(id, _)] = items.as_slice() {
+            visible.insert(name, Lookup::One(*id));
         } else {
             let sites = items.iter().map(|(_, site)| *site).collect();
             visible.insert(name, Lookup::Ambiguous(sites));
@@ -1033,59 +504,73 @@ fn compute_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lilac_error::Diags;
     use lilac_lex::Lexer;
-    use lilac_module::{FileUnit, Namespace};
+    use lilac_module::{FileUnit, Namespace as LoadedNs};
     use lilac_parse::Parser;
     use lilac_span::SourceMap;
     use std::path::PathBuf;
 
-    fn resolve_with_file(src: &str) -> (Module, FileId, Diags) {
+    struct Spec {
+        ns: usize,
+        src: &'static str,
+        usings: &'static [&'static str],
+    }
+
+    fn resolve_files(paths: &[&str], specs: &[Spec]) -> (Resolved, Vec<FileId>, Diags) {
         let mut sm = SourceMap::new();
-        let file = sm.add_file("test.lilac", src);
-        let (tokens, lex_errors) = Lexer::lex_all(src, file);
         let mut diags = Diags::new();
-        for error in lex_errors {
-            diags.emit(error);
+        let mut namespaces: Vec<LoadedNs> = paths
+            .iter()
+            .map(|path| LoadedNs {
+                path: (*path).to_owned(),
+                dir: PathBuf::from(path),
+                files: Vec::new(),
+            })
+            .collect();
+        let mut files = Vec::new();
+        let mut programs = Vec::new();
+        for (index, spec) in specs.iter().enumerate() {
+            let name = format!("f{index}.lilac");
+            let file = sm.add_file(&name, spec.src);
+            let (tokens, _) = Lexer::lex_all(spec.src, file);
+            let program = Parser::new(tokens, file)
+                .parse_program(&mut diags)
+                .expect("parses");
+            programs.push((file, program));
+            namespaces[spec.ns].files.push(index);
+            files.push(FileUnit {
+                name: name.clone(),
+                path: PathBuf::from(&name),
+                file,
+                ns: spec.ns,
+                src: spec.src.to_owned(),
+                usings: spec.usings.iter().map(|u| (*u).to_owned()).collect(),
+                using_spans: spec.usings.iter().map(|_| Span::dummy()).collect(),
+            });
         }
-        let mut parser = Parser::new(tokens, file);
-        let program = parser
-            .parse_program(&mut diags)
-            .expect("test source parses");
-        let module = collect(&program, &mut diags);
-        (module, file, diags)
+        let ids = files.iter().map(|f| f.file).collect();
+        let project = Project {
+            root: PathBuf::from("."),
+            namespaces,
+            files,
+        };
+        let resolved = resolve(&project, &programs, &mut diags);
+        (resolved, ids, diags)
     }
 
-    fn resolve_src(src: &str) -> (Module, Diags) {
-        let (module, _file, diags) = resolve_with_file(src);
-        (module, diags)
-    }
-
-    /// Resolves one source as a one-file project and returns the first object.
-    fn resolve_object(src: &'static str) -> (ResItem, Diags) {
-        let (project, diags) = resolve_project(src);
-        let object = project
-            .all_items()
-            .find(|(_, item)| matches!(item.kind, ResKind::Object { .. }))
-            .map(|(_, item)| item.clone())
-            .expect("test source declares an object");
-        (object, diags)
-    }
-
-    /// Resolves one source as a one-file project.
-    fn resolve_project(src: &'static str) -> (ResolvedProject, Diags) {
-        collect_project_src(
+    fn resolve_one(src: &'static str) -> (Resolved, FileId, Diags) {
+        let (resolved, files, diags) = resolve_files(
             &[""],
             &[Spec {
                 ns: 0,
-                name: "test.lilac",
                 src,
                 usings: &[],
             }],
-        )
+        );
+        (resolved, files[0], diags)
     }
 
-    fn e020_count(diags: &Diags) -> usize {
+    fn e020(diags: &Diags) -> usize {
         diags
             .diagnostics()
             .iter()
@@ -1093,818 +578,204 @@ mod tests {
             .count()
     }
 
+    fn one(resolved: &Resolved, file: FileId, name: &str) -> DefId {
+        match resolved.lookup(file, name) {
+            Some(Lookup::One(id)) => *id,
+            other => panic!("`{name}`: {other:?}"),
+        }
+    }
+
     #[test]
-    fn single_project_lookup() {
-        let src = "main: function () nothing {}\n";
-        let (module, file, diags) = resolve_with_file(src);
+    fn top_level_items_are_visible() {
+        let (resolved, file, diags) = resolve_one("main: function () nothing {}\n");
         assert!(!diags.has_errors(), "{diags:?}");
-        let def = module.items.get("main").expect("has main").id;
-        let project = ResolvedProject::single(module, file);
-        let Lookup::One(item) = project.lookup(file, "main").expect("main is visible") else {
-            panic!("expected exactly one binding");
-        };
-        assert_eq!(item.id, def);
-        assert_eq!(project.namespace_of(def), Some(NsId(0)));
-        assert_eq!(project.namespace_path(NsId(0)), "");
+        let main = one(&resolved, file, "main");
+        assert_eq!(resolved.def(main).name, "main");
+        assert_eq!(resolved.qualified_name(main), "main");
     }
 
     #[test]
-    fn hook_overload_defs_share_root_namespace() {
-        let (module, file, diags) = resolve_with_file(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add_32(lhs, rhs)\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let overloads = module.hooks.get("@add").expect("has @add");
-        assert_eq!(overloads.len(), 2);
-        let second = overloads[1].id;
-        assert!(
-            !module.items.values().any(|item| item.id == second),
-            "the non-first overload must not live in `items`"
-        );
-        let project = ResolvedProject::single(module, file);
-        assert_eq!(project.namespace_of(second), Some(NsId(0)));
+    fn duplicate_names_are_e020() {
+        let (_, _, diags) =
+            resolve_one("get: function () nothing {}\nget: function () nothing {}\n");
+        assert_eq!(e020(&diags), 1);
     }
 
     #[test]
-    fn duplicate_top_level_names_emit_e020() {
-        let (_, diags) = resolve_src("get: function () nothing {}\nget: function () nothing {}\n");
-        assert_eq!(e020_count(&diags), 1);
-    }
-
-    #[test]
-    fn object_members_resolve() {
-        let (module, diags) = resolve_src(
-            "Object: object {\n    member: @bit8\n    get: function () nothing {}\n}\n",
-        );
-        assert!(!diags.has_errors());
-        let object = module.items.get("Object").expect("has Object");
-        let ResKind::Object { members, .. } = &object.kind else {
-            panic!("expected object, got {:?}", object.kind);
-        };
-        assert!(matches!(
-            members.get("member").map(|m| &m.kind),
-            Some(ResKind::Field)
-        ));
-        assert!(matches!(
-            members.get("get").map(|m| &m.kind),
-            Some(ResKind::Func { .. })
-        ));
-    }
-
-    #[test]
-    fn object_private_members_recorded() {
-        let (module, diags) = resolve_src(
-            "Object: object {\n    public_member: @bit8\n    private {\n        secret: @bit8\n        hidden: function () nothing {}\n    }\n}\n",
+    fn hooks_are_unit_global_and_unscoped() {
+        let (resolved, file, diags) = resolve_one(
+            "@add: function (a: @bit8, b: @bit8) r: @bit8 => a\n@add: function (a: @bit32, b: @bit32) r: @bit32 => a\nNum: object {\n    d: @bit8\n    @negate: function (v: Num) r: Num => v\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        let object = module.items.get("Object").expect("has Object");
-        let ResKind::Object { members, .. } = &object.kind else {
-            panic!("expected object, got {:?}", object.kind);
-        };
-        assert_eq!(
-            members.get("public_member").map(|m| m.vis),
-            Some(Visibility::Public)
-        );
-        assert_eq!(
-            members.get("secret").map(|m| m.vis),
-            Some(Visibility::Private)
-        );
-        assert_eq!(
-            members.get("hidden").map(|m| m.vis),
-            Some(Visibility::Private)
-        );
+        assert_eq!(resolved.hooks.len(), 3);
+        assert!(resolved.lookup(file, "@add").is_none());
+        let num = one(&resolved, file, "Num");
+        assert_eq!(resolved.def(num).hooks.len(), 1);
+        let negate = resolved.def(num).hooks[0];
+        assert_eq!(resolved.def(negate).parent, Some(num));
+        assert_eq!(resolved.qualified_name(negate), "Num.@negate");
     }
 
     #[test]
-    fn hooks_marked_hook() {
-        let (module, diags) = resolve_src("@myhook: function () nothing {}\n");
-        assert!(!diags.has_errors());
-        let hook = module.items.get("@myhook").expect("has hook");
-        assert!(matches!(hook.kind, ResKind::Hook { .. }));
-    }
-
-    #[test]
-    fn enum_variants_recorded() {
-        let (module, diags) = resolve_src("Number: enum {\n    One\n    Two\n}\n");
-        assert!(!diags.has_errors());
-        let number = module.items.get("Number").expect("has Number");
-        let ResKind::Enum { variants } = &number.kind else {
-            panic!("expected enum, got {:?}", number.kind);
-        };
-        let names: Vec<_> = variants.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, ["One", "Two"]);
-        assert!(variants.iter().all(|v| v.payload.is_none()));
-    }
-
-    #[test]
-    fn hook_overloads_with_distinct_sigs_pass() {
-        let (module, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit32, rhs: @bit32) result: @bit32 => @i_add_32(lhs, rhs)\n",
+    fn members_fields_and_private() {
+        let (resolved, file, diags) = resolve_one(
+            "Object: object {\n    a: @bit8\n    private {\n        b: @bit8\n        hidden: function () nothing {}\n    }\n    get: function (self) nothing {}\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(module.hooks.get("@add").map(Vec::len), Some(2));
-    }
-
-    #[test]
-    fn identical_hook_sigs_emit_e020() {
-        let (_, diags) = resolve_src(
-            "@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n@add: function (lhs: @bit8, rhs: @bit8) result: @bit8 => @i_add_8(lhs, rhs)\n",
-        );
-        assert_eq!(e020_count(&diags), 1);
-    }
-
-    #[test]
-    fn enum_payloads_recorded() {
-        let (module, diags) = resolve_src("OptionalBit32: enum {\n    Some: @bit32\n    None\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let number = module.items.get("OptionalBit32").expect("has enum");
-        let ResKind::Enum { variants } = &number.kind else {
-            panic!("expected enum, got {:?}", number.kind);
-        };
-        assert_eq!(variants.len(), 2);
-        assert_eq!(variants[0].name, "Some");
-        assert!(variants[0].payload.is_some());
-        assert!(variants[1].payload.is_none());
-    }
-
-    #[test]
-    fn func_records_generic_params() {
-        let (module, diags) = resolve_src("gen[T, U]: function (a: T) r: U {\n    r = a\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let func = module.items.get("gen").expect("has gen");
-        let ResKind::Func {
-            generic,
-            generic_params,
-            ..
-        } = &func.kind
-        else {
-            panic!("expected func, got {:?}", func.kind);
-        };
-        assert!(generic);
-        assert_eq!(generic_params, &["T".to_owned(), "U".to_owned()]);
-    }
-
-    #[test]
-    fn object_records_generic_params() {
-        let (module, diags) = resolve_src("GenObj[T]: object {\n    value: T\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        let object = module.items.get("GenObj").expect("has GenObj");
-        let ResKind::Object { generic_params, .. } = &object.kind else {
-            panic!("expected object, got {:?}", object.kind);
-        };
-        assert_eq!(generic_params, &["T".to_owned()]);
-    }
-
-    #[test]
-    fn object_hook_overloads_by_signature() {
-        let (object, diags) = resolve_object(
-            "Int64: object {\n\
-             @conversion: function (from: @byte_buffer) Int64 => Int64 { data = 0x0 }\n\
-             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
-             @conversion: function (from: Int64) @bit64 => from.data\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let ResKind::Object { hooks, .. } = &object.kind else {
-            panic!("object");
-        };
-        assert_eq!(hooks["@conversion"].len(), 3);
-    }
-
-    #[test]
-    fn identical_conversion_pair_is_e020() {
-        let (_, diags) = resolve_object(
-            "Int64: object {\n\
-             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
-             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n}\n",
-        );
-        assert!(
-            diags.diagnostics().iter().any(|d| d.code == "E020"),
-            "{diags:?}"
-        );
-    }
-
-    #[test]
-    fn single_file_identical_member_conversion_pair_is_e020() {
-        // Single-file mode (`collect`) must dedup member hooks by signature too,
-        // matching folder mode (`collect_project`).
-        let (_, diags) = resolve_src(
-            "Int64: object {\n\
-             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n\
-             @conversion: function (from: @bit64) Int64 => Int64 { data = 0x0 }\n}\n",
-        );
-        assert_eq!(e020_count(&diags), 1);
-    }
-
-    #[test]
-    fn single_file_member_hooks_of_different_objects_do_not_collide() {
-        // `@on_drop(ref self)` keys by its parent, so two objects' drops are
-        // distinct signatures in single-file mode.
-        let (_, diags) = resolve_src(
-            "A: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n\
-             B: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-    }
-
-    #[test]
-    fn member_hook_records_parent_and_self_keys_by_parent() {
-        // `@on_drop(ref self)` in two different objects must not collide, and each
-        // hook's parent must be its own object.
-        let (project, diags) = resolve_project(
-            "A: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n\
-             B: object {\n    @on_drop: function (ref self) nothing => 0x0\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let drops = &project.hooks["@on_drop"];
-        assert_eq!(drops.len(), 2);
-        let parents: Vec<_> = drops
+        let object = one(&resolved, file, "Object");
+        let def = resolved.def(object);
+        let fields: Vec<_> = def
+            .slots
             .iter()
-            .filter_map(|d| match &d.kind {
-                ResKind::Hook {
-                    parent: Some(p), ..
-                } => Some(p.name.clone()),
-                _ => None,
-            })
+            .map(|id| resolved.def(*id).name.as_str())
             .collect();
-        assert!(
-            parents.contains(&"A".to_owned()) && parents.contains(&"B".to_owned()),
-            "{parents:?}"
+        assert_eq!(fields, ["a", "b"]);
+        let b = resolved.member(object, "b").expect("b");
+        assert_eq!(resolved.def(b).vis, Visibility::Private);
+        let hidden = resolved.member(object, "hidden").expect("hidden");
+        assert_eq!(resolved.def(hidden).vis, Visibility::Private);
+        assert!(resolved.member(object, "get").is_some());
+    }
+
+    #[test]
+    fn enum_variants_and_members() {
+        let (resolved, file, diags) = resolve_one(
+            "Opt[T]: enum {\n    Some: T\n    None\n    get: function (self) v: T {}\n}\n",
         );
-    }
-
-    struct Spec {
-        ns: usize,
-        name: &'static str,
-        src: &'static str,
-        usings: &'static [&'static str],
-    }
-
-    fn build_project(ns_paths: &[&str], specs: &[Spec]) -> (Project, Vec<(FileId, Program)>) {
-        let mut programs = Vec::new();
-        let mut files = Vec::new();
-        let mut ns_files: Vec<Vec<usize>> = vec![Vec::new(); ns_paths.len()];
-        for (index, spec) in specs.iter().enumerate() {
-            let file = FileId(u32::try_from(index).expect("index fits in u32"));
-            let (tokens, lex_errors) = Lexer::lex_all(spec.src, file);
-            assert!(lex_errors.is_empty(), "{lex_errors:?}");
-            let mut parse_diags = Diags::new();
-            let mut parser = Parser::new(tokens, file);
-            let program = parser
-                .parse_program(&mut parse_diags)
-                .expect("source parses");
-            programs.push((file, program));
-            files.push(FileUnit {
-                name: spec.name.to_owned(),
-                path: PathBuf::from(spec.name),
-                file,
-                ns: spec.ns,
-                src: spec.src.to_owned(),
-                usings: spec
-                    .usings
-                    .iter()
-                    .map(|using| (*using).to_owned())
-                    .collect(),
-                using_spans: spec.usings.iter().map(|_| Span::dummy()).collect(),
-            });
-            ns_files[spec.ns].push(index);
-        }
-        let namespaces = ns_paths
+        assert!(!diags.has_errors(), "{diags:?}");
+        let opt = one(&resolved, file, "Opt");
+        assert_eq!(resolved.def(opt).generic_params, ["T"]);
+        let variants: Vec<_> = resolved
+            .def(opt)
+            .slots
             .iter()
-            .enumerate()
-            .map(|(index, path)| Namespace {
-                path: (*path).to_owned(),
-                dir: PathBuf::from(path),
-                files: ns_files[index].clone(),
-            })
+            .map(|id| resolved.def(*id).name.as_str())
             .collect();
-        let project = Project {
-            root: PathBuf::from("proj"),
-            namespaces,
-            files,
-        };
-        (project, programs)
-    }
-
-    fn collect_project_src(ns_paths: &[&str], specs: &[Spec]) -> (ResolvedProject, Diags) {
-        let (project, programs) = build_project(ns_paths, specs);
-        let mut diags = Diags::new();
-        let resolved = collect_project(&project, &programs, &mut diags);
-        (resolved, diags)
-    }
-
-    fn one<'a>(project: &'a ResolvedProject, file: FileId, name: &str) -> &'a ResItem {
-        match project.lookup(file, name) {
-            Some(Lookup::One(item)) => item,
-            other => panic!("expected one binding for `{name}`, got {other:?}"),
-        }
+        assert_eq!(variants, ["Some", "None"]);
+        assert!(resolved.member(opt, "get").is_some());
     }
 
     #[test]
-    fn namespace_local_names_are_distinct() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let root_foo = one(&resolved, FileId(0), "foo");
-        let util_foo = one(&resolved, FileId(1), "foo");
-        assert_eq!(resolved.namespace_of(root_foo.id), Some(NsId(0)));
-        assert_eq!(resolved.namespace_of(util_foo.id), Some(NsId(1)));
-        assert_eq!(resolved.namespace_path(NsId(0)), "");
-        assert_eq!(resolved.namespace_path(NsId(1)), "util");
+    fn variant_and_method_clash_is_e020() {
+        let (_, _, diags) = resolve_one("E: enum {\n    A\n    A: function () nothing {}\n}\n");
+        assert_eq!(e020(&diags), 1, "{diags:?}");
     }
 
     #[test]
-    fn descendant_sees_ancestor_without_import() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "bar: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(
-            resolved.namespace_of(one(&resolved, FileId(1), "foo").id),
-            Some(NsId(0))
-        );
-    }
-
-    #[test]
-    fn ancestor_does_not_see_descendant() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "main: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(resolved.lookup(FileId(0), "foo").is_none());
-    }
-
-    #[test]
-    fn namespace_private_is_not_importable() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "using util\n",
-                    usings: &["util"],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "private {\n    secret: function () nothing {}\n}\npublic_fn: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(resolved.lookup(FileId(0), "secret").is_none());
-        assert!(resolved.lookup(FileId(0), "public_fn").is_some());
-        assert!(resolved.lookup(FileId(1), "secret").is_some());
-    }
-
-    #[test]
-    fn colliding_imports_are_ambiguous() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util1", "util2"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "using util1\nusing util2\n",
-                    usings: &["util1", "util2"],
-                },
-                Spec {
-                    ns: 1,
-                    name: "one.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 2,
-                    name: "two.lilac",
-                    src: "foo: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        match resolved.lookup(FileId(0), "foo") {
-            Some(Lookup::Ambiguous(spans)) => assert_eq!(spans.len(), 2),
-            other => panic!("expected ambiguity, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cross_file_duplicate_emits_e020() {
-        let (_, diags) = collect_project_src(
-            &[""],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "a.lilac",
-                    src: "dup: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 0,
-                    name: "b.lilac",
-                    src: "dup: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert_eq!(e020_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
-    fn hooks_are_unit_global_across_namespaces() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let overloads = resolved.hooks.get("@h").expect("has @h");
-        assert_eq!(overloads.len(), 2);
-        let namespaces: HashSet<_> = overloads.iter().map(|item| item.ns).collect();
-        assert_eq!(namespaces, HashSet::from([NsId(0), NsId(1)]));
-    }
-
-    #[test]
-    fn identical_hooks_across_namespaces_emit_e020() {
-        let (_, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert_eq!(e020_count(&diags), 1, "{diags:?}");
-    }
-
-    /// Regression: a type reached from an ancestor must key by its *declaring*
-    /// namespace, so root `@h(ref Base)` and child `b` `@h(ref Base)` are the
-    /// same signature (`E020`) rather than escaping to a later `E070`.
-    #[test]
-    fn ancestor_type_hook_is_e020_not_distinct() {
-        let (_, diags) = collect_project_src(
-            &["", "b"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "Base: object {\n    x: @bit32\n}\n@h: function (value: ref Base) result: @bit32 {\n    result = value.x\n}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "gen.lilac",
-                    src: "@h: function (value: ref Base) result: @bit32 {\n    result = value.x\n}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert_eq!(e020_count(&diags), 1, "{diags:?}");
-    }
-
-    /// Two namespaces that each declare their *own* same-named type keep
-    /// distinct hook signatures (no `E020`).
-    #[test]
-    fn own_type_hooks_are_distinct_across_namespaces() {
-        let (_, diags) = collect_project_src(
-            &["", "a", "b"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "main: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "a.lilac",
-                    src: "Thing: object {\n    x: @bit32\n}\n@h: function (value: ref Thing) result: @bit32 {\n    result = value.x\n}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 2,
-                    name: "b.lilac",
-                    src: "Thing: object {\n    x: @bit32\n}\n@h: function (value: ref Thing) result: @bit32 {\n    result = value.x\n}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert_eq!(e020_count(&diags), 0, "{diags:?}");
-    }
-
-    #[test]
-    fn qualification_covers_members_and_hook_overloads() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "main: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "Obj: object {\n    member: @bit8\n}\n@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let util = NsId(1);
-        let object = resolved
-            .all_items()
-            .find(|(_, item)| item.name == "Obj")
-            .map(|(_, item)| item)
-            .expect("has Obj");
-        assert_eq!(resolved.namespace_of(object.id), Some(util));
-        let ResKind::Object { members, .. } = &object.kind else {
-            panic!("expected object, got {:?}", object.kind);
-        };
-        let member = members.get("member").expect("has member");
-        assert_eq!(resolved.namespace_of(member.id), Some(util));
-        let overloads = resolved.hooks.get("@h").expect("has @h");
-        assert_eq!(overloads.len(), 2);
-        for overload in overloads {
-            assert_eq!(resolved.namespace_of(overload.id), Some(util));
-        }
-    }
-
-    #[test]
-    fn cross_file_distinct_hook_overloads_do_not_collide() {
-        let (resolved, diags) = collect_project_src(
-            &[""],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "a.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 0,
-                    name: "b.lilac",
-                    src: "@h: function (x: @bit32) result: @bit32 => @i_add_32(x, x)\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(resolved.hooks.get("@h").map(Vec::len), Some(2));
-        // The namespace still records the first overload for `namespace_of`.
-        let first = one(&resolved, FileId(0), "@h");
-        assert_eq!(resolved.namespace_of(first.id), Some(NsId(0)));
-    }
-
-    #[test]
-    fn cross_file_identical_hooks_emit_e020() {
-        let (_, diags) = collect_project_src(
-            &[""],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "a.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 0,
-                    name: "b.lilac",
-                    src: "@h: function (x: @bit8) result: @bit8 => @i_add_8(x, x)\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert_eq!(e020_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
-    fn local_name_shadows_import() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "using util\nfoo: function () nothing {}\n",
-                    usings: &["util"],
-                },
-                Spec {
-                    ns: 1,
-                    name: "util.lilac",
-                    src: "foo: function () nothing {}\nbar: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        let foo = one(&resolved, FileId(0), "foo");
-        assert_eq!(resolved.namespace_of(foo.id), Some(NsId(0)));
-        let bar = one(&resolved, FileId(0), "bar");
-        assert_eq!(resolved.namespace_of(bar.id), Some(NsId(1)));
-    }
-
-    #[test]
-    fn using_is_not_transitive() {
-        let (resolved, diags) = collect_project_src(
-            &["", "a", "b", "c"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "main.lilac",
-                    src: "main: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 1,
-                    name: "a.lilac",
-                    src: "using b\n",
-                    usings: &["b"],
-                },
-                Spec {
-                    ns: 2,
-                    name: "b.lilac",
-                    src: "using c\nb_item: function () nothing {}\n",
-                    usings: &["c"],
-                },
-                Spec {
-                    ns: 3,
-                    name: "c.lilac",
-                    src: "c_item: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(resolved.lookup(FileId(1), "b_item").is_some());
-        assert!(resolved.lookup(FileId(1), "c_item").is_none());
-        assert!(resolved.lookup(FileId(2), "c_item").is_some());
-    }
-
-    #[test]
-    fn using_is_per_file() {
-        let (resolved, diags) = collect_project_src(
-            &["", "util1", "util2"],
-            &[
-                Spec {
-                    ns: 0,
-                    name: "a.lilac",
-                    src: "using util1\n",
-                    usings: &["util1"],
-                },
-                Spec {
-                    ns: 0,
-                    name: "b.lilac",
-                    src: "using util2\n",
-                    usings: &["util2"],
-                },
-                Spec {
-                    ns: 1,
-                    name: "one.lilac",
-                    src: "one: function () nothing {}\n",
-                    usings: &[],
-                },
-                Spec {
-                    ns: 2,
-                    name: "two.lilac",
-                    src: "two: function () nothing {}\n",
-                    usings: &[],
-                },
-            ],
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(resolved.lookup(FileId(0), "one").is_some());
-        assert!(resolved.lookup(FileId(0), "two").is_none());
-        assert!(resolved.lookup(FileId(1), "two").is_some());
-        assert!(resolved.lookup(FileId(1), "one").is_none());
-    }
-
-    #[test]
-    fn nested_namespace_parent_chain_and_path() {
-        let (resolved, diags) = collect_project_src(
+    fn namespaces_reach_and_privacy() {
+        let (resolved, files, diags) = resolve_files(
             &["", "a", "a.b"],
             &[
                 Spec {
                     ns: 0,
-                    name: "main.lilac",
-                    src: "root_item: function () nothing {}\n",
-                    usings: &[],
+                    src: "root_fn: function () nothing {}\nprivate {\n    secret: function () nothing {}\n}\n",
+                    usings: &["a"],
                 },
                 Spec {
                     ns: 1,
-                    name: "a.lilac",
-                    src: "a_item: function () nothing {}\n",
+                    src: "a_fn: function () nothing {}\nprivate {\n    a_secret: function () nothing {}\n}\n",
                     usings: &[],
                 },
                 Spec {
                     ns: 2,
-                    name: "deep.lilac",
-                    src: "deep_item: function () nothing {}\n",
+                    src: "b_fn: function () nothing {}\n",
                     usings: &[],
                 },
             ],
         );
         assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(resolved.namespace_path(NsId(0)), "");
-        assert_eq!(resolved.namespace_path(NsId(1)), "a");
-        assert_eq!(resolved.namespace_path(NsId(2)), "a.b");
-        assert_eq!(resolved.namespaces[0].parent, None);
-        assert_eq!(resolved.namespaces[1].parent, Some(NsId(0)));
-        assert_eq!(resolved.namespaces[2].parent, Some(NsId(1)));
-        // `a.b` reaches both its ancestors (root and `a`) with no import.
-        assert!(resolved.lookup(FileId(2), "root_item").is_some());
-        assert!(resolved.lookup(FileId(2), "a_item").is_some());
-        assert_eq!(
-            resolved.namespace_of(one(&resolved, FileId(2), "deep_item").id),
-            Some(NsId(2))
-        );
+        // The root imports `a`'s public items only.
+        assert!(resolved.lookup(files[0], "a_fn").is_some());
+        assert!(resolved.lookup(files[0], "a_secret").is_none());
+        // A descendant sees its ancestors' items, private ones included.
+        assert!(resolved.lookup(files[2], "a_secret").is_some());
+        assert!(resolved.lookup(files[2], "secret").is_some());
+        // An ancestor does not see its descendants without importing them.
+        assert!(resolved.lookup(files[1], "b_fn").is_none());
+        let a_fn = one(&resolved, files[0], "a_fn");
+        assert_eq!(resolved.qualified_name(a_fn), "a.a_fn");
     }
 
     #[test]
-    fn error_item_defines_nothing_and_keeps_ids_stable() {
-        // A recovered broken item is an `ItemKind::Error`: it defines nothing,
-        // emits no diagnostic, and must not consume a `DefId` (so the tolerant
-        // passes see stable ids for the items that do survive).
-        let (module, diags) = resolve_src("bad: 1\ngood: function () nothing {}\n");
-        assert!(
-            !diags
-                .diagnostics()
-                .iter()
-                .any(|d| matches!(d.code, "E020" | "E023")),
-            "{diags:?}"
+    fn colliding_imports_are_ambiguous_and_locals_shadow() {
+        let (resolved, files, diags) = resolve_files(
+            &["", "a", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "local: function () nothing {}\n",
+                    usings: &["a", "b"],
+                },
+                Spec {
+                    ns: 1,
+                    src: "shared: function () nothing {}\nlocal: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "shared: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
         );
-        assert_eq!(module.items.len(), 1, "only the good item is defined");
-        let good = module
-            .items
-            .get("good")
-            .expect("the good item is collected");
-        assert_eq!(good.id, DefId(0), "an error item must not consume a DefId");
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert!(matches!(
+            resolved.lookup(files[0], "shared"),
+            Some(Lookup::Ambiguous(sites)) if sites.len() == 2
+        ));
+        let local = one(&resolved, files[0], "local");
+        assert_eq!(resolved.def(local).ns, NsId(0));
+    }
+
+    #[test]
+    fn same_namespace_files_merge_and_clash() {
+        let (_, _, diags) = resolve_files(
+            &[""],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "x: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 0,
+                    src: "x: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e020(&diags), 1);
+    }
+
+    #[test]
+    fn error_items_define_nothing() {
+        let mut sm = SourceMap::new();
+        let src = "broken: function ( {\n}\nok: function () nothing {}\n";
+        let file = sm.add_file("t.lilac", src);
+        let (tokens, _) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        let program = Parser::new(tokens, file)
+            .parse_program(&mut diags)
+            .expect("recovers");
+        let project = Project {
+            root: PathBuf::from("."),
+            namespaces: vec![LoadedNs {
+                path: String::new(),
+                dir: PathBuf::from("."),
+                files: vec![0],
+            }],
+            files: vec![FileUnit {
+                name: "t.lilac".to_owned(),
+                path: PathBuf::from("t.lilac"),
+                file,
+                ns: 0,
+                src: src.to_owned(),
+                usings: Vec::new(),
+                using_spans: Vec::new(),
+            }],
+        };
+        let resolved = resolve(&project, &[(file, program)], &mut diags);
+        assert_eq!(resolved.defs.len(), 1);
+        assert_eq!(resolved.defs[0].name, "ok");
     }
 }

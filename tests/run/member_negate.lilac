@@ -1,4 +1,3 @@
-// pending: phase 3 (unary `-` resolves `@negate` by name, missing member hooks)
 // expect-exit: 3
 
 exit: extern function (code: @bit32) nothing

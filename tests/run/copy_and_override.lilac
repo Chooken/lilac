@@ -1,4 +1,3 @@
-// pending: phase 5 (`@on_copy` and `@on_override` are never called)
 // expect-stdout: co
 // expect-exit: 1
 

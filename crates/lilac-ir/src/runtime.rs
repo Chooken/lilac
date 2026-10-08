@@ -193,6 +193,7 @@ fn lir_func(
             .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
             .collect(),
         is_extern: false,
+        inline: false,
         blocks,
     }
 }
@@ -328,7 +329,7 @@ fn format_args_push(stride: &str) -> LirFunc {
                 vec![
                     field("table", "count", 0, "c", "#bit_native"),
                     constant("cap", "0x10", "#bit_native"),
-                    arith(ArithOp::ILtU, "c", "cap", "ok", "#bit_native"),
+                    arith(ArithOp::ILtU, "c", "cap", "ok", "#bit8"),
                 ],
                 branch_if("ok", "append", "done"),
             ),
@@ -391,7 +392,7 @@ fn format_args_piece(stride: &str) -> LirFunc {
                 vec![
                     field("table", "count", 0, "c", "#bit_native"),
                     copy_reg(LirOperand::Place("index".to_owned()), "idx", "#bit_native"),
-                    arith(ArithOp::ILtU, "idx", "c", "ok", "#bit_native"),
+                    arith(ArithOp::ILtU, "idx", "c", "ok", "#bit8"),
                 ],
                 branch_if("ok", "load", "trap"),
             ),

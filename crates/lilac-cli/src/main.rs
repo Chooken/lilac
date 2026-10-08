@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]..."
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]..."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -108,6 +108,17 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 return Err(ExitCode::from(2));
             }
             dump_lir = Some(PathBuf::from(dir));
+        } else if let Some(mount) = arg.strip_prefix("--lib=") {
+            let Some((name, dir)) = mount
+                .split_once('=')
+                .filter(|(n, d)| !n.is_empty() && !d.is_empty())
+            else {
+                eprintln!("--lib= needs `Name=dir`\n{}", usage());
+                return Err(ExitCode::from(2));
+            };
+            session
+                .libraries
+                .push((name.to_owned(), PathBuf::from(dir)));
         } else if let Some(name) = arg.strip_prefix("--export=") {
             if name.is_empty() {
                 eprintln!("--export= needs a name\n{}", usage());

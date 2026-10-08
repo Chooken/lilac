@@ -6,18 +6,20 @@ function @main
   $entry:
     alloca #byte_buffer %s : zeroed
     alloca #bit_native %n : zeroed
-    alloca #bit_native %tmp.1 : zeroed
+    alloca #byte_buffer %tmp.1 : zeroed
+    alloca #bit_native %tmp.2 : zeroed
     alloca ref #bit8 %p : zeroed
-    alloca ref #bit8 %tmp.2 : zeroed
+    alloca #byte_buffer %tmp.3 : zeroed
+    alloca ref #bit8 %tmp.4 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %s
+    copy %s -> %tmp.1
     &cf.1: #bit_native = const 0x5
-    copy &cf.1 -> %tmp.1
-    &2: #bit_native = copy %tmp.1
-    copy &2 -> %n
-    call @.lilac.byte_buffer_ptr (in %s) (out %tmp.2)
-    &3: ref #bit8 = copy %tmp.2
-    copy &3 -> %p
+    copy &cf.1 -> %tmp.2
+    copy %tmp.2 -> %n
+    copy %s -> %tmp.3
+    call @.lilac.byte_buffer_ptr (in %tmp.3) (out %tmp.4)
+    copy %tmp.4 -> %p
     return
 }
 function @.lilac.byte_buffer_ptr

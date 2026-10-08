@@ -1,4 +1,4 @@
-//! Types: interner, `TypeRef`, signatures (real checker lands in M1).
+//! Types: the interner, `TypeRef`, and function signatures.
 
 use std::collections::HashMap;
 
@@ -20,6 +20,38 @@ pub struct TypeRef {
     pub id: TypeId,
     /// Whether this is `ref <base>`.
     pub is_ref: bool,
+}
+
+impl TypeRef {
+    /// Poison for error recovery.
+    pub const ERROR: Self = Self {
+        id: TypeId::ERROR,
+        is_ref: false,
+    };
+
+    /// The by-value type `id`.
+    #[must_use]
+    pub fn value(id: TypeId) -> Self {
+        Self { id, is_ref: false }
+    }
+
+    /// `ref id`.
+    #[must_use]
+    pub fn reference(id: TypeId) -> Self {
+        Self { id, is_ref: true }
+    }
+
+    /// Whether this is poison.
+    #[must_use]
+    pub fn is_error(self) -> bool {
+        self.id == TypeId::ERROR
+    }
+
+    /// The same base type without `ref`.
+    #[must_use]
+    pub fn deref(self) -> Self {
+        Self::value(self.id)
+    }
 }
 
 /// What a `TypeId` stands for.
@@ -77,7 +109,7 @@ pub enum TypeKind {
     Error,
 }
 
-/// Function signature (checked in M1).
+/// Function signature.
 #[derive(Clone, Debug, Default)]
 pub struct FuncSig {
     /// Parameter types in order.
@@ -86,7 +118,7 @@ pub struct FuncSig {
     pub returns: Vec<TypeRef>,
 }
 
-/// Type table (real interner lands in M1).
+/// The type interner.
 #[derive(Clone, Debug, Default)]
 pub struct Types {
     kinds: Vec<TypeKind>,
@@ -221,6 +253,19 @@ impl Types {
                 }
             }
             _ => ty,
+        }
+    }
+
+    /// Whether `id` mentions an unsubstituted generic parameter anywhere.
+    pub fn contains_param(&self, id: TypeId) -> bool {
+        match self.kind(id) {
+            TypeKind::Param { .. } => true,
+            TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
+            TypeKind::Func { params, returns } => params
+                .iter()
+                .chain(returns.iter())
+                .any(|slot| self.contains_param(slot.id)),
+            _ => false,
         }
     }
 

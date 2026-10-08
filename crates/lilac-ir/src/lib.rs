@@ -74,6 +74,8 @@ pub struct LirFunc {
     pub outs: Vec<(String, String)>,
     /// Whether this is an `extern` (foreign) declaration with no body.
     pub is_extern: bool,
+    /// Whether backends must always inline it (`=>` functions).
+    pub inline: bool,
     /// Blocks in layout order (empty only for extern declarations).
     pub blocks: Vec<LirBlock>,
 }
@@ -154,6 +156,58 @@ pub enum ArithOp {
     FLt,
     /// `f.cmp.gt`.
     FGt,
+    /// `i.cmp.le`.
+    ILe,
+    /// `i.cmp.le.u`.
+    ILeU,
+    /// `i.cmp.ge`.
+    IGe,
+    /// `i.cmp.ge.u`.
+    IGeU,
+    /// `f.cmp.le` (false when either side is NaN).
+    FLe,
+    /// `f.cmp.ge` (false when either side is NaN).
+    FGe,
+}
+
+impl ArithOp {
+    /// Whether the result is a `#bit8` truth value.
+    #[must_use]
+    pub fn is_comparison(&self) -> bool {
+        matches!(
+            self,
+            Self::Eq
+                | Self::ILt
+                | Self::ILtU
+                | Self::IGt
+                | Self::IGtU
+                | Self::ILe
+                | Self::ILeU
+                | Self::IGe
+                | Self::IGeU
+                | Self::FLt
+                | Self::FGt
+                | Self::FLe
+                | Self::FGe
+        )
+    }
+
+    /// Whether this is a float operation (arithmetic or comparison).
+    #[must_use]
+    pub fn is_float(&self) -> bool {
+        matches!(
+            self,
+            Self::FAdd
+                | Self::FSub
+                | Self::FMul
+                | Self::FDiv
+                | Self::FMod
+                | Self::FLt
+                | Self::FGt
+                | Self::FLe
+                | Self::FGe
+        )
+    }
 }
 
 /// One Lilac IR instruction (every variant carries its span).
@@ -342,18 +396,11 @@ pub enum LirInst {
         /// Call-site span.
         call_span: Span,
     },
-    /// Pre-fold marker for `@size_of` (name keeps the `@`). Folding consumes
-    /// it before verification; a survivor is an internal error (reported as
-    /// `E070`).
-    FoldIntrinsic {
-        /// Intrinsic name (`@size_of`).
-        name: String,
-        /// Operand to fold (a register holding a constant).
-        arg: LirOperand,
-        /// Destination register (without sigil).
-        dst: String,
-        /// Result type.
-        ty: String,
+    /// `zero %x`: overwrites a place with all-zero bits (return slots start
+    /// zeroed on every call).
+    Zero {
+        /// Place (without sigil).
+        place: String,
         /// Instruction span.
         span: Span,
     },
@@ -580,6 +627,12 @@ fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::IGtU => "i.cmp.gt.u",
         ArithOp::FLt => "f.cmp.lt",
         ArithOp::FGt => "f.cmp.gt",
+        ArithOp::ILe => "i.cmp.le",
+        ArithOp::ILeU => "i.cmp.le.u",
+        ArithOp::IGe => "i.cmp.ge",
+        ArithOp::IGeU => "i.cmp.ge.u",
+        ArithOp::FLe => "f.cmp.le",
+        ArithOp::FGe => "f.cmp.ge",
     }
 }
 
@@ -674,11 +727,7 @@ fn print_inst(inst: &LirInst) -> String {
             ..
         } => format!("&{dst}: {ty} = {} &{lhs}, &{rhs}", print_op(op)),
         LirInst::CompileError { .. } => "@compile_error(live)".to_owned(),
-        LirInst::FoldIntrinsic {
-            name, arg, dst, ty, ..
-        } => {
-            format!("&{dst}: {ty} = {name} {}", print_operand(arg))
-        }
+        LirInst::Zero { place, .. } => format!("zero %{place}"),
     }
 }
 
@@ -716,7 +765,7 @@ fn inst_span(inst: &LirInst) -> Span {
         | LirInst::Alloca { span, .. }
         | LirInst::Drop { span, .. }
         | LirInst::Arith { span, .. }
-        | LirInst::FoldIntrinsic { span, .. } => *span,
+        | LirInst::Zero { span, .. } => *span,
         LirInst::CompileError { call_span, .. } => *call_span,
     }
 }
@@ -735,6 +784,8 @@ fn term_span(term: &LirTerm) -> Span {
 fn print_func(func: &LirFunc) -> Vec<(String, Option<Span>)> {
     let header = if func.is_extern {
         format!("extern @{}", func.name)
+    } else if func.inline {
+        format!("inline function @{}", func.name)
     } else {
         format!("function @{}", func.name)
     };
@@ -849,6 +900,48 @@ pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)
         "#format_args" => Some(&FORMAT_ARGS_LAYOUT),
         _ => None,
     }
+}
+
+/// Size and alignment in bytes of an IR type, by C layout rules (fields in
+/// order, each aligned; the struct padded to its largest alignment), which is
+/// what LLVM's data layouts use for our targets. `ptr_bytes` is the target's
+/// pointer width.
+#[must_use]
+pub fn size_align<S: std::hash::BuildHasher>(
+    layouts: &HashMap<String, Vec<(String, String)>, S>,
+    ty: &str,
+    ptr_bytes: u64,
+) -> (u64, u64) {
+    if ty.starts_with("ref ") {
+        return (ptr_bytes, ptr_bytes);
+    }
+    let scalar = match ty {
+        "#bit8" => Some(1),
+        "#bit16" | "#fbit16" => Some(2),
+        "#bit32" | "#fbit32" => Some(4),
+        "#bit64" | "#fbit64" => Some(8),
+        "#fbit128" => Some(16),
+        "#bit_native" => Some(ptr_bytes),
+        _ => None,
+    };
+    if let Some(size) = scalar {
+        return (size, size);
+    }
+    let fields: Vec<(String, String)> = match builtin_layout(ty) {
+        Some(fields) => fields
+            .iter()
+            .map(|(name, ty)| ((*name).to_owned(), (*ty).to_owned()))
+            .collect(),
+        None => layouts.get(ty).cloned().unwrap_or_default(),
+    };
+    let mut size = 0u64;
+    let mut align = 1u64;
+    for (_, field) in &fields {
+        let (field_size, field_align) = size_align(layouts, field, ptr_bytes);
+        size = size.next_multiple_of(field_align) + field_size;
+        align = align.max(field_align);
+    }
+    (size.next_multiple_of(align), align)
 }
 
 /// Whether an IR type spelling is a reference (`ref X`).
@@ -1019,6 +1112,7 @@ impl Verifier<'_> {
         self.verify_term(func, &block.term, &regs, has_fallthrough);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn verify_inst<'a>(
         &mut self,
         func: &LirFunc,
@@ -1112,8 +1206,14 @@ impl Verifier<'_> {
             LirInst::CompileError { call_span, .. } => {
                 lilac_error::bug!(*call_span, "unfolded `@compile_error` reached verify");
             }
-            LirInst::FoldIntrinsic { name, span, .. } => {
-                self.error(format!("unfolded `{name}` reached verify"), *span);
+            LirInst::Zero { place, span } => {
+                if !places.contains_key(place.as_str()) {
+                    self.error(
+                        format!("zero of undeclared place `%{place}` in `@{}`", func.name),
+                        *span,
+                    );
+                }
+                assigned.insert(place.as_str());
             }
             LirInst::StoreField { .. }
             | LirInst::Store { .. }
@@ -1469,7 +1569,10 @@ impl Verifier<'_> {
             op,
             ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod
         );
-        let is_float_cmp = matches!(op, ArithOp::FLt | ArithOp::FGt);
+        let is_float_cmp = matches!(
+            op,
+            ArithOp::FLt | ArithOp::FGt | ArithOp::FLe | ArithOp::FGe
+        );
         if is_float_cmp {
             if ty != "#bit8" {
                 self.error(
@@ -1496,6 +1599,28 @@ impl Verifier<'_> {
             return;
         }
         if !(is_float_arith || is_float_cmp) {
+            // Integer operands must match each other, and the result unless
+            // the op is a comparison (whose result is `#bit8`).
+            let operand_tys: Vec<&str> = [lhs, rhs]
+                .iter()
+                .filter_map(|reg| regs.get(*reg).map(|def| def.ty.as_str()))
+                .collect();
+            if let [left, right] = operand_tys.as_slice() {
+                let is_eq = matches!(op, ArithOp::Eq);
+                let mismatched = left != right
+                    || (!is_eq && !is_bit_container(left))
+                    || (!op.is_comparison() && *left != ty)
+                    || (op.is_comparison() && ty != "#bit8");
+                if mismatched {
+                    self.error(
+                        format!(
+                            "`{}` operands `{left}`/`{right}` do not match result `{ty}`",
+                            print_op(op)
+                        ),
+                        span,
+                    );
+                }
+            }
             return;
         }
         for reg in [lhs, rhs] {
@@ -1660,6 +1785,7 @@ mod tests {
                 ins: vec![("in".to_owned(), "#bit32".to_owned())],
                 outs: vec![("out".to_owned(), "#bit32".to_owned())],
                 is_extern: false,
+                inline: false,
                 blocks: vec![LirBlock {
                     label: "entry".to_owned(),
                     insts: vec![
@@ -1773,6 +1899,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1809,6 +1936,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: Vec::new(),
@@ -1843,6 +1971,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2071,6 +2200,7 @@ mod tests {
                 ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
                 outs: Vec::new(),
                 is_extern: true,
+                inline: false,
                 blocks: Vec::new(),
             }],
             layouts: HashMap::new(),
@@ -2105,6 +2235,7 @@ mod tests {
                 ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
                 outs: Vec::new(),
                 is_extern: true,
+                inline: false,
                 blocks: Vec::new(),
             }],
             layouts: HashMap::new(),
@@ -2175,6 +2306,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Call {
@@ -2228,34 +2360,6 @@ mod tests {
     }
 
     #[test]
-    fn fold_intrinsic_prints() {
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![LirInst::FoldIntrinsic {
-                    name: "@size_of".to_owned(),
-                    arg: LirOperand::Reg("1".to_owned()),
-                    dst: "2".to_owned(),
-                    ty: "#bit8".to_owned(),
-                    span: test_span(),
-                }],
-                term: LirTerm::Return { span: test_span() },
-                span: test_span(),
-            }],
-        });
-        let text = module.to_text();
-        assert!(text.contains("@size_of"), "{text}");
-        let mut diags = lilac_error::Diags::new();
-        assert!(verify(&module, &mut diags).is_err());
-        assert_eq!(e070_count(&diags), 1, "{diags:?}");
-    }
-
-    #[test]
     fn data_symbol_const_verifies() {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
@@ -2268,6 +2372,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Const {
@@ -2292,6 +2397,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Const {
@@ -2328,6 +2434,7 @@ mod tests {
             ins: vec![("buffer".to_owned(), "#byte_buffer".to_owned())],
             outs: vec![("out".to_owned(), "ref #bit8".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2410,6 +2517,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2495,6 +2603,7 @@ mod tests {
             ins: vec![("s".to_owned(), "#bit8".to_owned())],
             outs: vec![],
             is_extern: true,
+            inline: false,
             blocks: vec![],
         });
         let spanned = module.to_text_spanned();

@@ -3,23 +3,30 @@ target = "x86_64-unknown-none"
 type #GenBox.1..bit32 {
     value: #bit32,
 }
-function @GenBox.1..bit32.@on_drop
-  in ref #GenBox.1..bit32 %from
-{
-  $entry:
-    &1: #bit32 = const 0x0
-    copy &1 -> %from.value  // idx 0
-    return
-}
 function @main
 {
   $entry:
     alloca #GenBox.1..bit32 %box : zeroed
     alloca #GenBox.1..bit32 %tmp.1 : zeroed
+    alloca ref #GenBox.1..bit32 %tmp.2 : zeroed
+    zero %tmp.1
     &1: #bit32 = const 0x0
     copy &1 -> %tmp.1.value  // idx 0
     copy %tmp.1 -> %box
-    call @GenBox.1..bit32.@on_drop (in %box) (out)
+    &2: ref #GenBox.1..bit32 = addr %box
+    copy &2 -> %tmp.2
+    call @GenBox.1..bit32.@on_drop:ref_GenBox[bit32] (in %tmp.2) (out)
     drop %box
+    return
+}
+function @GenBox.1..bit32.@on_drop:ref_GenBox[bit32]
+  in ref #GenBox.1..bit32 %from
+{
+  $entry:
+    alloca ref #bit32 %tmp.1 : zeroed
+    &1: #bit32 = const 0x0
+    &2: ref #bit32 = field.addr %from .value  // idx 0
+    copy &2 -> %tmp.1
+    copy &1 -> ref %tmp.1
     return
 }

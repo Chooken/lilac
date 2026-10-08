@@ -7,33 +7,32 @@ function @main
 {
   $entry:
     alloca #byte_buffer %part : zeroed
-    alloca #format_args %__f : zeroed
+    alloca #format_args %msg : zeroed
     alloca #format_args %tmp.1 : zeroed
-    alloca ref #format_args %tmp.2 : zeroed
-    alloca #byte_buffer %tmp.3 : zeroed
-    alloca ref #format_args %tmp.4 : zeroed
+    alloca #byte_buffer %tmp.2 : zeroed
+    alloca ref #format_args %tmp.3 : zeroed
+    alloca #byte_buffer %tmp.4 : zeroed
     alloca ref #format_args %tmp.5 : zeroed
     alloca #byte_buffer %tmp.6 : zeroed
-    alloca #format_args %msg : zeroed
+    alloca ref #format_args %tmp.7 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %part
     call @.lilac.format_args_new (in) (out %tmp.1)
-    &2: #format_args = copy %tmp.1
-    copy &2 -> %__f
-    &3: ref #format_args = addr %__f
-    copy &3 -> %tmp.2
-    &4: #byte_buffer = const !c1
-    copy &4 -> %tmp.3
-    call @.lilac.format_args_push (in %tmp.2, %tmp.3) (out)
-    &6: ref #format_args = addr %__f
-    copy &6 -> %tmp.4
-    call @.lilac.format_args_push (in %tmp.4, %part) (out)
-    &8: ref #format_args = addr %__f
-    copy &8 -> %tmp.5
-    &9: #byte_buffer = const !c2
-    copy &9 -> %tmp.6
-    call @.lilac.format_args_push (in %tmp.5, %tmp.6) (out)
-    copy %__f -> %msg
+    &2: #byte_buffer = const !c1
+    copy &2 -> %tmp.2
+    &3: ref #format_args = addr %tmp.1
+    copy &3 -> %tmp.3
+    call @.lilac.format_args_push (in %tmp.3, %tmp.2) (out)
+    copy %part -> %tmp.4
+    &4: ref #format_args = addr %tmp.1
+    copy &4 -> %tmp.5
+    call @.lilac.format_args_push (in %tmp.5, %tmp.4) (out)
+    &5: #byte_buffer = const !c2
+    copy &5 -> %tmp.6
+    &6: ref #format_args = addr %tmp.1
+    copy &6 -> %tmp.7
+    call @.lilac.format_args_push (in %tmp.7, %tmp.6) (out)
+    copy %tmp.1 -> %msg
     return
 }
 function @.lilac.format_args_new
@@ -51,7 +50,7 @@ function @.lilac.format_args_push
   $entry:
     &c: #bit_native = field %table .count  // idx 0
     &cap: #bit_native = const 0x10
-    &ok: #bit_native = i.cmp.lt.u &c, &cap
+    &ok: #bit8 = i.cmp.lt.u &c, &cap
     branch.if &ok, $append, $done
   $append:
     &c: #bit_native = field %table .count  // idx 0

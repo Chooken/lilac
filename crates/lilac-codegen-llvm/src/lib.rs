@@ -180,6 +180,7 @@ mod tests {
             ],
             outs: vec![("out".to_owned(), "#bit32".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,
@@ -256,6 +257,7 @@ mod tests {
             ],
             outs: vec![("written".to_owned(), "#bit_native".to_owned())],
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let text = emit(&module);
@@ -274,6 +276,7 @@ mod tests {
             ins: vec![("x".to_owned(), "#fbit64".to_owned())],
             outs: vec![("out".to_owned(), "#fbit32".to_owned())],
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let text = emit(&module);
@@ -285,6 +288,7 @@ mod tests {
             ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
             outs: Vec::new(),
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let err = backend()
@@ -314,6 +318,7 @@ mod tests {
             ],
             outs: vec![("written".to_owned(), "#bit_native".to_owned())],
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let mut insts = Vec::new();
@@ -392,6 +397,7 @@ mod tests {
             ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
             outs: Vec::new(),
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let err = backend()
@@ -412,6 +418,7 @@ mod tests {
                 ("b".to_owned(), "#bit32".to_owned()),
             ],
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let err = backend()
@@ -433,6 +440,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: true,
+            inline: false,
             blocks: Vec::new(),
         });
         let text = emit(&module);
@@ -507,6 +515,7 @@ mod tests {
                 .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
                 .collect(),
             is_extern: false,
+            inline: false,
             blocks,
         }
     }
@@ -738,6 +747,7 @@ mod tests {
             ins: vec![("p".to_owned(), "ref #bit32".to_owned())],
             outs: vec![("o".to_owned(), "#bit32".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,
@@ -820,6 +830,7 @@ mod tests {
             ins: vec![("rp".to_owned(), "ref #Pair".to_owned())],
             outs: vec![("o".to_owned(), "#bit32".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,
@@ -1354,6 +1365,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::Const {
@@ -1437,6 +1449,7 @@ mod tests {
             ins: vec![("x".to_owned(), "#bit32".to_owned())],
             outs: vec![("out".to_owned(), "#fbit32".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,
@@ -1489,6 +1502,7 @@ mod tests {
             ],
             outs: vec![("out".to_owned(), "#bit8".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts,

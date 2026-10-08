@@ -13,13 +13,17 @@ entry:
 
 define void @root_bump(ptr %in0) {
 entry:
-  %tmp.1 = alloca i64, align 8
-  store i64 0, ptr %tmp.1, align 8
-  %tmp.2 = alloca i8, align 1
-  store i8 0, ptr %tmp.2, align 1
-  store i64 0, ptr %tmp.1, align 8
-  store i8 1, ptr %tmp.2, align 1
-  call void @.lilac.store_u8(ptr %in0, ptr %tmp.1, ptr %tmp.2)
+  %tmp.1 = alloca ptr, align 8
+  store ptr null, ptr %tmp.1, align 8
+  %tmp.2 = alloca i64, align 8
+  store i64 0, ptr %tmp.2, align 8
+  %tmp.3 = alloca i8, align 1
+  store i8 0, ptr %tmp.3, align 1
+  %0 = load ptr, ptr %in0, align 8
+  store ptr %0, ptr %tmp.1, align 8
+  store i64 0, ptr %tmp.2, align 8
+  store i8 1, ptr %tmp.3, align 1
+  call void @.lilac.store_u8(ptr %tmp.1, ptr %tmp.2, ptr %tmp.3)
   ret void
 }
 
@@ -29,28 +33,44 @@ entry:
   store i8 0, ptr %cell, align 1
   %p = alloca ptr, align 8
   store ptr null, ptr %p, align 8
+  %tmp.1 = alloca ptr, align 8
+  store ptr null, ptr %tmp.1, align 8
   store i8 0, ptr %cell, align 1
   store ptr %cell, ptr %p, align 8
-  call void @util.write_byte(ptr %p)
+  %0 = load ptr, ptr %p, align 8
+  store ptr %0, ptr %tmp.1, align 8
+  call void @util.write_byte(ptr %tmp.1)
   ret void
 }
 
 define void @util.secret(ptr %in0) {
 entry:
-  %tmp.1 = alloca i64, align 8
-  store i64 0, ptr %tmp.1, align 8
-  %tmp.2 = alloca i8, align 1
-  store i8 0, ptr %tmp.2, align 1
-  store i64 0, ptr %tmp.1, align 8
-  store i8 9, ptr %tmp.2, align 1
-  call void @.lilac.store_u8(ptr %in0, ptr %tmp.1, ptr %tmp.2)
+  %tmp.1 = alloca ptr, align 8
+  store ptr null, ptr %tmp.1, align 8
+  %tmp.2 = alloca i64, align 8
+  store i64 0, ptr %tmp.2, align 8
+  %tmp.3 = alloca i8, align 1
+  store i8 0, ptr %tmp.3, align 1
+  %0 = load ptr, ptr %in0, align 8
+  store ptr %0, ptr %tmp.1, align 8
+  store i64 0, ptr %tmp.2, align 8
+  store i8 9, ptr %tmp.3, align 1
+  call void @.lilac.store_u8(ptr %tmp.1, ptr %tmp.2, ptr %tmp.3)
   ret void
 }
 
 define void @util.write_byte(ptr %in0) {
 entry:
-  call void @root_bump(ptr %in0)
-  call void @util.secret(ptr %in0)
+  %tmp.1 = alloca ptr, align 8
+  store ptr null, ptr %tmp.1, align 8
+  %tmp.2 = alloca ptr, align 8
+  store ptr null, ptr %tmp.2, align 8
+  %0 = load ptr, ptr %in0, align 8
+  store ptr %0, ptr %tmp.1, align 8
+  call void @root_bump(ptr %tmp.1)
+  %1 = load ptr, ptr %in0, align 8
+  store ptr %1, ptr %tmp.2, align 8
+  call void @util.secret(ptr %tmp.2)
   ret void
 }
 

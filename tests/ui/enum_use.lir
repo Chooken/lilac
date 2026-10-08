@@ -8,6 +8,7 @@ function @main
   $entry:
     alloca #Number %number : zeroed
     alloca #Number %tmp.1 : zeroed
+    zero %tmp.1
     &1: #bit8 = const 0x0
     copy &1 -> %tmp.1.tag  // idx 0
     copy %tmp.1 -> %number

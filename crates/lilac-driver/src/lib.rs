@@ -8,13 +8,10 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use lilac_ast::Program;
 use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
 use lilac_ir::LirModule;
-use lilac_lex::Lexer;
 use lilac_module::Fs;
-use lilac_parse::Parser;
-use lilac_span::{FileId, SourceMap, Span};
+use lilac_span::{FileId, SourceMap};
 
 pub use lilac_target::Target;
 
@@ -65,29 +62,24 @@ pub struct Opts {
 /// Retained analysis artifacts from the last compile (for editor tooling).
 #[derive(Clone, Debug)]
 pub struct Analysis {
-    /// Resolved namespaces and per-file scopes.
-    pub project: lilac_resolve::ResolvedProject,
+    /// Resolved definitions, namespaces and per-file scopes.
+    pub resolved: lilac_resolve::Resolved,
     /// Type table (for rendering types).
     pub types: lilac_ty::Types,
-    /// Collected function/hook signatures.
-    pub sigs: lilac_typeck::Sigs,
+    /// Declared signature of every function and hook.
+    pub sigs: std::collections::HashMap<lilac_resolve::DefId, lilac_ty::FuncSig>,
     /// Checked HIR (carries `uses`).
     pub hir: lilac_hir::HirProgram,
-    /// Non-item semantic-token sites (locals, parameters, type names,
-    /// builtins), assembled from the signature and body passes, deduped by
-    /// `(span, kind)` and sorted by `(file, lo)`.
+    /// Non-item semantic-token sites, deduped by `(span, kind)` and sorted by
+    /// `(file, lo)`.
     pub semantics: Vec<lilac_hir::SemanticSite>,
 }
 
-/// Merges the signature and body semantic-token sources: dedup by
-/// `(span, kind)` and sort by `(file, lo)` for a deterministic list.
-fn merge_semantics(
-    signature: &[lilac_hir::SemanticSite],
-    body: &[lilac_hir::SemanticSite],
-) -> Vec<lilac_hir::SemanticSite> {
-    let mut sites: Vec<lilac_hir::SemanticSite> =
-        signature.iter().chain(body.iter()).copied().collect();
-    sites.sort_by_key(|site| (site.span.file.0, site.span.lo.0));
+/// Dedups semantic-token sites by `(span, kind)` and sorts them by
+/// `(file, lo)`.
+fn merge_semantics(sites: &[lilac_hir::SemanticSite]) -> Vec<lilac_hir::SemanticSite> {
+    let mut sites = sites.to_vec();
+    sites.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
     sites.dedup_by(|a, b| a.span == b.span && a.kind == b.kind);
     sites
 }
@@ -117,6 +109,8 @@ pub struct Session {
     pub exports: HashSet<String>,
     /// Loaded project files: identity to path (empty outside project compiles).
     pub project_files: Vec<(FileId, PathBuf)>,
+    /// Mounted libraries (`--lib Name=dir`): `using Name.X` loads `dir/X`.
+    pub libraries: Vec<(String, PathBuf)>,
     /// Retained analysis from the last compile (best-effort; editor tooling).
     pub analysis: Option<Analysis>,
     /// Whether to run the passes past parse/type errors and keep the partial
@@ -140,6 +134,7 @@ impl Default for Session {
             cache_dir: None,
             exports: HashSet::new(),
             project_files: Vec::new(),
+            libraries: Vec::new(),
             analysis: None,
             retain_partial_analysis: false,
         }
@@ -153,45 +148,31 @@ impl Session {
         Self::default()
     }
 
-    /// Runs the full pipeline but returns the AST (`check` entry point;
-    /// diagnostics render separately).
-    pub fn compile_source(&mut self, name: &str, src: &str) -> Result<Program, ErrorGuaranteed> {
-        let (program, _) =
-            self.run_pipeline(name, src, &mut |_: &'static str, _: &LirModule| {})?;
-        Ok(program)
-    }
-
-    /// Runs the full pipeline through IR verification, returning the folded
-    /// module (`check` runs this too but prints diagnostics only).
+    /// Compiles one source file (a one-file project) through IR
+    /// verification, returning the folded module.
     pub fn compile_lir(&mut self, name: &str, src: &str) -> Result<LirModule, ErrorGuaranteed> {
-        let (_, module) = self.run_pipeline(name, src, &mut |_: &'static str, _: &LirModule| {})?;
-        Ok(module)
+        self.compile_lir_with_stages(name, src, &mut |_: &'static str, _: &LirModule| {})
     }
 
     /// Like [`Session::compile_lir`], but invokes `on_stage` at every pipeline
     /// boundary with the stage name and the module as it stands there. Stages,
-    /// in order: `lower` (after lowering, **before** const folding), `fold`
-    /// (after folding, before runtime injection), `runtime` (after the
-    /// `.lilac.*` prelude is injected, before DCE), `final` (after pruning and
-    /// verification — the returned module). Used for debugging; the driver does
-    /// no file I/O itself.
+    /// in order: `lower` (before folding), `fold`, `runtime` (after the
+    /// `.lilac.*` prelude is injected, before DCE), and `final` (the returned
+    /// module). The driver does no file I/O itself.
     pub fn compile_lir_with_stages(
         &mut self,
         name: &str,
         src: &str,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        let (_, module) = self.run_pipeline(name, src, on_stage)?;
-        Ok(module)
+        self.project_files.clear();
+        let project = lilac_module::single_file(name, src, &mut self.source_map);
+        self.run(&project, on_stage)
     }
 
-    /// Compiles a whole folder project rooted at `root`, loading every file
-    /// reachable through `using` via the injected [`Fs`] (the driver itself
-    /// does no I/O). Returns the folded, verified module.
-    ///
-    /// The loader registers every source in this session's [`SourceMap`] as it
-    /// reads it and carries the returned [`FileId`] on each file, so its
-    /// `using`/`E025` spans resolve directly (no `FileId(index)` coincidence).
+    /// Compiles a folder project rooted at `root`, loading every file reachable
+    /// through `using` via the injected [`Fs`]. Returns the folded, verified
+    /// module.
     pub fn compile_project(
         &mut self,
         root: &Path,
@@ -208,12 +189,14 @@ impl Session {
         fs: &mut dyn Fs,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        // `load` registers each source in this session's `SourceMap` itself, so
-        // the loader's `E025`/`using` spans resolve without `FileId(index)`
-        // coincidence (finding: `E025` labels never rendered).
         self.project_files.clear();
-        let (project, failed) =
-            lilac_module::load_with_status(root, fs, &mut self.source_map, &mut self.diags);
+        let (project, failed) = lilac_module::load_with_status(
+            root,
+            &self.libraries,
+            fs,
+            &mut self.source_map,
+            &mut self.diags,
+        );
         self.project_files = project
             .files
             .iter()
@@ -222,30 +205,7 @@ impl Session {
         if failed {
             return Err(ErrorGuaranteed::new());
         }
-        let mut programs: Vec<(FileId, Program)> = Vec::with_capacity(project.files.len());
-        let mut merged = Program {
-            items: Vec::new(),
-            span: Span::dummy(),
-        };
-        for unit in &project.files {
-            let file = unit.file;
-            let (tokens, lex_errors) = Lexer::lex_all(&unit.src, file);
-            for error in lex_errors {
-                self.diags.emit(error);
-            }
-            let mut parser = Parser::new(tokens, file);
-            let program = parser.parse_program(&mut self.diags)?;
-            // Strict mode aborts at the first parse-failing file (today's `?` on
-            // the old `Err` return), so later files are never parsed/reported.
-            // Tolerant mode (editor tooling) keeps going across every file.
-            if parser.had_errors() && !self.retain_partial_analysis {
-                return Err(ErrorGuaranteed::new());
-            }
-            merged.items.extend(program.items.iter().cloned());
-            programs.push((file, program));
-        }
-        let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
-        self.finish_pipeline(&merged, &resolved, on_stage)
+        self.run(&project, on_stage)
     }
 
     /// The loaded project's file identities and paths (empty outside project
@@ -262,97 +222,54 @@ impl Session {
         self.analysis.as_ref()
     }
 
-    /// Lex → parse → `collect` → `collect_sigs` → `check_bodies` → `lower` →
-    /// LIR const `fold` (`lilac-const`) → inject runtime → `prune` → check live
-    /// `@compile_error` → `verify`. Stops at the first failing pass. Literal-only
-    /// arithmetic folds in typeck (`lilac-typeck`), not here; the `lilac-const`
-    /// fold collapses LIR constants. The live-error check runs after `prune` so
-    /// errors in functions unreachable from `main` or an `--export` root are
-    /// silent. `on_stage` fires at each reached boundary (see
-    /// [`Session::compile_lir_with_stages`]).
-    fn run_pipeline(
+    /// Parse → resolve → check → lower → fold → inject runtime → prune →
+    /// live `@compile_error` check → verify. Strict mode (the CLI) stops at the
+    /// first failing stage; tolerant mode (editor tooling) keeps going through
+    /// checking so the partial analysis is retained.
+    fn run(
         &mut self,
-        name: &str,
-        src: &str,
-        on_stage: &mut dyn FnMut(&'static str, &LirModule),
-    ) -> Result<(Program, LirModule), ErrorGuaranteed> {
-        let file = self.source_map.add_file(name, src);
-        let (tokens, lex_errors) = Lexer::lex_all(src, file);
-        for error in lex_errors {
-            self.diags.emit(error);
-        }
-        let mut parser = Parser::new(tokens, file);
-        let program = parser.parse_program(&mut self.diags)?;
-        if parser.had_errors() && !self.retain_partial_analysis {
-            return Err(ErrorGuaranteed::new());
-        }
-        let module = lilac_resolve::collect(&program, &mut self.diags);
-        let project = lilac_resolve::ResolvedProject::single(module, file);
-        let lir = self.finish_pipeline(&program, &project, on_stage)?;
-        Ok((program, lir))
-    }
-
-    /// The backend half of the pipeline, shared by the single-file and project
-    /// entry points: `collect_sigs` → `check_bodies` → `lower` → `fold` →
-    /// inject runtime → `prune` → check live `@compile_error` → `verify`.
-    fn finish_pipeline(
-        &mut self,
-        program: &Program,
-        project: &lilac_resolve::ResolvedProject,
+        project: &lilac_module::Project,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        let mut types = lilac_ty::Types::new();
-        let sigs = lilac_typeck::collect_sigs(project, program, &mut types, &mut self.diags);
-        self.analysis = Some(Analysis {
-            project: project.clone(),
-            types: types.clone(),
-            semantics: merge_semantics(&sigs.semantics, &[]),
-            sigs: sigs.clone(),
-            hir: lilac_hir::HirProgram::default(),
-        });
-        // Signature collection can reject a definition (`E020`/`E052`), leaving
-        // some `DefId` without a signature. In strict mode, stop before
-        // `check_bodies`, which assumes every reachable definition has one
-        // (defense in depth against any future signatureless-def class
-        // panicking in `bug!`). In tolerant mode (editor tooling), keep going:
-        // `check_bodies` now tolerates a missing signature by poisoning the
-        // body, so its partial HIR is retained for the broken buffer.
-        if self.diags.has_errors() && !self.retain_partial_analysis {
+        let strict = !self.retain_partial_analysis;
+        let (programs, failed) = lilac_module::parse_all(project, &mut self.diags, strict);
+        if failed && strict {
             return Err(ErrorGuaranteed::new());
         }
-        let hir = lilac_typeck::check_bodies(
-            program,
-            project,
-            &sigs,
+        let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
+        if self.diags.has_errors() && strict {
+            return Err(ErrorGuaranteed::new());
+        }
+        let mut types = lilac_ty::Types::new();
+        let checked = lilac_typeck::check(
+            &resolved,
             &mut types,
             &mut self.diags,
             self.target.bit_native_width(),
         );
         self.analysis = Some(Analysis {
-            project: project.clone(),
+            resolved: resolved.clone(),
             types: types.clone(),
-            semantics: merge_semantics(&sigs.semantics, &hir.semantics),
-            sigs: sigs.clone(),
-            hir: hir.clone(),
+            sigs: checked.sigs.clone(),
+            semantics: merge_semantics(&checked.hir.semantics),
+            hir: checked.hir.clone(),
         });
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
-        // The `extern` C ABI is LLVM-only: validate its signatures here (with
-        // the offending slot's span) so `E028` is an ordinary diagnostic, not a
-        // backend failure.
-        lilac_lower::check_extern_signatures(&hir, &types, &mut self.diags);
+        lilac_lower::check_extern_signatures(&checked.hir, &resolved, &types, &mut self.diags);
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
+        let ptr_bytes = u64::from(self.target.bit_native_width() / 8);
         let triple = self.target.to_triple();
-        let mut lir = lilac_lower::lower(&hir, project, &types, &mut self.diags, &triple)?;
+        let mut lir = lilac_lower::lower(&checked.hir, &resolved, &types, &triple, ptr_bytes);
         on_stage("lower", &lir);
-        lilac_const::fold(&mut lir, &mut self.diags)?;
+        lilac_const::fold(&mut lir);
         on_stage("fold", &lir);
-        let ptr_width = self.target.bit_native_width() / 8;
-        lir.funcs
-            .extend(lilac_ir::runtime::build_runtime(ptr_width));
+        lir.funcs.extend(lilac_ir::runtime::build_runtime(
+            self.target.bit_native_width() / 8,
+        ));
         on_stage("runtime", &lir);
         lilac_ir::prune_unreachable(&mut lir, &self.exports);
         lilac_const::check_live_compile_errors(&lir, &mut self.diags)?;
@@ -398,10 +315,10 @@ mod tests {
     #[test]
     fn hello_compiles() {
         let mut session = Session::new();
-        let program = session
-            .compile_source("hello.lilac", "main: function () nothing {\n}\n")
+        let module = session
+            .compile_lir("hello.lilac", "main: function () nothing {\n}\n")
             .expect("hello should compile");
-        assert_eq!(program.items.len(), 1);
+        assert!(module.funcs.iter().any(|func| func.name == "main"));
         assert_eq!(session.render_diagnostics(), "");
     }
 
@@ -518,7 +435,7 @@ mod tests {
     #[test]
     fn broken_source_reports_e001() {
         let mut session = Session::new();
-        let result = session.compile_source("bad.lilac", "main: function ( {\n}\n");
+        let result = session.compile_lir("bad.lilac", "main: function ( {\n}\n");
         assert!(result.is_err());
         assert!(session.render_diagnostics().contains("error[E001]"));
     }
@@ -526,7 +443,7 @@ mod tests {
     #[test]
     fn check_runs_typeck() {
         let mut session = Session::new();
-        let result = session.compile_source(
+        let result = session.compile_lir(
             "bad.lilac",
             "main: function () nothing {\n    x: @bit8 = nope\n}\n",
         );
@@ -537,7 +454,7 @@ mod tests {
     #[test]
     fn check_accepts_clean_typed_source() {
         let mut session = Session::new();
-        let result = session.compile_source(
+        let result = session.compile_lir(
             "ok.lilac",
             "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n",
         );
@@ -598,7 +515,7 @@ mod tests {
         let module = session
             .compile_lir(
                 "branch.lilac",
-                "main: function () nothing {\n    x: @bit32 = 0x0\n    if x {\n    }\n}\n",
+                "main: function () nothing {\n    x: @bit8 = 0x0\n    if x {\n    }\n}\n",
             )
             .expect("branch source should lower");
         assert!(module.to_text().contains("branch"), "{}", module.to_text());
@@ -607,9 +524,9 @@ mod tests {
     #[test]
     fn check_runs_through_verify() {
         let mut session = Session::new();
-        let result = session.compile_source(
+        let result = session.compile_lir(
             "ok.lilac",
-            "main: function () nothing {\n    x: @bit32 = 0x1\n    if x {\n    }\n}\n",
+            "main: function () nothing {\n    x: @bit8 = 0x1\n    if x {\n    }\n}\n",
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
         assert_eq!(session.render_diagnostics(), "");
@@ -659,7 +576,7 @@ mod tests {
     #[test]
     fn e010_shows_both_sides() {
         let mut session = Session::new();
-        let result = session.compile_source(
+        let result = session.compile_lir(
             "e010.lilac",
             "set: function (r: ref @bit8) nothing {\n}\nmain: function () nothing {\n    v: @bit8 = 0x1\n    set(v)\n}\n",
         );

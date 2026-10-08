@@ -21,12 +21,20 @@ define void @put(ptr %in0, ptr %in1) {
 entry:
   %p = alloca ptr, align 8
   store ptr null, ptr %p, align 8
-  %tmp.1 = alloca i64, align 8
-  store i64 0, ptr %tmp.1, align 8
+  %tmp.1 = alloca ptr, align 8
+  store ptr null, ptr %tmp.1, align 8
+  %tmp.2 = alloca i64, align 8
+  store i64 0, ptr %tmp.2, align 8
+  %tmp.3 = alloca i8, align 1
+  store i8 0, ptr %tmp.3, align 1
   %0 = load ptr, ptr %in0, align 8
   store ptr %0, ptr %p, align 8
-  store i64 0, ptr %tmp.1, align 8
-  call void @.lilac.store_u8(ptr %p, ptr %tmp.1, ptr %in1)
+  %1 = load ptr, ptr %p, align 8
+  store ptr %1, ptr %tmp.1, align 8
+  store i64 0, ptr %tmp.2, align 8
+  %2 = load i8, ptr %in1, align 1
+  store i8 %2, ptr %tmp.3, align 1
+  call void @.lilac.store_u8(ptr %tmp.1, ptr %tmp.2, ptr %tmp.3)
   ret void
 }
 
@@ -54,6 +62,7 @@ entry:
   store ptr %1, ptr %tmp.1, align 8
   %2 = load ptr, ptr %tmp.1, align 8
   store ptr %2, ptr %raw, align 8
+  call void @llvm.memset.p0.i64(ptr align 1 %tmp.3, i8 0, i64 ptrtoint (ptr getelementptr (%Store, ptr null, i32 1) to i64), i1 false)
   %3 = getelementptr inbounds %Store, ptr %tmp.3, i32 0, i32 0
   %4 = load ptr, ptr %raw, align 8
   store ptr %4, ptr %3, align 8
@@ -86,8 +95,13 @@ entry:
   ret void
 }
 
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
+
 define i32 @main() {
 entry:
   call void @.lilac.main()
   ret i32 0
 }
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

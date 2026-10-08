@@ -5,10 +5,6 @@ target triple = "x86_64-unknown-none"
 
 define void @.lilac.main() {
 entry:
-  %tmp.1 = alloca i8, align 1
-  store i8 0, ptr %tmp.1, align 1
-  %tmp.2 = alloca i8, align 1
-  store i8 0, ptr %tmp.2, align 1
   br label %l.2
 
 l.2:                                              ; preds = %entry

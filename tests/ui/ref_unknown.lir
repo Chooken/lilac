@@ -14,11 +14,16 @@ function @put
 {
   $entry:
     alloca ref #bit8 %p : zeroed
-    alloca #bit_native %tmp.1 : zeroed
-    copy %b -> %p
-    &1: #bit_native = const 0x0
-    copy &1 -> %tmp.1
-    call @.lilac.store_u8 (in %p, %tmp.1, %v) (out)
+    alloca ref #bit8 %tmp.1 : zeroed
+    alloca #bit_native %tmp.2 : zeroed
+    alloca #bit8 %tmp.3 : zeroed
+    &1: ref #bit8 = copy %b
+    copy &1 -> %p
+    copy %p -> %tmp.1
+    &2: #bit_native = const 0x0
+    copy &2 -> %tmp.2
+    copy %v -> %tmp.3
+    call @.lilac.store_u8 (in %tmp.1, %tmp.2, %tmp.3) (out)
     return
 }
 function @main
@@ -36,6 +41,7 @@ function @main
     copy &1 -> %tmp.2
     call @malloc (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %raw
+    zero %tmp.3
     copy %raw -> %tmp.3.Data  // idx 0
     copy %tmp.3 -> %s
     &2: ref #unknown = field %s .Data  // idx 0

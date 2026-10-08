@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
-use lilac_hir::{HirBlock, HirExpr, HirExprKind, HirStmt, NameSite, SemanticSite};
+use lilac_hir::{NameSite, SemanticSite};
 use lilac_ir::LirModule;
-use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject};
+use lilac_resolve::{DefId, DefKind};
 use lilac_span::{FileId, Span};
 use lilac_ty::TypeRef;
 use lsp_types::Url;
@@ -94,26 +94,29 @@ impl Retained {
 
 /// Builds the index from a session's retained analysis.
 fn build_index(analysis: &Analysis) -> AnalysisIndex {
+    let resolved = &analysis.resolved;
     let mut defs = HashMap::new();
-    for (_, item) in analysis.project.all_items() {
-        add_def(&analysis.project, item, None, &mut defs);
-    }
-    for overloads in analysis.project.hooks.values() {
-        for item in overloads {
-            // Member hooks are indexed through their object's `hooks` walk so
-            // they keep their owner-qualified name; only top-level hooks are
-            // recorded from the unit-global set here.
-            if matches!(
-                &item.kind,
-                ResKind::Hook {
-                    parent: Some(_),
-                    ..
-                }
-            ) {
-                continue;
-            }
-            add_def(&analysis.project, item, None, &mut defs);
-        }
+    for id in resolved.ids() {
+        let def = resolved.def(id);
+        let kind = match &def.kind {
+            DefKind::Func(_) => "function",
+            DefKind::Hook(_) => "hook",
+            DefKind::Object => "object",
+            DefKind::Enum => "enum",
+            DefKind::Const { .. } => "const",
+            DefKind::Field(_) => "field",
+            DefKind::Variant(_) => "variant",
+        };
+        defs.insert(
+            id,
+            DefInfo {
+                name: def.name.clone(),
+                qualified: resolved.qualified_name(id),
+                kind,
+                span: def.span,
+                name_span: def.name_span,
+            },
+        );
     }
 
     let mut uses = analysis.hir.uses.clone();
@@ -121,159 +124,21 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
     uses.dedup_by_key(|s| (s.span.file.0, s.span.lo.0, s.span.hi.0, s.def.0));
 
     let mut exprs = Vec::new();
+    let mut record = |expr: &lilac_hir::HirExpr| exprs.push((expr.span, expr.ty));
     for func in &analysis.hir.funcs {
-        walk_block(&func.body, &mut exprs);
+        if let Some(body) = &func.body {
+            body.walk_exprs(&mut record);
+        }
     }
-    for konst in &analysis.hir.consts {
-        walk_expr(&konst.value, &mut exprs);
+    for value in analysis.hir.consts.values() {
+        value.walk(&mut record);
     }
-
-    let semantics = analysis.semantics.clone();
 
     AnalysisIndex {
         defs,
         uses,
         exprs,
-        semantics,
-    }
-}
-
-/// The declaration name's token span: a declaration span begins at its name,
-/// so the name is the span's first `name.len()` bytes.
-fn name_span(declaration: Span, name: &str) -> Span {
-    let length = u32::try_from(name.len()).unwrap_or(u32::MAX);
-    Span::new(
-        declaration.lo.0,
-        declaration.lo.0.saturating_add(length),
-        declaration.file,
-    )
-}
-
-/// Records `item` and, recursively, its object members.
-fn add_def(
-    project: &ResolvedProject,
-    item: &ResItem,
-    owner: Option<&str>,
-    defs: &mut HashMap<DefId, DefInfo>,
-) {
-    let qualified = if let Some(owner) = owner {
-        format!("{owner}.{}", item.name)
-    } else {
-        let path = project.namespace_path(item.ns);
-        if path.is_empty() {
-            item.name.clone()
-        } else {
-            format!("{path}.{}", item.name)
-        }
-    };
-    defs.insert(
-        item.id,
-        DefInfo {
-            name: item.name.clone(),
-            qualified: qualified.clone(),
-            kind: kind_of(&item.kind),
-            span: item.span,
-            name_span: name_span(item.span, &item.name),
-        },
-    );
-    if let ResKind::Object { members, hooks, .. } = &item.kind {
-        for member in members.values() {
-            add_def(project, member, Some(&qualified), defs);
-        }
-        for overloads in hooks.values() {
-            for hook in overloads {
-                add_def(project, hook, Some(&qualified), defs);
-            }
-        }
-    }
-}
-
-/// The hover label for a definition kind.
-fn kind_of(kind: &ResKind) -> &'static str {
-    match kind {
-        ResKind::Func { .. } => "function",
-        ResKind::Hook { .. } => "hook",
-        ResKind::Object { .. } => "object",
-        ResKind::Enum { .. } => "enum",
-        ResKind::Const => "const",
-        ResKind::Field => "field",
-    }
-}
-
-/// Collects every expression in a block, depth-first.
-fn walk_block(block: &HirBlock, out: &mut Vec<(Span, TypeRef)>) {
-    for stmt in &block.stmts {
-        walk_stmt(stmt, out);
-    }
-}
-
-/// Collects every expression in a statement, depth-first.
-fn walk_stmt(stmt: &HirStmt, out: &mut Vec<(Span, TypeRef)>) {
-    match stmt {
-        HirStmt::Let { value, .. } | HirStmt::MultiLet { value, .. } | HirStmt::ExprStmt(value) => {
-            walk_expr(value, out);
-        }
-        HirStmt::Assign { target, value, .. } => {
-            walk_expr(target, out);
-            walk_expr(value, out);
-        }
-        HirStmt::Return { .. } | HirStmt::Break { .. } => {}
-        HirStmt::If {
-            cond, then, els, ..
-        } => {
-            walk_expr(cond, out);
-            walk_block(then, out);
-            walk_block(els, out);
-        }
-        HirStmt::Loop { body, .. } => walk_block(body, out),
-        HirStmt::Match {
-            scrutinee,
-            arms,
-            els,
-            ..
-        } => {
-            walk_expr(scrutinee, out);
-            for arm in arms {
-                walk_block(&arm.body, out);
-            }
-            walk_block(els, out);
-        }
-    }
-}
-
-/// Collects an expression and its sub-expressions, depth-first.
-fn walk_expr(expr: &HirExpr, out: &mut Vec<(Span, TypeRef)>) {
-    out.push((expr.span, expr.ty));
-    match &expr.kind {
-        HirExprKind::Ident { .. }
-        | HirExprKind::Tag { .. }
-        | HirExprKind::Number { .. }
-        | HirExprKind::Str { .. }
-        | HirExprKind::Char { .. }
-        | HirExprKind::Temp(_)
-        | HirExprKind::CompileError { .. }
-        | HirExprKind::Poison => {}
-        HirExprKind::Variant { payload, .. } => {
-            if let Some(payload) = payload {
-                walk_expr(payload, out);
-            }
-        }
-        HirExprKind::Call { args, .. } => {
-            for arg in args {
-                walk_expr(arg, out);
-            }
-        }
-        HirExprKind::EqEq { lhs, rhs } => {
-            walk_expr(lhs, out);
-            walk_expr(rhs, out);
-        }
-        HirExprKind::Member { obj, .. } => walk_expr(obj, out),
-        HirExprKind::RefOf { value } => walk_expr(value, out),
-        HirExprKind::StructLit { fields } => {
-            for field in fields {
-                walk_expr(&field.value, out);
-            }
-        }
+        semantics: analysis.semantics.clone(),
     }
 }
 

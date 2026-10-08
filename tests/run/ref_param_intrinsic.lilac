@@ -1,4 +1,3 @@
-// pending: phase 4 (a `ref` value passed to a by-value intrinsic is not dereferenced)
 // expect-exit: 4
 
 exit: extern function (code: @bit32) nothing

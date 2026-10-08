@@ -7,6 +7,7 @@ target triple = "x86_64-unknown-none"
 
 define void @Object.get(ptr %in0, ptr %out0) {
 entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
   %0 = load ptr, ptr %in0, align 8
   %1 = getelementptr inbounds %Object, ptr %0, i32 0, i32 0
   %2 = load i32, ptr %1, align 4
@@ -26,6 +27,7 @@ entry:
   store i32 0, ptr %tmp.2, align 4
   %tmp.3 = alloca ptr, align 8
   store ptr null, ptr %tmp.3, align 8
+  call void @llvm.memset.p0.i64(ptr align 1 %tmp.1, i8 0, i64 ptrtoint (ptr getelementptr (%Object, ptr null, i32 1) to i64), i1 false)
   %0 = getelementptr inbounds %Object, ptr %tmp.1, i32 0, i32 0
   store i32 1, ptr %0, align 4
   %1 = load %Object, ptr %tmp.1, align 4
@@ -37,8 +39,13 @@ entry:
   ret void
 }
 
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
+
 define i32 @main() {
 entry:
   call void @.lilac.main()
   ret i32 0
 }
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

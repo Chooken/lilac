@@ -118,15 +118,7 @@ fn item_hover(retained: &Retained, site: NameSite, byte: usize) -> Option<String
     let analysis = retained.session.analysis()?;
     let text = match info.kind {
         "function" | "hook" => {
-            let sig = analysis.sigs.funcs.get(&site.def).or_else(|| {
-                analysis
-                    .sigs
-                    .hooks
-                    .values()
-                    .flatten()
-                    .find(|(id, _)| *id == site.def)
-                    .map(|(_, sig)| sig)
-            })?;
+            let sig = analysis.sigs.get(&site.def)?;
             let params = join_types(&analysis.types, &sig.params);
             let returns = join_types(&analysis.types, &sig.returns);
             if returns.is_empty() {

@@ -1,4 +1,3 @@
-// pending: phase 3 (member operator hooks: definition and call-site names differ)
 // expect-exit: 6
 
 exit: extern function (code: @bit32) nothing

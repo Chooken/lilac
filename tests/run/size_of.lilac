@@ -1,4 +1,3 @@
-// pending: phase 4 (`@size_of` is a placeholder)
 // expect-exit: 12
 
 exit: extern function (code: @bit32) nothing

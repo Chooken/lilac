@@ -10,10 +10,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
+use inkwell::targets::TargetData;
 use inkwell::types::{
     BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StructType,
 };
@@ -301,7 +303,12 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let arity = func.ins.len() + func.outs.len();
         let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
-        self.module.add_function(symbol(&func.name), fn_type, None);
+        let function = self.module.add_function(symbol(&func.name), fn_type, None);
+        if func.inline {
+            let kind = Attribute::get_named_enum_kind_id("alwaysinline");
+            let attribute = self.context.create_enum_attribute(kind, 0);
+            function.add_attribute(AttributeLoc::Function, attribute);
+        }
         Ok(())
     }
 
@@ -518,7 +525,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 self.lower_call(func, ins, outs, builder, state);
             }
             LirInst::Drop { .. } => {}
-            LirInst::CompileError { .. } | LirInst::FoldIntrinsic { .. } => bug!(
+            LirInst::Zero { place, .. } => {
+                let ptr = place_ptr(place, state);
+                let Some(ty) = state.place_types.get(place) else {
+                    bug!(Span::dummy(), "zero of undeclared place `%{place}`");
+                };
+                let Some(size) = self.lir_type(ty).size_of() else {
+                    bug!(Span::dummy(), "zero of unsized place `%{place}`");
+                };
+                let zero = self.context.i8_type().const_zero();
+                checked(builder.build_memset(ptr, 1, zero, size), "zero place");
+            }
+            LirInst::CompileError { .. } => bug!(
                 Span::dummy(),
                 "instruction `{inst:?}` is a post-fold marker and must not reach codegen"
             ),
@@ -574,6 +592,28 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         );
         state.places.insert(place.to_owned(), ptr);
         state.place_types.insert(place.to_owned(), ty.to_owned());
+    }
+
+    /// An `alloca` in the current function's entry block (so a loop does not
+    /// grow the stack).
+    fn entry_alloca(
+        &self,
+        ty: impl BasicType<'ctx>,
+        builder: &Builder<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let Some(entry) = builder
+            .get_insert_block()
+            .and_then(inkwell::basic_block::BasicBlock::get_parent)
+            .and_then(inkwell::values::FunctionValue::get_first_basic_block)
+        else {
+            bug!(Span::dummy(), "alloca outside a function");
+        };
+        let at_entry = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => at_entry.position_before(&first),
+            None => at_entry.position_at_end(entry),
+        }
+        checked(at_entry.build_alloca(ty, ""), "entry alloca")
     }
 
     /// Materializes the address of `@name`, normalized to the instruction's
@@ -1069,13 +1109,24 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 );
                 self.widen_bool(cmp, ty, builder)
             }
-            ArithOp::ILt | ArithOp::ILtU | ArithOp::IGt | ArithOp::IGtU => {
+            ArithOp::ILt
+            | ArithOp::ILtU
+            | ArithOp::IGt
+            | ArithOp::IGtU
+            | ArithOp::ILe
+            | ArithOp::ILeU
+            | ArithOp::IGe
+            | ArithOp::IGeU => {
                 let left = reg_int(lhs, state);
                 let right = reg_int(rhs, state);
                 let predicate = match op {
                     ArithOp::ILt => IntPredicate::SLT,
                     ArithOp::ILtU => IntPredicate::ULT,
                     ArithOp::IGtU => IntPredicate::UGT,
+                    ArithOp::ILe => IntPredicate::SLE,
+                    ArithOp::ILeU => IntPredicate::ULE,
+                    ArithOp::IGe => IntPredicate::SGE,
+                    ArithOp::IGeU => IntPredicate::UGE,
                     _ => IntPredicate::SGT,
                 };
                 let cmp = checked(
@@ -1099,13 +1150,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 };
                 checked(value, "float arith").into()
             }
-            ArithOp::FLt | ArithOp::FGt => {
+            ArithOp::FLt | ArithOp::FGt | ArithOp::FLe | ArithOp::FGe => {
                 let left = reg_float(lhs, state);
                 let right = reg_float(rhs, state);
-                let predicate = if matches!(op, ArithOp::FLt) {
-                    FloatPredicate::OLT
-                } else {
-                    FloatPredicate::OGT
+                let predicate = match op {
+                    ArithOp::FLt => FloatPredicate::OLT,
+                    ArithOp::FLe => FloatPredicate::OLE,
+                    ArithOp::FGe => FloatPredicate::OGE,
+                    _ => FloatPredicate::OGT,
                 };
                 let cmp = checked(
                     builder.build_float_compare(predicate, left, right, ""),
@@ -1147,6 +1199,30 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) -> IntValue<'ctx> {
         match state.regs.get(name).copied() {
             Some(BasicValueEnum::IntValue(value)) => value,
+            Some(BasicValueEnum::PointerValue(value)) => {
+                checked(builder.build_ptr_to_int(value, self.native, ""), "ptrtoint")
+            }
+            Some(BasicValueEnum::StructValue(value)) => {
+                // Aggregates compare as one integer over their bytes; the slot
+                // is zeroed first so padding is deterministic.
+                let ty = value.get_type();
+                let layout = self.module.get_data_layout();
+                let data = TargetData::create(layout.as_str().to_str().unwrap_or_default());
+                let bits = u32::try_from(data.get_abi_size(&ty) * 8).unwrap_or(u32::MAX);
+                let slot = self.entry_alloca(ty, builder);
+                let Some(size) = ty.size_of() else {
+                    bug!(Span::dummy(), "comparison of an unsized aggregate");
+                };
+                let zero = self.context.i8_type().const_zero();
+                checked(builder.build_memset(slot, 1, zero, size), "eq slot zero");
+                checked(builder.build_store(slot, value), "eq slot store");
+                let Some(int_ty) = std::num::NonZeroU32::new(bits)
+                    .and_then(|bits| self.context.custom_width_int_type(bits).ok())
+                else {
+                    bug!(Span::dummy(), "comparison of a zero-sized aggregate");
+                };
+                checked(builder.build_load(int_ty, slot, ""), "eq slot load").into_int_value()
+            }
             Some(BasicValueEnum::FloatValue(value)) => {
                 let int_ty = self.int_type_of_width(value.get_type().get_bit_width());
                 match checked(builder.build_bit_cast(value, int_ty, ""), "float bitcast") {

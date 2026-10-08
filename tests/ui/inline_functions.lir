@@ -4,9 +4,12 @@ function @main
 {
   $entry:
     alloca #bit32 %variable : zeroed
+    alloca #bit32 %tmp.1 : zeroed
+    alloca #bit32 %tmp.2 : zeroed
     &1: #bit32 = const 0x1
-    &2: #bit32 = const 0x1
-    &3: #bit32 = const 0x2
-    copy &3 -> %variable
+    copy &1 -> %tmp.2
+    &cf.1: #bit32 = const 0x2
+    copy &cf.1 -> %tmp.1
+    copy %tmp.1 -> %variable
     return
 }

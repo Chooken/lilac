@@ -7,17 +7,17 @@ define void @.lilac.main() {
 entry:
   %conditional = alloca i32, align 4
   store i32 0, ptr %conditional, align 4
-  %t.1 = alloca i8, align 1
-  store i8 0, ptr %t.1, align 1
+  %tmp.1 = alloca i8, align 1
+  store i8 0, ptr %tmp.1, align 1
   store i32 0, ptr %conditional, align 4
   br label %l.2
 
 l.2:                                              ; preds = %entry
-  store i8 0, ptr %t.1, align 1
+  store i8 0, ptr %tmp.1, align 1
   br label %l.3
 
 l.3:                                              ; preds = %l.2
-  %0 = load i8, ptr %t.1, align 1
+  %0 = load i8, ptr %tmp.1, align 1
   %1 = icmp ne i8 %0, 0
   br i1 %1, label %l.4, label %l.5
 

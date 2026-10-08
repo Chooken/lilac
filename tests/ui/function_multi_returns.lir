@@ -3,15 +3,11 @@ target = "x86_64-unknown-none"
 function @main
 {
   $entry:
-    alloca #bit32 %tmp.1 : zeroed
-    alloca #bit32 %tmp.2 : zeroed
     alloca #bit32 %condition : zeroed
     alloca #bit32 %result : zeroed
     &cf.1: #bit32 = const 0x1
-    copy &cf.1 -> %tmp.1
+    copy &cf.1 -> %condition
     &cf.2: #bit32 = const 0x2
-    copy &cf.2 -> %tmp.2
-    copy %tmp.1 -> %condition
-    copy %tmp.2 -> %result
+    copy &cf.2 -> %result
     return
 }

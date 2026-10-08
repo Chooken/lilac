@@ -22,7 +22,7 @@ use crate::{
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
 /// `IGtU`/`IDivU`/`IModU` tags (16–18).
-pub const LIR_CODEC_VERSION: u32 = 4;
+pub const LIR_CODEC_VERSION: u32 = 5;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -168,6 +168,12 @@ fn put_arith(w: &mut impl Write, op: &ArithOp) -> io::Result<()> {
         ArithOp::IGtU => 16,
         ArithOp::IDivU => 17,
         ArithOp::IModU => 18,
+        ArithOp::ILe => 19,
+        ArithOp::ILeU => 20,
+        ArithOp::IGe => 21,
+        ArithOp::IGeU => 22,
+        ArithOp::FLe => 23,
+        ArithOp::FGe => 24,
     };
     put_u8(w, tag)
 }
@@ -365,18 +371,9 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_span(w, *msg_span)?;
             put_span(w, *call_span)
         }
-        LirInst::FoldIntrinsic {
-            name,
-            arg,
-            dst,
-            ty,
-            span,
-        } => {
+        LirInst::Zero { place, span } => {
             put_u8(w, 16)?;
-            put_str(w, name)?;
-            put_operand(w, arg)?;
-            put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_str(w, place)?;
             put_span(w, *span)
         }
     }
@@ -441,6 +438,7 @@ fn put_func(w: &mut impl Write, func: &LirFunc) -> io::Result<()> {
     put_pairs(w, &func.ins)?;
     put_pairs(w, &func.outs)?;
     put_bool(w, func.is_extern)?;
+    put_bool(w, func.inline)?;
     put_len(w, func.blocks.len())?;
     for block in &func.blocks {
         put_block(w, block)?;
@@ -564,6 +562,12 @@ fn get_arith(r: &mut impl Read) -> Result<ArithOp, CodecError> {
         16 => ArithOp::IGtU,
         17 => ArithOp::IDivU,
         18 => ArithOp::IModU,
+        19 => ArithOp::ILe,
+        20 => ArithOp::ILeU,
+        21 => ArithOp::IGe,
+        22 => ArithOp::IGeU,
+        23 => ArithOp::FLe,
+        24 => ArithOp::FGe,
         _ => return Err(CodecError::Malformed("invalid ArithOp tag")),
     })
 }
@@ -766,18 +770,9 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             })
         }
         16 => {
-            let name = get_str(r)?;
-            let arg = get_operand(r)?;
-            let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let place = get_str(r)?;
             let span = get_span(r)?;
-            Ok(LirInst::FoldIntrinsic {
-                name,
-                arg,
-                dst,
-                ty,
-                span,
-            })
+            Ok(LirInst::Zero { place, span })
         }
         _ => Err(CodecError::Malformed("invalid LirInst tag")),
     }
@@ -849,6 +844,7 @@ fn get_func(r: &mut impl Read) -> Result<LirFunc, CodecError> {
     let ins = get_pairs(r)?;
     let outs = get_pairs(r)?;
     let is_extern = get_bool(r)?;
+    let inline = get_bool(r)?;
     let count = get_len(r)?;
     let mut blocks = Vec::new();
     for _ in 0..count {
@@ -859,6 +855,7 @@ fn get_func(r: &mut impl Read) -> Result<LirFunc, CodecError> {
         ins,
         outs,
         is_extern,
+        inline,
         blocks,
     })
 }
@@ -1178,11 +1175,8 @@ mod tests {
             msg_span: span,
             call_span: span,
         });
-        insts.push(LirInst::FoldIntrinsic {
-            name: "@size_of".to_owned(),
-            arg: LirOperand::Reg("r0".to_owned()),
-            dst: "r10".to_owned(),
-            ty: "#bit8".to_owned(),
+        insts.push(LirInst::Zero {
+            place: "p0".to_owned(),
             span,
         });
 
@@ -1257,6 +1251,7 @@ mod tests {
             ins: vec![("p0".to_owned(), "#bit32".to_owned())],
             outs: vec![("p1".to_owned(), "ref #bit32".to_owned())],
             is_extern: false,
+            inline: false,
             blocks,
         });
         module.layouts.insert(

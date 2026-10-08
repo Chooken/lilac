@@ -6,38 +6,45 @@ function @main
   $entry:
     alloca #byte_buffer %s : zeroed
     alloca ref #bit8 %p : zeroed
-    alloca ref #bit8 %tmp.1 : zeroed
+    alloca #byte_buffer %tmp.1 : zeroed
+    alloca ref #bit8 %tmp.2 : zeroed
     alloca #bit8 %c : zeroed
-    alloca #bit_native %tmp.2 : zeroed
-    alloca #bit8 %tmp.3 : zeroed
+    alloca ref #bit8 %tmp.3 : zeroed
+    alloca #bit_native %tmp.4 : zeroed
+    alloca #bit8 %tmp.5 : zeroed
     alloca #bit8 %cell : zeroed
     alloca ref #bit8 %q : zeroed
-    alloca #bit_native %tmp.4 : zeroed
+    alloca ref #bit8 %tmp.6 : zeroed
+    alloca #bit_native %tmp.7 : zeroed
+    alloca #bit8 %tmp.8 : zeroed
     alloca #bit8 %d : zeroed
-    alloca #bit_native %tmp.5 : zeroed
-    alloca #bit8 %tmp.6 : zeroed
+    alloca ref #bit8 %tmp.9 : zeroed
+    alloca #bit_native %tmp.10 : zeroed
+    alloca #bit8 %tmp.11 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %s
-    call @.lilac.byte_buffer_ptr (in %s) (out %tmp.1)
-    &2: ref #bit8 = copy %tmp.1
-    copy &2 -> %p
-    &3: #bit_native = const 0x0
-    copy &3 -> %tmp.2
-    call @.lilac.load_u8 (in %p, %tmp.2) (out %tmp.3)
-    &4: #bit8 = copy %tmp.3
-    copy &4 -> %c
-    &5: #bit8 = const 0x0
-    copy &5 -> %cell
-    &6: ref #bit8 = addr %cell
-    copy &6 -> %q
-    &7: #bit_native = const 0x0
-    copy &7 -> %tmp.4
-    call @.lilac.store_u8 (in %q, %tmp.4, %c) (out)
-    &9: #bit_native = const 0x0
-    copy &9 -> %tmp.5
-    call @.lilac.load_u8 (in %q, %tmp.5) (out %tmp.6)
-    &10: #bit8 = copy %tmp.6
-    copy &10 -> %d
+    copy %s -> %tmp.1
+    call @.lilac.byte_buffer_ptr (in %tmp.1) (out %tmp.2)
+    copy %tmp.2 -> %p
+    copy %p -> %tmp.3
+    &2: #bit_native = const 0x0
+    copy &2 -> %tmp.4
+    call @.lilac.load_u8 (in %tmp.3, %tmp.4) (out %tmp.5)
+    copy %tmp.5 -> %c
+    &3: #bit8 = const 0x0
+    copy &3 -> %cell
+    &4: ref #bit8 = addr %cell
+    copy &4 -> %q
+    copy %q -> %tmp.6
+    &5: #bit_native = const 0x0
+    copy &5 -> %tmp.7
+    copy %c -> %tmp.8
+    call @.lilac.store_u8 (in %tmp.6, %tmp.7, %tmp.8) (out)
+    copy %q -> %tmp.9
+    &6: #bit_native = const 0x0
+    copy &6 -> %tmp.10
+    call @.lilac.load_u8 (in %tmp.9, %tmp.10) (out %tmp.11)
+    copy %tmp.11 -> %d
     return
 }
 function @.lilac.byte_buffer_ptr

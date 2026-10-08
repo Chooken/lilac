@@ -11,10 +11,14 @@ entry:
   store i8 0, ptr %b, align 1
   %tmp.1 = alloca i8, align 1
   store i8 0, ptr %tmp.1, align 1
+  %tmp.2 = alloca i32, align 4
+  store i32 0, ptr %tmp.2, align 4
   store i32 1, ptr %a, align 4
+  %0 = load i32, ptr %a, align 4
+  store i32 %0, ptr %tmp.2, align 4
   store i8 1, ptr %tmp.1, align 1
-  %0 = load i8, ptr %tmp.1, align 1
-  store i8 %0, ptr %b, align 1
+  %1 = load i8, ptr %tmp.1, align 1
+  store i8 %1, ptr %b, align 1
   ret void
 }
 

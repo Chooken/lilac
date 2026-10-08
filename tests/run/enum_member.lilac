@@ -1,4 +1,3 @@
-// pending: phase 4 (enum bodies with methods)
 // expect-exit: 2
 
 exit: extern function (code: @bit32) nothing

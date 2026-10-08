@@ -5,6 +5,7 @@ target triple = "x86_64-unknown-none"
 
 define void @"@conversion:bit32:bit16"(ptr %in0, ptr %out0) {
 entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i16, ptr null, i32 1) to i64), i1 false)
   %0 = load i32, ptr %in0, align 4
   %1 = trunc i32 %0 to i16
   store i16 %1, ptr %out0, align 2
@@ -17,6 +18,8 @@ entry:
   store i16 0, ptr %truncated, align 2
   %tmp.1 = alloca i16, align 2
   store i16 0, ptr %tmp.1, align 2
+  %tmp.2 = alloca i32, align 4
+  store i32 0, ptr %tmp.2, align 4
   %pinned = alloca i16, align 2
   store i16 0, ptr %pinned, align 2
   %same = alloca i16, align 2
@@ -27,19 +30,24 @@ entry:
   store ptr null, ptr %erased, align 8
   %round_trip = alloca ptr, align 8
   store ptr null, ptr %round_trip, align 8
-  call void @"@conversion:bit32:bit16"(ptr %in0, ptr %tmp.1)
-  %0 = load i16, ptr %tmp.1, align 2
-  store i16 %0, ptr %truncated, align 2
+  %0 = load i32, ptr %in0, align 4
+  store i32 %0, ptr %tmp.2, align 4
+  call void @"@conversion:bit32:bit16"(ptr %tmp.2, ptr %tmp.1)
+  %1 = load i16, ptr %tmp.1, align 2
+  store i16 %1, ptr %truncated, align 2
   store i16 1, ptr %pinned, align 2
-  %1 = load i16, ptr %truncated, align 2
-  store i16 %1, ptr %same, align 2
+  %2 = load i16, ptr %truncated, align 2
+  store i16 %2, ptr %same, align 2
   store ptr %in0, ptr %v_ref, align 8
-  %2 = load ptr, ptr %v_ref, align 8
-  store ptr %2, ptr %erased, align 8
-  %3 = load ptr, ptr %erased, align 8
-  store ptr %3, ptr %round_trip, align 8
+  %3 = load ptr, ptr %v_ref, align 8
+  store ptr %3, ptr %erased, align 8
+  %4 = load ptr, ptr %erased, align 8
+  store ptr %4, ptr %round_trip, align 8
   ret void
 }
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
 
 define i32 @main() {
 entry:
@@ -48,3 +56,5 @@ entry:
   call void @.lilac.main(ptr %v)
   ret i32 0
 }
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

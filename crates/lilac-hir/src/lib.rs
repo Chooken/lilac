@@ -1,33 +1,92 @@
-//! Typed HIR: checked functions with desugared control flow.
+//! Typed HIR: concrete, checked functions.
 //!
-//! Every expression carries its `TypeId` and source `Span`. `If` and `Match`
-//! with `out: Some(t)` end each branch by assigning the value temp; lowering
-//! turns them into labeled blocks mechanically.
+//! Every expression carries its type and span. Locals are numbered per
+//! function ([`LocalId`]); calls name their callee by identity
+//! ([`FuncKey`]: a definition plus its generic arguments). Generic templates
+//! never appear: each used `(definition, arguments)` pair is its own
+//! [`HirFunc`]. Blocks are scopes: a `Let` inside a block is dropped when the
+//! block exits (lowering emits the drops).
+//!
+//! Places are [`HirExprKind::Local`], [`HirExprKind::Field`] and
+//! [`HirExprKind::Deref`]. Lowering copies a place (running copy hooks) when
+//! its value moves into a new owner; every other expression is a fresh value
+//! that moves.
+
+pub mod intrinsics;
 
 use std::collections::HashMap;
 
 use lilac_resolve::DefId;
 use lilac_span::Span;
-use lilac_ty::TypeRef;
+use lilac_ty::{TypeId, TypeRef};
 
-/// Typed program: checked functions.
+pub use intrinsics::Intrinsic;
+
+/// A function instance: a definition plus its generic arguments (empty for
+/// non-generic functions; for a method of a generic type, the type's
+/// arguments come first, then the method's own).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct FuncKey {
+    /// The function or hook definition.
+    pub def: DefId,
+    /// Concrete generic arguments.
+    pub args: Vec<TypeRef>,
+}
+
+impl FuncKey {
+    /// A non-generic function.
+    #[must_use]
+    pub fn plain(def: DefId) -> Self {
+        Self {
+            def,
+            args: Vec::new(),
+        }
+    }
+}
+
+/// A checked program.
 #[derive(Clone, Debug, Default)]
 pub struct HirProgram {
-    /// Functions in source order.
+    /// Every concrete function instance.
     pub funcs: Vec<HirFunc>,
-    /// Module constants: name, identity, and checked value (inlined at use).
-    pub consts: Vec<HirConst>,
-    /// Type layouts: display name → `(member, payload)` in declaration
-    /// order (fields carry `Some`, payload-less variants `None`).
-    pub layouts: HashMap<String, Vec<(String, Option<TypeRef>)>>,
-    /// Drop hooks: display name → mangled `@on_drop` callee.
-    pub drops: HashMap<String, String>,
-    /// Resolved item uses (for editor hover / go-to-definition).
+    /// Checked module constants (lowering inlines them at each use).
+    pub consts: HashMap<DefId, HirExpr>,
+    /// Layout of every concrete object/enum type that occurs in the program.
+    pub layouts: HashMap<TypeId, Layout>,
+    /// RAII hooks per concrete type.
+    pub hooks: HashMap<TypeId, TypeHooks>,
+    /// Resolved item uses (editor hover / go-to-definition).
     pub uses: Vec<NameSite>,
-    /// Non-item semantic-token sites (locals, parameters, type names,
-    /// builtins). Item names come from `uses`; this source never duplicates
-    /// them.
+    /// Non-item semantic-token sites.
     pub semantics: Vec<SemanticSite>,
+}
+
+/// A concrete type's layout.
+#[derive(Clone, Debug)]
+pub enum Layout {
+    /// Object fields in declaration order.
+    Object {
+        /// `(name, type)` per field.
+        fields: Vec<(String, TypeRef)>,
+    },
+    /// Enum variants in declaration order and the tag container.
+    Enum {
+        /// `(name, payload)` per variant.
+        variants: Vec<(String, Option<TypeRef>)>,
+        /// The tag's bit container: the smallest `@bitN` holding the count.
+        tag: TypeId,
+    },
+}
+
+/// The RAII hooks bound to one concrete type.
+#[derive(Clone, Debug, Default)]
+pub struct TypeHooks {
+    /// `@on_drop(ref T)`.
+    pub drop: Option<FuncKey>,
+    /// `@on_copy(ref T) -> T`.
+    pub copy: Option<FuncKey>,
+    /// `@on_override(ref T, ref T)`.
+    pub override_: Option<FuncKey>,
 }
 
 /// What a non-item semantic-token site names.
@@ -39,15 +98,15 @@ pub enum SemanticKind {
     Param,
     /// A user object/enum name in type position.
     UserType,
-    /// An enum variant (declaration name and each `.Variant` use).
+    /// An enum variant (declaration name and each use).
     Variant,
-    /// A builtin type name (`@bit8`, `unknown`, …).
+    /// A builtin type name (`@bit8`, `unknown`, ...).
     BuiltinType,
-    /// A compiler-known intrinsic call name (`@i_add_8`, `@load_u8`, …).
+    /// A compiler intrinsic call name (`@i_add_8`, `@load_u8`, ...).
     BuiltinFunc,
 }
 
-/// One semantic-token site: a name token's span and what it is.
+/// One semantic-token site.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SemanticSite {
     /// The name token's span.
@@ -56,57 +115,58 @@ pub struct SemanticSite {
     pub kind: SemanticKind,
 }
 
-/// One resolved item use: the name token's span and what it resolved to.
+/// One resolved item use.
 #[derive(Clone, Copy, Debug)]
 pub struct NameSite {
-    /// The name token (callee, member field, tag, or bare identifier).
+    /// The name token.
     pub span: Span,
-    /// The item it resolved to (`DefId::ERROR` when not an item).
+    /// The definition it resolved to.
     pub def: DefId,
 }
 
-/// One checked module constant (`name: Type = expr` or `=> expr`).
+/// Local slot identity within one function.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LocalId(pub u32);
+
+/// One local slot: parameter, return slot, `let` binding, or hidden temp.
 #[derive(Clone, Debug)]
-pub struct HirConst {
-    /// Constant name.
+pub struct HirLocal {
+    /// Source name (`""` for anonymous slots and hidden temps).
     pub name: String,
-    /// Stable identity.
-    pub def: DefId,
-    /// Checked value (inlined wherever the constant is used).
-    pub value: HirExpr,
+    /// Slot type.
+    pub ty: TypeRef,
+    /// Declaration span.
+    pub span: Span,
 }
 
-/// One checked function body.
+/// One concrete function.
 #[derive(Clone, Debug)]
 pub struct HirFunc {
-    /// Stable identity.
-    pub def: DefId,
-    /// Function name.
-    pub name: String,
-    /// Input parameters.
-    pub params: Vec<HirParam>,
-    /// Named return slots.
-    pub returns: Vec<HirParam>,
-    /// Whether this is an `extern` (foreign, C ABI) declaration with no body.
-    pub is_extern: bool,
-    /// Checked body.
-    pub body: HirBlock,
-    /// Whole-item span.
+    /// Identity (definition plus generic arguments).
+    pub key: FuncKey,
+    /// Parameter locals, in order.
+    pub params: Vec<LocalId>,
+    /// Return-slot locals, in order.
+    pub returns: Vec<LocalId>,
+    /// Every local, indexed by [`LocalId`].
+    pub locals: Vec<HirLocal>,
+    /// Body; `None` for `extern` declarations.
+    pub body: Option<HirBlock>,
+    /// `=>` function: always inlined by the backend.
+    pub inline: bool,
+    /// Whole-declaration span.
     pub span: Span,
 }
 
-/// One `name: Type` slot (parameter, return, or capture).
-#[derive(Clone, Debug)]
-pub struct HirParam {
-    /// Slot name.
-    pub name: String,
-    /// Checked type.
-    pub ty: TypeRef,
-    /// Whole-slot span.
-    pub span: Span,
+impl HirFunc {
+    /// The local `id` names.
+    #[must_use]
+    pub fn local(&self, id: LocalId) -> &HirLocal {
+        &self.locals[id.0 as usize]
+    }
 }
 
-/// A checked statement sequence.
+/// A statement sequence and scope.
 #[derive(Clone, Debug)]
 pub struct HirBlock {
     /// Statements in order.
@@ -115,344 +175,304 @@ pub struct HirBlock {
     pub span: Span,
 }
 
-/// Fresh value temporary for desugared control flow.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct TempId(pub u32);
-
-/// Checked statements. Control flow is desugared at build time: `If` and
-/// `Match` with `out: Some(t)` end each branch by assigning the value temp.
+/// Checked statements.
 #[derive(Clone, Debug)]
 pub enum HirStmt {
-    /// `name: Type = expr`.
+    /// `name: T = value`: initializes a fresh local owned by this block.
     Let {
-        /// Bound name.
-        name: String,
-        /// Checked type.
-        ty: TypeRef,
-        /// Initializer.
+        /// The local.
+        local: LocalId,
+        /// Initializer (already converted to the local's type).
         value: HirExpr,
-        /// Whole-statement span.
-        span: Span,
     },
-    /// `a: T, b: U = f()` (value is always a call).
+    /// `a: T, b: U = f()`: the call writes its outs straight into the locals.
     MultiLet {
-        /// Bound slots in order.
-        bindings: Vec<HirParam>,
-        /// Call producing one value per binding.
-        value: HirExpr,
-        /// Whole-statement span.
-        span: Span,
+        /// One local per out slot, in order.
+        locals: Vec<LocalId>,
+        /// The call (an [`HirExprKind::Call`]).
+        call: HirExpr,
     },
-    /// `target = expr` (targets include `Temp` for desugared joins).
+    /// `place = value` (runs `@on_override`, then drops the old value).
     Assign {
-        /// Assignment target.
-        target: HirExpr,
-        /// New value.
+        /// Target place.
+        place: HirExpr,
+        /// New value (already converted to the place's type).
         value: HirExpr,
-        /// Whole-statement span.
-        span: Span,
     },
-    /// Expression used for effects.
-    ExprStmt(HirExpr),
-    /// Bare `return`.
-    Return {
-        /// Keyword span.
-        span: Span,
-    },
-    /// `break` (loop exit).
-    Break {
-        /// Keyword span.
-        span: Span,
-    },
-    /// `if` statement or desugared `if` value.
+    /// An expression evaluated for its effects.
+    Expr(HirExpr),
+    /// `return`.
+    Return(Span),
+    /// `break`.
+    Break(Span),
+    /// `if cond { } else { }`.
     If {
-        /// Condition (`@bitN`, tested non-zero).
+        /// A `@bit8` condition.
         cond: HirExpr,
-        /// Live branch.
+        /// Taken branch.
         then: HirBlock,
-        /// `else` branch (always present in HIR; empty when absent in source).
+        /// Other branch (empty when absent).
         els: HirBlock,
-        /// Value temp when this `if` produces a value.
-        out: Option<TempId>,
-        /// Whole-statement span.
-        span: Span,
     },
-    /// `loop { ... }` (condition loops desugar to `If` + `Break` inside).
-    Loop {
-        /// Loop body.
-        body: HirBlock,
-        /// Whole-statement span.
-        span: Span,
-    },
-    /// `match` statement or desugared `match` value.
+    /// `loop { }`.
+    Loop(HirBlock),
+    /// `match`.
     Match {
-        /// Inspected value.
+        /// Inspected value (a place, or a value lowering spills).
         scrutinee: HirExpr,
         /// Arms in order.
         arms: Vec<HirArm>,
-        /// `else` branch (explicit block, or `unreachable` when absent).
+        /// `else` block (empty when absent).
         els: HirBlock,
-        /// Value temp when this `match` produces a value.
-        out: Option<TempId>,
-        /// Whole-statement span.
-        span: Span,
     },
+    /// A nested `{ }` scope.
+    Block(HirBlock),
 }
 
-/// One checked expression: type + span + shape.
+/// One statement `match` arm.
+#[derive(Clone, Debug)]
+pub struct HirArm {
+    /// Tested pattern.
+    pub pattern: HirPattern,
+    /// Payload capture (a local initialized from the payload).
+    pub capture: Option<LocalId>,
+    /// Arm body.
+    pub body: HirBlock,
+}
+
+/// One value `match` arm.
+#[derive(Clone, Debug)]
+pub struct HirValueArm {
+    /// Tested pattern.
+    pub pattern: HirPattern,
+    /// Payload capture.
+    pub capture: Option<LocalId>,
+    /// Arm value.
+    pub value: HirExpr,
+}
+
+/// A match pattern.
+#[derive(Clone, Debug)]
+pub enum HirPattern {
+    /// An enum variant, by declaration index.
+    Variant(u32),
+    /// A literal compared bit-for-bit (source bytes).
+    Const(String),
+}
+
+/// One checked expression.
 #[derive(Clone, Debug)]
 pub struct HirExpr {
-    /// Checked type (with its `ref` flag).
+    /// Type (with its `ref` flag).
     pub ty: TypeRef,
     /// Source span.
     pub span: Span,
-    /// Expression shape.
+    /// Shape.
     pub kind: HirExprKind,
 }
 
-/// Checked expression shapes (typed mirrors of `ast::Expr`, desugared).
+/// A call target.
+#[derive(Clone, Debug)]
+pub enum HirCallee {
+    /// A function instance.
+    Func(FuncKey),
+    /// A function value held in a local.
+    Local(LocalId),
+    /// A compiler intrinsic.
+    Intrinsic(Intrinsic),
+}
+
+/// Checked expression shapes.
 #[derive(Clone, Debug)]
 pub enum HirExprKind {
-    /// Resolved name.
-    Ident {
-        /// Source name.
-        name: String,
-        /// What it resolved to.
-        def: DefId,
+    /// A local (place).
+    Local(LocalId),
+    /// Field `index` of an object place (place).
+    Field {
+        /// The object place.
+        base: Box<HirExpr>,
+        /// Field index in layout order.
+        index: u32,
     },
-    /// `.Some` tag literal (checked against the expected enum).
-    Tag {
-        /// Tag name.
-        name: String,
-    },
-    /// Enum variant construction (`.Some(0x1)`).
+    /// The place a `ref T` value points at (place of type `T`).
+    Deref(Box<HirExpr>),
+    /// Integer or float literal bits (source bytes, typed by `ty`).
+    Number(String),
+    /// String literal bytes (`@byte_buffer`).
+    Str(Vec<u8>),
+    /// Object literal: one value per field, in layout order.
+    Struct(Vec<HirExpr>),
+    /// Enum variant value.
     Variant {
-        /// Owning enum definition.
-        def: DefId,
-        /// Variant name.
-        variant: String,
-        /// Payload value (`None` for payload-less variants).
+        /// Variant index.
+        index: u32,
+        /// Payload value.
         payload: Option<Box<HirExpr>>,
     },
-    /// Number literal (source bytes; width comes from checking).
-    Number {
-        /// Source bytes.
-        bytes: String,
-    },
-    /// String literal (decoded bytes).
-    Str {
-        /// Decoded bytes (`\xHH` is one raw byte).
-        bytes: Vec<u8>,
-    },
-    /// Char literal (Unicode scalar).
-    Char {
-        /// Scalar value.
-        value: char,
-    },
-    /// Checked call (overload selected at build).
+    /// A call returning at most one value (its type is that value's type).
     Call {
-        /// Resolved callee.
+        /// Target.
         callee: HirCallee,
-        /// Checked arguments.
+        /// Arguments (already converted to parameter types).
         args: Vec<HirExpr>,
     },
-    /// `==` bit-equality (primitive: no hook to desugar to).
-    EqEq {
+    /// A function used as a value.
+    FuncRef(FuncKey),
+    /// `ref place`.
+    RefOf(Box<HirExpr>),
+    /// A pointer reinterpretation (`as ref unknown` / `as ref T`).
+    Retype(Box<HirExpr>),
+    /// `lhs == rhs` (bit equality, `@bit8`).
+    Eq(Box<HirExpr>, Box<HirExpr>),
+    /// `if c then x else y`.
+    If {
+        /// `@bit8` condition.
+        cond: Box<HirExpr>,
+        /// Value when true.
+        then: Box<HirExpr>,
+        /// Value when false.
+        els: Box<HirExpr>,
+    },
+    /// `match` used as a value.
+    Match {
+        /// Inspected value.
+        scrutinee: Box<HirExpr>,
+        /// Arms.
+        arms: Vec<HirValueArm>,
+        /// Fallback value.
+        els: Box<HirExpr>,
+    },
+    /// Short-circuit `and` (`true`) / `or` (`false`) over `@bit8`.
+    Logic {
+        /// `and` when true, `or` when false.
+        and: bool,
         /// Left operand.
         lhs: Box<HirExpr>,
         /// Right operand.
         rhs: Box<HirExpr>,
     },
-    /// Field read on an object value.
-    Member {
-        /// Receiver.
-        obj: Box<HirExpr>,
-        /// Field name.
-        field: String,
-    },
-    /// `ref place`.
-    RefOf {
-        /// Place expression.
-        value: Box<HirExpr>,
-    },
-    /// Checked struct literal (direct field init; never calls `@init`).
-    StructLit {
-        /// Checked fields in order.
-        fields: Vec<HirField>,
-    },
-    /// Branch-join value temporary.
-    Temp(TempId),
-    /// Recorded `@compile_error` (folding decides liveness; never emitted here).
+    /// `$"..."`: pieces pushed into a fresh `@format_args`.
+    FormatArgs(Vec<HirExpr>),
+    /// A module constant (inlined by lowering).
+    Const(DefId),
+    /// `@size_of(T)`.
+    SizeOf(TypeRef),
+    /// A `@compile_error` site (an error if it survives folding).
     CompileError {
-        /// Error message.
+        /// Message.
         msg: String,
         /// Message literal span.
         msg_span: Span,
-        /// Call-site span.
-        call_span: Span,
     },
-    /// Error-recovery poison (checking continues around it).
+    /// Error recovery (never lowered).
     Poison,
 }
 
-/// A resolved call target.
-#[derive(Clone, Debug)]
-pub enum HirCallee {
-    /// User function by identity.
-    Item(DefId),
-    /// Function-typed local (indirect call through the variable).
-    Local {
-        /// Local name holding the function value.
-        name: String,
-    },
-    /// Hook overload by name and identity.
-    Hook {
-        /// Hook name (`@add`, `@conversion`, …).
-        name: String,
-        /// Selected overload.
-        def: DefId,
-    },
-    /// Compiler intrinsic by `@`-name.
-    Intrinsic {
-        /// Intrinsic name (`@i_add_8`, `@compile_error`, …).
-        name: String,
-    },
-}
-
-/// One checked struct-literal field.
-#[derive(Clone, Debug)]
-pub struct HirField {
-    /// Field name.
-    pub name: String,
-    /// Checked value.
-    pub value: HirExpr,
-    /// Whole-field span.
-    pub span: Span,
-}
-
-/// One checked match arm.
-#[derive(Clone, Debug)]
-pub struct HirArm {
-    /// Tag or byte pattern.
-    pub pattern: HirPattern,
-    /// Optional `-> binding: Type` capture.
-    pub capture: Option<HirParam>,
-    /// Arm body.
-    pub body: HirBlock,
-}
-
-/// A checked match pattern.
-#[derive(Clone, Debug)]
-pub enum HirPattern {
-    /// `.Some` tag.
-    Tag {
-        /// Tag name.
-        name: String,
-    },
-    /// `0x0` byte pattern.
-    Const {
-        /// Source bytes.
-        bytes: String,
-    },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lilac_ty::TypeId;
-
-    fn temp_assign(temp: TempId, value: HirExpr) -> HirStmt {
-        HirStmt::Assign {
-            target: HirExpr {
-                ty: TypeRef {
-                    id: TypeId(0),
-                    is_ref: false,
-                },
-                span: Span::dummy(),
-                kind: HirExprKind::Temp(temp),
-            },
-            value,
-            span: Span::dummy(),
+impl HirExpr {
+    /// A poison expression (error recovery; never lowered).
+    #[must_use]
+    pub fn poison(span: Span) -> Self {
+        Self {
+            ty: TypeRef::ERROR,
+            span,
+            kind: HirExprKind::Poison,
         }
     }
 
-    #[test]
-    fn hir_nodes_carry_types_and_spans() {
-        let bit8 = TypeRef {
-            id: TypeId(0),
-            is_ref: false,
-        };
-        let temp = TempId(0);
-        let cond = HirExpr {
-            ty: TypeRef {
-                id: TypeId(0),
-                is_ref: false,
-            },
-            span: Span::dummy(),
-            kind: HirExprKind::Number {
-                bytes: "0x1".to_owned(),
-            },
-        };
-        let one = HirExpr {
-            ty: TypeRef {
-                id: TypeId(0),
-                is_ref: false,
-            },
-            span: Span::dummy(),
-            kind: HirExprKind::Number {
-                bytes: "0x1".to_owned(),
-            },
-        };
-        let zero = HirExpr {
-            ty: TypeRef {
-                id: TypeId(0),
-                is_ref: false,
-            },
-            span: Span::dummy(),
-            kind: HirExprKind::Number {
-                bytes: "0x0".to_owned(),
-            },
-        };
-        let func = HirFunc {
-            def: DefId(0),
-            name: "main".to_owned(),
-            params: Vec::new(),
-            returns: Vec::new(),
-            is_extern: false,
-            body: HirBlock {
-                stmts: vec![
-                    HirStmt::Let {
-                        name: "x".to_owned(),
-                        ty: bit8,
-                        value: one,
-                        span: Span::dummy(),
-                    },
-                    HirStmt::If {
-                        cond,
-                        then: HirBlock {
-                            stmts: vec![temp_assign(temp, zero)],
-                            span: Span::dummy(),
-                        },
-                        els: HirBlock {
-                            stmts: Vec::new(),
-                            span: Span::dummy(),
-                        },
-                        out: Some(temp),
-                        span: Span::dummy(),
-                    },
-                ],
-                span: Span::dummy(),
-            },
-            span: Span::dummy(),
-        };
-        assert_eq!(func.name, "main");
-        assert_eq!(func.body.stmts.len(), 2);
-        let HirStmt::If { out, .. } = &func.body.stmts[1] else {
-            panic!("expected if, got {:?}", func.body.stmts[1]);
-        };
-        assert_eq!(*out, Some(temp));
-        let rendered = format!("{func:?}");
-        assert!(rendered.contains("If"));
-        assert!(rendered.contains("Temp"));
+    /// Whether this expression denotes a place.
+    #[must_use]
+    pub fn is_place(&self) -> bool {
+        matches!(
+            self.kind,
+            HirExprKind::Local(_) | HirExprKind::Field { .. } | HirExprKind::Deref(_)
+        )
+    }
+
+    /// Calls `f` on this expression and every sub-expression, depth-first.
+    pub fn walk(&self, f: &mut dyn FnMut(&HirExpr)) {
+        f(self);
+        match &self.kind {
+            HirExprKind::Field { base, .. }
+            | HirExprKind::Deref(base)
+            | HirExprKind::RefOf(base)
+            | HirExprKind::Retype(base) => base.walk(f),
+            HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
+                for value in values {
+                    value.walk(f);
+                }
+            }
+            HirExprKind::Variant { payload, .. } => {
+                if let Some(payload) = payload {
+                    payload.walk(f);
+                }
+            }
+            HirExprKind::Call { args, .. } => {
+                for arg in args {
+                    arg.walk(f);
+                }
+            }
+            HirExprKind::Eq(lhs, rhs) | HirExprKind::Logic { lhs, rhs, .. } => {
+                lhs.walk(f);
+                rhs.walk(f);
+            }
+            HirExprKind::If { cond, then, els } => {
+                cond.walk(f);
+                then.walk(f);
+                els.walk(f);
+            }
+            HirExprKind::Match {
+                scrutinee,
+                arms,
+                els,
+            } => {
+                scrutinee.walk(f);
+                for arm in arms {
+                    arm.value.walk(f);
+                }
+                els.walk(f);
+            }
+            HirExprKind::Local(_)
+            | HirExprKind::Number(_)
+            | HirExprKind::Str(_)
+            | HirExprKind::FuncRef(_)
+            | HirExprKind::Const(_)
+            | HirExprKind::SizeOf(_)
+            | HirExprKind::CompileError { .. }
+            | HirExprKind::Poison => {}
+        }
+    }
+}
+
+impl HirBlock {
+    /// Calls `f` on every expression in this block, depth-first.
+    pub fn walk_exprs(&self, f: &mut dyn FnMut(&HirExpr)) {
+        for stmt in &self.stmts {
+            match stmt {
+                HirStmt::Let { value, .. } | HirStmt::Expr(value) => value.walk(f),
+                HirStmt::MultiLet { call, .. } => call.walk(f),
+                HirStmt::Assign { place, value } => {
+                    place.walk(f);
+                    value.walk(f);
+                }
+                HirStmt::Return(_) | HirStmt::Break(_) => {}
+                HirStmt::If { cond, then, els } => {
+                    cond.walk(f);
+                    then.walk_exprs(f);
+                    els.walk_exprs(f);
+                }
+                HirStmt::Loop(body) | HirStmt::Block(body) => body.walk_exprs(f),
+                HirStmt::Match {
+                    scrutinee,
+                    arms,
+                    els,
+                } => {
+                    scrutinee.walk(f);
+                    for arm in arms {
+                        arm.body.walk_exprs(f);
+                    }
+                    els.walk_exprs(f);
+                }
+            }
+        }
     }
 }

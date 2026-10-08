@@ -5,6 +5,7 @@ function @@conversion:bit32:bit16
   out #bit16 %to
 {
   $entry:
+    zero %to
     &1: #bit32 = copy %from
     &2: #bit16 = trunc &1
     copy &2 -> %to
@@ -16,19 +17,23 @@ function @main
   $entry:
     alloca #bit16 %truncated : zeroed
     alloca #bit16 %tmp.1 : zeroed
+    alloca #bit32 %tmp.2 : zeroed
     alloca #bit16 %pinned : zeroed
     alloca #bit16 %same : zeroed
     alloca ref #bit32 %v_ref : zeroed
     alloca ref #unknown %erased : zeroed
     alloca ref #bit32 %round_trip : zeroed
-    call @@conversion:bit32:bit16 (in %v) (out %tmp.1)
+    copy %v -> %tmp.2
+    call @@conversion:bit32:bit16 (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %truncated
     &1: #bit16 = const 0x1
     copy &1 -> %pinned
     copy %truncated -> %same
     &2: ref #bit32 = addr %v
     copy &2 -> %v_ref
-    copy %v_ref -> %erased
-    copy %erased -> %round_trip
+    &3: ref #unknown = copy %v_ref
+    copy &3 -> %erased
+    &4: ref #bit32 = copy %erased
+    copy &4 -> %round_trip
     return
 }

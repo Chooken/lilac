@@ -1,0 +1,897 @@
+//! Calls: one resolution path for every callee shape.
+//!
+//! `f(...)`, `Type.f(...)`, `value.f(...)`, `Type(...)` (`@init`),
+//! `@hook(...)`, `.Variant(...)` and intrinsics all end in either a call of a
+//! [`FuncKey`] (generic arguments resolved, instance requested) or a value
+//! (variant construction, folded literal, `@compile_error`).
+
+use lilac_ast::{Expr, Type as AstType};
+use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_hir::intrinsics::{Intrinsic, Slot};
+use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, SemanticKind};
+use lilac_resolve::{DefId, DefKind};
+use lilac_span::Span;
+use lilac_ty::{TypeId, TypeKind, TypeRef};
+
+use crate::body::FnCx;
+use crate::expr::{tail_span, Receiver};
+use crate::{Checker, Hook, Requirement};
+
+/// A checked call.
+pub(crate) enum Called {
+    /// A call with its out-slot types.
+    Call {
+        /// Target.
+        callee: HirCallee,
+        /// Checked arguments.
+        args: Vec<HirExpr>,
+        /// Out-slot types (empty for `nothing`).
+        outs: Vec<TypeRef>,
+    },
+    /// The call shape produced a plain value.
+    Value(HirExpr),
+}
+
+impl Checker<'_> {
+    pub(crate) fn check_call(
+        &mut self,
+        fcx: &mut FnCx,
+        callee: &Expr,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        match callee {
+            Expr::Ident(name, name_span) => {
+                self.check_named_call(fcx, name, *name_span, generic_args, args, span, expected)
+            }
+            Expr::Member {
+                obj,
+                field,
+                span: member_span,
+            } => {
+                if let Some(receiver) = self.static_receiver(fcx, obj) {
+                    let receiver = receiver?;
+                    return self.static_call(
+                        fcx,
+                        receiver,
+                        field,
+                        generic_args,
+                        args,
+                        span,
+                        *member_span,
+                        expected,
+                    );
+                }
+                let receiver = self.check_expr(fcx, obj, None);
+                if receiver.ty.is_error() {
+                    return Err(ErrorGuaranteed::new());
+                }
+                self.method_call(
+                    fcx,
+                    receiver,
+                    field,
+                    generic_args,
+                    args,
+                    span,
+                    *member_span,
+                    expected,
+                )
+            }
+            Expr::Tag(name, tag_span) => {
+                let Some(want) = expected else {
+                    return Err(self.diags.emit(
+                        Diagnostic::error("E024", "tag construction needs an expected type").label(
+                            *tag_span,
+                            true,
+                            "annotate the binding",
+                        ),
+                    ));
+                };
+                if want == TypeId::ERROR {
+                    return Err(ErrorGuaranteed::new());
+                }
+                let tag = tail_span(*tag_span, name);
+                Ok(Called::Value(self.variant_value(
+                    want,
+                    name,
+                    Some((fcx, args)),
+                    span,
+                    tag,
+                )))
+            }
+            Expr::TypeApp(ty) => {
+                let resolved = self.resolve_type(ty);
+                if resolved.is_error() {
+                    return Err(ErrorGuaranteed::new());
+                }
+                self.init_call(fcx, resolved, args, span)
+            }
+            _ => {
+                let _ = self.check_expr(fcx, callee, None);
+                Err(self.diags.emit(
+                    Diagnostic::error("E022", "this expression is not callable").label(
+                        span,
+                        true,
+                        "only functions can be called",
+                    ),
+                ))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_named_call(
+        &mut self,
+        fcx: &mut FnCx,
+        name: &str,
+        name_span: Span,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        if name == "@negate" && generic_args.is_empty() && args.len() == 1 {
+            if let Some(folded) = self.fold_negative(&args[0], span, expected) {
+                return Ok(Called::Value(folded));
+            }
+        }
+        if let Some(local) = fcx.lookup(name) {
+            self.record_semantic(name_span, SemanticKind::Local);
+            if !generic_args.is_empty() {
+                return Err(self.generic_arity(span, name, 0, generic_args.len()));
+            }
+            let ty = fcx.ty(local);
+            let TypeKind::Func { params, returns } = self.types.kind(ty.id).clone() else {
+                return Err(self.diags.emit(
+                    Diagnostic::error("E022", format!("`{name}` is not callable")).label(
+                        name_span,
+                        true,
+                        "only functions can be called",
+                    ),
+                ));
+            };
+            let args = self.check_args(fcx, &params, args, span)?;
+            return Ok(Called::Call {
+                callee: HirCallee::Local(local),
+                args,
+                outs: returns,
+            });
+        }
+        if name.starts_with('@') {
+            if let Some(intrinsic) = Intrinsic::lookup(name) {
+                self.record_semantic(name_span, SemanticKind::BuiltinFunc);
+                if !generic_args.is_empty() {
+                    return Err(self.generic_arity(span, name, 0, generic_args.len()));
+                }
+                return self.check_intrinsic(fcx, intrinsic, name, args, span, expected);
+            }
+            let overloads = self.overloads(name);
+            if overloads.is_empty() {
+                return Err(self.diags.emit(
+                    Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                        name_span,
+                        true,
+                        "no hook or intrinsic with this name",
+                    ),
+                ));
+            }
+            return self.hook_call(fcx, name, &overloads, args, span);
+        }
+        let receiver = Expr::Ident(name.to_owned(), name_span);
+        if let Some(receiver) = self.static_receiver(fcx, &receiver) {
+            let ty = match receiver? {
+                Receiver::Type(ty) => ty,
+                Receiver::Bare(def) => {
+                    if generic_args.is_empty() {
+                        self.infer_bare(def, expected, span)?
+                    } else {
+                        let mut resolved = Vec::new();
+                        for arg in generic_args {
+                            let arg = self.resolve_type(arg);
+                            if arg.is_error() {
+                                return Err(ErrorGuaranteed::new());
+                            }
+                            resolved.push(arg);
+                        }
+                        let count = self.res.def(def).generic_params.len();
+                        if resolved.len() != count {
+                            return Err(self.generic_arity(span, name, count, resolved.len()));
+                        }
+                        let ty = self.type_of_def(def, resolved);
+                        self.ensure_type(ty, span)?;
+                        ty
+                    }
+                }
+            };
+            return self.init_call(fcx, ty, args, span);
+        }
+        let Some(def) = self.lookup_item(name, name_span)? else {
+            return Err(self.diags.emit(
+                Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                    name_span,
+                    true,
+                    "not a local, item, or intrinsic",
+                ),
+            ));
+        };
+        self.record_use(name_span, def);
+        match &self.res.def(def).kind {
+            DefKind::Func(_) => {
+                self.func_call(fcx, def, Vec::new(), generic_args, args, span, None)
+            }
+            _ => Err(self.diags.emit(
+                Diagnostic::error("E022", "this item is not callable").label(
+                    span,
+                    true,
+                    "only functions can be called",
+                ),
+            )),
+        }
+    }
+
+    /// Calls function `def` (of a type instantiated at `type_args`, if a
+    /// member), with an optional `ref` receiver as the first argument.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn func_call(
+        &mut self,
+        fcx: &mut FnCx,
+        def: DefId,
+        type_args: Vec<TypeRef>,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        receiver: Option<HirExpr>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let own = self.res.def(def).generic_params.len();
+        if generic_args.len() != own {
+            let name = self.function_name(def);
+            return Err(self.generic_arity(span, &name, own, generic_args.len()));
+        }
+        let mut key_args = type_args;
+        for arg in generic_args {
+            let arg = self.resolve_type(arg);
+            if arg.is_error() {
+                return Err(ErrorGuaranteed::new());
+            }
+            key_args.push(arg);
+        }
+        let key = FuncKey {
+            def,
+            args: key_args,
+        };
+        let sig = self.request(key.clone(), span)?;
+        let skip = usize::from(receiver.is_some());
+        if receiver.is_some() && sig.params.is_empty() {
+            return Err(ErrorGuaranteed::new());
+        }
+        let mut hir_args: Vec<HirExpr> = receiver.into_iter().collect();
+        hir_args.extend(self.check_args(fcx, &sig.params[skip..], args, span)?);
+        Ok(Called::Call {
+            callee: HirCallee::Func(key),
+            args: hir_args,
+            outs: sig.returns,
+        })
+    }
+
+    /// `Type.member(...)`: a static function, or a variant with a payload.
+    #[allow(clippy::too_many_arguments)]
+    fn static_call(
+        &mut self,
+        fcx: &mut FnCx,
+        receiver: Receiver,
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        member_span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let ty = match receiver {
+            Receiver::Type(ty) => ty,
+            Receiver::Bare(def) => {
+                let is_variant = self
+                    .res
+                    .member(def, field)
+                    .is_some_and(|member| matches!(self.res.def(member).kind, DefKind::Variant(_)));
+                if !is_variant {
+                    let name = self.res.def(def).name.clone();
+                    let count = self.res.def(def).generic_params.len();
+                    return Err(self.generic_arity(span, &name, count, 0));
+                }
+                self.infer_bare(def, expected, span)?
+            }
+        };
+        let owner = self.types.display_ref(ty);
+        let Some((def, type_args)) = self.type_parts(ty.id).filter(|_| !ty.is_ref) else {
+            let mut diagnostic = Diagnostic::error(
+                "E010",
+                format!("cannot call static member `{field}` on `{owner}`"),
+            )
+            .label(span, true, "static calls need an object type");
+            if self.is_generic_derived(ty) {
+                let probed = self.probe_args(fcx, args);
+                diagnostic =
+                    diagnostic.note(self.required_method_note(field, None, &probed, expected));
+            }
+            return Err(self.missing(diagnostic, true, field, owner, None));
+        };
+        let Some(member) = self.res.member(def, field) else {
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{owner}`"),
+            )
+            .label(span, true, "no such member");
+            if self.is_generic_derived(ty) {
+                let probed = self.probe_args(fcx, args);
+                diagnostic =
+                    diagnostic.note(self.required_method_note(field, None, &probed, expected));
+            }
+            return Err(self.missing(diagnostic, true, field, owner, Some(def)));
+        };
+        let member_name = tail_span(member_span, field);
+        match &self.res.def(member).kind {
+            DefKind::Variant(_) => {
+                if !generic_args.is_empty() {
+                    return Err(self.generic_arity(span, field, 0, generic_args.len()));
+                }
+                Ok(Called::Value(self.variant_value(
+                    ty.id,
+                    field,
+                    Some((fcx, args)),
+                    span,
+                    member_name,
+                )))
+            }
+            DefKind::Func(_) => {
+                if self.private_denied(member, def, span) {
+                    return Err(ErrorGuaranteed::new());
+                }
+                self.record_use(member_name, member);
+                self.func_call(fcx, member, type_args, generic_args, args, span, None)
+            }
+            _ => Err(self.diags.emit(
+                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                    span,
+                    true,
+                    "only functions can be called",
+                ),
+            )),
+        }
+    }
+
+    /// `value.method(...)`: the receiver is passed as `ref Self`.
+    #[allow(clippy::too_many_arguments)]
+    fn method_call(
+        &mut self,
+        fcx: &mut FnCx,
+        receiver: HirExpr,
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        member_span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let base = receiver.ty.deref();
+        let owner = self.types.display(base.id);
+        let Some((def, type_args)) = self.type_parts(base.id) else {
+            let mut diagnostic =
+                Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
+                    .label(span, true, "methods need an object");
+            if self.is_generic_derived(base) {
+                let probed = self.probe_args(fcx, args);
+                diagnostic = diagnostic.note(self.required_method_note(
+                    field,
+                    Some(receiver.ty),
+                    &probed,
+                    expected,
+                ));
+            }
+            return Err(self.missing(diagnostic, true, field, owner, None));
+        };
+        let Some(member) = self.res.member(def, field) else {
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no member `{field}` on `{owner}`"),
+            )
+            .label(member_span, true, "no such member");
+            if self.is_generic_derived(base) {
+                let probed = self.probe_args(fcx, args);
+                diagnostic = diagnostic.note(self.required_method_note(
+                    field,
+                    Some(receiver.ty),
+                    &probed,
+                    expected,
+                ));
+            }
+            return Err(self.missing(diagnostic, true, field, owner, Some(def)));
+        };
+        if !matches!(self.res.def(member).kind, DefKind::Func(_)) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+                    member_span,
+                    true,
+                    "only functions can be called",
+                ),
+            ));
+        }
+        if self.private_denied(member, def, member_span) {
+            return Err(ErrorGuaranteed::new());
+        }
+        self.record_use(tail_span(member_span, field), member);
+        let template = self.sig_of(member)?;
+        let takes_self = template.params.first().is_some_and(|first| {
+            first.is_ref && self.type_parts(first.id).is_some_and(|(d, _)| d == def)
+        });
+        if !takes_self {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
+                    member_span,
+                    true,
+                    "first parameter must be `ref Self`",
+                ),
+            ));
+        }
+        let receiver = if receiver.ty.is_ref {
+            receiver
+        } else {
+            HirExpr {
+                ty: TypeRef::reference(base.id),
+                span: receiver.span,
+                kind: HirExprKind::RefOf(Box::new(receiver)),
+            }
+        };
+        self.func_call(
+            fcx,
+            member,
+            type_args,
+            generic_args,
+            args,
+            span,
+            Some(receiver),
+        )
+    }
+
+    /// Emits a missing-member diagnostic and records the requirement.
+    fn missing(
+        &mut self,
+        diagnostic: Diagnostic,
+        method: bool,
+        name: &str,
+        owner: String,
+        owner_def: Option<DefId>,
+    ) -> ErrorGuaranteed {
+        self.emit_requirement(
+            diagnostic,
+            Requirement::Missing {
+                method,
+                name: name.to_owned(),
+                owner,
+                owner_def,
+            },
+        )
+    }
+
+    /// Argument types for a required-signature note (diagnostics discarded).
+    fn probe_args(&mut self, fcx: &mut FnCx, args: &[Expr]) -> Vec<Option<TypeRef>> {
+        args.iter().map(|arg| self.probe(fcx, arg)).collect()
+    }
+
+    /// The type an expression would have, without keeping its diagnostics.
+    fn probe(&mut self, fcx: &mut FnCx, expr: &Expr) -> Option<TypeRef> {
+        let mark = self.diags.checkpoint();
+        let requirements = self.requirements.len();
+        let ty = self.check_expr(fcx, expr, None).ty;
+        let _ = self.diags.take_since(mark);
+        self.requirements.truncate(requirements);
+        (!ty.is_error()).then_some(ty)
+    }
+
+    /// `Type(args)`: the `@init` overload returning `Type`.
+    fn init_call(
+        &mut self,
+        fcx: &mut FnCx,
+        ty: TypeRef,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let name = self.types.display(ty.id);
+        let overloads: Vec<Hook> = self
+            .overloads("@init")
+            .into_iter()
+            .filter(|hook| hook.sig.returns.first().is_some_and(|ret| ret.id == ty.id))
+            .collect();
+        if overloads.is_empty() {
+            return Err(self.diags.emit(
+                Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
+                    .label(span, true, "define `@init` or use `= { ... }`"),
+            ));
+        }
+        let Some(hook) = self.select_overload(fcx, &overloads, args) else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!(
+                        "no overload of `{name}.@init` takes {} arguments",
+                        args.len()
+                    ),
+                )
+                .label(span, true, "arity mismatch here"),
+            ));
+        };
+        if let Some(owner) = self.res.def(hook.key.def).parent {
+            if self.private_denied(hook.key.def, owner, span) {
+                return Err(ErrorGuaranteed::new());
+            }
+        }
+        let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
+        Ok(Called::Call {
+            callee: HirCallee::Func(hook.key),
+            args,
+            outs: hook.sig.returns,
+        })
+    }
+
+    /// `@hook(args)`: exact-match overload selection.
+    fn hook_call(
+        &mut self,
+        fcx: &mut FnCx,
+        name: &str,
+        overloads: &[Hook],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let Some(hook) = self.select_overload(fcx, overloads, args) else {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E022",
+                    format!("no overload of `{name}` takes {} arguments", args.len()),
+                )
+                .label(span, true, "arity mismatch here"),
+            ));
+        };
+        let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
+        Ok(Called::Call {
+            callee: HirCallee::Func(hook.key),
+            args,
+            outs: hook.sig.returns,
+        })
+    }
+
+    /// The overload whose arity and (probed) argument types match.
+    fn select_overload(
+        &mut self,
+        fcx: &mut FnCx,
+        overloads: &[Hook],
+        args: &[Expr],
+    ) -> Option<Hook> {
+        let candidates: Vec<&Hook> = overloads
+            .iter()
+            .filter(|hook| hook.sig.params.len() == args.len())
+            .collect();
+        let first = (*candidates.first()?).clone();
+        if candidates.len() == 1 {
+            return Some(first);
+        }
+        let probed: Vec<Option<TypeRef>> = args
+            .iter()
+            .map(|arg| {
+                if matches!(arg, Expr::Number(..)) {
+                    None
+                } else {
+                    self.probe(fcx, arg)
+                }
+            })
+            .collect();
+        let found = candidates.into_iter().find(|hook| {
+            hook.sig
+                .params
+                .iter()
+                .zip(&probed)
+                .all(|(param, got)| match got {
+                    None => true,
+                    Some(got) if param.is_ref => got.is_ref && got.id == param.id,
+                    Some(got) => got.id == param.id,
+                })
+        });
+        Some(found.cloned().unwrap_or(first))
+    }
+
+    /// Arguments of an ordinary call: each converts to its parameter type.
+    pub(crate) fn check_args(
+        &mut self,
+        fcx: &mut FnCx,
+        params: &[TypeRef],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
+        self.arity(params.len(), args.len(), span)?;
+        let mut checked = Vec::with_capacity(args.len());
+        let mut failed = false;
+        for (arg, param) in args.iter().zip(params) {
+            let value = self.check_expr(fcx, arg, Some(param.id));
+            if value.ty.is_error() {
+                failed = true;
+                continue;
+            }
+            if param.is_ref && !value.ty.is_ref {
+                self.mismatch(*param, value.ty, span, arg.span());
+                failed = true;
+                continue;
+            }
+            let value = self.coerce(value, *param, span);
+            failed |= value.ty.is_error();
+            checked.push(value);
+        }
+        if failed {
+            Err(ErrorGuaranteed::new())
+        } else {
+            Ok(checked)
+        }
+    }
+
+    /// Arguments of a hook call: exact types only (references deref).
+    fn check_exact_args(
+        &mut self,
+        fcx: &mut FnCx,
+        params: &[TypeRef],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
+        self.arity(params.len(), args.len(), span)?;
+        let mut checked = Vec::with_capacity(args.len());
+        let mut failed = false;
+        for (arg, param) in args.iter().zip(params) {
+            let value = self.check_expr(fcx, arg, Some(param.id));
+            if value.ty.is_error() {
+                failed = true;
+                continue;
+            }
+            let fits = if param.is_ref {
+                value.ty == *param
+            } else {
+                value.ty.id == param.id
+            };
+            if !fits {
+                self.mismatch(*param, value.ty, span, arg.span());
+                failed = true;
+                continue;
+            }
+            let value = if param.is_ref {
+                value
+            } else {
+                self.auto_deref(value)
+            };
+            checked.push(value);
+        }
+        if failed {
+            Err(ErrorGuaranteed::new())
+        } else {
+            Ok(checked)
+        }
+    }
+
+    fn arity(&mut self, expected: usize, found: usize, span: Span) -> Result<(), ErrorGuaranteed> {
+        if expected == found {
+            return Ok(());
+        }
+        let diagnostic = Diagnostic::error(
+            "E022",
+            format!("wrong number of arguments: expected {expected}, found {found}"),
+        )
+        .label(span, true, "arity mismatch here");
+        Err(self.emit_requirement(diagnostic, Requirement::Arity { expected, found }))
+    }
+
+    // ---- intrinsics -------------------------------------------------------
+
+    fn check_intrinsic(
+        &mut self,
+        fcx: &mut FnCx,
+        intrinsic: Intrinsic,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        match intrinsic {
+            Intrinsic::SizeOf => {
+                self.intrinsic_arity(name, 1, args.len(), span)?;
+                let ty = self.size_of_operand(fcx, &args[0])?;
+                return Ok(Called::Value(HirExpr {
+                    ty: self.value_of("@bit_native"),
+                    span,
+                    kind: HirExprKind::SizeOf(ty),
+                }));
+            }
+            Intrinsic::CompileError => {
+                self.intrinsic_arity(name, 1, args.len(), span)?;
+                let Expr::Str(msg, msg_span) = &args[0] else {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            "E010",
+                            "`@compile_error` needs a string literal message",
+                        )
+                        .label(args[0].span(), true, "message goes here"),
+                    ));
+                };
+                return Ok(Called::Value(HirExpr {
+                    ty: expected.map_or(TypeRef::ERROR, TypeRef::value),
+                    span,
+                    kind: HirExprKind::CompileError {
+                        msg: String::from_utf8_lossy(msg).into_owned(),
+                        msg_span: *msg_span,
+                    },
+                }));
+            }
+            _ => {}
+        }
+        let signature = intrinsic.signature();
+        self.intrinsic_arity(name, signature.params.len(), args.len(), span)?;
+        let exact = matches!(
+            intrinsic,
+            Intrinsic::Int(..)
+                | Intrinsic::Float(..)
+                | Intrinsic::FbitToBits(_)
+                | Intrinsic::BitsToFbit(_)
+        );
+        let mut checked = Vec::with_capacity(args.len());
+        let mut failed = false;
+        for (arg, slot) in args.iter().zip(&signature.params) {
+            match self.intrinsic_arg(fcx, arg, *slot, exact, span) {
+                Some(value) => checked.push(value),
+                None => failed = true,
+            }
+        }
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
+        let outs = match signature.result {
+            None => Vec::new(),
+            Some(Slot::Builtin(ty)) => vec![self.value_of(ty)],
+            Some(Slot::Ref(ty)) => vec![TypeRef::reference(self.builtin(ty))],
+            Some(Slot::ExpectedBit | Slot::AnyBit) => match expected {
+                Some(want) if self.is_bit(want) => vec![TypeRef::value(want)],
+                _ => {
+                    return Err(self.diags.emit(
+                        Diagnostic::error("E024", format!("`{name}` needs an expected bit type"))
+                            .label(span, true, "annotate the binding"),
+                    ));
+                }
+            },
+        };
+        Ok(Called::Call {
+            callee: HirCallee::Intrinsic(intrinsic),
+            args: checked,
+            outs,
+        })
+    }
+
+    fn intrinsic_arity(
+        &mut self,
+        name: &str,
+        want: usize,
+        found: usize,
+        span: Span,
+    ) -> Result<(), ErrorGuaranteed> {
+        if want == found {
+            return Ok(());
+        }
+        Err(self.diags.emit(
+            Diagnostic::error(
+                "E022",
+                format!("wrong number of arguments to `{name}`: expected {want}, found {found}"),
+            )
+            .label(span, true, "arity mismatch here"),
+        ))
+    }
+
+    fn intrinsic_arg(
+        &mut self,
+        fcx: &mut FnCx,
+        arg: &Expr,
+        slot: Slot,
+        exact: bool,
+        span: Span,
+    ) -> Option<HirExpr> {
+        match slot {
+            Slot::Builtin(name) => {
+                let id = self.builtin(name);
+                let value = self.check_expr(fcx, arg, Some(id));
+                if value.ty.is_error() {
+                    return None;
+                }
+                if !exact {
+                    let value = self.coerce(value, TypeRef::value(id), arg.span());
+                    return (!value.ty.is_error()).then_some(value);
+                }
+                let value = self.auto_deref(value);
+                if value.ty.id != id {
+                    let diagnostic = Diagnostic::error(
+                        "E010",
+                        format!(
+                            "mismatched types: expected {}, found {}",
+                            self.types.display(id),
+                            self.types.display(value.ty.id)
+                        ),
+                    )
+                    .label(arg.span(), true, "wrong operand type here");
+                    self.emit_requirement(diagnostic, Requirement::Mismatch);
+                    return None;
+                }
+                Some(value)
+            }
+            Slot::Ref(name) => {
+                let id = self.builtin(name);
+                let value = self.check_expr(fcx, arg, None);
+                if value.ty.is_error() {
+                    return None;
+                }
+                if value.ty.is_ref && value.ty.id == id {
+                    return Some(value);
+                }
+                let diagnostic =
+                    Diagnostic::error("E010", format!("mismatched types: expected ref {name}"))
+                        .label(span, false, format!("expected `ref {name}` here"))
+                        .label(arg.span(), true, "needs an explicit `ref`");
+                self.emit_requirement(diagnostic, Requirement::Mismatch);
+                None
+            }
+            Slot::AnyBit | Slot::ExpectedBit => {
+                let value = self.check_expr(fcx, arg, None);
+                if value.ty.is_error() {
+                    return None;
+                }
+                let value = self.auto_deref(value);
+                if self.is_bit(value.ty.id) {
+                    return Some(value);
+                }
+                let diagnostic = Diagnostic::error(
+                    "E010",
+                    format!(
+                        "mismatched types: expected a bit container, found {}",
+                        self.types.display(value.ty.id)
+                    ),
+                )
+                .label(arg.span(), true, "not a bit container");
+                self.emit_requirement(diagnostic, Requirement::Mismatch);
+                None
+            }
+        }
+    }
+
+    /// `@size_of`'s operand: a type (`@bit32`, `T`, `Box[T]`, `ref T`) or a
+    /// value (its type).
+    fn size_of_operand(&mut self, fcx: &mut FnCx, arg: &Expr) -> Result<TypeRef, ErrorGuaranteed> {
+        let as_type = match arg {
+            Expr::RefOf { value, .. } => self.static_receiver(fcx, value).map(|receiver| {
+                receiver.and_then(|receiver| match receiver {
+                    Receiver::Type(ty) => Ok(TypeRef::reference(ty.id)),
+                    Receiver::Bare(def) => Err(self.bare_arity(def, arg.span())),
+                })
+            }),
+            _ => self.static_receiver(fcx, arg).map(|receiver| {
+                receiver.and_then(|receiver| match receiver {
+                    Receiver::Type(ty) => Ok(ty),
+                    Receiver::Bare(def) => Err(self.bare_arity(def, arg.span())),
+                })
+            }),
+        };
+        if let Some(ty) = as_type {
+            return ty;
+        }
+        let value = self.check_expr(fcx, arg, None);
+        if value.ty.is_error() {
+            return Err(ErrorGuaranteed::new());
+        }
+        Ok(value.ty)
+    }
+
+    fn bare_arity(&mut self, def: DefId, span: Span) -> ErrorGuaranteed {
+        let name = self.res.def(def).name.clone();
+        let count = self.res.def(def).generic_params.len();
+        self.generic_arity(span, &name, count, 0)
+    }
+}

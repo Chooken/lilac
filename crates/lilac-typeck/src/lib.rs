@@ -1,12 +1,499 @@
-//! Type checker: collect-sigs + check-bodies + duck-typed generics.
+//! Type checking: resolved definitions in, concrete typed HIR out.
 //!
-//! Real checking lands in M1 (non-generic) and M4 (requirements/obligations).
-//! Hook bindings must be concrete: blanket-generic hooks are rejected with
-//! `E052` once checking exists.
+//! The checker works through a queue of function instances. Every non-generic
+//! function and hook is queued up front; a generic function (or a method of a
+//! generic type) is queued the first time a concrete instance is used, and its
+//! body is then checked under that instance's arguments (duck typing:
+//! requirements are proven per instance). A failure inside an instance body is
+//! reported once as `E042` at the use that requested it (see `generics.rs`).
+//!
+//! Module map: `sigs` (signatures and the hook table), `types` (type syntax,
+//! layouts, generic type instances), `body` (statements and scopes), `expr`
+//! (expressions and places), `calls` (call and member resolution), `literals`
+//! (number literals), `generics` (instance diagnostics).
 
-pub mod check;
-pub mod ops;
-pub mod sigs;
+mod body;
+mod calls;
+mod expr;
+mod generics;
+mod literals;
+mod sigs;
+mod types;
 
-pub use check::check_bodies;
-pub use sigs::*;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_hir::{FuncKey, HirProgram};
+use lilac_resolve::{DefId, DefKind, Lookup, Resolved};
+use lilac_span::{FileId, Span};
+use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef, Types};
+
+/// The result of checking a unit.
+#[derive(Clone, Debug, Default)]
+pub struct Checked {
+    /// Concrete typed HIR (usable only when no errors were emitted).
+    pub hir: HirProgram,
+    /// Declared signature of every function and hook (generic ones as
+    /// templates), for editor hovers.
+    pub sigs: HashMap<DefId, FuncSig>,
+}
+
+/// Checks every definition in `res`. `native_bits` is the target's pointer
+/// width (`@bit_native` literal range).
+pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, native_bits: u32) -> Checked {
+    let mut checker = Checker {
+        res,
+        types,
+        diags,
+        native_bits,
+        sigs: HashMap::new(),
+        failed_sigs: HashSet::new(),
+        hooks: HashMap::new(),
+        instances: HashMap::new(),
+        queue: VecDeque::new(),
+        type_states: HashMap::new(),
+        type_stack: Vec::new(),
+        const_types: HashMap::new(),
+        out: HirProgram::default(),
+        env: Env::default(),
+        requirements: Vec::new(),
+        reported: HashSet::new(),
+    };
+    checker.run();
+    let sigs = checker.sigs.clone();
+    Checked {
+        hir: std::mem::take(&mut checker.out),
+        sigs,
+    }
+}
+
+/// One entry of the concrete hook table.
+#[derive(Clone, Debug)]
+pub(crate) struct Hook {
+    /// The instance implementing it.
+    pub key: FuncKey,
+    /// Its concrete signature.
+    pub sig: FuncSig,
+    /// Declaration span (for `E020`).
+    pub span: Span,
+}
+
+/// Progress of one function instance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum State {
+    /// Queued; body not checked yet.
+    Queued,
+    /// Body checked successfully.
+    Done,
+    /// Body or signature failed; later uses stay silent.
+    Failed,
+}
+
+/// One function instance.
+#[derive(Clone, Debug)]
+pub(crate) struct Instance {
+    /// Concrete signature.
+    pub sig: FuncSig,
+    /// The instance whose body requested this one, and the use site.
+    pub origin: Option<(Option<FuncKey>, Span)>,
+    /// Number of generic instances on the request chain (`E051` bound).
+    pub depth: usize,
+    /// Progress.
+    pub state: State,
+}
+
+/// Progress of one concrete type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TypeState {
+    /// Layout being computed (a by-value cycle if reached again).
+    Active,
+    /// Layout and hooks registered.
+    Done,
+    /// Failed; later uses stay silent.
+    Failed,
+}
+
+/// The environment a body or signature is checked in.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Env {
+    /// File whose scope resolves names.
+    pub file: Option<FileId>,
+    /// Generic parameter names in scope (owning type's first).
+    pub params: Vec<String>,
+    /// Their concrete arguments (empty for templates).
+    pub args: Vec<TypeRef>,
+    /// The type whose member is being checked (private-member access).
+    pub owner: Option<DefId>,
+    /// The instance being checked.
+    pub key: Option<FuncKey>,
+}
+
+/// A duck-typing requirement failure recorded alongside its diagnostic, so
+/// `E042` can be assembled without re-reading message text.
+#[derive(Clone, Debug)]
+pub(crate) enum Requirement {
+    /// `value.member` / `T.member` found nothing.
+    Missing {
+        /// Method (call) or member (field read).
+        method: bool,
+        /// Member name.
+        name: String,
+        /// Display of the receiver type.
+        owner: String,
+        /// The receiver's base definition, for did-you-mean.
+        owner_def: Option<DefId>,
+    },
+    /// A one-step conversion was missing.
+    Conversion {
+        /// Display of the source type.
+        from: String,
+    },
+    /// Wrong argument count.
+    Arity {
+        /// Expected count.
+        expected: usize,
+        /// Supplied count.
+        found: usize,
+    },
+    /// Any other type mismatch.
+    Mismatch,
+}
+
+pub(crate) struct Checker<'a> {
+    pub res: &'a Resolved,
+    pub types: &'a mut Types,
+    pub diags: &'a mut Diags,
+    pub native_bits: u32,
+    /// Declared signatures by definition (templates for generic ones).
+    pub sigs: HashMap<DefId, FuncSig>,
+    /// Definitions whose signature failed (callers stay silent).
+    pub failed_sigs: HashSet<DefId>,
+    /// The concrete hook table: name to overloads.
+    pub hooks: HashMap<String, Vec<Hook>>,
+    /// Every requested function instance.
+    pub instances: HashMap<FuncKey, Instance>,
+    /// Instances whose bodies are still to be checked.
+    pub queue: VecDeque<FuncKey>,
+    /// Concrete object/enum types seen so far.
+    pub type_states: HashMap<TypeId, TypeState>,
+    /// Types whose layout is being computed (innermost last).
+    pub type_stack: Vec<TypeId>,
+    /// Declared types of module constants.
+    pub const_types: HashMap<DefId, TypeRef>,
+    /// Output being built.
+    pub out: HirProgram,
+    /// Current environment.
+    pub env: Env,
+    /// Requirement failures by diagnostic index.
+    pub requirements: Vec<(usize, Requirement)>,
+    /// `E042`s already reported, by instance (one per instance).
+    pub reported: HashSet<FuncKey>,
+}
+
+/// Production instantiation depth cap; the test cap keeps `E051` cheap.
+#[cfg(not(test))]
+pub(crate) const MAX_DEPTH: usize = 16;
+#[cfg(test)]
+pub(crate) const MAX_DEPTH: usize = 4;
+
+impl Checker<'_> {
+    fn run(&mut self) {
+        self.collect_hooks();
+        self.check_types();
+        self.check_consts();
+        for id in self.res.ids() {
+            let def = self.res.def(id);
+            let generic = !def.generic_params.is_empty()
+                || def
+                    .parent
+                    .is_some_and(|parent| !self.res.def(parent).generic_params.is_empty());
+            if matches!(def.kind, DefKind::Func(_)) && !generic {
+                let span = def.span;
+                let _ = self.request(FuncKey::plain(id), span);
+            }
+        }
+        while let Some(key) = self.queue.pop_front() {
+            self.check_instance(&key);
+        }
+        self.finish_type_hooks();
+    }
+
+    // ---- environment ---------------------------------------------------
+
+    /// The file the current environment resolves names in.
+    pub(crate) fn file(&self) -> FileId {
+        self.env.file.unwrap_or(FileId(u32::MAX))
+    }
+
+    /// Runs `f` in `env`, restoring the previous environment after.
+    pub(crate) fn with_env<T>(&mut self, env: Env, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(&mut self.env, env);
+        let result = f(self);
+        self.env = saved;
+        result
+    }
+
+    /// The environment of definition `def` instantiated at `args`.
+    pub(crate) fn env_of(&self, def: DefId, args: Vec<TypeRef>, key: Option<FuncKey>) -> Env {
+        let d = self.res.def(def);
+        let owner = if d.is_type() { Some(def) } else { d.parent };
+        Env {
+            file: Some(d.file),
+            params: self.scope_of(def),
+            args,
+            owner,
+            key,
+        }
+    }
+
+    /// The generic parameter names in scope for `def`: its owning type's,
+    /// then its own.
+    pub(crate) fn scope_of(&self, def: DefId) -> Vec<String> {
+        let d = self.res.def(def);
+        let mut scope = match d.parent {
+            Some(parent) if !d.is_type() => self.res.def(parent).generic_params.clone(),
+            _ => Vec::new(),
+        };
+        scope.extend(d.generic_params.iter().cloned());
+        scope
+    }
+
+    // ---- instances -----------------------------------------------------
+
+    /// Requests instance `key` (from the instance being checked, at
+    /// `use_span`): computes its concrete signature and queues its body.
+    /// `Err` (silent) when the definition or a previous request failed.
+    pub(crate) fn request(
+        &mut self,
+        key: FuncKey,
+        use_span: Span,
+    ) -> Result<FuncSig, ErrorGuaranteed> {
+        if let Some(instance) = self.instances.get(&key) {
+            return match instance.state {
+                State::Failed => Err(ErrorGuaranteed::new()),
+                _ => Ok(instance.sig.clone()),
+            };
+        }
+        let template = self.sig_of(key.def)?;
+        let sig = FuncSig {
+            params: template
+                .params
+                .iter()
+                .map(|ty| self.types.substitute(*ty, &key.args))
+                .collect(),
+            returns: template
+                .returns
+                .iter()
+                .map(|ty| self.types.substitute(*ty, &key.args))
+                .collect(),
+        };
+        let origin_key = self.env.key.clone();
+        let parent_depth = origin_key
+            .as_ref()
+            .and_then(|parent| self.instances.get(parent))
+            .map_or(0, |parent| parent.depth);
+        let depth = parent_depth + usize::from(!key.args.is_empty());
+        let mut instance = Instance {
+            sig: sig.clone(),
+            origin: Some((origin_key, use_span)),
+            depth,
+            state: State::Queued,
+        };
+        if depth > MAX_DEPTH {
+            instance.state = State::Failed;
+            self.instances.insert(key.clone(), instance);
+            let chain = self.chain_text(&key);
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E051",
+                    "generic instantiation is too deep (possible infinite recursion)",
+                )
+                .label(use_span, true, "instantiated here")
+                .note(format!("instantiation chain: {chain}")),
+            ));
+        }
+        // Every type the signature mentions must exist before the body runs.
+        for ty in sig.params.iter().chain(sig.returns.iter()) {
+            if self.ensure_type(*ty, use_span).is_err() {
+                instance.state = State::Failed;
+                self.instances.insert(key, instance);
+                return Err(ErrorGuaranteed::new());
+            }
+        }
+        self.instances.insert(key.clone(), instance);
+        self.queue.push_back(key);
+        Ok(sig)
+    }
+
+    /// The declared signature of a function or hook (a template when generic).
+    pub(crate) fn sig_of(&mut self, def: DefId) -> Result<FuncSig, ErrorGuaranteed> {
+        if let Some(sig) = self.sigs.get(&def) {
+            return Ok(sig.clone());
+        }
+        if self.failed_sigs.contains(&def) {
+            return Err(ErrorGuaranteed::new());
+        }
+        if let Some(sig) = self.collect_sig(def) {
+            self.sigs.insert(def, sig.clone());
+            Ok(sig)
+        } else {
+            self.failed_sigs.insert(def);
+            Err(ErrorGuaranteed::new())
+        }
+    }
+
+    // ---- name lookup ---------------------------------------------------
+
+    /// Resolves an item name in the current file. `Ok(None)`: no binding;
+    /// `Err`: ambiguous (`E029` emitted).
+    pub(crate) fn lookup_item(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<DefId>, ErrorGuaranteed> {
+        match self.res.lookup(self.file(), name) {
+            Some(Lookup::One(id)) => Ok(Some(*id)),
+            Some(Lookup::Ambiguous(sites)) => {
+                let mut diagnostic = Diagnostic::error("E029", format!("`{name}` is ambiguous"))
+                    .label(span, true, "ambiguous reference here");
+                for site in sites {
+                    diagnostic = diagnostic.label(*site, false, "imported here");
+                }
+                Err(self.diags.emit(diagnostic))
+            }
+            None => Ok(None),
+        }
+    }
+
+    // ---- diagnostics ---------------------------------------------------
+
+    /// Emits a diagnostic that also records a duck-typing requirement.
+    pub(crate) fn emit_requirement(
+        &mut self,
+        diagnostic: Diagnostic,
+        requirement: Requirement,
+    ) -> ErrorGuaranteed {
+        let index = self.diags.checkpoint();
+        let guaranteed = self.diags.emit(diagnostic);
+        if self.diags.checkpoint() > index {
+            self.requirements.push((index, requirement));
+        }
+        guaranteed
+    }
+
+    /// `E010` with both sides labelled.
+    pub(crate) fn mismatch(
+        &mut self,
+        expected: TypeRef,
+        found: TypeRef,
+        expected_span: Span,
+        found_span: Span,
+    ) -> ErrorGuaranteed {
+        let exp = self.types.display_ref(expected);
+        let got = self.types.display_ref(found);
+        let diagnostic = Diagnostic::error(
+            "E010",
+            format!("mismatched types: expected {exp}, found {got}"),
+        )
+        .label(expected_span, false, format!("expected `{exp}` here"))
+        .label(found_span, true, format!("found `{got}` here"));
+        self.emit_requirement(diagnostic, Requirement::Mismatch)
+    }
+
+    /// Records an item use for the editor.
+    pub(crate) fn record_use(&mut self, span: Span, def: DefId) {
+        if def != DefId::ERROR && !span.is_dummy() {
+            self.out.uses.push(lilac_hir::NameSite { span, def });
+        }
+    }
+
+    /// Records a semantic-token site for the editor.
+    pub(crate) fn record_semantic(&mut self, span: Span, kind: lilac_hir::SemanticKind) {
+        if !span.is_dummy() {
+            self.out
+                .semantics
+                .push(lilac_hir::SemanticSite { span, kind });
+        }
+    }
+
+    // ---- small type helpers --------------------------------------------
+
+    pub(crate) fn builtin(&self, name: &str) -> TypeId {
+        match self.types.builtin(name) {
+            Some(id) => id,
+            None => lilac_error::bug!(Span::dummy(), "missing builtin `{name}`"),
+        }
+    }
+
+    pub(crate) fn value_of(&self, name: &str) -> TypeRef {
+        TypeRef {
+            id: self.builtin(name),
+            is_ref: false,
+        }
+    }
+
+    pub(crate) fn is_bit(&self, id: TypeId) -> bool {
+        matches!(
+            self.types.kind(id),
+            TypeKind::Bit8
+                | TypeKind::Bit16
+                | TypeKind::Bit32
+                | TypeKind::Bit64
+                | TypeKind::BitNative
+        )
+    }
+
+    pub(crate) fn is_float(&self, id: TypeId) -> bool {
+        matches!(
+            self.types.kind(id),
+            TypeKind::FBit16 | TypeKind::FBit32 | TypeKind::FBit64 | TypeKind::FBit128
+        )
+    }
+
+    pub(crate) fn bit_width(&self, id: TypeId) -> u32 {
+        match self.types.kind(id) {
+            TypeKind::Bit8 => 8,
+            TypeKind::Bit16 => 16,
+            TypeKind::Bit32 => 32,
+            TypeKind::Bit64 => 64,
+            TypeKind::BitNative => self.native_bits,
+            _ => lilac_error::bug!(Span::dummy(), "bit width of a non-bit type"),
+        }
+    }
+
+    pub(crate) fn float_width(&self, id: TypeId) -> u32 {
+        match self.types.kind(id) {
+            TypeKind::FBit16 => 16,
+            TypeKind::FBit32 => 32,
+            TypeKind::FBit64 => 64,
+            TypeKind::FBit128 => 128,
+            _ => lilac_error::bug!(Span::dummy(), "float width of a non-float type"),
+        }
+    }
+
+    pub(crate) fn bit_of_width(&self, width: u32) -> TypeId {
+        self.builtin(match width {
+            8 => "@bit8",
+            16 => "@bit16",
+            32 => "@bit32",
+            _ => "@bit64",
+        })
+    }
+
+    /// Every concrete `@conversion` as `(from, to)`.
+    pub(crate) fn conversion_pairs(&self) -> Vec<(TypeId, TypeId)> {
+        self.hooks
+            .get("@conversion")
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter(|hook| hook.sig.params.len() == 1 && hook.sig.returns.len() == 1)
+                    .map(|hook| (hook.sig.params[0].id, hook.sig.returns[0].id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}

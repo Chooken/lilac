@@ -1,8 +1,10 @@
-//! Constant evaluation + folding on LIR (peephole + `if`-folding in M2,
-//! full call-eval with fuel in M3).
+//! Constant evaluation and folding on LIR: constant arithmetic, constant
+//! branches (with dead-block pruning, which silences dead `@compile_error`
+//! sites), and best-effort evaluation of calls with constant arguments.
 //!
-//! Foldable v1 set, fuel caps, and the miss-is-ok rule are fixed by plan §10:
-//! a missed fold costs performance only, never correctness.
+//! A missed fold costs performance only, never correctness. A place whose
+//! address is taken is never treated as constant (writes through the
+//! reference are invisible to the dataflow).
 
 use std::collections::{HashMap, HashSet};
 
@@ -34,42 +36,25 @@ pub enum ConstValue {
     Bool(bool),
 }
 
-/// A value error raised while evaluating a fold-required intrinsic,
-/// rendered as a user-facing `E060`.
+/// Why a builtin could not be evaluated (a fold miss, never a user error).
 #[derive(Clone, Debug)]
 pub struct FoldValueError {
     /// Human-readable reason.
     pub message: String,
 }
 
-/// Folds one function at a time: constant arithmetic, constant branch
-/// conditions (with dead-block pruning), fold-required intrinsics
-/// (`@size_of`), and dead `@compile_error` removal.
-/// Still-live `@compile_error` sites are left in place for
-/// [`check_live_compile_errors`] (which the driver runs after reachability
-/// pruning); unfoldable intrinsics report `E060`.
-///
-/// M3 adds bounded best-effort call-eval: a `call` whose `in` places are all
-/// constant is interpreted under [`MAX_FOLD_STEPS`]/[`MAX_CALL_DEPTH`]; a
-/// miss (unknown value, unsupported op, or exhausted fuel/depth) leaves the
-/// runtime call in place.
-///
-/// # Errors
-///
-/// Returns [`ErrorGuaranteed`] when a fold-required intrinsic value error
-/// (`E060`) was reported.
-pub fn fold(module: &mut LirModule, diags: &mut Diags) -> Result<(), ErrorGuaranteed> {
-    fold_with_fuel(module, diags, MAX_FOLD_STEPS, MAX_CALL_DEPTH)
+/// Folds every function: constant arithmetic, constant branch conditions
+/// (with dead-block pruning, which removes dead `@compile_error` sites), and
+/// bounded call evaluation: a `call` whose `in` places are all constant is
+/// interpreted under [`MAX_FOLD_STEPS`]/[`MAX_CALL_DEPTH`]; a miss leaves the
+/// runtime call in place. Live `@compile_error` sites are reported later by
+/// [`check_live_compile_errors`].
+pub fn fold(module: &mut LirModule) {
+    fold_with_fuel(module, MAX_FOLD_STEPS, MAX_CALL_DEPTH);
 }
 
-/// Folding entry point with an injectable fuel/depth budget (tests exercise
-/// exhaustion with a tiny budget).
-fn fold_with_fuel(
-    module: &mut LirModule,
-    diags: &mut Diags,
-    fuel: u64,
-    depth: u32,
-) -> Result<(), ErrorGuaranteed> {
+/// Folding with an injectable fuel/depth budget (tests exercise exhaustion).
+fn fold_with_fuel(module: &mut LirModule, fuel: u64, depth: u32) {
     let data: HashMap<String, Vec<u8>> = module
         .data
         .iter()
@@ -77,21 +62,15 @@ fn fold_with_fuel(
         .collect();
     let funcs = module.funcs.clone();
     let mut folder = Folder {
-        diags,
         data: &data,
         funcs: &funcs,
-        failed: false,
         fuel,
         max_depth: depth,
         fresh: 0,
+        escaped: HashSet::new(),
     };
     for func in &mut module.funcs {
         folder.fold_func(func);
-    }
-    if folder.failed {
-        Err(ErrorGuaranteed::new())
-    } else {
-        Ok(())
     }
 }
 
@@ -137,13 +116,33 @@ pub fn check_live_compile_errors(
 }
 
 struct Folder<'a> {
-    diags: &'a mut Diags,
     data: &'a HashMap<String, Vec<u8>>,
     funcs: &'a [LirFunc],
-    failed: bool,
     fuel: u64,
     max_depth: u32,
     fresh: u64,
+    /// Places of the current function whose address is taken.
+    escaped: HashSet<String>,
+}
+
+/// Places whose address is taken (`addr`, `field.addr`): writes through the
+/// resulting reference are invisible to the dataflow.
+fn escaped_places(func: &LirFunc) -> HashSet<String> {
+    let mut escaped = HashSet::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            match inst {
+                LirInst::Addr { place, .. } => {
+                    escaped.insert(place.clone());
+                }
+                LirInst::FieldAddr { obj, .. } => {
+                    escaped.insert(obj.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    escaped
 }
 
 /// Parses integer text (`0x`/`0X`, `0b`/`0B`, decimal, `_` separators and
@@ -281,39 +280,6 @@ fn int_lit(value: &ConstValue) -> Option<String> {
     }
 }
 
-/// Evaluates a fold-required intrinsic over constant `args`. `_width` is
-/// the result bit width (from the instruction's type), kept for the
-/// signature's callers though `@size_of` derives its own width.
-///
-/// # Errors
-///
-/// Returns a [`FoldValueError`] (rendered as `E060`) when the operand is
-/// not the expected kind.
-pub fn eval_intrinsic(
-    name: &str,
-    args: &[ConstValue],
-    _width: u32,
-) -> Result<ConstValue, FoldValueError> {
-    match name {
-        "@size_of" => eval_size_of(args),
-        _ => Err(FoldValueError {
-            message: format!("`{name}` is not a fold-required intrinsic"),
-        }),
-    }
-}
-
-/// Best-effort `@size_of`: its operand-type semantics are not pinned in
-/// M3 (ledger ruling R3), so a typed integer constant yields its byte
-/// count and anything else is `E060`.
-fn eval_size_of(args: &[ConstValue]) -> Result<ConstValue, FoldValueError> {
-    match args.first() {
-        Some(ConstValue::Int(_, bits)) => Ok(ConstValue::Int(u64::from(bits / 8), 64)),
-        _ => Err(FoldValueError {
-            message: "`@size_of` requires a constant typed operand".to_owned(),
-        }),
-    }
-}
-
 /// Evaluates a builtin over constant `ins` (`out_ty` supplies the result
 /// width). Only the pure, value-producing builtins are foldable here;
 /// pointer-producing (`@byte_buffer_ptr`) and mutating (`@store_u8`,
@@ -408,22 +374,32 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
         (ConstValue::Int(left, _), ConstValue::Int(right, _)) => Some((*left, *right)),
         _ => None,
     };
+    // Operand width (comparisons have a `#bit8` result but wider operands).
+    let operand_width = match left {
+        ConstValue::Int(_, width) => *width,
+        _ => width,
+    };
+    let signed = |value: u64| sign_extend(value, operand_width);
+    let unsigned = |value: u64| value & mask_of(operand_width);
     match op {
-        ArithOp::IAdd | ArithOp::FAdd => match ints {
+        ArithOp::IAdd => match ints {
             Some((l, r)) => ConstValue::Int(l.wrapping_add(r) & mask, width),
             None => ConstValue::Unknown,
         },
-        ArithOp::ISub | ArithOp::FSub => match ints {
+        ArithOp::ISub => match ints {
             Some((l, r)) => ConstValue::Int(l.wrapping_sub(r) & mask, width),
             None => ConstValue::Unknown,
         },
-        ArithOp::IMul | ArithOp::FMul => match ints {
+        ArithOp::IMul => match ints {
             Some((l, r)) => ConstValue::Int(l.wrapping_mul(r) & mask, width),
             None => ConstValue::Unknown,
         },
-        ArithOp::IDiv | ArithOp::FDiv => match ints {
+        ArithOp::IDiv => match ints {
             Some((_, 0)) | None => ConstValue::Unknown,
-            Some((l, r)) => ConstValue::Int(l.wrapping_div(r) & mask, width),
+            Some((l, r)) => ConstValue::Int(
+                signed(l).wrapping_div(signed(r)).cast_unsigned() & mask,
+                width,
+            ),
         },
         ArithOp::IDivU => match ints {
             Some((l, r)) => match (l & mask).checked_div(r & mask) {
@@ -432,9 +408,12 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
             },
             None => ConstValue::Unknown,
         },
-        ArithOp::IMod | ArithOp::FMod => match ints {
+        ArithOp::IMod => match ints {
             Some((_, 0)) | None => ConstValue::Unknown,
-            Some((l, r)) => ConstValue::Int(l.wrapping_rem(r) & mask, width),
+            Some((l, r)) => ConstValue::Int(
+                signed(l).wrapping_rem(signed(r)).cast_unsigned() & mask,
+                width,
+            ),
         },
         ArithOp::IModU => match ints {
             Some((l, r)) => match (l & mask).checked_rem(r & mask) {
@@ -448,23 +427,59 @@ fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> 
             (ConstValue::Bool(l), ConstValue::Bool(r)) => ConstValue::Bool(l == r),
             _ => ConstValue::Unknown,
         },
-        ArithOp::ILt | ArithOp::FLt => match ints {
-            Some((l, r)) => ConstValue::Bool(l < r),
+        ArithOp::ILt | ArithOp::IGt | ArithOp::ILe | ArithOp::IGe => match ints {
+            Some((l, r)) => {
+                let (l, r) = (signed(l), signed(r));
+                ConstValue::Bool(match op {
+                    ArithOp::ILt => l < r,
+                    ArithOp::IGt => l > r,
+                    ArithOp::ILe => l <= r,
+                    _ => l >= r,
+                })
+            }
             None => ConstValue::Unknown,
         },
-        ArithOp::ILtU => match ints {
-            Some((l, r)) => ConstValue::Bool((l & mask) < (r & mask)),
+        ArithOp::ILtU | ArithOp::IGtU | ArithOp::ILeU | ArithOp::IGeU => match ints {
+            Some((l, r)) => {
+                let (l, r) = (unsigned(l), unsigned(r));
+                ConstValue::Bool(match op {
+                    ArithOp::ILtU => l < r,
+                    ArithOp::IGtU => l > r,
+                    ArithOp::ILeU => l <= r,
+                    _ => l >= r,
+                })
+            }
             None => ConstValue::Unknown,
         },
-        ArithOp::IGt | ArithOp::FGt => match ints {
-            Some((l, r)) => ConstValue::Bool(l > r),
-            None => ConstValue::Unknown,
-        },
-        ArithOp::IGtU => match ints {
-            Some((l, r)) => ConstValue::Bool((l & mask) > (r & mask)),
-            None => ConstValue::Unknown,
-        },
+        // Floats are never folded.
+        ArithOp::FAdd
+        | ArithOp::FSub
+        | ArithOp::FMul
+        | ArithOp::FDiv
+        | ArithOp::FMod
+        | ArithOp::FLt
+        | ArithOp::FGt
+        | ArithOp::FLe
+        | ArithOp::FGe => ConstValue::Unknown,
     }
+}
+
+/// All-ones mask of `width` bits.
+fn mask_of(width: u32) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1 << width) - 1
+    }
+}
+
+/// Two's-complement value of the low `width` bits.
+fn sign_extend(value: u64, width: u32) -> i64 {
+    if width >= 64 {
+        return value.cast_signed();
+    }
+    let shift = 64 - width;
+    (value << shift).cast_signed() >> shift
 }
 
 /// Evaluates width conversions over constants. A `Bitcast` reinterprets the
@@ -517,14 +532,11 @@ struct FoldedCall {
     out_types: Vec<Option<String>>,
 }
 
-/// A best-effort call-eval outcome: either a finalized call evaluation error
-/// (`E060`, fatal) or a reason to leave the runtime call in place.
+/// Why a call evaluation stopped: not enough information, unsupported, or
+/// out of budget. The runtime call stays.
 enum Eval {
-    /// Not enough information / unsupported / out of budget: leave the call.
+    /// Leave the call in place.
     Miss,
-    /// A fold-required intrinsic produced a value error (propagate as
-    /// `E060`).
-    ValueError(String),
 }
 
 impl Folder<'_> {
@@ -581,8 +593,8 @@ impl Folder<'_> {
                 }
                 consts.insert(dst_name, folded);
             }
-            LirInst::FoldIntrinsic { .. } => {
-                self.fold_intrinsic(inst, consts);
+            LirInst::Zero { place, .. } => {
+                consts.insert(place.clone(), ConstValue::Unknown);
             }
             _ => {}
         }
@@ -598,64 +610,6 @@ impl Folder<'_> {
                 _ => ConstValue::Unknown,
             },
             None => parse_lit(lit, ty),
-        }
-    }
-
-    /// Folds a fold-required intrinsic: a known operand is evaluated and
-    /// the marker rewritten to `Const`; an unknown operand or an
-    /// evaluation error reports `E060` and poisons the destination.
-    fn fold_intrinsic(&mut self, inst: &mut LirInst, consts: &mut HashMap<String, ConstValue>) {
-        let (name, arg, dst, ty, span) = match inst {
-            LirInst::FoldIntrinsic {
-                name,
-                arg,
-                dst,
-                ty,
-                span,
-            } => (name.clone(), arg.clone(), dst.clone(), ty.clone(), *span),
-            _ => return,
-        };
-        let width = width_of(&ty).unwrap_or(64);
-        let value = operand_const(consts, &arg);
-        let result = if matches!(value, ConstValue::Unknown) {
-            Err(FoldValueError {
-                message: format!("`{name}` requires a compile-time-constant operand"),
-            })
-        } else {
-            eval_intrinsic(&name, &[value], width)
-        };
-        match result {
-            Ok(ConstValue::Int(value, bits)) => {
-                *inst = LirInst::Const {
-                    dst: dst.clone(),
-                    lit: format!("0x{value:x}"),
-                    ty,
-                    span,
-                };
-                consts.insert(dst, ConstValue::Int(value, bits));
-            }
-            Ok(ConstValue::Float(value, bits)) => {
-                *inst = LirInst::Const {
-                    dst: dst.clone(),
-                    lit: format!("{value:?}"),
-                    ty,
-                    span,
-                };
-                consts.insert(dst, ConstValue::Float(value, bits));
-            }
-            Ok(value) => {
-                consts.insert(dst, value);
-            }
-            Err(error) => {
-                self.failed = true;
-                self.diags
-                    .emit(Diagnostic::error("E060", error.message).label(
-                        span,
-                        true,
-                        "evaluated here".to_owned(),
-                    ));
-                consts.insert(dst, ConstValue::Unknown);
-            }
         }
     }
 
@@ -694,20 +648,11 @@ impl Folder<'_> {
                     }
                 }
             }
-            LirInst::FoldIntrinsic {
-                name, arg, dst, ty, ..
-            } => {
-                let value = operand_const(consts, arg);
-                let width = width_of(ty).unwrap_or(64);
-                let result = if matches!(value, ConstValue::Unknown) {
-                    ConstValue::Unknown
-                } else {
-                    eval_intrinsic(name, &[value], width).unwrap_or(ConstValue::Unknown)
-                };
-                consts.insert(dst.clone(), result);
+            LirInst::Zero { place, .. } => {
+                consts.insert(place.clone(), ConstValue::Unknown);
             }
-            LirInst::Call { outs, .. } => {
-                for place in outs {
+            LirInst::Call { ins, outs, .. } => {
+                for place in ins.iter().chain(outs) {
                     consts.insert(place.clone(), ConstValue::Unknown);
                 }
             }
@@ -744,6 +689,7 @@ impl Folder<'_> {
                 let mut exit = entry.clone();
                 for inst in &func.blocks[index].insts {
                     self.track_inst(inst, &mut exit);
+                    self.forget_escaped(&mut exit);
                 }
                 if !maps_equal(&entry, &entries[index]) || !maps_equal(&exit, &exits[index]) {
                     changed = true;
@@ -775,6 +721,7 @@ impl Folder<'_> {
                     insts.push(other);
                 }
             }
+            self.forget_escaped(consts);
         }
         block.insts = insts;
         Self::fold_term(&mut block.term, consts);
@@ -849,10 +796,6 @@ impl Folder<'_> {
                 }
             }
             Ok(None) | Err(Eval::Miss) => {
-                Self::miss_call(callee, ins, outs, span, consts, insts);
-            }
-            Err(Eval::ValueError(message)) => {
-                self.report_value_error(&message, span);
                 Self::miss_call(callee, ins, outs, span, consts, insts);
             }
         }
@@ -992,17 +935,6 @@ impl Folder<'_> {
         Some(materialized)
     }
 
-    /// Reports a fold-required value error (`E060`).
-    fn report_value_error(&mut self, message: &str, span: Span) {
-        self.failed = true;
-        self.diags
-            .emit(Diagnostic::error("E060", message.to_owned()).label(
-                span,
-                true,
-                "evaluated here".to_owned(),
-            ));
-    }
-
     /// A fresh register name that cannot collide with lowered names.
     fn fresh_reg(&mut self) -> String {
         self.fresh += 1;
@@ -1013,12 +945,20 @@ impl Folder<'_> {
         if func.is_extern {
             return;
         }
+        self.escaped = escaped_places(func);
         let entries = self.compute_entry_consts(func);
         for (index, block) in func.blocks.iter_mut().enumerate() {
             let mut consts = entries.get(index).cloned().unwrap_or_default();
             self.fold_block(block, &mut consts);
         }
         Self::prune_dead(func);
+    }
+
+    /// Forgets every place whose address escaped.
+    fn forget_escaped(&self, consts: &mut HashMap<String, ConstValue>) {
+        for place in &self.escaped {
+            consts.remove(place);
+        }
     }
 
     /// Deletes unreachable non-entry blocks to a fixpoint (dead
@@ -1220,9 +1160,14 @@ impl Evaluator<'_> {
                 }
                 Ok(())
             }
-            LirInst::FoldIntrinsic {
-                name, arg, dst, ty, ..
-            } => Self::exec_fold(name, arg, dst, ty, frame),
+            LirInst::Zero { place, .. } => {
+                let zero = match frame.values.get(place) {
+                    Some(ConstValue::Int(_, width)) => ConstValue::Int(0, *width),
+                    _ => ConstValue::Unknown,
+                };
+                frame.values.insert(place.clone(), zero);
+                Ok(())
+            }
             LirInst::Call {
                 func,
                 ins,
@@ -1230,29 +1175,6 @@ impl Evaluator<'_> {
                 span,
             } => self.exec_call(func, ins, outs, *span, frame),
             _ => Err(Eval::Miss),
-        }
-    }
-
-    /// Evaluates a fold-required intrinsic inside a call body; a known-bad
-    /// value is fatal (`E060`), an unknown one is a miss.
-    fn exec_fold(
-        name: &str,
-        arg: &LirOperand,
-        dst: &str,
-        ty: &str,
-        frame: &mut Frame,
-    ) -> Result<(), Eval> {
-        let value = operand_value(frame, arg);
-        if is_unknown(&value) {
-            return Err(Eval::Miss);
-        }
-        let width = width_of(ty).unwrap_or(64);
-        match eval_intrinsic(name, &[value], width) {
-            Ok(result) => {
-                frame.values.insert(dst.to_owned(), result);
-                Ok(())
-            }
-            Err(error) => Err(Eval::ValueError(error.message)),
         }
     }
 
@@ -1625,6 +1547,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -1669,8 +1592,8 @@ mod tests {
     #[test]
     fn folds_const_arith() {
         let mut module = arith_module();
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok());
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         let text = module.to_text();
         assert!(!text.contains("i.add"), "{text}");
@@ -1687,6 +1610,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
@@ -1718,8 +1642,8 @@ mod tests {
     #[test]
     fn if_fold_prunes_dead() {
         let mut module = branch_module(false);
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok());
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         let labels: Vec<&str> = module.funcs[0]
             .blocks
@@ -1735,8 +1659,8 @@ mod tests {
         // Mirrors `cfold_dead_compile_error.lilac`: the error dies with its
         // branch and never reports.
         let mut module = branch_module(false);
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok());
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
     }
 
@@ -1746,7 +1670,7 @@ mod tests {
         let mut diags = Diags::new();
         // Folding no longer decides E031; the module-level check does, so a
         // caller that already pruned unreachable functions can run it.
-        assert!(fold(&mut module, &mut diags).is_ok());
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(check_live_compile_errors(&module, &mut diags).is_err());
         let errors: Vec<_> = diags
@@ -1766,6 +1690,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: Vec::new(),
@@ -1778,6 +1703,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![LirInst::CompileError {
@@ -1797,7 +1723,7 @@ mod tests {
     fn pruned_compile_error_is_silent() {
         let mut module = dead_error_module();
         let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok());
+        fold(&mut module);
         assert!(!diags.has_errors(), "fold must not report E031: {diags:?}");
         lilac_ir::prune_unreachable(&mut module, &std::collections::HashSet::new());
         assert!(
@@ -1838,37 +1764,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn size_of_folds_to_byte_count() {
-        let mut module = LirModule::new("x86_64-unknown-none");
-        module.funcs.push(LirFunc {
-            name: "main".to_owned(),
-            ins: Vec::new(),
-            outs: Vec::new(),
-            is_extern: false,
-            blocks: vec![LirBlock {
-                label: "entry".to_owned(),
-                insts: vec![
-                    constant("1", "0x0", "#bit16"),
-                    LirInst::FoldIntrinsic {
-                        name: "@size_of".to_owned(),
-                        arg: reg("1"),
-                        dst: "2".to_owned(),
-                        ty: "#bit_native".to_owned(),
-                        span: test_span(),
-                    },
-                ],
-                term: ret(),
-                span: test_span(),
-            }],
-        });
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
-        let text = module.to_text();
-        assert!(text.contains("const 0x2"), "{text}");
-        assert!(!text.contains("@size_of"), "{text}");
-    }
-
     /// A two-function module: `@parse` is a pure loop over `@load_u8` from
     /// its `@byte_buffer` param accumulating a `#bit_native` sum. When
     /// `set_arg`, `main` passes a `"AB"` data buffer; otherwise the arg
@@ -1887,6 +1782,7 @@ mod tests {
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
             outs: vec![("result".to_owned(), "#bit_native".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
@@ -1954,6 +1850,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: main_insts,
@@ -1969,8 +1866,8 @@ mod tests {
     #[test]
     fn block_wrapper_parser_folds() {
         let mut module = parser_module(true);
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         let text = module.to_text();
         assert!(text.contains("0x83"), "{text}");
@@ -1998,6 +1895,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![
                 LirBlock {
                     label: "entry".to_owned(),
@@ -2032,8 +1930,8 @@ mod tests {
                 },
             ],
         });
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         let text = module.to_text();
         assert!(!text.contains(".lilac.byte_buffer_len"), "{text}");
@@ -2043,8 +1941,8 @@ mod tests {
     #[test]
     fn call_eval_miss_stays_call() {
         let mut module = parser_module(false);
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        let _diags = Diags::new();
+        fold(&mut module);
         assert!(
             module.to_text().contains("call @parse"),
             "{}",
@@ -2055,11 +1953,8 @@ mod tests {
     #[test]
     fn fuel_exhaustion_stays_call() {
         let mut module = parser_module(true);
-        let mut diags = Diags::new();
-        assert!(
-            fold_with_fuel(&mut module, &mut diags, 2, 16).is_ok(),
-            "{diags:?}"
-        );
+        let _diags = Diags::new();
+        fold_with_fuel(&mut module, 2, 16);
         assert!(
             module.to_text().contains("call @parse"),
             "{}",
@@ -2083,6 +1978,7 @@ mod tests {
             ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
             outs: vec![("result".to_owned(), "#bit_native".to_owned())],
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2110,6 +2006,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
                 insts: vec![
@@ -2131,8 +2028,8 @@ mod tests {
     #[test]
     fn store_in_callee_stays_call() {
         let mut module = mutating_module();
-        let mut diags = Diags::new();
-        assert!(fold(&mut module, &mut diags).is_ok(), "{diags:?}");
+        let diags = Diags::new();
+        fold(&mut module);
         assert!(!diags.has_errors(), "{diags:?}");
         let text = module.to_text();
         assert!(text.contains("call @wipe"), "{text}");

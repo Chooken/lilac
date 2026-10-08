@@ -1,4 +1,3 @@
-// pending: phase 3 (`=>` substitutes arguments, evaluating them twice)
 // expect-exit: 1
 
 exit: extern function (code: @bit32) nothing

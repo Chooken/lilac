@@ -7,7 +7,14 @@ define void @.lilac.main() {
 entry:
   %variable = alloca i32, align 4
   store i32 0, ptr %variable, align 4
-  store i32 2, ptr %variable, align 4
+  %tmp.1 = alloca i32, align 4
+  store i32 0, ptr %tmp.1, align 4
+  %tmp.2 = alloca i32, align 4
+  store i32 0, ptr %tmp.2, align 4
+  store i32 1, ptr %tmp.2, align 4
+  store i32 2, ptr %tmp.1, align 4
+  %0 = load i32, ptr %tmp.1, align 4
+  store i32 %0, ptr %variable, align 4
   ret void
 }
 

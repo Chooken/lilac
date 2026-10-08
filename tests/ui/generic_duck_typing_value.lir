@@ -4,25 +4,13 @@ type #Object {
     value: #bit32,
 }
 function @Object.get
-  in ref #Object %instance
+  in ref #Object %self
   out #Object %result
 {
   $entry:
-    &1: #Object = load %instance
+    zero %result
+    &1: #Object = load %self
     copy &1 -> %result
-    return
-}
-function @gen.1.Object
-  in #Object %value
-  out #Object %out
-{
-  $entry:
-    alloca #Object %tmp.1 : zeroed
-    alloca ref #Object %tmp.2 : zeroed
-    &1: ref #Object = addr %value
-    copy &1 -> %tmp.2
-    call @Object.get (in %tmp.2) (out %tmp.1)
-    copy %tmp.1 -> %out
     return
 }
 function @main
@@ -32,10 +20,27 @@ function @main
     alloca #Object %tmp.1 : zeroed
     alloca #Object %result : zeroed
     alloca #Object %tmp.2 : zeroed
+    alloca #Object %tmp.3 : zeroed
+    zero %tmp.1
     &1: #bit32 = const 0x2
     copy &1 -> %tmp.1.value  // idx 0
     copy %tmp.1 -> %source
-    call @gen.1.Object (in %source) (out %tmp.2)
+    copy %source -> %tmp.3
+    call @gen.1.Object (in %tmp.3) (out %tmp.2)
     copy %tmp.2 -> %result
+    return
+}
+function @gen.1.Object
+  in #Object %value
+  out #Object %out
+{
+  $entry:
+    alloca #Object %tmp.1 : zeroed
+    alloca ref #Object %tmp.2 : zeroed
+    zero %out
+    &1: ref #Object = addr %value
+    copy &1 -> %tmp.2
+    call @Object.get (in %tmp.2) (out %tmp.1)
+    copy %tmp.1 -> %out
     return
 }

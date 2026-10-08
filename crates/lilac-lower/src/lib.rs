@@ -1,104 +1,117 @@
-//! HIR -> LIR lowering with zero-init, RAII, and conversions.
+//! HIR -> LIR lowering: places, ownership, and control flow.
 //!
-//! Assumes checked, error-free HIR (the driver only lowers clean programs):
-//! internal inconsistencies are `bug!`, never diagnostics — except genuinely
-//! unlowerable constructs, which report `E030` naming the milestone that owns
-//! them (M3 strings and exotic intrinsics, M5 nested member stores).
+//! Ownership is decided here, uniformly:
+//!
+//! - Reading a *place* (local, field, dereference) into a new owner copies it:
+//!   the type's `@on_copy` hook, or copy glue when only its fields have hooks,
+//!   or a plain bit copy. Every other expression is a fresh value and moves.
+//! - Every `let` local is dropped when its block exits (reverse declaration
+//!   order); `return` and `break` drop the scopes they leave. By-value
+//!   parameters belong to the callee and are dropped on exit; return slots
+//!   move to the caller. A fresh value nobody takes is dropped at the end of
+//!   its statement.
+//! - Dropping runs the type's `@on_drop`, then drops every field (drop glue).
+//! - Assignment evaluates the new value, runs `@on_override(ref old, ref new)`,
+//!   drops the old value, then moves the new one in.
+//!
+//! Arguments always reach the callee in a fresh place (the callee owns and may
+//! modify its parameters), and every function zeroes its return slots on
+//! entry, so a slot starts zeroed on each call.
 
 use std::collections::{HashMap, HashSet};
 
-use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_error::{Diagnostic, Diags};
+use lilac_hir::intrinsics::{Intrinsic, NumOp};
 use lilac_hir::{
-    HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirParam, HirPattern, HirProgram, HirStmt,
-    TempId,
+    FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirProgram,
+    HirStmt, HirValueArm, Layout, LocalId,
 };
 use lilac_ir::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
     LirTerm,
 };
-use lilac_resolve::{DefId, ResolvedProject};
+use lilac_resolve::{DefKind, Resolved};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeRef, Types};
+use lilac_ty::{TypeId, TypeKind, TypeRef, Types};
 
-/// Lowers typed HIR to Lilac IR.
+/// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
+/// size (for `@size_of`).
+#[must_use]
 pub fn lower(
     hir: &HirProgram,
-    project: &ResolvedProject,
+    res: &Resolved,
     types: &Types,
-    diags: &mut Diags,
-    target_triple: &str,
-) -> Result<LirModule, ErrorGuaranteed> {
+    triple: &str,
+    ptr_bytes: u64,
+) -> LirModule {
     let mut lower = Lower {
-        project,
+        hir,
+        res,
         types,
-        diags,
-        module: LirModule::new(target_triple),
-        const_src: HashMap::new(),
-        consts: HashMap::new(),
-        func_names: HashMap::new(),
-        tags: HashMap::new(),
-        drops: &hir.drops,
-        failed: false,
+        ptr_bytes,
+        module: LirModule::new(triple),
+        symbols: HashMap::new(),
+        externs: HashSet::new(),
+        drop_glue: HashMap::new(),
+        copy_glue: HashMap::new(),
+        needs_drop: HashMap::new(),
+        needs_copy: HashMap::new(),
     };
-    let enum_names: HashSet<String> = project
-        .all_items()
-        .filter(|(_, item)| matches!(item.kind, lilac_resolve::ResKind::Enum { .. }))
-        .map(|(name, item)| lower.symbol(item.id, name, false))
-        .collect();
-    for (name, members) in &hir.layouts {
-        let is_aggregate = enum_names.contains(name.as_str());
-        let mut layout = Vec::with_capacity(members.len() + 1);
-        let mut variants = Vec::with_capacity(members.len());
-        for (member, ty) in members {
-            variants.push(member.clone());
-            if let Some(ty) = ty {
-                layout.push((member.clone(), lir_ty(lower.types, *ty)));
+    for func in &hir.funcs {
+        let symbol = lower.symbol_of(func);
+        if func.body.is_none() {
+            lower.externs.insert(func.key.clone());
+        }
+        lower.symbols.insert(func.key.clone(), symbol);
+    }
+    let mut layouts: Vec<(&TypeId, &Layout)> = hir.layouts.iter().collect();
+    layouts.sort_by_key(|(id, _)| id.0);
+    for (id, layout) in layouts {
+        let name = lower.type_name(*id);
+        let fields = match layout {
+            Layout::Object { fields } => fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), lower.lir_ty(*ty)))
+                .collect(),
+            Layout::Enum { variants, tag } => {
+                let mut fields = vec![("tag".to_owned(), lower.lir_ty(TypeRef::value(*tag)))];
+                for (name, payload) in variants {
+                    if let Some(payload) = payload {
+                        fields.push((name.clone(), lower.lir_ty(*payload)));
+                    }
+                }
+                fields
             }
-        }
-        if is_aggregate {
-            layout.insert(0, ("tag".to_owned(), "#bit8".to_owned()));
-            lower.tags.insert(name.clone(), variants);
-        }
-        lower.module.layouts.insert(format!("#{name}"), layout);
-    }
-    for constant in &hir.consts {
-        lower.const_src.insert(constant.def, constant.value.clone());
-    }
-    let defs: Vec<DefId> = hir.consts.iter().map(|constant| constant.def).collect();
-    for def in defs {
-        let mut inlining = HashSet::new();
-        let expanded = lower.expand_const(def, &mut inlining);
-        lower.consts.insert(def, expanded);
+        };
+        lower.module.layouts.insert(format!("#{name}"), fields);
     }
     for func in &hir.funcs {
-        let symbol = lower.symbol(func.def, &func.name, func.is_extern);
-        lower.func_names.insert(func.def, symbol);
+        let lowered = lower.lower_func(func);
+        lower.module.funcs.push(lowered);
     }
-    for func in &hir.funcs {
-        lower.lower_func(func);
-    }
-    if lower.failed {
-        Err(ErrorGuaranteed::new())
-    } else {
-        Ok(lower.module)
-    }
+    lower.module
 }
 
-/// Diagnoses `extern` declarations the platform C ABI cannot represent: a
-/// parameter or return that is neither a C scalar (bit integer or float) nor
-/// `ref T`, more than one out place, or an `extern` named `main` (the unmangled
-/// C entry point the compiler emits). Each is `E028`, labelled at the offending
-/// slot (for `>1` out, at the extra slot; for `main`, at the declaration).
-pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diags) {
-    for func in &hir.funcs {
-        if !func.is_extern {
-            continue;
-        }
-        // Externs are never namespace-prefixed, so an `extern` named `main`
-        // anywhere in the unit keeps the C symbol `main` and collides with the
-        // entry wrapper the LLVM backend emits. Diagnose it here so `check`
-        // reports it instead of the backend ICEing on the missing `.lilac.main`.
-        if func.name == "main" {
+/// Diagnoses `extern` signatures the C ABI cannot carry (`E028`): parameters
+/// and returns must be bit integers, floats, `ref T`, or an object wrapping
+/// exactly one such field; at most one return; never named `main`.
+pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, diags: &mut Diags) {
+    let lower = Lower {
+        hir,
+        res,
+        types,
+        ptr_bytes: 8,
+        module: LirModule::new(""),
+        symbols: HashMap::new(),
+        externs: HashSet::new(),
+        drop_glue: HashMap::new(),
+        copy_glue: HashMap::new(),
+        needs_drop: HashMap::new(),
+        needs_copy: HashMap::new(),
+    };
+    for func in hir.funcs.iter().filter(|func| func.body.is_none()) {
+        let name = &res.def(func.key.def).name;
+        if name == "main" {
             diags.emit(
                 Diagnostic::error(
                     "E028",
@@ -108,165 +121,178 @@ pub fn check_extern_signatures(hir: &HirProgram, types: &Types, diags: &mut Diag
                 .help("rename the `extern`; an `extern` symbol is unmangled and cannot be `main`"),
             );
         }
-        check_extern_sig(func, types, diags);
-    }
-}
-
-/// Checks one `extern` function's signature, emitting `E028` per offending
-/// slot. Place names mirror `lower_func`'s `arg.N`/`out.N` fallback for
-/// anonymous slots so a diagnostic reads the same as the lowered LIR.
-fn check_extern_sig(func: &HirFunc, types: &Types, diags: &mut Diags) {
-    let mut args = 0;
-    let mut place_name = |param: &HirParam, prefix: &str| -> String {
-        if param.name.is_empty() {
-            args += 1;
-            format!("{prefix}.{args}")
-        } else {
-            param.name.clone()
-        }
-    };
-    for param in &func.params {
-        let place = place_name(param, "arg");
-        let ty = lir_ty(types, param.ty);
-        if !lilac_ir::is_c_abi_type(&ty) {
-            diags.emit(
-                Diagnostic::error(
-                    "E028",
-                    format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
-                )
-                .label(param.span, true, "not a C ABI type")
-                .help("`extern` parameters must be a bit integer, a float, or `ref T`"),
-            );
-        }
-    }
-    if func.returns.len() > 1 {
-        let slot = func.returns.get(1).map_or(func.span, |param| param.span);
-        diags.emit(
-            Diagnostic::error(
-                "E028",
-                format!(
-                    "`extern` function `{}` declares {} out places; at most one is allowed",
-                    func.name,
-                    func.returns.len()
-                ),
-            )
-            .label(slot, true, "extra out place")
-            .help("an `extern` may return at most one C value"),
-        );
-    } else if let Some(ret) = func.returns.first() {
-        let place = place_name(ret, "out");
-        let ty = lir_ty(types, ret.ty);
-        if !lilac_ir::is_c_abi_type(&ty) {
-            diags.emit(
-                Diagnostic::error(
-                    "E028",
-                    format!("`extern` return `{place}` has unsupported C type `{ty}`"),
-                )
-                .label(ret.span, true, "not a C ABI type")
-                .help("`extern` returns must be a bit integer, a float, or `ref T`"),
-            );
-        }
-    }
-}
-
-/// Layout key for a place type: references address their pointee's layout.
-fn layout_key(place_ty: &str) -> &str {
-    place_ty.strip_prefix("ref ").unwrap_or(place_ty)
-}
-
-/// Whether `local` already begins with the namespace `path` and its `.`
-/// separator, so [`Lower::symbol`] must not prefix it a second time. Generic
-/// object instance names (`util.GenBox.1..bit32`) and object-member names
-/// (`util.Object.method`) are built from the qualified owner; only bare
-/// top-level names have no dotted prefix. A namespace whose name equals one of
-/// its object names (`foo` containing object `foo`) is safe because the member
-/// prefix is now genuinely `foo` (`foo.foo.bar`), not just the object's local
-/// name.
-fn already_prefixed(local: &str, path: &str) -> bool {
-    local.len() > path.len()
-        && local.starts_with(path)
-        && local.as_bytes().get(path.len()) == Some(&b'.')
-}
-fn lir_ty(types: &Types, ty: TypeRef) -> String {
-    let base = match types.kind(ty.id) {
-        lilac_ty::TypeKind::Func { .. } => "#bit64".to_owned(),
-        lilac_ty::TypeKind::Error => "#error".to_owned(),
-        lilac_ty::TypeKind::FBit16 => "#fbit16".to_owned(),
-        lilac_ty::TypeKind::FBit32 => "#fbit32".to_owned(),
-        lilac_ty::TypeKind::FBit64 => "#fbit64".to_owned(),
-        lilac_ty::TypeKind::FBit128 => "#fbit128".to_owned(),
-        lilac_ty::TypeKind::Object(_) => format!("#{}", types.display(ty.id)),
-        lilac_ty::TypeKind::Instance { .. } => format!("#{}", types.mangle(ty.id)),
-        _ => {
-            let display = types.display(ty.id);
-            if let Some(rest) = display.strip_prefix('@') {
-                format!("#{rest}")
+        let mut anonymous = 0;
+        let mut place = |id: LocalId, prefix: &str| {
+            let local = func.local(id);
+            if local.name.is_empty() {
+                anonymous += 1;
+                format!("{prefix}.{anonymous}")
             } else {
-                format!("#{display}")
+                local.name.clone()
+            }
+        };
+        for id in &func.params {
+            let local = func.local(*id);
+            let ty = lower.abi_ty(local.ty).0;
+            if !lilac_ir::is_c_abi_type(&ty) {
+                let place = place(*id, "arg");
+                diags.emit(
+                    Diagnostic::error("E028", format!("`extern` parameter `{place}` has unsupported C type `{ty}`"))
+                        .label(local.span, true, "not a C ABI type")
+                        .help("`extern` parameters must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+                );
             }
         }
-    };
-    if ty.is_ref {
-        format!("ref {base}")
-    } else {
-        base
+        if func.returns.len() > 1 {
+            let slot = func.local(func.returns[1]).span;
+            diags.emit(
+                Diagnostic::error(
+                    "E028",
+                    format!(
+                        "`extern` function `{name}` declares {} out places; at most one is allowed",
+                        func.returns.len()
+                    ),
+                )
+                .label(slot, true, "extra out place")
+                .help("an `extern` may return at most one C value"),
+            );
+        } else if let Some(id) = func.returns.first() {
+            let local = func.local(*id);
+            let ty = lower.abi_ty(local.ty).0;
+            if !lilac_ir::is_c_abi_type(&ty) {
+                let place = place(*id, "out");
+                diags.emit(
+                    Diagnostic::error("E028", format!("`extern` return `{place}` has unsupported C type `{ty}`"))
+                        .label(local.span, true, "not a C ABI type")
+                        .help("`extern` returns must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+                );
+            }
+        }
     }
 }
 
 struct Lower<'a> {
-    /// Resolved namespaces, for qualifying emitted symbols (spec §7.1).
-    project: &'a ResolvedProject,
+    hir: &'a HirProgram,
+    res: &'a Resolved,
     types: &'a Types,
-    diags: &'a mut Diags,
+    ptr_bytes: u64,
     module: LirModule,
-    /// Module constant sources by identity (expanded on demand).
-    const_src: HashMap<DefId, HirExpr>,
-    /// Expanded module constants by identity (cycle-free).
-    consts: HashMap<DefId, HirExpr>,
-    /// Emitted function names by identity.
-    func_names: HashMap<DefId, String>,
-    /// Variant names in declaration order by type display name.
-    tags: HashMap<String, Vec<String>>,
-    /// Drop hooks by type display name (mangled callees).
-    drops: &'a HashMap<String, String>,
-    failed: bool,
+    /// LIR symbol of every function instance.
+    symbols: HashMap<FuncKey, String>,
+    /// `extern` instances (C ABI calls).
+    externs: HashSet<FuncKey>,
+    /// Drop routine per type (a hook or generated glue).
+    drop_glue: HashMap<TypeId, String>,
+    /// Copy routine per type (a hook or generated glue).
+    copy_glue: HashMap<TypeId, String>,
+    needs_drop: HashMap<TypeId, bool>,
+    needs_copy: HashMap<TypeId, bool>,
 }
 
-/// Per-function emission state (owned; no borrows into HIR).
-struct FuncState {
+/// A place: a named LIR place, or a `ref` place holding the address of one.
+#[derive(Clone, Debug)]
+enum Place {
+    Direct(String),
+    Indirect(String),
+}
+
+impl Place {
+    fn name(&self) -> &str {
+        match self {
+            Self::Direct(name) | Self::Indirect(name) => name,
+        }
+    }
+}
+
+/// Owned places of one block (or expression region).
+#[derive(Default)]
+struct Scope {
+    /// `let` locals and by-value parameters needing a drop, in order.
+    locals: Vec<(String, TypeRef)>,
+    /// Fresh values nobody took yet (dropped at the end of their statement).
+    temps: Vec<(String, TypeRef)>,
+}
+
+/// Per-function emission state.
+struct Fs {
     ins: Vec<(String, String)>,
     outs: Vec<(String, String)>,
     blocks: Vec<LirBlock>,
     label: String,
     insts: Vec<LirInst>,
+    open: bool,
     labels: u32,
     regs: u32,
     tmps: u32,
-    args: u32,
-    /// Source name → (LIR place, type).
-    locals: HashMap<String, (String, TypeRef)>,
-    /// Shadowing counters by source name (`x.1` can't collide: dots don't lex).
-    counts: HashMap<String, u32>,
-    /// Join-temp places by identity.
-    temps: HashMap<TempId, String>,
-    /// Entry-block allocas, hoisted past all branches so dead-block
-    /// pruning (fold) can never orphan a place's storage.
+    /// LIR place of every declared local.
+    places: HashMap<LocalId, String>,
+    /// Place names in use (shadowing gets `.N` suffixes).
+    used: HashSet<String>,
+    /// Hoisted entry-block allocations.
     allocas: Vec<LirInst>,
-    /// Owned places in declaration order (drops fire for these).
-    owned: Vec<(String, TypeRef)>,
-    /// Place names to LIR types (field layouts resolve through these).
-    ptypes: HashMap<String, String>,
-    /// Loop-exit labels, innermost last.
-    breaks: Vec<String>,
-    /// Whether the current block accepts instructions (false drops dead tails).
-    open: bool,
-    /// Whether this function is an object member (lazy implicit `instance`).
-    is_member: bool,
-    /// Enclosing object name for member functions.
-    member_parent: Option<String>,
+    /// Place types.
+    place_tys: HashMap<String, String>,
+    scopes: Vec<Scope>,
+    /// `(exit label, scope depth)` per enclosing loop.
+    loops: Vec<(String, usize)>,
 }
 
-impl FuncState {
+impl Fs {
+    fn tmp_lir(&mut self, lir: String, span: Span) -> String {
+        self.tmps += 1;
+        let place = format!("tmp.{}", self.tmps);
+        self.used.insert(place.clone());
+        self.alloca(&place, lir, span);
+        place
+    }
+
+    fn read_place(&mut self, place: &Place, lir: &str, span: Span) -> LirOperand {
+        match place {
+            Place::Direct(name) => LirOperand::Place(name.clone()),
+            Place::Indirect(name) => {
+                let reg = self.reg();
+                self.emit(LirInst::Load {
+                    src: name.clone(),
+                    dst: reg.clone(),
+                    ty: lir.to_owned(),
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+        }
+    }
+
+    fn write(&mut self, place: &Place, value: LirOperand, span: Span) {
+        match place {
+            Place::Direct(name) => self.emit(LirInst::CopyPlace {
+                src: value,
+                dst: name.clone(),
+                span,
+            }),
+            Place::Indirect(name) => self.emit(LirInst::Store {
+                src: value,
+                dst: name.clone(),
+                span,
+            }),
+        }
+    }
+
+    fn reg_of(&mut self, operand: LirOperand, lir: &str, span: Span) -> String {
+        match operand {
+            LirOperand::Reg(reg) => reg,
+            LirOperand::Place(place) => {
+                let reg = self.reg();
+                self.emit(LirInst::CopyReg {
+                    src: LirOperand::Place(place),
+                    dst: reg.clone(),
+                    ty: lir.to_owned(),
+                    span,
+                });
+                reg
+            }
+        }
+    }
+
     fn new() -> Self {
         Self {
             ins: Vec::new(),
@@ -274,1199 +300,1541 @@ impl FuncState {
             blocks: Vec::new(),
             label: "entry".to_owned(),
             insts: Vec::new(),
+            open: true,
             labels: 0,
             regs: 0,
             tmps: 0,
-            args: 0,
-            locals: HashMap::new(),
-            counts: HashMap::new(),
-            temps: HashMap::new(),
+            places: HashMap::new(),
+            used: HashSet::new(),
             allocas: Vec::new(),
-            owned: Vec::new(),
-            ptypes: HashMap::new(),
-            breaks: Vec::new(),
-            open: true,
-            is_member: false,
-            member_parent: None,
+            place_tys: HashMap::new(),
+            scopes: vec![Scope::default()],
+            loops: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, inst: LirInst) {
+        if !self.open {
+            self.labels += 1;
+            self.label = format!("l.{}", self.labels);
+            self.open = true;
+        }
+        self.insts.push(inst);
+    }
+
+    fn end(&mut self, term: LirTerm) {
+        if !self.open {
+            return;
+        }
+        self.blocks.push(LirBlock {
+            label: std::mem::take(&mut self.label),
+            insts: std::mem::take(&mut self.insts),
+            term,
+            span: Span::dummy(),
+        });
+        self.open = false;
+    }
+
+    fn at(&mut self, label: String) {
+        self.label = label;
+        self.open = true;
+    }
+
+    fn label(&mut self) -> String {
+        self.labels += 1;
+        format!("l.{}", self.labels)
+    }
+
+    fn reg(&mut self) -> String {
+        self.regs += 1;
+        self.regs.to_string()
+    }
+
+    fn branch(&mut self, target: &str, span: Span) {
+        self.end(LirTerm::Branch {
+            target: target.to_owned(),
+            span,
+        });
+    }
+
+    /// A fresh name for a place, avoiding collisions.
+    fn place_name(&mut self, base: &str) -> String {
+        let mut name = base.to_owned();
+        let mut counter = 0;
+        while !self.used.insert(name.clone()) {
+            counter += 1;
+            name = format!("{base}.{counter}");
+        }
+        name
+    }
+
+    fn alloca(&mut self, place: &str, ty: String, span: Span) {
+        self.place_tys.insert(place.to_owned(), ty.clone());
+        self.allocas.push(LirInst::Alloca {
+            ty,
+            place: place.to_owned(),
+            span,
+        });
+    }
+
+    fn finish(mut self, name: String, inline: bool) -> LirFunc {
+        self.end(LirTerm::Return {
+            span: Span::dummy(),
+        });
+        if let Some(first) = self.blocks.first_mut() {
+            let mut insts = std::mem::take(&mut self.allocas);
+            insts.append(&mut first.insts);
+            first.insts = insts;
+        }
+        LirFunc {
+            name,
+            ins: self.ins,
+            outs: self.outs,
+            is_extern: false,
+            inline,
+            blocks: self.blocks,
         }
     }
 }
 
-/// Appends an instruction, opening a fresh unreachable block if needed.
-fn emit(fs: &mut FuncState, inst: LirInst) {
-    if !fs.open {
-        fs.labels += 1;
-        fs.label = format!("l.{}", fs.labels);
-        fs.open = true;
-    }
-    fs.insts.push(inst);
-}
-
-/// Closes the current block with a terminator (skipped when dead: a
-/// previous `return`/`break` already terminated it).
-fn end(fs: &mut FuncState, term: LirTerm) {
-    if !fs.open {
-        return;
-    }
-    let insts = std::mem::take(&mut fs.insts);
-    let label = std::mem::take(&mut fs.label);
-    fs.blocks.push(LirBlock {
-        label,
-        insts,
-        term,
-        span: Span::dummy(),
-    });
-    fs.open = false;
-}
-
-/// Opens a labeled block (branch targets are always reachable).
-fn at_label(fs: &mut FuncState, label: String) {
-    fs.label = label;
-    fs.open = true;
-}
-
-/// Queues an entry-block allocation (flushed to the top of the first
-/// block at function finalization, ahead of every branch).
-fn emit_alloca(fs: &mut FuncState, ty: String, place: String, span: Span) {
-    fs.allocas.push(LirInst::Alloca { ty, place, span });
-}
-
-/// Binds a source name to a fresh place (shadowing gets `.N` suffixes,
-/// which never collide: dots don't lex in Lilac).
-fn bind_place(fs: &mut FuncState, base: &str, ty: TypeRef) -> String {
-    let place = if fs.locals.contains_key(base) {
-        let counter = fs.counts.entry(base.to_owned()).or_insert(0);
-        *counter += 1;
-        format!("{base}.{counter}")
-    } else {
-        base.to_owned()
-    };
-    fs.locals.insert(base.to_owned(), (place.clone(), ty));
-    place
-}
-
-/// Generates a fresh block label (`l.N`).
-fn fresh_label(fs: &mut FuncState) -> String {
-    fs.labels += 1;
-    format!("l.{}", fs.labels)
-}
-
-/// Generates a fresh register (`&N`).
-fn fresh_reg(fs: &mut FuncState) -> String {
-    fs.regs += 1;
-    format!("{}", fs.regs)
-}
-
-/// Splits a width-suffixed numeric intrinsic name (`@i_add_8`, `@f_div_64`)
-/// into its signedness side (`true` for `@f_`) and its op spelling with the
-/// trailing `_W` removed, or `None` when the name is not a well-formed numeric
-/// intrinsic. Only the widths the intrinsic table accepts are recognized.
-fn split_numeric_intrinsic(name: &str) -> Option<(bool, &str)> {
-    let (is_float, rest) = if let Some(rest) = name.strip_prefix("@i_") {
-        (false, rest)
-    } else {
-        let rest = name.strip_prefix("@f_")?;
-        (true, rest)
-    };
-    let (op, width) = rest.rsplit_once('_')?;
-    let valid = if is_float {
-        matches!(width, "16" | "32" | "64" | "128")
-    } else {
-        matches!(width, "8" | "16" | "32" | "64" | "native")
-    };
-    valid.then_some((is_float, op))
-}
-
-/// Maps an arithmetic intrinsic name (signed/unsigned integer and float) to
-/// its `ArithOp`, or `None` for a non-arithmetic intrinsic.
-fn arith_op_for(name: &str) -> Option<ArithOp> {
-    let (is_float, op) = split_numeric_intrinsic(name)?;
-    Some(if is_float {
-        match op {
-            "add" => ArithOp::FAdd,
-            "sub" => ArithOp::FSub,
-            "mul" => ArithOp::FMul,
-            "div" => ArithOp::FDiv,
-            "mod" => ArithOp::FMod,
-            "less_than" => ArithOp::FLt,
-            "greater_than" => ArithOp::FGt,
-            _ => return None,
-        }
-    } else {
-        match op {
-            "add" => ArithOp::IAdd,
-            "sub" => ArithOp::ISub,
-            "mul" => ArithOp::IMul,
-            "div" => ArithOp::IDiv,
-            "div_u" => ArithOp::IDivU,
-            "mod" => ArithOp::IMod,
-            "mod_u" => ArithOp::IModU,
-            "less_than" => ArithOp::ILt,
-            "less_than_u" => ArithOp::ILtU,
-            "greater_than" => ArithOp::IGt,
-            "greater_than_u" => ArithOp::IGtU,
-            _ => return None,
-        }
-    })
-}
-
-/// Whether `name` is one of the float reinterpret casts
-/// (`@fbit_to_bits_W`/`@bits_to_fbit_W`), all of which lower to a `bitcast`.
-/// Only 16/32/64 exist (`@fbit128` has no `@bit128` container), mirroring the
-/// typeck table.
-fn is_bitcast_intrinsic(name: &str) -> bool {
-    name.strip_prefix("@fbit_to_bits_")
-        .or_else(|| name.strip_prefix("@bits_to_fbit_"))
-        .is_some_and(|width| matches!(width, "16" | "32" | "64"))
-}
-
-/// The `ArithOp` (subtract from zero) for a width-suffixed negate intrinsic
-/// (`@i_negate_8`/`@f_negate_32`), or `None` for anything else.
-fn negate_op_for(name: &str) -> Option<ArithOp> {
-    let (is_float, op) = split_numeric_intrinsic(name)?;
-    if op != "negate" {
-        return None;
-    }
-    Some(if is_float {
-        ArithOp::FSub
-    } else {
-        ArithOp::ISub
-    })
-}
-
-/// Converts a layout position to a field index (layouts never approach
-/// `u32` limits; overflow is an internal error).
-fn field_idx(index: usize, span: Span) -> u32 {
-    u32::try_from(index).unwrap_or_else(|_| lilac_error::bug!(span, "field index overflow"))
-}
-
-/// The callee for a `lower_builtin_call` name. The byte-buffer, format-args,
-/// and byte-access runtime moved into LIR, so those calls target ordinary
-/// `.lilac.<name>` functions; only the remaining leaf (`@memcpy`) is a builtin.
-fn runtime_callee(name: &str) -> LirCallee {
-    match name {
-        "@byte_buffer_from" | "@byte_buffer_ptr" | "@byte_buffer_len" | "@format_args_new"
-        | "@format_args_push" | "@format_args_count" | "@format_args_piece" | "@load_u8"
-        | "@store_u8" => LirCallee::Func(format!(".lilac.{}", name.trim_start_matches('@'))),
-        _ => LirCallee::Builtin(name.to_owned()),
-    }
+fn is_fresh(place: &str) -> bool {
+    place.starts_with("tmp.")
 }
 
 impl Lower<'_> {
-    /// The emitted LIR symbol for an item. Hooks (`@` in the name, top-level or
-    /// object) and `extern` functions keep their bare local name — hooks are
-    /// unit-global and externs keep their unmangled C name (spec §7.1/§7.2).
-    /// Everything else is its namespace path (omitted at the root) plus `.`
-    /// and its existing local name; that local name already carries any
-    /// object-member and generic-instance suffix.
-    fn symbol(&self, def: DefId, local: &str, is_extern: bool) -> String {
-        if is_extern || local.contains('@') {
-            return local.to_owned();
-        }
-        match self.project.namespace_of(def) {
-            Some(ns) => {
-                let path = self.project.namespace_path(ns);
-                if path.is_empty() || already_prefixed(local, path) {
-                    local.to_owned()
-                } else {
-                    format!("{path}.{local}")
-                }
-            }
-            None => local.to_owned(),
+    // ---- names and types ---------------------------------------------------
+
+    /// The LIR name of a concrete object/enum type (without `#`).
+    fn type_name(&self, id: TypeId) -> String {
+        match self.types.kind(id) {
+            TypeKind::Instance { .. } => self.types.mangle(id),
+            _ => self.types.display(id),
         }
     }
 
-    fn expand_const(&mut self, def: DefId, inlining: &mut HashSet<DefId>) -> HirExpr {
-        let Some(value) = self.const_src.get(&def).cloned() else {
-            lilac_error::bug!(Span::dummy(), "unknown constant in expansion");
+    fn lir_ty(&self, ty: TypeRef) -> String {
+        let base = match self.types.kind(ty.id) {
+            TypeKind::Func { .. } => return "ref #unknown".to_owned(),
+            TypeKind::Object(_) | TypeKind::Instance { .. } => {
+                format!("#{}", self.type_name(ty.id))
+            }
+            TypeKind::Error => "#error".to_owned(),
+            _ => {
+                let display = self.types.display(ty.id);
+                format!("#{}", display.trim_start_matches('@'))
+            }
         };
-        if !inlining.insert(def) {
-            self.diags
-                .emit(Diagnostic::error("E022", "cyclic constant").label(
-                    value.span,
-                    true,
-                    "constants cannot refer to themselves".to_owned(),
-                ));
-            self.failed = true;
-            return HirExpr {
-                ty: TypeRef {
-                    id: TypeId::ERROR,
-                    is_ref: false,
-                },
-                span: value.span,
-                kind: HirExprKind::Poison,
-            };
+        if ty.is_ref {
+            format!("ref {base}")
+        } else {
+            base
         }
-        let expanded = self.expand_expr(&value, inlining);
-        inlining.remove(&def);
-        expanded
     }
 
-    /// Expands constant references inside one constant value.
-    fn expand_expr(&mut self, expr: &HirExpr, inlining: &mut HashSet<DefId>) -> HirExpr {
-        match &expr.kind {
-            HirExprKind::Ident { def, .. } => {
-                if !self.const_src.contains_key(def) {
-                    return expr.clone();
-                }
-                self.expand_const(*def, inlining)
+    fn mangle_ref(&self, ty: TypeRef) -> String {
+        if ty.is_ref {
+            format!("ref.{}", self.types.mangle(ty.id))
+        } else {
+            self.types.mangle(ty.id)
+        }
+    }
+
+    /// The LIR symbol of a function instance: namespace or owning type, name,
+    /// own generic arguments (arity-tagged), and for hooks the signature.
+    fn symbol_of(&self, func: &HirFunc) -> String {
+        let def = self.res.def(func.key.def);
+        if func.body.is_none() {
+            return def.name.clone();
+        }
+        let is_hook = matches!(def.kind, DefKind::Hook(_));
+        let (prefix, own) = match def.parent {
+            Some(parent) => {
+                let count = self.res.def(parent).generic_params.len();
+                let owner = self.res.qualified_name(parent);
+                let owner = if count == 0 {
+                    owner
+                } else {
+                    let mut name = format!("{owner}.{count}");
+                    for arg in &func.key.args[..count] {
+                        name.push('.');
+                        name.push_str(&self.mangle_ref(*arg));
+                    }
+                    name
+                };
+                (owner, &func.key.args[count..])
             }
-            HirExprKind::Call { callee, args } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::Call {
-                    callee: callee.clone(),
-                    args: args
-                        .iter()
-                        .map(|arg| self.expand_expr(arg, inlining))
-                        .collect(),
-                },
-            },
-            HirExprKind::EqEq { lhs, rhs } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::EqEq {
-                    lhs: Box::new(self.expand_expr(lhs, inlining)),
-                    rhs: Box::new(self.expand_expr(rhs, inlining)),
-                },
-            },
-            HirExprKind::Member { obj, field } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::Member {
-                    obj: Box::new(self.expand_expr(obj, inlining)),
-                    field: field.clone(),
-                },
-            },
-            HirExprKind::RefOf { value } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::RefOf {
-                    value: Box::new(self.expand_expr(value, inlining)),
-                },
-            },
-            HirExprKind::StructLit { fields } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::StructLit {
-                    fields: fields
-                        .iter()
-                        .map(|field| lilac_hir::HirField {
-                            name: field.name.clone(),
-                            value: self.expand_expr(&field.value, inlining),
-                            span: field.span,
-                        })
-                        .collect(),
-                },
-            },
-            HirExprKind::Variant {
-                def,
-                variant,
-                payload,
-            } => HirExpr {
-                ty: expr.ty,
-                span: expr.span,
-                kind: HirExprKind::Variant {
-                    def: *def,
-                    variant: variant.clone(),
-                    payload: payload
-                        .as_ref()
-                        .map(|value| Box::new(self.expand_expr(value, inlining))),
-                },
-            },
-            _ => expr.clone(),
+            None if is_hook => (String::new(), &func.key.args[..]),
+            None => (
+                self.res.namespace_path(def.ns).to_owned(),
+                &func.key.args[..],
+            ),
+        };
+        let mut name = if prefix.is_empty() {
+            def.name.clone()
+        } else {
+            format!("{prefix}.{}", def.name)
+        };
+        if !own.is_empty() {
+            name.push('.');
+            name.push_str(&own.len().to_string());
+            for arg in own {
+                name.push('.');
+                name.push_str(&self.mangle_ref(*arg));
+            }
+        }
+        if is_hook {
+            for id in func.params.iter().chain(&func.returns) {
+                let display = self.types.display_ref(func.local(*id).ty);
+                name.push(':');
+                name.push_str(&display.replace('@', "").replace(' ', "_"));
+            }
+        }
+        name
+    }
+
+    fn symbol(&self, key: &FuncKey) -> String {
+        match self.symbols.get(key) {
+            Some(symbol) => symbol.clone(),
+            None => lilac_error::bug!(Span::dummy(), "call to an unchecked instance {key:?}"),
         }
     }
 
-    /// Lowers one function (parameters and return slots become places).
-    fn lower_func(&mut self, func: &HirFunc) {
-        let symbol = self.symbol(func.def, &func.name, func.is_extern);
-        let mut fs = FuncState::new();
-        // Object-member and generic-instance names are `[<ns>.]<Object>[.…].<member>`;
-        // the owning type is everything before the final `.`, which may itself
-        // contain namespace and instance dots (`util.GenBox.1..bit32.get`).
-        // Bare top-level names have no dot.
-        if let Some((parent, _)) = func.name.rsplit_once('.') {
-            fs.is_member = true;
-            fs.member_parent = Some(parent.to_owned());
+    /// The C type an `extern` slot uses: the type itself, or for an object
+    /// wrapping exactly one C-representable field, that field (`true`).
+    fn abi_ty(&self, ty: TypeRef) -> (String, bool) {
+        let lir = self.lir_ty(ty);
+        if !ty.is_ref {
+            if let Some(Layout::Object { fields }) = self.hir.layouts.get(&ty.id) {
+                if let [(_, field)] = fields.as_slice() {
+                    let inner = self.lir_ty(*field);
+                    if lilac_ir::is_c_abi_type(&inner) {
+                        return (inner, true);
+                    }
+                }
+            }
         }
-        for param in &func.params {
-            let place = if param.name.is_empty() {
-                fs.args += 1;
-                format!("arg.{}", fs.args)
-            } else {
-                param.name.clone()
-            };
-            let ty = lir_ty(self.types, param.ty);
-            fs.ins.push((place.clone(), ty.clone()));
-            fs.ptypes.insert(place.clone(), ty);
-            fs.locals.insert(param.name.clone(), (place, param.ty));
+        (lir, false)
+    }
+
+    fn layout(&self, ty: TypeId) -> Option<&Layout> {
+        self.hir.layouts.get(&ty)
+    }
+
+    /// LIR field index and name of a payload variant.
+    fn payload_field(&self, ty: TypeId, variant: u32) -> (u32, String) {
+        let Some(Layout::Enum { variants, .. }) = self.layout(ty) else {
+            lilac_error::bug!(Span::dummy(), "payload of a non-enum type");
+        };
+        let before = variants[..variant as usize]
+            .iter()
+            .filter(|(_, payload)| payload.is_some())
+            .count();
+        (
+            u32::try_from(before + 1).unwrap_or(u32::MAX),
+            variants[variant as usize].0.clone(),
+        )
+    }
+
+    fn field_name(&self, ty: TypeId, index: u32) -> (String, TypeRef) {
+        match self.layout(ty) {
+            Some(Layout::Object { fields }) => fields[index as usize].clone(),
+            _ => lilac_error::bug!(Span::dummy(), "field of a non-object type"),
         }
-        for slot in &func.returns {
-            let place = if slot.name.is_empty() {
-                fs.args += 1;
-                format!("out.{}", fs.args)
-            } else {
-                slot.name.clone()
-            };
-            let ty = lir_ty(self.types, slot.ty);
-            fs.outs.push((place.clone(), ty.clone()));
-            fs.ptypes.insert(place.clone(), ty);
-            fs.locals.insert(slot.name.clone(), (place, slot.ty));
+    }
+
+    // ---- ownership facts -----------------------------------------------------
+
+    fn needs_drop(&mut self, ty: TypeRef) -> bool {
+        if ty.is_ref {
+            return false;
         }
-        if func.is_extern {
-            self.module.funcs.push(LirFunc {
+        if let Some(known) = self.needs_drop.get(&ty.id) {
+            return *known;
+        }
+        self.needs_drop.insert(ty.id, false);
+        let hooked = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .is_some_and(|hooks| hooks.drop.is_some());
+        let result = hooked
+            || self
+                .slot_types(ty.id)
+                .into_iter()
+                .any(|slot| self.needs_drop(slot));
+        self.needs_drop.insert(ty.id, result);
+        result
+    }
+
+    fn needs_copy(&mut self, ty: TypeRef) -> bool {
+        if ty.is_ref {
+            return false;
+        }
+        if let Some(known) = self.needs_copy.get(&ty.id) {
+            return *known;
+        }
+        self.needs_copy.insert(ty.id, false);
+        let hooked = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .is_some_and(|hooks| hooks.copy.is_some());
+        let result = hooked
+            || self
+                .slot_types(ty.id)
+                .into_iter()
+                .any(|slot| self.needs_copy(slot));
+        self.needs_copy.insert(ty.id, result);
+        result
+    }
+
+    /// Field or payload types of an aggregate.
+    fn slot_types(&self, ty: TypeId) -> Vec<TypeRef> {
+        match self.layout(ty) {
+            Some(Layout::Object { fields }) => fields.iter().map(|(_, ty)| *ty).collect(),
+            Some(Layout::Enum { variants, .. }) => {
+                variants.iter().filter_map(|(_, ty)| *ty).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    // ---- functions -------------------------------------------------------------
+
+    fn lower_func(&mut self, func: &HirFunc) -> LirFunc {
+        let symbol = self.symbol(&func.key);
+        let mut fs = Fs::new();
+        let extern_ = func.body.is_none();
+        let mut anonymous = 0;
+        for (list, prefix) in [(&func.params, "arg"), (&func.returns, "out")] {
+            for id in list {
+                let local = func.local(*id);
+                let base = if local.name.is_empty() {
+                    anonymous += 1;
+                    format!("{prefix}.{anonymous}")
+                } else {
+                    local.name.clone()
+                };
+                let place = fs.place_name(&base);
+                let ty = if extern_ {
+                    self.abi_ty(local.ty).0
+                } else {
+                    self.lir_ty(local.ty)
+                };
+                fs.place_tys.insert(place.clone(), ty.clone());
+                fs.places.insert(*id, place.clone());
+                if prefix == "arg" {
+                    fs.ins.push((place, ty));
+                } else {
+                    fs.outs.push((place, ty));
+                }
+            }
+        }
+        let Some(body) = &func.body else {
+            return LirFunc {
                 name: symbol,
                 ins: fs.ins,
                 outs: fs.outs,
                 is_extern: true,
+                inline: false,
                 blocks: Vec::new(),
+            };
+        };
+        for (place, _) in fs.outs.clone() {
+            fs.emit(LirInst::Zero {
+                place,
+                span: func.span,
             });
-            return;
         }
-        self.lower_block(&mut fs, &func.body);
+        for id in &func.params {
+            let ty = func.local(*id).ty;
+            if self.needs_drop(ty) {
+                let place = fs.places[id].clone();
+                fs.scopes[0].locals.push((place, ty));
+            }
+        }
+        for stmt in &body.stmts {
+            self.lower_stmt(&mut fs, func, stmt);
+        }
         if fs.open {
-            self.emit_drops(&mut fs);
-            end(
-                &mut fs,
-                LirTerm::Return {
-                    span: Span::dummy(),
-                },
-            );
+            self.drop_scope(&mut fs, 0);
         }
-        debug_assert!(!fs.blocks.is_empty(), "lowered function has no blocks");
-        if !fs.allocas.is_empty() {
-            let mut allocas = std::mem::take(&mut fs.allocas);
-            allocas.append(&mut fs.blocks[0].insts);
-            fs.blocks[0].insts = allocas;
-        }
-        self.module.funcs.push(LirFunc {
-            name: symbol,
-            ins: fs.ins,
-            outs: fs.outs,
-            is_extern: false,
-            blocks: fs.blocks,
-        });
+        fs.finish(symbol, func.inline)
     }
 
-    /// Declares a place: binds the name, allocates zeroed storage, tracks
-    /// its type and (for `let`s) its drop candidacy.
-    fn declare(&mut self, fs: &mut FuncState, base: &str, ty: TypeRef, span: Span) -> String {
-        let place = bind_place(fs, base, ty);
-        let lir = lir_ty(self.types, ty);
-        emit_alloca(fs, lir.clone(), place.clone(), span);
-        fs.owned.push((place.clone(), ty));
-        fs.ptypes.insert(place.clone(), lir);
+    /// Declares a local's place (zeroed alloca) and returns it.
+    fn declare(&mut self, fs: &mut Fs, func: &HirFunc, id: LocalId) -> String {
+        let local = func.local(id);
+        let base = if local.name.is_empty() {
+            format!("l.{}", id.0)
+        } else {
+            local.name.clone()
+        };
+        let place = fs.place_name(&base);
+        let ty = self.lir_ty(local.ty);
+        fs.alloca(&place, ty, local.span);
+        fs.places.insert(id, place.clone());
         place
     }
 
-    /// Emits `drop` + `@on_drop` for every owned place of a dropping type.
-    fn emit_drops(&mut self, fs: &mut FuncState) {
-        let mut drops = Vec::new();
-        for (place, ty) in &fs.owned {
-            // Drop keys follow the layout key: instances use the arity-tagged
-            // mangled name (`GenBox.1..bit32`); concrete types use the display
-            // name (design §3.4).
-            let key = match self.types.kind(ty.id) {
-                lilac_ty::TypeKind::Instance { .. } => self.types.mangle(ty.id),
-                _ => self.types.display(ty.id),
-            };
-            if let Some(hook) = self.drops.get(&key).cloned() {
-                drops.push((place.clone(), hook));
+    /// Registers a declared local as owned by the current scope.
+    fn own(&mut self, fs: &mut Fs, place: &str, ty: TypeRef) {
+        if self.needs_drop(ty) {
+            if let Some(scope) = fs.scopes.last_mut() {
+                scope.locals.push((place.to_owned(), ty));
             }
-        }
-        for (place, hook) in drops {
-            // The hook runs on live memory, so the destructor call comes first;
-            // the `drop` marker then records that the place is destroyed.
-            emit(
-                fs,
-                LirInst::Call {
-                    func: LirCallee::Func(hook),
-                    ins: vec![place.clone()],
-                    outs: Vec::new(),
-                    span: Span::dummy(),
-                },
-            );
-            emit(
-                fs,
-                LirInst::Drop {
-                    place,
-                    span: Span::dummy(),
-                },
-            );
         }
     }
 
-    /// Lowers a statement list into the current block.
-    fn lower_block(&mut self, fs: &mut FuncState, block: &HirBlock) {
+    /// A fresh temporary place of type `ty`.
+    fn tmp(&mut self, fs: &mut Fs, ty: TypeRef, span: Span) -> String {
+        let lir = self.lir_ty(ty);
+        fs.tmp_lir(lir, span)
+    }
+
+    /// Registers a fresh value as owned until the end of the statement.
+    fn own_temp(&mut self, fs: &mut Fs, place: &str, ty: TypeRef) {
+        if self.needs_drop(ty) {
+            if let Some(scope) = fs.scopes.last_mut() {
+                scope.temps.push((place.to_owned(), ty));
+            }
+        }
+    }
+
+    /// Marks a fresh value as taken (it moved into a new owner).
+    fn take_temp(fs: &mut Fs, place: &str) {
+        for scope in fs.scopes.iter_mut().rev() {
+            if let Some(index) = scope.temps.iter().position(|(name, _)| name == place) {
+                scope.temps.remove(index);
+                return;
+            }
+        }
+    }
+
+    /// Drops everything scope `index` owns (temps, then locals, newest first).
+    fn drop_scope(&mut self, fs: &mut Fs, index: usize) {
+        let owned: Vec<(String, TypeRef)> = fs.scopes[index]
+            .temps
+            .iter()
+            .rev()
+            .chain(fs.scopes[index].locals.iter().rev())
+            .cloned()
+            .collect();
+        for (place, ty) in owned {
+            self.drop_place(fs, &Place::Direct(place), ty, Span::dummy());
+        }
+    }
+
+    // ---- statements --------------------------------------------------------------
+
+    fn lower_block(&mut self, fs: &mut Fs, func: &HirFunc, block: &HirBlock) {
+        fs.scopes.push(Scope::default());
         for stmt in &block.stmts {
-            self.lower_stmt(fs, stmt);
+            self.lower_stmt(fs, func, stmt);
         }
+        if fs.open {
+            let index = fs.scopes.len() - 1;
+            self.drop_scope(fs, index);
+        }
+        fs.scopes.pop();
     }
 
-    /// Lowers an effect statement. A checked effect statement is a call
-    /// returning nothing, so it has no output places (its HIR type is `ERROR`
-    /// by design); intrinsics materialize through `eval` as before.
-    fn lower_expr_stmt(&mut self, fs: &mut FuncState, expr: &HirExpr) {
-        match &expr.kind {
-            HirExprKind::Call { callee, args }
-                if !matches!(callee, HirCallee::Intrinsic { .. }) =>
-            {
-                let _ = self.emit_call(fs, callee, args, &[], expr.span);
-            }
-            _ => {
-                let _ = self.eval(fs, expr);
-            }
-        }
-    }
-
-    /// Lowers one statement (control flow splits blocks; terminators drop
-    /// dead tails via the open flag).
-    fn lower_stmt(&mut self, fs: &mut FuncState, stmt: &HirStmt) {
+    #[allow(clippy::too_many_lines)]
+    fn lower_stmt(&mut self, fs: &mut Fs, func: &HirFunc, stmt: &HirStmt) {
+        let scope = fs.scopes.len() - 1;
+        let mark = fs.scopes[scope].temps.len();
         match stmt {
-            HirStmt::Let {
-                name,
-                ty,
-                value,
-                span,
-            } => {
-                let place = self.declare(fs, name, *ty, *span);
-                if let Ok(operand) = self.eval(fs, value) {
-                    self.store_operand(fs, &place, *ty, operand, value.ty, *span);
+            HirStmt::Let { local, value } => {
+                let place = self.declare(fs, func, *local);
+                let operand = self.read(fs, func, value);
+                fs.emit(LirInst::CopyPlace {
+                    src: operand,
+                    dst: place.clone(),
+                    span: value.span,
+                });
+                self.own(fs, &place, func.local(*local).ty);
+            }
+            HirStmt::MultiLet { locals, call } => {
+                let places: Vec<String> = locals
+                    .iter()
+                    .map(|id| self.declare(fs, func, *id))
+                    .collect();
+                if let HirExprKind::Call {
+                    callee: callee @ (HirCallee::Func(_) | HirCallee::Local(_)),
+                    args,
+                } = &call.kind
+                {
+                    self.emit_call(fs, func, callee, args, &places, call.span);
+                } else {
+                    let operand = self.read(fs, func, call);
+                    fs.emit(LirInst::CopyPlace {
+                        src: operand,
+                        dst: places[0].clone(),
+                        span: call.span,
+                    });
+                }
+                for (place, id) in places.iter().zip(locals) {
+                    self.own(fs, place, func.local(*id).ty);
                 }
             }
-            HirStmt::MultiLet {
-                bindings,
-                value,
-                span,
-            } => {
-                let HirExprKind::Call { callee, args } = &value.kind else {
-                    lilac_error::bug!(*span, "multi-`let` value is not a call");
+            HirStmt::Assign { place, value } => self.lower_assign(fs, func, place, value),
+            HirStmt::Expr(expr) => match &expr.kind {
+                HirExprKind::Call { callee, args } if expr.ty.is_error() => {
+                    if let HirCallee::Intrinsic(intrinsic) = callee {
+                        let _ =
+                            self.lower_intrinsic(fs, func, *intrinsic, args, expr.ty, expr.span);
+                    } else {
+                        self.emit_call(fs, func, callee, args, &[], expr.span);
+                    }
+                }
+                HirExprKind::CompileError { msg, msg_span } => {
+                    fs.emit(LirInst::CompileError {
+                        msg: msg.clone(),
+                        msg_span: *msg_span,
+                        call_span: expr.span,
+                    });
+                }
+                _ => {
+                    let _ = self.value(fs, func, expr);
+                }
+            },
+            HirStmt::Return(span) => {
+                for index in (0..fs.scopes.len()).rev() {
+                    self.drop_scope(fs, index);
+                }
+                fs.end(LirTerm::Return { span: *span });
+            }
+            HirStmt::Break(span) => {
+                let Some((exit, depth)) = fs.loops.last().cloned() else {
+                    lilac_error::bug!(*span, "break outside a loop");
                 };
-                let mut tmps = Vec::with_capacity(bindings.len());
-                for binding in bindings {
-                    tmps.push(self.fresh_tmp(fs, binding.ty, *span));
+                for index in (depth..fs.scopes.len()).rev() {
+                    self.drop_scope(fs, index);
                 }
-                let _ = self.emit_call(fs, callee, args, &tmps, *span);
-                for (binding, tmp) in bindings.iter().zip(tmps.iter()) {
-                    let place = self.declare(fs, &binding.name, binding.ty, binding.span);
-                    emit(
-                        fs,
-                        LirInst::CopyPlace {
-                            src: LirOperand::Place(tmp.clone()),
-                            dst: place,
-                            span: *span,
-                        },
-                    );
-                }
+                fs.branch(&exit, *span);
             }
-            HirStmt::Assign {
-                target,
-                value,
-                span,
-            } => {
-                if let Ok(operand) = self.eval(fs, value) {
-                    self.lower_assign(fs, target, operand, value.ty, *span);
-                }
+            HirStmt::If { cond, then, els } => {
+                let cond = self.value_reg(fs, func, cond);
+                let (then_label, els_label, join) = (fs.label(), fs.label(), fs.label());
+                fs.end(LirTerm::BranchIf {
+                    cond,
+                    then: then_label.clone(),
+                    els: Some(els_label.clone()),
+                    span: then.span,
+                });
+                fs.at(then_label);
+                self.lower_block(fs, func, then);
+                fs.branch(&join, then.span);
+                fs.at(els_label);
+                self.lower_block(fs, func, els);
+                fs.branch(&join, els.span);
+                fs.at(join);
             }
-            HirStmt::ExprStmt(expr) => self.lower_expr_stmt(fs, expr),
-            HirStmt::Return { span } => {
-                self.emit_drops(fs);
-                end(fs, LirTerm::Return { span: *span });
-                fs.open = false;
-            }
-            HirStmt::Break { span } => {
-                let Some(exit) = fs.breaks.last().cloned() else {
-                    lilac_error::bug!(*span, "break with no enclosing loop");
-                };
-                end(
-                    fs,
-                    LirTerm::Branch {
-                        target: exit,
-                        span: *span,
-                    },
-                );
-                fs.open = false;
-            }
-            HirStmt::If {
-                cond,
-                then,
-                els,
-                out: _,
-                span,
-            } => {
-                self.lower_if(fs, cond, then, els, *span);
+            HirStmt::Loop(body) => {
+                let (head, exit) = (fs.label(), fs.label());
+                fs.branch(&head, body.span);
+                fs.at(head.clone());
+                fs.loops.push((exit.clone(), fs.scopes.len()));
+                self.lower_block(fs, func, body);
+                fs.loops.pop();
+                fs.branch(&head, body.span);
+                fs.at(exit);
             }
             HirStmt::Match {
                 scrutinee,
                 arms,
                 els,
-                span,
-                ..
-            } => {
-                self.lower_match(fs, scrutinee, arms, els, *span);
-            }
-            HirStmt::Loop { body, span } => {
-                self.lower_loop(fs, body, *span);
+            } => self.lower_match(fs, func, scrutinee, arms, els),
+            HirStmt::Block(block) => self.lower_block(fs, func, block),
+        }
+        if fs.open {
+            let temps: Vec<(String, TypeRef)> = fs.scopes[scope].temps[mark..]
+                .iter()
+                .rev()
+                .cloned()
+                .collect();
+            for (place, ty) in temps {
+                self.drop_place(fs, &Place::Direct(place), ty, Span::dummy());
             }
         }
+        fs.scopes[scope].temps.truncate(mark);
     }
 
-    /// Lowers `if` to a branch-join over labels.
-    fn lower_if(
-        &mut self,
-        fs: &mut FuncState,
-        cond: &HirExpr,
-        then: &HirBlock,
-        els: &HirBlock,
-        span: Span,
-    ) {
-        let then_label = fresh_label(fs);
-        let els_label = fresh_label(fs);
-        let join_label = fresh_label(fs);
-        if let Ok(cond_reg) = self.eval_reg(fs, cond) {
-            end(
-                fs,
-                LirTerm::BranchIf {
-                    cond: cond_reg,
-                    then: then_label.clone(),
-                    els: Some(els_label.clone()),
-                    span,
-                },
-            );
+    fn lower_assign(&mut self, fs: &mut Fs, func: &HirFunc, place: &HirExpr, value: &HirExpr) {
+        let ty = place.ty;
+        let operand = self.read(fs, func, value);
+        let target = self.place_of(fs, func, place);
+        let override_ = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .and_then(|hooks| hooks.override_.clone());
+        let drops = self.needs_drop(ty);
+        if override_.is_none() && !drops {
+            fs.write(&target, operand, value.span);
+            return;
         }
-        at_label(fs, then_label);
-        self.lower_block(fs, then);
-        end(
-            fs,
-            LirTerm::Branch {
-                target: join_label.clone(),
-                span,
-            },
-        );
-        at_label(fs, els_label);
-        self.lower_block(fs, els);
-        end(
-            fs,
-            LirTerm::Branch {
-                target: join_label.clone(),
-                span,
-            },
-        );
-        at_label(fs, join_label);
-    }
-
-    /// Lowers `loop` to a labeled back-edge with a break stack.
-    fn lower_loop(&mut self, fs: &mut FuncState, body: &HirBlock, span: Span) {
-        let loop_label = fresh_label(fs);
-        let exit_label = fresh_label(fs);
-        end(
-            fs,
-            LirTerm::Branch {
-                target: loop_label.clone(),
-                span,
-            },
-        );
-        at_label(fs, loop_label.clone());
-        fs.breaks.push(exit_label.clone());
-        self.lower_block(fs, body);
-        end(
-            fs,
-            LirTerm::Branch {
-                target: loop_label,
-                span,
-            },
-        );
-        fs.breaks.pop();
-        at_label(fs, exit_label);
-    }
-
-    /// Allocates a fresh temp place (`%tmp.N`) of a known type.
-    fn fresh_tmp(&mut self, fs: &mut FuncState, ty: TypeRef, span: Span) -> String {
-        fs.tmps += 1;
-        let place = format!("tmp.{}", fs.tmps);
-        let lir = lir_ty(self.types, ty);
-        emit_alloca(fs, lir.clone(), place.clone(), span);
-        fs.ptypes.insert(place.clone(), lir);
-        place
-    }
-
-    /// Writes `operand` (a value of `value_ty`) into `place` (declared as
-    /// `dst_ty`), adapting between references and values: a `ref` value stored
-    /// into a value place is dereferenced first, a value stored into a `ref`
-    /// place is written through it, and matching types are copied directly.
-    fn store_operand(
-        &mut self,
-        fs: &mut FuncState,
-        place: &str,
-        dst_ty: TypeRef,
-        operand: LirOperand,
-        value_ty: TypeRef,
-        span: Span,
-    ) {
-        if dst_ty.is_ref && !value_ty.is_ref {
-            emit(
-                fs,
-                LirInst::Store {
-                    src: operand,
-                    dst: place.to_owned(),
-                    span,
-                },
-            );
-        } else if !dst_ty.is_ref && value_ty.is_ref {
-            let source = match operand {
-                LirOperand::Place(src_place) => src_place,
-                LirOperand::Reg(reg) => {
-                    let tmp = self.fresh_tmp(fs, value_ty, span);
-                    emit(
-                        fs,
-                        LirInst::CopyPlace {
-                            src: LirOperand::Reg(reg),
-                            dst: tmp.clone(),
-                            span,
-                        },
-                    );
-                    tmp
-                }
-            };
-            let reg = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::Load {
-                    src: source,
-                    dst: reg.clone(),
-                    ty: lir_ty(self.types, dst_ty),
-                    span,
-                },
-            );
-            emit(
-                fs,
-                LirInst::CopyPlace {
-                    src: LirOperand::Reg(reg),
-                    dst: place.to_owned(),
-                    span,
-                },
-            );
-        } else {
-            emit(
-                fs,
-                LirInst::CopyPlace {
-                    src: operand,
-                    dst: place.to_owned(),
-                    span,
-                },
-            );
+        let new = self.fresh_place(fs, operand, ty, value.span);
+        // Assigning an out slot initializes the result, so `@on_override` is
+        // skipped (a guard type could otherwise never be returned); the old
+        // value is still dropped.
+        let is_out = matches!(place.kind, HirExprKind::Local(id) if func.returns.contains(&id));
+        if let Some(hook) = override_.filter(|_| !ty.is_ref && !is_out) {
+            let old_ref = self.ref_place(fs, &target, ty, place.span);
+            let new_ref = self.ref_place(fs, &Place::Direct(new.clone()), ty, place.span);
+            let symbol = self.symbol(&hook);
+            fs.emit(LirInst::Call {
+                func: LirCallee::Func(symbol),
+                ins: vec![old_ref, new_ref],
+                outs: Vec::new(),
+                span: place.span,
+            });
         }
-    }
-
-    /// Assigns a value operand to a target (rebinding, store-through,
-    /// field store, or temp copy as the target shape demands).
-    fn lower_assign(
-        &mut self,
-        fs: &mut FuncState,
-        target: &HirExpr,
-        operand: LirOperand,
-        value_ty: TypeRef,
-        span: Span,
-    ) {
-        match &target.kind {
-            HirExprKind::Ident { name, .. } => {
-                let Some((place, ty)) = fs.locals.get(name).cloned() else {
-                    lilac_error::bug!(span, "assign to unbound local");
-                };
-                self.store_operand(fs, &place, ty, operand, value_ty, span);
-            }
-            HirExprKind::Member { obj, field } => {
-                let Ok(obj_operand) = self.eval(fs, obj) else {
-                    return;
-                };
-                let LirOperand::Place(obj_place) = obj_operand else {
-                    self.diags.emit(
-                        lilac_error::Diagnostic::error(
-                            "E030",
-                            "nested member stores lower in a later milestone",
-                        )
-                        .label(
-                            span,
-                            true,
-                            "store through a value, not a place".to_owned(),
-                        ),
-                    );
-                    self.failed = true;
-                    return;
-                };
-                let Some(owner_ty) = fs.ptypes.get(&obj_place).cloned() else {
-                    lilac_error::bug!(span, "member store on untyped place");
-                };
-                let Some(layout) = self.module.layouts.get(layout_key(&owner_ty)) else {
-                    lilac_error::bug!(span, "member store with unknown layout");
-                };
-                let Some(idx) = layout.iter().position(|(name, _)| name == field) else {
-                    lilac_error::bug!(span, "member store of unknown field");
-                };
-                emit(
-                    fs,
-                    LirInst::StoreField {
-                        value: operand,
-                        obj: obj_place,
-                        name: field.clone(),
-                        idx: field_idx(idx, span),
-                        span,
-                    },
-                );
-            }
-            HirExprKind::Temp(temp) => {
-                let place = self.temp_place(fs, *temp, target.ty, span);
-                self.store_operand(fs, &place, target.ty, operand, value_ty, span);
-            }
-            _ => {
-                lilac_error::bug!(span, "assignment to non-place expression");
-            }
+        if drops {
+            self.drop_place(fs, &target, ty, place.span);
         }
+        fs.write(&target, LirOperand::Place(new), value.span);
     }
 
-    /// Returns a temp's place, allocating it (zeroed) on first assignment.
-    fn temp_place(&mut self, fs: &mut FuncState, temp: TempId, ty: TypeRef, span: Span) -> String {
-        if let Some(place) = fs.temps.get(&temp) {
-            return place.clone();
-        }
-        fs.tmps += 1;
-        let place = format!("t.{}", fs.tmps);
-        let lir = lir_ty(self.types, ty);
-        emit_alloca(fs, lir.clone(), place.clone(), span);
-        fs.ptypes.insert(place.clone(), lir);
-        fs.temps.insert(temp, place.clone());
-        place
-    }
-
-    /// Lowers `match` to tag-test chains over a join label.
     fn lower_match(
         &mut self,
-        fs: &mut FuncState,
+        fs: &mut Fs,
+        func: &HirFunc,
         scrutinee: &HirExpr,
-        arms: &[lilac_hir::HirArm],
+        arms: &[HirArm],
         els: &HirBlock,
-        span: Span,
     ) {
-        let Ok(scrut_operand) = self.eval(fs, scrutinee) else {
-            return;
-        };
-        let scrut_place = match scrut_operand {
-            LirOperand::Place(place) => place,
-            LirOperand::Reg(reg) => {
-                let tmp = self.fresh_tmp(fs, scrutinee.ty, scrutinee.span);
-                emit(
-                    fs,
-                    LirInst::CopyPlace {
-                        src: LirOperand::Reg(reg),
-                        dst: tmp.clone(),
-                        span: scrutinee.span,
-                    },
-                );
-                tmp
-            }
-        };
-        let owner = fs.ptypes.get(&scrut_place).cloned().unwrap_or_default();
-        let scrut_lir_ty = lir_ty(self.types, scrutinee.ty);
-        let join_label = fresh_label(fs);
-        let els_label = fresh_label(fs);
-        let mut next = fresh_label(fs);
+        let (subject, is_enum) = self.subject(fs, func, scrutinee);
+        let join = fs.label();
+        let els_label = fs.label();
+        let mut next = fs.label();
+        fs.branch(&next, scrutinee.span);
         for (index, arm) in arms.iter().enumerate() {
-            at_label(fs, next);
-            let arm_label = fresh_label(fs);
-            next = fresh_label(fs);
-            let following = if index + 1 == arms.len() {
+            fs.at(next);
+            let body = fs.label();
+            next = if index + 1 == arms.len() {
                 els_label.clone()
             } else {
-                next.clone()
+                fs.label()
             };
-            let test_reg =
-                self.emit_arm_test(fs, &scrut_place, &scrut_lir_ty, &owner, &arm.pattern, span);
-            end(
+            let test = self.pattern_test(
                 fs,
-                LirTerm::BranchIf {
-                    cond: test_reg,
-                    then: arm_label.clone(),
-                    els: Some(following),
-                    span,
-                },
+                &subject,
+                scrutinee.ty,
+                is_enum,
+                &arm.pattern,
+                scrutinee.span,
             );
-            at_label(fs, arm_label);
-            if let Some(capture) = &arm.capture {
-                self.emit_arm_capture(fs, &scrut_place, &owner, &arm.pattern, capture, span);
+            fs.end(LirTerm::BranchIf {
+                cond: test,
+                then: body.clone(),
+                els: Some(next.clone()),
+                span: arm.body.span,
+            });
+            fs.at(body);
+            fs.scopes.push(Scope::default());
+            if let Some(capture) = arm.capture {
+                self.bind_capture(fs, func, &subject, scrutinee.ty, &arm.pattern, capture);
             }
-            self.lower_block(fs, &arm.body);
-            end(
-                fs,
-                LirTerm::Branch {
-                    target: join_label.clone(),
-                    span,
-                },
-            );
+            for stmt in &arm.body.stmts {
+                self.lower_stmt(fs, func, stmt);
+            }
+            if fs.open {
+                let index = fs.scopes.len() - 1;
+                self.drop_scope(fs, index);
+            }
+            fs.scopes.pop();
+            fs.branch(&join, arm.body.span);
         }
-        at_label(fs, els_label);
-        self.lower_block(fs, els);
-        end(
-            fs,
-            LirTerm::Branch {
-                target: join_label.clone(),
-                span,
-            },
-        );
-        at_label(fs, join_label);
+        if arms.is_empty() {
+            fs.at(next);
+            fs.branch(&els_label, els.span);
+        }
+        fs.at(els_label);
+        self.lower_block(fs, func, els);
+        fs.branch(&join, els.span);
+        fs.at(join);
     }
 
-    /// Emits one arm test: scrutinee value against the pattern, returning
-    /// the boolean register for `branch.if`. Enum scrutinees test
-    /// their discriminator tag field; bit containers test the value.
-    fn emit_arm_test(
+    /// The place a `match` inspects (fresh values spill into a temp).
+    fn subject(&mut self, fs: &mut Fs, func: &HirFunc, scrutinee: &HirExpr) -> (Place, bool) {
+        let is_enum = matches!(self.layout(scrutinee.ty.id), Some(Layout::Enum { .. }));
+        if scrutinee.is_place() {
+            return (self.place_of(fs, func, scrutinee), is_enum);
+        }
+        let operand = self.value(fs, func, scrutinee);
+        let place = self.spill(fs, operand, scrutinee.ty, scrutinee.span);
+        (Place::Direct(place), is_enum)
+    }
+
+    /// `&test: #bit8` for one arm pattern.
+    fn pattern_test(
         &mut self,
-        fs: &mut FuncState,
-        scrut_place: &str,
-        scrut_ty: &str,
-        owner: &str,
+        fs: &mut Fs,
+        subject: &Place,
+        ty: TypeRef,
+        is_enum: bool,
         pattern: &HirPattern,
         span: Span,
     ) -> String {
-        let test_reg = fresh_reg(fs);
-        let const_reg = fresh_reg(fs);
-        let owner_display = owner.strip_prefix('#').unwrap_or(owner);
-        if self.tags.contains_key(owner_display) {
-            let idx = match pattern {
-                HirPattern::Tag { name } => self.variant_index(owner_display, name, span),
-                HirPattern::Const { .. } => {
-                    lilac_error::bug!(span, "byte pattern on enum scrutinee");
-                }
+        let (value, constant, lir) = if is_enum {
+            let HirPattern::Variant(index) = pattern else {
+                lilac_error::bug!(span, "byte pattern on an enum");
             };
-            emit(
-                fs,
-                LirInst::Field {
-                    obj: scrut_place.to_owned(),
-                    name: "tag".to_owned(),
-                    idx: 0,
-                    dst: test_reg.clone(),
-                    ty: "#bit8".to_owned(),
-                    span,
-                },
-            );
-            emit(
-                fs,
-                LirInst::Const {
-                    dst: const_reg.clone(),
-                    lit: format!("0x{idx:x}"),
-                    ty: "#bit8".to_owned(),
-                    span,
-                },
-            );
-        } else {
-            let bytes = match pattern {
-                HirPattern::Const { bytes } => bytes.clone(),
-                HirPattern::Tag { .. } => {
-                    lilac_error::bug!(span, "tag pattern on bit scrutinee");
-                }
+            let Some(Layout::Enum { tag, .. }) = self.layout(ty.id) else {
+                lilac_error::bug!(span, "enum without a layout");
             };
-            emit(
-                fs,
-                LirInst::CopyReg {
-                    src: LirOperand::Place(scrut_place.to_owned()),
-                    dst: test_reg.clone(),
-                    ty: scrut_ty.to_owned(),
-                    span,
-                },
-            );
-            emit(
-                fs,
-                LirInst::Const {
-                    dst: const_reg.clone(),
-                    lit: bytes,
-                    ty: scrut_ty.to_owned(),
-                    span,
-                },
-            );
-        }
-        let dst = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Arith {
-                op: ArithOp::Eq,
-                lhs: test_reg,
-                rhs: const_reg,
-                dst: dst.clone(),
-                ty: "#bit8".to_owned(),
-                span,
-            },
-        );
-        dst
-    }
-
-    /// Emits one arm capture: payload field load into a fresh place.
-    fn emit_arm_capture(
-        &mut self,
-        fs: &mut FuncState,
-        scrut_place: &str,
-        owner: &str,
-        pattern: &HirPattern,
-        capture: &lilac_hir::HirParam,
-        span: Span,
-    ) {
-        let HirPattern::Tag { name: variant } = pattern else {
-            lilac_error::bug!(span, "capture on non-tag pattern");
-        };
-        let place = self.declare(fs, &capture.name, capture.ty, capture.span);
-        let payload_idx = self.payload_index(owner, variant, span);
-        let field_ty = self
-            .module
-            .layouts
-            .get(owner)
-            .and_then(|layout| layout.get(payload_idx as usize))
-            .map_or("#bit8".to_owned(), |(_, ty)| ty.clone());
-        let value_reg = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Field {
-                obj: scrut_place.to_owned(),
-                name: variant.clone(),
-                idx: payload_idx,
-                dst: value_reg.clone(),
-                ty: field_ty,
-                span: capture.span,
-            },
-        );
-        emit(
-            fs,
-            LirInst::CopyPlace {
-                src: LirOperand::Reg(value_reg),
-                dst: place,
-                span: capture.span,
-            },
-        );
-    }
-
-    /// Discriminant of a variant: its declaration-order index.
-    fn variant_index(&mut self, owner: &str, variant: &str, span: Span) -> u32 {
-        let Some(names) = self.tags.get(owner) else {
-            lilac_error::bug!(span, "match on type without variants");
-        };
-        let Some(idx) = names.iter().position(|name| name == variant) else {
-            lilac_error::bug!(span, "match on unknown variant");
-        };
-        field_idx(idx, span)
-    }
-
-    /// Payload field index: position of the variant's entry in the layout.
-    fn payload_index(&mut self, owner: &str, variant: &str, span: Span) -> u32 {
-        let Some(layout) = self.module.layouts.get(layout_key(owner)) else {
-            lilac_error::bug!(span, "payload of type without layout");
-        };
-        let Some(idx) = layout.iter().position(|(name, _)| name == variant) else {
-            lilac_error::bug!(span, "payload of unknown variant");
-        };
-        field_idx(idx, span)
-    }
-
-    /// Evaluates a name: locals and join temps read places, constants
-    /// inline, functions materialize addresses. Member functions without a
-    /// declared `instance` parameter read a zeroed implicit receiver.
-    fn lower_ident(
-        &mut self,
-        fs: &mut FuncState,
-        name: &str,
-        def: DefId,
-        span: Span,
-    ) -> Result<LirOperand, ErrorGuaranteed> {
-        if let Some((place, _)) = fs.locals.get(name) {
-            return Ok(LirOperand::Place(place.clone()));
-        }
-        if name == "instance" && fs.is_member {
-            // Static-style members read a zeroed implicit receiver.
-            let parent = fs.member_parent.clone().unwrap_or_default();
-            let place = "instance".to_owned();
-            let ty = format!("ref #{parent}");
-            emit_alloca(fs, ty.clone(), place.clone(), span);
-            fs.ptypes.insert(place.clone(), ty);
-            fs.locals.insert(
-                name.to_owned(),
-                (
-                    place.clone(),
-                    TypeRef {
-                        id: TypeId::ERROR,
-                        is_ref: true,
-                    },
-                ),
-            );
-            return Ok(LirOperand::Place(place));
-        }
-        if let Some((place, _)) = fs.locals.get(name) {
-            return Ok(LirOperand::Place(place.clone()));
-        }
-        if let Some(value) = self.consts.get(&def).cloned() {
-            return self.eval(fs, &value);
-        }
-        if self.func_names.contains_key(&def) {
-            let reg = fresh_reg(fs);
-            let Some(name) = self.func_names.get(&def).cloned() else {
-                lilac_error::bug!(span, "function without a name");
-            };
-            emit(
-                fs,
-                LirInst::AddrFunc {
-                    func: name,
-                    dst: reg.clone(),
-                    ty: "#bit64".to_owned(),
-                    span,
-                },
-            );
-            return Ok(LirOperand::Reg(reg));
-        }
-        lilac_error::bug!(span, "unbound name in lowering");
-    }
-
-    /// Evaluates an expression to an operand (register or place).
-    fn eval(&mut self, fs: &mut FuncState, expr: &HirExpr) -> Result<LirOperand, ErrorGuaranteed> {
-        match &expr.kind {
-            HirExprKind::Ident { name, def } => self.lower_ident(fs, name, *def, expr.span),
-            HirExprKind::Tag { name } => Ok(self.lower_tag(fs, expr.ty, name, expr.span)),
-            HirExprKind::Number { bytes } => Ok(self.lower_number(fs, expr.ty, bytes, expr.span)),
-            HirExprKind::Str { bytes } => {
-                let reg = fresh_reg(fs);
-                let name = self.intern_data(bytes);
-                emit(
-                    fs,
-                    LirInst::Const {
-                        dst: reg.clone(),
-                        lit: format!("!{name}"),
-                        ty: "#byte_buffer".to_owned(),
-                        span: expr.span,
-                    },
-                );
-                Ok(LirOperand::Reg(reg))
-            }
-            HirExprKind::Char { value } => {
-                let reg = fresh_reg(fs);
-                emit(
-                    fs,
-                    LirInst::Const {
-                        dst: reg.clone(),
-                        lit: format!("0x{:x}", *value as u32),
-                        ty: lir_ty(self.types, expr.ty),
-                        span: expr.span,
-                    },
-                );
-                Ok(LirOperand::Reg(reg))
-            }
-            HirExprKind::Call { callee, args } => {
-                self.lower_call_value(fs, callee, args, expr.ty, expr.span)
-            }
-            HirExprKind::Member { obj, field } => {
-                let reg = fresh_reg(fs);
-                self.lower_member(fs, obj, field, expr.span, reg.clone())?;
-                Ok(LirOperand::Reg(reg))
-            }
-            HirExprKind::RefOf { value } => {
-                let reg = fresh_reg(fs);
-                self.lower_ref_of(fs, value, expr.span, reg.clone())?;
-                Ok(LirOperand::Reg(reg))
-            }
-            HirExprKind::StructLit { fields } => {
-                let tmp = self.fresh_tmp(fs, expr.ty, expr.span);
-                self.lower_struct_lit(fs, fields, &tmp)?;
-                Ok(LirOperand::Place(tmp))
-            }
-            HirExprKind::Variant {
-                variant, payload, ..
-            } => {
-                let tmp = self.fresh_tmp(fs, expr.ty, expr.span);
-                self.lower_variant(fs, variant, payload.as_deref(), &tmp, expr.span)?;
-                Ok(LirOperand::Place(tmp))
-            }
-            HirExprKind::Temp(temp) => {
-                let Some(place) = fs.temps.get(temp).cloned() else {
-                    lilac_error::bug!(expr.span, "use of unassigned join temp");
-                };
-                Ok(LirOperand::Place(place))
-            }
-            HirExprKind::EqEq { lhs, rhs } => {
-                let left = self.eval_reg(fs, lhs)?;
-                let right = self.eval_reg(fs, rhs)?;
-                let reg = fresh_reg(fs);
-                emit(
-                    fs,
-                    LirInst::Arith {
-                        op: ArithOp::Eq,
-                        lhs: left,
-                        rhs: right,
-                        dst: reg.clone(),
-                        ty: lir_ty(self.types, expr.ty),
-                        span: expr.span,
-                    },
-                );
-                Ok(LirOperand::Reg(reg))
-            }
-            HirExprKind::CompileError {
-                msg,
-                msg_span,
-                call_span,
-            } => Ok(self.lower_compile_error(fs, msg, *msg_span, *call_span, expr.span)),
-            HirExprKind::Poison => {
-                lilac_error::bug!(expr.span, "lowering poisoned HIR");
-            }
-        }
-    }
-
-    /// Builds a bare tag into an enum struct (discriminant only).
-    fn lower_tag(&mut self, fs: &mut FuncState, ty: TypeRef, name: &str, span: Span) -> LirOperand {
-        let owner_ty = lir_ty(self.types, ty);
-        let tmp = self.fresh_tmp(fs, ty, span);
-        let owner = layout_key(&owner_ty);
-        let display = owner.strip_prefix('#').unwrap_or(owner);
-        let idx = self.variant_index(display, name, span);
-        let tag_reg = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Const {
-                dst: tag_reg.clone(),
-                lit: format!("0x{idx:x}"),
-                ty: "#bit8".to_owned(),
-                span,
-            },
-        );
-        emit(
-            fs,
-            LirInst::StoreField {
-                value: LirOperand::Reg(tag_reg),
-                obj: tmp.clone(),
+            let tag = self.lir_ty(TypeRef::value(*tag));
+            let value = fs.reg();
+            fs.emit(LirInst::Field {
+                obj: subject.name().to_owned(),
                 name: "tag".to_owned(),
                 idx: 0,
+                dst: value.clone(),
+                ty: tag.clone(),
                 span,
-            },
-        );
-        LirOperand::Place(tmp)
+            });
+            (value, format!("0x{index:x}"), tag)
+        } else {
+            let HirPattern::Const(bytes) = pattern else {
+                lilac_error::bug!(span, "tag pattern on a bit scrutinee");
+            };
+            let lir = self.lir_ty(ty);
+            let value = fs.read_place(subject, &lir, span);
+            let value = fs.reg_of(value, &lir, span);
+            (value, bytes.clone(), lir)
+        };
+        let constant_reg = fs.reg();
+        fs.emit(LirInst::Const {
+            dst: constant_reg.clone(),
+            lit: constant,
+            ty: lir,
+            span,
+        });
+        let test = fs.reg();
+        fs.emit(LirInst::Arith {
+            op: ArithOp::Eq,
+            lhs: value,
+            rhs: constant_reg,
+            dst: test.clone(),
+            ty: "#bit8".to_owned(),
+            span,
+        });
+        test
     }
 
-    /// Materializes a number literal into a register.
-    fn lower_number(
+    /// Initializes a capture local with a copy of the matched payload.
+    fn bind_capture(
         &mut self,
-        fs: &mut FuncState,
+        fs: &mut Fs,
+        func: &HirFunc,
+        subject: &Place,
         ty: TypeRef,
-        bytes: &str,
-        span: Span,
-    ) -> LirOperand {
-        let lir = lir_ty(self.types, ty);
-        let reg = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Const {
-                dst: reg.clone(),
-                lit: bytes.to_owned(),
-                ty: lir,
-                span,
-            },
-        );
-        LirOperand::Reg(reg)
+        pattern: &HirPattern,
+        capture: LocalId,
+    ) {
+        let HirPattern::Variant(index) = pattern else {
+            lilac_error::bug!(Span::dummy(), "capture on a byte pattern");
+        };
+        let place = self.declare(fs, func, capture);
+        let capture_ty = func.local(capture).ty;
+        let (field, name) = self.payload_field(ty.id, *index);
+        let payload = self.field_place(fs, subject, field, &name, capture_ty, Span::dummy());
+        let value = self.copy_out(fs, &payload, capture_ty, Span::dummy());
+        fs.emit(LirInst::CopyPlace {
+            src: value,
+            dst: place.clone(),
+            span: Span::dummy(),
+        });
+        self.own(fs, &place, capture_ty);
     }
 
-    /// Interns a data const, deduping by payload and assigning `c0`, `c1`, …
-    /// in first-use order.
+    // ---- places ------------------------------------------------------------------
+
+    fn place_of(&mut self, fs: &mut Fs, func: &HirFunc, expr: &HirExpr) -> Place {
+        match &expr.kind {
+            HirExprKind::Local(id) => match fs.places.get(id) {
+                Some(place) => Place::Direct(place.clone()),
+                None => lilac_error::bug!(expr.span, "use of an undeclared local"),
+            },
+            HirExprKind::Deref(inner) => {
+                if let HirExprKind::Local(id) = inner.kind {
+                    if let Some(place) = fs.places.get(&id) {
+                        return Place::Indirect(place.clone());
+                    }
+                }
+                let pointer = self.value(fs, func, inner);
+                Place::Indirect(self.fresh_place(fs, pointer, inner.ty, expr.span))
+            }
+            HirExprKind::Field { base, index } => {
+                let base_place = if base.is_place() {
+                    self.place_of(fs, func, base)
+                } else {
+                    let operand = self.value(fs, func, base);
+                    Place::Direct(self.spill(fs, operand, base.ty, base.span))
+                };
+                let (name, _) = self.field_name(base.ty.id, *index);
+                self.field_place(fs, &base_place, *index, &name, expr.ty, expr.span)
+            }
+            _ => {
+                let operand = self.value(fs, func, expr);
+                Place::Direct(self.spill(fs, operand, expr.ty, expr.span))
+            }
+        }
+    }
+
+    /// The place of field `index` of the aggregate at `base`.
+    fn field_place(
+        &mut self,
+        fs: &mut Fs,
+        base: &Place,
+        index: u32,
+        name: &str,
+        ty: TypeRef,
+        span: Span,
+    ) -> Place {
+        // A field that is itself a reference has a pointer-to-pointer address,
+        // which LIR spells as the opaque `ref #unknown`.
+        let pointer_ty = if ty.is_ref {
+            "ref #unknown".to_owned()
+        } else {
+            format!("ref {}", self.lir_ty(ty))
+        };
+        let reg = fs.reg();
+        fs.emit(LirInst::FieldAddr {
+            obj: base.name().to_owned(),
+            name: name.to_owned(),
+            idx: index,
+            dst: reg.clone(),
+            ty: pointer_ty.clone(),
+            span,
+        });
+        let holder = fs.tmp_lir(pointer_ty, span);
+        fs.emit(LirInst::CopyPlace {
+            src: LirOperand::Reg(reg),
+            dst: holder.clone(),
+            span,
+        });
+        Place::Indirect(holder)
+    }
+
+    /// A fresh `ref T` place holding the address of `place`.
+    fn ref_place(&mut self, fs: &mut Fs, place: &Place, ty: TypeRef, span: Span) -> String {
+        let pointer = format!("ref {}", self.lir_ty(ty));
+        let reg = fs.reg();
+        match place {
+            Place::Direct(name) => fs.emit(LirInst::Addr {
+                place: name.clone(),
+                dst: reg.clone(),
+                ty: pointer.clone(),
+                span,
+            }),
+            Place::Indirect(name) => fs.emit(LirInst::CopyReg {
+                src: LirOperand::Place(name.clone()),
+                dst: reg.clone(),
+                ty: pointer.clone(),
+                span,
+            }),
+        }
+        let holder = fs.tmp_lir(pointer, span);
+        fs.emit(LirInst::CopyPlace {
+            src: LirOperand::Reg(reg),
+            dst: holder.clone(),
+            span,
+        });
+        holder
+    }
+
+    /// Stores an operand into a new temp place (registered as owned).
+    fn spill(&mut self, fs: &mut Fs, operand: LirOperand, ty: TypeRef, span: Span) -> String {
+        if let LirOperand::Place(place) = &operand {
+            if is_fresh(place) {
+                return place.clone();
+            }
+        }
+        let place = self.tmp(fs, ty, span);
+        fs.emit(LirInst::CopyPlace {
+            src: operand,
+            dst: place.clone(),
+            span,
+        });
+        place
+    }
+
+    /// An operand as a fresh place the caller owns (not registered).
+    fn fresh_place(&mut self, fs: &mut Fs, operand: LirOperand, ty: TypeRef, span: Span) -> String {
+        if let LirOperand::Place(place) = &operand {
+            if is_fresh(place) {
+                Self::take_temp(fs, place);
+                return place.clone();
+            }
+        }
+        let place = self.tmp(fs, ty, span);
+        fs.emit(LirInst::CopyPlace {
+            src: operand,
+            dst: place.clone(),
+            span,
+        });
+        place
+    }
+
+    // ---- copies and drops ---------------------------------------------------------
+
+    /// A copy of the value at `place` (copy hooks applied).
+    fn copy_out(&mut self, fs: &mut Fs, place: &Place, ty: TypeRef, span: Span) -> LirOperand {
+        let lir = self.lir_ty(ty);
+        if !self.needs_copy(ty) {
+            return fs.read_place(place, &lir, span);
+        }
+        let source = self.ref_place(fs, place, ty, span);
+        let out = self.tmp(fs, ty, span);
+        let routine = self.copy_routine(ty);
+        fs.emit(LirInst::Call {
+            func: LirCallee::Func(routine),
+            ins: vec![source],
+            outs: vec![out.clone()],
+            span,
+        });
+        LirOperand::Place(out)
+    }
+
+    /// Drops the value at `place`.
+    fn drop_place(&mut self, fs: &mut Fs, place: &Place, ty: TypeRef, span: Span) {
+        if !self.needs_drop(ty) {
+            return;
+        }
+        let pointer = self.ref_place(fs, place, ty, span);
+        let routine = self.drop_routine(ty);
+        fs.emit(LirInst::Call {
+            func: LirCallee::Func(routine),
+            ins: vec![pointer],
+            outs: Vec::new(),
+            span,
+        });
+        if let Place::Direct(name) = place {
+            fs.emit(LirInst::Drop {
+                place: name.clone(),
+                span,
+            });
+        }
+    }
+
+    /// The function dropping a `T` through a `ref T`: its `@on_drop` when no
+    /// field needs dropping, else generated glue.
+    fn drop_routine(&mut self, ty: TypeRef) -> String {
+        if let Some(name) = self.drop_glue.get(&ty.id) {
+            return name.clone();
+        }
+        let hook = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .and_then(|hooks| hooks.drop.clone());
+        let slots = self.slot_types(ty.id);
+        let fields_drop = slots.iter().any(|slot| self.needs_drop(*slot));
+        if let (Some(hook), false) = (&hook, fields_drop) {
+            let symbol = self.symbol(hook);
+            self.drop_glue.insert(ty.id, symbol.clone());
+            return symbol;
+        }
+        let name = format!(".lilac.drop.{}", self.type_name(ty.id));
+        self.drop_glue.insert(ty.id, name.clone());
+        let mut fs = Fs::new();
+        let lir = self.lir_ty(ty);
+        fs.ins.push(("self".to_owned(), format!("ref {lir}")));
+        fs.place_tys.insert("self".to_owned(), format!("ref {lir}"));
+        fs.used.insert("self".to_owned());
+        let span = Span::dummy();
+        let this = Place::Indirect("self".to_owned());
+        if let Some(hook) = hook {
+            let symbol = self.symbol(&hook);
+            fs.emit(LirInst::Call {
+                func: LirCallee::Func(symbol),
+                ins: vec!["self".to_owned()],
+                outs: Vec::new(),
+                span,
+            });
+        }
+        self.for_each_slot(&mut fs, &this, ty, |lower, fs, slot, slot_ty| {
+            if lower.needs_drop(slot_ty) {
+                lower.drop_place(fs, slot, slot_ty, span);
+            }
+        });
+        let func = fs.finish(name.clone(), false);
+        self.module.funcs.push(func);
+        name
+    }
+
+    /// The function copying a `T` from a `ref T` into an out place: its
+    /// `@on_copy`, else glue copying field by field.
+    fn copy_routine(&mut self, ty: TypeRef) -> String {
+        if let Some(name) = self.copy_glue.get(&ty.id) {
+            return name.clone();
+        }
+        if let Some(hook) = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .and_then(|hooks| hooks.copy.clone())
+        {
+            let symbol = self.symbol(&hook);
+            self.copy_glue.insert(ty.id, symbol.clone());
+            return symbol;
+        }
+        let name = format!(".lilac.copy.{}", self.type_name(ty.id));
+        self.copy_glue.insert(ty.id, name.clone());
+        let mut fs = Fs::new();
+        let lir = self.lir_ty(ty);
+        for (place, slot_ty) in [("from", format!("ref {lir}")), ("to", lir.clone())] {
+            fs.place_tys.insert(place.to_owned(), slot_ty.clone());
+            fs.used.insert(place.to_owned());
+        }
+        fs.ins.push(("from".to_owned(), format!("ref {lir}")));
+        fs.outs.push(("to".to_owned(), lir.clone()));
+        let span = Span::dummy();
+        let whole = fs.read_place(&Place::Indirect("from".to_owned()), &lir, span);
+        fs.emit(LirInst::CopyPlace {
+            src: whole,
+            dst: "to".to_owned(),
+            span,
+        });
+        let from = Place::Indirect("from".to_owned());
+        let to = Place::Direct("to".to_owned());
+        let pairs = self.slot_pairs(ty);
+        for (field, name, slot_ty, variant) in pairs {
+            if !self.needs_copy(slot_ty) {
+                continue;
+            }
+            let skip = variant.map(|variant| self.variant_guard(&mut fs, &from, ty, variant, span));
+            let source = self.field_place(&mut fs, &from, field, &name, slot_ty, span);
+            let copied = self.copy_out(&mut fs, &source, slot_ty, span);
+            let target = self.field_place(&mut fs, &to, field, &name, slot_ty, span);
+            fs.write(&target, copied, span);
+            if let Some(skip) = skip {
+                fs.branch(&skip, span);
+                fs.at(skip);
+            }
+        }
+        let func = fs.finish(name.clone(), false);
+        self.module.funcs.push(func);
+        name
+    }
+
+    /// Every slot of an aggregate: `(field index, name, type, variant)` where
+    /// `variant` is the enum variant that slot belongs to.
+    fn slot_pairs(&self, ty: TypeRef) -> Vec<(u32, String, TypeRef, Option<u32>)> {
+        match self.layout(ty.id) {
+            Some(Layout::Object { fields }) => fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, ty))| {
+                    (
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                        name.clone(),
+                        *ty,
+                        None,
+                    )
+                })
+                .collect(),
+            Some(Layout::Enum { variants, .. }) => {
+                let mut out = Vec::new();
+                for (variant, (name, payload)) in variants.iter().enumerate() {
+                    if let Some(payload) = payload {
+                        let variant = u32::try_from(variant).unwrap_or(u32::MAX);
+                        let (field, _) = self.payload_field(ty.id, variant);
+                        out.push((field, name.clone(), *payload, Some(variant)));
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Branches past the following code unless `place` holds `variant`;
+    /// returns the label to continue at.
+    fn variant_guard(
+        &mut self,
+        fs: &mut Fs,
+        place: &Place,
+        ty: TypeRef,
+        variant: u32,
+        span: Span,
+    ) -> String {
+        let test = self.pattern_test(fs, place, ty, true, &HirPattern::Variant(variant), span);
+        let (body, skip) = (fs.label(), fs.label());
+        fs.end(LirTerm::BranchIf {
+            cond: test,
+            then: body.clone(),
+            els: Some(skip.clone()),
+            span,
+        });
+        fs.at(body);
+        skip
+    }
+
+    /// Runs `f` on every slot place of the aggregate at `place` (enum payloads
+    /// only when live).
+    fn for_each_slot(
+        &mut self,
+        fs: &mut Fs,
+        place: &Place,
+        ty: TypeRef,
+        mut f: impl FnMut(&mut Self, &mut Fs, &Place, TypeRef),
+    ) {
+        for (field, name, slot_ty, variant) in self.slot_pairs(ty) {
+            if !self.needs_drop(slot_ty) {
+                continue;
+            }
+            let skip =
+                variant.map(|variant| self.variant_guard(fs, place, ty, variant, Span::dummy()));
+            let slot = self.field_place(fs, place, field, &name, slot_ty, Span::dummy());
+            f(self, fs, &slot, slot_ty);
+            if let Some(skip) = skip {
+                fs.branch(&skip, Span::dummy());
+                fs.at(skip);
+            }
+        }
+    }
+
+    // ---- values --------------------------------------------------------------------
+
+    /// Evaluates an expression into a value that moves into a new owner:
+    /// places are copied (hooks applied), fresh values are taken.
+    fn read(&mut self, fs: &mut Fs, func: &HirFunc, expr: &HirExpr) -> LirOperand {
+        if expr.is_place() && self.needs_copy(expr.ty) {
+            let place = self.place_of(fs, func, expr);
+            return self.copy_out(fs, &place, expr.ty, expr.span);
+        }
+        let operand = self.value(fs, func, expr);
+        if let LirOperand::Place(place) = &operand {
+            if is_fresh(place) {
+                Self::take_temp(fs, place);
+            }
+        }
+        operand
+    }
+
+    /// `read` into a fresh place (call arguments).
+    fn arg(&mut self, fs: &mut Fs, func: &HirFunc, expr: &HirExpr) -> String {
+        let operand = self.read(fs, func, expr);
+        self.fresh_place(fs, operand, expr.ty, expr.span)
+    }
+
+    fn value_reg(&mut self, fs: &mut Fs, func: &HirFunc, expr: &HirExpr) -> String {
+        let operand = self.value(fs, func, expr);
+        let lir = self.lir_ty(expr.ty);
+        fs.reg_of(operand, &lir, expr.span)
+    }
+
+    /// Registers for several operands, spilling earlier ones when a later one
+    /// branches (registers do not cross blocks).
+    fn regs(&mut self, fs: &mut Fs, func: &HirFunc, exprs: &[HirExpr]) -> Vec<String> {
+        let mut operands = Vec::with_capacity(exprs.len());
+        for (index, expr) in exprs.iter().enumerate() {
+            let operand = self.value(fs, func, expr);
+            let later_branches = exprs[index + 1..].iter().any(|later| self.branches(later));
+            let operand = match operand {
+                LirOperand::Reg(_) if later_branches => {
+                    let place = self.tmp(fs, expr.ty, expr.span);
+                    fs.emit(LirInst::CopyPlace {
+                        src: operand,
+                        dst: place.clone(),
+                        span: expr.span,
+                    });
+                    LirOperand::Place(place)
+                }
+                other => other,
+            };
+            operands.push(operand);
+        }
+        operands
+            .into_iter()
+            .zip(exprs)
+            .map(|(operand, expr)| {
+                let lir = self.lir_ty(expr.ty);
+                fs.reg_of(operand, &lir, expr.span)
+            })
+            .collect()
+    }
+
+    /// Whether lowering `expr` creates blocks.
+    fn branches(&self, expr: &HirExpr) -> bool {
+        let mut found = false;
+        expr.walk(&mut |e| match &e.kind {
+            HirExprKind::If { .. } | HirExprKind::Match { .. } | HirExprKind::Logic { .. } => {
+                found = true;
+            }
+            HirExprKind::Const(def) => {
+                if let Some(value) = self.hir.consts.get(def) {
+                    found |= self.branches(value);
+                }
+            }
+            _ => {}
+        });
+        found
+    }
+
+    /// Evaluates an expression without taking ownership: a fresh aggregate
+    /// value stays registered for its statement's drop.
+    #[allow(clippy::too_many_lines)]
+    fn value(&mut self, fs: &mut Fs, func: &HirFunc, expr: &HirExpr) -> LirOperand {
+        let span = expr.span;
+        let lir = self.lir_ty(expr.ty);
+        match &expr.kind {
+            HirExprKind::Local(id) => match fs.places.get(id) {
+                Some(place) => LirOperand::Place(place.clone()),
+                None => lilac_error::bug!(span, "use of an undeclared local"),
+            },
+            HirExprKind::Field { base, index } if base.is_place() => {
+                let base_place = self.place_of(fs, func, base);
+                let (name, _) = self.field_name(base.ty.id, *index);
+                let reg = fs.reg();
+                fs.emit(LirInst::Field {
+                    obj: base_place.name().to_owned(),
+                    name,
+                    idx: *index,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::Field { .. } | HirExprKind::Deref(_) => {
+                let place = self.place_of(fs, func, expr);
+                fs.read_place(&place, &lir, span)
+            }
+            HirExprKind::Number(bytes) => {
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: bytes.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::Str(bytes) => {
+                let name = self.intern_data(bytes);
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: format!("!{name}"),
+                    ty: "#byte_buffer".to_owned(),
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::Struct(values) => {
+                let place = self.tmp(fs, expr.ty, span);
+                fs.emit(LirInst::Zero {
+                    place: place.clone(),
+                    span,
+                });
+                for (index, value) in values.iter().enumerate() {
+                    let index = u32::try_from(index).unwrap_or(u32::MAX);
+                    let (name, _) = self.field_name(expr.ty.id, index);
+                    let operand = self.read(fs, func, value);
+                    fs.emit(LirInst::StoreField {
+                        value: operand,
+                        obj: place.clone(),
+                        name,
+                        idx: index,
+                        span: value.span,
+                    });
+                }
+                self.own_temp(fs, &place, expr.ty);
+                LirOperand::Place(place)
+            }
+            HirExprKind::Variant { index, payload } => {
+                let place = self.tmp(fs, expr.ty, span);
+                fs.emit(LirInst::Zero {
+                    place: place.clone(),
+                    span,
+                });
+                let Some(Layout::Enum { tag, .. }) = self.layout(expr.ty.id) else {
+                    lilac_error::bug!(span, "variant of a non-enum");
+                };
+                let tag_ty = self.lir_ty(TypeRef::value(*tag));
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: format!("0x{index:x}"),
+                    ty: tag_ty,
+                    span,
+                });
+                fs.emit(LirInst::StoreField {
+                    value: LirOperand::Reg(reg),
+                    obj: place.clone(),
+                    name: "tag".to_owned(),
+                    idx: 0,
+                    span,
+                });
+                if let Some(payload) = payload {
+                    let (field, name) = self.payload_field(expr.ty.id, *index);
+                    let operand = self.read(fs, func, payload);
+                    fs.emit(LirInst::StoreField {
+                        value: operand,
+                        obj: place.clone(),
+                        name,
+                        idx: field,
+                        span,
+                    });
+                }
+                self.own_temp(fs, &place, expr.ty);
+                LirOperand::Place(place)
+            }
+            HirExprKind::Call { callee, args } => {
+                if let HirCallee::Intrinsic(intrinsic) = callee {
+                    return self.lower_intrinsic(fs, func, *intrinsic, args, expr.ty, span);
+                }
+                if expr.ty.is_error() {
+                    self.emit_call(fs, func, callee, args, &[], span);
+                    return LirOperand::Reg(String::new());
+                }
+                let out = self.tmp(fs, expr.ty, span);
+                self.emit_call(fs, func, callee, args, std::slice::from_ref(&out), span);
+                self.own_temp(fs, &out, expr.ty);
+                LirOperand::Place(out)
+            }
+            HirExprKind::FuncRef(key) => {
+                let reg = fs.reg();
+                fs.emit(LirInst::AddrFunc {
+                    func: self.symbol(key),
+                    dst: reg.clone(),
+                    ty: "ref #unknown".to_owned(),
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::RefOf(inner) => {
+                let place = self.place_of(fs, func, inner);
+                let reg = fs.reg();
+                match &place {
+                    Place::Direct(name) => fs.emit(LirInst::Addr {
+                        place: name.clone(),
+                        dst: reg.clone(),
+                        ty: lir,
+                        span,
+                    }),
+                    Place::Indirect(name) => fs.emit(LirInst::CopyReg {
+                        src: LirOperand::Place(name.clone()),
+                        dst: reg.clone(),
+                        ty: lir,
+                        span,
+                    }),
+                }
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::Retype(inner) => {
+                let operand = self.value(fs, func, inner);
+                let reg = fs.reg();
+                fs.emit(LirInst::CopyReg {
+                    src: operand,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::Eq(lhs, rhs) => {
+                let regs = self.regs(fs, func, &[(**lhs).clone(), (**rhs).clone()]);
+                let reg = fs.reg();
+                fs.emit(LirInst::Arith {
+                    op: ArithOp::Eq,
+                    lhs: regs[0].clone(),
+                    rhs: regs[1].clone(),
+                    dst: reg.clone(),
+                    ty: "#bit8".to_owned(),
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::If { cond, then, els } => {
+                let result = self.tmp(fs, expr.ty, span);
+                let cond = self.value_reg(fs, func, cond);
+                let (then_label, els_label, join) = (fs.label(), fs.label(), fs.label());
+                fs.end(LirTerm::BranchIf {
+                    cond,
+                    then: then_label.clone(),
+                    els: Some(els_label.clone()),
+                    span,
+                });
+                for (label, branch) in [(then_label, then), (els_label, els)] {
+                    fs.at(label);
+                    self.region(fs, func, branch, &result);
+                    fs.branch(&join, span);
+                }
+                fs.at(join);
+                self.own_temp(fs, &result, expr.ty);
+                LirOperand::Place(result)
+            }
+            HirExprKind::Match {
+                scrutinee,
+                arms,
+                els,
+            } => self.lower_match_value(fs, func, expr, scrutinee, arms, els),
+            HirExprKind::Logic { and, lhs, rhs } => {
+                let result = self.tmp(fs, expr.ty, span);
+                let left = self.value_reg(fs, func, lhs);
+                let (rhs_label, short_label, join) = (fs.label(), fs.label(), fs.label());
+                let (then, els) = if *and {
+                    (rhs_label.clone(), short_label.clone())
+                } else {
+                    (short_label.clone(), rhs_label.clone())
+                };
+                fs.end(LirTerm::BranchIf {
+                    cond: left,
+                    then,
+                    els: Some(els),
+                    span,
+                });
+                fs.at(rhs_label);
+                self.region(fs, func, rhs, &result);
+                fs.branch(&join, span);
+                fs.at(short_label);
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: if *and { "0x0" } else { "0x1" }.to_owned(),
+                    ty: "#bit8".to_owned(),
+                    span,
+                });
+                fs.emit(LirInst::CopyPlace {
+                    src: LirOperand::Reg(reg),
+                    dst: result.clone(),
+                    span,
+                });
+                fs.branch(&join, span);
+                fs.at(join);
+                LirOperand::Place(result)
+            }
+            HirExprKind::FormatArgs(pieces) => {
+                let place = self.tmp(fs, expr.ty, span);
+                fs.emit(LirInst::Call {
+                    func: LirCallee::Func(".lilac.format_args_new".to_owned()),
+                    ins: Vec::new(),
+                    outs: vec![place.clone()],
+                    span,
+                });
+                for piece in pieces {
+                    let piece_place = self.arg(fs, func, piece);
+                    let table = self.ref_place(fs, &Place::Direct(place.clone()), expr.ty, span);
+                    fs.emit(LirInst::Call {
+                        func: LirCallee::Func(".lilac.format_args_push".to_owned()),
+                        ins: vec![table, piece_place],
+                        outs: Vec::new(),
+                        span: piece.span,
+                    });
+                }
+                LirOperand::Place(place)
+            }
+            HirExprKind::Const(def) => match self.hir.consts.get(def) {
+                Some(value) => self.value(fs, func, value),
+                None => lilac_error::bug!(span, "use of an unchecked constant"),
+            },
+            HirExprKind::SizeOf(ty) => {
+                let lir_ty = self.lir_ty(*ty);
+                let (size, _) = lilac_ir::size_align(&self.module.layouts, &lir_ty, self.ptr_bytes);
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: format!("0x{size:x}"),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            HirExprKind::CompileError { msg, msg_span } => {
+                fs.emit(LirInst::CompileError {
+                    msg: msg.clone(),
+                    msg_span: *msg_span,
+                    call_span: span,
+                });
+                let ty = if expr.ty.is_error() {
+                    TypeRef::value(self.types.builtin("@bit8").unwrap_or(TypeId::ERROR))
+                } else {
+                    expr.ty
+                };
+                LirOperand::Place(self.tmp(fs, ty, span))
+            }
+            HirExprKind::Poison => lilac_error::bug!(span, "lowering poisoned HIR"),
+        }
+    }
+
+    /// Evaluates `value` in its own scope and moves it into `result`.
+    fn region(&mut self, fs: &mut Fs, func: &HirFunc, value: &HirExpr, result: &str) {
+        fs.scopes.push(Scope::default());
+        let operand = self.read(fs, func, value);
+        fs.emit(LirInst::CopyPlace {
+            src: operand,
+            dst: result.to_owned(),
+            span: value.span,
+        });
+        let index = fs.scopes.len() - 1;
+        self.drop_scope(fs, index);
+        fs.scopes.pop();
+    }
+
+    fn lower_match_value(
+        &mut self,
+        fs: &mut Fs,
+        func: &HirFunc,
+        expr: &HirExpr,
+        scrutinee: &HirExpr,
+        arms: &[HirValueArm],
+        els: &HirExpr,
+    ) -> LirOperand {
+        let span = expr.span;
+        let result = self.tmp(fs, expr.ty, span);
+        let (subject, is_enum) = self.subject(fs, func, scrutinee);
+        let join = fs.label();
+        let els_label = fs.label();
+        let mut next = fs.label();
+        fs.branch(&next, span);
+        for (index, arm) in arms.iter().enumerate() {
+            fs.at(next);
+            let body = fs.label();
+            next = if index + 1 == arms.len() {
+                els_label.clone()
+            } else {
+                fs.label()
+            };
+            let test = self.pattern_test(fs, &subject, scrutinee.ty, is_enum, &arm.pattern, span);
+            fs.end(LirTerm::BranchIf {
+                cond: test,
+                then: body.clone(),
+                els: Some(next.clone()),
+                span,
+            });
+            fs.at(body);
+            fs.scopes.push(Scope::default());
+            if let Some(capture) = arm.capture {
+                self.bind_capture(fs, func, &subject, scrutinee.ty, &arm.pattern, capture);
+            }
+            let operand = self.read(fs, func, &arm.value);
+            fs.emit(LirInst::CopyPlace {
+                src: operand,
+                dst: result.clone(),
+                span,
+            });
+            let scope = fs.scopes.len() - 1;
+            self.drop_scope(fs, scope);
+            fs.scopes.pop();
+            fs.branch(&join, span);
+        }
+        if arms.is_empty() {
+            fs.at(next);
+            fs.branch(&els_label, span);
+        }
+        fs.at(els_label);
+        self.region(fs, func, els, &result);
+        fs.branch(&join, span);
+        fs.at(join);
+        self.own_temp(fs, &result, expr.ty);
+        LirOperand::Place(result)
+    }
+
     fn intern_data(&mut self, bytes: &[u8]) -> String {
         if let Some(existing) = self.module.data.iter().find(|data| data.bytes == bytes) {
             return existing.name.clone();
@@ -1480,761 +1848,266 @@ impl Lower<'_> {
         name
     }
 
-    /// Lowers a call in value position (intrinsics yield registers,
-    /// other calls write one fresh out place).
-    fn lower_call_value(
-        &mut self,
-        fs: &mut FuncState,
-        callee: &HirCallee,
-        args: &[HirExpr],
-        result_ty: TypeRef,
-        span: Span,
-    ) -> Result<LirOperand, ErrorGuaranteed> {
-        if let HirCallee::Intrinsic { name } = callee {
-            let reg = self.lower_intrinsic(fs, name, args, result_ty, span)?;
-            Ok(LirOperand::Reg(reg))
-        } else {
-            let place = self.fresh_tmp(fs, result_ty, span);
-            self.emit_call(fs, callee, args, std::slice::from_ref(&place), span)?;
-            Ok(LirOperand::Place(place))
-        }
-    }
+    // ---- calls ----------------------------------------------------------------------
 
-    /// Materializes an expression into a place (copying regs as needed).
-    fn eval_place(
-        &mut self,
-        fs: &mut FuncState,
-        expr: &HirExpr,
-    ) -> Result<String, ErrorGuaranteed> {
-        match self.eval(fs, expr)? {
-            LirOperand::Place(place) => Ok(place),
-            LirOperand::Reg(reg) => {
-                let tmp = self.fresh_tmp(fs, expr.ty, expr.span);
-                emit(
-                    fs,
-                    LirInst::CopyPlace {
-                        src: LirOperand::Reg(reg),
-                        dst: tmp.clone(),
-                        span: expr.span,
-                    },
-                );
-                Ok(tmp)
-            }
-        }
-    }
-
-    /// Materializes an expression into a register (copying places as needed).
-    fn eval_reg(&mut self, fs: &mut FuncState, expr: &HirExpr) -> Result<String, ErrorGuaranteed> {
-        match self.eval(fs, expr)? {
-            LirOperand::Reg(reg) => Ok(reg),
-            LirOperand::Place(place) => {
-                let reg = fresh_reg(fs);
-                emit(
-                    fs,
-                    LirInst::CopyReg {
-                        src: LirOperand::Place(place),
-                        dst: reg.clone(),
-                        ty: lir_ty(self.types, expr.ty),
-                        span: expr.span,
-                    },
-                );
-                Ok(reg)
-            }
-        }
-    }
-
-    /// Emits a call into preallocated out places.
     fn emit_call(
         &mut self,
-        fs: &mut FuncState,
+        fs: &mut Fs,
+        func: &HirFunc,
         callee: &HirCallee,
         args: &[HirExpr],
         outs: &[String],
         span: Span,
-    ) -> Result<(), ErrorGuaranteed> {
-        let mut ins = Vec::with_capacity(args.len());
-        for arg in args {
-            ins.push(self.eval_place(fs, arg)?);
-        }
-        let func = match callee {
-            HirCallee::Item(def) => {
-                let Some(name) = self.func_names.get(def).cloned() else {
-                    lilac_error::bug!(span, "call to missing function");
-                };
-                LirCallee::Func(name)
+    ) {
+        if let HirCallee::Func(key) = callee {
+            if self.externs.contains(key) {
+                self.emit_extern_call(fs, func, key, args, outs, span);
+                return;
             }
-            HirCallee::Local { name } => {
-                let Some((place, _)) = fs.locals.get(name).cloned() else {
-                    lilac_error::bug!(span, "call through unbound local");
+        }
+        let ins: Vec<String> = args.iter().map(|arg| self.arg(fs, func, arg)).collect();
+        let target = match callee {
+            HirCallee::Func(key) => LirCallee::Func(self.symbol(key)),
+            HirCallee::Local(id) => {
+                let Some(place) = fs.places.get(id).cloned() else {
+                    lilac_error::bug!(span, "call through an undeclared local");
                 };
-                let reg = fresh_reg(fs);
-                emit(
-                    fs,
-                    LirInst::CopyReg {
-                        src: LirOperand::Place(place),
-                        dst: reg.clone(),
-                        ty: "#bit64".to_owned(),
-                        span,
-                    },
-                );
+                let reg = fs.reg();
+                fs.emit(LirInst::CopyReg {
+                    src: LirOperand::Place(place),
+                    dst: reg.clone(),
+                    ty: "ref #unknown".to_owned(),
+                    span,
+                });
                 LirCallee::Reg(reg)
             }
-            // Hooks and generic-instance calls both carry their per-call symbol
-            // in `name`; do not index `func_names` here, since every
-            // specialization shares its template `def` and the map keeps only
-            // the last-inserted instance. `symbol` re-applies the namespace
-            // rule (hooks stay bare; instances prefix by the template's ns).
-            HirCallee::Hook { name, def } => LirCallee::Func(self.symbol(*def, name, false)),
-            HirCallee::Intrinsic { .. } => {
-                lilac_error::bug!(span, "intrinsic in general call path");
+            HirCallee::Intrinsic(_) => {
+                lilac_error::bug!(span, "intrinsic in the general call path")
             }
         };
-        emit(
-            fs,
-            LirInst::Call {
-                func,
-                ins,
-                outs: outs.to_owned(),
-                span,
-            },
-        );
-        Ok(())
+        fs.emit(LirInst::Call {
+            func: target,
+            ins,
+            outs: outs.to_vec(),
+            span,
+        });
     }
 
-    /// Lowers an intrinsic to arithmetic, conversion, or `E030` (M3 strings
-    /// and exotic intrinsics stay deferred).
-    fn lower_intrinsic(
+    /// A C ABI call: wrapper objects pass (and return) their single field.
+    fn emit_extern_call(
         &mut self,
-        fs: &mut FuncState,
-        name: &str,
+        fs: &mut Fs,
+        func: &HirFunc,
+        key: &FuncKey,
         args: &[HirExpr],
-        result_ty: TypeRef,
+        outs: &[String],
         span: Span,
-    ) -> Result<String, ErrorGuaranteed> {
-        if let Some(op) = arith_op_for(name) {
-            if args.len() != 2 {
-                lilac_error::bug!(span, "arithmetic intrinsic without two operands");
-            }
-            let lhs = self.eval_reg(fs, &args[0])?;
-            let rhs = self.eval_reg(fs, &args[1])?;
-            let dst = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::Arith {
-                    op,
-                    lhs,
-                    rhs,
-                    dst: dst.clone(),
-                    ty: lir_ty(self.types, result_ty),
-                    span,
-                },
-            );
-            return Ok(dst);
-        }
-        if let Some(op) = negate_op_for(name) {
-            if args.len() != 1 {
-                lilac_error::bug!(span, "negate without one operand");
-            }
-            let value = self.eval_reg(fs, &args[0])?;
-            let ty = lir_ty(self.types, result_ty);
-            let zero_lit = if ty.starts_with("#fbit") {
-                "0.0".to_owned()
-            } else {
-                "0x0".to_owned()
-            };
-            let zero = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::Const {
-                    dst: zero.clone(),
-                    lit: zero_lit,
-                    ty: ty.clone(),
-                    span,
-                },
-            );
-            let dst = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::Arith {
-                    op,
-                    lhs: zero,
-                    rhs: value,
-                    dst: dst.clone(),
-                    ty,
-                    span,
-                },
-            );
-            return Ok(dst);
-        }
-        if is_bitcast_intrinsic(name) {
-            return self.lower_convert(fs, args, result_ty, span, ConvertOp::Bitcast);
-        }
-        match name {
-            "@truncate" => self.lower_convert(fs, args, result_ty, span, ConvertOp::Trunc),
-            "@extend_zero" => self.lower_convert(fs, args, result_ty, span, ConvertOp::ExtendZero),
-            "@size_of" => self.lower_fold_intrinsic(fs, name, args, result_ty, span),
-            "@byte_buffer_from" | "@byte_buffer_ptr" | "@byte_buffer_len" | "@format_args_new"
-            | "@format_args_count" | "@format_args_piece" | "@load_u8" => {
-                self.lower_builtin_call(fs, name, args, result_ty, span, true)
-            }
-            "@store_u8" | "@memcpy" | "@format_args_push" => {
-                self.lower_builtin_call(fs, name, args, result_ty, span, false)
-            }
-            _ => {
-                self.diags.emit(
-                    lilac_error::Diagnostic::error("E030", format!("`{name}` lowers in M3")).label(
-                        span,
-                        true,
-                        "lands in a later milestone".to_owned(),
-                    ),
-                );
-                self.failed = true;
-                Err(ErrorGuaranteed::new())
-            }
-        }
-    }
-
-    /// Emits a pre-fold marker for `@size_of` with the single argument
-    /// evaluated to a register.
-    fn lower_fold_intrinsic(
-        &mut self,
-        fs: &mut FuncState,
-        name: &str,
-        args: &[HirExpr],
-        result_ty: TypeRef,
-        span: Span,
-    ) -> Result<String, ErrorGuaranteed> {
-        if args.len() != 1 {
-            lilac_error::bug!(span, "fold intrinsic without one operand");
-        }
-        let arg = self.eval_reg(fs, &args[0])?;
-        let dst = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::FoldIntrinsic {
-                name: name.to_owned(),
-                arg: LirOperand::Reg(arg),
-                dst: dst.clone(),
-                ty: lir_ty(self.types, result_ty),
-                span,
-            },
-        );
-        Ok(dst)
-    }
-
-    /// Emits a call to a compiler builtin. Single-result builtins copy the
-    /// temp out place into a fresh register; void builtins return a fresh
-    /// (unused) register for statement position.
-    fn lower_builtin_call(
-        &mut self,
-        fs: &mut FuncState,
-        name: &str,
-        args: &[HirExpr],
-        result_ty: TypeRef,
-        span: Span,
-        has_result: bool,
-    ) -> Result<String, ErrorGuaranteed> {
+    ) {
         let mut ins = Vec::with_capacity(args.len());
         for arg in args {
-            ins.push(self.eval_place(fs, arg)?);
-        }
-        let callee = runtime_callee(name);
-        if has_result {
-            let temp = self.fresh_tmp(fs, result_ty, span);
-            emit(
-                fs,
-                LirInst::Call {
-                    func: callee.clone(),
-                    ins,
-                    outs: vec![temp.clone()],
-                    span,
-                },
-            );
-            let reg = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::CopyReg {
-                    src: LirOperand::Place(temp),
+            let place = self.arg(fs, func, arg);
+            let (abi, wrapped) = self.abi_ty(arg.ty);
+            if wrapped {
+                let (name, _) = self.field_name(arg.ty.id, 0);
+                let reg = fs.reg();
+                fs.emit(LirInst::Field {
+                    obj: place,
+                    name,
+                    idx: 0,
                     dst: reg.clone(),
-                    ty: lir_ty(self.types, result_ty),
+                    ty: abi.clone(),
                     span,
-                },
-            );
-            Ok(reg)
-        } else {
-            emit(
-                fs,
-                LirInst::Call {
-                    func: callee,
+                });
+                let inner = fs.tmp_lir(abi, span);
+                fs.emit(LirInst::CopyPlace {
+                    src: LirOperand::Reg(reg),
+                    dst: inner.clone(),
+                    span,
+                });
+                ins.push(inner);
+            } else {
+                ins.push(place);
+            }
+        }
+        let symbol = self.symbol(key);
+        let returns: Vec<TypeRef> = self
+            .hir
+            .funcs
+            .iter()
+            .find(|candidate| candidate.key == *key)
+            .map(|callee| {
+                callee
+                    .returns
+                    .iter()
+                    .map(|id| callee.local(*id).ty)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut call_outs = Vec::with_capacity(outs.len());
+        let mut rewrap = Vec::new();
+        for (out, ty) in outs.iter().zip(&returns) {
+            let (abi, wrapped) = self.abi_ty(*ty);
+            if wrapped {
+                let inner = fs.tmp_lir(abi, span);
+                rewrap.push((out.clone(), inner.clone(), *ty));
+                call_outs.push(inner);
+            } else {
+                call_outs.push(out.clone());
+            }
+        }
+        fs.emit(LirInst::Call {
+            func: LirCallee::Func(symbol),
+            ins,
+            outs: call_outs,
+            span,
+        });
+        for (out, inner, ty) in rewrap {
+            let (name, _) = self.field_name(ty.id, 0);
+            fs.emit(LirInst::StoreField {
+                value: LirOperand::Place(inner),
+                obj: out,
+                name,
+                idx: 0,
+                span,
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn lower_intrinsic(
+        &mut self,
+        fs: &mut Fs,
+        func: &HirFunc,
+        intrinsic: Intrinsic,
+        args: &[HirExpr],
+        ty: TypeRef,
+        span: Span,
+    ) -> LirOperand {
+        let lir = self.lir_ty(ty);
+        let arith = |op: NumOp, float: bool| -> Option<ArithOp> {
+            Some(match (op, float) {
+                (NumOp::Add, false) => ArithOp::IAdd,
+                (NumOp::Sub, false) => ArithOp::ISub,
+                (NumOp::Mul, false) => ArithOp::IMul,
+                (NumOp::Div, false) => ArithOp::IDiv,
+                (NumOp::DivU, false) => ArithOp::IDivU,
+                (NumOp::Mod, false) => ArithOp::IMod,
+                (NumOp::ModU, false) => ArithOp::IModU,
+                (NumOp::Lt, false) => ArithOp::ILt,
+                (NumOp::Gt, false) => ArithOp::IGt,
+                (NumOp::Le, false) => ArithOp::ILe,
+                (NumOp::Ge, false) => ArithOp::IGe,
+                (NumOp::LtU, false) => ArithOp::ILtU,
+                (NumOp::GtU, false) => ArithOp::IGtU,
+                (NumOp::LeU, false) => ArithOp::ILeU,
+                (NumOp::GeU, false) => ArithOp::IGeU,
+                (NumOp::Add, true) => ArithOp::FAdd,
+                (NumOp::Sub, true) => ArithOp::FSub,
+                (NumOp::Mul, true) => ArithOp::FMul,
+                (NumOp::Div, true) => ArithOp::FDiv,
+                (NumOp::Mod, true) => ArithOp::FMod,
+                (NumOp::Lt, true) => ArithOp::FLt,
+                (NumOp::Gt, true) => ArithOp::FGt,
+                (NumOp::Le, true) => ArithOp::FLe,
+                (NumOp::Ge, true) => ArithOp::FGe,
+                _ => return None,
+            })
+        };
+        match intrinsic {
+            Intrinsic::Int(NumOp::Negate, _) | Intrinsic::Float(NumOp::Negate, _) => {
+                let float = matches!(intrinsic, Intrinsic::Float(..));
+                let operand = self.value_reg(fs, func, &args[0]);
+                let zero = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: zero.clone(),
+                    lit: if float { "0.0" } else { "0x0" }.to_owned(),
+                    ty: lir.clone(),
+                    span,
+                });
+                let reg = fs.reg();
+                fs.emit(LirInst::Arith {
+                    op: if float { ArithOp::FSub } else { ArithOp::ISub },
+                    lhs: zero,
+                    rhs: operand,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            Intrinsic::Int(op, _) | Intrinsic::Float(op, _) => {
+                let float = matches!(intrinsic, Intrinsic::Float(..));
+                let Some(op) = arith(op, float) else {
+                    lilac_error::bug!(span, "intrinsic without an IR operation");
+                };
+                let regs = self.regs(fs, func, args);
+                let reg = fs.reg();
+                fs.emit(LirInst::Arith {
+                    op,
+                    lhs: regs[0].clone(),
+                    rhs: regs[1].clone(),
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            Intrinsic::FbitToBits(_)
+            | Intrinsic::BitsToFbit(_)
+            | Intrinsic::Truncate
+            | Intrinsic::ExtendZero => {
+                let op = match intrinsic {
+                    Intrinsic::Truncate => ConvertOp::Trunc,
+                    Intrinsic::ExtendZero => ConvertOp::ExtendZero,
+                    _ => ConvertOp::Bitcast,
+                };
+                let src = self.value_reg(fs, func, &args[0]);
+                let reg = fs.reg();
+                fs.emit(LirInst::Convert {
+                    op,
+                    src,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            Intrinsic::Memcpy => {
+                let ins = args.iter().map(|arg| self.arg(fs, func, arg)).collect();
+                fs.emit(LirInst::Call {
+                    func: LirCallee::Builtin("@memcpy".to_owned()),
                     ins,
                     outs: Vec::new(),
                     span,
-                },
-            );
-            Ok(fresh_reg(fs))
-        }
-    }
-
-    /// Lowers `@truncate`/`@extend_zero` to a typed conversion.
-    fn lower_convert(
-        &mut self,
-        fs: &mut FuncState,
-        args: &[HirExpr],
-        result_ty: TypeRef,
-        span: Span,
-        op: ConvertOp,
-    ) -> Result<String, ErrorGuaranteed> {
-        if args.len() != 1 {
-            lilac_error::bug!(span, "conversion without one operand");
-        }
-        let src = self.eval_reg(fs, &args[0])?;
-        let dst = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Convert {
-                op,
-                src,
-                dst: dst.clone(),
-                ty: lir_ty(self.types, result_ty),
-                span,
-            },
-        );
-        Ok(dst)
-    }
-
-    /// Loads `obj.field` into a register (nested objects materialize first).
-    fn lower_member(
-        &mut self,
-        fs: &mut FuncState,
-        obj: &HirExpr,
-        field: &str,
-        span: Span,
-        dst: String,
-    ) -> Result<(), ErrorGuaranteed> {
-        let obj_place = self.eval_place(fs, obj)?;
-        let owner_ty = fs.ptypes.get(&obj_place).cloned().unwrap_or_default();
-        let layout = self
-            .module
-            .layouts
-            .get(layout_key(&owner_ty))
-            .cloned()
-            .unwrap_or_default();
-        let Some(idx) = layout.iter().position(|(name, _)| name == field) else {
-            lilac_error::bug!(span, "member read of unknown field");
-        };
-        let Some((_, field_ty)) = layout.get(idx).cloned() else {
-            lilac_error::bug!(span, "member index out of bounds");
-        };
-        emit(
-            fs,
-            LirInst::Field {
-                obj: obj_place,
-                name: field.to_owned(),
-                idx: field_idx(idx, span),
-                dst,
-                ty: field_ty,
-                span,
-            },
-        );
-        Ok(())
-    }
-
-    /// Emits a `@compile_error` marker with a dummy `#bit8` result slot:
-    /// live sites never reach codegen (the post-DCE check reports `E031`
-    /// first); dead ones prune away, leaving only an unused zeroed place
-    /// behind.
-    fn lower_compile_error(
-        &mut self,
-        fs: &mut FuncState,
-        msg: &str,
-        msg_span: Span,
-        call_span: Span,
-        span: Span,
-    ) -> LirOperand {
-        emit(
-            fs,
-            LirInst::CompileError {
-                msg: msg.to_owned(),
-                msg_span,
-                call_span,
-            },
-        );
-        let bit8 = self.types.builtin("@bit8").unwrap_or(TypeId::ERROR);
-        let place = self.fresh_tmp(
-            fs,
-            TypeRef {
-                id: bit8,
-                is_ref: false,
-            },
-            span,
-        );
-        LirOperand::Place(place)
-    }
-
-    /// Takes a reference: plain places directly, nested members through a
-    /// materialized temporary (writes through those need M5 address math).
-    fn lower_ref_of(
-        &mut self,
-        fs: &mut FuncState,
-        value: &HirExpr,
-        span: Span,
-        dst: String,
-    ) -> Result<(), ErrorGuaranteed> {
-        match &value.kind {
-            HirExprKind::Ident { .. } | HirExprKind::Temp(_) => {
-                let place = self.eval_place(fs, value)?;
-                let place_ty = fs.ptypes.get(&place).cloned().unwrap_or_default();
-                emit(
-                    fs,
-                    LirInst::Addr {
-                        place,
-                        dst,
-                        ty: format!("ref {place_ty}"),
-                        span,
-                    },
-                );
-                Ok(())
-            }
-            HirExprKind::Member { obj, field } => {
-                let obj_place = self.eval_place(fs, obj)?;
-                let owner_ty = fs.ptypes.get(&obj_place).cloned().unwrap_or_default();
-                let layout = self
-                    .module
-                    .layouts
-                    .get(&owner_ty)
-                    .cloned()
-                    .unwrap_or_default();
-                let Some(idx) = layout.iter().position(|(name, _)| name == field) else {
-                    lilac_error::bug!(span, "member address of unknown field");
-                };
-                let field_ty = layout
-                    .get(idx)
-                    .map(|(_, ty)| ty.clone())
-                    .unwrap_or_default();
-                emit(
-                    fs,
-                    LirInst::FieldAddr {
-                        obj: obj_place,
-                        name: field.clone(),
-                        idx: field_idx(idx, span),
-                        dst,
-                        ty: format!("ref {field_ty}"),
-                        span,
-                    },
-                );
-                Ok(())
+                });
+                LirOperand::Reg(String::new())
             }
             _ => {
-                self.diags.emit(
-                    lilac_error::Diagnostic::error(
-                        "E030",
-                        "nested member addresses lower in a later milestone",
-                    )
-                    .label(span, true, "lands in a later milestone".to_owned()),
-                );
-                self.failed = true;
-                Err(ErrorGuaranteed::new())
+                let Some(symbol) = intrinsic.runtime_symbol() else {
+                    lilac_error::bug!(span, "intrinsic `{intrinsic:?}` has no lowering");
+                };
+                let ins = args.iter().map(|arg| self.arg(fs, func, arg)).collect();
+                if ty.is_error() {
+                    fs.emit(LirInst::Call {
+                        func: LirCallee::Func(symbol.to_owned()),
+                        ins,
+                        outs: Vec::new(),
+                        span,
+                    });
+                    return LirOperand::Reg(String::new());
+                }
+                let out = self.tmp(fs, ty, span);
+                fs.emit(LirInst::Call {
+                    func: LirCallee::Func(symbol.to_owned()),
+                    ins,
+                    outs: vec![out.clone()],
+                    span,
+                });
+                LirOperand::Place(out)
             }
         }
-    }
-
-    /// Initializes a struct literal into a place, field by field.
-    fn lower_struct_lit(
-        &mut self,
-        fs: &mut FuncState,
-        fields: &[lilac_hir::HirField],
-        tmp: &str,
-    ) -> Result<(), ErrorGuaranteed> {
-        let owner_ty = fs.ptypes.get(tmp).cloned().unwrap_or_default();
-        for field in fields {
-            let value = self.eval(fs, &field.value)?;
-            let layout = self
-                .module
-                .layouts
-                .get(&owner_ty)
-                .cloned()
-                .unwrap_or_default();
-            let Some(idx) = layout.iter().position(|(name, _)| name == &field.name) else {
-                lilac_error::bug!(field.span, "struct literal of unknown field");
-            };
-            emit(
-                fs,
-                LirInst::StoreField {
-                    value,
-                    obj: tmp.to_owned(),
-                    name: field.name.clone(),
-                    idx: field_idx(idx, field.span),
-                    span: field.span,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    /// Constructs an enum value: discriminant tag plus payload.
-    fn lower_variant(
-        &mut self,
-        fs: &mut FuncState,
-        variant: &str,
-        payload: Option<&HirExpr>,
-        tmp: &str,
-        span: Span,
-    ) -> Result<(), ErrorGuaranteed> {
-        let owner = fs.ptypes.get(tmp).cloned().unwrap_or_default();
-        let display = owner.strip_prefix('#').unwrap_or(&owner);
-        let idx = self.variant_index(display, variant, span);
-        let tag_reg = fresh_reg(fs);
-        emit(
-            fs,
-            LirInst::Const {
-                dst: tag_reg.clone(),
-                lit: format!("0x{idx:x}"),
-                ty: "#bit8".to_owned(),
-                span,
-            },
-        );
-        emit(
-            fs,
-            LirInst::StoreField {
-                value: LirOperand::Reg(tag_reg),
-                obj: tmp.to_owned(),
-                name: "tag".to_owned(),
-                idx: 0,
-                span,
-            },
-        );
-        if let Some(payload) = payload {
-            let value = self.eval(fs, payload)?;
-            let layout = self
-                .module
-                .layouts
-                .get(layout_key(&owner))
-                .cloned()
-                .unwrap_or_default();
-            let Some(idx) = layout.iter().position(|(name, _)| name == variant) else {
-                lilac_error::bug!(span, "variant payload without layout entry");
-            };
-            emit(
-                fs,
-                LirInst::StoreField {
-                    value,
-                    obj: tmp.to_owned(),
-                    name: variant.to_owned(),
-                    idx: field_idx(idx, span),
-                    span: payload.span,
-                },
-            );
-        }
-        Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use lilac_error::Diags;
-    use lilac_lex::Lexer;
-    use lilac_parse::Parser;
-    use lilac_span::SourceMap;
-    use lilac_ty::{TypeRef, Types};
-
-    fn lower_src(src: &str) -> (String, Diags) {
-        let mut sm = SourceMap::new();
-        let file = sm.add_file("test.lilac", src);
-        let (tokens, lex_errors) = Lexer::lex_all(src, file);
-        let mut diags = Diags::new();
-        for error in lex_errors {
-            diags.emit(error);
-        }
-        let mut parser = Parser::new(tokens, file);
-        let program = parser
-            .parse_program(&mut diags)
-            .expect("test source parses");
-        let module = lilac_resolve::collect(&program, &mut diags);
-        let project = lilac_resolve::ResolvedProject::single(module, file);
-        let mut types = Types::new();
-        let sigs = lilac_typeck::collect_sigs(&project, &program, &mut types, &mut diags);
-        let hir = lilac_typeck::check_bodies(&program, &project, &sigs, &mut types, &mut diags, 64);
-        let lir = lower(&hir, &project, &types, &mut diags, "x86_64-unknown-none")
-            .expect("test source lowers");
-        (lir.to_text(), diags)
-    }
-
-    #[test]
-    fn lir_ty_maps_float_builtins() {
-        let types = Types::new();
-        for (name, expected) in [
-            ("@fbit16", "#fbit16"),
-            ("@fbit32", "#fbit32"),
-            ("@fbit64", "#fbit64"),
-            ("@fbit128", "#fbit128"),
-        ] {
-            let id = types.builtin(name).expect("has fbit");
-            let ty = TypeRef { id, is_ref: false };
-            assert_eq!(lir_ty(&types, ty), expected, "{name}");
-        }
-    }
-
-    #[test]
-    fn lower_if_produces_branches() {
-        let (text, diags) = lower_src(
-            "main: function () nothing {\n    conditional: @bit32 = 0x0\n    if 0x0 {\n        conditional = 0x1\n    } else {\n        conditional = 0x2\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("branch.if"), "{text}");
-        assert!(text.contains("branch $"), "{text}");
-    }
-
-    #[test]
-    fn lower_unsigned_intrinsics_map_to_unsigned_ops() {
-        let (text, diags) = lower_src(
-            "main: function () nothing {\n    a: @bit32 = 0x8\n    b: @bit32 = 0x2\n    q: @bit32 = @i_div_u_32(a, b)\n    r: @bit32 = @i_mod_u_32(a, b)\n    if @i_less_than_u_32(a, b) {\n        q = 0x1\n    }\n    if @i_greater_than_u_32(a, b) {\n        r = 0x1\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        for op in ["i.div.u", "i.mod.u", "i.cmp.lt.u", "i.cmp.gt.u"] {
-            assert!(text.contains(op), "missing `{op}` in:\n{text}");
-        }
-    }
-
-    #[test]
-    fn lower_multiret_arity() {
-        let (text, diags) = lower_src(
-            "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    condition: @bit32, result: @bit32 = get_multi()\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("call @get_multi"), "{text}");
-        assert!(text.contains("(out "), "{text}");
-    }
-
-    #[test]
-    fn lower_generic_object_instance() {
-        let (text, diags) = lower_src(
-            "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("#GenObject.1..bit32"), "{text}");
-        assert!(text.contains("GenObject.1..bit32.get"), "{text}");
-    }
-
-    #[test]
-    fn lower_method_own_generics_distinct() {
-        let (text, diags) = lower_src(
-            "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("GenObject.1..bit32.get.1..bit32"), "{text}");
-        assert!(text.contains("GenObject.1..bit32.get.1..bit64"), "{text}");
-        // Both specializations share the template `DefId`, so the call site
-        // must resolve its own suffix rather than a def-keyed map that keeps
-        // only the last instance: assert each call target is distinct/correct.
-        assert!(
-            text.contains("call @GenObject.1..bit32.get.1..bit32"),
-            "{text}"
-        );
-        assert!(
-            text.contains("call @GenObject.1..bit32.get.1..bit64"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn lower_structlit_alloca_zeroed() {
-        let (text, diags) = lower_src(
-            "Object: object {\n    member: @bit32\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains(": zeroed"), "{text}");
-        assert!(text.contains(".member"), "{text}");
-    }
-
-    #[test]
-    fn lower_drop_when_on_drop() {
-        let (text, diags) = lower_src(
-            "Object: object {\n    member: @bit32\n    @on_drop: function (from: ref Object) nothing {\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("drop %"), "{text}");
-        // The destructor runs on live memory, so its call precedes the marker
-        // that marks the place destroyed.
-        let call = text.find("call @Object.@on_drop").expect("on_drop call");
-        let drop = text.find("drop %variable").expect("drop marker");
-        assert!(call < drop, "@on_drop must precede drop:\n{text}");
-    }
-
-    #[test]
-    fn drop_emitted_for_instance() {
-        let (text, diags) = lower_src(
-            "GenBox[T]: object {\n    value: T\n    @on_drop: function (from: ref GenBox[T]) nothing {\n    }\n}\n\nmain: function () nothing {\n    box: GenBox[@bit32] = GenBox {\n        value = 0x0\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("drop %"), "{text}");
-        assert!(text.contains("@GenBox.1..bit32.@on_drop"), "{text}");
-        // The destructor runs on live memory, so its call precedes the marker
-        // that marks the place destroyed.
-        let call = text
-            .find("call @GenBox.1..bit32.@on_drop")
-            .expect("on_drop call");
-        let drop = text.find("drop %box").expect("drop marker");
-        assert!(call < drop, "@on_drop must precede drop:\n{text}");
-    }
-
-    #[test]
-    fn lower_no_drop_without_hook() {
-        let (text, diags) = lower_src(
-            "Object: object {\n    member: @bit32\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(!text.contains("drop %"), "{text}");
-    }
-
-    #[test]
-    fn lower_str_emits_data_and_buffer() {
-        let (text, diags) =
-            lower_src("main: function () nothing {\n    s: @byte_buffer = \"hi\"\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("str = \"hi\""), "{text}");
-        assert!(text.contains("#byte_buffer"), "{text}");
-    }
-
-    #[test]
-    fn lower_decimal_emits_const() {
-        let (text, diags) = lower_src("main: function () nothing {\n    x: @bit8 = 5\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("#bit8 = const 5"), "{text}");
-        assert!(!text.contains("numlit ="), "{text}");
-    }
-
-    #[test]
-    fn lower_float_emits_const() {
-        let (text, diags) = lower_src("main: function () nothing {\n    x: @fbit64 = 3.14\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("#fbit64 = const 3.14"), "{text}");
-    }
-
-    #[test]
-    fn lower_hex_stays_const() {
-        let (text, diags) = lower_src("main: function () nothing {\n    x: @bit8 = 0x1\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("#bit8 = const 0x1"), "{text}");
-        assert!(!text.contains("numlit ="), "{text}");
-    }
-
-    #[test]
-    fn lower_builtin_calls() {
-        // The format-args runtime is ordinary LIR now: call sites name the
-        // `.lilac.*` function rather than a value-ABI builtin.
-        let (text, diags) =
-            lower_src("main: function () nothing {\n    x: @format_args = @format_args_new()\n}\n");
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert!(text.contains("call @.lilac.format_args_new"), "{text}");
-    }
-
-    #[test]
-    fn identical_strings_share_one_const() {
-        let (text, diags) = lower_src(
-            "main: function () nothing {\n    a: @byte_buffer = \"hi\"\n    b: @byte_buffer = \"hi\"\n}\n",
-        );
-        assert!(!diags.has_errors(), "{diags:?}");
-        assert_eq!(text.matches("str = \"hi\"").count(), 1, "{text}");
-    }
-}
+mod tests;

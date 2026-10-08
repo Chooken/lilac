@@ -1,4 +1,3 @@
-// pending: phase 4 (conditions convert to `@bit8` through `@conversion`)
 // expect-exit: 1
 
 exit: extern function (code: @bit32) nothing

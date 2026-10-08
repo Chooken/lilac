@@ -11,10 +11,12 @@ function @main
     alloca ref #bit8 %p : zeroed
     alloca ref #bit8 %tmp.1 : zeroed
     alloca #bit64 %tmp.2 : zeroed
+    alloca ref #bit8 %tmp.3 : zeroed
     &1: #bit64 = const 0x10
     copy &1 -> %tmp.2
     call @malloc (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %p
-    call @free (in %p) (out)
+    copy %p -> %tmp.3
+    call @free (in %tmp.3) (out)
     return
 }

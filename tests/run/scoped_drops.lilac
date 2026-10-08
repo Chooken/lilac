@@ -1,4 +1,3 @@
-// pending: phase 5 (drops run only at function exit; locals are function-scoped)
 // expect-stdout: dddd!
 
 putchar: extern function (c: @bit32) result: @bit32
