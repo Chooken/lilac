@@ -51,7 +51,7 @@ Expected: FAIL (`parse_program` returns `Err`).
 
 - [ ] **Step 3: Add the AST node and parser recovery**
 
-Add `ItemKind::Error` to `lilac-ast` and an arm to the walkers. In `parse_program`, push `ItemKind::Error` (span = the failed item's tokens) instead of skipping, keep the existing `synchronize`, and return `Ok(Program { items, span })` unconditionally; delete the `self.failed` flag and its `Err` return. Update every exhaustive `ItemKind` match across the workspace to skip `Error` (no name/def recorded, no diagnostic).
+Add `ItemKind::Error` to `lilac-ast` and an arm to the walkers. In `parse_program`, push `ItemKind::Error` (span = the failed item's tokens) instead of skipping, keep the existing `synchronize`, and return `Ok(Program { items, span })` unconditionally; replace the `self.failed`-gated `Err` return with a parser flag set whenever a construct fails, exposed as `Parser::had_errors()`. Update every exhaustive `ItemKind` match across the workspace to skip `Error` (no name/def recorded, no diagnostic).
 
 - [ ] **Step 4: Run the parser test to verify it passes**
 
@@ -60,7 +60,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Add the session flag and the post-parse strict gate**
 
-Add `retain_partial_analysis: bool` (default `false`) to `Session` (and its `Default`). In `run_pipeline`, immediately after `parse_program`, add: if `self.diags.has_errors() && !self.retain_partial_analysis`, return `Err` — reproducing today's "a parse error stops before `collect`".
+Add `retain_partial_analysis: bool` (default `false`) to `Session` (and its `Default`). In `run_pipeline`, immediately after `parse_program`, add: if `parser.had_errors() && !self.retain_partial_analysis`, return `Err` — reproducing today's "a parse failure stops before `collect`". Gate on `parser.had_errors()`, **not** `has_errors()`: a lex error that still parses must keep today's behavior of running `collect`. `compile_project_with_stages` accumulates the same flag across its per-file parse loop.
 
 - [ ] **Step 6: Write the CLI regression test**
 
@@ -103,7 +103,7 @@ Expected: FAIL (the function becomes an `ItemKind::Error` or the parse aborts).
 
 - [ ] **Step 3: Add the AST nodes and recovery**
 
-Add `Stmt::Error { span }` and `Expr::Error { span }` to `lilac-ast` and the walkers. In the parser, recover at the construct boundaries: a failed statement in `parse_block` becomes `Stmt::Error` and parsing resumes at the next synchronization point; a failed expression in a statement/initializer position becomes `Expr::Error`; a failed `parse_type` yields the poison `Type`. Update every exhaustive `Stmt`/`Expr` match to skip/poison the error nodes.
+Add `Stmt::Error { span }` and `Expr::Error { span }` to `lilac-ast` and the walkers. In the parser, recover at the construct boundaries: a failed statement in `parse_block` becomes `Stmt::Error` and parsing resumes at the next synchronization point; a failed expression in a statement/initializer position becomes `Expr::Error`; a failed `parse_type` yields the poison `Type`. Set the parser's `had_errors` flag on every recovered failure (so strict mode still stops before `collect`, as today). Update every exhaustive `Stmt`/`Expr` match to skip/poison the error nodes.
 
 - [ ] **Step 4: Run the parser tests to verify they pass**
 
@@ -125,8 +125,8 @@ git commit -m "parse: recover broken statements, expressions, and types"
 ### Task 3: Downstream tolerance (resolve, sigs, check_bodies)
 
 **Files:**
-- Modify: `crates/lilac-resolve/src/lib.rs` (skip `ItemKind::Error`; poison an empty-name type without a diagnostic)
-- Modify: `crates/lilac-typeck/src/sigs.rs` (skip error items; poison a signature whose type is poison)
+- Modify: `crates/lilac-resolve/src/lib.rs` (skip `ItemKind::Error` items)
+- Modify: `crates/lilac-typeck/src/sigs.rs` (poison an empty-name type; skip error items; poison a signature whose type is poison)
 - Modify: `crates/lilac-typeck/src/check.rs` (tolerate a reachable def with no usable signature)
 - Test: `crates/lilac-typeck/src/sigs.rs` / `check.rs`, `crates/lilac-resolve/src/lib.rs`
 
@@ -145,7 +145,7 @@ Expected: FAIL (spurious diagnostic, or `bug!` panic).
 
 - [ ] **Step 3: Implement tolerance**
 
-In `lilac-resolve`, skip `ItemKind::Error` items and map an empty-name `Type` to `TypeId::ERROR` with no diagnostic. In `sigs.rs`, skip error items and record a poison-typed signature as `TypeId::ERROR` without a new diagnostic. In `check.rs`, when a reachable definition has no usable signature, poison its body (reuse `HirExprKind::Poison`) and continue instead of `bug!`.
+In `lilac-resolve`, skip `ItemKind::Error` items. In `sigs.rs` — where type names resolve and `E023` is emitted — map an empty-name `Type` to `TypeId::ERROR` with no diagnostic, skip error items, and record a poison-typed signature as `TypeId::ERROR` without a new diagnostic. In `check.rs`, when a reachable definition has no usable signature, poison its body (reuse `HirExprKind::Poison`) and continue instead of `bug!`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
