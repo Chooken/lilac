@@ -115,6 +115,10 @@ impl Backend for LlvmBackend {
 
 #[cfg(test)]
 mod tests {
+    fn t(text: &str) -> lilac_ir::LirTy {
+        lilac_ir::LirTy::parse(text).expect("type spelling")
+    }
+
     use crate as lilac_codegen_llvm;
     use lilac_codegen::{Backend, OptLevel};
     use lilac_ir::{
@@ -141,11 +145,8 @@ mod tests {
     fn type_module() -> LirModule {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.layouts.insert(
-            "#Pair".to_owned(),
-            vec![
-                ("a".to_owned(), "#bit32".to_owned()),
-                ("b".to_owned(), "#bit8".to_owned()),
-            ],
+            "Pair".to_owned(),
+            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
         );
         let allocas = [
             ("p8", "#bit8"),
@@ -161,7 +162,7 @@ mod tests {
         let insts = allocas
             .iter()
             .map(|(place, ty)| LirInst::Alloca {
-                ty: (*ty).to_owned(),
+                ty: t(ty),
                 place: (*place).to_owned(),
                 span: span(),
             })
@@ -169,16 +170,16 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "f".to_owned(),
             ins: vec![
-                ("a".to_owned(), "#bit8".to_owned()),
-                ("b".to_owned(), "#bit16".to_owned()),
-                ("c".to_owned(), "#bit32".to_owned()),
-                ("d".to_owned(), "#bit64".to_owned()),
-                ("e".to_owned(), "#bit_native".to_owned()),
-                ("r".to_owned(), "ref #bit32".to_owned()),
-                ("bb".to_owned(), "#byte_buffer".to_owned()),
-                ("fa".to_owned(), "#format_args".to_owned()),
+                ("a".to_owned(), t("#bit8")),
+                ("b".to_owned(), t("#bit16")),
+                ("c".to_owned(), t("#bit32")),
+                ("d".to_owned(), t("#bit64")),
+                ("e".to_owned(), t("#bit_native")),
+                ("r".to_owned(), t("ref #bit32")),
+                ("bb".to_owned(), t("#byte_buffer")),
+                ("fa".to_owned(), t("#format_args")),
             ],
-            outs: vec![("out".to_owned(), "#bit32".to_owned())],
+            outs: vec![("out".to_owned(), t("#bit32"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -251,11 +252,11 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "write".to_owned(),
             ins: vec![
-                ("fd".to_owned(), "#bit32".to_owned()),
-                ("buf".to_owned(), "ref #bit8".to_owned()),
-                ("n".to_owned(), "#bit_native".to_owned()),
+                ("fd".to_owned(), t("#bit32")),
+                ("buf".to_owned(), t("ref #bit8")),
+                ("n".to_owned(), t("#bit_native")),
             ],
-            outs: vec![("written".to_owned(), "#bit_native".to_owned())],
+            outs: vec![("written".to_owned(), t("#bit_native"))],
             is_extern: true,
             inline: false,
             blocks: Vec::new(),
@@ -273,8 +274,8 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.funcs.push(LirFunc {
             name: "scale".to_owned(),
-            ins: vec![("x".to_owned(), "#fbit64".to_owned())],
-            outs: vec![("out".to_owned(), "#fbit32".to_owned())],
+            ins: vec![("x".to_owned(), t("#fbit64"))],
+            outs: vec![("out".to_owned(), t("#fbit32"))],
             is_extern: true,
             inline: false,
             blocks: Vec::new(),
@@ -285,7 +286,7 @@ mod tests {
         let mut bad = LirModule::new("x86_64-pc-windows-msvc");
         bad.funcs.push(LirFunc {
             name: "puts".to_owned(),
-            ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+            ins: vec![("s".to_owned(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
             inline: false,
@@ -312,11 +313,11 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "write".to_owned(),
             ins: vec![
-                ("fd".to_owned(), "#bit32".to_owned()),
-                ("buf".to_owned(), "ref #bit8".to_owned()),
-                ("n".to_owned(), "#bit_native".to_owned()),
+                ("fd".to_owned(), t("#bit32")),
+                ("buf".to_owned(), t("ref #bit8")),
+                ("n".to_owned(), t("#bit_native")),
             ],
-            outs: vec![("written".to_owned(), "#bit_native".to_owned())],
+            outs: vec![("written".to_owned(), t("#bit_native"))],
             is_extern: true,
             inline: false,
             blocks: Vec::new(),
@@ -333,21 +334,21 @@ mod tests {
         insts.push(LirInst::Const {
             dst: "1".to_owned(),
             lit: "1".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fd");
         insts.push(LirInst::Const {
             dst: "2".to_owned(),
             lit: "!data".to_owned(),
-            ty: "ref #bit8".to_owned(),
+            ty: t("ref #bit8"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("2".to_owned()), "buf");
         insts.push(LirInst::Const {
             dst: "3".to_owned(),
             lit: "2".to_owned(),
-            ty: "#bit_native".to_owned(),
+            ty: t("#bit_native"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("3".to_owned()), "n");
@@ -394,7 +395,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.funcs.push(LirFunc {
             name: "puts".to_owned(),
-            ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+            ins: vec![("s".to_owned(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
             inline: false,
@@ -413,10 +414,7 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "pair".to_owned(),
             ins: Vec::new(),
-            outs: vec![
-                ("a".to_owned(), "#bit32".to_owned()),
-                ("b".to_owned(), "#bit32".to_owned()),
-            ],
+            outs: vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit32"))],
             is_extern: true,
             inline: false,
             blocks: Vec::new(),
@@ -473,7 +471,7 @@ mod tests {
 
     fn alloca(insts: &mut Vec<LirInst>, place: &str, ty: &str) {
         insts.push(LirInst::Alloca {
-            ty: ty.to_owned(),
+            ty: t(ty),
             place: place.to_owned(),
             span: span(),
         });
@@ -493,7 +491,7 @@ mod tests {
             lhs: lhs.to_owned(),
             rhs: rhs.to_owned(),
             dst: dst.to_owned(),
-            ty: ty.to_owned(),
+            ty: t(ty),
             span: span(),
         });
     }
@@ -508,11 +506,11 @@ mod tests {
             name: name.to_owned(),
             ins: ins
                 .iter()
-                .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+                .map(|(place, ty)| ((*place).to_owned(), t(ty)))
                 .collect(),
             outs: outs
                 .iter()
-                .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+                .map(|(place, ty)| ((*place).to_owned(), t(ty)))
                 .collect(),
             is_extern: false,
             inline: false,
@@ -583,11 +581,8 @@ mod tests {
     fn inst_module() -> LirModule {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.layouts.insert(
-            "#Pair".to_owned(),
-            vec![
-                ("a".to_owned(), "#bit32".to_owned()),
-                ("b".to_owned(), "#bit8".to_owned()),
-            ],
+            "Pair".to_owned(),
+            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
         );
         module.data.push(LirData {
             name: "c0".to_owned(),
@@ -613,32 +608,32 @@ mod tests {
         insts.push(LirInst::Const {
             dst: "c".to_owned(),
             lit: "0x2a".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         insts.push(LirInst::Const {
             dst: "dec".to_owned(),
             lit: "7".to_owned(),
-            ty: "#bit8".to_owned(),
+            ty: t("#bit8"),
             span: span(),
         });
 
         insts.push(LirInst::Const {
             dst: "bb".to_owned(),
             lit: "!c0".to_owned(),
-            ty: "#byte_buffer".to_owned(),
+            ty: t("#byte_buffer"),
             span: span(),
         });
         insts.push(LirInst::Addr {
             place: "x".to_owned(),
             dst: "ad".to_owned(),
-            ty: "ref #bit32".to_owned(),
+            ty: t("ref #bit32"),
             span: span(),
         });
         insts.push(LirInst::AddrFunc {
             func: "f".to_owned(),
             dst: "af".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
 
@@ -651,19 +646,19 @@ mod tests {
         insts.push(LirInst::CopyReg {
             src: LirOperand::Place("x".to_owned()),
             dst: "cr".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         insts.push(LirInst::Load {
             src: "r".to_owned(),
             dst: "ld".to_owned(),
-            ty: "ref #bit32".to_owned(),
+            ty: t("ref #bit32"),
             span: span(),
         });
         insts.push(LirInst::Load {
             src: "fslot".to_owned(),
             dst: "fcr".to_owned(),
-            ty: "#fbit32".to_owned(),
+            ty: t("#fbit32"),
             span: span(),
         });
         insts.push(LirInst::Field {
@@ -671,7 +666,7 @@ mod tests {
             name: "a".to_owned(),
             idx: 0,
             dst: "fa".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         insts.push(LirInst::FieldAddr {
@@ -679,7 +674,7 @@ mod tests {
             name: "a".to_owned(),
             idx: 0,
             dst: "fad".to_owned(),
-            ty: "ref #bit32".to_owned(),
+            ty: t("ref #bit32"),
             span: span(),
         });
         insts.push(LirInst::StoreField {
@@ -698,14 +693,14 @@ mod tests {
             op: ConvertOp::Trunc,
             src: "cr".to_owned(),
             dst: "t".to_owned(),
-            ty: "#bit8".to_owned(),
+            ty: t("#bit8"),
             span: span(),
         });
         insts.push(LirInst::Convert {
             op: ConvertOp::ExtendZero,
             src: "t".to_owned(),
             dst: "z".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
 
@@ -744,8 +739,8 @@ mod tests {
 
         module.funcs.push(LirFunc {
             name: "f".to_owned(),
-            ins: vec![("p".to_owned(), "ref #bit32".to_owned())],
-            outs: vec![("o".to_owned(), "#bit32".to_owned())],
+            ins: vec![("p".to_owned(), t("ref #bit32"))],
+            outs: vec![("o".to_owned(), t("#bit32"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -804,11 +799,8 @@ mod tests {
     fn field_through_ref_loads_reference_first() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.layouts.insert(
-            "#Pair".to_owned(),
-            vec![
-                ("a".to_owned(), "#bit32".to_owned()),
-                ("b".to_owned(), "#bit8".to_owned()),
-            ],
+            "Pair".to_owned(),
+            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
         );
         let insts = vec![
             LirInst::Field {
@@ -816,7 +808,7 @@ mod tests {
                 name: "a".to_owned(),
                 idx: 0,
                 dst: "v".to_owned(),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span: span(),
             },
             LirInst::CopyPlace {
@@ -827,8 +819,8 @@ mod tests {
         ];
         module.funcs.push(LirFunc {
             name: "g".to_owned(),
-            ins: vec![("rp".to_owned(), "ref #Pair".to_owned())],
-            outs: vec![("o".to_owned(), "#bit32".to_owned())],
+            ins: vec![("rp".to_owned(), t("ref #Pair"))],
+            outs: vec![("o".to_owned(), t("#bit32"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -902,7 +894,7 @@ mod tests {
         insts.push(LirInst::AddrFunc {
             func: "later".to_owned(),
             dst: "1".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fptr");
@@ -939,14 +931,14 @@ mod tests {
         insts.push(LirInst::AddrFunc {
             func: "addOne".to_owned(),
             dst: "1".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "add");
         insts.push(LirInst::CopyReg {
             src: LirOperand::Place("add".to_owned()),
             dst: "3".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
         call(
@@ -1210,7 +1202,7 @@ mod tests {
         entry.push(LirInst::CopyReg {
             src: LirOperand::Place("c".to_owned()),
             dst: "1".to_owned(),
-            ty: "#bit8".to_owned(),
+            ty: t("#bit8"),
             span: span(),
         });
         let entry = LirBlock {
@@ -1264,7 +1256,7 @@ mod tests {
         entry.push(LirInst::CopyReg {
             src: LirOperand::Place("c".to_owned()),
             dst: "1".to_owned(),
-            ty: "#bit8".to_owned(),
+            ty: t("#bit8"),
             span: span(),
         });
         let entry = LirBlock {
@@ -1371,7 +1363,7 @@ mod tests {
                 insts: vec![LirInst::Const {
                     dst: "x".to_owned(),
                     lit: "!c0".to_owned(),
-                    ty: "#format_args".to_owned(),
+                    ty: t("#format_args"),
                     span: span(),
                 }],
                 term: LirTerm::Return { span: span() },
@@ -1388,17 +1380,7 @@ mod tests {
         let module = context.create_module("ice");
         let lir = LirModule::new("x86_64-pc-windows-msvc");
         let lower = crate::lower::Lower::new(&context, module, &lir, true);
-        let _ = lower.lir_type("#bogus");
-    }
-
-    #[test]
-    #[should_panic(expected = "data-only type")]
-    fn data_only_type_is_ice() {
-        let context = inkwell::context::Context::create();
-        let module = context.create_module("ice");
-        let lir = LirModule::new("x86_64-pc-windows-msvc");
-        let lower = crate::lower::Lower::new(&context, module, &lir, true);
-        let _ = lower.lir_type("#str");
+        let _ = lower.lir_type(&t("#bogus"));
     }
 
     #[test]
@@ -1414,7 +1396,7 @@ mod tests {
             ("#fbit128", "fp128"),
         ] {
             assert_eq!(
-                lower.lir_type(ty).print_to_string().to_string(),
+                lower.lir_type(&t(ty)).print_to_string().to_string(),
                 expected,
                 "{ty}"
             );
@@ -1428,14 +1410,14 @@ mod tests {
             LirInst::CopyReg {
                 src: LirOperand::Place("x".to_owned()),
                 dst: "r0".to_owned(),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span: span(),
             },
             LirInst::Convert {
                 op: ConvertOp::Bitcast,
                 src: "r0".to_owned(),
                 dst: "r1".to_owned(),
-                ty: "#fbit32".to_owned(),
+                ty: t("#fbit32"),
                 span: span(),
             },
             LirInst::CopyPlace {
@@ -1446,8 +1428,8 @@ mod tests {
         ];
         module.funcs.push(LirFunc {
             name: "cast".to_owned(),
-            ins: vec![("x".to_owned(), "#bit32".to_owned())],
-            outs: vec![("out".to_owned(), "#fbit32".to_owned())],
+            ins: vec![("x".to_owned(), t("#bit32"))],
+            outs: vec![("out".to_owned(), t("#fbit32"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -1471,13 +1453,13 @@ mod tests {
             LirInst::CopyReg {
                 src: LirOperand::Place("a".to_owned()),
                 dst: "r0".to_owned(),
-                ty: "#fbit32".to_owned(),
+                ty: t("#fbit32"),
                 span: span(),
             },
             LirInst::CopyReg {
                 src: LirOperand::Place("b".to_owned()),
                 dst: "r1".to_owned(),
-                ty: "#fbit32".to_owned(),
+                ty: t("#fbit32"),
                 span: span(),
             },
             LirInst::Arith {
@@ -1485,7 +1467,7 @@ mod tests {
                 lhs: "r0".to_owned(),
                 rhs: "r1".to_owned(),
                 dst: "r2".to_owned(),
-                ty: "#bit8".to_owned(),
+                ty: t("#bit8"),
                 span: span(),
             },
             LirInst::CopyPlace {
@@ -1497,10 +1479,10 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "feq".to_owned(),
             ins: vec![
-                ("a".to_owned(), "#fbit32".to_owned()),
-                ("b".to_owned(), "#fbit32".to_owned()),
+                ("a".to_owned(), t("#fbit32")),
+                ("b".to_owned(), t("#fbit32")),
             ],
-            outs: vec![("out".to_owned(), "#bit8".to_owned())],
+            outs: vec![("out".to_owned(), t("#bit8"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -1606,10 +1588,9 @@ mod tests {
     #[test]
     fn coerces_value_argument_to_ref_parameter() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.layouts.insert(
-            "#Pair".to_owned(),
-            vec![("a".to_owned(), "#bit32".to_owned())],
-        );
+        module
+            .layouts
+            .insert("Pair".to_owned(), vec![("a".to_owned(), t("#bit32"))]);
         module.funcs.push(func(
             "hook",
             &[("from", "ref #Pair")],
@@ -1648,7 +1629,7 @@ mod tests {
         insts.push(LirInst::AddrFunc {
             func: "main".to_owned(),
             dst: "1".to_owned(),
-            ty: "#bit64".to_owned(),
+            ty: t("#bit64"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("1".to_owned()), "fptr");
@@ -1678,20 +1659,20 @@ mod tests {
         insts.push(LirInst::Const {
             dst: "one".to_owned(),
             lit: "1".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         copy_place(&mut insts, LirOperand::Reg("one".to_owned()), "a");
         insts.push(LirInst::CopyReg {
             src: LirOperand::Place("a".to_owned()),
             dst: "ra".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         insts.push(LirInst::CopyReg {
             src: LirOperand::Place("a".to_owned()),
             dst: "rb".to_owned(),
-            ty: "#bit32".to_owned(),
+            ty: t("#bit32"),
             span: span(),
         });
         arith(&mut insts, ArithOp::IAdd, "ra", "rb", "sum", "#bit32");

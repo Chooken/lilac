@@ -11,7 +11,7 @@
 
 use lilac_span::Span;
 
-use crate::{ArithOp, LirBlock, LirCallee, LirFunc, LirInst, LirOperand, LirTerm};
+use crate::{ArithOp, LirBlock, LirCallee, LirFunc, LirInst, LirOperand, LirTerm, LirTy};
 
 /// Builds the runtime prelude for a target with `ptr_size`-byte pointers.
 ///
@@ -40,32 +40,32 @@ fn span() -> Span {
     Span::dummy()
 }
 
-fn alloca(ty: &str, place: &str) -> LirInst {
+fn alloca(ty: LirTy, place: &str) -> LirInst {
     LirInst::Alloca {
-        ty: ty.to_owned(),
+        ty,
         place: place.to_owned(),
         span: span(),
     }
 }
 
-fn field(obj: &str, name: &str, idx: u32, dst: &str, ty: &str) -> LirInst {
+fn field(obj: &str, name: &str, idx: u32, dst: &str, ty: LirTy) -> LirInst {
     LirInst::Field {
         obj: obj.to_owned(),
         name: name.to_owned(),
         idx,
         dst: dst.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
 
-fn field_addr(obj: &str, name: &str, idx: u32, dst: &str, ty: &str) -> LirInst {
+fn field_addr(obj: &str, name: &str, idx: u32, dst: &str, ty: LirTy) -> LirInst {
     LirInst::FieldAddr {
         obj: obj.to_owned(),
         name: name.to_owned(),
         idx,
         dst: dst.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
@@ -96,40 +96,40 @@ fn copy_place(src: LirOperand, dst: &str) -> LirInst {
     }
 }
 
-fn copy_reg(src: LirOperand, dst: &str, ty: &str) -> LirInst {
+fn copy_reg(src: LirOperand, dst: &str, ty: LirTy) -> LirInst {
     LirInst::CopyReg {
         src,
         dst: dst.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
 
-fn load(src: &str, dst: &str, ty: &str) -> LirInst {
+fn load(src: &str, dst: &str, ty: LirTy) -> LirInst {
     LirInst::Load {
         src: src.to_owned(),
         dst: dst.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
 
-fn constant(dst: &str, lit: &str, ty: &str) -> LirInst {
+fn constant(dst: &str, lit: &str, ty: LirTy) -> LirInst {
     LirInst::Const {
         dst: dst.to_owned(),
         lit: lit.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
 
-fn arith(op: ArithOp, lhs: &str, rhs: &str, dst: &str, ty: &str) -> LirInst {
+fn arith(op: ArithOp, lhs: &str, rhs: &str, dst: &str, ty: LirTy) -> LirInst {
     LirInst::Arith {
         op,
         lhs: lhs.to_owned(),
         rhs: rhs.to_owned(),
         dst: dst.to_owned(),
-        ty: ty.to_owned(),
+        ty,
         span: span(),
     }
 }
@@ -178,19 +178,19 @@ fn branch_if(cond: &str, then: &str, els: &str) -> LirTerm {
 
 fn lir_func(
     name: &str,
-    ins: &[(&str, &str)],
-    outs: &[(&str, &str)],
+    ins: &[(&str, LirTy)],
+    outs: &[(&str, LirTy)],
     blocks: Vec<LirBlock>,
 ) -> LirFunc {
     LirFunc {
         name: name.to_owned(),
         ins: ins
             .iter()
-            .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+            .map(|(place, ty)| ((*place).to_owned(), ty.clone()))
             .collect(),
         outs: outs
             .iter()
-            .map(|(place, ty)| ((*place).to_owned(), (*ty).to_owned()))
+            .map(|(place, ty)| ((*place).to_owned(), ty.clone()))
             .collect(),
         is_extern: false,
         inline: false,
@@ -202,12 +202,12 @@ fn lir_func(
 fn byte_buffer_from() -> LirFunc {
     lir_func(
         ".lilac.byte_buffer_from",
-        &[("data", "ref #bit8"), ("len", "#bit_native")],
-        &[("out", "#byte_buffer")],
+        &[("data", LirTy::byte_ref()), ("len", LirTy::BitNative)],
+        &[("out", LirTy::byte_buffer())],
         vec![block(
             "entry",
             vec![
-                alloca("#byte_buffer", "tmp"),
+                alloca(LirTy::byte_buffer(), "tmp"),
                 store_field(LirOperand::Place("len".to_owned()), "tmp", "len", 0),
                 store_field(LirOperand::Place("data".to_owned()), "tmp", "data", 1),
                 copy_place(LirOperand::Place("tmp".to_owned()), "out"),
@@ -221,12 +221,12 @@ fn byte_buffer_from() -> LirFunc {
 fn byte_buffer_ptr() -> LirFunc {
     lir_func(
         ".lilac.byte_buffer_ptr",
-        &[("buffer", "#byte_buffer")],
-        &[("out", "ref #bit8")],
+        &[("buffer", LirTy::byte_buffer())],
+        &[("out", LirTy::byte_ref())],
         vec![block(
             "entry",
             vec![
-                field("buffer", "data", 1, "r", "ref #bit8"),
+                field("buffer", "data", 1, "r", LirTy::byte_ref()),
                 copy_place(LirOperand::Reg("r".to_owned()), "out"),
             ],
             ret(),
@@ -238,12 +238,12 @@ fn byte_buffer_ptr() -> LirFunc {
 fn byte_buffer_len() -> LirFunc {
     lir_func(
         ".lilac.byte_buffer_len",
-        &[("buffer", "#byte_buffer")],
-        &[("out", "#bit_native")],
+        &[("buffer", LirTy::byte_buffer())],
+        &[("out", LirTy::BitNative)],
         vec![block(
             "entry",
             vec![
-                field("buffer", "len", 0, "r", "#bit_native"),
+                field("buffer", "len", 0, "r", LirTy::BitNative),
                 copy_place(LirOperand::Reg("r".to_owned()), "out"),
             ],
             ret(),
@@ -258,14 +258,14 @@ fn byte_buffer_len() -> LirFunc {
 fn load_u8() -> LirFunc {
     lir_func(
         ".lilac.load_u8",
-        &[("base", "ref #bit8"), ("index", "#bit_native")],
-        &[("out", "#bit8")],
+        &[("base", LirTy::byte_ref()), ("index", LirTy::BitNative)],
+        &[("out", LirTy::Bit(8))],
         vec![block(
             "entry",
             vec![
-                alloca("ref #bit8", "slot"),
+                alloca(LirTy::byte_ref(), "slot"),
                 call_builtin("@ptr_add", &["base", "index"], &["slot"]),
-                load("slot", "r", "#bit8"),
+                load("slot", "r", LirTy::Bit(8)),
                 copy_place(LirOperand::Reg("r".to_owned()), "out"),
             ],
             ret(),
@@ -281,15 +281,15 @@ fn store_u8() -> LirFunc {
     lir_func(
         ".lilac.store_u8",
         &[
-            ("base", "ref #bit8"),
-            ("index", "#bit_native"),
-            ("value", "#bit8"),
+            ("base", LirTy::byte_ref()),
+            ("index", LirTy::BitNative),
+            ("value", LirTy::Bit(8)),
         ],
         &[],
         vec![block(
             "entry",
             vec![
-                alloca("ref #bit8", "slot"),
+                alloca(LirTy::byte_ref(), "slot"),
                 call_builtin("@ptr_add", &["base", "index"], &["slot"]),
                 store(LirOperand::Place("value".to_owned()), "slot"),
             ],
@@ -303,11 +303,11 @@ fn format_args_new() -> LirFunc {
     lir_func(
         ".lilac.format_args_new",
         &[],
-        &[("out", "#format_args")],
+        &[("out", LirTy::format_args())],
         vec![block(
             "entry",
             vec![
-                alloca("#format_args", "tmp"),
+                alloca(LirTy::format_args(), "tmp"),
                 copy_place(LirOperand::Place("tmp".to_owned()), "out"),
             ],
             ret(),
@@ -321,36 +321,39 @@ fn format_args_new() -> LirFunc {
 fn format_args_push(stride: &str) -> LirFunc {
     lir_func(
         ".lilac.format_args_push",
-        &[("table", "ref #format_args"), ("piece", "#byte_buffer")],
+        &[
+            ("table", LirTy::format_args().to_ref()),
+            ("piece", LirTy::byte_buffer()),
+        ],
         &[],
         vec![
             block(
                 "entry",
                 vec![
-                    field("table", "count", 0, "c", "#bit_native"),
-                    constant("cap", "0x10", "#bit_native"),
-                    arith(ArithOp::ILtU, "c", "cap", "ok", "#bit8"),
+                    field("table", "count", 0, "c", LirTy::BitNative),
+                    constant("cap", "0x10", LirTy::BitNative),
+                    arith(ArithOp::ILtU, "c", "cap", "ok", LirTy::Bit(8)),
                 ],
                 branch_if("ok", "append", "done"),
             ),
             block(
                 "append",
                 vec![
-                    field("table", "count", 0, "c", "#bit_native"),
-                    field_addr("table", "p0", 1, "p0", "ref #byte_buffer"),
-                    alloca("ref #bit8", "base"),
+                    field("table", "count", 0, "c", LirTy::BitNative),
+                    field_addr("table", "p0", 1, "p0", LirTy::byte_buffer().to_ref()),
+                    alloca(LirTy::byte_ref(), "base"),
                     copy_place(LirOperand::Reg("p0".to_owned()), "base"),
-                    constant("stride", stride, "#bit_native"),
-                    arith(ArithOp::IMul, "c", "stride", "off", "#bit_native"),
-                    alloca("#bit_native", "offp"),
+                    constant("stride", stride, LirTy::BitNative),
+                    arith(ArithOp::IMul, "c", "stride", "off", LirTy::BitNative),
+                    alloca(LirTy::BitNative, "offp"),
                     copy_place(LirOperand::Reg("off".to_owned()), "offp"),
-                    alloca("ref #bit8", "slot"),
+                    alloca(LirTy::byte_ref(), "slot"),
                     call_builtin("@ptr_add", &["base", "offp"], &["slot"]),
-                    alloca("ref #byte_buffer", "s"),
+                    alloca(LirTy::byte_buffer().to_ref(), "s"),
                     copy_place(LirOperand::Place("slot".to_owned()), "s"),
                     store(LirOperand::Place("piece".to_owned()), "s"),
-                    constant("one", "0x1", "#bit_native"),
-                    arith(ArithOp::IAdd, "c", "one", "n", "#bit_native"),
+                    constant("one", "0x1", LirTy::BitNative),
+                    arith(ArithOp::IAdd, "c", "one", "n", LirTy::BitNative),
                     store_field(LirOperand::Reg("n".to_owned()), "table", "count", 0),
                 ],
                 branch("done"),
@@ -364,12 +367,12 @@ fn format_args_push(stride: &str) -> LirFunc {
 fn format_args_count() -> LirFunc {
     lir_func(
         ".lilac.format_args_count",
-        &[("table", "#format_args")],
-        &[("out", "#bit_native")],
+        &[("table", LirTy::format_args())],
+        &[("out", LirTy::BitNative)],
         vec![block(
             "entry",
             vec![
-                field("table", "count", 0, "r", "#bit_native"),
+                field("table", "count", 0, "r", LirTy::BitNative),
                 copy_place(LirOperand::Reg("r".to_owned()), "out"),
             ],
             ret(),
@@ -384,15 +387,19 @@ fn format_args_count() -> LirFunc {
 fn format_args_piece(stride: &str) -> LirFunc {
     lir_func(
         ".lilac.format_args_piece",
-        &[("table", "#format_args"), ("index", "#bit_native")],
-        &[("out", "#byte_buffer")],
+        &[("table", LirTy::format_args()), ("index", LirTy::BitNative)],
+        &[("out", LirTy::byte_buffer())],
         vec![
             block(
                 "entry",
                 vec![
-                    field("table", "count", 0, "c", "#bit_native"),
-                    copy_reg(LirOperand::Place("index".to_owned()), "idx", "#bit_native"),
-                    arith(ArithOp::ILtU, "idx", "c", "ok", "#bit8"),
+                    field("table", "count", 0, "c", LirTy::BitNative),
+                    copy_reg(
+                        LirOperand::Place("index".to_owned()),
+                        "idx",
+                        LirTy::BitNative,
+                    ),
+                    arith(ArithOp::ILtU, "idx", "c", "ok", LirTy::Bit(8)),
                 ],
                 branch_if("ok", "load", "trap"),
             ),
@@ -404,19 +411,23 @@ fn format_args_piece(stride: &str) -> LirFunc {
             block(
                 "load",
                 vec![
-                    copy_reg(LirOperand::Place("index".to_owned()), "idx", "#bit_native"),
-                    field_addr("table", "p0", 1, "p0", "ref #byte_buffer"),
-                    alloca("ref #bit8", "base"),
+                    copy_reg(
+                        LirOperand::Place("index".to_owned()),
+                        "idx",
+                        LirTy::BitNative,
+                    ),
+                    field_addr("table", "p0", 1, "p0", LirTy::byte_buffer().to_ref()),
+                    alloca(LirTy::byte_ref(), "base"),
                     copy_place(LirOperand::Reg("p0".to_owned()), "base"),
-                    constant("stride", stride, "#bit_native"),
-                    arith(ArithOp::IMul, "idx", "stride", "off", "#bit_native"),
-                    alloca("#bit_native", "offp"),
+                    constant("stride", stride, LirTy::BitNative),
+                    arith(ArithOp::IMul, "idx", "stride", "off", LirTy::BitNative),
+                    alloca(LirTy::BitNative, "offp"),
                     copy_place(LirOperand::Reg("off".to_owned()), "offp"),
-                    alloca("ref #bit8", "slot"),
+                    alloca(LirTy::byte_ref(), "slot"),
                     call_builtin("@ptr_add", &["base", "offp"], &["slot"]),
-                    alloca("ref #byte_buffer", "s"),
+                    alloca(LirTy::byte_buffer().to_ref(), "s"),
                     copy_place(LirOperand::Place("slot".to_owned()), "s"),
-                    load("s", "v", "#byte_buffer"),
+                    load("s", "v", LirTy::byte_buffer()),
                     copy_place(LirOperand::Reg("v".to_owned()), "out"),
                 ],
                 ret(),
@@ -515,7 +526,7 @@ mod tests {
                     .flat_map(|b| &b.insts)
                     .filter_map(|inst| match inst {
                         LirInst::Const { dst, lit, ty, .. }
-                            if dst == "stride" && ty == "#bit_native" =>
+                            if dst == "stride" && *ty == crate::LirTy::BitNative =>
                         {
                             Some(lit.clone())
                         }

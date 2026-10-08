@@ -14,7 +14,7 @@ use lilac_span::{BytePos, FileId, Span};
 
 use crate::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm,
+    LirTerm, LirTy,
 };
 
 /// Wire-format version; bump on any normative codec change.
@@ -88,6 +88,11 @@ fn put_str(w: &mut impl Write, text: &str) -> io::Result<()> {
     w.write_all(text.as_bytes())
 }
 
+/// Writes a type as its text spelling.
+fn put_ty(w: &mut impl Write, ty: &LirTy) -> io::Result<()> {
+    put_str(w, &ty.to_string())
+}
+
 /// Writes a [`Span`] as `file`, `lo`, `hi`.
 fn put_span(w: &mut impl Write, span: Span) -> io::Result<()> {
     put_u32(w, span.file.0)?;
@@ -105,11 +110,11 @@ fn put_strings(w: &mut impl Write, items: &[String]) -> io::Result<()> {
 }
 
 /// Writes a length-prefixed sequence of `(name, type)` pairs.
-fn put_pairs(w: &mut impl Write, pairs: &[(String, String)]) -> io::Result<()> {
+fn put_pairs(w: &mut impl Write, pairs: &[(String, LirTy)]) -> io::Result<()> {
     put_len(w, pairs.len())?;
     for (name, ty) in pairs {
         put_str(w, name)?;
-        put_str(w, ty)?;
+        put_ty(w, ty)?;
     }
     Ok(())
 }
@@ -209,7 +214,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_u8(w, 0)?;
             put_operand(w, src)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::CopyPlace { src, dst, span } => {
@@ -222,14 +227,14 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_u8(w, 2)?;
             put_str(w, dst)?;
             put_str(w, lit)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::Load { src, dst, ty, span } => {
             put_u8(w, 3)?;
             put_str(w, src)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::Addr {
@@ -241,7 +246,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_u8(w, 4)?;
             put_str(w, place)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::AddrFunc {
@@ -253,7 +258,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_u8(w, 5)?;
             put_str(w, func)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::Call {
@@ -281,7 +286,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_str(w, name)?;
             put_u32(w, *idx)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::StoreField {
@@ -315,7 +320,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_convert(w, op)?;
             put_str(w, src)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::FieldAddr {
@@ -331,12 +336,12 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_str(w, name)?;
             put_u32(w, *idx)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::Alloca { ty, place, span } => {
             put_u8(w, 12)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_str(w, place)?;
             put_span(w, *span)
         }
@@ -358,7 +363,7 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_str(w, lhs)?;
             put_str(w, rhs)?;
             put_str(w, dst)?;
-            put_str(w, ty)?;
+            put_ty(w, ty)?;
             put_span(w, *span)
         }
         LirInst::CompileError {
@@ -509,13 +514,18 @@ fn get_strings(r: &mut impl Read) -> Result<Vec<String>, CodecError> {
     Ok(items)
 }
 
+/// Reads a type from its text spelling.
+fn get_ty(r: &mut impl Read) -> Result<LirTy, CodecError> {
+    LirTy::parse(&get_str(r)?).ok_or(CodecError::Malformed("invalid type spelling"))
+}
+
 /// Reads a length-prefixed sequence of `(name, type)` pairs.
-fn get_pairs(r: &mut impl Read) -> Result<Vec<(String, String)>, CodecError> {
+fn get_pairs(r: &mut impl Read) -> Result<Vec<(String, LirTy)>, CodecError> {
     let count = get_len(r)?;
     let mut pairs = Vec::new();
     for _ in 0..count {
         let name = get_str(r)?;
-        let ty = get_str(r)?;
+        let ty = get_ty(r)?;
         pairs.push((name, ty));
     }
     Ok(pairs)
@@ -606,7 +616,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
         0 => {
             let src = get_operand(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::CopyReg { src, dst, ty, span })
         }
@@ -619,21 +629,21 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
         2 => {
             let dst = get_str(r)?;
             let lit = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Const { dst, lit, ty, span })
         }
         3 => {
             let src = get_str(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Load { src, dst, ty, span })
         }
         4 => {
             let place = get_str(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Addr {
                 place,
@@ -645,7 +655,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
         5 => {
             let func = get_str(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::AddrFunc {
                 func,
@@ -671,7 +681,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             let name = get_str(r)?;
             let idx = get_u32(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Field {
                 obj,
@@ -706,7 +716,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             let op = get_convert(r)?;
             let src = get_str(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Convert {
                 op,
@@ -721,7 +731,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             let name = get_str(r)?;
             let idx = get_u32(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::FieldAddr {
                 obj,
@@ -733,7 +743,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             })
         }
         12 => {
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let place = get_str(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Alloca { ty, place, span })
@@ -748,7 +758,7 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             let lhs = get_str(r)?;
             let rhs = get_str(r)?;
             let dst = get_str(r)?;
-            let ty = get_str(r)?;
+            let ty = get_ty(r)?;
             let span = get_span(r)?;
             Ok(LirInst::Arith {
                 op,
@@ -975,6 +985,10 @@ impl Write for Fnv64 {
 
 #[cfg(test)]
 mod tests {
+    fn t(text: &str) -> crate::LirTy {
+        crate::LirTy::parse(text).expect("type spelling")
+    }
+
     use super::*;
     use crate::tests::canonical_module;
     use crate::{
@@ -990,10 +1004,10 @@ mod tests {
             span: Span::dummy(),
         });
         module.layouts.insert(
-            "#Number".to_owned(),
+            "Number".to_owned(),
             vec![
-                ("tag".to_owned(), "#bit8".to_owned()),
-                ("val".to_owned(), "#bit32".to_owned()),
+                ("tag".to_owned(), t("#bit8")),
+                ("val".to_owned(), t("#bit32")),
             ],
         );
         module
@@ -1012,8 +1026,8 @@ mod tests {
     fn hash_is_stable_and_layout_order_independent() {
         let a = sample();
         let mut b = sample();
-        b.layouts.insert("#Extra".to_owned(), Vec::new());
-        b.layouts.remove("#Extra");
+        b.layouts.insert("Extra".to_owned(), Vec::new());
+        b.layouts.remove("Extra");
         assert_eq!(a.content_hash(), b.content_hash());
         assert_eq!(a.content_hash(), a.content_hash());
     }
@@ -1028,7 +1042,7 @@ mod tests {
             LirInst::CopyReg {
                 src: LirOperand::Reg("r0".to_owned()),
                 dst: "r1".to_owned(),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span,
             },
             LirInst::CopyPlace {
@@ -1039,25 +1053,25 @@ mod tests {
             LirInst::Const {
                 dst: "r2".to_owned(),
                 lit: "!d0".to_owned(),
-                ty: "#byte_buffer".to_owned(),
+                ty: t("#byte_buffer"),
                 span,
             },
             LirInst::Load {
                 src: "p1".to_owned(),
                 dst: "r3".to_owned(),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span,
             },
             LirInst::Addr {
                 place: "p1".to_owned(),
                 dst: "r4".to_owned(),
-                ty: "ref #bit32".to_owned(),
+                ty: t("ref #bit32"),
                 span,
             },
             LirInst::AddrFunc {
                 func: "f1".to_owned(),
                 dst: "r5".to_owned(),
-                ty: "ref #bit32".to_owned(),
+                ty: t("ref #bit32"),
                 span,
             },
             LirInst::Call {
@@ -1083,7 +1097,7 @@ mod tests {
                 name: "x".to_owned(),
                 idx: 3,
                 dst: "r6".to_owned(),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span,
             },
             LirInst::StoreField {
@@ -1102,21 +1116,21 @@ mod tests {
                 op: ConvertOp::Trunc,
                 src: "r0".to_owned(),
                 dst: "r7".to_owned(),
-                ty: "#bit8".to_owned(),
+                ty: t("#bit8"),
                 span,
             },
             LirInst::Convert {
                 op: ConvertOp::ExtendZero,
                 src: "r0".to_owned(),
                 dst: "r8".to_owned(),
-                ty: "#bit64".to_owned(),
+                ty: t("#bit64"),
                 span,
             },
             LirInst::Convert {
                 op: ConvertOp::Bitcast,
                 src: "r0".to_owned(),
                 dst: "r8b".to_owned(),
-                ty: "#fbit32".to_owned(),
+                ty: t("#fbit32"),
                 span,
             },
             LirInst::FieldAddr {
@@ -1124,11 +1138,11 @@ mod tests {
                 name: "x".to_owned(),
                 idx: 3,
                 dst: "r9".to_owned(),
-                ty: "ref #bit32".to_owned(),
+                ty: t("ref #bit32"),
                 span,
             },
             LirInst::Alloca {
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 place: "p2".to_owned(),
                 span,
             },
@@ -1166,7 +1180,7 @@ mod tests {
                 lhs: "r0".to_owned(),
                 rhs: "r1".to_owned(),
                 dst: format!("a{i}"),
-                ty: "#bit32".to_owned(),
+                ty: t("#bit32"),
                 span,
             });
         }
@@ -1248,17 +1262,17 @@ mod tests {
         });
         module.funcs.push(LirFunc {
             name: "all".to_owned(),
-            ins: vec![("p0".to_owned(), "#bit32".to_owned())],
-            outs: vec![("p1".to_owned(), "ref #bit32".to_owned())],
+            ins: vec![("p0".to_owned(), t("#bit32"))],
+            outs: vec![("p1".to_owned(), t("ref #bit32"))],
             is_extern: false,
             inline: false,
             blocks,
         });
         module.layouts.insert(
-            "#Number".to_owned(),
+            "Number".to_owned(),
             vec![
-                ("tag".to_owned(), "#bit8".to_owned()),
-                ("val".to_owned(), "#bit32".to_owned()),
+                ("tag".to_owned(), t("#bit8")),
+                ("val".to_owned(), t("#bit32")),
             ],
         );
         module

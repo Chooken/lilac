@@ -28,7 +28,7 @@ use lilac_hir::{
 };
 use lilac_ir::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm,
+    LirTerm, LirTy,
 };
 use lilac_resolve::{DefKind, Resolved};
 use lilac_span::Span;
@@ -83,7 +83,7 @@ pub fn lower(
                 fields
             }
         };
-        lower.module.layouts.insert(format!("#{name}"), fields);
+        lower.module.layouts.insert(name, fields);
     }
     for func in &hir.funcs {
         let lowered = lower.lower_func(func);
@@ -215,8 +215,8 @@ struct Scope {
 
 /// Per-function emission state.
 struct Fs {
-    ins: Vec<(String, String)>,
-    outs: Vec<(String, String)>,
+    ins: Vec<(String, LirTy)>,
+    outs: Vec<(String, LirTy)>,
     blocks: Vec<LirBlock>,
     label: String,
     insts: Vec<LirInst>,
@@ -231,14 +231,14 @@ struct Fs {
     /// Hoisted entry-block allocations.
     allocas: Vec<LirInst>,
     /// Place types.
-    place_tys: HashMap<String, String>,
+    place_tys: HashMap<String, LirTy>,
     scopes: Vec<Scope>,
     /// `(exit label, scope depth)` per enclosing loop.
     loops: Vec<(String, usize)>,
 }
 
 impl Fs {
-    fn tmp_lir(&mut self, lir: String, span: Span) -> String {
+    fn tmp_lir(&mut self, lir: LirTy, span: Span) -> String {
         self.tmps += 1;
         let place = format!("tmp.{}", self.tmps);
         self.used.insert(place.clone());
@@ -246,7 +246,7 @@ impl Fs {
         place
     }
 
-    fn read_place(&mut self, place: &Place, lir: &str, span: Span) -> LirOperand {
+    fn read_place(&mut self, place: &Place, lir: &LirTy, span: Span) -> LirOperand {
         match place {
             Place::Direct(name) => LirOperand::Place(name.clone()),
             Place::Indirect(name) => {
@@ -254,7 +254,7 @@ impl Fs {
                 self.emit(LirInst::Load {
                     src: name.clone(),
                     dst: reg.clone(),
-                    ty: lir.to_owned(),
+                    ty: lir.clone(),
                     span,
                 });
                 LirOperand::Reg(reg)
@@ -277,7 +277,7 @@ impl Fs {
         }
     }
 
-    fn reg_of(&mut self, operand: LirOperand, lir: &str, span: Span) -> String {
+    fn reg_of(&mut self, operand: LirOperand, lir: &LirTy, span: Span) -> String {
         match operand {
             LirOperand::Reg(reg) => reg,
             LirOperand::Place(place) => {
@@ -285,7 +285,7 @@ impl Fs {
                 self.emit(LirInst::CopyReg {
                     src: LirOperand::Place(place),
                     dst: reg.clone(),
-                    ty: lir.to_owned(),
+                    ty: lir.clone(),
                     span,
                 });
                 reg
@@ -368,7 +368,7 @@ impl Fs {
         name
     }
 
-    fn alloca(&mut self, place: &str, ty: String, span: Span) {
+    fn alloca(&mut self, place: &str, ty: LirTy, span: Span) {
         self.place_tys.insert(place.to_owned(), ty.clone());
         self.allocas.push(LirInst::Alloca {
             ty,
@@ -412,20 +412,26 @@ impl Lower<'_> {
         }
     }
 
-    fn lir_ty(&self, ty: TypeRef) -> String {
+    fn lir_ty(&self, ty: TypeRef) -> LirTy {
         let base = match self.types.kind(ty.id) {
-            TypeKind::Func { .. } => return "ref #unknown".to_owned(),
-            TypeKind::Object(_) | TypeKind::Instance { .. } => {
-                format!("#{}", self.type_name(ty.id))
-            }
-            TypeKind::Error => "#error".to_owned(),
-            _ => {
-                let display = self.types.display(ty.id);
-                format!("#{}", display.trim_start_matches('@'))
-            }
+            TypeKind::Func { .. } => return LirTy::opaque_ref(),
+            TypeKind::Bit8 => LirTy::Bit(8),
+            TypeKind::Bit16 => LirTy::Bit(16),
+            TypeKind::Bit32 => LirTy::Bit(32),
+            TypeKind::Bit64 => LirTy::Bit(64),
+            TypeKind::BitNative => LirTy::BitNative,
+            TypeKind::FBit16 => LirTy::FBit(16),
+            TypeKind::FBit32 => LirTy::FBit(32),
+            TypeKind::FBit64 => LirTy::FBit(64),
+            TypeKind::FBit128 => LirTy::FBit(128),
+            TypeKind::ByteBuffer => LirTy::byte_buffer(),
+            TypeKind::FormatArgs => LirTy::format_args(),
+            TypeKind::Unknown => LirTy::Named("unknown".to_owned()),
+            TypeKind::Object(_) | TypeKind::Instance { .. } => LirTy::Named(self.type_name(ty.id)),
+            TypeKind::Param { .. } | TypeKind::Error => LirTy::Named("error".to_owned()),
         };
         if ty.is_ref {
-            format!("ref {base}")
+            base.to_ref()
         } else {
             base
         }
@@ -501,7 +507,7 @@ impl Lower<'_> {
 
     /// The C type an `extern` slot uses: the type itself, or for an object
     /// wrapping exactly one C-representable field, that field (`true`).
-    fn abi_ty(&self, ty: TypeRef) -> (String, bool) {
+    fn abi_ty(&self, ty: TypeRef) -> (LirTy, bool) {
         let lir = self.lir_ty(ty);
         if !ty.is_ref {
             if let Some(Layout::Object { fields }) = self.hir.layouts.get(&ty.id) {
@@ -1017,7 +1023,7 @@ impl Lower<'_> {
             lhs: value,
             rhs: constant_reg,
             dst: test.clone(),
-            ty: "#bit8".to_owned(),
+            ty: LirTy::Bit(8),
             span,
         });
         test
@@ -1096,9 +1102,9 @@ impl Lower<'_> {
         // A field that is itself a reference has a pointer-to-pointer address,
         // which LIR spells as the opaque `ref #unknown`.
         let pointer_ty = if ty.is_ref {
-            "ref #unknown".to_owned()
+            LirTy::opaque_ref()
         } else {
-            format!("ref {}", self.lir_ty(ty))
+            self.lir_ty(ty).to_ref()
         };
         let reg = fs.reg();
         fs.emit(LirInst::FieldAddr {
@@ -1120,7 +1126,7 @@ impl Lower<'_> {
 
     /// A fresh `ref T` place holding the address of `place`.
     fn ref_place(&mut self, fs: &mut Fs, place: &Place, ty: TypeRef, span: Span) -> String {
-        let pointer = format!("ref {}", self.lir_ty(ty));
+        let pointer = self.lir_ty(ty).to_ref();
         let reg = fs.reg();
         match place {
             Place::Direct(name) => fs.emit(LirInst::Addr {
@@ -1241,8 +1247,8 @@ impl Lower<'_> {
         self.drop_glue.insert(ty.id, name.clone());
         let mut fs = Fs::new();
         let lir = self.lir_ty(ty);
-        fs.ins.push(("self".to_owned(), format!("ref {lir}")));
-        fs.place_tys.insert("self".to_owned(), format!("ref {lir}"));
+        fs.ins.push(("self".to_owned(), lir.clone().to_ref()));
+        fs.place_tys.insert("self".to_owned(), lir.clone().to_ref());
         fs.used.insert("self".to_owned());
         let span = Span::dummy();
         let this = Place::Indirect("self".to_owned());
@@ -1285,11 +1291,11 @@ impl Lower<'_> {
         self.copy_glue.insert(ty.id, name.clone());
         let mut fs = Fs::new();
         let lir = self.lir_ty(ty);
-        for (place, slot_ty) in [("from", format!("ref {lir}")), ("to", lir.clone())] {
+        for (place, slot_ty) in [("from", lir.clone().to_ref()), ("to", lir.clone())] {
             fs.place_tys.insert(place.to_owned(), slot_ty.clone());
             fs.used.insert(place.to_owned());
         }
-        fs.ins.push(("from".to_owned(), format!("ref {lir}")));
+        fs.ins.push(("from".to_owned(), lir.clone().to_ref()));
         fs.outs.push(("to".to_owned(), lir.clone()));
         let span = Span::dummy();
         let whole = fs.read_place(&Place::Indirect("from".to_owned()), &lir, span);
@@ -1520,7 +1526,7 @@ impl Lower<'_> {
                 fs.emit(LirInst::Const {
                     dst: reg.clone(),
                     lit: format!("!{name}"),
-                    ty: "#byte_buffer".to_owned(),
+                    ty: LirTy::byte_buffer(),
                     span,
                 });
                 LirOperand::Reg(reg)
@@ -1602,7 +1608,7 @@ impl Lower<'_> {
                 fs.emit(LirInst::AddrFunc {
                     func: self.symbol(key),
                     dst: reg.clone(),
-                    ty: "ref #unknown".to_owned(),
+                    ty: LirTy::opaque_ref(),
                     span,
                 });
                 LirOperand::Reg(reg)
@@ -1645,7 +1651,7 @@ impl Lower<'_> {
                     lhs: regs[0].clone(),
                     rhs: regs[1].clone(),
                     dst: reg.clone(),
-                    ty: "#bit8".to_owned(),
+                    ty: LirTy::Bit(8),
                     span,
                 });
                 LirOperand::Reg(reg)
@@ -1697,7 +1703,7 @@ impl Lower<'_> {
                 fs.emit(LirInst::Const {
                     dst: reg.clone(),
                     lit: if *and { "0x0" } else { "0x1" }.to_owned(),
-                    ty: "#bit8".to_owned(),
+                    ty: LirTy::Bit(8),
                     span,
                 });
                 fs.emit(LirInst::CopyPlace {
@@ -1876,7 +1882,7 @@ impl Lower<'_> {
                 fs.emit(LirInst::CopyReg {
                     src: LirOperand::Place(place),
                     dst: reg.clone(),
-                    ty: "ref #unknown".to_owned(),
+                    ty: LirTy::opaque_ref(),
                     span,
                 });
                 LirCallee::Reg(reg)

@@ -1,7 +1,8 @@
 # Compiler Fix & Simplification Plan
 
-> Status: phases 0–7 done (2026-10-08) except 6.6 (typed LIR, optional) and
-> archiving `docs/superpowers` (left for the owner). Source: the compiler
+> Status: phases 0–7 done (2026-10-08), including 6.6 (typed LIR:
+> `lilac_ir::LirTy`), except archiving `docs/superpowers` (left for the
+> owner). Source: the compiler
 > review of the same date.
 >
 > Decisions made while implementing (all in `SPEC.md`):

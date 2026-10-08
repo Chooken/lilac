@@ -91,6 +91,10 @@ fn callees(func: &LirFunc) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    fn t(text: &str) -> crate::LirTy {
+        crate::LirTy::parse(text).expect("type spelling")
+    }
+
     use super::*;
     use crate::{LirBlock, LirData};
     use lilac_span::Span;
@@ -111,7 +115,7 @@ mod tests {
             insts.push(LirInst::AddrFunc {
                 func: (*target).to_owned(),
                 dst: format!("a{i}"),
-                ty: "ref #bit8".to_owned(),
+                ty: t("ref #bit8"),
                 span: Span::dummy(),
             });
         }
@@ -158,7 +162,7 @@ mod tests {
                     f.blocks[0].insts.push(LirInst::Const {
                         dst: "d".to_owned(),
                         lit: format!("!{datum}"),
-                        ty: "#byte_buffer".to_owned(),
+                        ty: t("#byte_buffer"),
                         span: Span::dummy(),
                     });
                 }

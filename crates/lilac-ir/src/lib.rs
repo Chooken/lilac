@@ -17,9 +17,12 @@ use lilac_span::Span;
 mod codec;
 mod dce;
 pub mod runtime;
+mod ty;
+
 pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::prune_unreachable;
 pub use runtime::build_runtime;
+pub use ty::LirTy;
 
 /// IR version header; bump on any normative IR change.
 pub const LILAC_IR_VERSION: &str = "0.3";
@@ -35,8 +38,8 @@ pub struct LirModule {
     pub data: Vec<LirData>,
     /// Functions in source order.
     pub funcs: Vec<LirFunc>,
-    /// Type name → `(field, type)` in order (verifier only, never printed).
-    pub layouts: HashMap<String, Vec<(String, String)>>,
+    /// Layout name (without `#`) → `(field, type)` in order.
+    pub layouts: HashMap<String, Vec<(String, LirTy)>>,
 }
 
 /// Canonical module text plus the source span of each physical line.
@@ -69,9 +72,9 @@ pub struct LirFunc {
     /// Function name without sigil (`main` prints as `@main`).
     pub name: String,
     /// `(place, type)` inputs (print as `in #t %p`).
-    pub ins: Vec<(String, String)>,
+    pub ins: Vec<(String, LirTy)>,
     /// `(place, type)` outputs (print as `out #t %p`).
-    pub outs: Vec<(String, String)>,
+    pub outs: Vec<(String, LirTy)>,
     /// Whether this is an `extern` (foreign) declaration with no body.
     pub is_extern: bool,
     /// Whether backends must always inline it (`=>` functions).
@@ -220,7 +223,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Value type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -240,7 +243,7 @@ pub enum LirInst {
         /// Literal text.
         lit: String,
         /// Value type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -251,7 +254,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Value type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -262,7 +265,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Pointer type (`ref #t`).
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -273,7 +276,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Pointer type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -299,7 +302,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Field type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -334,7 +337,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Result type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -349,14 +352,14 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Pointer type (`ref #t`).
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
     /// `alloca #t %x : zeroed` (every place starts zeroed).
     Alloca {
         /// Place type.
-        ty: String,
+        ty: LirTy,
         /// Place (without sigil).
         place: String,
         /// Instruction span.
@@ -382,7 +385,7 @@ pub enum LirInst {
         /// Destination register (without sigil).
         dst: String,
         /// Result type.
-        ty: String,
+        ty: LirTy,
         /// Instruction span.
         span: Span,
     },
@@ -582,8 +585,8 @@ fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
 /// Prints one type section (`type #Name` with `name: #ty` members in
 /// layout order; the section order itself is sorted in `to_text`). Type
 /// sections are compiler-generated, so every line carries no span.
-fn print_layout(name: &str, members: &[(String, String)]) -> Vec<(String, Option<Span>)> {
-    let mut lines = vec![(format!("type {name} {{"), None)];
+fn print_layout(name: &str, members: &[(String, LirTy)]) -> Vec<(String, Option<Span>)> {
+    let mut lines = vec![(format!("type #{name} {{"), None)];
     for (member, ty) in members {
         lines.push((format!("    {member}: {ty},"), None));
     }
@@ -814,18 +817,13 @@ fn print_func(func: &LirFunc) -> Vec<(String, Option<Span>)> {
     lines
 }
 
-/// Signature of a compiler builtin: input/output type slots in `#`-spelling.
-///
-/// Every current leaf (`@ptr_add`, `@memcpy`, `@lilac_abort`) pins all of its
-/// slots, so no `None` appears today. `Option` is retained so a future
-/// width-parameterized leaf could skip a slot's type check; arity is always
-/// checked.
+/// Signature of a compiler builtin: input/output place types.
 #[derive(Clone, Debug)]
 pub struct BuiltinSig {
     /// Input place types.
-    pub ins: Vec<Option<&'static str>>,
+    pub ins: Vec<LirTy>,
     /// Output place types.
-    pub outs: Vec<Option<&'static str>>,
+    pub outs: Vec<LirTy>,
 }
 
 /// Looks up a builtin's signature by its `@`-prefixed name.
@@ -833,12 +831,12 @@ pub struct BuiltinSig {
 pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     let (ins, outs) = match name {
         "@memcpy" => (
-            vec![Some("ref #bit8"), Some("ref #bit8"), Some("#bit_native")],
+            vec![LirTy::byte_ref(), LirTy::byte_ref(), LirTy::BitNative],
             vec![],
         ),
         "@ptr_add" => (
-            vec![Some("ref #bit8"), Some("#bit_native")],
-            vec![Some("ref #bit8")],
+            vec![LirTy::byte_ref(), LirTy::BitNative],
+            vec![LirTy::byte_ref()],
         ),
         "@lilac_abort" => (vec![], vec![]),
         _ => return None,
@@ -846,60 +844,46 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     Some(BuiltinSig { ins, outs })
 }
 
-/// Whether a LIR type spelling is representable in the platform C ABI used by
-/// `extern`: a bit or float width by value, or any `ref T` (an opaque pointer).
+/// Whether a LIR type is representable in the platform C ABI used by
+/// `extern`: an integer or float by value, or any `ref T` (an opaque pointer).
 ///
 /// This is the single source of truth for the `extern` accept-set, shared by
 /// the `E028` frontend validation (`lilac-lower`) and the LLVM signature
 /// lowering (`lilac-codegen-llvm`), so the two cannot drift.
 #[must_use]
-pub fn is_c_abi_type(ty: &str) -> bool {
-    ty.starts_with("ref ")
-        || matches!(
-            ty,
-            "#bit8"
-                | "#bit16"
-                | "#bit32"
-                | "#bit64"
-                | "#bit_native"
-                | "#fbit16"
-                | "#fbit32"
-                | "#fbit64"
-                | "#fbit128"
-        )
+pub fn is_c_abi_type(ty: &LirTy) -> bool {
+    !matches!(ty, LirTy::Named(_))
 }
 
-/// Fixed layout of `#format_args`: a count plus sixteen named pieces. LIR has
-/// no array type, so the fixed table is spelled out as sixteen fields.
-static FORMAT_ARGS_LAYOUT: [(&str, &str); 17] = [
-    ("count", "#bit_native"),
-    ("p0", "#byte_buffer"),
-    ("p1", "#byte_buffer"),
-    ("p2", "#byte_buffer"),
-    ("p3", "#byte_buffer"),
-    ("p4", "#byte_buffer"),
-    ("p5", "#byte_buffer"),
-    ("p6", "#byte_buffer"),
-    ("p7", "#byte_buffer"),
-    ("p8", "#byte_buffer"),
-    ("p9", "#byte_buffer"),
-    ("p10", "#byte_buffer"),
-    ("p11", "#byte_buffer"),
-    ("p12", "#byte_buffer"),
-    ("p13", "#byte_buffer"),
-    ("p14", "#byte_buffer"),
-    ("p15", "#byte_buffer"),
-];
-
-/// Fixed field layouts of the builtin aggregate types. These never appear in
-/// `module.layouts`, so the verifier and the backend both consult this table.
+/// Fixed field layouts of the builtin aggregate types (`#byte_buffer`, and
+/// `#format_args`: a count plus sixteen pieces, since LIR has no arrays).
+/// These never appear in `module.layouts`, so the verifier and the backend
+/// both consult this table.
 #[must_use]
-pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    match ty {
-        "#byte_buffer" => Some(&[("len", "#bit_native"), ("data", "ref #bit8")]),
-        "#format_args" => Some(&FORMAT_ARGS_LAYOUT),
+pub fn builtin_layout(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
+    match ty.name()? {
+        "byte_buffer" => Some(vec![
+            ("len".to_owned(), LirTy::BitNative),
+            ("data".to_owned(), LirTy::byte_ref()),
+        ]),
+        "format_args" => Some(
+            std::iter::once(("count".to_owned(), LirTy::BitNative))
+                .chain((0..16).map(|index| (format!("p{index}"), LirTy::byte_buffer())))
+                .collect(),
+        ),
         _ => None,
     }
+}
+
+/// The fields of an aggregate: a module layout, else a builtin one.
+#[must_use]
+pub fn fields_of<S: std::hash::BuildHasher>(
+    layouts: &HashMap<String, Vec<(String, LirTy)>, S>,
+    ty: &LirTy,
+) -> Option<Vec<(String, LirTy)>> {
+    ty.name()
+        .and_then(|name| layouts.get(name).cloned())
+        .or_else(|| builtin_layout(ty))
 }
 
 /// Size and alignment in bytes of an IR type, by C layout rules (fields in
@@ -908,45 +892,23 @@ pub fn builtin_layout(ty: &str) -> Option<&'static [(&'static str, &'static str)
 /// pointer width.
 #[must_use]
 pub fn size_align<S: std::hash::BuildHasher>(
-    layouts: &HashMap<String, Vec<(String, String)>, S>,
-    ty: &str,
+    layouts: &HashMap<String, Vec<(String, LirTy)>, S>,
+    ty: &LirTy,
     ptr_bytes: u64,
 ) -> (u64, u64) {
-    if ty.starts_with("ref ") {
-        return (ptr_bytes, ptr_bytes);
-    }
-    let scalar = match ty {
-        "#bit8" => Some(1),
-        "#bit16" | "#fbit16" => Some(2),
-        "#bit32" | "#fbit32" => Some(4),
-        "#bit64" | "#fbit64" => Some(8),
-        "#fbit128" => Some(16),
-        "#bit_native" => Some(ptr_bytes),
-        _ => None,
-    };
-    if let Some(size) = scalar {
+    let ptr_bits = u32::try_from(ptr_bytes * 8).unwrap_or(u32::MAX);
+    if let Some(bits) = ty.bits(ptr_bits) {
+        let size = u64::from(bits / 8);
         return (size, size);
     }
-    let fields: Vec<(String, String)> = match builtin_layout(ty) {
-        Some(fields) => fields
-            .iter()
-            .map(|(name, ty)| ((*name).to_owned(), (*ty).to_owned()))
-            .collect(),
-        None => layouts.get(ty).cloned().unwrap_or_default(),
-    };
     let mut size = 0u64;
     let mut align = 1u64;
-    for (_, field) in &fields {
+    for (_, field) in &fields_of(layouts, ty).unwrap_or_default() {
         let (field_size, field_align) = size_align(layouts, field, ptr_bytes);
         size = size.next_multiple_of(field_align) + field_size;
         align = align.max(field_align);
     }
     (size.next_multiple_of(align), align)
-}
-
-/// Whether an IR type spelling is a reference (`ref X`).
-fn is_ref_ty(ty: &str) -> bool {
-    ty.starts_with("ref ")
 }
 
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.
@@ -975,10 +937,15 @@ struct Verifier<'a> {
 /// One register definition: whether it holds a constant (folding order), and
 /// its declared type (so operand widths can be checked).
 #[derive(Clone)]
-struct RegDef {
+struct RegDef<'a> {
     is_const: bool,
-    ty: String,
+    ty: &'a LirTy,
 }
+
+/// Declared places of the function being verified, with their types.
+type Places<'a> = HashMap<&'a str, &'a LirTy>;
+/// Defined registers of the block being verified.
+type Regs<'a> = HashMap<&'a str, RegDef<'a>>;
 
 impl Verifier<'_> {
     fn error(&mut self, msg: String, span: Span) {
@@ -1013,34 +980,16 @@ impl Verifier<'_> {
         }
     }
 
-    /// Whether a type spelling names a *sized* value: a scalar builtin or a
-    /// known layout. Bare `unknown` is unsized and never valid on its own;
-    /// `ref unknown` is handled by [`Self::valid_type`].
-    fn valid_base_type(&self, base: &str) -> bool {
-        matches!(
-            base,
-            "#bit8"
-                | "#bit16"
-                | "#bit32"
-                | "#bit64"
-                | "#bit_native"
-                | "#fbit16"
-                | "#fbit32"
-                | "#fbit64"
-                | "#fbit128"
-                | "#byte_buffer"
-                | "#format_args"
-                | "#str"
-                | "#numlit"
-        ) || self.module.layouts.contains_key(base)
-    }
-
-    fn valid_type(&self, ty: &str) -> bool {
-        match ty.strip_prefix("ref ") {
-            // `ref unknown` is the opaque pointer (`void*`). `unknown` itself
-            // has no size, so it is valid only behind a reference.
-            Some(base) => base == "#unknown" || self.valid_base_type(base),
-            None => self.valid_base_type(ty),
+    /// Whether a type is known: a scalar, a pointer to a known type or to
+    /// `#unknown` (the opaque `void*`; bare `#unknown` has no size), or a
+    /// builtin or module layout.
+    fn valid_type(&self, ty: &LirTy) -> bool {
+        match ty {
+            LirTy::Bit(_) | LirTy::BitNative | LirTy::FBit(_) => true,
+            LirTy::Ref(inner) => inner.name() == Some("unknown") || self.valid_type(inner),
+            LirTy::Named(name) => {
+                builtin_layout(ty).is_some() || self.module.layouts.contains_key(name)
+            }
         }
     }
 
@@ -1052,7 +1001,7 @@ impl Verifier<'_> {
                     Span::dummy(),
                 );
             }
-            let mut places: HashMap<&'a str, &'a str> = HashMap::new();
+            let mut places: Places<'a> = HashMap::new();
             self.verify_signature(func, &mut places);
             return;
         }
@@ -1063,7 +1012,7 @@ impl Verifier<'_> {
             );
             return;
         }
-        let mut places: HashMap<&'a str, &'a str> = HashMap::new();
+        let mut places: Places<'a> = HashMap::new();
         self.verify_signature(func, &mut places);
         let mut assigned: HashSet<&str> = HashSet::new();
         let last = func.blocks.len().saturating_sub(1);
@@ -1083,9 +1032,9 @@ impl Verifier<'_> {
 
     /// Validates the signature places shared by functions and externs: no
     /// duplicate place names and every `in`/`out` type known.
-    fn verify_signature<'a>(&mut self, func: &'a LirFunc, places: &mut HashMap<&'a str, &'a str>) {
+    fn verify_signature<'a>(&mut self, func: &'a LirFunc, places: &mut Places<'a>) {
         for (place, ty) in func.ins.iter().chain(func.outs.iter()) {
-            if places.insert(place.as_str(), ty.as_str()).is_some() {
+            if places.insert(place.as_str(), ty).is_some() {
                 self.error(
                     format!("duplicate place `%{place}` in `@{}`", func.name),
                     Span::dummy(),
@@ -1101,11 +1050,11 @@ impl Verifier<'_> {
         &mut self,
         func: &'a LirFunc,
         block: &'a LirBlock,
-        places: &mut HashMap<&'a str, &'a str>,
+        places: &mut Places<'a>,
         assigned: &mut HashSet<&'a str>,
         has_fallthrough: bool,
     ) {
-        let mut regs: HashMap<&str, RegDef> = HashMap::new();
+        let mut regs: Regs = HashMap::new();
         for inst in &block.insts {
             self.verify_inst(func, inst, places, &mut regs, assigned);
         }
@@ -1117,8 +1066,8 @@ impl Verifier<'_> {
         &mut self,
         func: &LirFunc,
         inst: &'a LirInst,
-        places: &mut HashMap<&'a str, &'a str>,
-        regs: &mut HashMap<&'a str, RegDef>,
+        places: &mut Places<'a>,
+        regs: &mut Regs<'a>,
         assigned: &mut HashSet<&'a str>,
     ) {
         match inst {
@@ -1166,13 +1115,15 @@ impl Verifier<'_> {
                 ty,
                 span,
             } => {
-                let owner_ty = places.get(obj.as_str()).copied().unwrap_or("#unknown");
-                self.check_field_layout(owner_ty, name, *idx, ty, *span);
+                match places.get(obj.as_str()).copied() {
+                    Some(owner_ty) => self.check_field_layout(owner_ty, name, *idx, ty, *span),
+                    None => self.error(format!("field of undeclared place `%{obj}`"), *span),
+                }
                 self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::Alloca { ty, place, span } => {
                 self.check_type(ty, *span);
-                if places.insert(place.as_str(), ty.as_str()).is_some() {
+                if places.insert(place.as_str(), ty).is_some() {
                     self.error(
                         format!("duplicate place `%{place}` in `@{}`", func.name),
                         *span,
@@ -1233,8 +1184,8 @@ impl Verifier<'_> {
         &mut self,
         src: &LirOperand,
         dst: &str,
-        places: &HashMap<&str, &str>,
-        regs: &HashMap<&str, RegDef>,
+        places: &Places,
+        regs: &Regs,
         span: Span,
         func: &LirFunc,
     ) {
@@ -1246,14 +1197,14 @@ impl Verifier<'_> {
             return;
         };
         let src_ty = match src {
-            LirOperand::Reg(reg) => regs.get(reg.as_str()).map(|def| def.ty.as_str()),
+            LirOperand::Reg(reg) => regs.get(reg.as_str()).map(|def| def.ty),
             LirOperand::Place(place) => places.get(place.as_str()).copied(),
         };
         // Under opaque pointers any two reference places are layout-compatible,
         // so `ref X` -> `ref Y` is a pointer copy. A reference/value mix or two
         // distinct value types is still ill-typed.
         if let Some(src_ty) = src_ty.filter(|src_ty| {
-            is_ref_ty(src_ty) != is_ref_ty(dst_ty) || (!is_ref_ty(src_ty) && *src_ty != dst_ty)
+            src_ty.is_ref() != dst_ty.is_ref() || (!src_ty.is_ref() && *src_ty != dst_ty)
         }) {
             self.error(
                 format!(
@@ -1267,14 +1218,14 @@ impl Verifier<'_> {
 
     /// Checks a `const` literal: a `!`-prefixed literal is a data-symbol
     /// reference and must name declared data under an allowed type.
-    fn check_const_lit(&mut self, lit: &str, ty: &str, span: Span) {
+    fn check_const_lit(&mut self, lit: &str, ty: &LirTy, span: Span) {
         let Some(sym) = lit.strip_prefix('!') else {
             return;
         };
         if !self.module.data.iter().any(|datum| datum.name == sym) {
             self.error(format!("const of undeclared data `!{sym}`"), span);
         }
-        if !matches!(ty, "#byte_buffer" | "#format_args" | "ref #bit8") {
+        if *ty != LirTy::byte_buffer() && *ty != LirTy::format_args() && *ty != LirTy::byte_ref() {
             self.error(
                 format!(
                     "data-symbol const needs `#byte_buffer`, `#format_args`, or `ref #bit8`, found `{ty}`"
@@ -1290,8 +1241,8 @@ impl Verifier<'_> {
         &mut self,
         func: &LirFunc,
         inst: &'a LirInst,
-        places: &HashMap<&str, &str>,
-        regs: &mut HashMap<&'a str, RegDef>,
+        places: &Places,
+        regs: &mut Regs<'a>,
     ) {
         match inst {
             LirInst::StoreField {
@@ -1307,7 +1258,7 @@ impl Verifier<'_> {
             LirInst::Store { src, dst, span } => {
                 self.check_operand(src, regs, places, *span, func);
                 match places.get(dst.as_str()).copied() {
-                    Some(ty) if ty.starts_with("ref ") => {}
+                    Some(ty) if ty.is_ref() => {}
                     _ => {
                         self.error(format!("store through non-reference place `%{dst}`"), *span);
                     }
@@ -1343,7 +1294,7 @@ impl Verifier<'_> {
     /// Tracks call places (declared) and marks outputs assigned.
     fn track_call_places<'a>(
         &mut self,
-        places: &HashMap<&str, &str>,
+        places: &Places,
         assigned: &mut HashSet<&'a str>,
         ins: &'a [String],
         outs: &'a [String],
@@ -1359,32 +1310,14 @@ impl Verifier<'_> {
         }
     }
 
-    /// The field layout of `owner_ty`: module-defined layouts first, then the
-    /// builtin aggregate table (`#byte_buffer`, `#format_args`).
-    fn layout_fields(&self, owner_ty: &str) -> Option<Vec<(&str, &str)>> {
-        if let Some(layout) = self.module.layouts.get(owner_ty) {
-            return Some(
-                layout
-                    .iter()
-                    .map(|(name, ty)| (name.as_str(), ty.as_str()))
-                    .collect(),
-            );
-        }
-        builtin_layout(owner_ty).map(<[(&str, &str)]>::to_vec)
-    }
-
     /// Checks a field reference against its owner's layout (name and index).
-    fn check_field_ref(
-        &mut self,
-        obj: &str,
-        name: &str,
-        idx: u32,
-        span: Span,
-        places: &HashMap<&str, &str>,
-    ) {
-        let owner_ty = places.get(obj).copied().unwrap_or("#unknown");
-        let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
-        let Some(layout) = self.layout_fields(owner_ty) else {
+    fn check_field_ref(&mut self, obj: &str, name: &str, idx: u32, span: Span, places: &Places) {
+        let Some(owner_ty) = places.get(obj).copied() else {
+            self.error(format!("field of undeclared place `%{obj}`"), span);
+            return;
+        };
+        let owner_ty = owner_ty.strip_ref();
+        let Some(layout) = fields_of(&self.module.layouts, owner_ty) else {
             self.error(
                 format!("field of `{obj}` with unknown layout `{owner_ty}`"),
                 span,
@@ -1398,7 +1331,7 @@ impl Verifier<'_> {
             );
             return;
         };
-        if *field_name != name {
+        if field_name != name {
             self.error(
                 format!("field `.{name}` is not at index `{idx}` of `{owner_ty}`"),
                 span,
@@ -1407,7 +1340,7 @@ impl Verifier<'_> {
     }
 
     /// Checks `addr.func` (target exists, type known).
-    fn check_addr_func(&mut self, target: &str, ty: &str, span: Span) {
+    fn check_addr_func(&mut self, target: &str, ty: &LirTy, span: Span) {
         if !self.module.funcs.iter().any(|item| item.name == target) {
             self.error(format!("address of unknown function `@{target}`"), span);
         }
@@ -1419,8 +1352,8 @@ impl Verifier<'_> {
         &mut self,
         func: &LirFunc,
         inst: &'a LirInst,
-        places: &HashMap<&str, &str>,
-        regs: &mut HashMap<&'a str, RegDef>,
+        places: &Places,
+        regs: &mut Regs<'a>,
     ) {
         let (place, dst, ty, span) = match inst {
             LirInst::Load { src, dst, ty, span } => (src, dst, ty, span),
@@ -1449,9 +1382,9 @@ impl Verifier<'_> {
         callee: &LirCallee,
         ins: &[String],
         outs: &[String],
-        places: &HashMap<&str, &str>,
+        places: &Places,
         span: Span,
-        regs: &HashMap<&str, RegDef>,
+        regs: &Regs,
     ) {
         match callee {
             LirCallee::Reg(reg) => {
@@ -1495,26 +1428,20 @@ impl Verifier<'_> {
                     );
                     return;
                 }
-                for (place, expected) in ins.iter().zip(&sig.ins) {
-                    if let Some(expected) = expected {
-                        let actual = places.get(place.as_str()).copied().unwrap_or("#unknown");
-                        if actual != *expected {
+                let slots = ins
+                    .iter()
+                    .zip(&sig.ins)
+                    .map(|slot| ("input", slot))
+                    .chain(outs.iter().zip(&sig.outs).map(|slot| ("output", slot)));
+                for (side, (place, expected)) in slots {
+                    match places.get(place.as_str()) {
+                        Some(actual) if *actual == expected => {}
+                        actual => {
+                            let actual =
+                                actual.map_or("undeclared".to_owned(), ToString::to_string);
                             self.error(
                                 format!(
-                                    "builtin `{name}` input `%{place}` is `{actual}`, expected `{expected}`"
-                                ),
-                                span,
-                            );
-                        }
-                    }
-                }
-                for (place, expected) in outs.iter().zip(&sig.outs) {
-                    if let Some(expected) = expected {
-                        let actual = places.get(place.as_str()).copied().unwrap_or("#unknown");
-                        if actual != *expected {
-                            self.error(
-                                format!(
-                                    "builtin `{name}` output `%{place}` is `{actual}`, expected `{expected}`"
+                                    "builtin `{name}` {side} `%{place}` is `{actual}`, expected `{expected}`"
                                 ),
                                 span,
                             );
@@ -1526,9 +1453,16 @@ impl Verifier<'_> {
     }
 
     /// Checks a `field` against its owner's layout (name, index, and type).
-    fn check_field_layout(&mut self, owner_ty: &str, name: &str, idx: u32, ty: &str, span: Span) {
-        let owner_ty = owner_ty.strip_prefix("ref ").unwrap_or(owner_ty);
-        let Some(layout) = self.layout_fields(owner_ty) else {
+    fn check_field_layout(
+        &mut self,
+        owner_ty: &LirTy,
+        name: &str,
+        idx: u32,
+        ty: &LirTy,
+        span: Span,
+    ) {
+        let owner_ty = owner_ty.strip_ref();
+        let Some(layout) = fields_of(&self.module.layouts, owner_ty) else {
             self.error(format!("field with unknown layout `{owner_ty}`"), span);
             return;
         };
@@ -1539,7 +1473,7 @@ impl Verifier<'_> {
             );
             return;
         };
-        if *field_name != name || *field_ty != ty {
+        if field_name != name || field_ty != ty {
             self.error(
                 format!("field `.{name}` is `{field_ty}` at index `{idx}`, not `{ty}`"),
                 span,
@@ -1553,18 +1487,12 @@ impl Verifier<'_> {
     fn check_arith_width(
         &mut self,
         op: &ArithOp,
-        ty: &str,
+        ty: &LirTy,
         lhs: &str,
         rhs: &str,
-        regs: &HashMap<&str, RegDef>,
+        regs: &Regs,
         span: Span,
     ) {
-        fn is_bit_container(ty: &str) -> bool {
-            matches!(ty, "#bit8" | "#bit16" | "#bit32" | "#bit64" | "#bit_native")
-        }
-        fn is_fbit_container(ty: &str) -> bool {
-            matches!(ty, "#fbit16" | "#fbit32" | "#fbit64" | "#fbit128")
-        }
         let is_float_arith = matches!(
             op,
             ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod
@@ -1574,21 +1502,21 @@ impl Verifier<'_> {
             ArithOp::FLt | ArithOp::FGt | ArithOp::FLe | ArithOp::FGe
         );
         if is_float_cmp {
-            if ty != "#bit8" {
+            if *ty != LirTy::Bit(8) {
                 self.error(
                     format!("`{}` needs a `#bit8` result, found `{ty}`", print_op(op)),
                     span,
                 );
             }
         } else if is_float_arith {
-            if !is_fbit_container(ty) {
+            if !ty.is_float() {
                 self.error(
                     format!("`{}` needs a float type, found `{ty}`", print_op(op)),
                     span,
                 );
                 return;
             }
-        } else if !is_bit_container(ty) {
+        } else if !ty.is_int() {
             self.error(
                 format!(
                     "`{}` needs a bit-container type, found `{ty}`",
@@ -1601,16 +1529,16 @@ impl Verifier<'_> {
         if !(is_float_arith || is_float_cmp) {
             // Integer operands must match each other, and the result unless
             // the op is a comparison (whose result is `#bit8`).
-            let operand_tys: Vec<&str> = [lhs, rhs]
+            let operand_tys: Vec<&LirTy> = [lhs, rhs]
                 .iter()
-                .filter_map(|reg| regs.get(*reg).map(|def| def.ty.as_str()))
+                .filter_map(|reg| regs.get(*reg).map(|def| def.ty))
                 .collect();
             if let [left, right] = operand_tys.as_slice() {
                 let is_eq = matches!(op, ArithOp::Eq);
                 let mismatched = left != right
-                    || (!is_eq && !is_bit_container(left))
+                    || (!is_eq && !left.is_int())
                     || (!op.is_comparison() && *left != ty)
-                    || (op.is_comparison() && ty != "#bit8");
+                    || (op.is_comparison() && *ty != LirTy::Bit(8));
                 if mismatched {
                     self.error(
                         format!(
@@ -1625,7 +1553,7 @@ impl Verifier<'_> {
         }
         for reg in [lhs, rhs] {
             if let Some(def) = regs.get(reg) {
-                if !is_fbit_container(def.ty.as_str()) {
+                if !def.ty.is_float() {
                     self.error(
                         format!(
                             "`{}` needs float operands, found `{}` in `&{reg}`",
@@ -1642,8 +1570,8 @@ impl Verifier<'_> {
     fn check_operand(
         &mut self,
         operand: &LirOperand,
-        regs: &HashMap<&str, RegDef>,
-        places: &HashMap<&str, &str>,
+        regs: &Regs,
+        places: &Places,
         span: Span,
         func: &LirFunc,
     ) {
@@ -1667,7 +1595,7 @@ impl Verifier<'_> {
         }
     }
 
-    fn check_type(&mut self, ty: &str, span: Span) {
+    fn check_type(&mut self, ty: &LirTy, span: Span) {
         if !self.valid_type(ty) {
             self.error(format!("unknown type `{ty}`"), span);
         }
@@ -1675,23 +1603,14 @@ impl Verifier<'_> {
 
     fn define_reg<'a>(
         &mut self,
-        regs: &mut HashMap<&'a str, RegDef>,
+        regs: &mut Regs<'a>,
         dst: &'a str,
-        ty: &str,
+        ty: &'a LirTy,
         is_const: bool,
         span: Span,
         func: &LirFunc,
     ) {
-        if regs
-            .insert(
-                dst,
-                RegDef {
-                    is_const,
-                    ty: ty.to_owned(),
-                },
-            )
-            .is_some()
-        {
+        if regs.insert(dst, RegDef { is_const, ty }).is_some() {
             self.error(
                 format!("register `&{dst}` defined twice in `@{}`", func.name),
                 span,
@@ -1699,13 +1618,7 @@ impl Verifier<'_> {
         }
     }
 
-    fn verify_term(
-        &mut self,
-        func: &LirFunc,
-        term: &LirTerm,
-        regs: &HashMap<&str, RegDef>,
-        has_fallthrough: bool,
-    ) {
+    fn verify_term(&mut self, func: &LirFunc, term: &LirTerm, regs: &Regs, has_fallthrough: bool) {
         let labels: HashSet<&str> = func
             .blocks
             .iter()
@@ -1768,6 +1681,10 @@ impl Verifier<'_> {
 
 #[cfg(test)]
 mod tests {
+    fn t(text: &str) -> crate::LirTy {
+        crate::LirTy::parse(text).expect("type spelling")
+    }
+
     use super::*;
     use lilac_span::{FileId, Span};
 
@@ -1782,8 +1699,8 @@ mod tests {
             data: Vec::new(),
             funcs: vec![LirFunc {
                 name: "gen_function__bit32".to_owned(),
-                ins: vec![("in".to_owned(), "#bit32".to_owned())],
-                outs: vec![("out".to_owned(), "#bit32".to_owned())],
+                ins: vec![("in".to_owned(), t("#bit32"))],
+                outs: vec![("out".to_owned(), t("#bit32"))],
                 is_extern: false,
                 inline: false,
                 blocks: vec![LirBlock {
@@ -1792,7 +1709,7 @@ mod tests {
                         LirInst::CopyReg {
                             src: LirOperand::Place("in".to_owned()),
                             dst: "1".to_owned(),
-                            ty: "#bit32".to_owned(),
+                            ty: t("#bit32"),
                             span: test_span(),
                         },
                         LirInst::CopyPlace {
@@ -1820,10 +1737,10 @@ mod tests {
     fn printer_emits_type_sections() {
         let mut module = canonical_module();
         module.layouts.insert(
-            "#Number".to_owned(),
+            "Number".to_owned(),
             vec![
-                ("tag".to_owned(), "#bit8".to_owned()),
-                ("val".to_owned(), "#bit32".to_owned()),
+                ("tag".to_owned(), t("#bit8")),
+                ("val".to_owned(), t("#bit32")),
             ],
         );
         let text = module.to_text();
@@ -1866,7 +1783,7 @@ mod tests {
             failed: false,
         };
         for ty in ["#fbit16", "#fbit32", "#fbit64", "#fbit128"] {
-            assert!(verifier.valid_type(ty), "{ty}");
+            assert!(verifier.valid_type(&t(ty)), "{ty}");
         }
     }
 
@@ -1890,10 +1807,9 @@ mod tests {
     #[test]
     fn verify_rejects_copy_place_type_mismatch() {
         let mut module = LirModule::new("x86_64-unknown-none");
-        module.layouts.insert(
-            "#Object".to_owned(),
-            vec![("value".to_owned(), "#bit32".to_owned())],
-        );
+        module
+            .layouts
+            .insert("Object".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
         module.funcs.push(LirFunc {
             name: "mismatch".to_owned(),
             ins: Vec::new(),
@@ -1904,12 +1820,12 @@ mod tests {
                 label: "entry".to_owned(),
                 insts: vec![
                     LirInst::Alloca {
-                        ty: "ref #Object".to_owned(),
+                        ty: t("ref #Object"),
                         place: "r".to_owned(),
                         span: test_span(),
                     },
                     LirInst::Alloca {
-                        ty: "#Object".to_owned(),
+                        ty: t("#Object"),
                         place: "v".to_owned(),
                         span: test_span(),
                     },
@@ -1976,12 +1892,12 @@ mod tests {
                 label: "entry".to_owned(),
                 insts: vec![
                     LirInst::Alloca {
-                        ty: "ref #bit8".to_owned(),
+                        ty: t("ref #bit8"),
                         place: "a".to_owned(),
                         span: test_span(),
                     },
                     LirInst::Alloca {
-                        ty: "ref #byte_buffer".to_owned(),
+                        ty: t("ref #byte_buffer"),
                         place: "b".to_owned(),
                         span: test_span(),
                     },
@@ -2010,7 +1926,7 @@ mod tests {
         module.funcs[0].blocks[0].insts[1] = LirInst::Const {
             dst: "2".to_owned(),
             lit: "0x1".to_owned(),
-            ty: "#bit8".to_owned(),
+            ty: t("#bit8"),
             span: test_span(),
         };
         module.funcs[0].blocks[0].term = LirTerm::BranchIf {
@@ -2093,13 +2009,13 @@ mod tests {
         module.funcs[0].blocks[0].insts.push(LirInst::CopyReg {
             src: LirOperand::Place("in".to_owned()),
             dst: "2".to_owned(),
-            ty: lhs_ty.to_owned(),
+            ty: t(lhs_ty),
             span: test_span(),
         });
         module.funcs[0].blocks[0].insts.push(LirInst::CopyReg {
             src: LirOperand::Place("in".to_owned()),
             dst: "3".to_owned(),
-            ty: rhs_ty.to_owned(),
+            ty: t(rhs_ty),
             span: test_span(),
         });
         module.funcs[0].blocks[0].insts.push(LirInst::Arith {
@@ -2107,7 +2023,7 @@ mod tests {
             lhs: "2".to_owned(),
             rhs: "3".to_owned(),
             dst: "4".to_owned(),
-            ty: result_ty.to_owned(),
+            ty: t(result_ty),
             span: test_span(),
         });
         module
@@ -2197,7 +2113,7 @@ mod tests {
             data: Vec::new(),
             funcs: vec![LirFunc {
                 name: "puts".to_owned(),
-                ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+                ins: vec![("s".to_owned(), t("#byte_buffer"))],
                 outs: Vec::new(),
                 is_extern: true,
                 inline: false,
@@ -2232,7 +2148,7 @@ mod tests {
             data: Vec::new(),
             funcs: vec![LirFunc {
                 name: "puts".to_owned(),
-                ins: vec![("s".to_owned(), "#byte_buffer".to_owned())],
+                ins: vec![("s".to_owned(), t("#byte_buffer"))],
                 outs: Vec::new(),
                 is_extern: true,
                 inline: false,
@@ -2253,7 +2169,7 @@ mod tests {
     #[test]
     fn verifier_rejects_extern_duplicate_places() {
         let mut module = extern_module();
-        module.funcs[0].outs = vec![("s".to_owned(), "#byte_buffer".to_owned())];
+        module.funcs[0].outs = vec![("s".to_owned(), t("#byte_buffer"))];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
@@ -2262,7 +2178,7 @@ mod tests {
     #[test]
     fn verifier_rejects_extern_unknown_type() {
         let mut module = extern_module();
-        module.funcs[0].ins[0].1 = "#nope".to_owned();
+        module.funcs[0].ins[0].1 = t("#nope");
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
@@ -2271,7 +2187,7 @@ mod tests {
     #[test]
     fn verifier_accepts_ref_unknown() {
         let mut module = extern_module();
-        module.funcs[0].outs = vec![("p".to_owned(), "ref #unknown".to_owned())];
+        module.funcs[0].outs = vec![("p".to_owned(), t("ref #unknown"))];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_ok(), "{diags:?}");
         assert_eq!(e070_count(&diags), 0);
@@ -2280,7 +2196,7 @@ mod tests {
     #[test]
     fn verifier_rejects_bare_unknown() {
         let mut module = extern_module();
-        module.funcs[0].outs = vec![("p".to_owned(), "#unknown".to_owned())];
+        module.funcs[0].outs = vec![("p".to_owned(), t("#unknown"))];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1);
@@ -2290,8 +2206,8 @@ mod tests {
     fn verifier_rejects_non_extern_duplicate_places() {
         let mut module = canonical_module();
         module.funcs[0].ins = vec![
-            ("in".to_owned(), "#bit32".to_owned()),
-            ("in".to_owned(), "#bit64".to_owned()),
+            ("in".to_owned(), t("#bit32")),
+            ("in".to_owned(), t("#bit64")),
         ];
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
@@ -2328,8 +2244,8 @@ mod tests {
     #[test]
     fn ptr_add_and_abort_builtin_signatures() {
         let ptr_add = builtin_sig("@ptr_add").expect("@ptr_add is a builtin");
-        assert_eq!(ptr_add.ins, vec![Some("ref #bit8"), Some("#bit_native")]);
-        assert_eq!(ptr_add.outs, vec![Some("ref #bit8")]);
+        assert_eq!(ptr_add.ins, vec![t("ref #bit8"), t("#bit_native")]);
+        assert_eq!(ptr_add.outs, vec![t("ref #bit8")]);
 
         let abort = builtin_sig("@lilac_abort").expect("@lilac_abort is a builtin");
         assert!(abort.ins.is_empty(), "{:?}", abort.ins);
@@ -2378,7 +2294,7 @@ mod tests {
                 insts: vec![LirInst::Const {
                     dst: "1".to_owned(),
                     lit: "!c0".to_owned(),
-                    ty: "#byte_buffer".to_owned(),
+                    ty: t("#byte_buffer"),
                     span: test_span(),
                 }],
                 term: LirTerm::Return { span: test_span() },
@@ -2403,7 +2319,7 @@ mod tests {
                 insts: vec![LirInst::Const {
                     dst: "1".to_owned(),
                     lit: "!c9".to_owned(),
-                    ty: "#byte_buffer".to_owned(),
+                    ty: t("#byte_buffer"),
                     span: test_span(),
                 }],
                 term: LirTerm::Return { span: test_span() },
@@ -2417,11 +2333,11 @@ mod tests {
 
     #[test]
     fn builtin_layout_has_expected_fields() {
-        let byte_buffer = builtin_layout("#byte_buffer").expect("#byte_buffer has a layout");
-        assert_eq!(byte_buffer[0], ("len", "#bit_native"));
-        let format_args = builtin_layout("#format_args").expect("#format_args has a layout");
+        let byte_buffer = builtin_layout(&t("#byte_buffer")).expect("#byte_buffer has a layout");
+        assert_eq!(byte_buffer[0], ("len".to_owned(), t("#bit_native")));
+        let format_args = builtin_layout(&t("#format_args")).expect("#format_args has a layout");
         assert_eq!(format_args.len(), 17);
-        assert_eq!(format_args[1], ("p0", "#byte_buffer"));
+        assert_eq!(format_args[1], ("p0".to_owned(), t("#byte_buffer")));
     }
 
     /// A `field` on a builtin aggregate resolves against `builtin_layout`
@@ -2431,8 +2347,8 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.funcs.push(LirFunc {
             name: "main".to_owned(),
-            ins: vec![("buffer".to_owned(), "#byte_buffer".to_owned())],
-            outs: vec![("out".to_owned(), "ref #bit8".to_owned())],
+            ins: vec![("buffer".to_owned(), t("#byte_buffer"))],
+            outs: vec![("out".to_owned(), t("ref #bit8"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -2443,7 +2359,7 @@ mod tests {
                         name: "data".to_owned(),
                         idx: 1,
                         dst: "r".to_owned(),
-                        ty: "ref #bit8".to_owned(),
+                        ty: t("ref #bit8"),
                         span: test_span(),
                     },
                     LirInst::CopyPlace {
@@ -2467,10 +2383,9 @@ mod tests {
     #[test]
     fn spanned_text_matches_to_text_byte_for_byte() {
         let mut module = canonical_module();
-        module.layouts.insert(
-            "#Number".to_owned(),
-            vec![("tag".to_owned(), "#bit8".to_owned())],
-        );
+        module
+            .layouts
+            .insert("Number".to_owned(), vec![("tag".to_owned(), t("#bit8"))]);
         module.data.push(LirData {
             name: "c0".to_owned(),
             bytes: "hi".as_bytes().to_vec(),
@@ -2524,13 +2439,13 @@ mod tests {
                     LirInst::Const {
                         dst: "1".to_owned(),
                         lit: "0x1".to_owned(),
-                        ty: "#bit_native".to_owned(),
+                        ty: t("#bit_native"),
                         span: const1_span,
                     },
                     LirInst::Const {
                         dst: "2".to_owned(),
                         lit: "0x2".to_owned(),
-                        ty: "#bit_native".to_owned(),
+                        ty: t("#bit_native"),
                         span: const2_span,
                     },
                     LirInst::Arith {
@@ -2538,7 +2453,7 @@ mod tests {
                         lhs: "1".to_owned(),
                         rhs: "2".to_owned(),
                         dst: "3".to_owned(),
-                        ty: "#bit_native".to_owned(),
+                        ty: t("#bit_native"),
                         span: arith_span,
                     },
                 ],
@@ -2571,10 +2486,9 @@ mod tests {
     #[test]
     fn spanned_header_and_layout_lines_have_no_span() {
         let mut module = canonical_module();
-        module.layouts.insert(
-            "#Number".to_owned(),
-            vec![("tag".to_owned(), "#bit8".to_owned())],
-        );
+        module
+            .layouts
+            .insert("Number".to_owned(), vec![("tag".to_owned(), t("#bit8"))]);
         let spanned = module.to_text_spanned();
         let lines: Vec<&str> = spanned.text.lines().collect();
         for needle in [
@@ -2600,7 +2514,7 @@ mod tests {
         let mut module = LirModule::default();
         module.funcs.push(LirFunc {
             name: "puts".to_owned(),
-            ins: vec![("s".to_owned(), "#bit8".to_owned())],
+            ins: vec![("s".to_owned(), t("#bit8"))],
             outs: vec![],
             is_extern: true,
             inline: false,

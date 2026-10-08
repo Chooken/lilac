@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_ir::{
     builtin_sig, ArithOp, ConvertOp, LirBlock, LirCallee, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm,
+    LirTerm, LirTy,
 };
 use lilac_span::Span;
 
@@ -192,7 +192,7 @@ fn parse_int(text: &str) -> Option<u64> {
 
 /// Parses an integer literal at width `ty`. Floats and unparseable text
 /// stay `Unknown` (the fold-required intrinsics own those errors).
-fn parse_lit(lit: &str, ty: &str) -> ConstValue {
+fn parse_lit(lit: &str, ty: &LirTy) -> ConstValue {
     let width = width_of(ty).unwrap_or(64);
     match parse_int(lit) {
         Some(value) => ConstValue::Int(value, width),
@@ -200,16 +200,12 @@ fn parse_lit(lit: &str, ty: &str) -> ConstValue {
     }
 }
 
-/// Width in bits for `#bitN`/`#fbitN` types (masking truncated results,
-/// sizing float constants).
-fn width_of(ty: &str) -> Option<u32> {
-    match ty.strip_prefix("ref ").unwrap_or(ty) {
-        "#bit8" => Some(8),
-        "#bit16" | "#fbit16" => Some(16),
-        "#bit32" | "#fbit32" => Some(32),
-        "#bit64" | "#bit_native" | "#fbit64" => Some(64),
-        "#fbit128" => Some(128),
-        _ => None,
+/// Width in bits of a scalar (masking truncated results, sizing float
+/// constants); a `ref` gives its pointee's width. `#bit_native` folds at 64.
+fn width_of(ty: &LirTy) -> Option<u32> {
+    match ty.strip_ref() {
+        LirTy::Ref(_) => None,
+        scalar => scalar.bits(64),
     }
 }
 
@@ -316,7 +312,7 @@ fn int_lit(value: &ConstValue) -> Option<String> {
 fn eval_builtin(
     name: &str,
     ins: &[ConstValue],
-    out_ty: &str,
+    out_ty: &LirTy,
 ) -> Result<ConstValue, FoldValueError> {
     match name {
         "@byte_buffer_len" => match ins.first() {
@@ -373,21 +369,21 @@ fn lilac_func_builtin(name: &str) -> Option<String> {
     name.strip_prefix(".lilac.").map(|rest| format!("@{rest}"))
 }
 
-/// The out-place types and result type of a runtime function the folder can
-/// evaluate, mirroring its prelude signature. `None` for pointer-producing or
-/// mutating runtime functions (the const value model has no pointers).
-fn runtime_out_types(builtin: &str) -> Option<(Vec<Option<String>>, &'static str)> {
+/// The result type of a runtime function the folder can evaluate, mirroring
+/// its prelude signature. `None` for pointer-producing or mutating runtime
+/// functions (the const value model has no pointers).
+fn runtime_out_type(builtin: &str) -> Option<LirTy> {
     match builtin {
-        "@byte_buffer_len" => Some((vec![Some("#bit_native".to_owned())], "#bit_native")),
-        "@byte_buffer_from" => Some((vec![Some("#byte_buffer".to_owned())], "#byte_buffer")),
-        "@load_u8" => Some((vec![Some("#bit8".to_owned())], "#bit8")),
+        "@byte_buffer_len" => Some(LirTy::BitNative),
+        "@byte_buffer_from" => Some(LirTy::byte_buffer()),
+        "@load_u8" => Some(LirTy::Bit(8)),
         _ => None,
     }
 }
 
 /// Evaluates arithmetic over constants (misses stay `Unknown`: a missed
 /// fold is performance only, never a correctness error).
-fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &str) -> ConstValue {
+fn eval_arith(op: &ArithOp, left: &ConstValue, right: &ConstValue, ty: &LirTy) -> ConstValue {
     let width = width_of(ty).unwrap_or(64);
     let mask = if width >= 64 {
         u64::MAX
@@ -508,7 +504,7 @@ fn sign_extend(value: u64, width: u32) -> i64 {
 
 /// Evaluates width conversions over constants. A `Bitcast` reinterprets the
 /// bits of a float at 32/64 bits (16/128-bit folding is a best-effort miss).
-fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &str) -> ConstValue {
+fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &LirTy) -> ConstValue {
     let width = width_of(ty).unwrap_or(64);
     let mask = if width >= 64 {
         u64::MAX
@@ -553,7 +549,7 @@ fn bits_float(bits: u64, width: u32) -> ConstValue {
 /// needed to materialize them.
 struct FoldedCall {
     values: Vec<ConstValue>,
-    out_types: Vec<Option<String>>,
+    out_types: Vec<LirTy>,
 }
 
 /// Why a call evaluation stopped: not enough information, unsupported, or
@@ -629,10 +625,10 @@ impl Folder<'_> {
     /// Constant value of a `const` literal: a data symbol under a value type
     /// is its bytes; a `ref`-typed data symbol is a pointer (not a value,
     /// so statically `Unknown`); anything else is parsed text.
-    fn const_lit_value(&self, lit: &str, ty: &str) -> ConstValue {
+    fn const_lit_value(&self, lit: &str, ty: &LirTy) -> ConstValue {
         match lit.strip_prefix('!') {
             Some(name) => match self.data.get(name) {
-                Some(bytes) if !ty.starts_with("ref ") => ConstValue::Bytes(bytes.clone()),
+                Some(bytes) if !ty.is_ref() => ConstValue::Bytes(bytes.clone()),
                 _ => ConstValue::Unknown,
             },
             None => parse_lit(lit, ty),
@@ -668,7 +664,7 @@ impl Folder<'_> {
                 consts.insert(dst.clone(), eval_convert(op, &value, ty));
             }
             LirInst::Alloca { ty, place, .. } => {
-                if !ty.starts_with("ref ") {
+                if !ty.is_ref() {
                     if let Some(width) = width_of(ty) {
                         consts.insert(place.clone(), ConstValue::Int(0, width));
                     }
@@ -862,13 +858,13 @@ impl Folder<'_> {
         match callee {
             LirCallee::Func(name) => {
                 if let Some(builtin) = lilac_func_builtin(name) {
-                    let Some((out_types, out_ty)) = runtime_out_types(&builtin) else {
+                    let Some(out_ty) = runtime_out_type(&builtin) else {
                         return Ok(None);
                     };
-                    return match eval_builtin(&builtin, args, out_ty) {
+                    return match eval_builtin(&builtin, args, &out_ty) {
                         Ok(value) => Ok(Some(FoldedCall {
                             values: vec![value],
-                            out_types,
+                            out_types: vec![out_ty],
                         })),
                         Err(_) => Ok(None),
                     };
@@ -881,13 +877,11 @@ impl Folder<'_> {
                 let Some(sig) = builtin_sig(name) else {
                     return Ok(None);
                 };
-                let out_types: Vec<Option<String>> =
-                    sig.outs.iter().map(|ty| ty.map(str::to_owned)).collect();
-                let out_ty = sig.outs.first().copied().flatten().unwrap_or("#bit_native");
-                match eval_builtin(name, args, out_ty) {
+                let out_ty = sig.outs.first().cloned().unwrap_or(LirTy::BitNative);
+                match eval_builtin(name, args, &out_ty) {
                     Ok(value) => Ok(Some(FoldedCall {
                         values: vec![value],
-                        out_types,
+                        out_types: sig.outs,
                     })),
                     Err(_) => Ok(None),
                 }
@@ -897,11 +891,11 @@ impl Folder<'_> {
     }
 
     /// The out-place types of a named function (`None` when unknown).
-    fn func_out_types(&self, name: &str) -> Vec<Option<String>> {
+    fn func_out_types(&self, name: &str) -> Vec<LirTy> {
         self.funcs
             .iter()
             .find(|func| func.name == name)
-            .map(|func| func.outs.iter().map(|(_, ty)| Some(ty.clone())).collect())
+            .map(|func| func.outs.iter().map(|(_, ty)| ty.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -933,7 +927,7 @@ impl Folder<'_> {
         &mut self,
         outs: &[String],
         values: &[ConstValue],
-        out_types: &[Option<String>],
+        out_types: &[LirTy],
         span: Span,
     ) -> Option<Vec<LirInst>> {
         if outs.len() != values.len() || values.len() != out_types.len() {
@@ -941,9 +935,6 @@ impl Folder<'_> {
         }
         let mut materialized = Vec::with_capacity(outs.len() * 2);
         for ((place, value), ty) in outs.iter().zip(values).zip(out_types) {
-            let Some(ty) = ty else {
-                return None;
-            };
             let lit = match value {
                 ConstValue::Int(value, _) => format!("0x{value:x}"),
                 ConstValue::Float(value, _) => format!("{value:?}"),
@@ -1181,7 +1172,7 @@ impl Evaluator<'_> {
                 Ok(())
             }
             LirInst::Alloca { ty, place, .. } => {
-                if !ty.starts_with("ref ") {
+                if !ty.is_ref() {
                     if let Some(width) = width_of(ty) {
                         frame
                             .values
@@ -1265,7 +1256,8 @@ impl Evaluator<'_> {
                     .get(arg)
                     .cloned()
                     .unwrap_or(ConstValue::Unknown);
-                let result = eval_builtin(name, &[value], "#bit_native").map_err(|_| Eval::Miss)?;
+                let result =
+                    eval_builtin(name, &[value], &LirTy::BitNative).map_err(|_| Eval::Miss)?;
                 bind_out(frame, outs, &[result]);
                 Ok(())
             }
@@ -1297,7 +1289,7 @@ impl Evaluator<'_> {
                 let result = eval_builtin(
                     name,
                     &[ConstValue::Bytes(bytes), ConstValue::Int(len, 64)],
-                    "#byte_buffer",
+                    &LirTy::byte_buffer(),
                 )
                 .map_err(|_| Eval::Miss)?;
                 bind_out(frame, outs, &[result]);
@@ -1363,10 +1355,16 @@ fn call_result<'a>(outs: &'a [String], name: &str, span: Span) -> &'a String {
 
 /// Binds a `const` literal into a frame (data symbols become `Bytes`; a
 /// `ref`-typed data symbol becomes a pointer to a fresh buffer).
-fn bind_const(data: &HashMap<String, Vec<u8>>, frame: &mut Frame, dst: &str, lit: &str, ty: &str) {
+fn bind_const(
+    data: &HashMap<String, Vec<u8>>,
+    frame: &mut Frame,
+    dst: &str,
+    lit: &str,
+    ty: &LirTy,
+) {
     if let Some(name) = lit.strip_prefix('!') {
         if let Some(bytes) = data.get(name) {
-            if ty.starts_with("ref ") {
+            if ty.is_ref() {
                 let key = format!("!{name}");
                 let buffer = if let Some(&buffer) = frame.buffer_of.get(&key) {
                     buffer
@@ -1465,6 +1463,10 @@ fn memcpy(frame: &mut Frame, dst: Ptr, src: Ptr, len: usize) -> Result<(), Eval>
 
 #[cfg(test)]
 mod tests {
+    fn t(text: &str) -> lilac_ir::LirTy {
+        lilac_ir::LirTy::parse(text).expect("type spelling")
+    }
+
     use super::*;
     use lilac_error::Diags;
     use lilac_ir::{ArithOp, LirBlock, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
@@ -1488,7 +1490,7 @@ mod tests {
 
     fn alloca(ty: &str, name: &str) -> LirInst {
         LirInst::Alloca {
-            ty: ty.to_owned(),
+            ty: t(ty),
             place: name.to_owned(),
             span: test_span(),
         }
@@ -1498,7 +1500,7 @@ mod tests {
         LirInst::Const {
             dst: dst.to_owned(),
             lit: lit.to_owned(),
-            ty: ty.to_owned(),
+            ty: t(ty),
             span: test_span(),
         }
     }
@@ -1515,7 +1517,7 @@ mod tests {
         LirInst::CopyReg {
             src,
             dst: dst.to_owned(),
-            ty: ty.to_owned(),
+            ty: t(ty),
             span: test_span(),
         }
     }
@@ -1526,7 +1528,7 @@ mod tests {
             lhs: lhs.to_owned(),
             rhs: rhs.to_owned(),
             dst: dst.to_owned(),
-            ty: ty.to_owned(),
+            ty: t(ty),
             span: test_span(),
         }
     }
@@ -1536,7 +1538,7 @@ mod tests {
             op: ConvertOp::ExtendZero,
             src: src.to_owned(),
             dst: dst.to_owned(),
-            ty: ty.to_owned(),
+            ty: t(ty),
             span: test_span(),
         }
     }
@@ -1597,11 +1599,11 @@ mod tests {
         let max = ConstValue::Int(u64::MAX, 64);
         let one = ConstValue::Int(1, 64);
         assert!(matches!(
-            eval_arith(&ArithOp::IGtU, &max, &one, "#bit64"),
+            eval_arith(&ArithOp::IGtU, &max, &one, &t("#bit64")),
             ConstValue::Bool(true)
         ));
         assert!(matches!(
-            eval_arith(&ArithOp::IDivU, &max, &ConstValue::Int(2, 64), "#bit64"),
+            eval_arith(&ArithOp::IDivU, &max, &ConstValue::Int(2, 64), &t("#bit64")),
             ConstValue::Int(value, 64) if value == 0x7fff_ffff_ffff_ffff
         ));
         assert!(matches!(
@@ -1609,12 +1611,12 @@ mod tests {
                 &ArithOp::IModU,
                 &ConstValue::Int(7, 64),
                 &ConstValue::Int(3, 64),
-                "#bit64"
+                &t("#bit64")
             ),
             ConstValue::Int(1, 64)
         ));
         assert!(matches!(
-            eval_arith(&ArithOp::IDivU, &one, &ConstValue::Int(0, 64), "#bit64"),
+            eval_arith(&ArithOp::IDivU, &one, &ConstValue::Int(0, 64), &t("#bit64")),
             ConstValue::Unknown
         ));
     }
@@ -1767,7 +1769,11 @@ mod tests {
     #[test]
     fn bitcast_reinterprets_bits_directly() {
         // `1.0f32` is `0x3f80_0000`; the reverse round-trips.
-        let bits = eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 32), "#bit32");
+        let bits = eval_convert(
+            &ConvertOp::Bitcast,
+            &ConstValue::Float(1.0, 32),
+            &t("#bit32"),
+        );
         assert!(
             matches!(bits, ConstValue::Int(value, 32) if value == 0x3f80_0000),
             "{bits:?}"
@@ -1775,21 +1781,29 @@ mod tests {
         let back = eval_convert(
             &ConvertOp::Bitcast,
             &ConstValue::Int(0x3f80_0000, 32),
-            "#fbit32",
+            &t("#fbit32"),
         );
         assert!(
             matches!(back, ConstValue::Float(value, 32) if value.to_bits() == 1.0f64.to_bits()),
             "{back:?}"
         );
         // 64-bit doubles round-trip too.
-        let ints = eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 64), "#bit64");
+        let ints = eval_convert(
+            &ConvertOp::Bitcast,
+            &ConstValue::Float(1.0, 64),
+            &t("#bit64"),
+        );
         assert!(
             matches!(ints, ConstValue::Int(value, 64) if value == 0x3ff0_0000_0000_0000),
             "{ints:?}"
         );
         // 16/128-bit folding is a best-effort miss.
         assert!(matches!(
-            eval_convert(&ConvertOp::Bitcast, &ConstValue::Float(1.0, 16), "#bit16"),
+            eval_convert(
+                &ConvertOp::Bitcast,
+                &ConstValue::Float(1.0, 16),
+                &t("#bit16")
+            ),
             ConstValue::Unknown
         ));
     }
@@ -1809,8 +1823,8 @@ mod tests {
         });
         let parse = LirFunc {
             name: "parse".to_owned(),
-            ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
-            outs: vec![("result".to_owned(), "#bit_native".to_owned())],
+            ins: vec![("buf".to_owned(), t("#byte_buffer"))],
+            outs: vec![("result".to_owned(), t("#bit_native"))],
             is_extern: false,
             inline: false,
             blocks: vec![
@@ -2009,8 +2023,8 @@ mod tests {
         });
         let wipe = LirFunc {
             name: "wipe".to_owned(),
-            ins: vec![("buf".to_owned(), "#byte_buffer".to_owned())],
-            outs: vec![("result".to_owned(), "#bit_native".to_owned())],
+            ins: vec![("buf".to_owned(), t("#byte_buffer"))],
+            outs: vec![("result".to_owned(), t("#bit_native"))],
             is_extern: false,
             inline: false,
             blocks: vec![LirBlock {

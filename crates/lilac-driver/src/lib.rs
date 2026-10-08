@@ -657,7 +657,7 @@ mod tests {
             .flat_map(|block| &block.insts)
             .find_map(|inst| match inst {
                 lilac_ir::LirInst::Const { dst, lit, ty, .. }
-                    if dst == "stride" && ty == "#bit_native" =>
+                    if dst == "stride" && *ty == lilac_ir::LirTy::BitNative =>
                 {
                     Some(lit.clone())
                 }

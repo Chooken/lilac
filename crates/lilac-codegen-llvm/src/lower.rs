@@ -28,7 +28,7 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use lilac_error::{bug, Diagnostic};
 use lilac_ir::{
     builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm,
+    LirOperand, LirTerm, LirTy,
 };
 use lilac_span::Span;
 
@@ -44,7 +44,7 @@ pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
 /// plus the SSA value bound to each `&` register.
 struct FnState<'ctx> {
     places: HashMap<String, PointerValue<'ctx>>,
-    place_types: HashMap<String, String>,
+    place_types: HashMap<String, LirTy>,
     regs: HashMap<String, BasicValueEnum<'ctx>>,
 }
 
@@ -195,29 +195,21 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         super::runtime::emit_runtime(self);
     }
 
-    /// Maps a LIR type spelling to its LLVM type.
-    pub(crate) fn lir_type(&self, ty: &str) -> BasicTypeEnum<'ctx> {
-        if ty.starts_with("ref ") {
-            return self.ptr_type().into();
-        }
+    /// Maps a LIR type to its LLVM type.
+    pub(crate) fn lir_type(&self, ty: &LirTy) -> BasicTypeEnum<'ctx> {
         match ty {
-            "#bit8" => self.context.i8_type().into(),
-            "#bit16" => self.context.i16_type().into(),
-            "#bit32" => self.context.i32_type().into(),
-            "#bit64" => self.context.i64_type().into(),
-            "#bit_native" => self.native.into(),
-            "#fbit16" => self.context.f16_type().into(),
-            "#fbit32" => self.context.f32_type().into(),
-            "#fbit64" => self.context.f64_type().into(),
-            "#fbit128" => self.context.f128_type().into(),
-            "#str" | "#numlit" => bug!(
-                Span::dummy(),
-                "data-only type `{ty}` has no LLVM value type"
-            ),
-            other => match self.named.get(other) {
-                Some(struct_ty) => (*struct_ty).into(),
-                None => bug!(Span::dummy(), "unknown LIR type `{other}`"),
-            },
+            LirTy::Ref(_) => self.ptr_type().into(),
+            LirTy::Bit(8) => self.context.i8_type().into(),
+            LirTy::Bit(16) => self.context.i16_type().into(),
+            LirTy::Bit(32) => self.context.i32_type().into(),
+            LirTy::Bit(64) => self.context.i64_type().into(),
+            LirTy::BitNative => self.native.into(),
+            LirTy::FBit(16) => self.context.f16_type().into(),
+            LirTy::FBit(32) => self.context.f32_type().into(),
+            LirTy::FBit(64) => self.context.f64_type().into(),
+            LirTy::FBit(128) => self.context.f128_type().into(),
+            LirTy::Named(name) if self.named.contains_key(name) => self.named[name].into(),
+            other => bug!(Span::dummy(), "unknown LIR type `{other}`"),
         }
     }
 
@@ -234,20 +226,21 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// `module.layouts`, so they are built here from `builtin_layout`, resolving
     /// `#byte_buffer` before `#format_args` (which embeds it sixteen times).
     fn define_layouts(&mut self) {
-        for name in ["#byte_buffer", "#format_args"] {
-            let Some(layout) = builtin_layout(name) else {
+        for ty in [LirTy::byte_buffer(), LirTy::format_args()] {
+            let Some(layout) = builtin_layout(&ty) else {
                 continue;
             };
             let fields: Vec<BasicTypeEnum<'ctx>> =
                 layout.iter().map(|(_, ty)| self.lir_type(ty)).collect();
             let struct_ty = self.context.struct_type(&fields, false);
-            self.named.insert(name.to_owned(), struct_ty);
+            if let Some(name) = ty.name() {
+                self.named.insert(name.to_owned(), struct_ty);
+            }
         }
         let mut names: Vec<&String> = self.lir.layouts.keys().collect();
         names.sort_unstable();
         for name in &names {
-            let llvm_name = name.trim_start_matches('#');
-            let struct_ty = self.context.opaque_struct_type(llvm_name);
+            let struct_ty = self.context.opaque_struct_type(name);
             self.named.insert((*name).clone(), struct_ty);
         }
         for name in &names {
@@ -359,25 +352,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// The accept-set comes from [`lilac_ir::is_c_abi_type`] — the same
     /// predicate the frontend `E028` check uses — so a type the driver accepts
     /// always has a mapping here.
-    fn extern_c_type(&self, ty: &str) -> Option<BasicTypeEnum<'ctx>> {
-        if !lilac_ir::is_c_abi_type(ty) {
-            return None;
-        }
-        if ty.starts_with("ref ") {
-            return Some(self.ptr_type().into());
-        }
-        match ty {
-            "#bit8" => Some(self.context.i8_type().into()),
-            "#bit16" => Some(self.context.i16_type().into()),
-            "#bit32" => Some(self.context.i32_type().into()),
-            "#bit64" => Some(self.context.i64_type().into()),
-            "#bit_native" => Some(self.native.into()),
-            "#fbit16" => Some(self.context.f16_type().into()),
-            "#fbit32" => Some(self.context.f32_type().into()),
-            "#fbit64" => Some(self.context.f64_type().into()),
-            "#fbit128" => Some(self.context.f128_type().into()),
-            _ => None,
-        }
+    fn extern_c_type(&self, ty: &LirTy) -> Option<BasicTypeEnum<'ctx>> {
+        lilac_ir::is_c_abi_type(ty).then(|| self.lir_type(ty))
     }
 
     /// Lowers one function body: its signature places are bound to the incoming
@@ -558,7 +534,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         op: &ConvertOp,
         src: &str,
         dst: &str,
-        ty: &str,
+        ty: &LirTy,
         builder: &Builder<'ctx>,
         state: &mut FnState<'ctx>,
     ) {
@@ -586,7 +562,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Allocates a zeroed place of `ty` and binds it under `place`.
     fn lower_alloca(
         &self,
-        ty: &str,
+        ty: &LirTy,
         place: &str,
         builder: &Builder<'ctx>,
         state: &mut FnState<'ctx>,
@@ -598,7 +574,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             "zero-init store",
         );
         state.places.insert(place.to_owned(), ptr);
-        state.place_types.insert(place.to_owned(), ty.to_owned());
+        state.place_types.insert(place.to_owned(), ty.clone());
     }
 
     /// An `alloca` in the current function's entry block (so a loop does not
@@ -629,7 +605,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     fn addr_func_value(
         &self,
         name: &str,
-        ty: &str,
+        ty: &LirTy,
         builder: &Builder<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let Some(function) = self.module.get_function(symbol(name)) else {
@@ -718,11 +694,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         ins.iter()
             .zip(&callee.ins)
             .map(|(place, (_, param_ty))| {
-                if param_ty.starts_with("ref ") {
-                    let arg_is_ref = state
-                        .place_types
-                        .get(place)
-                        .is_some_and(|ty| ty.starts_with("ref "));
+                if param_ty.is_ref() {
+                    let arg_is_ref = state.place_types.get(place).is_some_and(LirTy::is_ref);
                     if arg_is_ref {
                         BasicMetadataValueEnum::from(self.load_place(place, builder, state))
                     } else {
@@ -751,21 +724,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> Vec<BasicMetadataValueEnum<'ctx>> {
-        let params = callee
-            .ins
-            .iter()
-            .chain(&callee.outs)
-            .map(|(_, ty)| ty.as_str());
+        let params = callee.ins.iter().chain(&callee.outs).map(|(_, ty)| ty);
         ins.iter()
             .chain(outs.iter())
             .zip(params)
             .map(|(place, param_ty)| {
                 let ptr = place_ptr(place, state);
-                let arg_is_ref = state
-                    .place_types
-                    .get(place)
-                    .is_some_and(|ty| ty.starts_with("ref "));
-                if param_ty.starts_with("ref ") && !arg_is_ref {
+                let arg_is_ref = state.place_types.get(place).is_some_and(LirTy::is_ref);
+                if param_ty.is_ref() && !arg_is_ref {
                     let slot = checked(
                         builder.build_alloca(self.ptr_type(), "ref.arg"),
                         "ref arg alloca",
@@ -832,20 +798,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let Some(sig) = builtin_sig(name) else {
             bug!(Span::dummy(), "call to unknown builtin `{name}`");
         };
-        let params: Vec<BasicMetadataTypeEnum<'ctx>> = ins
+        let params: Vec<BasicMetadataTypeEnum<'ctx>> = sig
+            .ins
             .iter()
-            .zip(&sig.ins)
-            .map(|(place, slot)| {
-                BasicMetadataTypeEnum::from(self.place_or_named_type(place, *slot, state))
-            })
+            .map(|slot| BasicMetadataTypeEnum::from(self.lir_type(slot)))
             .collect();
-        let fn_type = match outs.len() {
-            0 => self.context.void_type().fn_type(&params, false),
-            1 => {
-                let result =
-                    self.place_or_named_type(&outs[0], sig.outs.first().copied().flatten(), state);
-                result.fn_type(&params, false)
-            }
+        let fn_type = match (outs.len(), sig.outs.first()) {
+            (0, _) => self.context.void_type().fn_type(&params, false),
+            (1, Some(result)) => self.lir_type(result).fn_type(&params, false),
             _ => bug!(
                 Span::dummy(),
                 "builtin `{name}` has {} out places, at most one is supported",
@@ -882,23 +842,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// The LLVM type of a builtin slot: the signature's declared type when
-    /// present, else the actual place's type (width-parameterized slot).
-    fn place_or_named_type(
-        &self,
-        place: &str,
-        named: Option<&str>,
-        state: &FnState<'ctx>,
-    ) -> BasicTypeEnum<'ctx> {
-        match named {
-            Some(ty) => self.lir_type(ty),
-            None => match state.place_types.get(place) {
-                Some(ty) => self.lir_type(ty),
-                None => bug!(Span::dummy(), "builtin argument `%{place}` is undeclared"),
-            },
-        }
-    }
-
     /// Declares (once) `void @name(...)` with `fn_type`, reusing any existing
     /// definition or declaration.
     pub(crate) fn runtime_fn(
@@ -924,7 +867,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     fn operand(
         &self,
         operand: &LirOperand,
-        ty: Option<&str>,
+        ty: Option<&LirTy>,
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
@@ -957,7 +900,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     fn load_as(
         &self,
         name: &str,
-        ty: &str,
+        ty: &LirTy,
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
@@ -965,7 +908,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         // follows that pointer to the pointee first.
         let ptr = place_ptr(name, state);
         let ptr = match state.place_types.get(name) {
-            Some(place_ty) if place_ty.starts_with("ref ") && !ty.starts_with("ref ") => {
+            Some(place_ty) if place_ty.is_ref() && !ty.is_ref() => {
                 checked(builder.build_load(self.ptr_type(), ptr, ""), "load ref")
                     .into_pointer_value()
             }
@@ -986,11 +929,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let Some(place_ty) = state.place_types.get(obj).cloned() else {
             bug!(Span::dummy(), "field of undeclared place `%{obj}`");
         };
-        let owner = place_ty.strip_prefix("ref ").unwrap_or(&place_ty);
+        let owner = place_ty.strip_ref();
         let BasicTypeEnum::StructType(struct_ty) = self.lir_type(owner) else {
             bug!(Span::dummy(), "field of non-struct place `%{obj}`");
         };
-        let base = if place_ty.starts_with("ref ") {
+        let base = if place_ty.is_ref() {
             let raw = place_ptr(obj, state);
             checked(builder.build_load(self.ptr_type(), raw, ""), "load ref").into_pointer_value()
         } else {
@@ -1004,7 +947,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Materializes a `const` literal: a data-symbol address (or `#byte_buffer`
     /// wrapper), a decimal float immediate, or an integer/pointer immediate.
-    fn const_value(&self, lit: &str, ty: &str) -> BasicValueEnum<'ctx> {
+    fn const_value(&self, lit: &str, ty: &LirTy) -> BasicValueEnum<'ctx> {
         if let Some(name) = lit.strip_prefix('!') {
             return self.data_const(name, ty);
         }
@@ -1029,18 +972,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// The value of a data-symbol `const`: `#byte_buffer` wraps `{len, ptr}`,
     /// a reference type is the bare global address.
-    fn data_const(&self, name: &str, ty: &str) -> BasicValueEnum<'ctx> {
+    fn data_const(&self, name: &str, ty: &LirTy) -> BasicValueEnum<'ctx> {
         let Some(global) = self.module.get_global(name) else {
             bug!(Span::dummy(), "const of undeclared data `!{name}`");
         };
         let ptr = global.as_pointer_value();
-        if ty == "#byte_buffer" {
+        if *ty == LirTy::byte_buffer() {
             let len = self.data_len(name);
             let len_value = self.native.const_int(len, false);
             self.context
                 .const_struct(&[len_value.into(), ptr.into()], false)
                 .into()
-        } else if ty.starts_with("ref ") {
+        } else if ty.is_ref() {
             ptr.into()
         } else {
             // The LIR verifier's `check_const_lit` accepts `#byte_buffer`,
@@ -1073,7 +1016,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         op: &ArithOp,
         lhs: &str,
         rhs: &str,
-        ty: &str,
+        ty: &LirTy,
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
@@ -1179,7 +1122,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     fn widen_bool(
         &self,
         cmp: IntValue<'ctx>,
-        ty: &str,
+        ty: &LirTy,
         builder: &Builder<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
