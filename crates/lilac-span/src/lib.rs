@@ -91,15 +91,39 @@ impl SourceFile {
         }
     }
 
-    /// 1-based `(line, column)` for a byte offset (columns count bytes).
+    /// 1-based `(line, column)` for a byte offset. Columns count `char`s,
+    /// so a multi-byte character before the offset is one column.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
+        let mut off = offset.min(self.src.len());
+        while !self.src.is_char_boundary(off) {
+            off -= 1;
+        }
+        let line = self.line_of(off);
+        let start = self.line_starts[line - 1];
+        (line, self.src[start..off].chars().count() + 1)
+    }
+
+    /// 1-based line containing a byte offset (clamped to the file).
+    #[must_use]
+    pub fn line_of(&self, offset: usize) -> usize {
         let off = offset.min(self.src.len());
-        let line = self
-            .line_starts
-            .partition_point(|&start| start <= off)
-            .saturating_sub(1);
-        (line + 1, off - self.line_starts[line] + 1)
+        self.line_starts.partition_point(|&start| start <= off)
+    }
+
+    /// Byte offset where a 1-based line starts (clamped to the file).
+    #[must_use]
+    pub fn line_start(&self, line: usize) -> usize {
+        self.line_starts
+            .get(line.saturating_sub(1))
+            .copied()
+            .unwrap_or(self.src.len())
+    }
+
+    /// Number of lines (a trailing newline opens one more, empty line).
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
     }
 
     /// Text of a 1-based line without trailing newline, or `""` if out of range.
@@ -221,6 +245,20 @@ mod tests {
         assert_eq!(sm.line_col(Span::new(0, 1, file)), Some((1, 1)));
         assert_eq!(sm.line_col(Span::new(3, 4, file)), Some((2, 1)));
         assert_eq!(sm.line_col(Span::new(5, 6, file)), Some((2, 3)));
+    }
+
+    #[test]
+    fn line_col_counts_chars() {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file(
+            "main.lilac",
+            "\"é\" x
+",
+        );
+        // `é` is two bytes but one column; offset 5 is `x`.
+        assert_eq!(sm.line_col(Span::new(5, 6, file)), Some((1, 5)));
+        // An offset inside `é` snaps back to its start.
+        assert_eq!(sm.line_col(Span::new(2, 3, file)), Some((1, 2)));
     }
 
     #[test]

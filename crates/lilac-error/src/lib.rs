@@ -11,6 +11,10 @@ use std::hash::{Hash, Hasher};
 
 use lilac_span::{SourceMap, Span};
 
+mod human;
+
+pub use human::EmitterHuman;
+
 /// Severity of a [`Diagnostic`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
@@ -242,120 +246,13 @@ impl Default for Diags {
 }
 
 /// Stable prefix on instantiation-stack notes so [`EmitterHuman`] can elide
-/// them past [`EMITTER_MAX_FRAMES`] unless `verbose`.
+/// all but the first few unless `verbose`.
 pub const CHAIN_FRAME_PREFIX: &str = "in instantiation of ";
-
-/// Chain frames shown before [`EmitterHuman`] elides the rest (non-`verbose`).
-const EMITTER_MAX_FRAMES: usize = 5;
 
 /// Renders a [`Diagnostic`] against a [`SourceMap`].
 pub trait Emitter {
     /// Renders one diagnostic to a string (no I/O performed).
     fn render(&self, diagnostic: &Diagnostic, source_map: &SourceMap) -> String;
-}
-
-/// `rustc`-style human output with snippets and carets.
-#[derive(Debug, Default)]
-pub struct EmitterHuman {
-    /// Reserved for color support; currently always plain text.
-    pub color: bool,
-    /// Show every instantiation-chain frame (default elides past 5).
-    pub verbose: bool,
-}
-
-impl EmitterHuman {
-    /// Plain-text emitter.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Emitter for EmitterHuman {
-    fn render(&self, diagnostic: &Diagnostic, source_map: &SourceMap) -> String {
-        let mut out = format!(
-            "{}[{}]: {}\n",
-            diagnostic.level.as_str(),
-            diagnostic.code,
-            diagnostic.msg
-        );
-        let primary = diagnostic
-            .labels
-            .iter()
-            .find(|label| label.primary)
-            .or_else(|| diagnostic.labels.first());
-        if let Some(label) = primary {
-            if let Some(file) = source_map.file(label.span.file) {
-                let (line, col) = file.line_col(label.span.lo.0 as usize);
-                let _ = writeln!(out, "  --> {}:{line}:{col}", file.name);
-                let text = file.line_text(line);
-                let width = (label.span.len() as usize).clamp(1, text.len().max(1));
-                let pad = " ".repeat(col.saturating_sub(1));
-                out.push_str("   |\n");
-                let _ = writeln!(out, "{line} | {text}");
-                let _ = writeln!(out, "   | {pad}{}", "^".repeat(width));
-                if !label.msg.is_empty() {
-                    let _ = writeln!(out, "   = {}", label.msg);
-                }
-            }
-        }
-        for label in &diagnostic.labels {
-            let is_primary = primary.is_some_and(|first| std::ptr::eq(first, label));
-            if is_primary || label.span.is_dummy() {
-                continue;
-            }
-            // Every span-bearing secondary label renders as its own rustc-style
-            // snippet block; its message trails the carets (E060.md's shape).
-            if let Some(file) = source_map.file(label.span.file) {
-                let (line, col) = file.line_col(label.span.lo.0 as usize);
-                let _ = writeln!(out, "  --> {}:{line}:{col}", file.name);
-                let text = file.line_text(line);
-                let width = (label.span.len() as usize).clamp(1, text.len().max(1));
-                let pad = " ".repeat(col.saturating_sub(1));
-                out.push_str("   |\n");
-                let _ = writeln!(out, "{line} | {text}");
-                let carets = "^".repeat(width);
-                if label.msg.is_empty() {
-                    let _ = writeln!(out, "   | {pad}{carets}");
-                } else {
-                    let _ = writeln!(out, "   | {pad}{carets} {}", label.msg);
-                }
-            }
-        }
-        let frame_count = diagnostic
-            .notes
-            .iter()
-            .filter(|note| note.starts_with(CHAIN_FRAME_PREFIX))
-            .count();
-        let elide = !self.verbose && frame_count > EMITTER_MAX_FRAMES;
-        let mut frames_seen = 0usize;
-        let mut frames_elided = 0usize;
-        for note in &diagnostic.notes {
-            if note.starts_with(CHAIN_FRAME_PREFIX) {
-                frames_seen += 1;
-                if elide && frames_seen > EMITTER_MAX_FRAMES {
-                    frames_elided += 1;
-                    continue;
-                }
-            }
-            let _ = writeln!(out, "note: {note}");
-        }
-        if frames_elided > 0 {
-            let noun = if frames_elided == 1 {
-                "frame"
-            } else {
-                "frames"
-            };
-            let _ = writeln!(
-                out,
-                "note: ... {frames_elided} more {noun} elided (use --verbose)"
-            );
-        }
-        for help in &diagnostic.helps {
-            let _ = writeln!(out, "help: {help}");
-        }
-        out
-    }
 }
 
 /// Newline-delimited JSON, one object per diagnostic (`--error-format=json`).
@@ -470,11 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn human_secondary_label_renders_as_snippet() {
+    fn human_secondary_label_shares_the_snippet() {
         let mut sm = SourceMap::new();
         let file = sm.add_file(
             "main.lilac",
-            "out = T.other()\n    variable: @bit32 = gen_function[@bit32]()\n",
+            "out = T.other()
+    variable: @bit32 = gen_function[@bit32]()
+",
         );
         let primary = Span::new(6, 15, file);
         let secondary = Span::new(39, 61, file);
@@ -486,19 +385,24 @@ mod tests {
                 "required by instantiation of gen_function[@bit32] here",
             );
         let rendered = EmitterHuman::new().render(&diagnostic, &sm);
-        assert!(
-            rendered.contains("  --> main.lilac:2:24\n"),
-            "secondary lacks a snippet header: {rendered}"
-        );
-        assert!(
-            rendered.contains(
-                "   |                        ^^^^^^^^^^^^^^^^^^^^^^ required by instantiation of gen_function[@bit32] here\n"
-            ),
-            "secondary message not on the caret line: {rendered}"
-        );
-        assert!(
-            !rendered.contains("note: main.lilac:2:24"),
-            "old flat note form survived: {rendered}"
+        assert_eq!(
+            rendered,
+            concat!(
+                "error[E042]: unsatisfied requirements
+",
+                " --> main.lilac:1:7
+",
+                "  |
+",
+                "1 | out = T.other()
+",
+                "  |       ^^^^^^^^^ missing method `other` on `@bit32`
+",
+                "2 |     variable: @bit32 = gen_function[@bit32]()
+",
+                "  |                        ---------------------- required by instantiation of gen_function[@bit32] here
+",
+            )
         );
     }
 

@@ -14,8 +14,8 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
-  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--dump-lir=<dir>]"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
+  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -59,16 +59,32 @@ struct Common {
     session: Session,
 }
 
+/// `--color=auto|always|never`: whether diagnostics and progress are coloured.
+fn parse_color(choice: &str) -> Result<bool, ExitCode> {
+    match choice {
+        "auto" => Ok(progress::auto_color()),
+        "always" => Ok(true),
+        "never" => Ok(false),
+        _ => {
+            eprintln!("unknown --color={choice}; want auto|always|never");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
 fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitCode> {
     let mut file: Option<String> = None;
     let mut check_only = false;
     let mut target_set = false;
     let mut dump_lir: Option<PathBuf> = None;
     let mut session = Session::new();
+    session.opts.color = progress::auto_color();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if let Some(format) = arg.strip_prefix("--error-format=") {
+        if let Some(choice) = arg.strip_prefix("--color=") {
+            session.opts.color = parse_color(choice)?;
+        } else if let Some(format) = arg.strip_prefix("--error-format=") {
             match format {
                 "human" => session.opts.error_format = ErrorFormat::Human,
                 "json" => session.opts.error_format = ErrorFormat::Json,
@@ -294,6 +310,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         Err(_) => ExitCode::from(1),
     };
     eprint!("{}", session.render_diagnostics());
+    eprint!("{}", session.render_summary());
     if let Some(err) = &dump_err {
         eprintln!("{err}");
         return ExitCode::from(1);
@@ -312,11 +329,11 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
             Ok(pair) => pair,
             Err(code) => return code,
         };
+    eprint!("{}", session.render_diagnostics());
+    eprint!("{}", session.render_summary());
     let Ok(module) = result else {
-        eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
     };
-    eprint!("{}", session.render_diagnostics());
     if let Some(err) = &dump_err {
         eprintln!("{err}");
     }
@@ -372,11 +389,11 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
             Ok(pair) => pair,
             Err(code) => return code,
         };
+    eprint!("{}", session.render_diagnostics());
+    eprint!("{}", session.render_summary());
     let Ok(module) = result else {
-        eprint!("{}", session.render_diagnostics());
         return ExitCode::from(1);
     };
-    eprint!("{}", session.render_diagnostics());
     if let Some(err) = &dump_err {
         eprintln!("{err}");
     }

@@ -3,10 +3,9 @@
 //! `@compile_error` check, and verification.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
+use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed, Level};
 use lilac_ir::{LirModule, Syscalls, System};
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
@@ -123,6 +122,8 @@ pub struct Opts {
     pub verbose: bool,
     /// Output format.
     pub error_format: ErrorFormat,
+    /// Colour human diagnostics with ANSI codes.
+    pub color: bool,
 }
 /// Retained analysis artifacts from the last compile (for editor tooling).
 #[derive(Clone, Debug)]
@@ -486,30 +487,58 @@ impl Session {
         Ok(lir)
     }
 
-    /// Renders all recorded diagnostics to one string.
+    fn human_emitter(&self) -> EmitterHuman {
+        EmitterHuman {
+            color: self.opts.color,
+            verbose: self.opts.verbose,
+        }
+    }
+
+    /// Renders all recorded diagnostics to one string (human ones separated
+    /// by blank lines).
     #[must_use]
     pub fn render_diagnostics(&self) -> String {
-        let human = EmitterHuman {
-            verbose: self.opts.verbose,
-            ..EmitterHuman::new()
-        };
-        let mut out = String::new();
-        for diagnostic in self.diags.diagnostics() {
-            let text = match self.opts.error_format {
+        let human = self.human_emitter();
+        let rendered = self
+            .diags
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| match self.opts.error_format {
                 ErrorFormat::Human => human.render(diagnostic, &self.source_map),
                 ErrorFormat::Json => EmitterJson.render(diagnostic, &self.source_map),
-            };
-            out.push_str(&text);
+            })
+            .collect::<Vec<_>>();
+        match self.opts.error_format {
+            ErrorFormat::Human => rendered.join("\n"),
+            ErrorFormat::Json => rendered.concat(),
         }
-        if self.opts.error_format == ErrorFormat::Human && self.diags.suppressed_errors() > 0 {
-            let _ = writeln!(
-                out,
-                "error: {} more error(s) not shown (limit {})",
-                self.diags.suppressed_errors(),
-                self.diags.max_errors
-            );
+    }
+
+    /// The human closing line (`error: aborting due to …`), preceded by a
+    /// blank line; empty for JSON or when nothing was reported.
+    #[must_use]
+    pub fn render_summary(&self) -> String {
+        if self.opts.error_format == ErrorFormat::Json {
+            return String::new();
         }
-        out
+        let count = |level| {
+            self.diags
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.level == level)
+                .count()
+        };
+        let suppressed = self.diags.suppressed_errors();
+        let summary = self.human_emitter().summary(
+            count(Level::Error) + suppressed,
+            suppressed,
+            count(Level::Warning),
+        );
+        if summary.is_empty() {
+            summary
+        } else {
+            format!("\n{summary}")
+        }
     }
 }
 

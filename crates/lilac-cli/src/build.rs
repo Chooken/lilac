@@ -170,7 +170,7 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     } else {
         Verbosity::Normal
     };
-    let reporter = Reporter::new(verbosity);
+    let reporter = Reporter::new(verbosity, session.opts.color);
 
     let input = Path::new(&common.file);
     let is_dir = crate::is_dir(&common.file);
@@ -202,7 +202,13 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         if session.opts.error_format == ErrorFormat::Human {
             let errors = error_count(&session);
             let noun = if errors == 1 { "error" } else { "errors" };
-            reporter.error(&format!("could not compile `{name}` ({errors} {noun})"));
+            let hidden = match session.diags.suppressed_errors() {
+                0 => String::new(),
+                n => format!("; {n} not shown"),
+            };
+            reporter.error(&format!(
+                "could not compile `{name}` ({errors} {noun}{hidden})"
+            ));
         }
         return ExitCode::from(1);
     };

@@ -250,7 +250,7 @@ impl Checker<'_> {
             _ => "?".to_owned(),
         };
         format!(
-            "based on this usage, the generic body requires a method matching:\n      fn {name}({}) -> {ret}",
+            "based on this usage, the generic body requires a method matching:\n    fn {name}({}) -> {ret}",
             params.join(", ")
         )
     }
@@ -262,7 +262,7 @@ impl Checker<'_> {
             _ => "?".to_owned(),
         };
         format!(
-            "based on this usage, the generic body requires a field matching:\n      {name}: {ty}"
+            "based on this usage, the generic body requires a field matching:\n    {name}: {ty}"
         )
     }
 }

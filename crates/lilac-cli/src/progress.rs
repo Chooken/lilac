@@ -14,6 +14,12 @@ use std::time::{Duration, Instant};
 use lilac_codegen::CodegenStep;
 use lilac_driver::{Stage, StageEvent};
 
+/// The `--color=auto` choice: colour when stderr is a terminal and
+/// `NO_COLOR` is unset. Diagnostics and progress lines share it.
+pub fn auto_color() -> bool {
+    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 /// How much the reporter prints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verbosity {
@@ -39,10 +45,8 @@ struct State {
 pub struct Reporter(Rc<RefCell<State>>);
 
 impl Reporter {
-    /// A reporter printing at `verbosity`, coloured when stderr is a
-    /// terminal and `NO_COLOR` is unset.
-    pub fn new(verbosity: Verbosity) -> Self {
-        let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    /// A reporter printing at `verbosity`, coloured when `color`.
+    pub fn new(verbosity: Verbosity, color: bool) -> Self {
         Self(Rc::new(RefCell::new(State {
             verbosity,
             color,

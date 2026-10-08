@@ -1141,9 +1141,8 @@ fn field_miss_shows_required_field_note() {
         "{rendered}"
     );
     assert!(
-        rendered.contains(
-            "based on this usage, the generic body requires a field matching:\n      data: T"
-        ),
+        rendered.contains("based on this usage, the generic body requires a field matching:\n")
+            && rendered.contains("    data: T\n"),
         "missing field note: {rendered}"
     );
 }
@@ -1157,7 +1156,8 @@ fn concrete_field_type_stays_concrete() {
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
     assert!(
-        rendered.contains("requires a field matching:\n      data: Widget"),
+        rendered.contains("requires a field matching:\n")
+            && rendered.contains("    data: Widget\n"),
         "concrete field type not rendered concretely: {rendered}"
     );
 }

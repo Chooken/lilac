@@ -164,12 +164,14 @@ fn ambiguous_import_labels_both_using_sites() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E029]"), "stderr:\n{stderr}");
+    // One snippet of main.lilac carries all three labels.
     assert!(
-        stderr.contains("main.lilac:1") && stderr.contains("main.lilac:2"),
+        stderr.contains("1 | using a\n  | ------- imported here\n")
+            && stderr.contains("2 | using b\n  | ------- imported here\n"),
         "E029 must label both `using` sites in main.lilac:\n{stderr}"
     );
     assert!(
-        stderr.contains("main.lilac:5"),
+        stderr.contains("--> main.lilac:5:17"),
         "E029 must label the ambiguous reference:\n{stderr}"
     );
 }
@@ -289,8 +291,9 @@ fn private_member_denied_is_e026() {
         stderr.contains("FAILS_private_member.lilac:16"),
         "stderr:\n{stderr}"
     );
+    // The private declaration is labelled in the same snippet.
     assert!(
-        stderr.contains("FAILS_private_member.lilac:5"),
+        stderr.contains("\n 5 |") && stderr.contains("declared private here"),
         "stderr:\n{stderr}"
     );
 }
