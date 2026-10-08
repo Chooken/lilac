@@ -1,0 +1,14 @@
+Const[T]: object {
+
+    private {
+        value: T
+    }
+
+    get: function(self) value: T {
+        value = self.value
+    }
+
+    @on_override: function(prev: ref Const[T], new: ref Const[T]) nothing {
+        @compile_error("You cannot override a constant value.")
+    }
+}

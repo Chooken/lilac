@@ -1,0 +1,40 @@
+Optional[T]: enum {
+    Some: T
+    None
+
+    unwrap: function(self) has_value: Bool, value: T {
+        match self {
+            .Some -> some_value: T {
+                has_value = true
+                value = some_value
+            }
+        } else {
+            has_value = false
+            value = @zeroed(T)
+        }
+    }
+
+    unwrap_or: function(self, default: T) value: T {
+        match self {
+            .Some -> some_value: T {
+                value = some_value
+            }
+        } else {
+            value = default
+        }
+    }
+
+    // Idk if this will work or not. If not then just delete
+    // Depends on if generics check functions on use or not.
+    unwrap_or_default: function(self) has_value: Bool, value: T {
+        match self {
+            .Some -> some_value: T {
+                has_value = true
+                value = some_value
+            }
+        } else {
+            has_value = false
+            value = T.default()
+        }
+    }
+}

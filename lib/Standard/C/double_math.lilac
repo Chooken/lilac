@@ -2,47 +2,35 @@
 sin: extern function(in: Float64) result: Float64
 cos: extern function(in: Float64) result: Float64
 tan: extern function(in: Float64) result: Float64
-
 asin: extern function(in: Float64) result: Float64
 acos: extern function(in: Float64) result: Float64
 atan: extern function(in: Float64) result: Float64
-
 sinh: extern function(in: Float64) result: Float64
 cosh: extern function(in: Float64) result: Float64
 tanh: extern function(in: Float64) result: Float64
-
 asinh: extern function(in: Float64) result: Float64
 acosh: extern function(in: Float64) result: Float64
 atanh: extern function(in: Float64) result: Float64
-
 atan2: extern function(y: Float64, x: Float64) result: Float64
-
 
 exp: extern function(in: Float64) result: Float64
 exp2: extern function(in: Float64) result: Float64
 expm1: extern function(in: Float64) result: Float64
-
 log: extern function(in: Float64) result: Float64
 log2: extern function(in: Float64) result: Float64
 log10: extern function(in: Float64) result: Float64
 log1p: extern function(in: Float64) result: Float64
-
 pow: extern function(x: Float64, y: Float64) result: Float64
-
 sqrt: extern function(in: Float64) result: Float64
 cbrt: extern function(in: Float64) result: Float64
-
 hypot: extern function(x: Float64, y: Float64) result: Float64
-
 
 ceil: extern function(in: Float64) result: Float64
 floor: extern function(in: Float64) result: Float64
 trunc: extern function(in: Float64) result: Float64
 round: extern function(in: Float64) result: Float64
-
 rint: extern function(in: Float64) result: Float64
 nearbyint: extern function(in: Float64) result: Float64
-
 llround: extern function(x: Float64) result: Int64
 
 fmod: extern function(x: Float64, y: Float64) result: Float64
@@ -54,10 +42,9 @@ fma: extern function(x: Float64, y: Float64, z: Float64) result: Float64
 copysign: extern function(x: Float64, y: Float64) result: Float64
 
 
-ldexp: extern function(x: Float64, exp: Int32) result: Float64
-frexp: extern function(x: Float64, exp: ref Int32) result: Float64
-modf: extern function(x: Float64, iptr: ref Int32) result: Float64
-
+ldexp: extern function(x: Float64, exp: CInt) result: Float64
+frexp: extern function(x: Float64, exp: ref CInt) result: Float64
+modf: extern function(x: Float64, iptr: ref CInt) result: Float64
 
 erf: extern function(in: Float64) result: Float64
 erfc: extern function(in: Float64) result: Float64

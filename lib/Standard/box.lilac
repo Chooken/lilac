@@ -1,0 +1,36 @@
+using Standard.Heap
+
+Box[T]: object {
+
+    private {
+        value: Optional[ref T]
+    }
+
+    create: function(data: T) box: Box[T] {
+
+        // Create ref.
+        ptr: ref T = CAllocator.create[T]()
+        // Assign data to it.
+        ptr = data
+
+        // Put it in a box.
+        box = Box[T] {
+            value = Optional.Some(ptr)
+        }
+    }
+
+    move: function(self) to: Box[T] {
+        to = self
+        self.value = Optional.None
+    }
+
+    @on_copy: function(self) copy: Box[T] {
+        @compile_error("You cannot copy a Box[T]. If you want to move it use variable.move()!")
+    }
+
+    @on_drop: function(self) nothing {
+        if self.value.unwrap() -> value: ref T {
+            CAllocator.destroy[T](self.ptr)
+        }
+    }
+}

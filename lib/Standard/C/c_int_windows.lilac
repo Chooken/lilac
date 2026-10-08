@@ -1,0 +1,9 @@
+CInt: object {
+    data: @bit32
+
+    @conversion: function(from: Int32) CInt => CInt { data = from }
+    @conversion: function(from: @bit32) CInt => CInt { data = from }
+
+    @conversion: function(from: CInt) @bit32 => from.data
+    @conversion: function(from: CInt) Int32 => from.data
+}

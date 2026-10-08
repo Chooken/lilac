@@ -1,0 +1,12 @@
+using Standard.C
+
+CAllocator: object {
+
+    create[T]: function() allocation: ref T {
+        allocation = malloc(@sizeof(T)) as ref T
+    }
+
+    destroy[T]: function(allocation: ref T) nothing {
+        free(allocation)
+    }
+}

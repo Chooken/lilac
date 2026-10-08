@@ -1,0 +1,32 @@
+FILE: object {
+    opaque_ptr: ref unknown
+}
+
+fopen: extern function(pathname: ref Int8, mode: ref Int8) result: FILE
+freopen: extern function(fd: CInt, mode: ref Int8) result: FILE
+fclose: extern function(stream: FILE) result: CInt
+fflush: extern function(stream: FILE) result: CInt
+setvbuf: extern function(stream: FILE) result: CInt
+
+fread: extern function(ptr: ref unknown, size: @bit_native, nmemb: @bit_native, stream: FILE) result: @bit_native
+fwrite: extern function(ptr: ref unknown, size: @bit_native, nmemb: @bit_native, stream: FILE) result: @bit_native
+fgets: extern function(s: ref Int8, size: CInt, stream: FILE) result: ref Int8
+fgetc: extern function(stream: FILE) result: CInt
+fputc: extern function(c: Int8, stream: FILE) result: CInt
+fputs: extern function(s: ref Int8, stream: FILE) result: CInt
+puts: extern function(s: ref Int8) result: CInt
+putchar: extern function(c: CInt) result: CInt
+getchar: extern function() result: CInt
+ungetc: extern function(c: CInt, stream: FILE) result: CInt
+
+fseek: extern function(stream: FILE, offset: CLong, whence: CInt) result: CInt
+ftell: extern function(stream: FILE) result: CLong
+rewind: extern function(stream: FILE) nothing
+feof: extern function(stream: FILE) result: CInt
+ferror: extern function(stream: FILE) result: CInt
+clearerr: extern function(stream: FILE) nothing
+
+remove: extern function(pathname: ref Int8) result: CInt
+rename: extern function(oldpath: ref Int8, newpath: ref Int8) result: CInt
+tmpfile: extern function() result: FILE
+perror: extern function(s: ref Int8) nothing
