@@ -210,7 +210,6 @@ impl Session {
             items: Vec::new(),
             span: Span::dummy(),
         };
-        let mut had_parse_errors = false;
         for unit in &project.files {
             let file = unit.file;
             let (tokens, lex_errors) = Lexer::lex_all(&unit.src, file);
@@ -219,12 +218,14 @@ impl Session {
             }
             let mut parser = Parser::new(tokens, file);
             let program = parser.parse_program(&mut self.diags)?;
-            had_parse_errors |= parser.had_errors();
+            // Strict mode aborts at the first parse-failing file (today's `?` on
+            // the old `Err` return), so later files are never parsed/reported.
+            // Tolerant mode (editor tooling) keeps going across every file.
+            if parser.had_errors() && !self.retain_partial_analysis {
+                return Err(ErrorGuaranteed::new());
+            }
             merged.items.extend(program.items.iter().cloned());
             programs.push((file, program));
-        }
-        if had_parse_errors && !self.retain_partial_analysis {
-            return Err(ErrorGuaranteed::new());
         }
         let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
         self.finish_pipeline(&merged, &resolved, on_stage)
@@ -766,6 +767,40 @@ mod tests {
             )
             .is_err());
         assert!(s.render_diagnostics().contains("E060"));
+    }
+
+    /// Strict mode aborts a project compile at the first parse-failing file
+    /// (today's `?` on the old `Err` return), so later files are never parsed
+    /// or reported. Regression guard for item-level recovery making
+    /// `parse_program` always `Ok`.
+    #[test]
+    fn strict_project_aborts_at_first_parse_failing_file() {
+        let root = PathBuf::from("proj");
+        let a = root.join("a.lilac");
+        let b = root.join("b.lilac");
+        let mut fs = TestFs {
+            files: [
+                (a.clone(), "broken_a: function (\n".to_owned()),
+                (b.clone(), "broken_b: function (\n".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            dirs: [(root.clone(), vec![a, b])].into_iter().collect(),
+        };
+        let mut session = Session::new();
+        let result = session.compile_project(&root, &mut fs);
+        assert!(result.is_err(), "both files are broken");
+        let rendered = session.render_diagnostics();
+        assert_eq!(
+            rendered.matches("error[E001]").count(),
+            1,
+            "only the first parse-failing file is reported:\n{rendered}"
+        );
+        assert!(rendered.contains("a.lilac"), "{rendered}");
+        assert!(
+            !rendered.contains("b.lilac"),
+            "the later file must not be parsed in strict mode:\n{rendered}"
+        );
     }
 
     #[test]

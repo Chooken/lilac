@@ -241,6 +241,13 @@ fn scan_usings(src: &str, file: FileId) -> Vec<(String, Span)> {
     let Ok(program) = parser.parse_program(&mut ignore) else {
         return Vec::new();
     };
+    // A file with any failed construct must contribute no `using`s: before
+    // item-level recovery a parse failure made this return early, so the loader
+    // never followed such a file's imports. Gate on the parser's failure signal
+    // (`parse_program` now always returns `Ok`) to keep strict loading identical.
+    if parser.had_errors() {
+        return Vec::new();
+    }
     let mut usings = Vec::new();
     for item in &program.items {
         collect_usings(item, &mut usings);
@@ -373,6 +380,31 @@ mod tests {
             .find(|file| file.name == "main.lilac")
             .expect("main file");
         assert_eq!(main.usings, ["util"]);
+    }
+
+    #[test]
+    fn parse_broken_file_contributes_no_usings() {
+        // A file with a failed item must not contribute its `using`s: before
+        // item-level recovery a parse failure skipped scanning, so a broken
+        // file's import of a missing folder stayed silent (no `E025`). Recovery
+        // must preserve that strict-mode behavior.
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "broken: function (\nusing missing\n");
+
+        let mut diags = Diags::new();
+        let project = load(&root, &mut fs, &mut diags).expect("load succeeds");
+
+        assert!(
+            !diags.has_errors(),
+            "the broken file's `using` must not be followed: {diags:?}"
+        );
+        let main = project
+            .files
+            .iter()
+            .find(|file| file.name == "main.lilac")
+            .expect("main file");
+        assert!(main.usings.is_empty(), "{:?}", main.usings);
     }
 
     #[test]
