@@ -1690,6 +1690,38 @@ mod tests {
         }
     }
 
+    /// A native macOS module defines none of the C-runtime replacements: it
+    /// links `libSystem`, which has them, and its OS layer calls the C
+    /// functions.
+    #[test]
+    fn macos_native_uses_libsystem() {
+        let triple = "aarch64-apple-darwin";
+        let mut module = main_module(triple);
+        let main = module.funcs[0].clone();
+        module.funcs.extend(lilac_ir::build_runtime(
+            8,
+            lilac_ir::System::Libc,
+            Entry::Native,
+        ));
+        module.funcs.push(lilac_ir::entry_point(&main));
+        let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
+        let context = inkwell::context::Context::create();
+        let (built, _) = backend
+            .build_module(
+                &context,
+                &module,
+                inkwell::targets::RelocMode::PIC,
+                Entry::Native,
+                &mut |_| {},
+            )
+            .expect("builds");
+        let text = built.print_to_string().to_string();
+        assert!(text.contains("define void @.lilac.start("), "{text}");
+        for symbol in ["@memcpy(", "@memmove(", "@memset(", "\"stackrealign\""] {
+            assert!(!text.contains(symbol), "{symbol}: {text}");
+        }
+    }
+
     /// `Entry::Native` emits a COFF object (linking and running it is covered
     /// by the CLI's build and run tests).
     #[test]

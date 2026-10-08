@@ -1,0 +1,11 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1345
+exports:
+  - targets:         [ x86_64-macos ]
+    symbols:         [ ___chkstk_darwin, _bzero, _calloc, _exit, _fmod, _fmodf, _free,
+                       _malloc, _memcpy, _memmove, _memset, _write,
+                       dyld_stub_binder ]
+...

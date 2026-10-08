@@ -9,6 +9,10 @@
 //!
 //! On x86-64 Linux, `.lilac.start` also realigns its stack, which the kernel
 //! leaves 8 bytes off from a normal call.
+//!
+//! macOS needs none of this: its system interface is `libSystem`, which a
+//! native program links anyway, and which already defines the memory
+//! functions.
 
 use inkwell::attributes::AttributeLoc;
 use inkwell::builder::Builder;
@@ -75,6 +79,9 @@ pub(crate) fn define<'ctx>(
     triple: &str,
     native: IntType<'ctx>,
 ) {
+    if is_apple(triple) {
+        return;
+    }
     let support = Support {
         context,
         module,
@@ -103,6 +110,11 @@ pub(crate) fn define<'ctx>(
             start.add_attribute(AttributeLoc::Function, realign);
         }
     }
+}
+
+/// Whether `triple` is an Apple target (`-apple-darwin`, `-apple-macos…`).
+fn is_apple(triple: &str) -> bool {
+    triple.contains("-apple-")
 }
 
 struct Support<'ctx, 'm> {

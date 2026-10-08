@@ -464,6 +464,26 @@ a Linux machine). Differences from the outline below:
 
 ## Step 4: macOS
 
+**Status: done** (cross-linked and inspected from Windows; not yet run on a
+Mac). Differences from the outline below:
+
+- The OS layer is the existing `System::Libc` one (`write`, `calloc`/`free`,
+  `exit`), now bound to `libSystem` directly: on macOS it is the supported
+  system interface, so native and `--libc` builds share it, and `exit`
+  flushes C `stdio` for code still using `Standard.C`.
+- The stub lists one target per file (`toolchain/<triple>/libSystem.tbd`),
+  like the per-arch `kernel32.lib`. Besides the plan's symbols it has
+  `memcpy`/`memmove`/`memset` and `bzero` (arm64 lowers zeroing to it), so
+  the backend defines no C-runtime replacements on macOS; `fmod`/`fmodf`
+  for float `%`; `___chkstk_darwin`; and `dyld_stub_binder`, which lld's
+  lazy binding needs.
+- lld gives the executable `LC_MAIN` (dyld calls `.lilac.start` like a C
+  `main`, so its stack is aligned) and an ad-hoc `LC_CODE_SIGNATURE` on
+  arm64. All runnable run tests cross-link for both arches, debug and
+  release; the test that runs one only does so on a macOS host.
+- With every linkable target native, `lilac build` no longer has a
+  "native runtime not available" error.
+
 - Add a hand-written `libSystem.tbd` listing `write`, `exit`,
   `malloc`/`free`, and, optionally, the math symbols.
 - The OS layer makes plain `extern` calls into it.

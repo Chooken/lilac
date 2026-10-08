@@ -89,9 +89,9 @@
   and `-o` override it.
 - `Target::link_info` in `lilac-target` is the single table of per-OS link
   facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
-- **Native mode is the default** (`Entry::Native`, Windows and Linux so
-  far; macOS exits 2 asking for `--libc`). It links with the sysroot's
-  `lld` and `toolchain/` import stubs (`kernel32.lib`), no C library: the
+- **Native mode is the default** (`Entry::Native`, on Windows, Linux and
+  macOS). It links with the sysroot's `lld` and `toolchain/` stubs
+  (`kernel32.lib`, a hand-written `libSystem.tbd`), no C library: the
   sysroot is `LILAC_SYSROOT`, else `<exe dir>/../lib/lilac`
   (`scripts/package.sh` builds that layout). The program is entered at
   `.lilac.start` (`lilac_ir::entry_point`: calls `main`, then exits 0), and
@@ -100,7 +100,11 @@
   `native.rs`; on x86-64 Linux it also gives `.lilac.start` the
   `stackrealign` attribute, since the kernel enters it unaligned for a
   call). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
-  when a `--link-arg` names a shared library (`.so`, `-l`).
+  when a `--link-arg` names a shared library (`.so`, `-l`). macOS links
+  `libSystem` (Apple's only stable system interface; lld ad-hoc signs arm64
+  executables) and takes `memcpy`/`memset`/`bzero` from it, so the backend
+  defines none of the C-runtime replacements there; a `libSystem` function
+  the stub does not list needs adding to `toolchain/*-apple-darwin/`.
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
   else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`). It is the
   permanent opt-in for static C libraries, and how code using `Standard.C`
@@ -125,7 +129,7 @@
 - A file argument is compiled with `Session::compile_file_with_stages`
   (`lilac_module::load_file`): the file is the root namespace's only file,
   and its `using`s load mounted libraries (and folders next to it).
-- Run tests build natively on Windows and Linux, with a development
+- Run tests build natively on Windows, Linux and macOS, with a development
   sysroot assembled under cargo's test scratch folder from `toolchain/` and
   `$LLVM_SYS_181_PREFIX/bin/lld` (`tests/support`); `// libc` programs and
   other hosts use `--libc` with `LILAC_LINKER` set to the toolchain `clang`.

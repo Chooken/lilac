@@ -265,7 +265,7 @@ fn missing_linker_is_a_clear_error() {
 /// A native build links with the sysroot's `lld` and needs no C library.
 #[test]
 fn native_build_runs_without_libc() {
-    if !cfg!(any(windows, target_os = "linux")) {
+    if !cfg!(any(windows, target_os = "linux", target_os = "macos")) {
         return;
     }
     let Some(sysroot) = support::sysroot() else {
@@ -300,7 +300,7 @@ fn native_build_runs_without_libc() {
 /// A native build with no sysroot says where it looked.
 #[test]
 fn missing_sysroot_is_a_clear_error() {
-    if !cfg!(any(windows, target_os = "linux")) {
+    if !cfg!(any(windows, target_os = "linux", target_os = "macos")) {
         return;
     }
     let dir = scratch("no-sysroot");
@@ -421,20 +421,55 @@ fn native_linux_links_shared_libraries() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// macOS has no native runtime yet: building for it without `--libc` is a
-/// usage error.
+/// macOS executables link from any host with the sysroot's `lld` and the
+/// `libSystem.tbd` stub: entered through `LC_MAIN`, importing only from
+/// `libSystem`, and ad-hoc signed on Apple silicon. They run on a macOS host.
 #[test]
-fn native_mode_elsewhere_points_at_libc() {
-    let dir = scratch("native-elsewhere");
-    std::fs::write(dir.join("hello.lilac"), HELLO).expect("writes source");
-    let out = build(
-        &dir,
-        &["-q", "--target=aarch64-apple-darwin", "hello.lilac"],
-        None,
-    );
-    let err = stderr(&out);
-    assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("build with --libc"), "{err}");
+fn native_macos_cross_links() {
+    let Some(sysroot) = support::sysroot() else {
+        eprintln!("skipping: no lld");
+        return;
+    };
+    let dir = scratch("native-macos");
+    std::fs::write(dir.join("hi.lilac"), NATIVE_HELLO).expect("writes source");
+    for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+        let exe = dir.join(triple);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
+        command
+            .args(["build", "-q", "--release", "-o"])
+            .arg(&exe)
+            .arg(format!("--target={triple}"))
+            .arg("hi.lilac")
+            .current_dir(&dir)
+            .env("LILAC_SYSROOT", &sysroot);
+        let out = command.output().expect("runs lilac");
+        assert!(out.status.success(), "{triple}: {}", stderr(&out));
+        let bytes = std::fs::read(&exe).expect("reads the executable");
+        assert!(
+            bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]),
+            "{triple}: not Mach-O"
+        );
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"/usr/lib/libSystem.B.dylib"), "{triple}: no libSystem");
+        if triple.starts_with("aarch64") {
+            // `LC_CODE_SIGNATURE` (0x1d) as a little-endian load command.
+            assert!(has(&[0x1d, 0, 0, 0, 0x10, 0, 0, 0]), "{triple}: unsigned");
+        }
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        if cfg!(target_os = "macos") && triple.starts_with(arch) {
+            let run = Command::new(&exe).output().expect("runs hi");
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout),
+                "Hi
+"
+            );
+            assert_eq!(run.status.code(), Some(3));
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

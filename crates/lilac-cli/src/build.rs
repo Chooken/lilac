@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{Entry, ErrorFormat, LinkInfo, Os, Progress, Session, Target};
+use lilac_driver::{Entry, ErrorFormat, LinkInfo, Progress, Session};
 use lilac_error::Level;
 
 use crate::link;
@@ -116,12 +116,6 @@ pub fn layout(
     }
 }
 
-/// Whether the native runtime (no C library) supports `target` yet. macOS
-/// follows in a later step; until then it builds with `--libc`.
-fn native_supported(target: Target) -> bool {
-    matches!(target.os, Os::Windows | Os::Linux)
-}
-
 /// The program name: the file stem, or the project folder's name.
 fn program_name(input: &Path, is_dir: bool) -> String {
     let named = if is_dir {
@@ -169,12 +163,6 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         eprintln!("error: `lilac build` cannot link executables for `{triple}`");
         return ExitCode::from(2);
     };
-    if !flags.libc && !native_supported(session.target) {
-        eprintln!(
-            "error: the native runtime is not available for `{triple}` yet; build with --libc"
-        );
-        return ExitCode::from(2);
-    }
     let verbosity = if flags.quiet || session.opts.error_format == ErrorFormat::Json {
         Verbosity::Quiet
     } else if flags.timings {
@@ -333,6 +321,7 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lilac_driver::Target;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
@@ -421,16 +410,6 @@ mod tests {
                 .join("debug")
                 .join("app.exe")
         );
-    }
-
-    #[test]
-    fn native_runtime_is_windows_and_linux_for_now() {
-        let target = |triple| Target::parse(triple).expect("triple");
-        assert!(native_supported(target("x86_64-pc-windows-msvc")));
-        assert!(native_supported(target("aarch64-pc-windows-msvc")));
-        assert!(native_supported(target("x86_64-unknown-linux-gnu")));
-        assert!(native_supported(target("aarch64-unknown-linux-gnu")));
-        assert!(!native_supported(target("aarch64-apple-darwin")));
     }
 
     #[test]
