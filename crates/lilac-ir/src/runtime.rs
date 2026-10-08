@@ -8,7 +8,8 @@
 //! layer: `.lilac.write`, `.lilac.exit`, `.lilac.alloc` and `.lilac.free`,
 //! written as plain calls to `extern` system functions or, on Linux, to the
 //! `@syscall` leaf (see [`System`]), and
-//! the native process entry `.lilac.start` (see [`entry_point`]).
+//! the native process entry `.lilac.start` (see [`entry_point`]), and the
+//! panic handler `.lilac.panic` (see [`panic_runtime`]).
 //!
 //! Every place is addressed (the pointer place ABI), so the bodies only need
 //! `alloca`/`field`/`field.addr`, `copy`/`store`, `convert`, `arith`,
@@ -18,7 +19,7 @@
 use lilac_span::Span;
 
 use crate::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirFunc, LirInst, LirOperand, LirTerm, LirTy,
+    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirOperand, LirTerm, LirTy,
 };
 
 /// How a program enters: which entry symbol wraps the Lilac `main`.
@@ -159,6 +160,156 @@ pub fn entry_point(main: &LirFunc) -> LirFunc {
         &[],
         vec![block("entry", insts, unreachable())],
     )
+}
+
+/// Data written around a panic message.
+const PANIC_HEAD: &str = ".lilac.panic.head";
+const PANIC_NEWLINE: &str = ".lilac.panic.newline";
+const PANIC_ELIDED: &str = ".lilac.panic.elided";
+const PANIC_NO_TRACE: &str = ".lilac.panic.no_trace";
+/// Frames written before a trace is cut short (deep recursion).
+const PANIC_MAX_FRAMES: &str = "0x80";
+/// A panicking process's exit code (101, Rust's convention).
+const PANIC_EXIT_CODE: &str = "0x65";
+
+/// The panic handler `.lilac.panic(#byte_buffer %msg, #byte_buffer %site)`
+/// and the data it writes: `panic: <msg>`, then the stack trace, then
+/// `.lilac.exit(101)`. It never returns.
+///
+/// The trace walks the shadow stack `@trace_head` points at (see
+/// [`crate::trace`]), writing each frame's `site` line, innermost first, and
+/// `  ...` after 128 frames. With no frame pushed (a build without stack
+/// traces) it writes the panic's own `site` and a hint instead. Every line
+/// already ends in a newline.
+///
+/// It is kept apart from [`build_runtime`] because it carries data; DCE drops
+/// both from a program that never panics.
+#[must_use]
+pub fn panic_runtime() -> (LirFunc, Vec<LirData>) {
+    let data = [
+        (PANIC_HEAD, "panic: "),
+        (PANIC_NEWLINE, "\n"),
+        (PANIC_ELIDED, "  ...\n"),
+        (
+            PANIC_NO_TRACE,
+            "  (stack trace disabled; build with --stack-traces=on)\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, text)| LirData {
+        name: name.to_owned(),
+        bytes: text.as_bytes().to_vec(),
+        span: span(),
+    })
+    .collect();
+    (panic_handler(), data)
+}
+
+fn panic_handler() -> LirFunc {
+    let frame_ref = LirTy::trace_frame().to_ref();
+    let mut entry = vec![
+        alloca(LirTy::byte_ref(), "data"),
+        alloca(LirTy::BitNative, "len"),
+        alloca(LirTy::byte_buffer(), "text"),
+        alloca(frame_ref.clone().to_ref(), "head"),
+        alloca(frame_ref.clone(), "frame"),
+        alloca(LirTy::BitNative, "count"),
+    ];
+    entry.extend(const_place("fd", "0x2", LirTy::Bit(32)));
+    entry.extend(write_data(PANIC_HEAD, "a"));
+    entry.extend(write_buffer("msg", "b"));
+    entry.extend(write_data(PANIC_NEWLINE, "c"));
+    entry.extend([
+        call_builtin("@trace_head", &[], &["head"]),
+        load("head", "top", frame_ref.clone()),
+        copy_place(LirOperand::Reg("top".to_owned()), "frame"),
+    ]);
+    entry.extend(is_null("top", "untraced"));
+
+    let mut untraced = write_buffer("site", "a");
+    untraced.extend(write_data(PANIC_NO_TRACE, "b"));
+
+    let mut walk = vec![copy_reg(
+        LirOperand::Place("frame".to_owned()),
+        "cur",
+        frame_ref.clone(),
+    )];
+    walk.extend(is_null("cur", "done"));
+
+    let check = vec![
+        copy_reg(LirOperand::Place("count".to_owned()), "n", LirTy::BitNative),
+        constant("max", PANIC_MAX_FRAMES, LirTy::BitNative),
+        arith(ArithOp::Eq, "n", "max", "full", LirTy::Bit(8)),
+    ];
+
+    let mut print = vec![
+        field("frame", "site", 1, "site", LirTy::byte_buffer()),
+        copy_place(LirOperand::Reg("site".to_owned()), "text"),
+    ];
+    print.extend(write_buffer("text", "a"));
+    print.extend([
+        field("frame", "prev", 0, "prev", frame_ref),
+        copy_place(LirOperand::Reg("prev".to_owned()), "frame"),
+        copy_reg(LirOperand::Place("count".to_owned()), "n", LirTy::BitNative),
+        constant("one", "0x1", LirTy::BitNative),
+        arith(ArithOp::IAdd, "n", "one", "next", LirTy::BitNative),
+        copy_place(LirOperand::Reg("next".to_owned()), "count"),
+    ]);
+
+    let mut exit = const_place("code", PANIC_EXIT_CODE, LirTy::Bit(32)).to_vec();
+    exit.push(call(".lilac.exit", &["code"], &[]));
+
+    lir_func(
+        ".lilac.panic",
+        &[
+            ("msg", LirTy::byte_buffer()),
+            ("site", LirTy::byte_buffer()),
+        ],
+        &[],
+        vec![
+            block("entry", entry, branch_if("untraced", "untraced", "walk")),
+            block("untraced", untraced, branch("exit")),
+            block("walk", walk, branch_if("done", "exit", "check")),
+            block("check", check, branch_if("full", "elided", "print")),
+            block("print", print, branch("walk")),
+            block("elided", write_data(PANIC_ELIDED, "a"), branch("exit")),
+            block("exit", exit, unreachable()),
+        ],
+    )
+}
+
+/// Writes the `#byte_buffer` place `buffer` to `%fd` through the reused
+/// `%data`/`%len` places; `tag` keeps the registers unique within a block.
+fn write_buffer(buffer: &str, tag: &str) -> Vec<LirInst> {
+    let (data, len) = (format!("{tag}.data"), format!("{tag}.len"));
+    vec![
+        field(buffer, "data", 1, &data, LirTy::byte_ref()),
+        copy_place(LirOperand::Reg(data), "data"),
+        field(buffer, "len", 0, &len, LirTy::BitNative),
+        copy_place(LirOperand::Reg(len), "len"),
+        call(".lilac.write", &["fd", "data", "len"], &[]),
+    ]
+}
+
+/// Writes the data constant `name` through `%text`.
+fn write_data(name: &str, tag: &str) -> Vec<LirInst> {
+    let reg = format!("{tag}.text");
+    let mut insts = vec![
+        constant(&reg, &format!("!{name}"), LirTy::byte_buffer()),
+        copy_place(LirOperand::Reg(reg), "text"),
+    ];
+    insts.extend(write_buffer("text", tag));
+    insts
+}
+
+/// `&out = (&ptr as address) == 0`.
+fn is_null(ptr: &str, out: &str) -> [LirInst; 3] {
+    let (address, zero) = (format!("{out}.address"), format!("{out}.zero"));
+    [
+        convert(ConvertOp::Bitcast, ptr, &address, LirTy::BitNative),
+        constant(&zero, "0x0", LirTy::BitNative),
+        arith(ArithOp::Eq, &address, &zero, out, LirTy::Bit(8)),
+    ]
 }
 
 /// The OS layer for `system`: `extern` declarations first, then the four
@@ -1029,6 +1180,29 @@ fn format_args_piece(stride: &str) -> LirFunc {
 mod tests {
     use super::{build_runtime, entry_point, Entry, Syscalls, System};
     use crate::{verify, ArithOp, LirFunc, LirInst, LirModule};
+
+    /// The panic handler verifies on top of every OS layer.
+    #[test]
+    fn panic_handler_verifies() {
+        for system in [
+            System::Windows,
+            System::Libc,
+            System::Linux(Syscalls::X86_64),
+            System::None,
+        ] {
+            let mut module = LirModule::new("x86_64-pc-windows-msvc");
+            module.funcs = build_runtime(8, system, Entry::Native);
+            let (handler, data) = super::panic_runtime();
+            module.funcs.push(handler);
+            module.data = data;
+            let mut diags = lilac_error::Diags::new();
+            assert!(
+                verify(&module, &mut diags).is_ok(),
+                "{system:?}: {:?}",
+                diags.diagnostics()
+            );
+        }
+    }
 
     fn runtime(ptr_size: u32) -> Vec<LirFunc> {
         build_runtime(ptr_size, System::None, Entry::CMain)

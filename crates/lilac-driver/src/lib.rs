@@ -543,8 +543,9 @@ impl Session {
 }
 
 impl Session {
-    /// Appends the runtime for the target's OS layer and entry, plus the
-    /// native `.lilac.start` when the program has a `main`. A runtime
+    /// Appends the runtime for the target's OS layer and entry, the panic
+    /// handler `.lilac.panic` and its data, plus the native `.lilac.start`
+    /// when the program has a `main`. A runtime
     /// `extern` the program already declares (say, the C library's `exit`)
     /// is not declared twice.
     fn inject_runtime(&self, lir: &mut LirModule) {
@@ -567,6 +568,9 @@ impl Session {
                 lir.funcs.push(func);
             }
         }
+        let (panic, data) = lilac_ir::panic_runtime();
+        lir.funcs.push(panic);
+        lir.data.extend(data);
         if self.entry == Entry::Native {
             if let Some(main) = lir
                 .funcs

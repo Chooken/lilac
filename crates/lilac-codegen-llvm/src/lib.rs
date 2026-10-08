@@ -1207,6 +1207,19 @@ mod tests {
         assert!(text.contains("call ptr @.lilac.trace_head()"), "{text}");
     }
 
+    /// The panic handler (its shadow-stack walk included) lowers to LLVM.
+    #[test]
+    fn panic_handler_lowers() {
+        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        module.funcs = lilac_ir::build_runtime(8, lilac_ir::System::Windows, Entry::Native);
+        let (handler, data) = lilac_ir::panic_runtime();
+        module.funcs.push(handler);
+        module.data = data;
+        let text = emit(&module);
+        assert!(text.contains("define void @.lilac.panic("), "{text}");
+        assert!(text.contains("@.lilac.panic.head = private"), "{text}");
+    }
+
     /// The builtin aggregate LLVM types come from `builtin_layout`: a
     /// `{ iNative, ptr }` `#byte_buffer` and a 17-field `#format_args` (a count
     /// plus sixteen named pieces, no array).
