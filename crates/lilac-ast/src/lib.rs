@@ -128,6 +128,9 @@ pub struct Type {
     /// Type name (`@bit32` keeps its `@`; `ref` is in [`Type::is_ref`];
     /// `"function"` when [`Type::func`] is `Some`).
     pub name: String,
+    /// Span of the type's identifier token, excluding a leading `ref` and any
+    /// generic arguments.
+    pub name_span: Span,
     /// `ref T` (a type can never be doubly flagged).
     pub is_ref: bool,
     /// Generic arguments (`GenObj[T]` instantiation).

@@ -132,6 +132,7 @@ impl Parser {
         self.recover();
         Type {
             name: String::new(),
+            name_span: span,
             is_ref: false,
             generic_args: Vec::new(),
             func: None,
@@ -732,7 +733,7 @@ impl Parser {
     ) -> Result<Type, ErrorGuaranteed> {
         let start = first.span;
         if first.kind == TokenKind::KwFunction {
-            return self.parse_func_type(diags, start, false);
+            return self.parse_func_type(diags, start, start, false);
         }
         let (is_ref, name_token) = match first.kind {
             TokenKind::KwRef => {
@@ -746,7 +747,12 @@ impl Parser {
                 }
                 if self.peek().kind == TokenKind::KwFunction {
                     let keyword = self.bump();
-                    return self.parse_func_type(diags, join_spans(start, keyword.span), true);
+                    return self.parse_func_type(
+                        diags,
+                        join_spans(start, keyword.span),
+                        keyword.span,
+                        true,
+                    );
                 }
                 (true, self.parse_type_name(diags)?)
             }
@@ -791,6 +797,7 @@ impl Parser {
         }
         Ok(Type {
             name: name_token.text,
+            name_span: name_token.span,
             is_ref,
             generic_args,
             func: None,
@@ -803,6 +810,7 @@ impl Parser {
         &mut self,
         diags: &mut lilac_error::Diags,
         start: Span,
+        name_span: Span,
         is_ref: bool,
     ) -> Result<Type, ErrorGuaranteed> {
         self.expect(
@@ -839,6 +847,7 @@ impl Parser {
             .map_or_else(|| self.prev_span(), |param| param.span);
         Ok(Type {
             name: "function".to_owned(),
+            name_span,
             is_ref,
             generic_args: Vec::new(),
             func: Some(FuncType { params, returns }),
@@ -1904,6 +1913,53 @@ mod tests {
         };
         assert_eq!(ty.name, "@bit8");
         assert!(!ty.is_ref);
+    }
+
+    fn sole_let_type(src: &str) -> (Type, SourceMap) {
+        let (program, diags, sm) = parse(src);
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.diagnostics()
+        );
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        let Stmt::Let { ty, .. } = &block.stmts[0] else {
+            panic!("expected let, got {:?}", block.stmts[0]);
+        };
+        (ty.clone(), sm)
+    }
+
+    #[test]
+    fn type_name_span() {
+        let cases = [
+            (
+                "main: function () nothing {\n    x: @bit32 = 0x1\n}\n",
+                "@bit32",
+            ),
+            (
+                "main: function () nothing {\n    x: ref @bit32 = y\n}\n",
+                "@bit32",
+            ),
+            (
+                "main: function () nothing {\n    x: GenObj[@bit32] = y\n}\n",
+                "GenObj",
+            ),
+        ];
+        for (src, name) in cases {
+            let (ty, sm) = sole_let_type(src);
+            assert_eq!(ty.name, name, "type name in {src:?}");
+            let lo = u32::try_from(src.find(name).expect("name present in source"))
+                .expect("offset fits in u32");
+            let hi = lo + u32::try_from(name.len()).expect("name length fits in u32");
+            assert_eq!(ty.name_span.lo.0, lo, "lo for {name}");
+            assert_eq!(ty.name_span.hi.0, hi, "hi for {name}");
+            assert_eq!(sm.span_text(ty.name_span), Some(name), "text for {name}");
+        }
     }
 
     #[test]

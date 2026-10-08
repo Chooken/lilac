@@ -879,6 +879,7 @@ mod tests {
     fn named_type(name: &str) -> lilac_ast::Type {
         lilac_ast::Type {
             name: name.to_owned(),
+            name_span: Span::dummy(),
             is_ref: false,
             generic_args: Vec::new(),
             func: None,
@@ -889,6 +890,7 @@ mod tests {
     fn applied_type(name: &str, args: Vec<lilac_ast::Type>) -> lilac_ast::Type {
         lilac_ast::Type {
             name: name.to_owned(),
+            name_span: Span::dummy(),
             is_ref: false,
             generic_args: args,
             func: None,
