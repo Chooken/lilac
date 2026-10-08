@@ -224,7 +224,7 @@ call &f (in %a) (out %b)
 * Callee is a `@`-builtin **leaf** name (`call @ptr_add (in %base, %off) (out %s)`)
 * Only three target-specific leaves remain builtins, verified against the
   signature table below. They lower to the `.lilac.*` backend symbols shown.
-  `@size_of` and `@compile_error` are fold-only markers, never builtin calls
+  `@size_of` is a `const` and `@compile_error` a marker, never builtin calls
   (see `compile.error`)
 
 | builtin | in-args | out | LLVM lowering |
@@ -251,7 +251,7 @@ ordinary LIR functions in the `.lilac.` namespace, built once by
 | `.lilac.format_args_piece` | `#format_args`, `#bit_native` | `#byte_buffer` |
 
 These functions call back into the `@ptr_add` and `@lilac_abort` leaves. The
-driver's pass order is `fold` → inject the prelude → `prune_unreachable`, so
+driver's pass order is lower → inject the prelude → `prune_unreachable`, so
 the runtime is present during pruning and dead-code elimination removes
 whatever a program does not reach.
 
@@ -268,11 +268,10 @@ branch [$, &]
 ```lilac-ir
 branch.if [%, &], [$, &], [$, &]?
 ```
-A compile-time folding pass runs before verification. `branch.if` on a constant
-condition is replaced with `branch` to the live target, so verified IR never
-contains `branch.if` on a constant. Dead successors left unreachable are removed.
-`call`s with all-constant arguments to pure functions with bounded loops may
-additionally be folded, otherwise they are kept as runtime calls.
+Lowering decides constant-expression conditions (SPEC "Constant conditions
+and `@compile_error`") and emits only the live arm, so LIR never contains a
+`branch.if` on a constant; the verifier rejects one. Other constant
+arithmetic and calls are left for the backend to fold.
 
 ### return
 ```lilac-ir
@@ -315,10 +314,10 @@ the panic site and a hint instead.
 @compile_error(live)
 ```
 Lowering emits one `@compile_error(live)` marker per `@compile_error(msg)`
-call site. `compile.error` fires only if still live after constant folding and
-global dead-code elimination (`E031`): a marker inside a branch eliminated by
-folding, or inside a function unreachable from `main` or an `--export` root, is
-dropped without diagnostic, so verified IR reaching a backend contains no marker
+call site it lowers. A call in the dead arm of a constant condition is never
+lowered; a marker inside a function unreachable from `main` or an `--export`
+root is dropped by global dead-code elimination, without diagnostic. Any other
+marker is `E031`, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives is a live error, diagnosed after reachability pruning — never
 during verification (reaching the verifier is an internal error). `@size_of`

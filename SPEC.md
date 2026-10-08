@@ -191,22 +191,56 @@ The compiler names zero standard library entities anywhere in this path — only
 builtins and conversions. Whether an f-string allocates is
 therefore the caller's explicit choice of sink, never hidden sugar behavior.
 
-### Compile-time folding
+### Constant conditions and `@compile_error`
 
-Constant `if` conditions are folded before code generation: only the live branch
-is kept. `@compile_error(msg)` fires only if it is still live after folding and
-global dead-code elimination, so a `@compile_error` inside a dead branch, an
-uncalled function, or an unused hook is silently dropped. The former camelCase
-alias `@compilerError` is no longer accepted.
+Two rules decide whether a `@compile_error(msg)` is an error:
 
-A call whose arguments are all constant — whether to a `=>` function or a
-block body, including a hand-written parser — is folded by best-effort
-evaluation of pure bodies with bounded loops (`MAX_FOLD_STEPS = 100_000`,
-`MAX_CALL_DEPTH = 16`); if that fails the runtime call (and runtime parse) is
-kept. A missed fold costs performance only, never correctness — except that a
-`@compile_error` guarded by an undecided condition stays live. When that
-happens because evaluation hit the step or depth limit, the `E031` says so in a
-note.
+1. **Reachability.** A `@compile_error` is `E031` exactly when the function
+   containing it is reachable from the program's roots (`main`, `--export`
+   names) after generic instantiation. One in an uncalled function or an
+   unused hook is silently dropped.
+2. **Constant conditions.** An `if` (statement or value), an `and`/`or`
+   operand, or a `match` whose condition or scrutinee is a *constant
+   expression* has only its live arm compiled. The dead arm's calls never
+   happen, so they make nothing reachable, and its `@compile_error`s never
+   exist.
+
+An expression is constant when it is one of:
+
+| Form | Value |
+| --- | --- |
+| an integer literal | its bits at the expression's width |
+| `@size_of(T)` | the size of `T` (per generic instance) |
+| an inline constant (`name: T => expr`) | its initializer, which must be constant |
+| an object or enum-variant literal | if every field / the payload is constant |
+| `value.field` | the field of a constant object |
+| `a == b` | bit equality of two constant integers |
+| `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
+| `a and b`, `a or b` | short-circuit over a constant `a` (`b` only when it decides) |
+| a value `match` | the arm a constant scrutinee selects (a variant pattern binds its capture), else the `else` value |
+| an integer intrinsic | `@i_*` arithmetic and comparisons, `@truncate`, `@extend_zero`, over constant arguments |
+| a call to a `=>` function | with constant arguments: its body, with the parameters bound |
+
+and nothing else. In particular:
+
+- **A local is never constant**, even one initialized from a constant and
+  never assigned: `t: Bool = false; if t { … }` keeps both arms.
+- **Every value involved must be hook-free**: a value of a type with an
+  `@on_drop` or `@on_copy` (directly or through a field) is not constant,
+  since skipping it would skip the hook.
+- **A recursive `=>` call** (to a `=>` function already being expanded) is not
+  constant, so evaluation always terminates. There is no step limit.
+- Integer arithmetic wraps like the runtime operation; a division or modulo by
+  zero is not constant. Float arithmetic is never constant.
+
+Not being constant is never an error: the condition is simply a runtime
+branch. Optimizing constant arithmetic and calls elsewhere is the backend's
+job (LLVM folds them at `-O1` and above) and never changes which programs
+compile.
+
+`true` and `false` in `Standard` are inline constants built from `=>`
+functions over a hook-free `Bool`, so `if true { … } else { … }` compiles one
+arm. The former camelCase alias `@compilerError` is no longer accepted.
 
 ## 3. Compiler Intrinsics
 
@@ -245,8 +279,8 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@fbit_to_bits_W`** | `(@fbitW): @bitW` | Reinterprets a float's bits as the same-width integer (`W` ∈ 16/32/64 only: `@bit128` does not exist). |
 | **`@bits_to_fbit_W`** | `(@bitW): @fbitW` | Reinterprets integer bits as the same-width float (`W` ∈ 16/32/64 only). |
 | **`@size_of`** | `(T)` or `(value)` | The size in bytes of a type, or of a value's type, as a `@bit_native` constant (target C layout: fields in order, each aligned, padded to the largest alignment). Inside a generic body it is the size of the instantiated type. |
-| **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
-| **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). Folded when constant. |
+| **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). |
+| **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). |
 | **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
 | **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
 | **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bit_native`) from `ref @bit8` to `ref @bit8`. |
@@ -271,10 +305,11 @@ so programs do not depend on a separate C library. `Standard.Io`,
 `Standard.Process` and `Standard.Heap.Allocator` are built on them. On a target with no operating
 system they are left for the platform to define, and a program that uses one
 fails to link without it.
-`@compile_error` is a **fold-required marker**, not a runtime builtin call: it
-must be removed by folding (dead branch) or DCE (unreachable function), or it
-is reported as `E031`; a survivor reaching IR verification is an internal
-error. Builtin calls that
+`@compile_error` is a **compile-time marker**, not a runtime builtin call: it
+is never compiled in the dead arm of a constant condition, it is removed with
+its function when that function is unreachable, and otherwise it is reported
+as `E031` (see Constant conditions and `@compile_error`); a survivor reaching
+IR verification is an internal error. Builtin calls that
 do reach IR are checked against the builtin signature table; `@load_u8` takes
 two in-args (`ref #bit8`, `#bit_native`) and yields `#bit8`, while `@store_u8`
 takes three in-args (`ref #bit8`, `#bit_native`, `#bit8`) and yields nothing.
@@ -630,8 +665,8 @@ Inlined functions may omit the return name but are restricted to a single output
 
 A `=> expr` body is exactly `{ out = expr }` on an ordinary function marked
 always-inline: arguments are evaluated once, recursion is allowed (the
-recursive call is simply not inlined), and constant arguments fold like any
-other call.
+recursive call is simply not inlined), and a call with constant arguments is
+a constant expression (see Constant conditions and `@compile_error`).
 
 ```lilac
 inlined_const: @bit64 => 0x0
@@ -859,7 +894,7 @@ desugars to existing constructs the way f-strings do.
 
 Lowering follows the IR v2 rules in `IR_SPEC.md`: typed SSA registers (`&n: #type`),
 explicit `$label:` blocks each ending in one terminator, `alloca : zeroed`,
-verified `call` arity, named `field`, and folding before verification. Examples
+verified `call` arity, and named `field`. Examples
 below use canonical v2 text.
 
 Binary literal:
@@ -881,5 +916,6 @@ $entry:
   return
 ```
 Assignment and member access use `copy` / `field .name` as defined in `IR_SPEC.md`.
-`branch.if` on constant conditions and `compile.error` in dead branches never
-reach verified IR (see Compile-time folding above).
+`branch.if` on a constant-expression condition and `compile.error` in the
+dead arm of one never reach IR (see Constant conditions and `@compile_error`
+above).

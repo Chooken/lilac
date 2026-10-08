@@ -164,7 +164,9 @@
 lex → parse → `lilac-module` load → `lilac-resolve` → `lilac-typeck` (a
 worklist of `(def, type args)` instances emitting HIR directly) →
 `lilac-lower` (HIR → LIR, including the ownership model: copies, moves,
-drops, drop/copy glue) → `lilac-const` fold → runtime injection → DCE →
+drops, drop/copy glue, and constant conditions: only the live arm of an
+`if`/`and`/`or`/`match` on a constant expression is lowered) → runtime
+injection → DCE →
 stack-trace instrumentation (when on) → live `@compile_error` check →
 verify → backend. `Session::run` in `lilac-driver` is the only
 orchestration.
