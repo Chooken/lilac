@@ -32,6 +32,7 @@ use lilac_ir::{
     LirOperand, LirTerm, LirTy,
 };
 use lilac_span::Span;
+use lilac_target::{is_64_bit_triple, Arch, Target};
 
 /// Turns a fallible inkwell builder call into an ICE.
 pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
@@ -55,19 +56,20 @@ pub(crate) struct Lower<'ctx, 'a> {
     module: Module<'ctx>,
     lir: &'a LirModule,
     native: IntType<'ctx>,
+    arch: Option<Arch>,
     named: HashMap<String, StructType<'ctx>>,
 }
 
 impl<'ctx, 'a> Lower<'ctx, 'a> {
-    /// Creates a lowering context over `module`, picking `iNative` from
-    /// `is_64_bit` (the backend's triple drives this).
+    /// Creates a lowering context over `module` for `triple`, which picks
+    /// `iNative` and the `@syscall` instruction.
     pub(crate) fn new(
         context: &'ctx Context,
         module: Module<'ctx>,
         lir: &'a LirModule,
-        is_64_bit: bool,
+        triple: &str,
     ) -> Self {
-        let native = if is_64_bit {
+        let native = if is_64_bit_triple(triple) {
             context.i64_type()
         } else {
             context.i32_type()
@@ -77,6 +79,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             module,
             lir,
             native,
+            arch: Target::parse(triple).ok().map(|target| target.arch),
             named: HashMap::new(),
         }
     }
@@ -89,6 +92,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// The LLVM context this lowering is built in.
     pub(crate) fn context(&self) -> &'ctx Context {
         self.context
+    }
+
+    /// The target's architecture, when the triple parses.
+    pub(crate) fn arch(&self) -> Option<Arch> {
+        self.arch
     }
 
     /// The target's `iNative` integer width.
@@ -531,7 +539,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Lowers one `convert`. `trunc`/`extend.zero` change an integer's width;
     /// `bitcast` reinterprets between an integer and a float of the same width
-    /// (e.g. `#bit32` <-> `#fbit32`).
+    /// (e.g. `#bit32` <-> `#fbit32`), or between a reference and its address
+    /// (`ptrtoint`/`inttoptr`).
     fn lower_convert(
         &self,
         op: &ConvertOp,
@@ -555,8 +564,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             }
             ConvertOp::Bitcast => {
                 let source = self.operand(&LirOperand::Reg(src.to_owned()), None, builder, state);
-                let result_ty = self.lir_type(ty);
-                checked(builder.build_bit_cast(source, result_ty, ""), "bitcast")
+                match (source, self.lir_type(ty)) {
+                    (BasicValueEnum::PointerValue(pointer), BasicTypeEnum::IntType(int)) => {
+                        checked(builder.build_ptr_to_int(pointer, int, ""), "ptrtoint").into()
+                    }
+                    (BasicValueEnum::IntValue(int), BasicTypeEnum::PointerType(pointer)) => {
+                        checked(builder.build_int_to_ptr(int, pointer, ""), "inttoptr").into()
+                    }
+                    (source, result_ty) => {
+                        checked(builder.build_bit_cast(source, result_ty, ""), "bitcast")
+                    }
+                }
             }
         };
         state.regs.insert(dst.to_owned(), value);
@@ -1277,13 +1295,14 @@ pub(crate) fn symbol(name: &str) -> &str {
 
 /// The LLVM symbol a `@`-prefixed leaf LIR builtin emits under. `@memcpy`
 /// becomes `.lilac.memcpy` so its in-module definition cannot collide with the
-/// host C library's `memcpy`; `@ptr_add`/`@lilac_abort` map to their `.lilac.`
-/// leaves.
+/// host C library's `memcpy`; `@ptr_add`/`@lilac_abort`/`@syscall` map to
+/// their `.lilac.` leaves (`syscall` is also a C library function).
 fn builtin_symbol(name: &str) -> &str {
     match name {
         "@memcpy" => ".lilac.memcpy",
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
+        "@syscall" => ".lilac.syscall",
         other => other.strip_prefix('@').unwrap_or(other),
     }
 }

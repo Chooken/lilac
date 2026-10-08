@@ -1,10 +1,11 @@
 //! Run tests: every `tests/run/*.lilac` is built with `lilac build`,
 //! executed, and compared against its header.
 //!
-//! Programs build natively (no C library) on Windows, with a development
-//! sysroot assembled from `toolchain/` and the LLVM tree's `lld` (see
-//! `support::sysroot`). Elsewhere, and for `// libc` programs, they build
-//! with `--libc`, linking through the toolchain `clang` (as `LILAC_LINKER`).
+//! Programs build natively (no C library) on Windows and Linux, with a
+//! development sysroot assembled from `toolchain/` and the LLVM tree's `lld`
+//! (see `support::sysroot`). Elsewhere, and for `// libc` programs, they
+//! build with `--libc`, linking through the toolchain `clang` (as
+//! `LILAC_LINKER`).
 //!
 //! Header comments (any order, before or between items):
 //!
@@ -171,7 +172,7 @@ fn run_all(pending: bool) {
         eprintln!("skipping run tests: no clang (set LLVM_SYS_181_PREFIX)");
         return;
     };
-    let sysroot = if cfg!(windows) {
+    let sysroot = if cfg!(any(windows, target_os = "linux")) {
         let Some(sysroot) = support::sysroot() else {
             eprintln!("skipping run tests: no lld in LLVM_SYS_181_PREFIX");
             return;

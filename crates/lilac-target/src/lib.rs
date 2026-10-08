@@ -325,6 +325,7 @@ impl Target {
                 obj_suffix: ".obj",
                 entry_symbol: ".lilac.start",
                 system_libs: &["kernel32.lib"],
+                dynamic_linker: None,
             },
             Os::Linux => LinkInfo {
                 flavor: LinkFlavor::Elf,
@@ -332,6 +333,11 @@ impl Target {
                 obj_suffix: ".o",
                 entry_symbol: ".lilac.start",
                 system_libs: &[],
+                dynamic_linker: Some(if self.arch == Arch::X86_64 {
+                    "/lib64/ld-linux-x86-64.so.2"
+                } else {
+                    "/lib/ld-linux-aarch64.so.1"
+                }),
             },
             Os::Macos => LinkInfo {
                 flavor: LinkFlavor::MachO,
@@ -339,6 +345,7 @@ impl Target {
                 obj_suffix: ".o",
                 entry_symbol: ".lilac.start",
                 system_libs: &["libSystem.tbd"],
+                dynamic_linker: None,
             },
             Os::None | Os::Unknown => return None,
         };
@@ -408,6 +415,9 @@ pub struct LinkInfo {
     /// The system stubs a native link adds, found in the sysroot's
     /// `<triple>/` folder.
     pub system_libs: &'static [&'static str],
+    /// The program loader an ELF executable names when it links a shared
+    /// library (a static executable needs none). glibc's path.
+    pub dynamic_linker: Option<&'static str>,
 }
 
 /// Failure modes of [`Target::parse`].

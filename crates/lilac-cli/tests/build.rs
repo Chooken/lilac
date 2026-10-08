@@ -265,7 +265,7 @@ fn missing_linker_is_a_clear_error() {
 /// A native build links with the sysroot's `lld` and needs no C library.
 #[test]
 fn native_build_runs_without_libc() {
-    if !cfg!(windows) {
+    if !cfg!(any(windows, target_os = "linux")) {
         return;
     }
     let Some(sysroot) = support::sysroot() else {
@@ -274,6 +274,7 @@ fn native_build_runs_without_libc() {
     };
     let dir = scratch("native");
     std::fs::write(dir.join("hi.lilac"), NATIVE_HELLO).expect("writes source");
+    let exe = format!("hi{}", std::env::consts::EXE_SUFFIX);
     for mode in ["--mode=debug", "--release"] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
         command
@@ -284,10 +285,10 @@ fn native_build_runs_without_libc() {
         let out = command.output().expect("runs lilac");
         let err = stderr(&out);
         assert!(out.status.success(), "{err}");
-        assert!(err.contains("Linking hi.exe (lld)"), "{err}");
+        assert!(err.contains(&format!("Linking {exe} (lld)")), "{err}");
     }
     for mode in ["debug", "release"] {
-        let run = Command::new(dir.join("build").join(mode).join("hi.exe"))
+        let run = Command::new(dir.join("build").join(mode).join(&exe))
             .output()
             .expect("runs hi");
         assert_eq!(String::from_utf8_lossy(&run.stdout), "Hi\n");
@@ -299,7 +300,7 @@ fn native_build_runs_without_libc() {
 /// A native build with no sysroot says where it looked.
 #[test]
 fn missing_sysroot_is_a_clear_error() {
-    if !cfg!(windows) {
+    if !cfg!(any(windows, target_os = "linux")) {
         return;
     }
     let dir = scratch("no-sysroot");
@@ -316,15 +317,119 @@ fn missing_sysroot_is_a_clear_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Linux and macOS have no native runtime yet: building for them without
-/// `--libc` is a usage error.
+/// Linux executables link from any host with the sysroot's `lld`: static,
+/// with no C library and no loader.
+#[test]
+fn native_linux_cross_links() {
+    let Some(sysroot) = support::sysroot() else {
+        eprintln!("skipping: no lld");
+        return;
+    };
+    let dir = scratch("native-linux");
+    std::fs::write(dir.join("hi.lilac"), NATIVE_HELLO).expect("writes source");
+    for triple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let exe = dir.join(triple);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
+        command
+            .args(["build", "-q", "--release", "-o"])
+            .arg(&exe)
+            .arg(format!("--target={triple}"))
+            .arg("hi.lilac")
+            .current_dir(&dir)
+            .env("LILAC_SYSROOT", &sysroot);
+        let out = command.output().expect("runs lilac");
+        assert!(out.status.success(), "{triple}: {}", stderr(&out));
+        let bytes = std::fs::read(&exe).expect("reads the executable");
+        assert!(bytes.starts_with(b"ELF"), "{triple}: not ELF");
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(b"ld-linux"), "{triple}: names a loader");
+        if cfg!(target_os = "linux") && triple.starts_with(std::env::consts::ARCH) {
+            let run = Command::new(&exe).output().expect("runs hi");
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout),
+                "Hi
+"
+            );
+            assert_eq!(run.status.code(), Some(3));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A native Linux program that links a shared library is dynamically
+/// linked: it names the loader, which brings in the library (and, for a
+/// real library, the C library it needs). It runs on a Linux host.
+#[test]
+fn native_linux_links_shared_libraries() {
+    let (Some(clang), Some(sysroot)) = (clang(), support::sysroot()) else {
+        eprintln!("skipping: no clang or lld");
+        return;
+    };
+    let triple = if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let dir = scratch("native-shared");
+    std::fs::write(
+        dir.join("greet.c"),
+        "int greet(int x) { return x + 1; }
+",
+    )
+    .expect("writes greet.c");
+    let library = Command::new(&clang)
+        .arg(format!("--target={triple}"))
+        .args(["-shared", "-fPIC", "-nostdlib", "-fuse-ld=lld"])
+        .args(["greet.c", "-o", "libgreet.so"])
+        .current_dir(&dir)
+        .output()
+        .expect("runs clang");
+    if !library.status.success() {
+        eprintln!("skipping: clang cannot link a {triple} shared library");
+        return;
+    }
+    std::fs::write(
+        dir.join("main.lilac"),
+        "greet: extern function (x: @bit32) result: @bit32
+         main: function () nothing {
+    r: @bit32 = greet(0x2)
+    @os_exit(r)
+}
+",
+    )
+    .expect("writes main.lilac");
+    let out = Command::new(env!("CARGO_BIN_EXE_lilac"))
+        .args(["build", "-q", "-o", "greeter", "--link-arg=libgreet.so"])
+        .arg(format!("--target={triple}"))
+        .arg("main.lilac")
+        .current_dir(&dir)
+        .env("LILAC_SYSROOT", &sysroot)
+        .output()
+        .expect("runs lilac");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let bytes = std::fs::read(dir.join("greeter")).expect("reads the executable");
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(has(b"ld-linux"), "names the loader");
+    assert!(has(b"libgreet.so"), "needs the library");
+    if cfg!(target_os = "linux") {
+        let run = Command::new(dir.join("greeter"))
+            .env("LD_LIBRARY_PATH", &dir)
+            .output()
+            .expect("runs greeter");
+        assert_eq!(run.status.code(), Some(3));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// macOS has no native runtime yet: building for it without `--libc` is a
+/// usage error.
 #[test]
 fn native_mode_elsewhere_points_at_libc() {
     let dir = scratch("native-elsewhere");
     std::fs::write(dir.join("hello.lilac"), HELLO).expect("writes source");
     let out = build(
         &dir,
-        &["-q", "--target=x86_64-unknown-linux-gnu", "hello.lilac"],
+        &["-q", "--target=aarch64-apple-darwin", "hello.lilac"],
         None,
     );
     let err = stderr(&out);

@@ -17,7 +17,6 @@ use inkwell::OptimizationLevel;
 use lilac_codegen::{Backend, CodegenStep, Entry, OptLevel};
 use lilac_error::Emitter;
 use lilac_ir::LirModule;
-use lilac_target::is_64_bit_triple;
 
 mod lower;
 mod native;
@@ -90,7 +89,7 @@ impl LlvmBackend {
     ) -> Result<(Module<'ctx>, TargetMachine), String> {
         let (module, machine) = self.prepare_module(context, reloc)?;
         on_step(CodegenStep::Lower);
-        let mut lower = lower::Lower::new(context, module, lir, is_64_bit_triple(&self.triple));
+        let mut lower = lower::Lower::new(context, module, lir, &self.triple);
         if let Err(diagnostic) = lower.run(entry) {
             return Err(lilac_error::EmitterHuman::new()
                 .render(&diagnostic, &lilac_span::SourceMap::default()));
@@ -1420,7 +1419,7 @@ mod tests {
         let context = inkwell::context::Context::create();
         let module = context.create_module("ice");
         let lir = LirModule::new("x86_64-pc-windows-msvc");
-        let lower = crate::lower::Lower::new(&context, module, &lir, true);
+        let lower = crate::lower::Lower::new(&context, module, &lir, "x86_64-pc-windows-msvc");
         let _ = lower.lir_type(&t("#bogus"));
     }
 
@@ -1429,7 +1428,7 @@ mod tests {
         let context = inkwell::context::Context::create();
         let module = context.create_module("fbits");
         let lir = LirModule::new("x86_64-pc-windows-msvc");
-        let lower = crate::lower::Lower::new(&context, module, &lir, true);
+        let lower = crate::lower::Lower::new(&context, module, &lir, "x86_64-pc-windows-msvc");
         for (ty, expected) in [
             ("#fbit16", "half"),
             ("#fbit32", "float"),
@@ -1639,6 +1638,56 @@ mod tests {
             "{linux}"
         );
         assert!(linux.contains("define ptr @memcpy("), "{linux}");
+    }
+
+    /// The Linux OS layer reaches the kernel through `.lilac.syscall`, the
+    /// architecture's system-call instruction, and x86-64 realigns the stack
+    /// `.lilac.start` is entered with.
+    #[test]
+    fn linux_runtime_makes_system_calls() {
+        for (triple, instruction, realigns) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                "asm sideeffect \"syscall\"",
+                true,
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "asm sideeffect \"svc #0\"",
+                false,
+            ),
+        ] {
+            let numbers = if realigns {
+                lilac_ir::Syscalls::X86_64
+            } else {
+                lilac_ir::Syscalls::AARCH64
+            };
+            let mut module = main_module(triple);
+            let main = module.funcs[0].clone();
+            module.funcs.extend(lilac_ir::build_runtime(
+                8,
+                lilac_ir::System::Linux(numbers),
+                Entry::Native,
+            ));
+            module.funcs.push(lilac_ir::entry_point(&main));
+            let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
+            let context = inkwell::context::Context::create();
+            let (built, _) = backend
+                .build_module(
+                    &context,
+                    &module,
+                    inkwell::targets::RelocMode::PIC,
+                    Entry::Native,
+                    &mut |_| {},
+                )
+                .expect("builds");
+            let text = built.print_to_string().to_string();
+            assert!(text.contains("define i64 @.lilac.syscall("), "{text}");
+            assert!(text.contains(instruction), "{triple}: {text}");
+            assert!(text.contains("ptrtoint ptr"), "{text}");
+            assert!(text.contains("inttoptr i64"), "{text}");
+            assert_eq!(text.contains("\"stackrealign\""), realigns, "{triple}");
+        }
     }
 
     /// `Entry::Native` emits a COFF object (linking and running it is covered

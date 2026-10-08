@@ -2,17 +2,21 @@
 //!
 //! The byte-buffer, format-args, and byte-access runtime is ordinary LIR
 //! (`.lilac.*` functions built by `lilac_ir::runtime` and lowered through the
-//! normal pointer-ABI function path), so the backend defines only the three
-//! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`), and
-//! `@lilac_abort` (`llvm.trap` + `unreachable`). Each uses the value ABI from
+//! normal pointer-ABI function path), so the backend defines only the
+//! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`),
+//! `@lilac_abort` (`llvm.trap` + `unreachable`), and `@syscall` (the Linux
+//! system-call instruction, as inline assembly). Each uses the value ABI from
 //! `lilac_ir::builtin_sig`.
 
 use inkwell::builder::Builder;
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
+};
 
 use lilac_error::bug;
 use lilac_span::Span;
+use lilac_target::Arch;
 
 use crate::lower::{checked, Lower};
 
@@ -32,6 +36,9 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     }
     if used.contains("@lilac_abort") {
         abort(lower);
+    }
+    if used.contains("@syscall") {
+        syscall(lower);
     }
 }
 
@@ -111,6 +118,48 @@ fn abort(lower: &Lower<'_, '_>) {
     let builder = entry(lower, function);
     checked(builder.build_call(trap, &[], ""), "trap call");
     checked(builder.build_unreachable(), "abort unreachable");
+}
+
+/// `@syscall(n, a0..a5) -> iNative`: the Linux system-call instruction, with
+/// the number and six arguments in the kernel's registers and the result
+/// (or `-errno`) in the first. Only 64-bit x86 and Arm have one.
+fn syscall(lower: &Lower<'_, '_>) {
+    let (assembly, constraints) = match lower.arch() {
+        Some(Arch::X86_64) => (
+            "syscall",
+            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}",
+        ),
+        Some(Arch::Aarch64) => (
+            "svc #0",
+            "={x0},{x8},{x0},{x1},{x2},{x3},{x4},{x5},~{memory}",
+        ),
+        other => bug!(Span::dummy(), "`@syscall` has no instruction for {other:?}"),
+    };
+    let native = lower.native_int();
+    let params = [BasicMetadataTypeEnum::from(native); 7];
+    let fn_type = native.fn_type(&params, false);
+    let function = lower.runtime_fn(".lilac.syscall", fn_type);
+    let builder = entry(lower, function);
+    let instruction = lower.context().create_inline_asm(
+        fn_type,
+        assembly.to_owned(),
+        constraints.to_owned(),
+        true,
+        false,
+        None,
+        false,
+    );
+    let args: Vec<BasicMetadataValueEnum<'_>> = (0..7)
+        .map(|index| param(function, index, "syscall").into())
+        .collect();
+    let call = checked(
+        builder.build_indirect_call(fn_type, instruction, &args, "result"),
+        "syscall",
+    );
+    let ValueKind::Basic(result) = call.try_as_basic_value() else {
+        bug!(Span::dummy(), "`@syscall` returned void");
+    };
+    checked(builder.build_return(Some(&result)), "return syscall");
 }
 
 /// Byte-addressed pointer `base + offset`, using safe integer arithmetic in

@@ -21,7 +21,7 @@ mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::prune_unreachable;
-pub use runtime::{build_runtime, entry_point, Entry, System};
+pub use runtime::{build_runtime, entry_point, Entry, Syscalls, System};
 pub use ty::LirTy;
 
 /// IR version header; bump on any normative IR change.
@@ -416,7 +416,8 @@ pub enum ConvertOp {
     Trunc,
     /// `extend.zero` (zero-extension).
     ExtendZero,
-    /// `bitcast` (same-width reinterpret, e.g. `@bit32` <-> `@fbit32`).
+    /// `bitcast` (same-width reinterpret: `@bit32` <-> `@fbit32`, or a
+    /// reference <-> `#bit_native` address).
     Bitcast,
 }
 
@@ -839,6 +840,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
             vec![LirTy::byte_ref()],
         ),
         "@lilac_abort" => (vec![], vec![]),
+        "@syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
         _ => return None,
     };
     Some(BuiltinSig { ins, outs })

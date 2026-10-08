@@ -6,12 +6,13 @@
 //!
 //! Besides the byte-buffer and format-args helpers, the runtime holds the OS
 //! layer: `.lilac.write`, `.lilac.exit`, `.lilac.alloc` and `.lilac.free`,
-//! written as plain calls to `extern` system functions (see [`System`]), and
+//! written as plain calls to `extern` system functions or, on Linux, to the
+//! `@syscall` leaf (see [`System`]), and
 //! the native process entry `.lilac.start` (see [`entry_point`]).
 //!
 //! Every place is addressed (the pointer place ABI), so the bodies only need
-//! `alloca`/`field`/`field.addr`, `copy`/`store`, `arith`, `branch`, and the
-//! `@ptr_add` and `@lilac_abort` leaves. Registers are block-local in the
+//! `alloca`/`field`/`field.addr`, `copy`/`store`, `convert`, `arith`,
+//! `branch`, and the `@ptr_add`, `@lilac_abort` and `@syscall` leaves. Registers are block-local in the
 //! verifier, so each block re-materializes the values it uses.
 
 use lilac_span::Span;
@@ -42,9 +43,44 @@ pub enum System {
     /// `kernel32.dll`: `GetStdHandle`/`WriteFile`, `GetProcessHeap` with
     /// `HeapAlloc`/`HeapFree`, and `ExitProcess`.
     Windows,
-    /// The C library's `write`, `calloc`/`free` and `exit`. This is macOS's
-    /// `libSystem`, and Linux's interface until its system-call layer lands.
+    /// The C library's `write`, `calloc`/`free` and `exit`: macOS's
+    /// `libSystem`, and Linux under `--libc`.
     Libc,
+    /// Linux system calls through the `@syscall` leaf: `write`,
+    /// `exit_group`, and `mmap`/`munmap` (one mapping per allocation). For
+    /// 64-bit targets only.
+    Linux(Syscalls),
+}
+
+/// The Linux system-call numbers the OS layer uses, which differ per
+/// architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Syscalls {
+    /// `write(fd, data, len)`.
+    pub write: u32,
+    /// `mmap(addr, len, prot, flags, fd, offset)`.
+    pub mmap: u32,
+    /// `munmap(addr, len)`.
+    pub munmap: u32,
+    /// `exit_group(code)`.
+    pub exit_group: u32,
+}
+
+impl Syscalls {
+    /// x86-64.
+    pub const X86_64: Self = Self {
+        write: 1,
+        mmap: 9,
+        munmap: 11,
+        exit_group: 231,
+    };
+    /// 64-bit Arm (the generic system-call table).
+    pub const AARCH64: Self = Self {
+        write: 64,
+        mmap: 222,
+        munmap: 215,
+        exit_group: 94,
+    };
 }
 
 /// The `STD_INPUT_HANDLE` id (`-10` as a `DWORD`). `GetStdHandle` takes
@@ -52,6 +88,16 @@ pub enum System {
 const STD_HANDLE_BASE: &str = "0xfffffff6";
 /// `HEAP_ZERO_MEMORY`.
 const HEAP_ZERO_MEMORY: &str = "0x8";
+/// The bytes before each Linux allocation, holding the mapping's length for
+/// `munmap` (16 keeps the allocation 16-byte aligned).
+const ALLOC_HEADER: &str = "0x10";
+/// `PROT_READ | PROT_WRITE`.
+const PROT_READ_WRITE: &str = "0x3";
+/// `MAP_PRIVATE | MAP_ANONYMOUS`.
+const MAP_PRIVATE_ANONYMOUS: &str = "0x22";
+/// The smallest Linux error result: system calls return `-4095..=-1` for an
+/// error, so a 64-bit result above `-4096` is one.
+const SYSCALL_ERROR_LIMIT: &str = "0xfffffffffffff000";
 
 /// Builds the runtime prelude for a target with `ptr_size`-byte pointers,
 /// calling `system` for the OS layer. `entry` picks how `.lilac.exit` ends
@@ -205,6 +251,12 @@ fn os_layer(system: System, entry: Entry) -> Vec<LirFunc> {
             os_exit("exit"),
             libc_alloc(),
             libc_free(),
+        ],
+        System::Linux(numbers) => vec![
+            linux_write(numbers),
+            linux_exit(numbers),
+            linux_alloc(numbers),
+            linux_free(numbers),
         ],
     }
 }
@@ -543,6 +595,198 @@ fn libc_free() -> LirFunc {
     )
 }
 
+fn convert(op: ConvertOp, src: &str, dst: &str, ty: LirTy) -> LirInst {
+    LirInst::Convert {
+        op,
+        src: src.to_owned(),
+        dst: dst.to_owned(),
+        ty,
+        span: span(),
+    }
+}
+
+/// A `#bit_native` place `place` holding register `reg` (of type `from`)
+/// converted with `op`.
+fn native_place(op: ConvertOp, reg: &str, from: LirTy, place: &str) -> [LirInst; 4] {
+    let converted = format!("{place}.value");
+    [
+        copy_reg(LirOperand::Place(reg.to_owned()), reg, from),
+        convert(op, reg, &converted, LirTy::BitNative),
+        alloca(LirTy::BitNative, place),
+        copy_place(LirOperand::Reg(converted), place),
+    ]
+}
+
+/// System call `number` on the `#bit_native` places `args` (the rest are
+/// zero), with its result in a new place `result`.
+fn syscall(number: u32, args: &[&str], result: &str) -> Vec<LirInst> {
+    let mut insts = const_place("nr", &format!("0x{number:x}"), LirTy::BitNative).to_vec();
+    let mut ins = vec!["nr".to_owned()];
+    ins.extend(args.iter().map(|arg| (*arg).to_owned()));
+    for index in args.len()..6 {
+        let zero = format!("zero{index}");
+        insts.push(alloca(LirTy::BitNative, &zero));
+        ins.push(zero);
+    }
+    insts.push(alloca(LirTy::BitNative, result));
+    let ins: Vec<&str> = ins.iter().map(String::as_str).collect();
+    insts.push(call_builtin("@syscall", &ins, &[result]));
+    insts
+}
+
+/// `.lilac.write` on Linux: `write(fd, data, len)`.
+fn linux_write(numbers: Syscalls) -> LirFunc {
+    let mut insts = native_place(ConvertOp::ExtendZero, "fd", LirTy::Bit(32), "fdn").to_vec();
+    insts.extend(native_place(
+        ConvertOp::Bitcast,
+        "data",
+        LirTy::byte_ref(),
+        "address",
+    ));
+    insts.extend(syscall(
+        numbers.write,
+        &["fdn", "address", "len"],
+        "written",
+    ));
+    lir_func(
+        ".lilac.write",
+        &write_sig(),
+        &[],
+        vec![block("entry", insts, ret())],
+    )
+}
+
+/// `.lilac.exit` on Linux: `exit_group(code)`, ending every thread.
+fn linux_exit(numbers: Syscalls) -> LirFunc {
+    let mut insts = native_place(ConvertOp::ExtendZero, "code", LirTy::Bit(32), "coden").to_vec();
+    insts.extend(syscall(numbers.exit_group, &["coden"], "result"));
+    lir_func(
+        ".lilac.exit",
+        &[("code", LirTy::Bit(32))],
+        &[],
+        vec![block("entry", insts, unreachable())],
+    )
+}
+
+/// `.lilac.alloc` on Linux: an anonymous `mmap` of `size` plus a 16-byte
+/// header holding the mapping's length, returning the address after the
+/// header (zeroed memory), or null when `mmap` fails.
+fn linux_alloc(numbers: Syscalls) -> LirFunc {
+    let mut entry = vec![
+        copy_reg(
+            LirOperand::Place("size".to_owned()),
+            "size",
+            LirTy::BitNative,
+        ),
+        constant("header", ALLOC_HEADER, LirTy::BitNative),
+        arith(ArithOp::IAdd, "size", "header", "total", LirTy::BitNative),
+        alloca(LirTy::BitNative, "length"),
+        copy_place(LirOperand::Reg("total".to_owned()), "length"),
+        alloca(LirTy::BitNative, "address"),
+    ];
+    entry.extend(const_place("prot", PROT_READ_WRITE, LirTy::BitNative));
+    entry.extend(const_place(
+        "flags",
+        MAP_PRIVATE_ANONYMOUS,
+        LirTy::BitNative,
+    ));
+    entry.extend(const_place("fd", "0xffffffffffffffff", LirTy::BitNative));
+    entry.push(alloca(LirTy::BitNative, "offset"));
+    entry.extend(syscall(
+        numbers.mmap,
+        &["address", "length", "prot", "flags", "fd", "offset"],
+        "mapped",
+    ));
+    entry.extend([
+        copy_reg(
+            LirOperand::Place("mapped".to_owned()),
+            "mapped",
+            LirTy::BitNative,
+        ),
+        constant("limit", SYSCALL_ERROR_LIMIT, LirTy::BitNative),
+        arith(ArithOp::IGtU, "mapped", "limit", "failed", LirTy::Bit(8)),
+    ]);
+    let header_ref = LirTy::BitNative.to_ref();
+    let mut ok = vec![
+        copy_reg(
+            LirOperand::Place("mapped".to_owned()),
+            "mapped",
+            LirTy::BitNative,
+        ),
+        convert(ConvertOp::Bitcast, "mapped", "header", header_ref.clone()),
+        alloca(header_ref, "slot"),
+        copy_place(LirOperand::Reg("header".to_owned()), "slot"),
+        store(LirOperand::Place("length".to_owned()), "slot"),
+        convert(ConvertOp::Bitcast, "mapped", "base", LirTy::byte_ref()),
+        alloca(LirTy::byte_ref(), "basep"),
+        copy_place(LirOperand::Reg("base".to_owned()), "basep"),
+    ];
+    ok.extend(const_place("skip", ALLOC_HEADER, LirTy::BitNative));
+    ok.push(call_builtin("@ptr_add", &["basep", "skip"], &["out"]));
+    lir_func(
+        ".lilac.alloc",
+        &[("size", LirTy::BitNative)],
+        &[("out", LirTy::byte_ref())],
+        vec![
+            block("entry", entry, branch_if("failed", "fail", "ok")),
+            block(
+                "fail",
+                vec![
+                    alloca(LirTy::byte_ref(), "null"),
+                    copy_place(LirOperand::Place("null".to_owned()), "out"),
+                ],
+                ret(),
+            ),
+            block("ok", ok, ret()),
+        ],
+    )
+}
+
+/// `.lilac.free` on Linux: `munmap`s the mapping `.lilac.alloc` made, whose
+/// length is in the 16 bytes before `ptr`. Freeing null does nothing.
+fn linux_free(numbers: Syscalls) -> LirFunc {
+    let entry = vec![
+        copy_reg(
+            LirOperand::Place("ptr".to_owned()),
+            "ptr",
+            LirTy::byte_ref(),
+        ),
+        convert(ConvertOp::Bitcast, "ptr", "address", LirTy::BitNative),
+        constant("zero", "0x0", LirTy::BitNative),
+        arith(ArithOp::Eq, "address", "zero", "null", LirTy::Bit(8)),
+    ];
+    let header_ref = LirTy::BitNative.to_ref();
+    let mut unmap = vec![
+        copy_reg(
+            LirOperand::Place("ptr".to_owned()),
+            "ptr",
+            LirTy::byte_ref(),
+        ),
+        convert(ConvertOp::Bitcast, "ptr", "address", LirTy::BitNative),
+        constant("header", ALLOC_HEADER, LirTy::BitNative),
+        arith(ArithOp::ISub, "address", "header", "base", LirTy::BitNative),
+        alloca(LirTy::BitNative, "basep"),
+        copy_place(LirOperand::Reg("base".to_owned()), "basep"),
+        convert(ConvertOp::Bitcast, "base", "slotv", header_ref.clone()),
+        alloca(header_ref, "slot"),
+        copy_place(LirOperand::Reg("slotv".to_owned()), "slot"),
+        load("slot", "length", LirTy::BitNative),
+        alloca(LirTy::BitNative, "lengthp"),
+        copy_place(LirOperand::Reg("length".to_owned()), "lengthp"),
+    ];
+    unmap.extend(syscall(numbers.munmap, &["basep", "lengthp"], "result"));
+    lir_func(
+        ".lilac.free",
+        &[("ptr", LirTy::byte_ref())],
+        &[],
+        vec![
+            block("entry", entry, branch_if("null", "done", "unmap")),
+            block("done", Vec::new(), ret()),
+            block("unmap", unmap, ret()),
+        ],
+    )
+}
+
 /// `.lilac.byte_buffer_from(ref #bit8 %data, #bit_native %len) -> #byte_buffer`.
 fn byte_buffer_from() -> LirFunc {
     lir_func(
@@ -783,7 +1027,7 @@ fn format_args_piece(stride: &str) -> LirFunc {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_runtime, entry_point, Entry, System};
+    use super::{build_runtime, entry_point, Entry, Syscalls, System};
     use crate::{verify, ArithOp, LirFunc, LirInst, LirModule};
 
     fn runtime(ptr_size: u32) -> Vec<LirFunc> {
@@ -891,7 +1135,12 @@ mod tests {
             inline: false,
             blocks: vec![super::block("entry", Vec::new(), super::ret())],
         };
-        for system in [System::Windows, System::Libc] {
+        for system in [
+            System::Windows,
+            System::Libc,
+            System::Linux(Syscalls::X86_64),
+            System::Linux(Syscalls::AARCH64),
+        ] {
             for entry in [Entry::CMain, Entry::Native] {
                 let mut funcs = build_runtime(8, system, entry);
                 funcs.push(main.clone());
@@ -916,6 +1165,27 @@ mod tests {
                 assert!(names(funcs).contains(&name), "{name}");
             }
         }
+    }
+
+    /// Linux calls the kernel directly: no `extern` at all, and the
+    /// architecture's system-call numbers.
+    #[test]
+    fn linux_uses_system_calls() {
+        let funcs = build_runtime(8, System::Linux(Syscalls::AARCH64), Entry::Native);
+        assert!(funcs.iter().all(|func| !func.is_extern));
+        let exit = funcs
+            .iter()
+            .find(|func| func.name == ".lilac.exit")
+            .expect(".lilac.exit");
+        let numbers: Vec<&str> = exit.blocks[0]
+            .insts
+            .iter()
+            .filter_map(|inst| match inst {
+                LirInst::Const { lit, .. } => Some(lit.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(numbers, ["0x5e"], "exit_group is 94 on 64-bit Arm");
     }
 
     /// With no OS, the OS functions are declared for the platform to define.

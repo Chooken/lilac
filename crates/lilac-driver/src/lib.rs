@@ -7,12 +7,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
-use lilac_ir::{LirModule, System};
+use lilac_ir::{LirModule, Syscalls, System};
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
 
 pub use lilac_ir::Entry;
-pub use lilac_target::{LinkFlavor, LinkInfo, Os, Target};
+pub use lilac_target::{Arch, LinkFlavor, LinkInfo, Os, Target};
 
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -519,10 +519,12 @@ impl Session {
     /// `extern` the program already declares (say, the C library's `exit`)
     /// is not declared twice.
     fn inject_runtime(&self, lir: &mut LirModule) {
-        let system = match self.target.os {
-            Os::Windows => System::Windows,
-            Os::Linux | Os::Macos => System::Libc,
-            Os::None | Os::Unknown => System::None,
+        let system = match (self.target.os, self.target.arch, self.entry) {
+            (Os::Windows, _, _) => System::Windows,
+            (Os::Linux, Arch::X86_64, Entry::Native) => System::Linux(Syscalls::X86_64),
+            (Os::Linux, Arch::Aarch64, Entry::Native) => System::Linux(Syscalls::AARCH64),
+            (Os::Linux | Os::Macos, _, _) => System::Libc,
+            (Os::None | Os::Unknown, _, _) => System::None,
         };
         let runtime =
             lilac_ir::build_runtime(self.target.bit_native_width() / 8, system, self.entry);

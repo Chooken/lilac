@@ -265,8 +265,8 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 
 `@size_of` is computed during lowering and is always a constant.
 The `@os_*` intrinsics are the OS layer: the compiler implements them per
-target with the operating system's own interface (`kernel32` on Windows), so
-programs do not depend on a C library. `Standard.Io`, `Standard.Process` and
+target with the operating system's own interface (`kernel32` on Windows,
+system calls on Linux), so programs do not depend on a C library. `Standard.Io`, `Standard.Process` and
 `Standard.Heap.Allocator` are built on them. On a target with no operating
 system they are left for the platform to define, and a program that uses one
 fails to link without it.

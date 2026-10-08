@@ -6,6 +6,9 @@
 //! calls `__chkstk` to probe stack frames larger than a page. With no C
 //! runtime linked, the object defines all of them itself, as Rust's
 //! `compiler-builtins` does.
+//!
+//! On x86-64 Linux, `.lilac.start` also realigns its stack, which the kernel
+//! leaves 8 bytes off from a normal call.
 
 use inkwell::attributes::AttributeLoc;
 use inkwell::builder::Builder;
@@ -88,6 +91,16 @@ pub(crate) fn define<'ctx>(
             module.set_inline_assembly(CHKSTK_X86_64);
         } else if triple.starts_with("aarch64") {
             module.set_inline_assembly(CHKSTK_AARCH64);
+        }
+    }
+    // Linux enters a process with the stack 16-byte aligned and no return
+    // address, so on x86-64 it is 8 bytes off from what a called function
+    // assumes: `.lilac.start` realigns its frame (64-bit Arm's stack pointer
+    // is always aligned).
+    if triple.contains("linux") && triple.starts_with("x86_64") {
+        if let Some(start) = module.get_function(".lilac.start") {
+            let realign = context.create_string_attribute("stackrealign", "");
+            start.add_attribute(AttributeLoc::Function, realign);
         }
     }
 }

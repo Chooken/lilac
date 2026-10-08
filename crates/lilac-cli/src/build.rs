@@ -116,10 +116,10 @@ pub fn layout(
     }
 }
 
-/// Whether the native runtime (no C library) supports `target` yet. Linux
-/// and macOS follow in later steps; until then they build with `--libc`.
+/// Whether the native runtime (no C library) supports `target` yet. macOS
+/// follows in a later step; until then it builds with `--libc`.
 fn native_supported(target: Target) -> bool {
-    target.os == Os::Windows
+    matches!(target.os, Os::Windows | Os::Linux)
 }
 
 /// The program name: the file stem, or the project folder's name.
@@ -424,11 +424,12 @@ mod tests {
     }
 
     #[test]
-    fn native_runtime_is_windows_only_for_now() {
+    fn native_runtime_is_windows_and_linux_for_now() {
         let target = |triple| Target::parse(triple).expect("triple");
         assert!(native_supported(target("x86_64-pc-windows-msvc")));
         assert!(native_supported(target("aarch64-pc-windows-msvc")));
-        assert!(!native_supported(target("x86_64-unknown-linux-gnu")));
+        assert!(native_supported(target("x86_64-unknown-linux-gnu")));
+        assert!(native_supported(target("aarch64-unknown-linux-gnu")));
         assert!(!native_supported(target("aarch64-apple-darwin")));
     }
 

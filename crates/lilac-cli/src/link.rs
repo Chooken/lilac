@@ -101,7 +101,13 @@ pub fn native_args(
             args.push(out);
         }
         LinkFlavor::Elf => {
-            args.extend(["-static".into(), "-e".into(), info.entry_symbol.into()]);
+            match info.dynamic_linker {
+                Some(loader) if link_args.iter().any(|arg| is_shared_library(arg)) => {
+                    args.extend(["-dynamic-linker".into(), loader.into()]);
+                }
+                _ => args.push("-static".into()),
+            }
+            args.extend(["-e".into(), info.entry_symbol.into()]);
             args.extend(["-o".into(), exe.into()]);
         }
         LinkFlavor::MachO => {
@@ -119,6 +125,16 @@ pub fn native_args(
     }
     args.extend(link_args.iter().map(OsString::from));
     args
+}
+
+/// Whether a link argument names a shared library (`libfoo.so`,
+/// `libfoo.so.1`, or `-lfoo`), which makes an ELF executable dynamically
+/// linked: the loader then brings in the libraries it depends on, `libc.so`
+/// among them.
+fn is_shared_library(arg: &str) -> bool {
+    arg.starts_with("-l")
+        || arg.contains(".so.")
+        || Path::new(arg).extension().is_some_and(|ext| ext == "so")
 }
 
 /// The arguments for a `--libc` link through a C compiler driver. `cross` is
@@ -288,6 +304,38 @@ mod tests {
                 "o"
             ]
         );
+    }
+
+    /// A shared library makes the executable dynamically linked, naming the
+    /// loader; static archives and other flags do not.
+    #[test]
+    fn elf_links_shared_libraries_dynamically() {
+        let link = |extra: &[&str]| {
+            let extra: Vec<String> = extra.iter().map(|arg| (*arg).to_owned()).collect();
+            let args = native_args(
+                &info("aarch64-unknown-linux-gnu"),
+                "aarch64-unknown-linux-gnu",
+                "aarch64",
+                Path::new("sys"),
+                Path::new("o.o"),
+                Path::new("o"),
+                &extra,
+            );
+            strings(&args)
+        };
+        for shared in [&["libgreet.so"][..], &["-L.", "-lgreet"], &["libz.so.1"]] {
+            let args = link(shared);
+            assert!(!args.contains(&"-static".to_owned()), "{args:?}");
+            let at = args
+                .iter()
+                .position(|arg| arg == "-dynamic-linker")
+                .expect("names a loader");
+            assert_eq!(args[at + 1], "/lib/ld-linux-aarch64.so.1");
+        }
+        for other in [&["libgreet.a"][..], &["--gc-sections"]] {
+            let args = link(other);
+            assert!(args.contains(&"-static".to_owned()), "{args:?}");
+        }
     }
 
     #[test]

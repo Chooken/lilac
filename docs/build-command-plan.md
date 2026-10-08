@@ -425,6 +425,27 @@ when its step *starts*:
 
 ## Step 3: Linux
 
+**Status: done** (cross-linked and disassembled from Windows; not yet run on
+a Linux machine). Differences from the outline below:
+
+- `@syscall` is a backend leaf only the runtime calls (`.lilac.syscall`, so
+  it cannot collide with the C library's `syscall`); programs reach the OS
+  through the `@os_*` intrinsics as on Windows. Passing pointers to it
+  needed LIR's `bitcast` to also convert between a reference and its
+  `#bit_native` address (`ptrtoint`/`inttoptr`).
+- `.lilac.alloc` maps each allocation with its own `mmap`, behind a 16-byte
+  header holding the length `munmap` needs. That is simple and correct but
+  slow for many small allocations; a real allocator can replace it later
+  without changing the interface.
+- Under `--libc`, Linux keeps the C library's OS layer, so `stdio` and
+  `Standard.C` behave as before.
+- Linking is `-static` unless a `--link-arg` names a shared library
+  (`*.so`, `*.so.N` or `-l…`); then the executable names the loader from
+  `LinkInfo::dynamic_linker` (glibc's path; a musl system needs `--libc`
+  or its own `--link-arg=-dynamic-linker …`).
+- The shared-library test cross-links on every host and runs the program
+  only on Linux.
+
 - Add one new backend leaf, `@syscall(n, a0..a5)`, as inline assembly in
   `lilac-codegen-llvm`, for x86-64 and AArch64.
 - The OS layer uses `write`, `exit_group`, and `mmap`/`munmap`.

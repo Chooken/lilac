@@ -503,7 +503,8 @@ fn sign_extend(value: u64, width: u32) -> i64 {
 }
 
 /// Evaluates width conversions over constants. A `Bitcast` reinterprets the
-/// bits of a float at 32/64 bits (16/128-bit folding is a best-effort miss).
+/// bits of a float at 32/64 bits (16/128-bit folding is a best-effort miss);
+/// an integer bitcast to a reference (an address) is not folded.
 fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &LirTy) -> ConstValue {
     let width = width_of(ty).unwrap_or(64);
     let mask = if width >= 64 {
@@ -515,7 +516,7 @@ fn eval_convert(op: &ConvertOp, value: &ConstValue, ty: &LirTy) -> ConstValue {
         (ConvertOp::Trunc, ConstValue::Int(value, _)) => ConstValue::Int(value & mask, width),
         (ConvertOp::ExtendZero, ConstValue::Int(value, _)) => ConstValue::Int(*value, width),
         (ConvertOp::Bitcast, ConstValue::Float(value, _)) => float_bits(*value, width),
-        (ConvertOp::Bitcast, ConstValue::Int(bits, _)) => bits_float(*bits, width),
+        (ConvertOp::Bitcast, ConstValue::Int(bits, _)) if !ty.is_ref() => bits_float(*bits, width),
         _ => ConstValue::Unknown,
     }
 }
