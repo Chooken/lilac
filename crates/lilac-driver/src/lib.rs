@@ -293,10 +293,13 @@ impl Session {
             hir: lilac_hir::HirProgram::default(),
         });
         // Signature collection can reject a definition (`E020`/`E052`), leaving
-        // some `DefId` without a signature. Stop before `check_bodies`, which
-        // assumes every reachable definition has one (defense in depth against
-        // any future signatureless-def class panicking in `bug!`).
-        if self.diags.has_errors() {
+        // some `DefId` without a signature. In strict mode, stop before
+        // `check_bodies`, which assumes every reachable definition has one
+        // (defense in depth against any future signatureless-def class
+        // panicking in `bug!`). In tolerant mode (editor tooling), keep going:
+        // `check_bodies` now tolerates a missing signature by poisoning the
+        // body, so its partial HIR is retained for the broken buffer.
+        if self.diags.has_errors() && !self.retain_partial_analysis {
             return Err(ErrorGuaranteed::new());
         }
         let hir = lilac_typeck::check_bodies(
@@ -396,6 +399,59 @@ mod tests {
             !analysis.hir.uses.is_empty(),
             "uses must survive the error: {:?}",
             analysis.hir.uses
+        );
+    }
+
+    #[test]
+    fn tolerant_analysis_retained_after_syntax_and_type_errors() {
+        // (a) A syntax error in one function: the recovered `ItemKind::Error`
+        // does not stop the pipeline, and the surviving items still contribute
+        // name/type sites to the retained HIR.
+        let mut session = Session::new();
+        session.retain_partial_analysis = true;
+        let result = session.compile_lir(
+            "syntax.lilac",
+            "broken: function ( {\n}\npi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
+        );
+        assert!(result.is_err(), "errors still refuse lowering");
+        let analysis = session.analysis().expect("partial analysis retained");
+        assert!(
+            !analysis.hir.uses.is_empty(),
+            "uses must survive the syntax error: {:?}",
+            analysis.hir.uses
+        );
+
+        // (b) A type error in one body: `check_bodies` runs to completion and
+        // its partial HIR is retained.
+        let mut session = Session::new();
+        session.retain_partial_analysis = true;
+        let result = session.compile_lir(
+            "type.lilac",
+            "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n    x: @bit32 = pi\n}\n",
+        );
+        assert!(result.is_err(), "the body has a type error");
+        let analysis = session.analysis().expect("partial analysis retained");
+        assert!(
+            !analysis.hir.uses.is_empty(),
+            "uses must survive the type error: {:?}",
+            analysis.hir.uses
+        );
+    }
+
+    /// In strict mode the post-parse gate stops before `collect`, so a syntax
+    /// error retains no analysis (the CLI's stop-at-the-first-failing-stage
+    /// behavior is unchanged).
+    #[test]
+    fn strict_analysis_is_not_retained_on_syntax_error() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "syntax.lilac",
+            "broken: function ( {\n}\npi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
+        );
+        assert!(result.is_err(), "strict mode refuses the syntax error");
+        assert!(
+            session.analysis().is_none(),
+            "strict mode must stop before building the analysis"
         );
     }
 
