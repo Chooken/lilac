@@ -31,23 +31,35 @@ use lilac_ir::{
     LirTerm, LirTy,
 };
 use lilac_resolve::{DefKind, Resolved};
-use lilac_span::Span;
+use lilac_span::{SourceMap, Span};
 use lilac_ty::{TypeId, TypeKind, TypeRef, Types};
 
+/// Lowered LIR plus each function's source name.
+pub struct Lowered {
+    /// The module.
+    pub module: LirModule,
+    /// LIR symbol -> name as written in source (`Holder[@bit32].make`);
+    /// stack traces print these.
+    pub names: HashMap<String, String>,
+}
+
 /// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
-/// size (for `@size_of`).
+/// size (for `@size_of`); `sources` locates `@panic` sites.
 #[must_use]
 pub fn lower(
     hir: &HirProgram,
     res: &Resolved,
     types: &Types,
+    sources: &SourceMap,
     triple: &str,
     ptr_bytes: u64,
-) -> LirModule {
+) -> Lowered {
     let mut lower = Lower {
         hir,
         res,
         types,
+        sources,
+        names: HashMap::new(),
         ptr_bytes,
         module: LirModule::new(triple),
         symbols: HashMap::new(),
@@ -61,6 +73,9 @@ pub fn lower(
         let symbol = lower.symbol_of(func);
         if func.body.is_none() {
             lower.externs.insert(func.key.clone());
+        } else {
+            let name = lower.display_of(func);
+            lower.names.insert(symbol.clone(), name);
         }
         lower.symbols.insert(func.key.clone(), symbol);
     }
@@ -89,17 +104,23 @@ pub fn lower(
         let lowered = lower.lower_func(func);
         lower.module.funcs.push(lowered);
     }
-    lower.module
+    Lowered {
+        module: lower.module,
+        names: lower.names,
+    }
 }
 
 /// Diagnoses `extern` signatures the C ABI cannot carry (`E028`): parameters
 /// and returns must be bit integers, floats, `ref T`, or an object wrapping
 /// exactly one such field; at most one return; never named `main`.
 pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, diags: &mut Diags) {
+    let sources = SourceMap::new();
     let lower = Lower {
         hir,
         res,
         types,
+        sources: &sources,
+        names: HashMap::new(),
         ptr_bytes: 8,
         module: LirModule::new(""),
         symbols: HashMap::new(),
@@ -175,6 +196,10 @@ struct Lower<'a> {
     hir: &'a HirProgram,
     res: &'a Resolved,
     types: &'a Types,
+    /// Locates `@panic` sites.
+    sources: &'a SourceMap,
+    /// Source name of every function with a body, by LIR symbol.
+    names: HashMap<String, String>,
     ptr_bytes: u64,
     module: LirModule,
     /// LIR symbol of every function instance.
@@ -443,6 +468,45 @@ impl Lower<'_> {
         } else {
             self.types.mangle(ty.id)
         }
+    }
+
+    /// A function's name as written in source, with generic arguments:
+    /// `Holder[@bit32].make` for the symbol `Holder.1..bit32.make`. Stack
+    /// traces print it.
+    fn display_of(&self, func: &HirFunc) -> String {
+        let def = self.res.def(func.key.def);
+        let generics = |args: &[TypeRef]| {
+            if args.is_empty() {
+                String::new()
+            } else {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|arg| self.types.display_ref(*arg))
+                    .collect();
+                format!("[{}]", args.join(", "))
+            }
+        };
+        let (owner, own) = match def.parent {
+            Some(parent) => {
+                let count = self.res.def(parent).generic_params.len();
+                let owner = self.res.qualified_name(parent);
+                (
+                    format!("{owner}{}", generics(&func.key.args[..count])),
+                    &func.key.args[count..],
+                )
+            }
+            None if matches!(def.kind, DefKind::Hook(_)) => (String::new(), &func.key.args[..]),
+            None => (
+                self.res.namespace_path(def.ns).to_owned(),
+                &func.key.args[..],
+            ),
+        };
+        let name = if owner.is_empty() {
+            def.name.clone()
+        } else {
+            format!("{owner}.{}", def.name)
+        };
+        format!("{name}{}", generics(own))
     }
 
     /// The LIR symbol of a function instance: namespace or owning type, name,
@@ -2086,6 +2150,28 @@ impl Lower<'_> {
                     outs: Vec::new(),
                     span,
                 });
+                LirOperand::Reg(String::new())
+            }
+            Intrinsic::Panic => {
+                let msg = self.arg(fs, func, &args[0]);
+                let location = self.sources.location(span);
+                let site = lilac_ir::trace::site_text(&self.display_of(func), location.as_deref());
+                let name = self.intern_data(site.as_bytes());
+                let reg = fs.reg();
+                fs.emit(LirInst::Const {
+                    dst: reg.clone(),
+                    lit: format!("!{name}"),
+                    ty: LirTy::byte_buffer(),
+                    span,
+                });
+                let site = self.fresh_place(fs, LirOperand::Reg(reg), args[0].ty, span);
+                fs.emit(LirInst::Call {
+                    func: LirCallee::Func(".lilac.panic".to_owned()),
+                    ins: vec![msg, site],
+                    outs: Vec::new(),
+                    span,
+                });
+                fs.end(LirTerm::Unreachable { span });
                 LirOperand::Reg(String::new())
             }
             _ => {

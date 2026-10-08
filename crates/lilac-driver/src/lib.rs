@@ -444,7 +444,15 @@ impl Session {
         self.report(Stage::Lower, StageEvent::Begin);
         let ptr_bytes = u64::from(self.target.bit_native_width() / 8);
         let triple = self.target.to_triple();
-        let mut lir = lilac_lower::lower(&checked.hir, &resolved, &types, &triple, ptr_bytes);
+        let lowered = lilac_lower::lower(
+            &checked.hir,
+            &resolved,
+            &types,
+            &self.source_map,
+            &triple,
+            ptr_bytes,
+        );
+        let mut lir = lowered.module;
         if self.require_entry && !has_entry(&lir) {
             return Err(self.diags.emit(
                 Diagnostic::error(
@@ -604,6 +612,39 @@ mod tests {
             .expect("hello should compile");
         assert!(module.funcs.iter().any(|func| func.name == "main"));
         assert_eq!(session.render_diagnostics(), "");
+    }
+
+    /// `@panic` calls the handler with its own site, then ends the block.
+    #[test]
+    fn panic_lowers_to_the_handler_with_its_site() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "p.lilac",
+                "main: function () nothing {\n    @panic(\"stop\")\n}\n",
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let text = module.to_text();
+        assert!(text.contains("call @.lilac.panic"), "{text}");
+        assert!(text.contains("unreachable"), "{text}");
+        assert!(
+            module
+                .data
+                .iter()
+                .any(|datum| datum.bytes == b"  at main (p.lilac:2:5)\n"),
+            "{text}"
+        );
+    }
+
+    /// The handler and its data are pruned from a program that never panics.
+    #[test]
+    fn no_panic_no_handler() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir("p.lilac", "main: function () nothing {\n}\n")
+            .expect("compiles");
+        assert!(module.funcs.iter().all(|func| func.name != ".lilac.panic"));
+        assert!(module.data.is_empty());
     }
 
     #[test]

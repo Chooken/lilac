@@ -217,6 +217,9 @@ pub enum Intrinsic {
     OsAlloc,
     /// `@os_free(ptr)`: frees `@os_alloc` memory.
     OsFree,
+    /// `@panic(message)`: ends the program with a message and a stack trace
+    /// (see `.lilac.panic`).
+    Panic,
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -283,6 +286,7 @@ impl Intrinsic {
             "@os_exit" => Self::OsExit,
             "@os_alloc" => Self::OsAlloc,
             "@os_free" => Self::OsFree,
+            "@panic" => Self::Panic,
             _ => return None,
         })
     }
@@ -368,6 +372,7 @@ impl Intrinsic {
             Self::OsExit => sig(vec![Builtin("@bit32")], None),
             Self::OsAlloc => sig(vec![Builtin("@bit_native")], Some(Ref("unknown"))),
             Self::OsFree => sig(vec![Ref("unknown")], None),
+            Self::Panic => sig(vec![Builtin("@byte_buffer")], None),
         }
     }
 
@@ -417,6 +422,7 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@i_add"), None);
         assert_eq!(Intrinsic::lookup("@compilerError"), None);
         assert_eq!(Intrinsic::lookup("@size_of"), Some(Intrinsic::SizeOf));
+        assert_eq!(Intrinsic::lookup("@panic"), Some(Intrinsic::Panic));
     }
 
     #[test]

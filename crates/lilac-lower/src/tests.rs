@@ -12,7 +12,15 @@ fn lower_src(src: &str) -> (String, Diags) {
     let mut types = Types::new();
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, 64);
     assert!(!diags.has_errors(), "{diags:?}");
-    let mut lir = lower(&checked.hir, &res, &types, "x86_64-unknown-none", 8);
+    let mut lir = lower(
+        &checked.hir,
+        &res,
+        &types,
+        &sources,
+        "x86_64-unknown-none",
+        8,
+    )
+    .module;
     let text = lir.to_text();
     let _ = lilac_const::fold(&mut lir);
     let mut verify_diags = Diags::new();

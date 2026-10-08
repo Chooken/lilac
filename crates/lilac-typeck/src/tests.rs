@@ -559,6 +559,15 @@ fn old_unsuffixed_intrinsics_are_gone() {
     assert!(diags.has_errors(), "{diags:?}");
 }
 
+/// `@panic` takes a `@byte_buffer` message.
+#[test]
+fn panic_wants_a_byte_buffer() {
+    let ok = check_src("main: function () nothing {\n    @panic(\"stop\")\n}\n");
+    assert!(!ok.has_errors(), "{ok:?}");
+    let bad = check_src("main: function () nothing {\n    @panic(0x1)\n}\n");
+    assert!(bad.has_errors(), "{bad:?}");
+}
+
 #[test]
 fn bitcast_intrinsics_round_trip() {
     // `@fbit_to_bits_W(@bits_to_fbit_W(x))` typechecks at every width that
