@@ -92,19 +92,37 @@ impl Parser {
     /// An [`ItemKind::Error`] item spanning the tokens consumed for a failed
     /// item, from `start` through the current position.
     fn error_item(&self, start: usize) -> Item {
+        Item {
+            name: String::new(),
+            kind: ItemKind::Error,
+            span: self.error_span(start),
+        }
+    }
+
+    /// The span from token `start` through the last consumed token, used as an
+    /// error node's span.
+    fn error_span(&self, start: usize) -> Span {
         let first = self.tokens.get(start).map(|token| token.span);
         let last = self
             .pos
             .checked_sub(1)
             .and_then(|end| self.tokens.get(end))
             .map(|token| token.span);
-        let span = match (first, last) {
+        match (first, last) {
             (Some(first), Some(last)) => join_spans(first, last),
             _ => Span::dummy(),
-        };
-        Item {
+        }
+    }
+
+    /// The empty-name poison [`Type`]: the sentinel for a type that failed to
+    /// parse (a user type name is never empty). Records the failure.
+    fn poison_type(&mut self, span: Span) -> Type {
+        self.had_errors = true;
+        Type {
             name: String::new(),
-            kind: ItemKind::Error,
+            is_ref: false,
+            generic_args: Vec::new(),
+            func: None,
             span,
         }
     }
@@ -175,6 +193,56 @@ impl Parser {
                     }
                     self.pos += 1;
                 }
+            }
+        }
+    }
+
+    /// Skips to the next statement boundary inside a block: the closing `}` or
+    /// a token that can start a statement. Leaves the boundary unconsumed.
+    fn synchronize_stmt(&mut self) {
+        let mut depth = 0;
+        while self.peek().kind != TokenKind::Eof {
+            match self.peek().kind {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                TokenKind::RBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => {
+                    if depth == 0 && starts_stmt(self.peek().kind) {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Skips to the next `,` or `)` at bracket depth zero (leaving it), for
+    /// recovering a failed call argument.
+    fn synchronize_args(&mut self) {
+        let mut depth = 0usize;
+        while self.peek().kind != TokenKind::Eof {
+            match self.peek().kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                TokenKind::Comma if depth == 0 => break,
+                _ => self.pos += 1,
             }
         }
     }
@@ -464,7 +532,7 @@ impl Parser {
             let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
             let payload = if self.peek().kind == TokenKind::Colon {
                 self.bump();
-                Some(self.parse_type(diags)?)
+                Some(self.parse_type(diags))
             } else {
                 None
             };
@@ -555,7 +623,7 @@ impl Parser {
         if self.peek().kind == TokenKind::At
             || Self::is_anonymous_param(self.peek(), self.peek_at(1))
         {
-            let ty = self.parse_type(diags)?;
+            let ty = self.parse_type(diags);
             let span = ty.span;
             return Ok(Param {
                 name: String::new(),
@@ -571,7 +639,7 @@ impl Parser {
             }
         };
         self.expect(diags, TokenKind::Colon, "`:` after parameter name")?;
-        let ty = self.parse_type(diags)?;
+        let ty = self.parse_type(diags);
         let span = join_spans(name.span, ty.span);
         Ok(Param {
             name: name.text,
@@ -614,7 +682,34 @@ impl Parser {
         }
     }
 
-    fn parse_type(&mut self, diags: &mut lilac_error::Diags) -> Result<Type, ErrorGuaranteed> {
+    /// Parses a type, recovering a failure into the empty-name poison [`Type`]
+    /// (recording [`Parser::had_errors`]) so the enclosing construct survives.
+    fn parse_type(&mut self, diags: &mut lilac_error::Diags) -> Type {
+        let start = self.pos;
+        let start_span = self.peek().span;
+        if let Ok(ty) = self.parse_type_inner(diags) {
+            return ty;
+        }
+        self.had_errors = true;
+        let span = if self.pos == start {
+            start_span
+        } else {
+            self.error_span(start)
+        };
+        self.poison_type(span)
+    }
+
+    /// Parses a type strictly; the caller decides whether to recover. Used for
+    /// the recursive generic-argument positions so a failed inner type does not
+    /// produce a cascade of follow-on diagnostics.
+    fn parse_type_inner(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Type, ErrorGuaranteed> {
+        if !starts_type(self.peek().kind) {
+            let span = self.peek().span;
+            return Err(Self::err(diags, span, "expected a type"));
+        }
         let first = self.bump();
         self.parse_type_starting(diags, first)
     }
@@ -663,7 +758,7 @@ impl Parser {
         if self.peek().kind == TokenKind::LBracket {
             self.bump();
             loop {
-                generic_args.push(self.parse_type(diags)?);
+                generic_args.push(self.parse_type_inner(diags)?);
                 match self.peek().kind {
                     TokenKind::Comma => {
                         self.bump();
@@ -773,8 +868,18 @@ impl Parser {
     fn parse_block(&mut self, diags: &mut lilac_error::Diags) -> Result<Block, ErrorGuaranteed> {
         let open = self.expect(diags, TokenKind::LBrace, "`{` to open block")?;
         let mut stmts = Vec::new();
-        while self.peek().kind != TokenKind::RBrace {
+        loop {
+            if self.peek().kind == TokenKind::RBrace {
+                break;
+            }
             if self.peek().kind == TokenKind::Eof {
+                // If the last statement was recovered from a failure, the error
+                // already covers the malformed tail (the failure may even have
+                // consumed the closing `}`); do not cascade an unterminated
+                // block on top of it.
+                if matches!(stmts.last(), Some(Stmt::Error { .. })) {
+                    break;
+                }
                 let span = self.peek().span;
                 return Err(Self::err(
                     diags,
@@ -782,12 +887,27 @@ impl Parser {
                     "unterminated block; add a closing `}`",
                 ));
             }
-            stmts.push(self.parse_stmt(diags)?);
+            let before = self.pos;
+            if let Ok(stmt) = self.parse_stmt(diags) {
+                stmts.push(stmt);
+            } else {
+                self.had_errors = true;
+                let span = self.error_span(before);
+                if self.peek().kind != TokenKind::RBrace && self.peek().kind != TokenKind::Eof {
+                    self.synchronize_stmt();
+                    if self.pos == before {
+                        self.pos += 1;
+                    }
+                }
+                stmts.push(Stmt::Error { span });
+            }
         }
-        let close = self.bump();
+        if self.peek().kind == TokenKind::RBrace {
+            self.bump();
+        }
         Ok(Block {
             stmts,
-            span: join_spans(open.span, close.span),
+            span: join_spans(open.span, self.prev_span()),
         })
     }
 
@@ -1008,7 +1128,7 @@ impl Parser {
         if self.peek().kind == TokenKind::Ident && self.peek_at(1).kind == TokenKind::Colon {
             let name = self.bump();
             self.bump();
-            let ty = self.parse_type(diags)?;
+            let ty = self.parse_type(diags);
             let mut bindings = vec![LetBinding {
                 name: name.text,
                 span: join_spans(name.span, ty.span),
@@ -1018,7 +1138,7 @@ impl Parser {
                 self.bump();
                 let next = self.expect(diags, TokenKind::Ident, "binding name")?;
                 self.expect(diags, TokenKind::Colon, "`:` after binding name")?;
-                let next_ty = self.parse_type(diags)?;
+                let next_ty = self.parse_type(diags);
                 bindings.push(LetBinding {
                     name: next.text,
                     span: join_spans(next.span, next_ty.span),
@@ -1193,7 +1313,7 @@ impl Parser {
         let mut expr = self.parse_unary(diags)?;
         while self.peek().kind == TokenKind::KwAs {
             self.bump();
-            let ty = self.parse_type(diags)?;
+            let ty = self.parse_type(diags);
             expr = Expr::Cast(Box::new(expr), ty);
         }
         Ok(expr)
@@ -1258,7 +1378,7 @@ impl Parser {
                     self.bump();
                     let mut generic_args = Vec::new();
                     loop {
-                        generic_args.push(self.parse_type(diags)?);
+                        generic_args.push(self.parse_type_inner(diags)?);
                         match self.peek().kind {
                             TokenKind::Comma => {
                                 self.bump();
@@ -1311,7 +1431,22 @@ impl Parser {
                     "unterminated call; add a closing `)`",
                 ));
             }
-            args.push(self.with_struct_lit(true, |p| p.parse_expr(diags))?);
+            let before = self.pos;
+            if let Ok(arg) = self.with_struct_lit(true, |p| p.parse_expr(diags)) {
+                args.push(arg);
+            } else {
+                self.had_errors = true;
+                let span = if self.pos == before {
+                    self.peek().span
+                } else {
+                    self.error_span(before)
+                };
+                args.push(Expr::Error { span });
+                self.synchronize_args();
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
             if self.peek().kind == TokenKind::Comma {
                 self.bump();
             } else if self.peek().kind != TokenKind::RParen {
@@ -1520,6 +1655,36 @@ fn starts_expr(kind: TokenKind) -> bool {
             | TokenKind::KwRef
             | TokenKind::KwIf
             | TokenKind::Dot
+    )
+}
+
+/// Whether a token can start a type (mirrors [`Parser::parse_type_starting`]'s
+/// accepted first tokens; `nothing` is included so its targeted diagnostic is
+/// preserved).
+fn starts_type(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::KwFunction
+            | TokenKind::KwRef
+            | TokenKind::At
+            | TokenKind::Ident
+            | TokenKind::KwUnknown
+            | TokenKind::KwSelf
+            | TokenKind::KwNothing
+    )
+}
+
+/// Whether a token can start a statement (a block-recovery boundary).
+fn starts_stmt(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::At
+            | TokenKind::KwIf
+            | TokenKind::KwLoop
+            | TokenKind::KwMatch
+            | TokenKind::KwReturn
+            | TokenKind::KwBreak
     )
 }
 
@@ -2177,5 +2342,128 @@ mod tests {
         assert!(matches!(**callee, Expr::Ident(ref name, _) if name == "@negate"));
         assert_eq!(args.len(), 1);
         assert!(matches!(args[0], Expr::Ident(ref name, _) if name == "x"));
+    }
+
+    /// Parses `src` with [`Parser::parse_program`] directly, returning the
+    /// program, the parser's failure signal, and the diagnostics.
+    fn parse_with_status(src: &str) -> (Program, Diags, bool, SourceMap) {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("parse_program must recover rather than return Err");
+        (program, diags, parser.had_errors(), sm)
+    }
+
+    #[test]
+    fn stmt_error_recovery() {
+        // A function body whose initializer is missing: the enclosing function
+        // survives and the broken statement becomes `Stmt::Error`.
+        let src = "main: function () nothing {\n    x: @bit8 = \n}\n";
+        let (program, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "a failed statement records the failure");
+        assert_eq!(program.items.len(), 1, "the function item survives");
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        assert!(
+            block
+                .stmts
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Error { .. })),
+            "the broken statement recovers into `Stmt::Error`: {:?}",
+            block.stmts
+        );
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E001"),
+            "the syntax diagnostic is reported: {:?}",
+            diags.diagnostics()
+        );
+    }
+
+    #[test]
+    fn broken_type_annotation_recovers_to_poison() {
+        // A statement with no type annotation: the poison `Type` (empty name)
+        // lets the statement survive.
+        let src = "main: function () nothing {\n    x: = 0x1\n}\n";
+        let (program, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "a failed type records the failure");
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        let Some(Stmt::Let { ty, .. }) = block.stmts.first() else {
+            panic!("the statement survives, got {:?}", block.stmts);
+        };
+        assert_eq!(
+            ty.name, "",
+            "a failed type is the empty-name poison sentinel"
+        );
+        assert!(ty.generic_args.is_empty());
+        assert!(ty.func.is_none());
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E001"),
+            "the type diagnostic is reported: {:?}",
+            diags.diagnostics()
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_sibling_statements() {
+        // A good statement before a broken one is preserved.
+        let src = "main: function () nothing {\n    y: @bit8 = 0x1\n    x: @bit8 = \n}\n";
+        let (program, _diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors);
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        assert_eq!(block.stmts.len(), 2, "{:?}", block.stmts);
+        assert!(
+            matches!(&block.stmts[0], Stmt::Let { name, .. } if name == "y"),
+            "the good sibling is parsed: {:?}",
+            block.stmts[0]
+        );
+        assert!(
+            matches!(block.stmts[1], Stmt::Error { .. }),
+            "the broken statement is an error: {:?}",
+            block.stmts[1]
+        );
+    }
+
+    #[test]
+    fn call_arg_error_recovers_to_expr_error() {
+        // A malformed call argument becomes an `Expr::Error` and the statement
+        // (and call) survives.
+        let src = "main: function () nothing {\n    f(, 0x1)\n}\n";
+        let (program, diags, had_errors, _) = parse_with_status(src);
+        assert!(had_errors, "a failed expression records the failure");
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function, got {:?}", program.items[0].kind);
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body, got {:?}", decl.body);
+        };
+        let Stmt::ExprStmt(Expr::Call { args, .. }) = &block.stmts[0] else {
+            panic!("the call survives, got {:?}", block.stmts[0]);
+        };
+        assert!(
+            args.iter().any(|arg| matches!(arg, Expr::Error { .. })),
+            "the bad argument is an `Expr::Error`: {args:?}"
+        );
+        assert!(diags.diagnostics().iter().any(|d| d.code == "E001"));
     }
 }

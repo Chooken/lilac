@@ -235,6 +235,12 @@ pub enum Stmt {
         /// Whole-statement span.
         span: Span,
     },
+    /// A statement that failed to parse; its `span` covers the consumed tokens.
+    /// Downstream passes skip it.
+    Error {
+        /// Span of the consumed tokens.
+        span: Span,
+    },
 }
 
 /// One `name: Type` slot of a multi-`let`.
@@ -370,6 +376,12 @@ pub enum Expr {
     },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
     Cast(Box<Expr>, Type),
+    /// An expression that failed to parse; its `span` covers the consumed
+    /// tokens. Downstream passes map it to a poison value.
+    Error {
+        /// Span of the consumed tokens.
+        span: Span,
+    },
 }
 
 /// Binary operators and their `@` hook names.
@@ -438,7 +450,8 @@ impl Expr {
             | Self::MatchValue { span, .. }
             | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
-            | Self::FString { span, .. } => *span,
+            | Self::FString { span, .. }
+            | Self::Error { span } => *span,
             Self::Cast(operand, ty) => {
                 let start = operand.span();
                 Span::new(start.lo.0, ty.span.hi.0, start.file)
@@ -460,7 +473,8 @@ impl Stmt {
             | Self::Break { span }
             | Self::If { span, .. }
             | Self::Loop { span, .. }
-            | Self::Match { span, .. } => *span,
+            | Self::Match { span, .. }
+            | Self::Error { span } => *span,
         }
     }
 }
@@ -526,7 +540,7 @@ pub fn walk_stmt<V: Visitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
             visitor.visit_expr(value);
         }
         Stmt::ExprStmt(expr) => visitor.visit_expr(expr),
-        Stmt::Return { .. } | Stmt::Break { .. } => {}
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Error { .. } => {}
         Stmt::If {
             cond, then, els, ..
         } => {
@@ -584,7 +598,12 @@ pub fn walk_stmt<V: Visitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
 /// Default expression walk for [`Visitor`].
 pub fn walk_expr<V: Visitor + ?Sized>(visitor: &mut V, expr: &Expr) {
     match expr {
-        Expr::Ident(..) | Expr::Tag(..) | Expr::Number(..) | Expr::Str(..) | Expr::Char(..) => {}
+        Expr::Ident(..)
+        | Expr::Tag(..)
+        | Expr::Number(..)
+        | Expr::Str(..)
+        | Expr::Char(..)
+        | Expr::Error { .. } => {}
         Expr::Call { callee, args, .. } => {
             visitor.visit_expr(callee);
             for arg in args {
@@ -700,7 +719,7 @@ pub fn walk_stmt_mut<V: MutVisitor + ?Sized>(visitor: &mut V, stmt: &mut Stmt) {
             visitor.visit_expr_mut(value);
         }
         Stmt::ExprStmt(expr) => visitor.visit_expr_mut(expr),
-        Stmt::Return { .. } | Stmt::Break { .. } => {}
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Error { .. } => {}
         Stmt::If {
             cond, then, els, ..
         } => {
@@ -758,7 +777,12 @@ pub fn walk_stmt_mut<V: MutVisitor + ?Sized>(visitor: &mut V, stmt: &mut Stmt) {
 /// Default mutable expression walk for [`MutVisitor`].
 pub fn walk_expr_mut<V: MutVisitor + ?Sized>(visitor: &mut V, expr: &mut Expr) {
     match expr {
-        Expr::Ident(..) | Expr::Tag(..) | Expr::Number(..) | Expr::Str(..) | Expr::Char(..) => {}
+        Expr::Ident(..)
+        | Expr::Tag(..)
+        | Expr::Number(..)
+        | Expr::Str(..)
+        | Expr::Char(..)
+        | Expr::Error { .. } => {}
         Expr::Call { callee, args, .. } => {
             visitor.visit_expr_mut(callee);
             for arg in args {

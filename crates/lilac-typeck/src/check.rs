@@ -2078,6 +2078,7 @@ impl Checker<'_> {
                 els,
                 span,
             } => self.check_match(fctx, scrutinee, arms, els.as_ref(), *span),
+            Stmt::Error { .. } => {}
         }
     }
 
@@ -2673,6 +2674,13 @@ impl Checker<'_> {
                 span,
             } => self.check_struct_lit(fctx, ty_name, fields, *span, expected),
             Expr::FString { parts, span } => self.check_fstring(fctx, parts, *span),
+            Expr::Error { span } => (
+                TypeRef {
+                    id: TypeId::ERROR,
+                    is_ref: false,
+                },
+                poison_expr(*span),
+            ),
         }
     }
 
