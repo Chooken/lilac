@@ -1,0 +1,19 @@
+// pending: phase 1 (`x: T { ... }` and `x: T(args)` shorthands)
+// expect-exit: 6
+
+exit: extern function (code: @bit32) nothing
+
+Pair: object {
+    a: @bit32
+    b: @bit32
+
+    @init: function (a: @bit32) out: Pair {
+        out = Pair { a = a, b = 0x2 }
+    }
+}
+
+main: function () nothing {
+    p: Pair { a = 0x1, b = 0x3 }
+    q: Pair(0x0)
+    exit(@i_add_32(@i_add_32(p.a, p.b), q.b))
+}

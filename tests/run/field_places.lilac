@@ -1,0 +1,27 @@
+// pending: phase 4 (`ref self.field` ICE and nested field stores)
+// expect-exit: 8
+
+exit: extern function (code: @bit32) nothing
+
+set: function (r: ref @bit32, v: @bit32) nothing {
+    r = v
+}
+
+Inner: object {
+    v: @bit32
+}
+
+Outer: object {
+    inner: Inner
+
+    poke: function (self) nothing {
+        set(ref self.inner.v, 0x5)
+    }
+}
+
+main: function () nothing {
+    o: Outer = Outer { inner = Inner { v = 0x0 } }
+    o.poke()
+    o.inner.v = @i_add_32(o.inner.v, 0x3)
+    exit(o.inner.v)
+}

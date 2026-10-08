@@ -1,0 +1,12 @@
+// expect-stdout: Hi
+// expect-exit: 3
+
+putchar: extern function (c: @bit32) result: @bit32
+exit: extern function (code: @bit32) nothing
+
+main: function () nothing {
+    r: @bit32 = putchar('H')
+    r = putchar('i')
+    r = putchar(0xA)
+    exit(0x3)
+}

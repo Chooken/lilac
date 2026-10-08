@@ -1,0 +1,18 @@
+// pending: phase 1 (`Name[T] { ... }` and `Name[T].f()` in expression position)
+// expect-exit: 4
+
+exit: extern function (code: @bit32) nothing
+
+Box[T]: object {
+    value: T
+
+    make: function (v: T) out: Box[T] {
+        out = Box[T] { value = v }
+    }
+}
+
+main: function () nothing {
+    a: Box[@bit32] = Box[@bit32] { value = 0x1 }
+    b: Box[@bit32] = Box[@bit32].make(0x3)
+    exit(@i_add_32(a.value, b.value))
+}

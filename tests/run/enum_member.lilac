@@ -1,0 +1,21 @@
+// pending: phase 4 (enum bodies with methods)
+// expect-exit: 2
+
+exit: extern function (code: @bit32) nothing
+
+Choice: enum {
+    One
+    Two
+
+    code: function (self) c: @bit32 {
+        match self {
+            .One => c = 0x1
+            .Two => c = 0x2
+        }
+    }
+}
+
+main: function () nothing {
+    v: Choice = Choice.Two
+    exit(v.code())
+}

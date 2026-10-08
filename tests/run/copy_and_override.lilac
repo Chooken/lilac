@@ -1,0 +1,27 @@
+// pending: phase 5 (`@on_copy` and `@on_override` are never called)
+// expect-stdout: co
+// expect-exit: 1
+
+putchar: extern function (c: @bit32) result: @bit32
+exit: extern function (code: @bit32) nothing
+
+Counted: object {
+    copies: @bit32
+
+    @on_copy: function (self) out: Counted {
+        r: @bit32 = putchar('c')
+        out = Counted { copies = @i_add_32(self.copies, 0x1) }
+    }
+
+    @on_override: function (prev: ref Counted, new: ref Counted) nothing {
+        r: @bit32 = putchar('o')
+    }
+}
+
+main: function () nothing {
+    a: Counted = Counted { copies = 0x0 }
+    b: Counted = a
+    a = Counted { copies = 0x5 }
+    r: @bit32 = putchar(0xA)
+    exit(b.copies)
+}

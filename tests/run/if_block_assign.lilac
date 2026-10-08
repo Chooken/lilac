@@ -1,0 +1,11 @@
+// pending: phase 1 (struct-literal restriction rejects `if x { y = ... }`)
+// expect-exit: 7
+
+exit: extern function (code: @bit32) nothing
+
+main: function () nothing {
+    x: @bit8 = 0x1
+    y: @bit32 = 0x0
+    if x { y = 0x7 }
+    exit(y)
+}

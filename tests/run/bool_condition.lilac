@@ -1,0 +1,20 @@
+// pending: phase 4 (conditions convert to `@bit8` through `@conversion`)
+// expect-exit: 1
+
+exit: extern function (code: @bit32) nothing
+
+Bool: object {
+    data: @bit8
+
+    @conversion: function (from: Bool) to: @bit8 {
+        to = from.data
+    }
+}
+
+main: function () nothing {
+    t: Bool = Bool { data = 0x1 }
+    if t {
+        exit(0x1)
+    }
+    exit(0x0)
+}

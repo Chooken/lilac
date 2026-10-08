@@ -1,0 +1,16 @@
+// pending: phase 3 (`=>` methods and static functions ICE)
+// expect-exit: 7
+
+exit: extern function (code: @bit32) nothing
+
+Num: object {
+    data: @bit32
+
+    get: function (self) v: @bit32 => self.data
+    make: function (v: @bit32) out: Num => Num { data = v }
+}
+
+main: function () nothing {
+    a: Num = Num.make(0x7)
+    exit(a.get())
+}

@@ -1,0 +1,13 @@
+// pending: phase 1 (`\xHH` must be one byte, not UTF-8 encoded)
+// expect-exit: 255
+
+exit: extern function (code: @bit32) nothing
+
+main: function () nothing {
+    s: @byte_buffer = "\xFF"
+    if @i_less_than_u_native(@byte_buffer_len(s), 0x2) {
+        b: @bit8 = @load_u8(@byte_buffer_ptr(s), 0x0)
+        exit(@extend_zero(b))
+    }
+    exit(0x1)
+}

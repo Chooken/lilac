@@ -1,0 +1,19 @@
+// pending: phase 3 (member operator hooks: definition and call-site names differ)
+// expect-exit: 6
+
+exit: extern function (code: @bit32) nothing
+
+Num: object {
+    data: @bit32
+
+    @add: function (lhs: Num, rhs: Num) out: Num {
+        out = Num { data = @i_add_32(lhs.data, rhs.data) }
+    }
+}
+
+main: function () nothing {
+    a: Num = Num { data = 0x2 }
+    b: Num = Num { data = 0x4 }
+    c: Num = a + b
+    exit(c.data)
+}

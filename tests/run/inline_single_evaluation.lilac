@@ -1,0 +1,17 @@
+// pending: phase 3 (`=>` substitutes arguments, evaluating them twice)
+// expect-exit: 1
+
+exit: extern function (code: @bit32) nothing
+
+bump: function (c: ref @bit32) v: @bit32 {
+    c = @i_add_32(c, 0x1)
+    v = c
+}
+
+twice: function (v: @bit32) r: @bit32 => @i_add_32(v, v)
+
+main: function () nothing {
+    count: @bit32 = 0x0
+    t: @bit32 = twice(bump(ref count))
+    exit(count)
+}

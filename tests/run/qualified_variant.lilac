@@ -1,0 +1,17 @@
+// pending: phase 4 (`Enum.Variant(payload)` construction and qualified patterns)
+// expect-exit: 4
+
+exit: extern function (code: @bit32) nothing
+
+Opt: enum {
+    Some: @bit32
+    None
+}
+
+main: function () nothing {
+    a: Opt = Opt.Some(0x4)
+    match a {
+        Opt.Some -> v: @bit32 => exit(v)
+        Opt.None => exit(0x1)
+    }
+}

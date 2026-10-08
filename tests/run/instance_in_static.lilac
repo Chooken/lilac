@@ -1,0 +1,14 @@
+// pending: phase 2 (static methods get an implicit zeroed `instance` binding)
+// expect-error: E021
+
+Obj: object {
+    v: @bit32
+
+    make: function () out: @bit32 {
+        out = instance.v
+    }
+}
+
+main: function () nothing {
+    x: @bit32 = Obj.make()
+}

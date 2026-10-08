@@ -1,0 +1,17 @@
+// pending: phase 4 (generic enums drop their parameters)
+// expect-exit: 9
+
+exit: extern function (code: @bit32) nothing
+
+Maybe[T]: enum {
+    Some: T
+    None
+}
+
+main: function () nothing {
+    m: Maybe[@bit32] = Maybe[@bit32].Some(0x9)
+    match m {
+        .Some -> v: @bit32 => exit(v)
+        .None => exit(0x0)
+    }
+}
