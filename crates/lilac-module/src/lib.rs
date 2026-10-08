@@ -304,7 +304,8 @@ impl Loader<'_> {
         sources: &mut SourceMap,
         diags: &mut Diags,
     ) -> bool {
-        let file_id = sources.add_file(&name, &src);
+        let display = display_name(&self.namespaces[ns].path, &name);
+        let file_id = sources.add_file(&display, &src);
         let usings = scan_usings(&src, file_id, &self.namespaces[ns].path);
         let index = files.len();
         files.push(FileUnit {
@@ -428,6 +429,19 @@ fn file_name_str(path: &Path) -> String {
         .and_then(OsStr::to_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// A file's name in diagnostics and stack traces: its namespace's folder path
+/// from the root, `/`-separated, then the file name (`Std/Heap/alloc.lilac`
+/// for namespace `Std.Heap`, a mounted library's included), so it reads the
+/// same on every OS. A root-namespace file keeps `name`: its bare file name,
+/// or in single-file mode the path it was given as.
+fn display_name(ns_path: &str, name: &str) -> String {
+    if ns_path.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{}/{name}", ns_path.replace('.', "/"))
+    }
 }
 
 /// Resolves a dotted namespace path: below a mounted library when its first
@@ -971,5 +985,50 @@ mod tests {
             .find(|file| file.name == "helper.lilac")
             .expect("helper loaded");
         assert_eq!(helper.path, join_rel(&root, "util/helper.lilac"));
+    }
+
+    /// Source-map names are namespace paths, so same-named files in two
+    /// folders stay distinguishable in diagnostics and stack traces.
+    #[test]
+    fn source_names_are_namespace_paths() {
+        let root = PathBuf::from("proj");
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "main.lilac",
+            "using util
+using Std.Heap
+",
+        );
+        fs.add(
+            &root,
+            "util/helper.lilac",
+            "helper: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            "Heap/alloc.lilac",
+            "alloc: function () nothing {}
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        let mut names: Vec<&str> = project
+            .files
+            .iter()
+            .map(|unit| sources.file(unit.file).expect("registered").name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["Std/Heap/alloc.lilac", "main.lilac", "util/helper.lilac"]
+        );
     }
 }

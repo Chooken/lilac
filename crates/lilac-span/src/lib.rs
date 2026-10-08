@@ -176,6 +176,18 @@ impl SourceMap {
             .map(|file| file.line_col(span.lo.0 as usize))
     }
 
+    /// `name:line:col` (1-based) for the start of a span, as diagnostics and
+    /// stack traces print it; `None` for a dummy span or an unknown file.
+    #[must_use]
+    pub fn location(&self, span: Span) -> Option<String> {
+        if span.is_dummy() {
+            return None;
+        }
+        let file = self.file(span.file)?;
+        let (line, col) = file.line_col(span.lo.0 as usize);
+        Some(format!("{}:{line}:{col}", file.name))
+    }
+
     /// Source text covered by a span, or `None` for bad ranges.
     #[must_use]
     pub fn span_text(&self, span: Span) -> Option<&str> {
@@ -259,6 +271,22 @@ mod tests {
         assert_eq!(sm.line_col(Span::new(5, 6, file)), Some((1, 5)));
         // An offset inside `é` snaps back to its start.
         assert_eq!(sm.line_col(Span::new(2, 3, file)), Some((1, 2)));
+    }
+
+    #[test]
+    fn location_is_name_line_col() {
+        let mut sources = SourceMap::new();
+        let file = sources.add_file(
+            "A/b.lilac",
+            "x
+  yz
+",
+        );
+        assert_eq!(
+            sources.location(Span::new(4, 5, file)).as_deref(),
+            Some("A/b.lilac:2:3")
+        );
+        assert_eq!(sources.location(Span::dummy()), None);
     }
 
     #[test]
