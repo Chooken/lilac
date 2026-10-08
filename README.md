@@ -63,6 +63,7 @@ Common flags:
 | `--lib=<Name>=<dir>` | Mount a library folder as namespace `Name`. |
 | `--link-arg=<arg>` | Pass an argument to the linker, for example a library to link. |
 | `--libc` | Link through a C compiler and the C library (see below). |
+| `--stack-traces=on\|off` | Print a stack trace when the program panics; on by default in debug builds. |
 | `-q`, `--timings` | Print nothing, or print how long each stage took. |
 
 To use the standard library, mount it from the install folder:
@@ -73,6 +74,21 @@ lilac build hello.lilac --lib=Standard=<install>/lib/Standard
 
 Programs build for Windows, Linux and macOS, on x86-64 and 64-bit Arm, from
 any of those machines.
+
+### Panics
+
+`@panic("message")` stops the program. It prints the message and where each
+active function was, innermost first, to stderr, and exits with code 101:
+
+```
+panic: index 3 is out of range
+  at check (main.lilac:13:9)
+  at middle (main.lilac:18:5)
+  at main (main.lilac:23:5)
+```
+
+Debug builds record the trace; release builds print only the panic's own
+location. `--stack-traces=on|off` overrides either default.
 
 ### Native builds and `--libc`
 

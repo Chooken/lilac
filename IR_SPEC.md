@@ -1,6 +1,6 @@
-# Lilac IR Specification (0.3)
+# Lilac IR Specification (0.4)
 
-> Version: `lilac_ir = "0.3"`. Status: normative for the Rust rewrite.
+> Version: `lilac_ir = "0.4"`. Status: normative for the Rust rewrite.
 > `SPEC.md` is normative for language semantics; this file is normative for IR text,
 > verification, and backend contract. Plan-only material lives in `RUST_REWRITE_PLAN.md`.
 
@@ -41,14 +41,20 @@ type #Number {
 ```
 as produced by `tests/ui/match_enum.lir`.
 
-Builtin aggregates usable in `#` positions are `#byte_buffer` and
-`#format_args`. Both are plain values with no hidden behavior, and their field
-layouts are fixed by the IR rather than declared in a `type` section:
+Builtin aggregates usable in `#` positions are `#byte_buffer`,
+`#format_args` and `#.lilac.frame`. All are plain values with no hidden
+behavior, and their field layouts are fixed by the IR rather than declared in
+a `type` section:
 
 ```lilac-ir
 #byte_buffer { len: #bit_native, data: ref #bit8 }
 #format_args { count: #bit_native, p0: #byte_buffer, …, p15: #byte_buffer }
+#.lilac.frame { prev: ref #.lilac.frame, site: #byte_buffer }
 ```
+
+`#.lilac.frame` is one shadow-stack record for panic stack traces (see
+*Panics and stack traces* below); the leading `.` keeps it apart from user
+types.
 
 `#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
 LIR has no array type, so the table is spelled out as sixteen named fields.
@@ -61,7 +67,7 @@ bare `#unknown` place is unsized and rejected by the verifier.
 
 Functions can be declared as:
 ```lilac-ir
-lilac_ir = "0.3"
+lilac_ir = "0.4"
 target = "x86_64-unknown-none"
 function @func_name
     in #type %param_1,
@@ -74,7 +80,7 @@ function @func_name
 }
 ```
 `target` fixes `@bit_native` width. Every block starts with `$label:` and ends
-with exactly one terminator (`return | branch | branch.if | panic | unreachable`).
+with exactly one terminator (`return | branch | branch.if | unreachable`).
 
 `inline function @f` marks a function lowered from a `=>` body: backends must
 inline it at every call site where they can (LLVM `alwaysinline`, honored at
@@ -226,6 +232,7 @@ call &f (in %a) (out %b)
 | `@ptr_add` | `ref #bit8`, `#bit_native` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
 | `@memcpy` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
 | `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`) |
+| `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`) |
 
 The byte-buffer and format-args operations are **not** builtins: they are
 ordinary LIR functions in the `.lilac.` namespace, built once by
@@ -280,11 +287,27 @@ unreachable
 ```
 Explicit terminator for pruned `match` fallthrough and eliminated dead branches.
 
-### panic
-* Message: single `!const` byte string (printed as bytes, no `String` involved)
-```lilac-ir
-panic !msg
-```
+### Panics and stack traces
+There is no panic terminator. `@panic(msg)` lowers to a call to the runtime
+function `.lilac.panic` (in `msg`, then the panic site as a `!const` line
+such as `"  at main (main.lilac:3:5)\n"`) followed by `unreachable`.
+`.lilac.panic` (`lilac_ir::panic_runtime`) writes `panic: <msg>`, then the
+stack trace, then exits through `.lilac.exit` with code 101.
+
+The trace is a shadow stack. When stack traces are on, the driver runs
+`lilac_ir::trace::instrument` after `prune_unreachable`. It gives every
+non-`extern` function outside the `.lilac.` namespace:
+
+* after its entry block's leading `alloca`s, the places `%.lilac.frame`
+  (`#.lilac.frame`) and `%.lilac.head` (the `@trace_head` result), and links
+  the frame onto the list: `frame.prev ← *head`, `*head ← addr frame`;
+* before each non-builtin `call`, `frame.site ← !.lilac.site.N`, that call's
+  preformatted `"  at <function> (<file:line:col>)\n"` line;
+* before each `return`, `*head ← frame.prev`.
+
+`.lilac.panic` walks the list from `*@trace_head`, writing each `site`
+(innermost first, at most 128, then `  ...`). With no frame pushed it writes
+the panic site and a hint instead.
 
 ### compile.error
 * Message: constant or variable

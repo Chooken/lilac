@@ -165,13 +165,38 @@ lex → parse → `lilac-module` load → `lilac-resolve` → `lilac-typeck` (a
 worklist of `(def, type args)` instances emitting HIR directly) →
 `lilac-lower` (HIR → LIR, including the ownership model: copies, moves,
 drops, drop/copy glue) → `lilac-const` fold → runtime injection → DCE →
-live `@compile_error` check → verify → backend. `Session::run` in
-`lilac-driver` is the only orchestration.
+stack-trace instrumentation (when on) → live `@compile_error` check →
+verify → backend. `Session::run` in `lilac-driver` is the only
+orchestration.
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
-the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`,
-`// pending:` and `// lib:` directives. Add a run test for every bug fix that
-changes generated code.
+the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`
+(including `expect-stderr:`), `// build-arg:`, `// pending:` and `// lib:`
+directives. The harness runs `lilac` in `tests/run` with the program's bare
+name, so source locations are machine-independent. Add a run test for every
+bug fix that changes generated code.
+
+## Panics and stack traces
+
+- `@panic(msg)` lowers to a call to `.lilac.panic(msg, site)` followed by
+  `unreachable`; `site` is the panic's own `"  at <fn> (<file:line:col>)\n"`
+  line as a data constant. The handler is LIR in
+  `lilac_ir::panic_runtime` (injected beside `build_runtime`, pruned when
+  unused). It writes `panic: <msg>` and the trace to stderr, then exits with
+  code **101**. A panic is an abort: no drops run.
+- Stack traces are a shadow stack, not native unwinding:
+  `lilac_ir::trace::instrument` runs after DCE when `Session.stack_traces` is
+  set and links a `#.lilac.frame` record per user function call (the head
+  slot comes from `@trace_head`, the only backend leaf it adds; the frame is
+  a builtin layout). `lilac build` turns it on in debug and
+  `--stack-traces=on|off` overrides; `check`/`emit-*` leave it off unless
+  asked, so IR dumps stay readable.
+- `SourceMap::location` (`file:line:col`) and `trace::site_text` (the `at`
+  line) are the only formatters. Source-map file names are namespace display
+  paths (`Checks/checks.lilac`, `Standard/Io/io.lilac`); a root-namespace
+  file keeps its bare (or given) name. Function names in traces come from
+  `lilac_lower::Lowered::names` (`Holder[@bit32].make`, not the mangled
+  symbol).
 
 ## Gates
 
