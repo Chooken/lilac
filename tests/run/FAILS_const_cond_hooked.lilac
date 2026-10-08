@@ -1,0 +1,20 @@
+// expect-error: E031
+// A constant of a type with `@on_drop` is not a constant expression (folding
+// it would skip the hook), so the guarded `@compile_error` is reachable.
+
+Flag: object {
+    data: @bit8
+
+    @on_drop: function (self) nothing {
+    }
+
+    @conversion: function (from: Flag) to: @bit8 => from.data
+}
+
+off: Flag => Flag { data = 0x0 }
+
+main: function () nothing {
+    if off {
+        @compile_error("a hooked constant is not a constant condition")
+    }
+}

@@ -1,0 +1,14 @@
+// lib: Standard=lib/Standard
+// A `Box` copy (whose `@on_copy` is a `@compile_error`) behind `if false` is
+// never lowered, so the hook stays unreachable.
+
+using Standard
+using Standard.Process
+
+main: function () nothing {
+    b: Box[@bit32] = Box[@bit32].create(0x7)
+    if false {
+        c: Box[@bit32] = b
+    }
+    exit(0x0)
+}

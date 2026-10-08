@@ -1,0 +1,26 @@
+// expect-exit: 1
+// lib: Standard=lib/Standard
+// `true` and `false` are inline constants, so an `if` on them is a constant
+// condition: only the live arm is lowered, and the dead arm's
+// `@compile_error` never exists.
+
+using Standard
+using Standard.Process
+
+main: function () nothing {
+    if false {
+        @compile_error("dead: `false` is a constant condition")
+    }
+    if true and not_called() {
+        exit(0x2)
+    }
+    if true {
+        exit(0x1)
+    } else {
+        @compile_error("dead: `true` is a constant condition")
+    }
+}
+
+not_called: function () r: Bool {
+    r = false
+}
