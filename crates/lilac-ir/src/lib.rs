@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
-use lilac_span::Span;
+use lilac_span::{SourceMap, Span};
 
 mod codec;
 mod dce;
@@ -21,7 +21,7 @@ pub mod trace;
 mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
-pub use dce::prune_unreachable;
+pub use dce::{prune_unreachable, reach, Edge, EdgeKind, Frame, Reach};
 pub use runtime::{build_runtime, entry_point, panic_runtime, Entry, Syscalls, System};
 pub use ty::LirTy;
 
@@ -914,34 +914,44 @@ pub fn size_align<S: std::hash::BuildHasher>(
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
 /// a site is an error exactly when its function is reachable. The diagnostic
-/// labels both the message literal and the call.
+/// labels both the message literal and the call, and, given the pruning
+/// [`Reach`], notes the shortest call chain from a root in stack-trace form
+/// ([`trace::site_text`], `.lilac.*` frames hidden, names from `names`).
 ///
 /// # Errors
 ///
 /// Returns [`ErrorGuaranteed`] when at least one site was reported.
-pub fn check_live_compile_errors(
+pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
     module: &LirModule,
+    reach: Option<&Reach>,
+    sources: &SourceMap,
+    names: &HashMap<String, String, S>,
     diags: &mut Diags,
 ) -> Result<(), ErrorGuaranteed> {
     let mut failed = false;
-    for inst in module
-        .funcs
-        .iter()
-        .flat_map(|func| &func.blocks)
-        .flat_map(|block| &block.insts)
-    {
-        if let LirInst::CompileError {
-            msg,
-            msg_span,
-            call_span,
-        } = inst
-        {
-            failed = true;
-            diags.emit(
-                Diagnostic::error("E031", msg.clone())
+    for func in &module.funcs {
+        for inst in func.blocks.iter().flat_map(|block| &block.insts) {
+            if let LirInst::CompileError {
+                msg,
+                msg_span,
+                call_span,
+            } = inst
+            {
+                failed = true;
+                let mut diagnostic = Diagnostic::error("E031", msg.clone())
                     .label(*msg_span, true, "message here".to_owned())
-                    .label(*call_span, false, "evaluated here".to_owned()),
-            );
+                    .label(*call_span, false, "evaluated here".to_owned());
+                if let Some(reach) = reach {
+                    let chain = reach_chain_text(reach, &func.name, *call_span, sources, names);
+                    if !chain.is_empty() {
+                        diagnostic = diagnostic.note(format!(
+                            "reached from:
+{chain}"
+                        ));
+                    }
+                }
+                diags.emit(diagnostic);
+            }
         }
     }
     if failed {
@@ -949,6 +959,38 @@ pub fn check_live_compile_errors(
     } else {
         Ok(())
     }
+}
+
+/// The `at` lines from `func` (located at `site`) up to its root, one per
+/// line without a trailing newline. A frame reached by `addr.func` is marked
+/// `[address taken]`.
+fn reach_chain_text<S: std::hash::BuildHasher>(
+    reach: &Reach,
+    func: &str,
+    site: Span,
+    sources: &SourceMap,
+    names: &HashMap<String, String, S>,
+) -> String {
+    let mut lines = Vec::new();
+    for frame in reach.chain(func) {
+        if trace::is_hidden(&frame.func) {
+            continue;
+        }
+        let (span, kind) = frame.edge.unwrap_or((site, EdgeKind::Call));
+        let name = names.get(&frame.func).unwrap_or(&frame.func);
+        let location = sources.location(span);
+        let mut line = trace::site_text(name, location.as_deref())
+            .trim_end()
+            .to_owned();
+        if kind == EdgeKind::Address {
+            line.push_str(" [address taken]");
+        }
+        lines.push(line);
+    }
+    lines.join(
+        "
+",
+    )
 }
 
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.

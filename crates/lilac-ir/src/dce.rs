@@ -4,13 +4,141 @@
 //! The frontend lowers every declaration, so a function that nothing calls and a
 //! `!data` const nothing references still survive into `verify`. This pass is
 //! conservative and infallible: with no `main` it leaves the module untouched.
+//! The walk is breadth-first and remembers each function's first caller, so
+//! [`Reach::chain`] gives a shortest call path from a root (the `E031` trace).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
+
+use lilac_span::Span;
 
 use crate::{LirCallee, LirFunc, LirInst, LirModule};
 
-/// Removes functions unreachable from a root and data consts nothing names.
+/// How a caller reaches a callee: a direct `call` or a taken `addr.func`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// `call @f`.
+    Call,
+    /// `addr.func @f`.
+    Address,
+}
+
+/// One edge into a reached function: the caller, the instruction's span and
+/// its kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edge {
+    /// Calling function.
+    pub caller: String,
+    /// Span of the `call` / `addr.func`.
+    pub span: Span,
+    /// Edge kind.
+    pub kind: EdgeKind,
+}
+
+/// One frame of a [`Reach::chain`]: a function and the edge it takes toward
+/// the previous (deeper) frame. The innermost frame has no edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// Function name (LIR symbol).
+    pub func: String,
+    /// Span and kind of the edge to the previous frame.
+    pub edge: Option<(Span, EdgeKind)>,
+}
+
+/// Functions reachable from the roots, each with its first-found parent edge
+/// (`None` for a root). Breadth-first, so every chain is a shortest path.
+#[derive(Clone, Debug, Default)]
+pub struct Reach {
+    parent: HashMap<String, Option<Edge>>,
+}
+
+impl Reach {
+    /// Whether `func` is reachable.
+    #[must_use]
+    pub fn contains(&self, func: &str) -> bool {
+        self.parent.contains_key(func)
+    }
+
+    /// The path from `func` up to its root, innermost first. Each frame past
+    /// the first carries the edge it takes toward the frame before it. Empty
+    /// when `func` is unreachable.
+    #[must_use]
+    pub fn chain(&self, func: &str) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut current = func;
+        let mut edge_in: Option<(Span, EdgeKind)> = None;
+        while let Some(parent) = self.parent.get(current) {
+            frames.push(Frame {
+                func: current.to_owned(),
+                edge: edge_in,
+            });
+            match parent {
+                Some(edge) => {
+                    edge_in = Some((edge.span, edge.kind));
+                    current = &edge.caller;
+                }
+                None => break,
+            }
+        }
+        frames
+    }
+}
+
+/// Walks the call graph breadth-first from `main` and `extra_roots`.
+/// Returns `None` when there is no root (the pass is then a no-op).
+#[must_use]
+pub fn reach<S: BuildHasher>(
+    module: &LirModule,
+    extra_roots: &HashSet<String, S>,
+) -> Option<Reach> {
+    let funcs: HashMap<&str, &LirFunc> = module
+        .funcs
+        .iter()
+        .map(|func| (func.name.as_str(), func))
+        .collect();
+    let mut parent: HashMap<String, Option<Edge>> = HashMap::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for func in &module.funcs {
+        if func.name == "main" && !parent.contains_key(&func.name) {
+            parent.insert(func.name.clone(), None);
+            queue.push_back(func.name.clone());
+        }
+    }
+    let mut extra: Vec<&String> = extra_roots.iter().collect();
+    extra.sort();
+    for root in extra {
+        if !parent.contains_key(root) {
+            parent.insert(root.clone(), None);
+            queue.push_back(root.clone());
+        }
+    }
+    if queue.is_empty() {
+        return None;
+    }
+
+    while let Some(name) = queue.pop_front() {
+        let Some(func) = funcs.get(name.as_str()) else {
+            continue;
+        };
+        for (target, span, kind) in callees(func) {
+            if funcs.contains_key(target.as_str()) && !parent.contains_key(&target) {
+                parent.insert(
+                    target.clone(),
+                    Some(Edge {
+                        caller: name.clone(),
+                        span,
+                        kind,
+                    }),
+                );
+                queue.push_back(target);
+            }
+        }
+    }
+    Some(Reach { parent })
+}
+
+/// Removes functions unreachable from a root and data consts nothing names,
+/// and returns the reachability it pruned by (`None` when it was a no-op).
 ///
 /// Roots are every function named `main` plus every name in `extra_roots`
 /// (build-system export hints). Reachability follows direct `call` and
@@ -19,37 +147,13 @@ use crate::{LirCallee, LirFunc, LirInst, LirModule};
 /// instruction names them: a `Const` literal starting with `'!'`. `layouts` is verifier-only and is left untouched. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
 /// even when `main` is absent, so an exported entry point roots a library.
-pub fn prune_unreachable<S: BuildHasher>(module: &mut LirModule, extra_roots: &HashSet<String, S>) {
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut worklist: Vec<String> = Vec::new();
-    for func in &module.funcs {
-        if func.name == "main" && visited.insert(func.name.clone()) {
-            worklist.push(func.name.clone());
-        }
-    }
-    for root in extra_roots {
-        if visited.insert(root.clone()) {
-            worklist.push(root.clone());
-        }
-    }
-    if worklist.is_empty() {
-        return;
-    }
+pub fn prune_unreachable<S: BuildHasher>(
+    module: &mut LirModule,
+    extra_roots: &HashSet<String, S>,
+) -> Option<Reach> {
+    let reach = reach(module, extra_roots)?;
 
-    while let Some(name) = worklist.pop() {
-        let targets = match module.funcs.iter().find(|func| func.name == name) {
-            Some(func) => callees(func),
-            None => continue,
-        };
-        for target in targets {
-            let exists = module.funcs.iter().any(|func| func.name == target);
-            if exists && visited.insert(target.clone()) {
-                worklist.push(target);
-            }
-        }
-    }
-
-    module.funcs.retain(|func| visited.contains(&func.name));
+    module.funcs.retain(|func| reach.contains(&func.name));
 
     let mut referenced: HashSet<String> = HashSet::new();
     for func in &module.funcs {
@@ -64,19 +168,24 @@ pub fn prune_unreachable<S: BuildHasher>(module: &mut LirModule, extra_roots: &H
         }
     }
     module.data.retain(|datum| referenced.contains(&datum.name));
+    Some(reach)
 }
 
-/// Direct `call` and `addr.func` targets of every instruction in `func`.
-fn callees(func: &LirFunc) -> Vec<String> {
+/// Direct `call` and `addr.func` targets of every instruction in `func`, in
+/// order, with their spans.
+fn callees(func: &LirFunc) -> Vec<(String, Span, EdgeKind)> {
     let mut targets = Vec::new();
     for block in &func.blocks {
         for inst in &block.insts {
             match inst {
                 LirInst::Call {
                     func: LirCallee::Func(name),
+                    span,
                     ..
-                } => targets.push(name.clone()),
-                LirInst::AddrFunc { func, .. } => targets.push(func.clone()),
+                } => targets.push((name.clone(), *span, EdgeKind::Call)),
+                LirInst::AddrFunc { func, span, .. } => {
+                    targets.push((func.clone(), *span, EdgeKind::Address));
+                }
                 _ => {}
             }
         }
@@ -242,5 +351,58 @@ mod tests {
         prune_unreachable(&mut module, &roots);
         let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["api"]);
+    }
+
+    fn chain_names(reach: &Reach, func: &str) -> Vec<String> {
+        reach
+            .chain(func)
+            .into_iter()
+            .map(|frame| frame.func)
+            .collect()
+    }
+
+    #[test]
+    fn chain_is_the_shortest_path() {
+        // main -> a -> b -> c and main -> c: the chain skips a and b.
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(func("main", &["a", "c"], &[]));
+        module.funcs.push(func("a", &["b"], &[]));
+        module.funcs.push(func("b", &["c"], &[]));
+        module.funcs.push(func("c", &[], &[]));
+        let reach = prune_unreachable(&mut module, &HashSet::new()).expect("rooted");
+        assert_eq!(chain_names(&reach, "c"), ["c", "main"]);
+        assert_eq!(chain_names(&reach, "b"), ["b", "a", "main"]);
+        let frames = reach.chain("b");
+        assert_eq!(frames[0].edge, None);
+        assert_eq!(frames[1].edge.map(|(_, kind)| kind), Some(EdgeKind::Call));
+    }
+
+    #[test]
+    fn chain_ends_at_an_extra_root() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(func("api", &["leaf"], &[]));
+        module.funcs.push(func("leaf", &[], &[]));
+        let roots = HashSet::from(["api".to_owned()]);
+        let reach = prune_unreachable(&mut module, &roots).expect("rooted");
+        assert_eq!(chain_names(&reach, "leaf"), ["leaf", "api"]);
+        assert!(reach.chain("missing").is_empty());
+    }
+
+    #[test]
+    fn chain_follows_an_address_edge() {
+        let mut module = module_with(&["main", "only_indirect"], &[]);
+        let reach = prune_unreachable(&mut module, &HashSet::new()).expect("rooted");
+        let frames = reach.chain("only_indirect");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[1].edge.map(|(_, kind)| kind),
+            Some(EdgeKind::Address)
+        );
+    }
+
+    #[test]
+    fn no_root_reaches_nothing() {
+        let module = module_with(&["a", "b"], &[]);
+        assert!(reach(&module, &HashSet::<String>::new()).is_none());
     }
 }

@@ -29,6 +29,13 @@ pub fn site_text(func: &str, location: Option<&str>) -> String {
     }
 }
 
+/// Whether `func` is compiler runtime or glue (`.lilac.*`): never
+/// instrumented, and hidden from the `E031` reach chain.
+#[must_use]
+pub fn is_hidden(func: &str) -> bool {
+    func.starts_with(".lilac.")
+}
+
 /// Instruments every user function with a shadow-stack frame.
 ///
 /// - **Prologue** (entry block, after its leading `alloca`s, so every
@@ -49,7 +56,7 @@ pub fn instrument<S: std::hash::BuildHasher>(
 ) {
     let mut sites = Sites::new(&module.data);
     for func in &mut module.funcs {
-        if func.is_extern || func.name.starts_with(".lilac.") || func.blocks.is_empty() {
+        if func.is_extern || is_hidden(&func.name) || func.blocks.is_empty() {
             continue;
         }
         let name = names

@@ -1,6 +1,6 @@
 //! Driver: `Session` plus the one pipeline (`Session::run`): module load,
 //! parse, resolve, check, lower, runtime injection, DCE, the live
-//! `@compile_error` check, and verification.
+//! `@compile_error` check, stack-trace instrumentation, and verification.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -385,9 +385,9 @@ impl Session {
         }
     }
 
-    /// Parse → resolve → check → lower → inject runtime → prune →
-    /// trace (when [`Session::stack_traces`] is set) → live `@compile_error`
-    /// check → verify. Strict mode (the CLI) stops at the
+    /// Parse → resolve → check → lower → inject runtime → prune → live
+    /// `@compile_error` check (with the reach chain) → trace (when
+    /// [`Session::stack_traces`] is set) → verify. Strict mode (the CLI) stops at the
     /// first failing stage; tolerant mode (editor tooling) keeps going through
     /// checking so the partial analysis is retained.
     #[allow(clippy::too_many_lines)]
@@ -477,18 +477,24 @@ impl Session {
         if self.entry == Entry::Native && has_entry(&lir) {
             roots.insert(".lilac.start".to_owned());
         }
-        lilac_ir::prune_unreachable(&mut lir, &roots);
+        let reach = lilac_ir::prune_unreachable(&mut lir, &roots);
         self.report(
             Stage::Prune,
             StageEvent::End {
                 count: Some(lir.funcs.len()),
             },
         );
+        self.report(Stage::Verify, StageEvent::Begin);
+        lilac_ir::check_live_compile_errors(
+            &lir,
+            reach.as_ref(),
+            &self.source_map,
+            &lowered.names,
+            &mut self.diags,
+        )?;
         if self.stack_traces {
             lilac_ir::trace::instrument(&mut lir, &self.source_map, &lowered.names);
         }
-        self.report(Stage::Verify, StageEvent::Begin);
-        lilac_ir::check_live_compile_errors(&lir, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
@@ -1034,7 +1040,8 @@ mod tests {
         assert!(result.is_ok(), "{}", session.render_diagnostics());
     }
 
-    /// A `@compile_error` reachable from `main` still reports `E031`.
+    /// A `@compile_error` reachable from `main` still reports `E031`, with
+    /// the call chain from `main` as a note.
     #[test]
     fn reachable_compile_error_is_e031() {
         let mut session = Session::new();
@@ -1043,10 +1050,29 @@ mod tests {
             "boom: function () nothing {\n    @compile_error(\"live\")\n}\n\nmain: function () nothing {\n    boom()\n}\n",
         );
         assert!(result.is_err());
+        let rendered = session.render_diagnostics();
+        assert!(rendered.contains("error[E031]"), "{rendered}");
         assert!(
-            session.render_diagnostics().contains("error[E031]"),
-            "{}",
-            session.render_diagnostics()
+            rendered.contains("reached from:")
+                && rendered.contains("at boom (live.lilac:2:5)")
+                && rendered.contains("at main (live.lilac:6:5)"),
+            "{rendered}"
+        );
+    }
+
+    /// A function reached only through `addr.func` marks that frame.
+    #[test]
+    fn address_taken_compile_error_marks_the_edge() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "addr.lilac",
+            "boom: function () nothing {\n    @compile_error(\"addr\")\n}\n\nmain: function () nothing {\n    f: function () nothing = boom\n}\n",
+        );
+        let rendered = session.render_diagnostics();
+        assert!(result.is_err(), "{rendered}");
+        assert!(
+            rendered.contains("at main (addr.lilac:6:") && rendered.contains("[address taken]"),
+            "{rendered}"
         );
     }
 
@@ -1061,11 +1087,10 @@ mod tests {
             "api: function () nothing {\n    @compile_error(\"api\")\n}\n\nmain: function () nothing {\n}\n",
         );
         assert!(result.is_err());
-        assert!(
-            session.render_diagnostics().contains("error[E031]"),
-            "{}",
-            session.render_diagnostics()
-        );
+        let rendered = session.render_diagnostics();
+        assert!(rendered.contains("error[E031]"), "{rendered}");
+        assert!(rendered.contains("at api (api.lilac:2:5)"), "{rendered}");
+        assert!(!rendered.contains("at main"), "{rendered}");
     }
 
     /// An `--export` root prunes unexported functions even with no `main`, so a
