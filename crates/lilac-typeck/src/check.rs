@@ -315,6 +315,9 @@ struct Checker<'a> {
 
 struct FuncCtx {
     locals: HashMap<String, TypeRef>,
+    /// Declared parameter names (a subset of `locals`), so a use is colored
+    /// `Param` rather than `Local`.
+    param_names: HashSet<String>,
     slots: Vec<(String, TypeRef, Span)>,
     assigned: HashSet<String>,
     /// `loop` nesting depth (`break` outside any loop is `E022`).
@@ -329,6 +332,7 @@ impl FuncCtx {
     fn new() -> Self {
         Self {
             locals: HashMap::new(),
+            param_names: HashSet::new(),
             slots: Vec::new(),
             assigned: HashSet::new(),
             loop_depth: 0,
@@ -1661,6 +1665,7 @@ impl Checker<'_> {
         for (param, ty) in decl.params.iter().zip(sig.params.iter()) {
             if !param.name.is_empty() {
                 self.record_semantic(name_span(param.span, &param.name), SemanticKind::Param);
+                fctx.param_names.insert(param.name.clone());
                 fctx.locals.insert(param.name.clone(), *ty);
             }
         }
@@ -2697,7 +2702,9 @@ impl Checker<'_> {
                     },
                     DefId::ERROR,
                 ));
-                if fctx.locals.contains_key(name) {
+                if fctx.param_names.contains(name) {
+                    self.record_semantic(*span, SemanticKind::Param);
+                } else if fctx.locals.contains_key(name) {
                     self.record_semantic(*span, SemanticKind::Local);
                 }
                 self.record_use(*span, def);
@@ -7423,8 +7430,8 @@ mod tests {
             "{:?}",
             hir.semantics
         );
-        // Parameter declaration + use (a use of a parameter is still a local
-        // name use).
+        // Parameter declaration + use: a parameter *use* is `Param`, unlike a
+        // plain local use (`x` above), which stays `Local`.
         let p_decl = src.find("p: @bit32").expect("p parameter");
         assert!(
             has(p_decl, lilac_hir::SemanticKind::Param),
@@ -7433,8 +7440,13 @@ mod tests {
         );
         let p_use = src.find("= p\n").expect("p use") + 2;
         assert!(
-            has(p_use, lilac_hir::SemanticKind::Local),
+            has(p_use, lilac_hir::SemanticKind::Param),
             "{:?}",
+            hir.semantics
+        );
+        assert!(
+            !has(p_use, lilac_hir::SemanticKind::Local),
+            "a parameter use must not be `Local`: {:?}",
             hir.semantics
         );
         // A user type reference (the object used as a type).

@@ -35,7 +35,7 @@ pub struct HirProgram {
 pub enum SemanticKind {
     /// A local binding (declaration and each use).
     Local,
-    /// A parameter's declaration name.
+    /// A parameter (declaration name and each use).
     Param,
     /// A user object/enum name in type position.
     UserType,
