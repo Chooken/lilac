@@ -193,6 +193,10 @@ pub struct Session {
     pub entry: Entry,
     /// Called at the start and end of each pipeline [`Stage`].
     pub progress: Option<Progress>,
+    /// Whether to instrument functions for panic stack traces
+    /// (`lilac_ir::trace`); the CLI sets it from the mode and
+    /// `--stack-traces`.
+    pub stack_traces: bool,
 }
 
 impl Default for Session {
@@ -216,6 +220,7 @@ impl Default for Session {
             require_entry: false,
             entry: Entry::CMain,
             progress: None,
+            stack_traces: false,
         }
     }
 }
@@ -383,7 +388,8 @@ impl Session {
     }
 
     /// Parse → resolve → check → lower → fold → inject runtime → prune →
-    /// live `@compile_error` check → verify. Strict mode (the CLI) stops at the
+    /// trace (when [`Session::stack_traces`] is set) → live `@compile_error`
+    /// check → verify. Strict mode (the CLI) stops at the
     /// first failing stage; tolerant mode (editor tooling) keeps going through
     /// checking so the partial analysis is retained.
     #[allow(clippy::too_many_lines)]
@@ -484,6 +490,9 @@ impl Session {
                 count: Some(lir.funcs.len()),
             },
         );
+        if self.stack_traces {
+            lilac_ir::trace::instrument(&mut lir, &self.source_map, &lowered.names);
+        }
         self.report(Stage::Verify, StageEvent::Begin);
         lilac_const::check_live_compile_errors(&lir, &report, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
@@ -634,6 +643,20 @@ mod tests {
                 .any(|datum| datum.bytes == b"  at main (p.lilac:2:5)\n"),
             "{text}"
         );
+    }
+
+    /// Stack traces off (the default) adds no frame; on, `main` links one.
+    #[test]
+    fn stack_traces_instrument_only_when_on() {
+        let src = "main: function () nothing {\n    @panic(\"stop\")\n}\n";
+        let mut off = Session::new();
+        let text = off.compile_lir("p.lilac", src).expect("compiles").to_text();
+        assert!(!text.contains("%.lilac.frame"), "{text}");
+        let mut on = Session::new();
+        on.stack_traces = true;
+        let text = on.compile_lir("p.lilac", src).expect("compiles").to_text();
+        assert!(text.contains("call @trace_head"), "{text}");
+        assert!(text.contains("%.lilac.frame"), "{text}");
     }
 
     /// The handler and its data are pruned from a program that never panics.

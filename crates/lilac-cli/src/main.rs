@@ -14,8 +14,8 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
-  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
+  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -56,6 +56,9 @@ struct Common {
     check_only: bool,
     target_set: bool,
     dump_lir: Option<PathBuf>,
+    /// `--stack-traces=on|off`, when given. `session.stack_traces` takes it,
+    /// else stays off; `lilac build` defaults it from the mode instead.
+    stack_traces: Option<bool>,
     session: Session,
 }
 
@@ -77,6 +80,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
     let mut check_only = false;
     let mut target_set = false;
     let mut dump_lir: Option<PathBuf> = None;
+    let mut stack_traces: Option<bool> = None;
     let mut session = Session::new();
     session.opts.color = progress::auto_color();
     let mut index = 0;
@@ -116,18 +120,10 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             session.optimize = parsed;
         } else if parse_session_flag(arg, &mut session) {
             // Consumed by the session-wide parser above: `--release`.
-        } else if let Some(dir) = arg.strip_prefix("--cache-dir=") {
-            if dir.is_empty() {
-                eprintln!("--cache-dir= needs a path\n{}", usage());
-                return Err(ExitCode::from(2));
-            }
-            session.cache_dir = Some(std::path::PathBuf::from(dir));
-        } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
-            if dir.is_empty() {
-                eprintln!("--dump-lir= needs a path\n{}", usage());
-                return Err(ExitCode::from(2));
-            }
-            dump_lir = Some(PathBuf::from(dir));
+        } else if let Some(value) = arg.strip_prefix("--stack-traces=") {
+            stack_traces = Some(parse_on_off("--stack-traces", value)?);
+        } else if parse_path_flag(arg, &mut session, &mut dump_lir)? {
+            // `--cache-dir=` or `--dump-lir=`.
         } else if let Some(mount) = arg.strip_prefix("--lib=") {
             let Some((name, dir)) = mount
                 .split_once('=')
@@ -160,13 +156,54 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         eprintln!("missing <file>\n{}", usage());
         return Err(ExitCode::from(2));
     };
+    session.stack_traces = stack_traces.unwrap_or(false);
     Ok(Common {
         file,
         check_only,
         target_set,
         dump_lir,
+        stack_traces,
         session,
     })
+}
+
+/// Parses `--cache-dir=<path>` (into `session`) and `--dump-lir=<dir>` (into
+/// `dump_lir`), returning `true` when `arg` was one of them.
+///
+/// Kept out of [`parse_common`] to stay under the pedantic line budget.
+fn parse_path_flag(
+    arg: &str,
+    session: &mut Session,
+    dump_lir: &mut Option<PathBuf>,
+) -> Result<bool, ExitCode> {
+    if let Some(dir) = arg.strip_prefix("--cache-dir=") {
+        if dir.is_empty() {
+            eprintln!("--cache-dir= needs a path\n{}", usage());
+            return Err(ExitCode::from(2));
+        }
+        session.cache_dir = Some(PathBuf::from(dir));
+    } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
+        if dir.is_empty() {
+            eprintln!("--dump-lir= needs a path\n{}", usage());
+            return Err(ExitCode::from(2));
+        }
+        *dump_lir = Some(PathBuf::from(dir));
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// `on`/`off` for a switch flag.
+fn parse_on_off(flag: &str, value: &str) -> Result<bool, ExitCode> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => {
+            eprintln!("unknown {flag}={value}; want on|off");
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 /// Parses the session-wide scalar flag `--release`, returning `true` when `arg`
@@ -482,6 +519,20 @@ mod tests {
             common.session.cache_dir,
             Some(std::path::PathBuf::from("out/cache"))
         );
+    }
+
+    /// Outside `lilac build`, stack traces are off unless asked for.
+    #[test]
+    fn stack_traces_flag_parses() {
+        let traces = |flags: &[&str]| {
+            let mut all = vec!["f.lilac"];
+            all.extend(flags);
+            parse_common(&args(&all), false).map(|common| common.session.stack_traces)
+        };
+        assert_eq!(traces(&[]), Ok(false));
+        assert_eq!(traces(&["--release", "--stack-traces=on"]), Ok(true));
+        assert_eq!(traces(&["--stack-traces=off"]), Ok(false));
+        assert_eq!(traces(&["--stack-traces=maybe"]), Err(ExitCode::from(2)));
     }
 
     #[test]

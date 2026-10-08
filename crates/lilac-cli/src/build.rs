@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{Entry, ErrorFormat, LinkInfo, Progress, Session};
+use lilac_driver::{Entry, ErrorFormat, LinkInfo, OptimizeMode, Progress, Session};
 use lilac_error::Level;
 
 use crate::link;
@@ -155,6 +155,9 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let mut session = common.session;
+    session.stack_traces = common
+        .stack_traces
+        .unwrap_or(session.optimize == OptimizeMode::Debug);
     if !common.target_set {
         session.target = session.host;
     }
