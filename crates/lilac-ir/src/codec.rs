@@ -13,8 +13,8 @@ use std::io::{self, Read, Write};
 use lilac_span::{BytePos, FileId, Span};
 
 use crate::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm,
+    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
+    LirTerm,
 };
 
 /// Wire-format version; bump on any normative codec change.
@@ -22,7 +22,7 @@ use crate::{
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
 /// `IGtU`/`IDivU`/`IModU` tags (16–18).
-pub const LIR_CODEC_VERSION: u32 = 3;
+pub const LIR_CODEC_VERSION: u32 = 4;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -182,24 +182,16 @@ fn put_convert(w: &mut impl Write, op: &ConvertOp) -> io::Result<()> {
     put_u8(w, tag)
 }
 
-/// Writes a data-const kind (tag + payload).
-fn put_data_kind(w: &mut impl Write, kind: &LirDataKind) -> io::Result<()> {
-    match kind {
-        LirDataKind::Str(text) => {
-            put_u8(w, 0)?;
-            put_str(w, text)
-        }
-        LirDataKind::NumLit(text) => {
-            put_u8(w, 1)?;
-            put_str(w, text)
-        }
-    }
+/// Writes a length-prefixed byte string.
+fn put_bytes(w: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    put_len(w, bytes.len())?;
+    w.write_all(bytes)
 }
 
 /// Writes one data const.
 fn put_data(w: &mut impl Write, data: &LirData) -> io::Result<()> {
     put_str(w, &data.name)?;
-    put_data_kind(w, &data.kind)?;
+    put_bytes(w, &data.bytes)?;
     put_span(w, data.span)
 }
 
@@ -586,21 +578,20 @@ fn get_convert(r: &mut impl Read) -> Result<ConvertOp, CodecError> {
     })
 }
 
-/// Reads a data-const kind (tag + payload).
-fn get_data_kind(r: &mut impl Read) -> Result<LirDataKind, CodecError> {
-    match get_u8(r)? {
-        0 => Ok(LirDataKind::Str(get_str(r)?)),
-        1 => Ok(LirDataKind::NumLit(get_str(r)?)),
-        _ => Err(CodecError::Malformed("invalid LirDataKind tag")),
-    }
+/// Reads a length-prefixed byte string.
+fn get_bytes(r: &mut impl Read) -> Result<Vec<u8>, CodecError> {
+    let len = get_len(r)?;
+    let mut bytes = vec![0u8; len];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Reads one data const.
 fn get_data(r: &mut impl Read) -> Result<LirData, CodecError> {
     let name = get_str(r)?;
-    let kind = get_data_kind(r)?;
+    let bytes = get_bytes(r)?;
     let span = get_span(r)?;
-    Ok(LirData { name, kind, span })
+    Ok(LirData { name, bytes, span })
 }
 
 /// Reads one instruction (exhaustive tag match).
@@ -990,8 +981,7 @@ mod tests {
     use super::*;
     use crate::tests::canonical_module;
     use crate::{
-        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst,
-        LirOperand, LirTerm,
+        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirOperand, LirTerm,
     };
     use lilac_span::Span;
 
@@ -999,7 +989,7 @@ mod tests {
         let mut module = canonical_module();
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: Span::dummy(),
         });
         module.layouts.insert(
@@ -1254,12 +1244,12 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
             name: "d0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span,
         });
         module.data.push(LirData {
             name: "d1".to_owned(),
-            kind: LirDataKind::NumLit("10.5".to_owned()),
+            bytes: "10.5".as_bytes().to_vec(),
             span,
         });
         module.funcs.push(LirFunc {

@@ -239,10 +239,10 @@ pub enum HirExprKind {
         /// Source bytes.
         bytes: String,
     },
-    /// String literal (decoded value).
+    /// String literal (decoded bytes).
     Str {
-        /// Decoded value.
-        value: String,
+        /// Decoded bytes (`\xHH` is one raw byte).
+        bytes: Vec<u8>,
     },
     /// Char literal (Unicode scalar).
     Char {

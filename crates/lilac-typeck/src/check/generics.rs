@@ -1442,7 +1442,7 @@ mod tests {
         // A generic `=>` body with control flow now carries a statement prelude
         // that each instantiation expands, so it checks cleanly (no `E030`).
         let (diags, _, _) = check(
-            "pick[T]: function (x: T, c: @bit8) T => if c x else x\n\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
+            "pick[T]: function (x: T, c: @bit8) T => if c then x else x\n\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
     }

@@ -1,4 +1,3 @@
-// pending: phase 1 (`x: T { ... }` and `x: T(args)` shorthands)
 // expect-exit: 6
 
 exit: extern function (code: @bit32) nothing

@@ -132,18 +132,14 @@ fn object_setter_is_e022() {
 }
 
 #[test]
-fn object_setter_alt_is_e001() {
+fn object_setter_shorthand_checks() {
+    // `variable: Object { ... }` is shorthand for `= Object { ... }`.
     let output = lilac()
         .args(["check", &ui("object_setter_alt.lilac")])
         .output()
         .expect("runs lilac");
-    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("error[E001]"), "stderr:\n{stderr}");
-    assert!(
-        stderr.contains("use `= Type { ... }` to construct a struct value"),
-        "stderr:\n{stderr}"
-    );
+    assert!(output.status.success(), "stderr:\n{stderr}");
 }
 
 #[test]

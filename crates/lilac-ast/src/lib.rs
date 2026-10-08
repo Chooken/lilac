@@ -1,4 +1,4 @@
-//! Untyped AST plus a [`Visitor`] so new syntax touches one trait.
+//! Untyped AST produced by `lilac-parse`.
 //!
 //! Covers `SPEC.md` surface syntax: functions (multi-return, inline `=>`,
 //! generics), `object`/`enum`, `using`, `extern`, `ref` types, and the
@@ -44,13 +44,18 @@ pub enum ItemKind {
     Enum {
         /// Variant names in order.
         variants: Vec<EnumVariant>,
+        /// Methods, hooks, and `private` blocks declared in the enum body.
+        members: Vec<Item>,
         /// Generic parameters.
         generic_params: Vec<String>,
     },
-    /// `using Standard` (folder import, non-transitive).
+    /// `using Standard` (folder import, non-transitive), or `using *.C`
+    /// (relative to the importing file's own namespace).
     Using {
-        /// Dotted folder path.
+        /// Dotted folder path (without the `*.` marker).
         path: String,
+        /// `using *.Path`: resolved against the importing file's namespace.
+        relative: bool,
     },
     /// `private { <items> }` visibility wrapper (file or object scope).
     Private {
@@ -205,7 +210,7 @@ pub enum Stmt {
         /// Keyword span.
         span: Span,
     },
-    /// `if cond { ... } else { ... }`.
+    /// `if cond { ... } else <stmt>`.
     If {
         /// Condition (strict non-zero `@bit8` test).
         cond: Expr,
@@ -213,22 +218,20 @@ pub enum Stmt {
         capture: Option<Param>,
         /// Live branch.
         then: Block,
-        /// Optional `else` branch.
-        els: Option<Block>,
+        /// Optional `else` statement (`else { }`, `else if ...`, `else break`).
+        els: Option<Box<Stmt>>,
         /// Whole-statement span.
         span: Span,
     },
-    /// `loop { ... }` / `loop if cond { ... } else break`.
+    /// `loop <stmt>`: `loop { ... }`, `loop if cond { ... } else break`.
     Loop {
-        /// Optional condition (`None` loops forever).
-        cond: Option<Expr>,
-        /// Loop body.
-        body: Block,
-        /// Optional trailing `else` (runs on condition failure).
-        els: Option<Block>,
+        /// Repeated statement.
+        body: Box<Stmt>,
         /// Whole-statement span.
         span: Span,
     },
+    /// A nested `{ ... }` block statement.
+    Block(Block),
     /// `match scrutinee { arms } else { ... }` (non-exhaustive by design).
     Match {
         /// Inspected value.
@@ -272,11 +275,17 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-/// A match arm pattern: `.Tag` or a byte literal.
+/// A match arm pattern: `.Tag`, `Enum.Tag`, or a byte literal.
 #[derive(Clone, Debug)]
 pub enum MatchPattern {
-    /// `.Some` tag (enum tag; type comes from the scrutinee).
-    Tag(String),
+    /// `.Some` / `Optional.Some` / `Optional[T].Some` tag (the enum comes
+    /// from the scrutinee; a qualifier must name that same enum).
+    Tag {
+        /// `Enum` / `Enum[T]` before the dot, if written.
+        qualifier: Option<Type>,
+        /// Variant name.
+        name: String,
+    },
     /// `0x0` byte pattern (source bytes).
     Const(String),
 }
@@ -299,8 +308,8 @@ pub enum Expr {
     Tag(String, Span),
     /// `5`, `0xFF` (source bytes; meaning comes from use).
     Number(String, Span),
-    /// `"hi"` (decoded value).
-    Str(String, Span),
+    /// `"hi"` (decoded bytes; `\xHH` is one raw byte).
+    Str(Vec<u8>, Span),
     /// `'A'` (Unicode scalar).
     Char(char, Span),
     /// `f(args)`, `gen_function[@bit32](0x1)`.
@@ -334,7 +343,7 @@ pub enum Expr {
         /// Whole-expression span.
         span: Span,
     },
-    /// `if cond { ... } else { ... }` used as a value.
+    /// `if cond then x else y` used as a value.
     IfValue {
         /// Condition.
         cond: Box<Expr>,
@@ -356,10 +365,11 @@ pub enum Expr {
         /// Whole-expression span.
         span: Span,
     },
-    /// `Object { member = expr, ... }` (`=` form only).
+    /// `Object { member = expr, ... }` / `Name[T] { ... }` (`=` form only).
     StructLit {
-        /// Type name before the brace.
-        ty_name: String,
+        /// Type before the brace (generic arguments are optional and inferred
+        /// from the expected type when omitted).
+        ty: Type,
         /// Field initializers in order.
         fields: Vec<StructField>,
         /// Whole-literal span.
@@ -381,6 +391,9 @@ pub enum Expr {
     },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
     Cast(Box<Expr>, Type),
+    /// `Name[args]` in expression position: the receiver of a static member
+    /// (`Box[@bit32].make()`, `Optional[T].Some(x)`).
+    TypeApp(Type),
     /// An expression that failed to parse; its `span` covers the consumed
     /// tokens. Downstream passes map it to a poison value.
     Error {
@@ -429,11 +442,11 @@ pub struct StructField {
     pub span: Span,
 }
 
-/// One f-string piece: literal text or an interpolated hole.
+/// One f-string piece: literal bytes or an interpolated hole.
 #[derive(Clone, Debug)]
 pub enum FStrPart {
     /// Static chunk (borrows a `data` const after lowering).
-    Lit(String),
+    Lit(Vec<u8>),
     /// `{expr}` hole (converts via `@conversion(T -> @byte_buffer)`).
     Hole(Expr),
 }
@@ -457,6 +470,7 @@ impl Expr {
             | Self::RefOf { span, .. }
             | Self::FString { span, .. }
             | Self::Error { span } => *span,
+            Self::TypeApp(ty) => ty.span,
             Self::Cast(operand, ty) => {
                 let start = operand.span();
                 Span::new(start.lo.0, ty.span.hi.0, start.file)
@@ -480,423 +494,7 @@ impl Stmt {
             | Self::Loop { span, .. }
             | Self::Match { span, .. }
             | Self::Error { span } => *span,
+            Self::Block(block) => block.span,
         }
-    }
-}
-
-/// AST visitor: override only what a pass needs; defaults walk children.
-pub trait Visitor {
-    /// Visits a program root.
-    fn visit_program(&mut self, program: &Program) {
-        walk_program(self, program);
-    }
-    /// Visits one item.
-    fn visit_item(&mut self, item: &Item) {
-        walk_item(self, item);
-    }
-    /// Visits one statement.
-    fn visit_stmt(&mut self, stmt: &Stmt) {
-        walk_stmt(self, stmt);
-    }
-    /// Visits one expression.
-    fn visit_expr(&mut self, expr: &Expr) {
-        walk_expr(self, expr);
-    }
-}
-
-/// Default program walk for [`Visitor`].
-pub fn walk_program<V: Visitor + ?Sized>(visitor: &mut V, program: &Program) {
-    for item in &program.items {
-        visitor.visit_item(item);
-    }
-}
-
-/// Default item walk for [`Visitor`].
-pub fn walk_item<V: Visitor + ?Sized>(visitor: &mut V, item: &Item) {
-    match &item.kind {
-        ItemKind::Func(decl) => {
-            if let Some(FuncBody::Block(block)) = &decl.body {
-                for stmt in &block.stmts {
-                    visitor.visit_stmt(stmt);
-                }
-            } else if let Some(FuncBody::Inline(expr)) = &decl.body {
-                visitor.visit_expr(expr);
-            }
-        }
-        ItemKind::Object { members, .. } | ItemKind::Private { items: members } => {
-            for member in members {
-                visitor.visit_item(member);
-            }
-        }
-        ItemKind::Enum { .. }
-        | ItemKind::Using { .. }
-        | ItemKind::Field { .. }
-        | ItemKind::Error => {}
-        ItemKind::Const { value, .. } => visitor.visit_expr(value),
-    }
-}
-
-/// Default statement walk for [`Visitor`].
-pub fn walk_stmt<V: Visitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
-    match stmt {
-        Stmt::Let { value, .. } | Stmt::MultiLet { value, .. } => visitor.visit_expr(value),
-        Stmt::Assign { target, value, .. } => {
-            visitor.visit_expr(target);
-            visitor.visit_expr(value);
-        }
-        Stmt::ExprStmt(expr) => visitor.visit_expr(expr),
-        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Error { .. } => {}
-        Stmt::If {
-            cond, then, els, ..
-        } => {
-            visitor.visit_expr(cond);
-            for stmt in &then.stmts {
-                visitor.visit_stmt(stmt);
-            }
-            if let Some(els) = els {
-                for stmt in &els.stmts {
-                    visitor.visit_stmt(stmt);
-                }
-            }
-        }
-        Stmt::Loop {
-            cond, body, els, ..
-        } => {
-            if let Some(cond) = cond {
-                visitor.visit_expr(cond);
-            }
-            for stmt in &body.stmts {
-                visitor.visit_stmt(stmt);
-            }
-            if let Some(els) = els {
-                for stmt in &els.stmts {
-                    visitor.visit_stmt(stmt);
-                }
-            }
-        }
-        Stmt::Match {
-            scrutinee,
-            arms,
-            els,
-            ..
-        } => {
-            visitor.visit_expr(scrutinee);
-            for arm in arms {
-                match &arm.body {
-                    MatchArmBody::Block(block) => {
-                        for stmt in &block.stmts {
-                            visitor.visit_stmt(stmt);
-                        }
-                    }
-                    MatchArmBody::Inline(stmt) => visitor.visit_stmt(stmt),
-                }
-            }
-            if let Some(els) = els {
-                for stmt in &els.stmts {
-                    visitor.visit_stmt(stmt);
-                }
-            }
-        }
-    }
-}
-
-/// Default expression walk for [`Visitor`].
-pub fn walk_expr<V: Visitor + ?Sized>(visitor: &mut V, expr: &Expr) {
-    match expr {
-        Expr::Ident(..)
-        | Expr::Tag(..)
-        | Expr::Number(..)
-        | Expr::Str(..)
-        | Expr::Char(..)
-        | Expr::Error { .. } => {}
-        Expr::Call { callee, args, .. } => {
-            visitor.visit_expr(callee);
-            for arg in args {
-                visitor.visit_expr(arg);
-            }
-        }
-        Expr::Member { obj, .. } => visitor.visit_expr(obj),
-        Expr::BinOp { lhs, rhs, .. } => {
-            visitor.visit_expr(lhs);
-            visitor.visit_expr(rhs);
-        }
-        Expr::IfValue {
-            cond, then, els, ..
-        } => {
-            visitor.visit_expr(cond);
-            visitor.visit_expr(then);
-            visitor.visit_expr(els);
-        }
-        Expr::MatchValue {
-            scrutinee,
-            arms,
-            els,
-            ..
-        } => {
-            visitor.visit_expr(scrutinee);
-            for arm in arms {
-                match &arm.body {
-                    MatchArmBody::Block(block) => {
-                        for stmt in &block.stmts {
-                            visitor.visit_stmt(stmt);
-                        }
-                    }
-                    MatchArmBody::Inline(stmt) => visitor.visit_stmt(stmt),
-                }
-            }
-            visitor.visit_expr(els);
-        }
-        Expr::StructLit { fields, .. } => {
-            for field in fields {
-                visitor.visit_expr(&field.value);
-            }
-        }
-        Expr::FString { parts, .. } => {
-            for part in parts {
-                if let FStrPart::Hole(expr) = part {
-                    visitor.visit_expr(expr);
-                }
-            }
-        }
-        Expr::RefOf { value, .. } => visitor.visit_expr(value),
-        Expr::Cast(operand, _) => visitor.visit_expr(operand),
-    }
-}
-
-/// Mutable AST visitor: override only what a pass needs; defaults walk children.
-pub trait MutVisitor {
-    /// Visits a program root.
-    fn visit_program_mut(&mut self, program: &mut Program) {
-        walk_program_mut(self, program);
-    }
-    /// Visits one item.
-    fn visit_item_mut(&mut self, item: &mut Item) {
-        walk_item_mut(self, item);
-    }
-    /// Visits one statement.
-    fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
-        walk_stmt_mut(self, stmt);
-    }
-    /// Visits one expression.
-    fn visit_expr_mut(&mut self, expr: &mut Expr) {
-        walk_expr_mut(self, expr);
-    }
-}
-
-/// Default mutable program walk for [`MutVisitor`].
-pub fn walk_program_mut<V: MutVisitor + ?Sized>(visitor: &mut V, program: &mut Program) {
-    for item in &mut program.items {
-        visitor.visit_item_mut(item);
-    }
-}
-
-/// Default mutable item walk for [`MutVisitor`].
-pub fn walk_item_mut<V: MutVisitor + ?Sized>(visitor: &mut V, item: &mut Item) {
-    match &mut item.kind {
-        ItemKind::Func(decl) => {
-            if let Some(FuncBody::Block(block)) = &mut decl.body {
-                for stmt in &mut block.stmts {
-                    visitor.visit_stmt_mut(stmt);
-                }
-            } else if let Some(FuncBody::Inline(expr)) = &mut decl.body {
-                visitor.visit_expr_mut(expr);
-            }
-        }
-        ItemKind::Object { members, .. } | ItemKind::Private { items: members } => {
-            for member in members {
-                visitor.visit_item_mut(member);
-            }
-        }
-        ItemKind::Enum { .. }
-        | ItemKind::Using { .. }
-        | ItemKind::Field { .. }
-        | ItemKind::Error => {}
-        ItemKind::Const { value, .. } => visitor.visit_expr_mut(value),
-    }
-}
-
-/// Default mutable statement walk for [`MutVisitor`].
-pub fn walk_stmt_mut<V: MutVisitor + ?Sized>(visitor: &mut V, stmt: &mut Stmt) {
-    match stmt {
-        Stmt::Let { value, .. } | Stmt::MultiLet { value, .. } => visitor.visit_expr_mut(value),
-        Stmt::Assign { target, value, .. } => {
-            visitor.visit_expr_mut(target);
-            visitor.visit_expr_mut(value);
-        }
-        Stmt::ExprStmt(expr) => visitor.visit_expr_mut(expr),
-        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Error { .. } => {}
-        Stmt::If {
-            cond, then, els, ..
-        } => {
-            visitor.visit_expr_mut(cond);
-            for stmt in &mut then.stmts {
-                visitor.visit_stmt_mut(stmt);
-            }
-            if let Some(els) = els {
-                for stmt in &mut els.stmts {
-                    visitor.visit_stmt_mut(stmt);
-                }
-            }
-        }
-        Stmt::Loop {
-            cond, body, els, ..
-        } => {
-            if let Some(cond) = cond {
-                visitor.visit_expr_mut(cond);
-            }
-            for stmt in &mut body.stmts {
-                visitor.visit_stmt_mut(stmt);
-            }
-            if let Some(els) = els {
-                for stmt in &mut els.stmts {
-                    visitor.visit_stmt_mut(stmt);
-                }
-            }
-        }
-        Stmt::Match {
-            scrutinee,
-            arms,
-            els,
-            ..
-        } => {
-            visitor.visit_expr_mut(scrutinee);
-            for arm in arms {
-                match &mut arm.body {
-                    MatchArmBody::Block(block) => {
-                        for stmt in &mut block.stmts {
-                            visitor.visit_stmt_mut(stmt);
-                        }
-                    }
-                    MatchArmBody::Inline(stmt) => visitor.visit_stmt_mut(stmt),
-                }
-            }
-            if let Some(els) = els {
-                for stmt in &mut els.stmts {
-                    visitor.visit_stmt_mut(stmt);
-                }
-            }
-        }
-    }
-}
-
-/// Default mutable expression walk for [`MutVisitor`].
-pub fn walk_expr_mut<V: MutVisitor + ?Sized>(visitor: &mut V, expr: &mut Expr) {
-    match expr {
-        Expr::Ident(..)
-        | Expr::Tag(..)
-        | Expr::Number(..)
-        | Expr::Str(..)
-        | Expr::Char(..)
-        | Expr::Error { .. } => {}
-        Expr::Call { callee, args, .. } => {
-            visitor.visit_expr_mut(callee);
-            for arg in args {
-                visitor.visit_expr_mut(arg);
-            }
-        }
-        Expr::Member { obj, .. } => visitor.visit_expr_mut(obj),
-        Expr::BinOp { lhs, rhs, .. } => {
-            visitor.visit_expr_mut(lhs);
-            visitor.visit_expr_mut(rhs);
-        }
-        Expr::IfValue {
-            cond, then, els, ..
-        } => {
-            visitor.visit_expr_mut(cond);
-            visitor.visit_expr_mut(then);
-            visitor.visit_expr_mut(els);
-        }
-        Expr::MatchValue {
-            scrutinee,
-            arms,
-            els,
-            ..
-        } => {
-            visitor.visit_expr_mut(scrutinee);
-            for arm in arms {
-                match &mut arm.body {
-                    MatchArmBody::Block(block) => {
-                        for stmt in &mut block.stmts {
-                            visitor.visit_stmt_mut(stmt);
-                        }
-                    }
-                    MatchArmBody::Inline(stmt) => visitor.visit_stmt_mut(stmt),
-                }
-            }
-            visitor.visit_expr_mut(els);
-        }
-        Expr::StructLit { fields, .. } => {
-            for field in fields {
-                visitor.visit_expr_mut(&mut field.value);
-            }
-        }
-        Expr::FString { parts, .. } => {
-            for part in parts {
-                if let FStrPart::Hole(expr) = part {
-                    visitor.visit_expr_mut(expr);
-                }
-            }
-        }
-        Expr::RefOf { value, .. } => visitor.visit_expr_mut(value),
-        Expr::Cast(operand, _) => visitor.visit_expr_mut(operand),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lilac_span::Span;
-
-    struct Counter {
-        exprs: usize,
-    }
-
-    impl Visitor for Counter {
-        fn visit_expr(&mut self, expr: &Expr) {
-            self.exprs += 1;
-            walk_expr(self, expr);
-        }
-    }
-
-    #[test]
-    fn visitor_walks_nested_exprs() {
-        let span = Span::dummy();
-        let expr = Expr::BinOp {
-            lhs: Box::new(Expr::Number("0x1".to_owned(), span)),
-            op: BinOp::Add,
-            rhs: Box::new(Expr::Number("0x2".to_owned(), span)),
-            span,
-        };
-        let mut counter = Counter { exprs: 0 };
-        counter.visit_expr(&expr);
-        assert_eq!(counter.exprs, 3);
-    }
-
-    struct NumberRename;
-    impl MutVisitor for NumberRename {
-        fn visit_expr_mut(&mut self, expr: &mut Expr) {
-            walk_expr_mut(self, expr);
-            if let Expr::Number(text, _) = expr {
-                if text == "0x1" {
-                    *text = "0x9".to_owned();
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn mut_visitor_rewrites_nested_exprs() {
-        let span = Span::dummy();
-        let mut expr = Expr::BinOp {
-            lhs: Box::new(Expr::Number("0x1".to_owned(), span)),
-            op: BinOp::Add,
-            rhs: Box::new(Expr::Number("0x2".to_owned(), span)),
-            span,
-        };
-        NumberRename.visit_expr_mut(&mut expr);
-        let Expr::BinOp { lhs, .. } = expr else {
-            panic!("still a binop")
-        };
-        assert!(matches!(*lhs, Expr::Number(ref t, _) if t == "0x9"));
     }
 }

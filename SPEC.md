@@ -106,7 +106,9 @@ values of length greater than one.
   `_` separators allowed between digits (`0xFF_FF`). No sign is part of the
   literal: unary `-` is always an operator (`@negate` / `@i_sub_W`-family folding).
 * Strings: `"…"` with escapes `\"`, `\\`, `\n`, and `\xHH` only. Anything else
-  after `\` is a lex error.
+  after `\` is a lex error. A string is a byte sequence: `\xHH` is exactly one
+  raw byte (`"\xFF"` has length 1), and other characters contribute their
+  UTF-8 bytes.
 * Chars: `'…'` holds exactly one scalar. Empty or multi-scalar char literals are
   lex errors; use a `String` for those.
 
@@ -275,11 +277,20 @@ if condition {
 }
 ```
 
-If expressions can also return values (a later milestone; the M2 compiler
-rejects value position with `E001`):
+`else` takes any statement, so `else if`, `else break` and `else return`
+need no braces:
 
 ```lilac
-status: @bit8 = if 0x0 0x0 else 0x1
+if a {
+} else if b {
+} else return
+```
+
+An `if` used as a value is written `if c then x else y` (`then` is a keyword;
+the `else` branch is required):
+
+```lilac
+status: @bit8 = if 0x0 then 0x0 else 0x1
 ```
 
 Value capturing from multi-return functions:
@@ -294,7 +305,7 @@ if get_multi() -> result: @bit32 {
 }
 ```
 
-Loops execute infinitely by default unless broken or conditioned:
+`loop` repeats any single statement until a `break`:
 
 ```lilac
 loop {
@@ -302,7 +313,7 @@ loop {
 }
 ```
 
-To make a standard conditional loop this is a way:
+A conditional loop is just `loop` over an `if`:
 
 ```lilac
 val: @bit8 = 0x0
@@ -325,6 +336,9 @@ match enum_val {
     .None => return
 }
 ```
+
+A pattern may name the enum (`Optional.Some`, `Optional[T].Some`); it must
+be the enum being matched, and lowers exactly like `.Some`.
 
 You can attach else to the end of a match to catch invalid matches:
 
@@ -352,7 +366,11 @@ match number {
 
 ### Variable Declaration
 
-Variables are declared using `name: Type = value` syntax. Object types can utilize simplified constructor syntax during initialization, or invoke parameterized constructors using `Type(params)` if a matching `@init` hook is defined. Struct construction is always the `=`-form (`variable: Object = Object { member = 0x1 }`); the `:`-without-`=` spelling is rejected with `E001`.
+Variables are declared using `name: Type = value` syntax. Two shorthands
+avoid writing the type twice: `name: Type { fields }` means
+`name: Type = Type { fields }`, and `name: Type(args)` means
+`name: Type = Type(args)` (the `@init` constructor). Both work for generic
+types (`b: Box[@bit32] { value = 0x1 }`).
 
 ```lilac
 counter: @bit32 = 0x0
@@ -412,7 +430,9 @@ transitively; subfolders are never auto-loaded.
 
 **`using`.** `using A.B` resolves root-relative to `<root>/A/B` and makes that
 namespace's public (non-`private`) names visible, unqualified, **in the file that
-contains the directive only**. Sibling files do not inherit each other's
+contains the directive only**. `using *.A.B` resolves relative to the importing
+file's own namespace (`*` is that namespace), so a library can name its own
+subfolders without knowing where it is mounted. Sibling files do not inherit each other's
 `using`s even though they share each other's declarations. Imports are
 non-transitive (`B` `using C` does not expose `C` to a file in `A`) and never
 pull in a parent folder's imports. A `using` inside a `private { … }` block is
@@ -486,7 +506,12 @@ OptionalBit32: enum {
 
 Values construct from bare tags (`.None`) or tag calls with payloads
 (`.Some(0x1)`); `match` arms test tags with `.Tag` patterns and bind
-payloads via `-> name: Type`. (The old `union` keyword was removed:
+payloads via `-> name: Type`.
+
+An enum body may also declare members exactly like an object: methods
+(`name: function (self) ... { }` or `=> expr`), hooks (`@name: ...`) and
+`private { }` blocks. A `name: function (...) ...` with a body is a method; a
+`name: Type` without one is a payload variant. (The old `union` keyword was removed:
 it spelled the same type. Legacy `union { ... }` declarations fail to
 parse; rename them to `enum`.)
 
@@ -502,8 +527,11 @@ Type arguments are **explicit**: v1 has no type-argument inference, so every
 generic reference spells its arguments (`gen_function[@bit32]`,
 `GenObject[@bit32]`). Applying a generic with the wrong number of arguments —
 too few, too many, or any argument on a non-generic declaration — is `E044`;
-the bogus application is never built. A generic value's type carries its
-arguments while its constructor names the bare declaration:
+the bogus application is never built. In expression position `Name[args]`
+may be followed by `(` (a generic call), `.` (a static member,
+`GenObject[@bit32].make()`), or `{` (a struct literal,
+`GenObject[@bit32] { value = 0x0 }`). A struct literal may omit the
+arguments when the expected type supplies them:
 `x: GenObject[@bit32] = GenObject { value = 0x0 }`.
 
 ```lilac

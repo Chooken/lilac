@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_ir::{
-    builtin_sig, ArithOp, ConvertOp, LirBlock, LirCallee, LirDataKind, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm,
+    builtin_sig, ArithOp, ConvertOp, LirBlock, LirCallee, LirFunc, LirInst, LirModule, LirOperand,
+    LirTerm,
 };
 use lilac_span::Span;
 
@@ -73,12 +73,7 @@ fn fold_with_fuel(
     let data: HashMap<String, Vec<u8>> = module
         .data
         .iter()
-        .map(|data| {
-            let payload = match &data.kind {
-                LirDataKind::Str(text) | LirDataKind::NumLit(text) => text.as_bytes().to_vec(),
-            };
-            (data.name.clone(), payload)
-        })
+        .map(|data| (data.name.clone(), data.bytes.clone()))
         .collect();
     let funcs = module.funcs.clone();
     let mut folder = Folder {
@@ -1520,9 +1515,7 @@ fn memcpy(frame: &mut Frame, dst: Ptr, src: Ptr, len: usize) -> Result<(), Eval>
 mod tests {
     use super::*;
     use lilac_error::Diags;
-    use lilac_ir::{
-        ArithOp, LirBlock, LirData, LirDataKind, LirFunc, LirInst, LirModule, LirOperand, LirTerm,
-    };
+    use lilac_ir::{ArithOp, LirBlock, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm};
     use lilac_span::Span;
 
     fn test_span() -> Span {
@@ -1886,7 +1879,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("AB".to_owned()),
+            bytes: "AB".as_bytes().to_vec(),
             span: test_span(),
         });
         let parse = LirFunc {
@@ -1992,12 +1985,12 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
             name: "msg".to_owned(),
-            kind: LirDataKind::Str("boom".to_owned()),
+            bytes: "boom".as_bytes().to_vec(),
             span: test_span(),
         });
         module.data.push(LirData {
             name: "ab".to_owned(),
-            kind: LirDataKind::Str("AB".to_owned()),
+            bytes: "AB".as_bytes().to_vec(),
             span: test_span(),
         });
         module.funcs.push(LirFunc {
@@ -2082,7 +2075,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("AB".to_owned()),
+            bytes: "AB".as_bytes().to_vec(),
             span: test_span(),
         });
         let wipe = LirFunc {

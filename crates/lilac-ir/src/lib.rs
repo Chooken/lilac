@@ -9,6 +9,7 @@
 //! never print.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_span::Span;
@@ -56,19 +57,10 @@ pub struct SpannedText {
 pub struct LirData {
     /// Constant name without sigil (`c0` prints as `!c0`).
     pub name: String,
-    /// Constant payload.
-    pub kind: LirDataKind,
+    /// Raw bytes (`!c0: str = "hi"`; any byte, not necessarily UTF-8).
+    pub bytes: Vec<u8>,
     /// Definition span.
     pub span: Span,
-}
-
-/// Constant payloads.
-#[derive(Clone, Debug)]
-pub enum LirDataKind {
-    /// UTF-8 bytes (`!c0: str = "hi"`).
-    Str(String),
-    /// Number source bytes (`!c1: numlit = "10.5"`).
-    NumLit(String),
 }
 
 /// One function: signature places plus labeled blocks.
@@ -514,25 +506,28 @@ impl Default for LirModule {
     }
 }
 
-/// Escapes `"` and `\` inside `data` literal text.
-fn escape_data(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if ch == '"' || ch == '\\' {
-            escaped.push('\\');
+/// Escapes data bytes for the text form: `"` and `\` are backslashed, other
+/// printable ASCII and newlines print as-is, and every other byte is `\xHH`.
+fn escape_data(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        match byte {
+            b'"' | b'\\' => {
+                escaped.push('\\');
+                escaped.push(char::from(byte));
+            }
+            b'\n' | b' '..=b'~' => escaped.push(char::from(byte)),
+            _ => {
+                let _ = write!(escaped, "\\x{byte:02X}");
+            }
         }
-        escaped.push(ch);
     }
     escaped
 }
 
 fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
-    let (kind, value) = match &data.kind {
-        LirDataKind::Str(text) => ("str", escape_data(text)),
-        LirDataKind::NumLit(text) => ("numlit", escape_data(text)),
-    };
     vec![(
-        format!("!{}: {kind} = \"{value}\"", data.name),
+        format!("!{}: str = \"{}\"", data.name, escape_data(&data.bytes)),
         Some(data.span),
     )]
 }
@@ -2265,7 +2260,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-unknown-none");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: test_span(),
         });
         module.funcs.push(LirFunc {
@@ -2371,7 +2366,7 @@ mod tests {
         );
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: test_span(),
         });
         let spanned = module.to_text_spanned();
@@ -2513,7 +2508,7 @@ mod tests {
         let mut module = canonical_module();
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("a\nb".to_owned()),
+            bytes: "a\nb".as_bytes().to_vec(),
             span: test_span(),
         });
         let spanned = module.to_text_spanned();

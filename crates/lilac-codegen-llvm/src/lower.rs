@@ -25,8 +25,8 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
 use lilac_error::{bug, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirDataKind, LirFunc, LirInst,
-    LirModule, LirOperand, LirTerm,
+    builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm,
 };
 use lilac_span::Span;
 
@@ -267,9 +267,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// declaration order.
     fn define_data(&self) {
         for datum in &self.lir.data {
-            let bytes = match &datum.kind {
-                LirDataKind::Str(text) | LirDataKind::NumLit(text) => text.as_bytes(),
-            };
+            let bytes = datum.bytes.as_slice();
             let i8_ty = self.context.i8_type();
             let array_ty = i8_ty.array_type(u32::try_from(bytes.len()).unwrap_or(u32::MAX));
             let init = if bytes.is_empty() {
@@ -1015,11 +1013,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Byte length of a data global (no NUL terminator).
     fn data_len(&self, name: &str) -> u64 {
         match self.lir.data.iter().find(|datum| datum.name == name) {
-            Some(datum) => match &datum.kind {
-                LirDataKind::Str(text) | LirDataKind::NumLit(text) => {
-                    u64::try_from(text.len()).unwrap_or(u64::MAX)
-                }
-            },
+            Some(datum) => u64::try_from(datum.bytes.len()).unwrap_or(u64::MAX),
             None => bug!(Span::dummy(), "const of undeclared data `!{name}`"),
         }
     }

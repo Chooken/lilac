@@ -92,7 +92,7 @@ fn callees(func: &LirFunc) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LirBlock, LirData, LirDataKind};
+    use crate::{LirBlock, LirData};
     use lilac_span::Span;
 
     /// Builds one function whose `entry` block calls each name in `calls`
@@ -167,7 +167,7 @@ mod tests {
         for name in data {
             module.data.push(LirData {
                 name: (*name).to_owned(),
-                kind: LirDataKind::Str(String::new()),
+                bytes: Vec::new(),
                 span: Span::dummy(),
             });
         }

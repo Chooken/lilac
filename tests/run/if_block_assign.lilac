@@ -1,4 +1,3 @@
-// pending: phase 1 (struct-literal restriction rejects `if x { y = ... }`)
 // expect-exit: 7
 
 exit: extern function (code: @bit32) nothing

@@ -13,8 +13,8 @@ use lilac_hir::{
     TempId,
 };
 use lilac_ir::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm,
+    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
+    LirTerm,
 };
 use lilac_resolve::{DefId, ResolvedProject};
 use lilac_span::Span;
@@ -1327,9 +1327,9 @@ impl Lower<'_> {
             HirExprKind::Ident { name, def } => self.lower_ident(fs, name, *def, expr.span),
             HirExprKind::Tag { name } => Ok(self.lower_tag(fs, expr.ty, name, expr.span)),
             HirExprKind::Number { bytes } => Ok(self.lower_number(fs, expr.ty, bytes, expr.span)),
-            HirExprKind::Str { value } => {
+            HirExprKind::Str { bytes } => {
                 let reg = fresh_reg(fs);
-                let name = self.intern_data(LirDataKind::Str(value.clone()), value);
+                let name = self.intern_data(bytes);
                 emit(
                     fs,
                     LirInst::Const {
@@ -1452,50 +1452,29 @@ impl Lower<'_> {
         span: Span,
     ) -> LirOperand {
         let lir = lir_ty(self.types, ty);
-        if lir == "#byte_buffer" {
-            let reg = fresh_reg(fs);
-            let name = self.intern_data(LirDataKind::NumLit(bytes.to_owned()), bytes);
-            emit(
-                fs,
-                LirInst::Const {
-                    dst: reg.clone(),
-                    lit: format!("!{name}"),
-                    ty: lir,
-                    span,
-                },
-            );
-            LirOperand::Reg(reg)
-        } else {
-            let reg = fresh_reg(fs);
-            emit(
-                fs,
-                LirInst::Const {
-                    dst: reg.clone(),
-                    lit: bytes.to_owned(),
-                    ty: lir,
-                    span,
-                },
-            );
-            LirOperand::Reg(reg)
-        }
+        let reg = fresh_reg(fs);
+        emit(
+            fs,
+            LirInst::Const {
+                dst: reg.clone(),
+                lit: bytes.to_owned(),
+                ty: lir,
+                span,
+            },
+        );
+        LirOperand::Reg(reg)
     }
 
-    /// Interns a data const, deduping by `(kind, payload)` and assigning
-    /// `c0`, `c1`, … in first-use order.
-    fn intern_data(&mut self, kind: LirDataKind, payload: &str) -> String {
-        let same = |existing: &LirData| {
-            std::mem::discriminant(&existing.kind) == std::mem::discriminant(&kind)
-                && match &existing.kind {
-                    LirDataKind::Str(value) | LirDataKind::NumLit(value) => value == payload,
-                }
-        };
-        if let Some(existing) = self.module.data.iter().find(|data| same(data)) {
+    /// Interns a data const, deduping by payload and assigning `c0`, `c1`, …
+    /// in first-use order.
+    fn intern_data(&mut self, bytes: &[u8]) -> String {
+        if let Some(existing) = self.module.data.iter().find(|data| data.bytes == bytes) {
             return existing.name.clone();
         }
         let name = format!("c{}", self.module.data.len());
         self.module.data.push(LirData {
             name: name.clone(),
-            kind,
+            bytes: bytes.to_vec(),
             span: Span::dummy(),
         });
         name

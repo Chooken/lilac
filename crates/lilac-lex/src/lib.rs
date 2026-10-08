@@ -19,13 +19,13 @@ pub enum TokenKind {
     Ident,
     /// `5`, `0xFF`, `0b101`, `10.5` (source bytes; value comes from folding).
     Number,
-    /// `"hi"` (decoded value).
+    /// `"hi"` (decoded bytes in [`Token::bytes`]).
     StringLit,
     /// `'A'` (the scalar value is in [`Token::text`]).
     CharLit,
     /// `$"` opening an f-string.
     FStrStart,
-    /// Literal chunk inside an f-string (decoded value).
+    /// Literal chunk inside an f-string (decoded bytes in [`Token::bytes`]).
     FStrMid,
     /// Closing `"` of an f-string.
     FStrEnd,
@@ -53,6 +53,8 @@ pub enum TokenKind {
     KwLoop,
     /// `if`.
     KwIf,
+    /// `then` (value `if c then x else y`).
+    KwThen,
     /// `else`.
     KwElse,
     /// `match`.
@@ -126,8 +128,16 @@ pub struct Token {
     pub kind: TokenKind,
     /// Source range covered.
     pub span: Span,
-    /// Surface text (decoded value for strings/chars/f-string chunks).
+    /// Surface text (the decoded scalar for chars; a lossy UTF-8 view of the
+    /// bytes for strings and f-string chunks).
     pub text: String,
+    /// Decoded bytes of a string literal or f-string chunk (`\xHH` is one raw
+    /// byte); empty for every other token.
+    pub bytes: Vec<u8>,
+    /// Whether a line break separates this token from the previous one.
+    /// Lilac has no statement terminator, so the parser uses this to tell
+    /// `return x` (an error) from a `return` that ends its line.
+    pub newline_before: bool,
 }
 
 impl Token {
@@ -138,7 +148,23 @@ impl Token {
             kind,
             span: Span::new(offset_u32(start), offset_u32(end), file),
             text: text.to_owned(),
+            bytes: Vec::new(),
+            newline_before: false,
         }
+    }
+
+    /// Builds a string-literal or f-string-chunk token carrying decoded bytes.
+    #[must_use]
+    pub fn with_bytes(
+        kind: TokenKind,
+        bytes: Vec<u8>,
+        start: usize,
+        end: usize,
+        file: FileId,
+    ) -> Self {
+        let mut token = Self::new(kind, &String::from_utf8_lossy(&bytes), start, end, file);
+        token.bytes = bytes;
+        token
     }
 
     /// Whether this token can open a top-level item (used by parse recovery).
@@ -233,10 +259,16 @@ impl<'a> Lexer<'a> {
         )
     }
 
-    fn skip_trivia(&mut self) {
+    /// Skips whitespace and comments; returns whether a line break was skipped.
+    fn skip_trivia(&mut self) -> bool {
+        let mut newline = false;
         while !self.at_eof() {
             match self.peek() {
-                b' ' | b'\t' | b'\r' | b'\n' => self.pos += 1,
+                b'\n' => {
+                    newline = true;
+                    self.pos += 1;
+                }
+                b' ' | b'\t' | b'\r' => self.pos += 1,
                 b'/' if self.peek_at(1) == b'/' => {
                     while !self.at_eof() && self.peek() != b'\n' {
                         self.pos += 1;
@@ -245,6 +277,7 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
+        newline
     }
 
     fn lex_normal(&mut self) -> Result<Token, Diagnostic> {
@@ -282,6 +315,7 @@ impl<'a> Lexer<'a> {
             "nothing" => TokenKind::KwNothing,
             "loop" => TokenKind::KwLoop,
             "if" => TokenKind::KwIf,
+            "then" => TokenKind::KwThen,
             "else" => TokenKind::KwElse,
             "match" => TokenKind::KwMatch,
             "break" => TokenKind::KwBreak,
@@ -410,7 +444,7 @@ impl<'a> Lexer<'a> {
     fn lex_string(&mut self) -> Result<Token, Diagnostic> {
         let start = self.pos;
         self.pos += 1; // opening `"`
-        let mut value = String::new();
+        let mut value = Vec::new();
         loop {
             if self.at_eof() || self.peek() == b'\n' {
                 return Err(self.err(
@@ -421,22 +455,21 @@ impl<'a> Lexer<'a> {
             }
             if self.peek() == b'"' {
                 self.pos += 1;
-                return Ok(Token::new(
+                return Ok(Token::with_bytes(
                     TokenKind::StringLit,
-                    &value,
+                    value,
                     start,
                     self.pos,
                     self.file,
                 ));
             }
             if self.peek() == b'\\' {
-                let (ch, next) = self.decode_escape(self.pos)?;
-                value.push(ch);
+                let (byte, next) = self.decode_escape(self.pos)?;
+                value.push(byte);
                 self.pos = next;
             } else {
-                let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
-                value.push(ch);
-                self.pos += ch.len_utf8();
+                value.push(self.peek());
+                self.pos += 1;
             }
         }
     }
@@ -448,9 +481,9 @@ impl<'a> Lexer<'a> {
             return Err(self.err(start, self.pos, "unterminated char literal"));
         }
         let value = if self.peek() == b'\\' {
-            let (ch, next) = self.decode_escape(self.pos)?;
+            let (byte, next) = self.decode_escape(self.pos)?;
             self.pos = next;
-            ch
+            char::from(byte)
         } else {
             let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
             self.pos += ch.len_utf8();
@@ -473,12 +506,14 @@ impl<'a> Lexer<'a> {
         ))
     }
 
-    fn decode_escape(&self, backslash: usize) -> Result<(char, usize), Diagnostic> {
+    /// Decodes one escape starting at `backslash`: the byte it denotes and the
+    /// position after it. `\xHH` is one raw byte, never a UTF-8 encoding.
+    fn decode_escape(&self, backslash: usize) -> Result<(u8, usize), Diagnostic> {
         let code = self.peek_at(backslash - self.pos + 1);
         match code {
-            b'"' => Ok(('"', backslash + 2)),
-            b'\\' => Ok(('\\', backslash + 2)),
-            b'n' => Ok(('\n', backslash + 2)),
+            b'"' => Ok((b'"', backslash + 2)),
+            b'\\' => Ok((b'\\', backslash + 2)),
+            b'n' => Ok((b'\n', backslash + 2)),
             b'x' => {
                 let hi = self.peek_at(backslash - self.pos + 2);
                 let lo = self.peek_at(backslash - self.pos + 3);
@@ -490,8 +525,8 @@ impl<'a> Lexer<'a> {
                     ));
                 }
                 let digits = &self.src[backslash + 2..backslash + 4];
-                let byte = u32::from_str_radix(digits, 16).unwrap_or(0);
-                Ok((char::from_u32(byte).unwrap_or('\u{FFFD}'), backslash + 4))
+                let byte = u8::from_str_radix(digits, 16).unwrap_or(0);
+                Ok((byte, backslash + 4))
             }
             _ => Err(self.err(
                 backslash,
@@ -520,7 +555,7 @@ impl<'a> Lexer<'a> {
 
     fn lex_fstr_literal(&mut self) -> Result<Token, Diagnostic> {
         let start = self.pos;
-        let mut text = String::new();
+        let mut text = Vec::new();
         loop {
             if self.at_eof() {
                 // Guarantee progress: the next call ends the iterator.
@@ -544,9 +579,9 @@ impl<'a> Lexer<'a> {
                     }
                     // Leave the quote unconsumed so the next call emits `FStrEnd`.
                     self.mode = LexMode::PendingFStrEnd;
-                    return Ok(Token::new(
+                    return Ok(Token::with_bytes(
                         TokenKind::FStrMid,
-                        &text,
+                        text,
                         start,
                         self.pos,
                         self.file,
@@ -554,7 +589,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'{' => {
                     if self.peek_at(1) == b'{' {
-                        text.push('{');
+                        text.push(b'{');
                         self.pos += 2;
                     } else if text.is_empty() {
                         self.pos += 1;
@@ -569,9 +604,9 @@ impl<'a> Lexer<'a> {
                         ));
                     } else {
                         self.mode = LexMode::PendingLBrace;
-                        return Ok(Token::new(
+                        return Ok(Token::with_bytes(
                             TokenKind::FStrMid,
-                            &text,
+                            text,
                             start,
                             self.pos,
                             self.file,
@@ -580,7 +615,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'}' => {
                     if self.peek_at(1) == b'}' {
-                        text.push('}');
+                        text.push(b'}');
                         self.pos += 2;
                     } else {
                         return Err(self.err(
@@ -591,14 +626,13 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'\\' => {
-                    let (ch, next) = self.decode_escape(self.pos)?;
-                    text.push(ch);
+                    let (byte, next) = self.decode_escape(self.pos)?;
+                    text.push(byte);
                     self.pos = next;
                 }
-                _ => {
-                    let ch = self.src[self.pos..].chars().next().unwrap_or('\u{FFFD}');
-                    text.push(ch);
-                    self.pos += ch.len_utf8();
+                byte => {
+                    text.push(byte);
+                    self.pos += 1;
                 }
             }
         }
@@ -709,13 +743,18 @@ impl Iterator for Lexer<'_> {
         if self.mode == LexMode::FStrLiteral {
             return Some(self.lex_fstr_literal());
         }
-        self.skip_trivia();
+        let newline = self.skip_trivia();
         if self.at_eof() {
             self.eof_done = true;
             let pos = self.pos;
-            return Some(Ok(Token::new(TokenKind::Eof, "", pos, pos, self.file)));
+            let mut eof = Token::new(TokenKind::Eof, "", pos, pos, self.file);
+            eof.newline_before = newline;
+            return Some(Ok(eof));
         }
-        Some(self.lex_normal())
+        Some(self.lex_normal().map(|mut token| {
+            token.newline_before = newline;
+            token
+        }))
     }
 }
 

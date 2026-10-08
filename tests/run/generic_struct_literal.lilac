@@ -1,4 +1,3 @@
-// pending: phase 1 (`Name[T] { ... }` and `Name[T].f()` in expression position)
 // expect-exit: 4
 
 exit: extern function (code: @bit32) nothing

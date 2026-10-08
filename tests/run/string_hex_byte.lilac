@@ -1,4 +1,3 @@
-// pending: phase 1 (`\xHH` must be one byte, not UTF-8 encoded)
 // expect-exit: 255
 
 exit: extern function (code: @bit32) nothing

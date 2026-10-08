@@ -322,12 +322,13 @@ impl Parser {
         in_object: bool,
     ) -> Result<Item, ErrorGuaranteed> {
         if kind_token.kind == TokenKind::KwEnum {
-            let variants = self.parse_enum_variants(diags)?;
+            let (variants, members) = self.parse_enum_body(diags)?;
             Ok(Item {
                 span: join_spans(name_span, self.prev_span()),
                 name,
                 kind: ItemKind::Enum {
                     variants,
+                    members,
                     generic_params,
                 },
             })
@@ -341,6 +342,10 @@ impl Parser {
             if self.peek().kind == TokenKind::Eq {
                 self.bump();
                 let value = self.parse_expr(diags)?;
+                return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
+            }
+            if !in_object && matches!(self.peek().kind, TokenKind::LBrace | TokenKind::LParen) {
+                let value = self.parse_decl_shorthand(diags, &ty)?;
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
             if !in_object {
@@ -442,6 +447,11 @@ impl Parser {
 
     fn parse_using(&mut self, diags: &mut lilac_error::Diags) -> Result<Item, ErrorGuaranteed> {
         let using = self.bump();
+        let relative = self.peek().kind == TokenKind::Star;
+        if relative {
+            self.bump();
+            self.expect(diags, TokenKind::Dot, "`.` after `*` in a relative `using`")?;
+        }
         let first = self.expect(diags, TokenKind::Ident, "folder name after `using`")?;
         let mut path = first.text;
         let mut end = first.span;
@@ -455,7 +465,7 @@ impl Parser {
         Ok(Item {
             span: join_spans(using.span, end),
             name: path.clone(),
-            kind: ItemKind::Using { path },
+            kind: ItemKind::Using { path, relative },
         })
     }
 
@@ -527,12 +537,17 @@ impl Parser {
         Ok(members)
     }
 
-    fn parse_enum_variants(
+    /// Parses an enum body: variants (`One`, `Some: T`) interleaved with
+    /// members. A member is a hook (`@name: ...`), a `private { ... }` block,
+    /// a generic declaration (`name[T]: ...`), or a `function` with a body; any
+    /// other `name: Type` is a payload variant.
+    fn parse_enum_body(
         &mut self,
         diags: &mut lilac_error::Diags,
-    ) -> Result<Vec<EnumVariant>, ErrorGuaranteed> {
+    ) -> Result<(Vec<EnumVariant>, Vec<Item>), ErrorGuaranteed> {
         self.expect(diags, TokenKind::LBrace, "`{` to open enum body")?;
         let mut variants = Vec::new();
+        let mut members = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
                 let span = self.peek().span;
@@ -542,6 +557,23 @@ impl Parser {
                     "unterminated enum body; add a closing `}`",
                 ));
             }
+            let is_member = matches!(self.peek().kind, TokenKind::At | TokenKind::KwPrivate)
+                || (self.peek().kind == TokenKind::Ident
+                    && self.peek_at(1).kind == TokenKind::LBracket);
+            if is_member {
+                let before = self.pos;
+                if let Ok(item) = self.parse_item(diags, true) {
+                    members.push(item);
+                } else {
+                    self.recover();
+                    self.synchronize();
+                    if self.pos == before {
+                        self.pos += 1;
+                    }
+                    members.push(self.error_item(before));
+                }
+                continue;
+            }
             let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
             let payload = if self.peek().kind == TokenKind::Colon {
                 self.bump();
@@ -550,6 +582,27 @@ impl Parser {
                 None
             };
             let name_span = ident.span;
+            if let Some(Type {
+                func: Some(func), ..
+            }) = &payload
+            {
+                if matches!(self.peek().kind, TokenKind::LBrace | TokenKind::FatArrow) {
+                    let func = func.clone();
+                    let body = self.parse_func_body(diags, false)?;
+                    members.push(Item {
+                        name: ident.text,
+                        kind: ItemKind::Func(FuncDecl {
+                            generic_params: Vec::new(),
+                            params: func.params,
+                            returns: func.returns,
+                            body,
+                            is_extern: false,
+                        }),
+                        span: join_spans(name_span, self.prev_span()),
+                    });
+                    continue;
+                }
+            }
             let end = payload.as_ref().map_or(name_span, |ty| ty.span);
             variants.push(EnumVariant {
                 name: ident.text,
@@ -562,7 +615,7 @@ impl Parser {
             }
         }
         self.bump();
-        Ok(variants)
+        Ok((variants, members))
     }
 
     fn parse_func_rest(
@@ -596,35 +649,7 @@ impl Parser {
         }
         self.bump();
         let returns = self.parse_returns(diags)?;
-        let body = match self.peek().kind {
-            TokenKind::LBrace => {
-                if is_extern {
-                    let span = self.peek().span;
-                    return Err(Self::err(diags, span, "`extern` declarations have no body"));
-                }
-                Some(FuncBody::Block(self.parse_block(diags)?))
-            }
-            TokenKind::FatArrow => {
-                if is_extern {
-                    let span = self.peek().span;
-                    return Err(Self::err(diags, span, "`extern` declarations have no body"));
-                }
-                self.bump();
-                Some(FuncBody::Inline(self.parse_expr(diags)?))
-            }
-            _ => {
-                if is_extern {
-                    None
-                } else {
-                    let span = self.peek().span;
-                    return Err(Self::err(
-                        diags,
-                        span,
-                        "expected `{` or `=>` for function body",
-                    ));
-                }
-            }
-        };
+        let body = self.parse_func_body(diags, is_extern)?;
         Ok(FuncDecl {
             generic_params,
             params,
@@ -632,6 +657,38 @@ impl Parser {
             body,
             is_extern,
         })
+    }
+
+    /// Parses a function body (`{ ... }` or `=> expr`); `extern` declarations
+    /// have none.
+    fn parse_func_body(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        is_extern: bool,
+    ) -> Result<Option<FuncBody>, ErrorGuaranteed> {
+        let has_body = matches!(self.peek().kind, TokenKind::LBrace | TokenKind::FatArrow);
+        if is_extern {
+            if has_body {
+                let span = self.peek().span;
+                return Err(Self::err(diags, span, "`extern` declarations have no body"));
+            }
+            return Ok(None);
+        }
+        match self.peek().kind {
+            TokenKind::LBrace => Ok(Some(FuncBody::Block(self.parse_block(diags)?))),
+            TokenKind::FatArrow => {
+                self.bump();
+                Ok(Some(FuncBody::Inline(self.parse_expr(diags)?)))
+            }
+            _ => {
+                let span = self.peek().span;
+                Err(Self::err(
+                    diags,
+                    span,
+                    "expected `{` or `=>` for function body",
+                ))
+            }
+        }
     }
 
     fn parse_param(&mut self, diags: &mut lilac_error::Diags) -> Result<Param, ErrorGuaranteed> {
@@ -940,7 +997,7 @@ impl Parser {
         match self.peek().kind {
             TokenKind::KwReturn => {
                 let keyword = self.bump();
-                if starts_expr(self.peek().kind) {
+                if !self.peek().newline_before && starts_expression(self.peek().kind) {
                     return Err(Self::err(
                         diags,
                         self.peek().span,
@@ -956,10 +1013,12 @@ impl Parser {
             TokenKind::KwIf => self.parse_if_stmt(diags),
             TokenKind::KwLoop => self.parse_loop_stmt(diags),
             TokenKind::KwMatch => self.parse_match_stmt(diags),
+            TokenKind::LBrace => Ok(Stmt::Block(self.parse_block(diags)?)),
             _ => self.parse_let_or_expr_stmt(diags),
         }
     }
 
+    /// `if cond [-> capture] { ... } [else <stmt>]`.
     fn parse_if_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
         let cond = self.with_struct_lit(false, |p| p.parse_or(diags))?;
@@ -976,11 +1035,11 @@ impl Parser {
         let then = self.parse_block(diags)?;
         let els = if self.peek().kind == TokenKind::KwElse {
             self.bump();
-            Some(self.parse_block(diags)?)
+            Some(Box::new(self.parse_stmt(diags)?))
         } else {
             None
         };
-        let end = els.as_ref().map_or(then.span, |block| block.span);
+        let end = els.as_ref().map_or(then.span, |stmt| stmt.span());
         Ok(Stmt::If {
             cond,
             capture,
@@ -990,31 +1049,14 @@ impl Parser {
         })
     }
 
+    /// `loop <stmt>`: `loop { ... }`, `loop if c { ... } else break`, ...
     fn parse_loop_stmt(&mut self, diags: &mut lilac_error::Diags) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
-        let cond = if self.peek().kind == TokenKind::KwIf {
-            self.bump();
-            Some(self.with_struct_lit(false, |p| p.parse_or(diags))?)
-        } else {
-            None
-        };
-        if self.peek().kind != TokenKind::LBrace {
-            let span = self.peek().span;
-            return Err(Self::err(diags, span, "expected `{` for loop body"));
-        }
-        let body = self.parse_block(diags)?;
-        let els = if self.peek().kind == TokenKind::KwElse {
-            self.bump();
-            Some(self.parse_block(diags)?)
-        } else {
-            None
-        };
-        let end = els.as_ref().map_or(body.span, |block| block.span);
+        let body = self.parse_stmt(diags)?;
+        let span = join_spans(keyword.span, body.span());
         Ok(Stmt::Loop {
-            cond,
-            body,
-            els,
-            span: join_spans(keyword.span, end),
+            body: Box::new(body),
+            span,
         })
     }
 
@@ -1063,7 +1105,30 @@ impl Parser {
             TokenKind::Dot => {
                 let dot = self.bump();
                 let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
-                (MatchPattern::Tag(tag.text), dot.span)
+                (
+                    MatchPattern::Tag {
+                        qualifier: None,
+                        name: tag.text,
+                    },
+                    dot.span,
+                )
+            }
+            TokenKind::Ident => {
+                let qualifier = self.parse_type_inner(diags)?;
+                self.expect(
+                    diags,
+                    TokenKind::Dot,
+                    "`.` after the enum name in a pattern",
+                )?;
+                let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
+                let start = qualifier.span;
+                (
+                    MatchPattern::Tag {
+                        qualifier: Some(qualifier),
+                        name: tag.text,
+                    },
+                    start,
+                )
             }
             TokenKind::Number | TokenKind::StringLit | TokenKind::CharLit => {
                 let lit = self.bump();
@@ -1074,7 +1139,7 @@ impl Parser {
                 return Err(Self::err(
                     diags,
                     span,
-                    "expected `.Tag` or a literal pattern for match arm",
+                    "expected `.Tag`, `Enum.Tag`, or a literal pattern for match arm",
                 ));
             }
         };
@@ -1202,16 +1267,15 @@ impl Parser {
                 }
                 return Err(ErrorGuaranteed::new());
             }
-            if self.peek().kind == TokenKind::LBrace {
-                let span = self.peek().span;
-                return Err(Self::err(
-                    diags,
-                    span,
-                    "expected `=` after variable type; use `= Type { ... }` to construct a struct value",
-                ));
-            }
-            self.expect(diags, TokenKind::Eq, "`=` after variable type")?;
-            let value = self.parse_expr_recover(diags)?;
+            let value = if bindings.len() == 1
+                && matches!(self.peek().kind, TokenKind::LBrace | TokenKind::LParen)
+            {
+                let ty = bindings[0].ty.clone();
+                self.parse_decl_shorthand(diags, &ty)?
+            } else {
+                self.expect(diags, TokenKind::Eq, "`=` after variable type")?;
+                self.parse_expr_recover(diags)?
+            };
             let span = join_spans(bindings[0].span, value.span());
             if bindings.len() == 1 {
                 let only = bindings.remove(0);
@@ -1240,6 +1304,28 @@ impl Parser {
             });
         }
         Ok(Stmt::ExprStmt(target))
+    }
+
+    /// The declaration shorthands after `name: Type`: `{ fields }` is
+    /// `= Type { fields }` and `(args)` is `= Type(args)` (the `@init` call).
+    fn parse_decl_shorthand(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        ty: &Type,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        if ty.is_ref || ty.func.is_some() || ty.name.is_empty() {
+            let span = self.peek().span;
+            return Err(Self::err(
+                diags,
+                span,
+                "expected `=` after variable type; `Type { ... }` and `Type(...)` shorthands need a named type",
+            ));
+        }
+        if self.peek().kind == TokenKind::LBrace {
+            return self.parse_struct_lit(diags, ty.clone());
+        }
+        let callee = type_expr(ty);
+        self.finish_call(diags, callee, Vec::new())
     }
 
     fn parse_expr(&mut self, diags: &mut lilac_error::Diags) -> Result<Expr, ErrorGuaranteed> {
@@ -1435,29 +1521,22 @@ impl Parser {
                     expr = self.finish_call(diags, expr, Vec::new())?;
                 }
                 TokenKind::LBrace => {
-                    // Struct suffix on a path (`Type { ... }`); a bare `{`
-                    // after anything else opens a block (handled by the
-                    // caller). Like rustc, case never decides: the brace
-                    // restriction flag does.
-                    let Expr::Ident(name, span) = &expr else {
-                        break;
-                    };
-                    if self.allow_struct_lit {
-                        expr = self.parse_struct_lit(diags, name.clone(), *span)?;
-                    } else if self.peek_at(1).kind == TokenKind::Ident
-                        && self.peek_at(2).kind == TokenKind::Eq
-                    {
-                        return Err(Self::err(
-                            diags,
-                            join_spans(*span, self.peek().span),
-                            "struct literal not allowed here; wrap it in parentheses",
-                        ));
-                    } else {
+                    // Struct suffix on a type (`Type { ... }`, `Name[T] { ... }`);
+                    // a bare `{` after anything else, or anywhere struct
+                    // literals are disabled (`if`/`loop`/`match` heads), ends
+                    // the expression. Like rustc, case never decides.
+                    if !self.allow_struct_lit {
                         break;
                     }
+                    let ty = match &expr {
+                        Expr::Ident(name, span) => named_type(name.clone(), *span, Vec::new()),
+                        Expr::TypeApp(ty) => ty.clone(),
+                        _ => break,
+                    };
+                    expr = self.parse_struct_lit(diags, ty)?;
                 }
                 TokenKind::LBracket => {
-                    self.bump();
+                    let open = self.bump();
                     let mut generic_args = Vec::new();
                     loop {
                         generic_args.push(self.parse_type_inner(diags)?);
@@ -1479,15 +1558,23 @@ impl Parser {
                             }
                         }
                     }
-                    if self.peek().kind != TokenKind::LParen {
-                        let span = self.peek().span;
+                    if self.peek().kind == TokenKind::LParen {
+                        expr = self.finish_call(diags, expr, generic_args)?;
+                        continue;
+                    }
+                    // `Name[args]` not followed by a call is a type in value
+                    // position: a static receiver (`Box[T].make()`) or a struct
+                    // literal head (`Box[T] { ... }`).
+                    let Expr::Ident(name, name_span) = expr else {
                         return Err(Self::err(
                             diags,
-                            span,
+                            open.span,
                             "expected `(` after generic arguments",
                         ));
-                    }
-                    expr = self.finish_call(diags, expr, generic_args)?;
+                    };
+                    let mut ty = named_type(name, name_span, generic_args);
+                    ty.span = join_spans(name_span, self.prev_span());
+                    expr = Expr::TypeApp(ty);
                 }
                 _ => break,
             }
@@ -1570,7 +1657,7 @@ impl Parser {
         match token.kind {
             TokenKind::Ident => Ok(Expr::Ident(token.text, token.span)),
             TokenKind::Number => Ok(Expr::Number(token.text, token.span)),
-            TokenKind::StringLit => Ok(Expr::Str(token.text, token.span)),
+            TokenKind::StringLit => Ok(Expr::Str(token.bytes, token.span)),
             TokenKind::CharLit => Ok(Expr::Char(
                 token.text.chars().next().unwrap_or('\u{FFFD}'),
                 token.span,
@@ -1606,11 +1693,11 @@ impl Parser {
         }
     }
 
+    /// Parses `{ field = value, ... }` after the literal's type.
     fn parse_struct_lit(
         &mut self,
         diags: &mut lilac_error::Diags,
-        ty_name: String,
-        ty_span: Span,
+        ty: Type,
     ) -> Result<Expr, ErrorGuaranteed> {
         self.bump();
         let mut fields = Vec::new();
@@ -1636,11 +1723,8 @@ impl Parser {
             }
         }
         let close = self.bump();
-        Ok(Expr::StructLit {
-            ty_name,
-            fields,
-            span: join_spans(ty_span, close.span),
-        })
+        let span = join_spans(ty.span, close.span);
+        Ok(Expr::StructLit { ty, fields, span })
     }
 
     fn parse_if_value(
@@ -1653,9 +1737,10 @@ impl Parser {
             return Err(Self::err(
                 diags,
                 self.peek().span,
-                "block `if` is a statement; expression `if` needs value branches like `if c 0x0 else 0x1`",
+                "block `if` is a statement; an `if` value is written `if c then x else y`",
             ));
         }
+        self.expect(diags, TokenKind::KwThen, "`then` in `if` value")?;
         let then = self.parse_expr(diags)?;
         self.expect(diags, TokenKind::KwElse, "`else` in `if` value")?;
         let els = self.parse_expr(diags)?;
@@ -1678,7 +1763,7 @@ impl Parser {
             match self.peek().kind {
                 TokenKind::FStrMid => {
                     let chunk = self.bump();
-                    parts.push(FStrPart::Lit(chunk.text));
+                    parts.push(FStrPart::Lit(chunk.bytes));
                 }
                 TokenKind::LBrace => {
                     self.bump();
@@ -1738,22 +1823,25 @@ fn join_spans(first: Span, last: Span) -> Span {
     }
 }
 
-/// Whether a token can start an expression (used for `return` validation).
-fn starts_expr(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Ident
-            | TokenKind::Number
-            | TokenKind::StringLit
-            | TokenKind::CharLit
-            | TokenKind::LParen
-            | TokenKind::Minus
-            | TokenKind::FStrStart
-            | TokenKind::At
-            | TokenKind::KwRef
-            | TokenKind::KwIf
-            | TokenKind::Dot
-    )
+/// A plain named type (`Name` / `Name[args]`) built from an expression head.
+fn named_type(name: String, name_span: Span, generic_args: Vec<Type>) -> Type {
+    Type {
+        name,
+        name_span,
+        is_ref: false,
+        generic_args,
+        func: None,
+        span: name_span,
+    }
+}
+
+/// A named type in value position: `Name` or `Name[args]` (for `Type(args)`).
+fn type_expr(ty: &Type) -> Expr {
+    if ty.generic_args.is_empty() {
+        Expr::Ident(ty.name.clone(), ty.name_span)
+    } else {
+        Expr::TypeApp(ty.clone())
+    }
 }
 
 /// Whether a token can start an expression (the union of the primary forms and
@@ -2084,20 +2172,155 @@ mod tests {
     }
 
     #[test]
-    fn colon_struct_literal_rejected() {
-        let src =
-            "main: function () nothing {\n    variable: Object {\n        member = 0x1\n    }\n}\n";
-        let (_, diags, _) = parse(src);
-        assert!(diags.has_errors());
-        let messages: Vec<_> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+    fn declaration_shorthands_desugar() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    a: Object {\n        member = 0x1\n    }\n    b: Box[@bit8] { value = 0x1 }\n    c: Object(0x1, 0x2)\n    d: Box[@bit8](0x1)\n}\n",
+        );
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
         assert!(
-            diags.diagnostics().iter().any(|d| d.code == "E001"),
-            "expected E001, got {messages:?}"
+            matches!(value, Expr::StructLit { ty, fields, .. } if ty.name == "Object" && fields.len() == 1)
+        );
+        let Stmt::Let { value, .. } = &stmts[1] else {
+            panic!("{:?}", stmts[1]);
+        };
+        assert!(matches!(value, Expr::StructLit { ty, .. } if ty.generic_args.len() == 1));
+        let Stmt::Let { value, .. } = &stmts[2] else {
+            panic!("{:?}", stmts[2]);
+        };
+        let Expr::Call { callee, args, .. } = value else {
+            panic!("{value:?}");
+        };
+        assert!(matches!(callee.as_ref(), Expr::Ident(name, _) if name == "Object"));
+        assert_eq!(args.len(), 2);
+        let Stmt::Let { value, .. } = &stmts[3] else {
+            panic!("{:?}", stmts[3]);
+        };
+        assert!(
+            matches!(value, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::TypeApp(ty) if ty.name == "Box"))
+        );
+    }
+
+    #[test]
+    fn generic_type_in_value_position() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    a: Box[@bit8] = Box[@bit8] { value = 0x1 }\n    b: Box[@bit8] = Box[@bit8].make(0x1)\n    c: ref @bit8 = CAllocator.create[@bit8]()\n}\n",
+        );
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert!(
+            matches!(value, Expr::StructLit { ty, .. } if ty.name == "Box" && ty.generic_args.len() == 1)
+        );
+        let Stmt::Let { value, .. } = &stmts[1] else {
+            panic!("{:?}", stmts[1]);
+        };
+        let Expr::Call { callee, .. } = value else {
+            panic!("{value:?}");
+        };
+        let Expr::Member { obj, field, .. } = callee.as_ref() else {
+            panic!("{callee:?}");
+        };
+        assert_eq!(field, "make");
+        assert!(matches!(obj.as_ref(), Expr::TypeApp(ty) if ty.name == "Box"));
+        let Stmt::Let { value, .. } = &stmts[2] else {
+            panic!("{:?}", stmts[2]);
+        };
+        assert!(matches!(value, Expr::Call { generic_args, .. } if generic_args.len() == 1));
+    }
+
+    #[test]
+    fn loop_and_else_take_statements() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    loop if x { x = 0x0 } else break\n    if a { } else if b { } else { }\n    loop { }\n    { y: @bit8 = 0x1 }\n}\n",
+        );
+        let Stmt::Loop { body, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        let Stmt::If { els: Some(els), .. } = body.as_ref() else {
+            panic!("{body:?}");
+        };
+        assert!(matches!(els.as_ref(), Stmt::Break { .. }));
+        let Stmt::If { els: Some(els), .. } = &stmts[1] else {
+            panic!("{:?}", stmts[1]);
+        };
+        assert!(matches!(els.as_ref(), Stmt::If { els: Some(_), .. }));
+        assert!(
+            matches!(&stmts[2], Stmt::Loop { body, .. } if matches!(body.as_ref(), Stmt::Block(_)))
+        );
+        assert!(matches!(&stmts[3], Stmt::Block(block) if block.stmts.len() == 1));
+    }
+
+    #[test]
+    fn if_value_uses_then() {
+        let stmts =
+            main_stmts("main: function () nothing {\n    v: @bit8 = if c then -x else .A\n}\n");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        let Expr::IfValue { then, els, .. } = value else {
+            panic!("{value:?}");
+        };
+        assert!(matches!(then.as_ref(), Expr::Call { .. }));
+        assert!(matches!(els.as_ref(), Expr::Tag(name, _) if name == "A"));
+    }
+
+    #[test]
+    fn qualified_match_patterns() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    match v {\n        .A => return\n        Opt.Some -> x: @bit8 => return\n        Opt[@bit8].None => return\n    }\n}\n",
+        );
+        let Stmt::Match { arms, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert!(
+            matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: None, name } if name == "A")
         );
         assert!(
-            messages.iter().any(|m| m.contains("use `= Type")),
-            "expected `=`-form help, got {messages:?}"
+            matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.name == "Opt" && name == "Some")
         );
+        assert!(
+            matches!(&arms[2].pattern, MatchPattern::Tag { qualifier: Some(q), .. } if q.generic_args.len() == 1)
+        );
+    }
+
+    #[test]
+    fn enum_members_parse() {
+        let (program, diags, _) = parse(
+            "Opt[T]: enum {\n    Some: T\n    None\n    Callback: function (x: @bit8) nothing\n    get: function (self) v: T {\n    }\n    @on_drop: function (self) nothing {}\n    map[U]: function (self) nothing {}\n    private {\n        helper: function () nothing => 0x0\n    }\n}\n",
+        );
+        assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
+        let ItemKind::Enum {
+            variants, members, ..
+        } = &program.items[0].kind
+        else {
+            panic!("{:?}", program.items[0].kind);
+        };
+        let names: Vec<_> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["Some", "None", "Callback"]);
+        let names: Vec<_> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["get", "@on_drop", "map", ""]);
+    }
+
+    #[test]
+    fn hex_escape_is_one_byte() {
+        let stmts =
+            main_stmts("main: function () nothing {\n    s: @byte_buffer = \"\\xFFa\"\n}\n");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert!(matches!(value, Expr::Str(bytes, _) if bytes == &[0xFF, b'a']));
+    }
+
+    #[test]
+    fn relative_using_parses() {
+        let (program, diags, _) = parse("using *.Heap.Pool\n");
+        assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
+        assert!(matches!(
+            &program.items[0].kind,
+            ItemKind::Using { path, relative: true } if path == "Heap.Pool"
+        ));
     }
 
     #[test]
@@ -2118,13 +2341,10 @@ mod tests {
         let Stmt::Let { value, .. } = &block.stmts[0] else {
             panic!("expected let, got {:?}", block.stmts[0]);
         };
-        let Expr::StructLit {
-            ty_name, fields, ..
-        } = value
-        else {
+        let Expr::StructLit { ty, fields, .. } = value else {
             panic!("expected struct literal, got {value:?}");
         };
-        assert_eq!(ty_name, "Object");
+        assert_eq!(ty.name, "Object");
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "member");
     }
@@ -2265,7 +2485,7 @@ mod tests {
             panic!("expected if statement, got {stmt:?}");
         };
         assert!(
-            matches!(cond, Expr::StructLit { ref ty_name, .. } if ty_name == "Foo"),
+            matches!(cond, Expr::StructLit { ref ty, .. } if ty.name == "Foo"),
             "got {cond:?}"
         );
     }
@@ -2286,23 +2506,26 @@ mod tests {
             panic!("expected let statement, got {stmt:?}");
         };
         assert!(
-            matches!(value, Expr::StructLit { ref ty_name, .. } if ty_name == "foo"),
+            matches!(value, Expr::StructLit { ref ty, .. } if ty.name == "foo"),
             "got {value:?}"
         );
     }
 
     #[test]
-    fn struct_like_in_head_is_targeted_e001() {
-        // `if Foo { member = ... }` meant a struct literal: say so and
-        // suggest parentheses instead of failing downstream.
-        let (_, diags) =
-            first_stmt("main: function () nothing {\n    if Foo { member = 0x1 } {\n    }\n}\n");
-        assert!(diags.has_errors());
+    fn if_head_brace_always_opens_the_block() {
+        // `if x { y = 0x1 }` is a condition and a block holding an assignment;
+        // a struct literal in a head needs parentheses.
+        let (stmt, diags) = first_stmt("main: function () nothing {\n    if x { y = 0x1 }\n}\n");
         assert!(
-            diags.diagnostics().iter().any(|d| d.code == "E001"),
-            "{:?}",
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
             diags.diagnostics()
         );
+        let Some(Stmt::If { cond, then, .. }) = stmt else {
+            panic!("expected if statement, got {stmt:?}");
+        };
+        assert!(matches!(&cond, Expr::Ident(name, _) if name == "x"));
+        assert!(matches!(then.stmts[0], Stmt::Assign { .. }));
     }
 
     #[test]

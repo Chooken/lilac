@@ -624,7 +624,7 @@ mod tests {
         let mut session = Session::new();
         let result = session.compile_lir(
             "gen.lilac",
-            "pick[T]: function (x: T, c: @bit8) T => if c x else x\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
+            "pick[T]: function (x: T, c: @bit8) T => if c then x else x\nmain: function () nothing {\n    y: @bit32 = pick[@bit32](0x1, 0x1)\n}\n",
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
         assert_eq!(session.render_diagnostics(), "");
@@ -640,7 +640,7 @@ mod tests {
         for src in [
             // value-`if` argument
             "pick: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
-             main: function () nothing {\n    c: @bit8 = 0x1\n    r: @bit8 = pick(if c 0x1 else 0x2, 0x3)\n}\n",
+             main: function () nothing {\n    c: @bit8 = 0x1\n    r: @bit8 = pick(if c then 0x1 else 0x2, 0x3)\n}\n",
             // inline `or` argument
             "or2: function (a: @bit8, b: @bit8) @bit8 => a or b\n\
              main: function () nothing {\n    c: @bit8 = 0x1\n    r: @bit8 = or2(c or c, 0x3)\n}\n",

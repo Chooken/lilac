@@ -118,8 +118,8 @@ mod tests {
     use crate as lilac_codegen_llvm;
     use lilac_codegen::{Backend, OptLevel};
     use lilac_ir::{
-        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirDataKind, LirFunc, LirInst, LirModule,
-        LirOperand, LirTerm,
+        ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
+        LirTerm,
     };
     use lilac_span::Span;
 
@@ -302,7 +302,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.data.push(LirData {
             name: "data".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: span(),
         });
         module.funcs.push(LirFunc {
@@ -445,12 +445,12 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: span(),
         });
         module.data.push(LirData {
             name: "c1".to_owned(),
-            kind: LirDataKind::NumLit("10.5".to_owned()),
+            bytes: "10.5".as_bytes().to_vec(),
             span: span(),
         });
         let text = emit(&module);
@@ -582,7 +582,7 @@ mod tests {
         );
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: span(),
         });
 
@@ -1294,7 +1294,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("boom".to_owned()),
+            bytes: "boom".as_bytes().to_vec(),
             span: span(),
         });
         module
@@ -1346,7 +1346,7 @@ mod tests {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
         module.data.push(LirData {
             name: "c0".to_owned(),
-            kind: LirDataKind::Str("hi".to_owned()),
+            bytes: "hi".as_bytes().to_vec(),
             span: span(),
         });
         module.funcs.push(LirFunc {

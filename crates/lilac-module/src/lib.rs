@@ -3,7 +3,8 @@
 //!
 //! A directory is the root namespace; the `*.lilac` files directly inside it
 //! are read and parsed only far enough to collect `using` directives. Each
-//! `using A.B` resolves root-relative to `<root>/A/B`; newly-reached folders
+//! `using A.B` resolves root-relative to `<root>/A/B`, and `using *.A.B`
+//! resolves relative to the importing file's own namespace; newly-reached folders
 //! are read and scanned, repeating until no new folder appears. Every folder is
 //! visited once, so cycles terminate. A `using` inside a `private { ... }`
 //! block is honored (it still loads the folder).
@@ -46,7 +47,8 @@ pub struct FileUnit {
     pub ns: usize,
     /// Raw source text.
     pub src: String,
-    /// Dotted `using` paths, in source order.
+    /// Dotted `using` paths from the root, in source order (a relative
+    /// `using *.X` is stored already joined to the file's namespace path).
     pub usings: Vec<String>,
     /// Span of each `using` directive, parallel to [`FileUnit::usings`]; the
     /// `E029` ambiguity diagnostic labels these import sites.
@@ -159,7 +161,7 @@ pub fn load_with_status(
             };
             let name = file_name_str(&path);
             let file_id = sources.add_file(&name, &src);
-            let usings = scan_usings(&src, file_id);
+            let usings = scan_usings(&src, file_id, &namespaces[ns].path);
             let index = files.len();
             files.push(FileUnit {
                 name,
@@ -233,8 +235,9 @@ fn resolve_dir(root: &Path, dotted: &str) -> PathBuf {
     dir
 }
 
-/// Lexes and parses `src` far enough to collect `using` paths with their spans.
-fn scan_usings(src: &str, file: FileId) -> Vec<(String, Span)> {
+/// Lexes and parses `src` far enough to collect its `using` paths (relative
+/// ones joined to `ns_path`, the file's own namespace) with their spans.
+fn scan_usings(src: &str, file: FileId, ns_path: &str) -> Vec<(String, Span)> {
     let (tokens, _lex_errors) = Lexer::lex_all(src, file);
     let mut ignore = Diags::new();
     let mut parser = Parser::new(tokens, file);
@@ -253,12 +256,21 @@ fn scan_usings(src: &str, file: FileId) -> Vec<(String, Span)> {
         collect_usings(item, &mut usings);
     }
     usings
+        .into_iter()
+        .map(|(path, relative, span)| {
+            if relative && !ns_path.is_empty() {
+                (format!("{ns_path}.{path}"), span)
+            } else {
+                (path, span)
+            }
+        })
+        .collect()
 }
 
 /// Collects `using` paths from `item`, descending into `private` blocks.
-fn collect_usings(item: &Item, out: &mut Vec<(String, Span)>) {
+fn collect_usings(item: &Item, out: &mut Vec<(String, bool, Span)>) {
     match &item.kind {
-        ItemKind::Using { path } => out.push((path.clone(), item.span)),
+        ItemKind::Using { path, relative } => out.push((path.clone(), *relative, item.span)),
         ItemKind::Private { items } => {
             for inner in items {
                 collect_usings(inner, out);
@@ -490,6 +502,36 @@ mod tests {
             .find(|ns| ns.path == "a.b")
             .expect("a.b namespace loaded");
         assert_eq!(project.files[deep_ns.files[0]].name, "deep.lilac");
+    }
+
+    #[test]
+    fn relative_using_resolves_from_the_importing_namespace() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "using lib\n");
+        fs.add(&root, "lib/box.lilac", "using *.heap\n");
+        fs.add(
+            &root,
+            "lib/heap/alloc.lilac",
+            "alloc: function () nothing {}\n",
+        );
+
+        let mut diags = Diags::new();
+        let project = load(&root, &mut fs, &mut diags).expect("load succeeds");
+
+        assert!(!diags.has_errors(), "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "lib", "lib.heap"]);
+        let boxed = project
+            .files
+            .iter()
+            .find(|file| file.name == "box.lilac")
+            .expect("box file");
+        assert_eq!(boxed.usings, ["lib.heap"]);
     }
 
     #[test]

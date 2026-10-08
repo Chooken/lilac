@@ -1404,6 +1404,22 @@ impl Checker<'_> {
         temp
     }
 
+    /// Checks one statement into its own block (`else <stmt>`, `loop <stmt>`).
+    fn check_stmt_block(&mut self, fctx: &mut FuncCtx, stmt: &Stmt) -> HirBlock {
+        if let Stmt::Block(block) = stmt {
+            return self.check_block(fctx, block);
+        }
+        fctx.blocks.push(Vec::new());
+        self.check_stmt(fctx, stmt);
+        let Some(stmts) = fctx.blocks.pop() else {
+            lilac_error::bug!(stmt.span(), "block stack underflow");
+        };
+        HirBlock {
+            stmts,
+            span: stmt.span(),
+        }
+    }
+
     /// Checks a `{ ... }` block into its own buffer (nested expression
     /// preludes land inside it, not in the enclosing block).
     fn check_block(&mut self, fctx: &mut FuncCtx, block: &lilac_ast::Block) -> HirBlock {
@@ -2159,13 +2175,13 @@ impl Checker<'_> {
                 then,
                 els,
                 span,
-            } => self.check_if(fctx, cond, capture.as_ref(), then, els.as_ref(), *span),
-            Stmt::Loop {
-                cond,
-                body,
-                els,
-                span,
-            } => self.check_loop(fctx, cond.as_ref(), body, els.as_ref(), *span),
+            } => self.check_if(fctx, cond, capture.as_ref(), then, els.as_deref(), *span),
+            Stmt::Loop { body, span } => self.check_loop(fctx, body, *span),
+            Stmt::Block(block) => {
+                for stmt in &block.stmts {
+                    self.check_stmt(fctx, stmt);
+                }
+            }
             Stmt::Match {
                 scrutinee,
                 arms,
@@ -2772,11 +2788,22 @@ impl Checker<'_> {
                 els,
                 span,
             } => self.check_match_value(fctx, scrutinee, arms, els, *span, expected),
-            Expr::StructLit {
-                ty_name,
-                fields,
-                span,
-            } => self.check_struct_lit(fctx, ty_name, fields, *span, expected),
+            Expr::StructLit { ty, fields, span } => {
+                self.check_struct_lit(fctx, ty, fields, *span, expected)
+            }
+            Expr::TypeApp(ty) => {
+                self.diags.emit(
+                    Diagnostic::error("E021", format!("cannot use type `{}` as a value", ty.name))
+                        .label(ty.span, true, "a type, not a value".to_owned()),
+                );
+                (
+                    TypeRef {
+                        id: TypeId::ERROR,
+                        is_ref: false,
+                    },
+                    poison_expr(ty.span),
+                )
+            }
             Expr::FString { parts, span } => self.check_fstring(fctx, parts, *span),
             Expr::Error { span } => (
                 TypeRef {
@@ -2874,7 +2901,7 @@ impl Checker<'_> {
                 ty: byte_buffer,
                 span,
                 kind: HirExprKind::Str {
-                    value: chunk.clone(),
+                    bytes: chunk.clone(),
                 },
             },
             lilac_ast::FStrPart::Hole(expr) => {
@@ -2888,14 +2915,16 @@ impl Checker<'_> {
     /// Checks `Type { field = value, ... }`: every field against its declared
     /// type, no missing or unknown fields. Struct literals initialize
     /// fields directly and never call `@init` (factories serve `Type(params)`).
+    #[allow(clippy::too_many_lines)]
     fn check_struct_lit(
         &mut self,
         fctx: &mut FuncCtx,
-        ty_name: &str,
+        ty: &AstType,
         fields: &[lilac_ast::StructField],
         span: Span,
         expected: Option<TypeId>,
     ) -> (TypeRef, HirExpr) {
+        let ty_name = ty.name.as_str();
         let poison = (
             TypeRef {
                 id: TypeId::ERROR,
@@ -2938,15 +2967,22 @@ impl Checker<'_> {
             self.types.set_object_name(item.id, &name);
             TypeRef { id, is_ref: false }
         } else {
-            // A generic object literal takes its arguments from the expected
-            // type (`x: GenObject[@bit32] = GenObject { ... }`). Type arguments
-            // are always explicit, so an unannotated literal cannot be built.
-            let args = expected.and_then(|id| match self.types.kind(id) {
-                lilac_ty::TypeKind::Instance { base, args } if *base == item.id => {
-                    Some(args.clone())
-                }
-                _ => None,
-            });
+            // A generic object literal names its arguments (`Box[@bit32] { }`)
+            // or takes them from the expected type
+            // (`x: Box[@bit32] = Box { ... }`).
+            let written = if ty.generic_args.is_empty() {
+                None
+            } else {
+                Some(self.resolve_ty(ty).id)
+            };
+            let args = written
+                .or(expected)
+                .and_then(|id| match self.types.kind(id) {
+                    lilac_ty::TypeKind::Instance { base, args } if *base == item.id => {
+                        Some(args.clone())
+                    }
+                    _ => None,
+                });
             let Some(args) = args else {
                 self.diags.emit(
                     Diagnostic::error(
@@ -3078,7 +3114,7 @@ impl Checker<'_> {
                         ty,
                         span: *span,
                         kind: HirExprKind::Str {
-                            value: text.clone(),
+                            bytes: text.clone(),
                         },
                     },
                 )
@@ -3997,6 +4033,22 @@ impl Checker<'_> {
                 field,
                 span: member_span,
             } => {
+                if let Expr::TypeApp(ty) = obj.as_ref() {
+                    // `Box[@bit32].make()`: a static call on an applied generic.
+                    let receiver = self.resolve_ty(ty);
+                    if is_poison(receiver) {
+                        return Err(ErrorGuaranteed::new());
+                    }
+                    return self.check_static_call_ty(
+                        fctx,
+                        receiver,
+                        field,
+                        generic_args,
+                        args,
+                        span,
+                        expected,
+                    );
+                }
                 if let Expr::Ident(name, _) = obj.as_ref() {
                     // `T.method()`: a bare type parameter receiver within a
                     // specialization is a static (associated) call (ruling R3),
@@ -5212,7 +5264,7 @@ impl Checker<'_> {
                     },
                     span,
                     kind: HirExprKind::CompileError {
-                        msg: msg.clone(),
+                        msg: String::from_utf8_lossy(msg).into_owned(),
                         msg_span: args[0].span(),
                         call_span: span,
                     },
@@ -5734,7 +5786,7 @@ impl Checker<'_> {
         cond: &Expr,
         capture: Option<&lilac_ast::Param>,
         then: &lilac_ast::Block,
-        els: Option<&lilac_ast::Block>,
+        els: Option<&Stmt>,
         span: Span,
     ) {
         if let Some(cap) = capture {
@@ -5755,7 +5807,7 @@ impl Checker<'_> {
             );
         }
         let then_hir = self.check_block(fctx, then);
-        let els_hir = els.map(|block| self.check_block(fctx, block));
+        let els_hir = els.map(|stmt| self.check_stmt_block(fctx, stmt));
         let els_hir = els_hir.unwrap_or(HirBlock {
             stmts: Vec::new(),
             span,
@@ -5781,7 +5833,7 @@ impl Checker<'_> {
         cond: &Expr,
         cap: &lilac_ast::Param,
         then: &lilac_ast::Block,
-        els: Option<&lilac_ast::Block>,
+        els: Option<&Stmt>,
         span: Span,
     ) {
         let Some(call) = self.capture_call(fctx, cond, span) else {
@@ -5815,7 +5867,7 @@ impl Checker<'_> {
         for name in &hidden_names {
             fctx.locals.remove(name);
         }
-        let els_hir = els.map(|block| self.check_block(fctx, block));
+        let els_hir = els.map(|stmt| self.check_stmt_block(fctx, stmt));
         let els_hir = els_hir.unwrap_or(HirBlock {
             stmts: Vec::new(),
             span,
@@ -6009,61 +6061,19 @@ impl Checker<'_> {
         };
         Some((cond_hir, hidden_names, saved))
     }
-    fn check_loop(
-        &mut self,
-        fctx: &mut FuncCtx,
-        cond: Option<&Expr>,
-        body: &lilac_ast::Block,
-        els: Option<&lilac_ast::Block>,
-        span: Span,
-    ) {
+    /// Checks `loop <stmt>`: the body repeats until a `break`.
+    fn check_loop(&mut self, fctx: &mut FuncCtx, body: &Stmt, span: Span) {
         fctx.loop_depth += 1;
-        let body_hir = self.check_block(fctx, body);
-        match cond {
-            None => {
-                push_stmt(
-                    fctx,
-                    HirStmt::Loop {
-                        body: body_hir,
-                        span,
-                    },
-                    span,
-                );
-                if let Some(els) = els {
-                    let els_hir = self.check_block(fctx, els);
-                    for stmt in els_hir.stmts {
-                        push_stmt(fctx, stmt, span);
-                    }
-                }
-            }
-            Some(cond) => {
-                let (_, cond_hir) = self.check_cond(fctx, cond, "loop", cond.span());
-                let els_hir = els.map(|block| self.check_block(fctx, block));
-                let mut els_stmts = els_hir.map_or(Vec::new(), |block| block.stmts);
-                els_stmts.push(HirStmt::Break { span });
-                push_stmt(
-                    fctx,
-                    HirStmt::Loop {
-                        body: HirBlock {
-                            stmts: vec![HirStmt::If {
-                                cond: cond_hir,
-                                then: body_hir,
-                                els: HirBlock {
-                                    stmts: els_stmts,
-                                    span,
-                                },
-                                out: None,
-                                span,
-                            }],
-                            span,
-                        },
-                        span,
-                    },
-                    span,
-                );
-            }
-        }
+        let body_hir = self.check_stmt_block(fctx, body);
         fctx.loop_depth -= 1;
+        push_stmt(
+            fctx,
+            HirStmt::Loop {
+                body: body_hir,
+                span,
+            },
+            span,
+        );
     }
 
     /// Checks `match` statements (arms run blocks; no values produced).
@@ -6131,6 +6141,7 @@ impl Checker<'_> {
 
     /// Validates one arm pattern plus its capture; errors yield a poison
     /// pattern so the body still checks for more diagnostics.
+    #[allow(clippy::too_many_lines)]
     fn check_arm_pattern(
         &mut self,
         arm: &lilac_ast::MatchArm,
@@ -6145,7 +6156,28 @@ impl Checker<'_> {
             )
         };
         match &arm.pattern {
-            lilac_ast::MatchPattern::Tag(name) => {
+            lilac_ast::MatchPattern::Tag { qualifier, name } => {
+                if let Some(qualifier) = qualifier {
+                    let named = self.resolve_ty(qualifier);
+                    if !is_poison(named) && scrut_ty != TypeId::ERROR && named.id != scrut_ty {
+                        self.diags.emit(
+                            Diagnostic::error(
+                                "E010",
+                                format!(
+                                    "pattern names `{}`, but the match inspects `{}`",
+                                    self.types.display(named.id),
+                                    self.types.display(scrut_ty),
+                                ),
+                            )
+                            .label(
+                                qualifier.span,
+                                true,
+                                "wrong enum".to_owned(),
+                            ),
+                        );
+                        return poison_tag(name);
+                    }
+                }
                 let Ok(payload) = self.check_tag_pattern(scrut_ty, name, arm.span) else {
                     return poison_tag(name);
                 };
@@ -8142,7 +8174,7 @@ mod tests {
     #[test]
     fn inline_if_value_body_checks_and_inlines() {
         // Value-`if` branches are expressions: `if c a else b` (no braces).
-        let src = "pick: function (a: @bit8, b: @bit8) @bit8 => if a b else a\n\
+        let src = "pick: function (a: @bit8, b: @bit8) @bit8 => if a then b else a\n\
                    main: function () nothing {\n    r: @bit8 = pick(0x1, 0x2)\n}\n";
         let (diags, _) = check_hir(src);
         assert!(!diags.has_errors(), "{diags:?}");
@@ -8283,7 +8315,7 @@ mod tests {
     fn if_value_branch_converts() {
         // Branch values convert toward the expected type like `let` values.
         let (hir, diags) = check_hir_src(
-            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 a else 0x0\n}\n",
+            "@conversion: function (from: @bit32) to: @bit8 {\n    to = @truncate(from)\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 then a else 0x0\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let main = hir
@@ -8309,7 +8341,7 @@ mod tests {
     #[test]
     fn if_value_branch_mismatch_is_e043() {
         let diags = check_src(
-            "main: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 a else 0x0\n}\n",
+            "main: function () nothing {\n    a: @bit32 = 0x1\n    x: @bit8 = if 0x1 then a else 0x0\n}\n",
         );
         assert!(has_code(&diags, "E043"), "{diags:?}");
     }

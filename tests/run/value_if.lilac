@@ -1,4 +1,3 @@
-// pending: phase 1 (value `if c then x else y`)
 // expect-exit: 9
 
 exit: extern function (code: @bit32) nothing
