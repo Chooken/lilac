@@ -288,7 +288,7 @@ fn successors(term: &LirTerm) -> Vec<String> {
             }
             labels
         }
-        LirTerm::Return { .. } | LirTerm::Panic { .. } | LirTerm::Unreachable { .. } => Vec::new(),
+        LirTerm::Return { .. } | LirTerm::Unreachable { .. } => Vec::new(),
     }
 }
 
@@ -999,9 +999,7 @@ impl Folder<'_> {
                             referenced.insert(els.clone());
                         }
                     }
-                    LirTerm::Return { .. }
-                    | LirTerm::Panic { .. }
-                    | LirTerm::Unreachable { .. } => {}
+                    LirTerm::Return { .. } | LirTerm::Unreachable { .. } => {}
                 }
             }
             let entry = func.blocks[0].label.clone();
@@ -1108,7 +1106,7 @@ impl Evaluator<'_> {
                         None => return Err(Eval::Miss),
                     }
                 }
-                LirTerm::Panic { .. } | LirTerm::Unreachable { .. } => return Err(Eval::Miss),
+                LirTerm::Unreachable { .. } => return Err(Eval::Miss),
             }
         }
     }

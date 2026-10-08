@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 
-use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTerm};
+use crate::{LirCallee, LirFunc, LirInst, LirModule};
 
 /// Removes functions unreachable from a root and data consts nothing names.
 ///
@@ -17,8 +17,7 @@ use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTerm};
 /// (build-system export hints). Reachability follows direct `call` and
 /// `addr.func` targets (an address-taken function survives even when it is
 /// never called directly). Data consts survive only when a surviving
-/// instruction names them: a `Const` literal starting with `'!'`, or a `Panic`
-/// message. `layouts` is verifier-only and is left untouched. With no `main`
+/// instruction names them: a `Const` literal starting with `'!'`. `layouts` is verifier-only and is left untouched. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
 /// even when `main` is absent, so an exported entry point roots a library.
 pub fn prune_unreachable<S: BuildHasher>(module: &mut LirModule, extra_roots: &HashSet<String, S>) {
@@ -63,9 +62,6 @@ pub fn prune_unreachable<S: BuildHasher>(module: &mut LirModule, extra_roots: &H
                     }
                 }
             }
-            if let LirTerm::Panic { msg, .. } = &block.term {
-                referenced.insert(msg.clone());
-            }
         }
     }
     module.data.retain(|datum| referenced.contains(&datum.name));
@@ -96,7 +92,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::{LirBlock, LirData};
+    use crate::{LirBlock, LirData, LirTerm};
     use lilac_span::Span;
 
     /// Builds one function whose `entry` block calls each name in `calls`
@@ -214,22 +210,6 @@ mod tests {
         assert!(
             module.data.iter().any(|d| d.name == "c0"),
             "a surviving Const must keep its data const"
-        );
-    }
-
-    #[test]
-    fn panic_message_retains_data() {
-        // main's terminator is the only referencer of `!c0`.
-        let mut module = module_with(&["main"], &["c0"]);
-        module.funcs[0].blocks[0].insts.clear();
-        module.funcs[0].blocks[0].term = LirTerm::Panic {
-            msg: "c0".to_owned(),
-            span: Span::dummy(),
-        };
-        prune_unreachable(&mut module, &HashSet::new());
-        assert!(
-            module.data.iter().any(|d| d.name == "c0"),
-            "a surviving Panic must keep its data const"
         );
     }
 

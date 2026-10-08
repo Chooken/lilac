@@ -182,9 +182,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// The leaf builtins this module references, so the runtime emits only the
-    /// ones a surviving function calls: every `@`-builtin `call`, plus
-    /// `@lilac_abort` whenever a `panic` terminator survives (it lowers to a
-    /// `.lilac.abort` call). Names keep their `@` sigil.
+    /// ones a surviving function calls: every `@`-builtin `call`. Names keep
+    /// their `@` sigil.
     pub(crate) fn used_builtins(&self) -> HashSet<&str> {
         let mut used = HashSet::new();
         for func in &self.lir.funcs {
@@ -197,9 +196,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     {
                         used.insert(name.as_str());
                     }
-                }
-                if matches!(block.term, LirTerm::Panic { .. }) {
-                    used.insert("@lilac_abort");
                 }
             }
         }
@@ -438,7 +434,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 .blocks
                 .get(index + 1)
                 .and_then(|next| blocks.get(next.label.as_str()).copied());
-            self.lower_term(&block.term, &builder, &blocks, &state, next);
+            Self::lower_term(&block.term, &builder, &blocks, &state, next);
         }
     }
 
@@ -886,12 +882,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// The `void @.lilac.abort()` leaf runtime symbol.
-    fn abort_fn(&self) -> FunctionValue<'ctx> {
-        let fn_type = self.context.void_type().fn_type(&[], false);
-        self.runtime_fn(".lilac.abort", fn_type)
-    }
-
     /// Resolves an operand to an SSA value: a register's value, or a load of a
     /// place (using `ty` when the instruction names it, else the place's own
     /// declared type).
@@ -1241,10 +1231,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Lowers a block terminator. `return` → `ret void`; `branch` → `br`;
     /// `branch.if` → `br i1` (the false edge is the next block in layout order
-    /// when `els` is absent); `panic` → `@.lilac.abort()` + `unreachable`;
-    /// `unreachable` → `unreachable`.
+    /// when `els` is absent); `unreachable` → `unreachable`.
     fn lower_term(
-        &self,
         term: &LirTerm,
         builder: &Builder<'ctx>,
         blocks: &HashMap<&str, BasicBlock<'ctx>>,
@@ -1257,11 +1245,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             }
             LirTerm::Unreachable { .. } => {
                 checked(builder.build_unreachable(), "unreachable");
-            }
-            LirTerm::Panic { .. } => {
-                let abort = self.abort_fn();
-                checked(builder.build_call(abort, &[], ""), "panic abort call");
-                checked(builder.build_unreachable(), "panic unreachable");
             }
             LirTerm::Branch { target, .. } => {
                 let block = block_at(blocks, target);

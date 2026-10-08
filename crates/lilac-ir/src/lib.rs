@@ -448,13 +448,6 @@ pub enum LirTerm {
         /// Terminator span.
         span: Span,
     },
-    /// `panic !c`.
-    Panic {
-        /// Message const (without sigil).
-        msg: String,
-        /// Terminator span.
-        span: Span,
-    },
     /// `unreachable`.
     Unreachable {
         /// Terminator span.
@@ -746,7 +739,6 @@ fn print_term(term: &LirTerm) -> String {
             Some(els) => format!("branch.if &{cond}, ${then}, ${els}"),
             None => format!("branch.if &{cond}, ${then}"),
         },
-        LirTerm::Panic { msg, .. } => format!("panic !{msg}"),
         LirTerm::Unreachable { .. } => "unreachable".to_owned(),
     }
 }
@@ -781,7 +773,6 @@ fn term_span(term: &LirTerm) -> Span {
         LirTerm::Return { span, .. }
         | LirTerm::Branch { span, .. }
         | LirTerm::BranchIf { span, .. }
-        | LirTerm::Panic { span, .. }
         | LirTerm::Unreachable { span, .. } => *span,
     }
 }
@@ -1676,11 +1667,6 @@ impl Verifier<'_> {
                         ),
                         *span,
                     );
-                }
-            }
-            LirTerm::Panic { msg, span } => {
-                if !self.module.data.iter().any(|datum| datum.name == *msg) {
-                    self.error(format!("panic of undeclared const `!{msg}`"), *span);
                 }
             }
             LirTerm::Return { .. } | LirTerm::Unreachable { .. } => {}

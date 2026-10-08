@@ -26,8 +26,7 @@ use crate::lower::{checked, Lower};
 ///
 /// The definitions must precede `lower_func` so `lower_builtin_call` reuses
 /// them; a module that calls no leaf emits none, and the `llvm.trap`-backed
-/// `.lilac.abort` is emitted when `@lilac_abort` or a `panic` terminator needs
-/// it.
+/// `.lilac.abort` is emitted when `@lilac_abort` needs it.
 pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     let used = lower.used_builtins();
     if used.contains("@memcpy") {

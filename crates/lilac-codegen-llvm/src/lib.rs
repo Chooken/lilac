@@ -1081,7 +1081,7 @@ mod tests {
         assert!(body.contains("inttoptr i64"), "{body}");
     }
 
-    /// A module that calls no leaf builtin and has no `panic` emits none of the
+    /// A module that calls no leaf builtin emits none of the
     /// three leaf definitions and never declares `llvm.trap`.
     #[test]
     fn culls_all_unused_leaf_builtins() {
@@ -1371,16 +1371,11 @@ mod tests {
         assert!(text.contains(", label %then, label %join"), "{text}");
     }
 
-    /// `return` → `ret void`, `unreachable` → `unreachable`, `panic` → a
-    /// `@.lilac.abort` call plus `unreachable`, and `drop` emits nothing.
+    /// `return` → `ret void`, `unreachable` → `unreachable`, and `drop` emits
+    /// nothing.
     #[test]
     fn lowers_terminators_and_drop() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.data.push(LirData {
-            name: "c0".to_owned(),
-            bytes: "boom".as_bytes().to_vec(),
-            span: span(),
-        });
         module
             .funcs
             .push(func("ret", &[], &[], vec![ret_block("entry", Vec::new())]));
@@ -1391,16 +1386,6 @@ mod tests {
             span: span(),
         };
         module.funcs.push(func("dead", &[], &[], vec![unreachable]));
-        let panic = LirBlock {
-            label: "entry".to_owned(),
-            insts: Vec::new(),
-            term: LirTerm::Panic {
-                msg: "c0".to_owned(),
-                span: span(),
-            },
-            span: span(),
-        };
-        module.funcs.push(func("boom", &[], &[], vec![panic]));
         let mut drop_insts = Vec::new();
         alloca(&mut drop_insts, "p", "#bit32");
         drop_insts.push(LirInst::Drop {
@@ -1415,8 +1400,6 @@ mod tests {
         ));
         let text = emit(&module);
         assert!(text.contains("ret void"), "{text}");
-        assert!(text.contains("define void @.lilac.abort()"), "{text}");
-        assert!(text.contains("call void @.lilac.abort()"), "{text}");
         assert!(text.contains("unreachable"), "{text}");
         assert!(!text.contains("drop"), "drop must not lower:\n{text}");
     }

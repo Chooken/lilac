@@ -22,7 +22,7 @@ use crate::{
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
 /// `IGtU`/`IDivU`/`IModU` tags (16–18).
-pub const LIR_CODEC_VERSION: u32 = 5;
+pub const LIR_CODEC_VERSION: u32 = 6;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -414,11 +414,7 @@ fn put_term(w: &mut impl Write, term: &LirTerm) -> io::Result<()> {
             }
             put_span(w, *span)
         }
-        LirTerm::Panic { msg, span } => {
-            put_u8(w, 3)?;
-            put_str(w, msg)?;
-            put_span(w, *span)
-        }
+        // 3 was `panic`; never reused.
         LirTerm::Unreachable { span } => {
             put_u8(w, 4)?;
             put_span(w, *span)
@@ -817,11 +813,7 @@ fn get_term(r: &mut impl Read) -> Result<LirTerm, CodecError> {
                 span,
             })
         }
-        3 => {
-            let msg = get_str(r)?;
-            let span = get_span(r)?;
-            Ok(LirTerm::Panic { msg, span })
-        }
+        // 3 was `panic`; never reused.
         4 => {
             let span = get_span(r)?;
             Ok(LirTerm::Unreachable { span })
@@ -1228,15 +1220,6 @@ mod tests {
                     cond: "r1".to_owned(),
                     then: "entry".to_owned(),
                     els: None,
-                    span,
-                },
-                span,
-            },
-            LirBlock {
-                label: "b4".to_owned(),
-                insts: Vec::new(),
-                term: LirTerm::Panic {
-                    msg: "d0".to_owned(),
                     span,
                 },
                 span,
