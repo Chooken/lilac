@@ -276,12 +276,7 @@ mod tests {
     #[test]
     fn location_is_name_line_col() {
         let mut sources = SourceMap::new();
-        let file = sources.add_file(
-            "A/b.lilac",
-            "x
-  yz
-",
-        );
+        let file = sources.add_file("A/b.lilac", "x\n  yz\n");
         assert_eq!(
             sources.location(Span::new(4, 5, file)).as_deref(),
             Some("A/b.lilac:2:3")

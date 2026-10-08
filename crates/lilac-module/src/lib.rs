@@ -994,25 +994,13 @@ mod tests {
         let root = PathBuf::from("proj");
         let lib = PathBuf::from("libs").join("std");
         let mut fs = MemFs::new();
-        fs.add(
-            &root,
-            "main.lilac",
-            "using util
-using Std.Heap
-",
-        );
+        fs.add(&root, "main.lilac", "using util\nusing Std.Heap\n");
         fs.add(
             &root,
             "util/helper.lilac",
-            "helper: function () nothing {}
-",
+            "helper: function () nothing {}\n",
         );
-        fs.add(
-            &lib,
-            "Heap/alloc.lilac",
-            "alloc: function () nothing {}
-",
-        );
+        fs.add(&lib, "Heap/alloc.lilac", "alloc: function () nothing {}\n");
 
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
