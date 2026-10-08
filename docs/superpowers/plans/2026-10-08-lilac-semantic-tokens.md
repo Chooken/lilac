@@ -15,7 +15,7 @@
 - `lilac-lsp` remains the only crate permitted `lsp-server`/`lsp-types`/`serde_json`; compiler crates stay Rust std-only. No new dependencies. `unsafe_code = "forbid"` and `clippy::pedantic = deny` hold; no `unwrap`/`expect`/`panic!` on user input in production code (tests may).
 - No diagnostic changes; the CLI and all committed snapshots are unchanged. Semantic tokens have no lowering/codegen effect.
 - Legend `token_types` in order: `function`, `type`, `enum`, `property`, `enumMember`, `variable`, `parameter`. `token_modifiers`: `defaultLibrary` (index 0), set for `@`-builtin type names and intrinsic call names.
-- Item names (function/hook/object/enum/field/variant/const) come only from the index (`uses`/`defs`); `Analysis.semantics` never duplicates them.
+- Item names (function/hook/object/enum/field/const) come only from the index (`uses`/`defs`). Enum variants are the exception: they are not items, so `Analysis.semantics` records their declarations and `.Variant` uses as `SemanticKind::Variant`; the LSP drops the `.Variant` item use (which resolves to the owning enum) in favor of that more specific site.
 - Gates: `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; and in `editors/vscode`: `npm test` and `npm run package`.
 
 ## Review Focus

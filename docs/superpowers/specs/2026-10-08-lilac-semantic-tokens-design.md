@@ -12,8 +12,8 @@
 
 - The LSP advertises `semanticTokensProvider` and answers
   `textDocument/semanticTokens/full` with tokens derived from the retained
-  `Analysis`: item names (functions, hooks, objects, enums, fields, variants,
-  consts) from the existing index, plus locals, parameters, type names, and
+  `Analysis`: item names (functions, hooks, objects, enums, fields, consts)
+  from the existing index, plus locals, parameters, type names, variants, and
   builtins from a new analysis field.
 - Tokens are produced from the retained analysis, so they survive lex/parse/
   type errors (SP1) — colors do not vanish while you type.
@@ -100,14 +100,19 @@ editors/vscode/CHANGELOG.md        # entry
 - `Local` — a local binding (declaration name and each use);
 - `Param` — a parameter (declaration name and each use);
 - `UserType` — a user object/enum name in type position;
+- `Variant` — an enum variant (declaration name and each `.Variant` use);
 - `BuiltinType` — a builtin type name (`@bit8`…`@fbit128`, `@bit_native`,
-  `@byte_buffer`, `@format_args`);
+  `@byte_buffer`, `@format_args`, `unknown`);
 - `BuiltinFunc` — a compiler-known intrinsic call name (`@add`, `@truncate`,
   `@load_u8`, …).
 
-Item names (functions, hooks, objects, enums, fields, variants, consts) are
-**not** in this source: the index already maps them via `uses` (uses) and
-`defs` (declarations + kind).
+Item names (functions, hooks, objects, enums, fields, consts) are **not** in
+this source: the index already maps them via `uses` (uses) and `defs`
+(declarations + kind). Enum variants are the exception: a variant is not an item
+with its own `DefInfo`, so its declaration and each `.Variant` use are recorded
+here as `Variant` sites. A `.Variant` use also produces an item `use` resolving
+to the owning enum; the LSP merge drops that item use in favor of the more
+specific `Variant` site.
 
 **Where recorded.** During typeck, where each site is resolved:
 
@@ -116,9 +121,13 @@ Item names (functions, hooks, objects, enums, fields, variants, consts) are
   determines whether the name is a local (item uses there go through
   `record_use`; locals currently record nothing);
 - parameter names: at the parameter name span when a function body is set up;
+- variant declarations: at the variant name token when the enum's items are
+  collected, and `.Variant` uses: in `check_expr`'s `Tag` arm at the tag token
+  (not the leading dot);
 - type references: in `resolve_type` (called for both signature types during
-  `collect_sigs` and body types during `check_bodies`), classified `UserType`
-  or `BuiltinType` by the resolved name;
+  `collect_sigs` and body types during `check_bodies`), classified
+  `BuiltinType` when the name resolves via `types.builtin` (so `@bit8` and
+  `unknown` are builtins) and `UserType` otherwise;
 - builtin calls: in the intrinsic-call path when `lookup_intrinsic` matches, at
   the callee identifier's span.
 
@@ -163,16 +172,17 @@ Legend `token_types` (indices are positional):
 | 1 | `type` | object, user type reference, builtin type name |
 | 2 | `enum` | enum |
 | 3 | `property` | field |
-| 4 | `enumMember` | variant |
+| 4 | `enumMember` | variant (declaration and `.Variant` use) |
 | 5 | `variable` | const, local |
 | 6 | `parameter` | parameter |
 
 Legend `token_modifiers`: `defaultLibrary` (index 0) — set for `BuiltinType`
-and `BuiltinFunc` (`@`-names).
+(including `unknown`) and `BuiltinFunc` (intrinsic call names).
 
 Item kinds come from `DefInfo.kind` (`function`/`hook`/`object`/`enum`/`const`/
-`field`); the mapping table above is the single source of truth, shared by the
-LSP handler and documented for the VSCode scopes.
+`field`), and variant declarations/uses from `SemanticKind::Variant`; the mapping
+table above is the single source of truth, shared by the LSP handler and
+documented for the VSCode scopes.
 
 ## 7. VSCode
 
@@ -217,6 +227,8 @@ LSP handler and documented for the VSCode scopes.
   table (§6) is the single kind→token-type mapping, shared by the LSP handler
   and the VSCode scopes.
 - Item names come only from `uses`/`defs`; the source never duplicates them.
+  The one deliberate exception is `Variant` (enum variants are not items), whose
+  `.Variant` item use is dropped in favor of the `Variant` site.
 - The token source is populated best-effort (like `analysis`), so editor
   features never depend on a clean compile.
 
