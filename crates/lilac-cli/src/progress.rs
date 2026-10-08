@@ -184,7 +184,6 @@ fn stage_label(stage: Stage) -> &'static str {
         Stage::Resolve => "resolve",
         Stage::Check => "check",
         Stage::Lower => "lower",
-        Stage::Fold => "fold",
         Stage::Runtime => "runtime",
         Stage::Prune => "prune",
         Stage::Verify => "verify",

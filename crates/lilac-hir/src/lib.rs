@@ -357,7 +357,7 @@ pub enum HirExprKind {
     Const(DefId),
     /// `@size_of(T)`.
     SizeOf(TypeRef),
-    /// A `@compile_error` site (an error if it survives folding).
+    /// A `@compile_error` site (`E031` if lowered in a reachable function).
     CompileError {
         /// Message.
         msg: String,

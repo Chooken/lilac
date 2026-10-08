@@ -1,5 +1,5 @@
 //! Driver: `Session` plus the one pipeline (`Session::run`): module load,
-//! parse, resolve, check, lower, fold, runtime injection, DCE, the live
+//! parse, resolve, check, lower, runtime injection, DCE, the live
 //! `@compile_error` check, and verification.
 
 use std::collections::HashSet;
@@ -73,8 +73,6 @@ pub enum Stage {
     Check,
     /// HIR to LIR.
     Lower,
-    /// Constant folding.
-    Fold,
     /// Injecting the `.lilac.*` runtime.
     Runtime,
     /// Dead-code elimination.
@@ -233,14 +231,14 @@ impl Session {
     }
 
     /// Compiles one source file (a one-file project) through IR
-    /// verification, returning the folded module.
+    /// verification, returning the verified module.
     pub fn compile_lir(&mut self, name: &str, src: &str) -> Result<LirModule, ErrorGuaranteed> {
         self.compile_lir_with_stages(name, src, &mut |_: &'static str, _: &LirModule| {})
     }
 
     /// Like [`Session::compile_lir`], but invokes `on_stage` at every pipeline
     /// boundary with the stage name and the module as it stands there. Stages,
-    /// in order: `lower` (before folding), `fold`, `runtime` (after the
+    /// in order: `lower`, `runtime` (after the
     /// `.lilac.*` prelude is injected, before DCE), and `final` (the returned
     /// module). The driver does no file I/O itself.
     pub fn compile_lir_with_stages(
@@ -257,7 +255,7 @@ impl Session {
     }
 
     /// Compiles a folder project rooted at `root`, loading every file reachable
-    /// through `using` via the injected [`Fs`]. Returns the folded, verified
+    /// through `using` via the injected [`Fs`]. Returns the verified
     /// module.
     pub fn compile_project(
         &mut self,
@@ -387,7 +385,7 @@ impl Session {
         }
     }
 
-    /// Parse → resolve → check → lower → fold → inject runtime → prune →
+    /// Parse → resolve → check → lower → inject runtime → prune →
     /// trace (when [`Session::stack_traces`] is set) → live `@compile_error`
     /// check → verify. Strict mode (the CLI) stops at the
     /// first failing stage; tolerant mode (editor tooling) keeps going through
@@ -470,10 +468,6 @@ impl Session {
         }
         on_stage("lower", &lir);
         self.report(Stage::Lower, DONE);
-        self.report(Stage::Fold, StageEvent::Begin);
-        let report = lilac_const::fold(&mut lir);
-        on_stage("fold", &lir);
-        self.report(Stage::Fold, DONE);
         self.report(Stage::Runtime, StageEvent::Begin);
         self.inject_runtime(&mut lir);
         on_stage("runtime", &lir);
@@ -494,7 +488,7 @@ impl Session {
             lilac_ir::trace::instrument(&mut lir, &self.source_map, &lowered.names);
         }
         self.report(Stage::Verify, StageEvent::Begin);
-        lilac_const::check_live_compile_errors(&lir, &report, &mut self.diags)?;
+        lilac_ir::check_live_compile_errors(&lir, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
@@ -825,8 +819,8 @@ mod tests {
     }
 
     /// A source that reaches the byte-buffer runtime keeps exactly the
-    /// reachable prelude functions (and no others). `@byte_buffer_ptr` cannot
-    /// be folded, so its `.lilac.` body survives DCE.
+    /// reachable prelude functions (and no others): the `@byte_buffer_ptr`
+    /// call keeps its `.lilac.` body alive.
     #[test]
     fn used_runtime_survives_dce() {
         let mut session = Session::new();
@@ -1016,13 +1010,13 @@ mod tests {
             )
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
         let names: Vec<&str> = texts.iter().map(|(stage, _)| *stage).collect();
-        assert_eq!(names, ["lower", "fold", "runtime", "final"]);
+        assert_eq!(names, ["lower", "runtime", "final"]);
         assert_ne!(
             texts[0].1, texts[1].1,
-            "const folding must change the module"
+            "runtime injection must change the module"
         );
         assert_eq!(
-            texts[3].1,
+            texts[2].1,
             module.to_text(),
             "final stage is the returned module"
         );
@@ -1134,7 +1128,6 @@ mod tests {
             Stage::Resolve,
             Stage::Check,
             Stage::Lower,
-            Stage::Fold,
             Stage::Runtime,
             Stage::Prune,
             Stage::Verify,
@@ -1146,7 +1139,7 @@ mod tests {
         }
         assert_eq!(events[1].1, StageEvent::End { count: Some(1) });
         assert_eq!(events[7].1, StageEvent::End { count: Some(1) });
-        assert_eq!(events[15].1, StageEvent::End { count: Some(1) });
+        assert_eq!(events[13].1, StageEvent::End { count: Some(1) });
     }
 
     struct TestFs {

@@ -595,7 +595,7 @@ mod tests {
         );
         assert!(result.is_ok(), "{}", session.render_diagnostics());
         assert!(dump_err.is_none(), "{dump_err:?}");
-        for stage in ["lower", "fold", "runtime", "final"] {
+        for stage in ["lower", "runtime", "final"] {
             assert!(
                 dir.join(format!("s.{stage}.lir")).exists(),
                 "missing {stage}"

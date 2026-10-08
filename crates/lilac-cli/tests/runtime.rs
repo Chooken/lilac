@@ -1,5 +1,5 @@
 //! Task 5 runtime-swap tests: the runtime is carried as ordinary LIR
-//! (`.lilac.*`) functions, injected after folding and culled by DCE, so a
+//! (`.lilac.*`) functions, injected after lowering and culled by DCE, so a
 //! program only emits the runtime it reaches.
 
 use std::process::Command;
@@ -36,7 +36,7 @@ fn no_runtime_fixture_emits_no_runtime_text() {
     assert!(!text.contains(".lilac.format_args"), "{text}");
 }
 
-/// `string.lilac` reaches `@byte_buffer_ptr` (which cannot be folded), so the
+/// `string.lilac` reaches `@byte_buffer_ptr`, so the
 /// corresponding LIR runtime function survives DCE and is printed.
 #[test]
 fn string_uses_byte_buffer_runtime() {

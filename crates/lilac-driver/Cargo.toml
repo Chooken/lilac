@@ -13,7 +13,6 @@ lilac-hir = { path = "../lilac-hir" }
 lilac-typeck = { path = "../lilac-typeck" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-lower = { path = "../lilac-lower" }
-lilac-const = { path = "../lilac-const" }
 lilac-target = { path = "../lilac-target" }
 
 [lints]

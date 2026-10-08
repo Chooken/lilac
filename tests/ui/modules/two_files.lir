@@ -3,5 +3,14 @@ target = "x86_64-unknown-none"
 function @main
 {
   $entry:
+    call @util.helper (in) (out)
+    return
+}
+function @util.helper
+{
+  $entry:
+    alloca #bit32 %x : zeroed
+    &1: #bit32 = const 0x1
+    copy &1 -> %x
     return
 }

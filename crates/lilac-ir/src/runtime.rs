@@ -1,7 +1,7 @@
 //! Builds the runtime functions as ordinary LIR.
 //!
 //! The functions are not injected here; the driver appends `build_runtime` to
-//! a module between constant folding and dead-code pruning, where DCE keeps
+//! a module between lowering and dead-code pruning, where DCE keeps
 //! only the ones a program reaches.
 //!
 //! Besides the byte-buffer and format-args helpers, the runtime holds the OS

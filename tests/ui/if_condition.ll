@@ -8,12 +8,6 @@ entry:
   %conditional = alloca i32, align 4
   store i32 0, ptr %conditional, align 4
   store i32 0, ptr %conditional, align 4
-  br label %l.2
-
-l.2:                                              ; preds = %entry
-  br label %l.3
-
-l.3:                                              ; preds = %l.2
   ret void
 }
 

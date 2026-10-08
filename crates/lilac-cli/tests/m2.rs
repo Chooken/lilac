@@ -1,5 +1,5 @@
 //! M2 UI tests: control-flow ports check clean, `.lir` snapshots
-//! byte-stable, FAILS pins hold their codes, fold fixtures silent.
+//! byte-stable, FAILS pins hold their codes, dead `@compile_error`s silent.
 
 use std::process::Command;
 

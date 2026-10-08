@@ -25,8 +25,7 @@ function @main
     copy %s -> %tmp.3
     call @.lilac.byte_buffer_ptr (in %tmp.3) (out %tmp.4)
     copy %s -> %tmp.5
-    &cf.1: #bit_native = const 0x3
-    copy &cf.1 -> %tmp.6
+    call @.lilac.byte_buffer_len (in %tmp.5) (out %tmp.6)
     call @write (in %tmp.2, %tmp.4, %tmp.6) (out %tmp.1)
     copy %tmp.1 -> %n
     return
@@ -37,6 +36,15 @@ function @.lilac.byte_buffer_ptr
 {
   $entry:
     &r: ref #bit8 = field %buffer .data  // idx 1
+    copy &r -> %out
+    return
+}
+function @.lilac.byte_buffer_len
+  in #byte_buffer %buffer
+  out #bit_native %out
+{
+  $entry:
+    &r: #bit_native = field %buffer .len  // idx 0
     copy &r -> %out
     return
 }

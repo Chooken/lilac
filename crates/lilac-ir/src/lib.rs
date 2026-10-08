@@ -390,8 +390,9 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `@compile_error` site (folding removes it; the post-DCE check
-    /// reports `E031`; reaching `verify` is an internal error).
+    /// `@compile_error` site. Lowering never emits one in the dead arm of a
+    /// constant condition; [`check_live_compile_errors`] reports every site
+    /// that survives DCE as `E031`, so reaching `verify` is an internal error.
     CompileError {
         /// Error message.
         msg: String,
@@ -911,9 +912,48 @@ pub fn size_align<S: std::hash::BuildHasher>(
     (size.next_multiple_of(align), align)
 }
 
+/// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
+/// a site is an error exactly when its function is reachable. The diagnostic
+/// labels both the message literal and the call.
+///
+/// # Errors
+///
+/// Returns [`ErrorGuaranteed`] when at least one site was reported.
+pub fn check_live_compile_errors(
+    module: &LirModule,
+    diags: &mut Diags,
+) -> Result<(), ErrorGuaranteed> {
+    let mut failed = false;
+    for inst in module
+        .funcs
+        .iter()
+        .flat_map(|func| &func.blocks)
+        .flat_map(|block| &block.insts)
+    {
+        if let LirInst::CompileError {
+            msg,
+            msg_span,
+            call_span,
+        } = inst
+        {
+            failed = true;
+            diags.emit(
+                Diagnostic::error("E031", msg.clone())
+                    .label(*msg_span, true, "message here".to_owned())
+                    .label(*call_span, false, "evaluated here".to_owned()),
+            );
+        }
+    }
+    if failed {
+        Err(ErrorGuaranteed::new())
+    } else {
+        Ok(())
+    }
+}
+
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.
-/// A `CompileError` node reaching here means folding never ran — an
-/// internal error (`bug!`), never a user diagnostic.
+/// A `CompileError` node reaching here means the live `@compile_error` check
+/// never ran — an internal error (`bug!`), never a user diagnostic.
 pub fn verify(module: &LirModule, diags: &mut Diags) -> Result<(), ErrorGuaranteed> {
     let mut verifier = Verifier {
         module,
@@ -934,7 +974,8 @@ struct Verifier<'a> {
     failed: bool,
 }
 
-/// One register definition: whether it holds a constant (folding order), and
+/// One register definition: whether it holds a constant (constant branches
+/// are an error), and
 /// its declared type (so operand widths can be checked).
 #[derive(Clone)]
 struct RegDef<'a> {
@@ -1155,7 +1196,7 @@ impl Verifier<'_> {
                 self.define_reg(regs, dst, ty, false, *span, func);
             }
             LirInst::CompileError { call_span, .. } => {
-                lilac_error::bug!(*call_span, "unfolded `@compile_error` reached verify");
+                lilac_error::bug!(*call_span, "`@compile_error` reached verify");
             }
             LirInst::Zero { place, span } => {
                 if !places.contains_key(place.as_str()) {
@@ -1645,7 +1686,7 @@ impl Verifier<'_> {
                     }
                     Some(def) if def.is_const => {
                         self.error(
-                            format!("branch on constant `&{cond}`; fold constant branches first"),
+                            format!("branch on constant `&{cond}`; lowering decides constant conditions"),
                             *span,
                         );
                     }
@@ -1916,7 +1957,8 @@ mod tests {
 
     #[test]
     fn verify_rejects_const_branchif() {
-        // `branch.if` on a constant condition must fold first (Task 9).
+        // Lowering decides constant conditions, so `branch.if` on a constant
+        // is invalid IR.
         let mut module = canonical_module();
         module.funcs[0].blocks[0].insts[1] = LirInst::Const {
             dst: "2".to_owned(),

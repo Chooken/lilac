@@ -12,7 +12,7 @@ fn lower_src(src: &str) -> (String, Diags) {
     let mut types = Types::new();
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, 64);
     assert!(!diags.has_errors(), "{diags:?}");
-    let mut lir = lower(
+    let lir = lower(
         &checked.hir,
         &res,
         &types,
@@ -22,7 +22,6 @@ fn lower_src(src: &str) -> (String, Diags) {
     )
     .module;
     let text = lir.to_text();
-    let _ = lilac_const::fold(&mut lir);
     let mut verify_diags = Diags::new();
     assert!(
         lilac_ir::verify(&lir, &mut verify_diags).is_ok() || text.contains("@compile_error"),
@@ -34,7 +33,7 @@ fn lower_src(src: &str) -> (String, Diags) {
 #[test]
 fn if_produces_branches() {
     let (text, _) = lower_src(
-        "main: function () nothing {\n    conditional: @bit32 = 0x0\n    if 0x0 {\n        conditional = 0x1\n    } else {\n        conditional = 0x2\n    }\n}\n",
+        "main: function () nothing {\n    conditional: @bit32 = 0x0\n    flag: @bit8 = 0x0\n    if flag {\n        conditional = 0x1\n    } else {\n        conditional = 0x2\n    }\n}\n",
     );
     assert!(text.contains("branch.if"), "{text}");
 }
@@ -165,4 +164,123 @@ fn arguments_are_passed_as_fresh_copies() {
         "f: function (x: @bit32) nothing {\n    x = 0x5\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    f(a)\n}\n",
     );
     assert!(!text.contains("call @f (in %a)"), "{text}");
+}
+
+/// Lowers `prelude` plus a `main` running `if <cond> { live() } else {
+/// dead() }` (or the reverse when `taken` is false) and asserts which arm
+/// reached LIR. `None` means the condition is not constant: both arms and the
+/// branch stay.
+fn assert_arm(prelude: &str, cond: &str, taken: Option<bool>) {
+    let src = format!(
+        "{prelude}\nthen_arm: function () nothing {{\n}}\nelse_arm: function () nothing {{\n}}\nmain: function () nothing {{\n    if {cond} {{\n        then_arm()\n    }} else {{\n        else_arm()\n    }}\n}}\n"
+    );
+    let (text, _) = lower_src(&src);
+    let main = text.split("function @main").nth(1).expect("main");
+    let has = |name: &str| main.contains(&format!("call @{name}"));
+    if let Some(taken) = taken {
+        assert!(!main.contains("branch.if"), "{cond}:\n{main}");
+        assert_eq!(has("then_arm"), taken, "{cond}:\n{main}");
+        assert_eq!(has("else_arm"), !taken, "{cond}:\n{main}");
+    } else {
+        assert!(main.contains("branch.if"), "{cond}:\n{main}");
+        assert!(has("then_arm") && has("else_arm"), "{cond}:\n{main}");
+    }
+}
+
+const BOOL: &str = "Bool: object {\n    data: @bit8\n    from_int8: function (from: @bit8) Bool => Bool { data = from }\n    @conversion: function (from: Bool) to: @bit8 => from.data\n}\ntrue: Bool => Bool.from_int8(0x1)\nfalse: Bool => Bool.from_int8(0x0)\n";
+
+#[test]
+fn constant_literals_and_arithmetic() {
+    assert_arm("", "0x0", Some(false));
+    assert_arm("", "0x2", Some(true));
+    assert_arm("", "@i_less_than_32(0x1, 0x2)", Some(true));
+    assert_arm("", "@i_less_than_8(0xff, 0x0)", Some(true));
+    assert_arm("", "@i_less_than_u_8(0xff, 0x0)", Some(false));
+    assert_arm("", "@i_add_32(0x1, 0x2) == 0x3", Some(true));
+    assert_arm("", "@i_add_8(0xff, 0x2) == 0x1", Some(true));
+    assert_arm("", "@size_of(@bit32) == 0x4", Some(true));
+}
+
+#[test]
+fn division_by_zero_is_not_constant() {
+    assert_arm("", "@i_div_32(0x1, 0x0) == 0x0", None);
+}
+
+#[test]
+fn inline_constants_fold_through_inline_calls() {
+    assert_arm(BOOL, "true", Some(true));
+    assert_arm(BOOL, "false", Some(false));
+    assert_arm(BOOL, "Bool.from_int8(0x1)", Some(true));
+}
+
+#[test]
+fn nested_inline_calls_bind_parameters() {
+    let prelude = "add: function (a: @bit32, b: @bit32) r: @bit32 => @i_add_32(a, b)\ntwice: function (v: @bit32) r: @bit32 => add(v, v)\nlimit: @bit32 => twice(0x3)\n";
+    assert_arm(prelude, "limit == 0x6", Some(true));
+    assert_arm(prelude, "limit == 0x7", Some(false));
+}
+
+#[test]
+fn locals_are_never_constant() {
+    let (text, _) = lower_src(&format!(
+        "{BOOL}\nboom: function () nothing {{\n}}\nmain: function () nothing {{\n    t: Bool = false\n    if t {{\n        boom()\n    }}\n}}\n"
+    ));
+    assert!(text.contains("branch.if"), "{text}");
+    assert!(text.contains("call @boom"), "{text}");
+}
+
+#[test]
+fn recursive_and_block_bodied_calls_are_not_constant() {
+    let recursive = "spin: function (v: @bit8) r: @bit8 => spin(v)\n";
+    assert_arm(recursive, "spin(0x1)", None);
+    let block = "one: function () r: @bit8 {\n    r = 0x1\n}\n";
+    assert_arm(block, "one()", None);
+}
+
+#[test]
+fn hooked_types_are_not_constant() {
+    let drop = "Flag: object {\n    data: @bit8\n    @on_drop: function (self) nothing {\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
+    assert_arm(drop, "on", None);
+    let copy = "Flag: object {\n    data: @bit8\n    @on_copy: function (from: ref Flag) to: Flag {\n        to = Flag { data = from.data }\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
+    assert_arm(copy, "on", None);
+}
+
+#[test]
+fn value_if_and_logic_skip_the_dead_side() {
+    let prelude = "one: function () r: @bit8 {\n    r = 0x1\n}\n";
+    // The unevaluated side is not constant, yet the whole is.
+    assert_arm(prelude, "if 0x1 then 0x0 else one()", Some(false));
+    assert_arm(prelude, "0x0 and one()", Some(false));
+    assert_arm(prelude, "0x1 or one()", Some(true));
+    assert_arm(prelude, "0x1 and 0x0", Some(false));
+    assert_arm(prelude, "0x1 and one()", None);
+}
+
+#[test]
+fn value_match_in_an_inline_body() {
+    let prelude = "Opt: enum {\n    None\n    Some: @bit8\n}\nget: function (o: Opt) r: @bit8 => match o {\n    .Some -> v: @bit8 => v\n} else 0x0\nkind: function (b: @bit8) r: @bit8 => match b {\n    0x1 => 0x0\n} else 0x1\none: function () r: @bit8 {\n    r = 0x1\n}\npick: function (b: @bit8) r: @bit8 => match b {\n    0x0 => one()\n} else 0x1\n";
+    assert_arm(prelude, "get(Opt.Some(0x1))", Some(true));
+    assert_arm(prelude, "get(Opt.None)", Some(false));
+    assert_arm(prelude, "kind(0x7)", Some(true));
+    assert_arm(prelude, "kind(0x1)", Some(false));
+    assert_arm(prelude, "pick(0x5)", Some(true));
+}
+
+#[test]
+fn constant_match_statement_lowers_one_arm() {
+    let (text, _) = lower_src(
+        "Opt: enum {\n    None\n    Some: @bit8\n}\nboom: function () nothing {\n}\nkeep: function (v: @bit8) nothing {\n}\nmain: function () nothing {\n    match Opt.Some(0x4) {\n        .None => boom()\n        .Some -> v: @bit8 => keep(v)\n    }\n}\n",
+    );
+    let main = text.split("function @main").nth(1).expect("main");
+    assert!(!main.contains("call @boom"), "{main}");
+    assert!(main.contains("call @keep"), "{main}");
+    assert!(!main.contains("branch.if"), "{main}");
+}
+
+#[test]
+fn constant_condition_drops_dead_compile_error() {
+    let (text, _) = lower_src(
+        "main: function () nothing {\n    if 0x0 {\n        @compile_error(\"dead\")\n    }\n}\n",
+    );
+    assert!(!text.contains("@compile_error"), "{text}");
 }

@@ -1,8 +1,7 @@
-//! Post-fold reachability sweep: drops functions with no path from `main`
-//! and data consts no surviving instruction names.
+//! Reachability sweep: drops functions with no path from `main` and data
+//! consts no surviving instruction names.
 //!
-//! Folding removes dead *blocks* and dead `@compile_error` sites, but the
-//! frontend lowers every declaration, so a function that nothing calls and a
+//! The frontend lowers every declaration, so a function that nothing calls and a
 //! `!data` const nothing references still survive into `verify`. This pass is
 //! conservative and infallible: with no `main` it leaves the module untouched.
 

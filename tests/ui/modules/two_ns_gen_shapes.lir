@@ -26,8 +26,7 @@ function @b_use
     copy &3 -> %y
     &4: #bit64 = const 0x0
     copy &4 -> %tmp.3
-    &cf.1: #bit32 = const 0x2
-    copy &cf.1 -> %tmp.2
+    call @b.tag.1..bit64 (in %tmp.3) (out %tmp.2)
     copy %tmp.2 -> %m
     return
 }
@@ -48,9 +47,28 @@ function @main
     copy &2 -> %y
     &3: #bit32 = const 0x0
     copy &3 -> %tmp.3
-    &cf.2: #bit32 = const 0x1
-    copy &cf.2 -> %tmp.2
+    call @a.tag.1..bit32 (in %tmp.3) (out %tmp.2)
     copy %tmp.2 -> %n
     call @b_use (in) (out)
+    return
+}
+function @b.tag.1..bit64
+  in #bit64 %x
+  out #bit32 %result
+{
+  $entry:
+    zero %result
+    &1: #bit32 = const 0x2
+    copy &1 -> %result
+    return
+}
+function @a.tag.1..bit32
+  in #bit32 %x
+  out #bit32 %result
+{
+  $entry:
+    zero %result
+    &1: #bit32 = const 0x1
+    copy &1 -> %result
     return
 }

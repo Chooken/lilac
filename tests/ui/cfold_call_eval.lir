@@ -1,6 +1,64 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
 !c0: str = "AB"
+function @parse
+  in #byte_buffer %buf
+  out #bit_native %result
+{
+  $entry:
+    alloca #bit_native %i : zeroed
+    alloca #bit_native %acc : zeroed
+    alloca #bit_native %len : zeroed
+    alloca #byte_buffer %tmp.1 : zeroed
+    alloca #bit_native %tmp.2 : zeroed
+    alloca ref #bit8 %ptr : zeroed
+    alloca #byte_buffer %tmp.3 : zeroed
+    alloca ref #bit8 %tmp.4 : zeroed
+    alloca #bit_native %c : zeroed
+    alloca ref #bit8 %tmp.5 : zeroed
+    alloca #bit_native %tmp.6 : zeroed
+    alloca #bit8 %tmp.7 : zeroed
+    zero %result
+    &1: #bit_native = const 0x0
+    copy &1 -> %i
+    &2: #bit_native = const 0x0
+    copy &2 -> %acc
+    copy %buf -> %tmp.1
+    call @.lilac.byte_buffer_len (in %tmp.1) (out %tmp.2)
+    copy %tmp.2 -> %len
+    copy %buf -> %tmp.3
+    call @.lilac.byte_buffer_ptr (in %tmp.3) (out %tmp.4)
+    copy %tmp.4 -> %ptr
+    branch $l.1
+  $l.1:
+    &3: #bit_native = copy %i
+    &4: #bit_native = copy %len
+    &5: #bit8 = i.cmp.lt &3, &4
+    branch.if &5, $l.3, $l.4
+  $l.3:
+    copy %ptr -> %tmp.5
+    copy %i -> %tmp.6
+    call @.lilac.load_u8 (in %tmp.5, %tmp.6) (out %tmp.7)
+    &6: #bit8 = copy %tmp.7
+    &7: #bit_native = extend.zero &6
+    copy &7 -> %c
+    &8: #bit_native = copy %acc
+    &9: #bit_native = copy %c
+    &10: #bit_native = i.add &8, &9
+    copy &10 -> %acc
+    &11: #bit_native = const 0x1
+    &12: #bit_native = copy %i
+    &13: #bit_native = i.add &12, &11
+    copy &13 -> %i
+    branch $l.5
+  $l.4:
+    branch $l.2
+  $l.5:
+    branch $l.1
+  $l.2:
+    copy %acc -> %result
+    return
+}
 function @main
 {
   $entry:
@@ -9,8 +67,37 @@ function @main
     alloca #byte_buffer %tmp.2 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %tmp.2
-    &cf.1: #bit_native = const 0x83
-    copy &cf.1 -> %tmp.1
+    call @parse (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %total
+    return
+}
+function @.lilac.byte_buffer_ptr
+  in #byte_buffer %buffer
+  out ref #bit8 %out
+{
+  $entry:
+    &r: ref #bit8 = field %buffer .data  // idx 1
+    copy &r -> %out
+    return
+}
+function @.lilac.byte_buffer_len
+  in #byte_buffer %buffer
+  out #bit_native %out
+{
+  $entry:
+    &r: #bit_native = field %buffer .len  // idx 0
+    copy &r -> %out
+    return
+}
+function @.lilac.load_u8
+  in ref #bit8 %base
+  in #bit_native %index
+  out #bit8 %out
+{
+  $entry:
+    alloca ref #bit8 %slot : zeroed
+    call @ptr_add (in %base, %index) (out %slot)
+    &r: #bit8 = load %slot
+    copy &r -> %out
     return
 }

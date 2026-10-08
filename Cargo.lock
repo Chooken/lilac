@@ -257,19 +257,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "lilac-const"
-version = "0.2.0"
-dependencies = [
- "lilac-error",
- "lilac-ir",
- "lilac-span",
-]
-
-[[package]]
 name = "lilac-driver"
 version = "0.2.0"
 dependencies = [
- "lilac-const",
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
@@ -318,7 +308,6 @@ dependencies = [
 name = "lilac-lower"
 version = "0.2.0"
 dependencies = [
- "lilac-const",
  "lilac-error",
  "lilac-hir",
  "lilac-ir",

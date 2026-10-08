@@ -32,7 +32,7 @@ entry:
   call void @.lilac.byte_buffer_ptr(ptr %tmp.3, ptr %tmp.4)
   %1 = load { i64, ptr }, ptr %s, align 8
   store { i64, ptr } %1, ptr %tmp.5, align 8
-  store i64 2, ptr %tmp.6, align 8
+  call void @.lilac.byte_buffer_len(ptr %tmp.5, ptr %tmp.6)
   %2 = load i32, ptr %tmp.2, align 4
   %3 = load ptr, ptr %tmp.4, align 8
   %4 = load i64, ptr %tmp.6, align 8
@@ -48,6 +48,14 @@ entry:
   %0 = getelementptr inbounds { i64, ptr }, ptr %in0, i32 0, i32 1
   %1 = load ptr, ptr %0, align 8
   store ptr %1, ptr %out0, align 8
+  ret void
+}
+
+define void @.lilac.byte_buffer_len(ptr %in0, ptr %out0) {
+entry:
+  %0 = getelementptr inbounds { i64, ptr }, ptr %in0, i32 0, i32 0
+  %1 = load i64, ptr %0, align 8
+  store i64 %1, ptr %out0, align 8
   ret void
 }
 

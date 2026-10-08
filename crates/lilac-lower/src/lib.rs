@@ -18,6 +18,8 @@
 //! modify its parameters), and every function zeroes its return slots on
 //! entry, so a slot starts zeroed on each call.
 
+mod constant;
+
 use std::collections::{HashMap, HashSet};
 
 use lilac_error::{Diagnostic, Diags};
@@ -68,6 +70,11 @@ pub fn lower(
         copy_glue: HashMap::new(),
         needs_drop: HashMap::new(),
         needs_copy: HashMap::new(),
+        funcs: hir
+            .funcs
+            .iter()
+            .map(|func| (func.key.clone(), func))
+            .collect(),
     };
     for func in &hir.funcs {
         let symbol = lower.symbol_of(func);
@@ -129,6 +136,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         copy_glue: HashMap::new(),
         needs_drop: HashMap::new(),
         needs_copy: HashMap::new(),
+        funcs: HashMap::new(),
     };
     for func in hir.funcs.iter().filter(|func| func.body.is_none()) {
         let name = &res.def(func.key.def).name;
@@ -212,6 +220,8 @@ struct Lower<'a> {
     copy_glue: HashMap<TypeId, String>,
     needs_drop: HashMap<TypeId, bool>,
     needs_copy: HashMap<TypeId, bool>,
+    /// Every function instance by key (constant `=>` calls).
+    funcs: HashMap<FuncKey, &'a HirFunc>,
 }
 
 /// A place: a named LIR place, or a `ref` place holding the address of one.
@@ -884,21 +894,12 @@ impl Lower<'_> {
                 fs.branch(&exit, *span);
             }
             HirStmt::If { cond, then, els } => {
-                let cond = self.value_reg(fs, func, cond);
-                let (then_label, els_label, join) = (fs.label(), fs.label(), fs.label());
-                fs.end(LirTerm::BranchIf {
-                    cond,
-                    then: then_label.clone(),
-                    els: Some(els_label.clone()),
-                    span: then.span,
-                });
-                fs.at(then_label);
-                self.lower_block(fs, func, then);
-                fs.branch(&join, then.span);
-                fs.at(els_label);
-                self.lower_block(fs, func, els);
-                fs.branch(&join, els.span);
-                fs.at(join);
+                // A constant condition lowers only its live arm.
+                if let Some(taken) = self.constant(cond).and_then(|value| value.truthy()) {
+                    self.lower_block(fs, func, if taken { then } else { els });
+                } else {
+                    self.lower_if(fs, func, cond, then, els);
+                }
             }
             HirStmt::Loop(body) => {
                 let (head, exit) = (fs.label(), fs.label());
@@ -928,6 +929,31 @@ impl Lower<'_> {
             }
         }
         fs.scopes[scope].temps.truncate(mark);
+    }
+
+    fn lower_if(
+        &mut self,
+        fs: &mut Fs,
+        func: &HirFunc,
+        cond: &HirExpr,
+        then: &HirBlock,
+        els: &HirBlock,
+    ) {
+        let cond = self.value_reg(fs, func, cond);
+        let (then_label, els_label, join) = (fs.label(), fs.label(), fs.label());
+        fs.end(LirTerm::BranchIf {
+            cond,
+            then: then_label.clone(),
+            els: Some(els_label.clone()),
+            span: then.span,
+        });
+        fs.at(then_label);
+        self.lower_block(fs, func, then);
+        fs.branch(&join, then.span);
+        fs.at(els_label);
+        self.lower_block(fs, func, els);
+        fs.branch(&join, els.span);
+        fs.at(join);
     }
 
     fn lower_assign(&mut self, fs: &mut Fs, func: &HirFunc, place: &HirExpr, value: &HirExpr) {
@@ -974,6 +1000,29 @@ impl Lower<'_> {
         arms: &[HirArm],
         els: &HirBlock,
     ) {
+        if let Some((choice, _)) =
+            self.constant_choice(scrutinee, arms.iter().map(|arm| &arm.pattern))
+        {
+            // A constant scrutinee lowers only the chosen arm.
+            let Some(arm) = choice.map(|index| &arms[index]) else {
+                self.lower_block(fs, func, els);
+                return;
+            };
+            fs.scopes.push(Scope::default());
+            if let Some(capture) = arm.capture {
+                let (subject, _) = self.subject(fs, func, scrutinee);
+                self.bind_capture(fs, func, &subject, scrutinee.ty, &arm.pattern, capture);
+            }
+            for stmt in &arm.body.stmts {
+                self.lower_stmt(fs, func, stmt);
+            }
+            if fs.open {
+                let index = fs.scopes.len() - 1;
+                self.drop_scope(fs, index);
+            }
+            fs.scopes.pop();
+            return;
+        }
         let (subject, is_enum) = self.subject(fs, func, scrutinee);
         let join = fs.label();
         let els_label = fs.label();
@@ -1722,6 +1771,11 @@ impl Lower<'_> {
             }
             HirExprKind::If { cond, then, els } => {
                 let result = self.tmp(fs, expr.ty, span);
+                if let Some(taken) = self.constant(cond).and_then(|value| value.truthy()) {
+                    self.region(fs, func, if taken { then } else { els }, &result);
+                    self.own_temp(fs, &result, expr.ty);
+                    return LirOperand::Place(result);
+                }
                 let cond = self.value_reg(fs, func, cond);
                 let (then_label, els_label, join) = (fs.label(), fs.label(), fs.label());
                 fs.end(LirTerm::BranchIf {
@@ -1746,6 +1800,25 @@ impl Lower<'_> {
             } => self.lower_match_value(fs, func, expr, scrutinee, arms, els),
             HirExprKind::Logic { and, lhs, rhs } => {
                 let result = self.tmp(fs, expr.ty, span);
+                if let Some(left) = self.constant(lhs).and_then(|value| value.truthy()) {
+                    if left == *and {
+                        self.region(fs, func, rhs, &result);
+                    } else {
+                        let reg = fs.reg();
+                        fs.emit(LirInst::Const {
+                            dst: reg.clone(),
+                            lit: if *and { "0x0" } else { "0x1" }.to_owned(),
+                            ty: LirTy::Bit(8),
+                            span,
+                        });
+                        fs.emit(LirInst::CopyPlace {
+                            src: LirOperand::Reg(reg),
+                            dst: result.clone(),
+                            span,
+                        });
+                    }
+                    return LirOperand::Place(result);
+                }
                 let left = self.value_reg(fs, func, lhs);
                 let (rhs_label, short_label, join) = (fs.label(), fs.label(), fs.label());
                 let (then, els) = if *and {
@@ -1857,6 +1930,32 @@ impl Lower<'_> {
     ) -> LirOperand {
         let span = expr.span;
         let result = self.tmp(fs, expr.ty, span);
+        if let Some((choice, _)) =
+            self.constant_choice(scrutinee, arms.iter().map(|arm| &arm.pattern))
+        {
+            // A constant scrutinee lowers only the chosen arm.
+            match choice.map(|index| &arms[index]) {
+                Some(arm) => {
+                    fs.scopes.push(Scope::default());
+                    if let Some(capture) = arm.capture {
+                        let (subject, _) = self.subject(fs, func, scrutinee);
+                        self.bind_capture(fs, func, &subject, scrutinee.ty, &arm.pattern, capture);
+                    }
+                    let operand = self.read(fs, func, &arm.value);
+                    fs.emit(LirInst::CopyPlace {
+                        src: operand,
+                        dst: result.clone(),
+                        span,
+                    });
+                    let scope = fs.scopes.len() - 1;
+                    self.drop_scope(fs, scope);
+                    fs.scopes.pop();
+                }
+                None => self.region(fs, func, els, &result),
+            }
+            self.own_temp(fs, &result, expr.ty);
+            return LirOperand::Place(result);
+        }
         let (subject, is_enum) = self.subject(fs, func, scrutinee);
         let join = fs.label();
         let els_label = fs.label();
@@ -2054,35 +2153,6 @@ impl Lower<'_> {
         span: Span,
     ) -> LirOperand {
         let lir = self.lir_ty(ty);
-        let arith = |op: NumOp, float: bool| -> Option<ArithOp> {
-            Some(match (op, float) {
-                (NumOp::Add, false) => ArithOp::IAdd,
-                (NumOp::Sub, false) => ArithOp::ISub,
-                (NumOp::Mul, false) => ArithOp::IMul,
-                (NumOp::Div, false) => ArithOp::IDiv,
-                (NumOp::DivU, false) => ArithOp::IDivU,
-                (NumOp::Mod, false) => ArithOp::IMod,
-                (NumOp::ModU, false) => ArithOp::IModU,
-                (NumOp::Lt, false) => ArithOp::ILt,
-                (NumOp::Gt, false) => ArithOp::IGt,
-                (NumOp::Le, false) => ArithOp::ILe,
-                (NumOp::Ge, false) => ArithOp::IGe,
-                (NumOp::LtU, false) => ArithOp::ILtU,
-                (NumOp::GtU, false) => ArithOp::IGtU,
-                (NumOp::LeU, false) => ArithOp::ILeU,
-                (NumOp::GeU, false) => ArithOp::IGeU,
-                (NumOp::Add, true) => ArithOp::FAdd,
-                (NumOp::Sub, true) => ArithOp::FSub,
-                (NumOp::Mul, true) => ArithOp::FMul,
-                (NumOp::Div, true) => ArithOp::FDiv,
-                (NumOp::Mod, true) => ArithOp::FMod,
-                (NumOp::Lt, true) => ArithOp::FLt,
-                (NumOp::Gt, true) => ArithOp::FGt,
-                (NumOp::Le, true) => ArithOp::FLe,
-                (NumOp::Ge, true) => ArithOp::FGe,
-                _ => return None,
-            })
-        };
         match intrinsic {
             Intrinsic::Int(NumOp::Negate, _) | Intrinsic::Float(NumOp::Negate, _) => {
                 let float = matches!(intrinsic, Intrinsic::Float(..));
@@ -2107,7 +2177,7 @@ impl Lower<'_> {
             }
             Intrinsic::Int(op, _) | Intrinsic::Float(op, _) => {
                 let float = matches!(intrinsic, Intrinsic::Float(..));
-                let Some(op) = arith(op, float) else {
+                let Some(op) = constant::arith_op(op, float) else {
                     lilac_error::bug!(span, "intrinsic without an IR operation");
                 };
                 let regs = self.regs(fs, func, args);

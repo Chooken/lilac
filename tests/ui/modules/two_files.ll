@@ -5,6 +5,15 @@ target triple = "x86_64-unknown-none"
 
 define void @.lilac.main() {
 entry:
+  call void @util.helper()
+  ret void
+}
+
+define void @util.helper() {
+entry:
+  %x = alloca i32, align 4
+  store i32 0, ptr %x, align 4
+  store i32 1, ptr %x, align 4
   ret void
 }
 

@@ -3,15 +3,5 @@ target = "x86_64-unknown-none"
 function @main
 {
   $entry:
-    &1: #bit8 = const 0x0
-    branch $l.2
-  $l.2:
-    branch $l.3
-  $l.3:
-    &2: #bit8 = const 0x1
-    branch $l.4
-  $l.4:
-    branch $l.6
-  $l.6:
     return
 }

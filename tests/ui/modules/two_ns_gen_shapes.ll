@@ -31,7 +31,7 @@ entry:
   %4 = load i64, ptr %3, align 8
   store i64 %4, ptr %y, align 8
   store i64 0, ptr %tmp.3, align 8
-  store i32 2, ptr %tmp.2, align 4
+  call void @b.tag.1..bit64(ptr %tmp.3, ptr %tmp.2)
   %5 = load i32, ptr %tmp.2, align 4
   store i32 %5, ptr %m, align 4
   ret void
@@ -60,10 +60,24 @@ entry:
   %3 = load i32, ptr %2, align 4
   store i32 %3, ptr %y, align 4
   store i32 0, ptr %tmp.3, align 4
-  store i32 1, ptr %tmp.2, align 4
+  call void @a.tag.1..bit32(ptr %tmp.3, ptr %tmp.2)
   %4 = load i32, ptr %tmp.2, align 4
   store i32 %4, ptr %n, align 4
   call void @b_use()
+  ret void
+}
+
+define void @b.tag.1..bit64(ptr %in0, ptr %out0) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
+  store i32 2, ptr %out0, align 4
+  ret void
+}
+
+define void @a.tag.1..bit32(ptr %in0, ptr %out0) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
+  store i32 1, ptr %out0, align 4
   ret void
 }
 

@@ -438,8 +438,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// Lowers one instruction. `CompileError`/`FoldIntrinsic` are post-fold
-    /// markers; a survivor is an ICE.
+    /// Lowers one instruction. A `CompileError` marker is reported as `E031`
+    /// before verification; a survivor is an ICE.
     fn lower_inst(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
         match inst {
             LirInst::Alloca { ty, place, .. } => {
@@ -538,7 +538,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             }
             LirInst::CompileError { .. } => bug!(
                 Span::dummy(),
-                "instruction `{inst:?}` is a post-fold marker and must not reach codegen"
+                "instruction `{inst:?}` is a compile-time marker and must not reach codegen"
             ),
         }
     }

@@ -67,7 +67,7 @@ fn extern_arity_mismatch_is_diagnosed() {
 }
 
 #[test]
-fn dce_removes_dead_after_fold() {
+fn dce_removes_uncalled_functions() {
     // An uncalled helper has no path from `main` and is swept.
     let source = "dead: function () @bit32 => 1\n\
                   main: function () nothing {\n\

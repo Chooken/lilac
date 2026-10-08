@@ -12,14 +12,27 @@ entry:
   %tmp.2 = alloca i32, align 4
   store i32 0, ptr %tmp.2, align 4
   store i32 1, ptr %tmp.2, align 4
-  store i32 1, ptr %tmp.1, align 4
+  call void @gen_function.1..bit32(ptr %tmp.2, ptr %tmp.1)
   %0 = load i32, ptr %tmp.1, align 4
   store i32 %0, ptr %result, align 4
   ret void
 }
+
+define void @gen_function.1..bit32(ptr %in0, ptr %out0) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
+  %0 = load i32, ptr %in0, align 4
+  store i32 %0, ptr %out0, align 4
+  ret void
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
 
 define i32 @main() {
 entry:
   call void @.lilac.main()
   ret i32 0
 }
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

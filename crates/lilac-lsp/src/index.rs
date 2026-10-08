@@ -180,7 +180,7 @@ mod tests {
             stages,
         );
         let names: Vec<&str> = retained.stages.modules.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, vec!["lower", "fold", "runtime", "final"]);
+        assert_eq!(names, vec!["lower", "runtime", "final"]);
     }
 
     #[test]

@@ -6,7 +6,7 @@ function @main
     alloca #bit32 %addition : zeroed
     &1: #bit32 = const 0x1
     &2: #bit32 = const 0x2
-    &3: #bit32 = const 0x3
+    &3: #bit32 = i.add &1, &2
     copy &3 -> %addition
     return
 }

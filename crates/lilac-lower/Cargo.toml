@@ -14,7 +14,6 @@ lilac-ty = { path = "../lilac-ty" }
 [dev-dependencies]
 lilac-module = { path = "../lilac-module" }
 lilac-typeck = { path = "../lilac-typeck" }
-lilac-const = { path = "../lilac-const" }
 
 [lints]
 workspace = true

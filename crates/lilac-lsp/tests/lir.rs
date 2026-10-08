@@ -204,9 +204,7 @@ fn lir_request_returns_the_final_module() {
         "dummy (compiler-generated runtime) spans must be omitted"
     );
 
-    // The final module folds `@i_add_native(0x1, 0x2)` into a constant, so the live
-    // `i.add` instruction only survives in the `lower` stage. Bind that
-    // instruction's physical line to the exact byte range of its source
+    // Bind the `lower` stage's `i.add` instruction's physical line to the exact byte range of its source
     // expression: an off-by-one line map or a swapped span field would
     // otherwise pass the suite unnoticed.
     let expr = "@i_add_native(0x1, 0x2)";

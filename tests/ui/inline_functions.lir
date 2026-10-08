@@ -1,5 +1,17 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
+inline function @addOne
+  in #bit32 %value
+  out #bit32 %out.1
+{
+  $entry:
+    zero %out.1
+    &1: #bit32 = const 0x1
+    &2: #bit32 = copy %value
+    &3: #bit32 = i.add &2, &1
+    copy &3 -> %out.1
+    return
+}
 function @main
 {
   $entry:
@@ -8,8 +20,7 @@ function @main
     alloca #bit32 %tmp.2 : zeroed
     &1: #bit32 = const 0x1
     copy &1 -> %tmp.2
-    &cf.1: #bit32 = const 0x2
-    copy &cf.1 -> %tmp.1
+    call @addOne (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %variable
     return
 }

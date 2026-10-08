@@ -5,9 +5,19 @@ function @main
   $entry:
     alloca #bit32 %condition : zeroed
     alloca #bit32 %result : zeroed
-    &cf.1: #bit32 = const 0x1
-    copy &cf.1 -> %condition
-    &cf.2: #bit32 = const 0x2
-    copy &cf.2 -> %result
+    call @get_multi (in) (out %condition, %result)
+    return
+}
+function @get_multi
+  out #bit32 %condition
+  out #bit32 %result
+{
+  $entry:
+    zero %condition
+    zero %result
+    &1: #bit32 = const 0x1
+    copy &1 -> %condition
+    &2: #bit32 = const 0x2
+    copy &2 -> %result
     return
 }
