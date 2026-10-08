@@ -11,6 +11,11 @@
 //! - `// pending: <reason>` — a known bug: skipped by `run_programs` and
 //!   exercised by the ignored `run_pending_programs` instead. Remove the line
 //!   when the fix lands.
+//! - `// lib: <Name>=<dir>` — mounts a library (`--lib`); `<dir>` is relative
+//!   to the repository root (repeatable).
+//!
+//! A program is a single `*.lilac` file or a folder project, whose header is
+//! read from its `main.lilac`.
 //!
 //! Programs print with `extern putchar` and set the exit code with
 //! `extern exit`.
@@ -51,6 +56,7 @@ struct Expect {
     exit: i32,
     error: Option<String>,
     pending: Option<String>,
+    libs: Vec<String>,
 }
 
 fn parse_header(text: &str) -> Expect {
@@ -70,6 +76,12 @@ fn parse_header(text: &str) -> Expect {
             expect.error = Some(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("pending:") {
             expect.pending = Some(rest.trim().to_owned());
+        } else if let Some(rest) = comment.strip_prefix("lib:") {
+            let (name, dir) = rest.trim().split_once('=').expect("lib: is Name=dir");
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(dir);
+            expect.libs.push(format!("--lib={name}={}", dir.display()));
         }
     }
     expect
@@ -80,7 +92,9 @@ fn programs() -> Vec<PathBuf> {
         .expect("reads tests/run")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "lilac"))
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "lilac") || path.join("main.lilac").is_file()
+        })
         .collect();
     sources.sort();
     sources
@@ -92,6 +106,7 @@ fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Resu
     if let Some(code) = &expect.error {
         let out = lilac()
             .arg("check")
+            .args(&expect.libs)
             .arg(source)
             .output()
             .expect("runs lilac");
@@ -107,6 +122,7 @@ fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Resu
 
     let out = lilac()
         .arg("emit-llvm")
+        .args(&expect.libs)
         .arg(source)
         .output()
         .expect("runs lilac");
@@ -168,7 +184,12 @@ fn run_all(pending: bool) {
     let mut failures = Vec::new();
     let mut ran = 0;
     for source in programs() {
-        let text = std::fs::read_to_string(&source).expect("reads program");
+        let header = if source.is_dir() {
+            source.join("main.lilac")
+        } else {
+            source.clone()
+        };
+        let text = std::fs::read_to_string(&header).expect("reads program");
         let expect = parse_header(&text);
         if expect.pending.is_some() != pending {
             continue;

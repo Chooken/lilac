@@ -43,7 +43,7 @@ copysignf: extern function(x: Float32, y: Float32) result: Float32
 
 ldexpf: extern function(x: Float32, exp: CInt) result: Float32
 frexpf: extern function(x: Float32, exp: ref CInt) result: Float32
-modff: extern function(x: Float32, iptr: ref CInt) result: Float32
+modff: extern function(x: Float32, iptr: ref Float32) result: Float32
 
 erff: extern function(in: Float32) result: Float32
 erfcf: extern function(in: Float32) result: Float32

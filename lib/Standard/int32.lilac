@@ -12,8 +12,8 @@ Int32: object {
 
     @less_than: function (lhs: Int32, rhs: Int32) Bool => @i_less_than_32(lhs.data, rhs.data)
     @greater_than: function (lhs: Int32, rhs: Int32) Bool =>  @i_greater_than_32(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_less_than_32(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => (lhs == rhs) or @i_greater_than_32(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => @i_less_than_or_equal_32(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int32, rhs: Int32) Bool => @i_greater_than_or_equal_32(lhs.data, rhs.data)
 
     @negate: function (value: Int32) Int32 => @i_negate_32(value.data)
 

@@ -4,6 +4,10 @@ Const[T]: object {
         value: T
     }
 
+    create: function(value: T) constant: Const[T] {
+        constant = Const[T] { value = value }
+    }
+
     get: function(self) value: T {
         value = self.value
     }

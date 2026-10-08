@@ -1,0 +1,19 @@
+// expect-exit: 7
+// A `ref` enum payload is read back as the pointer it stores, not the
+// address of the payload slot.
+
+exit: extern function (code: @bit32) nothing
+
+Maybe[T]: enum {
+    Some: T
+    None
+}
+
+main: function () nothing {
+    x: @bit32 = 0x7
+    m: Maybe[ref @bit32] = .Some(ref x)
+    match m {
+        .Some -> p: ref @bit32 => exit(p)
+    }
+    exit(0x0)
+}

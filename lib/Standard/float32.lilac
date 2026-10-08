@@ -12,8 +12,8 @@ Float32: object {
 
     @less_than: function (lhs: Float32, rhs: Float32) Bool => @f_less_than_32(lhs.data, rhs.data)
     @greater_than: function (lhs: Float32, rhs: Float32) Bool =>  @f_greater_than_32(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Float32, rhs: Float32) Bool => (lhs == rhs) or @f_less_than_32(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Float32, rhs: Float32) Bool => (lhs == rhs) or @f_greater_than_32(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Float32, rhs: Float32) Bool => @f_less_than_or_equal_32(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Float32, rhs: Float32) Bool => @f_greater_than_or_equal_32(lhs.data, rhs.data)
 
     @negate: function (value: Float32) Float32 => @f_negate_32(value.data)
 

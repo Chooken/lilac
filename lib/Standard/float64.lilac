@@ -12,8 +12,8 @@ Float64: object {
 
     @less_than: function (lhs: Float64, rhs: Float64) Bool => @f_less_than_64(lhs.data, rhs.data)
     @greater_than: function (lhs: Float64, rhs: Float64) Bool =>  @f_greater_than_64(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_less_than_64(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => (lhs == rhs) or @f_greater_than_64(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => @f_less_than_or_equal_64(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Float64, rhs: Float64) Bool => @f_greater_than_or_equal_64(lhs.data, rhs.data)
 
     @negate: function (value: Float64) Float64 => @f_negate_64(value.data)
 

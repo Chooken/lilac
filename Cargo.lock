@@ -273,15 +273,12 @@ dependencies = [
 name = "lilac-driver"
 version = "0.2.0"
 dependencies = [
- "lilac-ast",
  "lilac-const",
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
- "lilac-lex",
  "lilac-lower",
  "lilac-module",
- "lilac-parse",
  "lilac-resolve",
  "lilac-span",
  "lilac-target",
@@ -300,7 +297,6 @@ dependencies = [
 name = "lilac-hir"
 version = "0.2.0"
 dependencies = [
- "lilac-ast",
  "lilac-resolve",
  "lilac-span",
  "lilac-ty",
@@ -326,11 +322,11 @@ dependencies = [
 name = "lilac-lower"
 version = "0.2.0"
 dependencies = [
+ "lilac-const",
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
- "lilac-lex",
- "lilac-parse",
+ "lilac-module",
  "lilac-resolve",
  "lilac-span",
  "lilac-ty",
@@ -415,6 +411,7 @@ dependencies = [
  "lilac-error",
  "lilac-hir",
  "lilac-lex",
+ "lilac-module",
  "lilac-parse",
  "lilac-resolve",
  "lilac-span",

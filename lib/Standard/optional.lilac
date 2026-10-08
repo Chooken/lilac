@@ -9,8 +9,8 @@ Optional[T]: enum {
                 value = some_value
             }
         } else {
+            // `value` stays zeroed.
             has_value = false
-            value = @zeroed(T)
         }
     }
 

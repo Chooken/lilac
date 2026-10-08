@@ -1,0 +1,138 @@
+// lib: Standard=lib/Standard
+// expect-stdout: OK
+// Uses every `Standard` type so the whole library is instantiated, checked
+// and emitted. Prints `OK` and exits 0 when every computed check matched.
+
+using Standard
+using Standard.C
+
+exit: extern function (code: @bit32) nothing
+
+expect: function (ok: Bool, code: @bit32) nothing {
+    if ok {
+    } else {
+        r: CInt = putchar(0x58)
+        exit(code)
+    }
+}
+
+ints: function () nothing {
+    a: Int32 = 0x6
+    b: Int32 = 0x4
+    sum: Int32 = a + b * a - b / a % b
+    expect(sum == 0x1E as Int32, 0x1)
+    n: Int32 = -a
+    expect(n < a, 0x2)
+    expect(b <= a, 0x3)
+    expect(a > b, 0x4)
+    expect(a >= a, 0x5)
+
+    i8: Int8 = 0x7
+    i16: Int16 = 0x7
+    i64: Int64 = 0x7
+    nat: Int = 0x7
+    expect(i8 + i8 == 0xE as Int8, 0x6)
+    expect(i16 * i16 == 0x31 as Int16, 0x7)
+    expect(i64 - i64 == 0x0 as Int64, 0x8)
+    expect(nat / nat == 0x1 as Int, 0x9)
+
+    // Every comparison hook on every integer type.
+    expect(i8 <= i8, 0xA)
+    expect(i8 >= i8, 0xA)
+    expect(i8 < i8 + i8, 0xA)
+    expect(i8 + i8 > i8, 0xA)
+    expect(i16 <= i16, 0xB)
+    expect(i16 >= i16, 0xB)
+    expect(i16 < i16 + i16, 0xB)
+    expect(i16 + i16 > i16, 0xB)
+    expect(i64 <= i64, 0xC)
+    expect(i64 >= i64, 0xC)
+    expect(i64 < i64 + i64, 0xC)
+    expect(i64 + i64 > i64, 0xC)
+    expect(nat <= nat, 0xD)
+    expect(nat >= nat, 0xD)
+    expect(nat < nat + nat, 0xD)
+    expect(nat + nat > nat, 0xD)
+    expect(-i8 < i8, 0xE)
+    expect(-i16 < i16, 0xE)
+    expect(-i64 < i64, 0xE)
+    expect(-nat < nat, 0xE)
+    expect(i8 % i8 == 0x0 as Int8, 0xF)
+}
+
+floats: function () nothing {
+    f: Float64 = 1.5
+    g: Float64 = f + f
+    expect(f <= g, 0x10)
+    expect(f < g, 0x11)
+    expect(g >= f, 0x12)
+    expect(g > f, 0x13)
+    expect(f >= f, 0x13)
+    expect(-f < f, 0x13)
+    expect(g - f == f, 0x13)
+    expect(g / f == 2.0 as Float64, 0x13)
+    h: Float32 = 2.0
+    expect(h * h == 4.0 as Float32, 0x14)
+    expect(h <= h, 0x15)
+    expect(h >= h, 0x15)
+    expect(h < h + h, 0x15)
+    expect(h + h > h, 0x15)
+    expect(-h < h, 0x15)
+    expect(h - h == 0.0 as Float32, 0x15)
+    expect(h / h == 1.0 as Float32, 0x15)
+}
+
+bools: function () nothing {
+    expect(true, 0x20)
+    if false {
+        exit(0x21)
+    }
+}
+
+optionals: function () nothing {
+    some: Optional[Int32] = .Some(0x9 as Int32)
+    none: Optional[Int32] = .None
+    has: Bool, value: Int32 = some.unwrap()
+    expect(has, 0x30)
+    expect(value == 0x9 as Int32, 0x31)
+    expect(none.unwrap_or(0x2 as Int32) == 0x2 as Int32, 0x32)
+}
+
+boxes: function () nothing {
+    box: Box[Int32] = Box[Int32].create(0x5 as Int32)
+    moved: Box[Int32] = box.move()
+}
+
+consts: function () nothing {
+    c: Const[Int32] = Const[Int32].create(0x3 as Int32)
+    expect(c.get() == 0x3 as Int32, 0x40)
+}
+
+c_library: function () nothing {
+    expect(sqrt(16.0) == 4.0 as Float64, 0x50)
+    expect(sqrtf(9.0) == 3.0 as Float32, 0x51)
+    whole: Float64 = 0.0
+    frac: Float64 = modf(2.5, ref whole)
+    expect(frac == 0.5 as Float64, 0x52)
+    expect(whole == 2.0 as Float64, 0x53)
+    digit: CInt = isdigit(0x37)
+    expect(digit as @bit32 as Int32 > 0x0 as Int32, 0x54)
+    upper: CInt = toupper(0x61)
+    expect(upper as @bit32 == 0x41, 0x55)
+    block: ref unknown = malloc(0x10)
+    zeroed: ref unknown = memset(block, 0x0, 0x10)
+    free(block)
+}
+
+main: function () nothing {
+    c_library()
+    ints()
+    floats()
+    bools()
+    optionals()
+    boxes()
+    consts()
+    r: CInt = putchar(0x4F)
+    r = putchar(0x4B)
+    r = putchar(0xA)
+}

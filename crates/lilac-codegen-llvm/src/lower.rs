@@ -466,7 +466,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Load { src, dst, ty, .. } => {
-                let value = self.load_as(src, ty, builder, state);
+                // `load %src` always follows the pointer in `src`, even when
+                // the pointee is itself a `ref` (an `Optional[ref T]` payload).
+                let ptr = checked(
+                    builder.build_load(self.ptr_type(), place_ptr(src, state), ""),
+                    "load ref",
+                )
+                .into_pointer_value();
+                let value = checked(builder.build_load(self.lir_type(ty), ptr, ""), "load");
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Addr { place, dst, .. } => {
@@ -954,8 +961,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        // A `ref` place holds a pointer; loading a non-`ref` value out of it
-        // means following that pointer to the pointee first (`load %src`).
+        // A `ref` place holds a pointer; reading a non-`ref` value out of it
+        // follows that pointer to the pointee first.
         let ptr = place_ptr(name, state);
         let ptr = match state.place_types.get(name) {
             Some(place_ty) if place_ty.starts_with("ref ") && !ty.starts_with("ref ") => {

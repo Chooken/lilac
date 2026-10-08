@@ -506,7 +506,12 @@ function startClient(context, serverPath) {
         "lilac",
         "Lilac",
         { command: serverPath, args: [], transport: TransportKind.stdio },
-        { documentSelector: [{ language: "lilac" }] }
+        {
+            documentSelector: [{ language: "lilac" }],
+            initializationOptions: {
+                libraries: workspace.getConfiguration("lilac").get("libraries", {}),
+            },
+        }
     );
     next.onNotification("lilac/lirInvalidated", refreshLir);
     next.start();
@@ -545,7 +550,10 @@ async function activate(context) {
 
     context.subscriptions.push(
         workspace.onDidChangeConfiguration(async (event) => {
-            if (!event.affectsConfiguration("lilac.serverPath")) {
+            if (
+                !event.affectsConfiguration("lilac.serverPath") &&
+                !event.affectsConfiguration("lilac.libraries")
+            ) {
                 return;
             }
             if (client) {

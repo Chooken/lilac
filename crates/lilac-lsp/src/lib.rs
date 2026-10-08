@@ -69,7 +69,9 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         serde_json::json!({ "capabilities": capabilities, "serverInfo": server_info }),
     )?;
 
-    let root = roots::root_from_params(&params).map(|workspace| roots::project_root(&workspace));
-    let mut server = server::Server::new(connection, root);
+    let workspace = roots::root_from_params(&params);
+    let libraries = roots::libraries_from_params(&params, workspace.as_deref());
+    let root = workspace.map(|workspace| roots::project_root(&workspace));
+    let mut server = server::Server::new(connection, root, libraries);
     server.main_loop()
 }

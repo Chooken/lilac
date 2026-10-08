@@ -1,4 +1,4 @@
-using Standard.Heap
+using *.Heap
 
 Box[T]: object {
 
@@ -8,20 +8,22 @@ Box[T]: object {
 
     create: function(data: T) box: Box[T] {
 
-        // Create ref.
+        // Allocate (zeroed) and move the data in.
         ptr: ref T = CAllocator.create[T]()
-        // Assign data to it.
         ptr = data
 
         // Put it in a box.
         box = Box[T] {
-            value = Optional.Some(ptr)
+            value = .Some(ptr)
         }
     }
 
+    // Hands the allocation to a new box; this one is left empty.
     move: function(self) to: Box[T] {
-        to = self
-        self.value = Optional.None
+        to = Box[T] {
+            value = self.value
+        }
+        self.value = .None
     }
 
     @on_copy: function(self) copy: Box[T] {
@@ -30,7 +32,7 @@ Box[T]: object {
 
     @on_drop: function(self) nothing {
         if self.value.unwrap() -> value: ref T {
-            CAllocator.destroy[T](self.ptr)
+            CAllocator.destroy[T](value)
         }
     }
 }

@@ -65,6 +65,12 @@
           "type": "string",
           "default": "lilac-lsp",
           "description": "Path to the lilac-lsp executable."
+        },
+        "lilac.libraries": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Mounted libraries, as { \"Name\": \"dir\" } (the CLI's --lib=Name=dir). A relative dir is taken from the workspace folder."
         }
       }
     }

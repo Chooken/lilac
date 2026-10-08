@@ -12,8 +12,8 @@ Int8: object {
 
     @less_than: function (lhs: Int8, rhs: Int8) Bool => @i_less_than_8(lhs.data, rhs.data)
     @greater_than: function (lhs: Int8, rhs: Int8) Bool =>  @i_greater_than_8(lhs.data, rhs.data)
-    @less_than_or_equal: function (lhs: Int8, rhs: Int8) Bool => (lhs == rhs) or @i_less_than_8(lhs.data, rhs.data)
-    @greater_than_or_equal: function (lhs: Int8, rhs: Int8) Bool => (lhs == rhs) or @i_greater_than_8(lhs.data, rhs.data)
+    @less_than_or_equal: function (lhs: Int8, rhs: Int8) Bool => @i_less_than_or_equal_8(lhs.data, rhs.data)
+    @greater_than_or_equal: function (lhs: Int8, rhs: Int8) Bool => @i_greater_than_or_equal_8(lhs.data, rhs.data)
 
     @negate: function (value: Int8) Int8 => @i_negate_8(value.data)
 

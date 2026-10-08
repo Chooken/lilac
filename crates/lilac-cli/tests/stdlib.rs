@@ -1,5 +1,5 @@
-//! The standard library under `lib/Standard` must check and emit cleanly.
-//! Folder mode is required: a single `int64.lilac` file cannot see `Bool`.
+//! The standard library under `lib/Standard` must check and emit cleanly
+//! when mounted as the `Standard` library.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -33,25 +33,31 @@ fn float_objects_do_not_expose_bit_reinterpret_conversions() {
     }
 }
 
+/// `tests/run/stdlib` uses every `Standard` type through `--lib`, so the
+/// whole library is instantiated; it must check silently and emit. (The run
+/// harness also links and runs it.)
 #[test]
-#[ignore = "phase 7: lib/Standard needs library mounting and the Phase 1-5 fixes"]
 fn standard_library_checks_and_emits() {
-    let standard = standard_dir();
+    let lib = format!("--lib=Standard={}", standard_dir().display());
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/run/stdlib");
     for sub in ["check", "emit-ir"] {
         let out = lilac()
             .arg(sub)
-            .arg(&standard)
+            .arg(&lib)
+            .arg(&project)
             .output()
             .expect("runs lilac");
         assert!(
             out.status.success(),
-            "`lilac {sub} lib/Standard` failed:\n{}",
+            "`lilac {sub}` on the stdlib project failed:
+{}",
             String::from_utf8_lossy(&out.stderr)
         );
         if sub == "check" {
             assert!(
                 out.stderr.is_empty(),
-                "`lilac check lib/Standard` wrote to stderr:\n{}",
+                "`lilac check` on the stdlib project wrote to stderr:
+{}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }

@@ -2,11 +2,12 @@ using Standard.C
 
 CAllocator: object {
 
+    // A zeroed allocation, so the first assignment drops a zero value.
     create[T]: function() allocation: ref T {
-        allocation = malloc(@sizeof(T)) as ref T
+        allocation = calloc(0x1, @size_of(T)) as ref T
     }
 
     destroy[T]: function(allocation: ref T) nothing {
-        free(allocation)
+        free(allocation as ref unknown)
     }
 }

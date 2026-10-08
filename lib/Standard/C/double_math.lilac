@@ -44,7 +44,7 @@ copysign: extern function(x: Float64, y: Float64) result: Float64
 
 ldexp: extern function(x: Float64, exp: CInt) result: Float64
 frexp: extern function(x: Float64, exp: ref CInt) result: Float64
-modf: extern function(x: Float64, iptr: ref CInt) result: Float64
+modf: extern function(x: Float64, iptr: ref Float64) result: Float64
 
 erf: extern function(in: Float64) result: Float64
 erfc: extern function(in: Float64) result: Float64

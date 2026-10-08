@@ -10,6 +10,37 @@ pub fn url_to_path(url: &Url) -> Option<PathBuf> {
     url.to_file_path().ok()
 }
 
+/// Mounted libraries from `initializationOptions.libraries` (the
+/// `lilac.libraries` setting): `{ "Name": "dir" }`, a relative `dir` taken
+/// from the workspace folder. Anything malformed is ignored.
+#[must_use]
+pub fn libraries_from_params(
+    params: &InitializeParams,
+    workspace: Option<&Path>,
+) -> Vec<(String, PathBuf)> {
+    let Some(map) = params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("libraries"))
+        .and_then(|libraries| libraries.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut libraries: Vec<(String, PathBuf)> = map
+        .iter()
+        .filter_map(|(name, dir)| {
+            let dir = PathBuf::from(dir.as_str()?);
+            let dir = match workspace {
+                Some(base) if dir.is_relative() => base.join(dir),
+                _ => dir,
+            };
+            Some((name.clone(), dir))
+        })
+        .collect();
+    libraries.sort();
+    libraries
+}
+
 /// The project root: the first workspace folder, else `rootUri`.
 #[must_use]
 #[allow(deprecated)] // `root_uri` is deprecated in the protocol but still sent by older clients.
@@ -98,6 +129,24 @@ mod tests {
         let expected = url_to_path(&Url::parse("file:///c:/proj").expect("url"));
         assert!(expected.is_some());
         assert_eq!(root_from_params(&params), expected);
+    }
+
+    #[test]
+    fn libraries_resolve_relative_to_the_workspace() {
+        let with_libraries: InitializeParams = serde_json::from_value(serde_json::json!({
+            "capabilities": {},
+            "initializationOptions": {
+                "libraries": { "Standard": "lib/Standard", "Bad": 3 }
+            },
+        }))
+        .expect("params");
+        let base = std::path::Path::new("ws");
+        let libraries = libraries_from_params(&with_libraries, Some(base));
+        assert_eq!(
+            libraries,
+            vec![("Standard".to_owned(), base.join("lib/Standard"))]
+        );
+        assert!(libraries_from_params(&params(None, None), None).is_empty());
     }
 
     #[test]

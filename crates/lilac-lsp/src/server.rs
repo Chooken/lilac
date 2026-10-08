@@ -31,6 +31,8 @@ pub struct Server {
     connection: Connection,
     documents: Documents,
     root: Option<PathBuf>,
+    /// Mounted libraries (`lilac.libraries`), passed to every session.
+    libraries: Vec<(String, PathBuf)>,
     dirty: bool,
     generation: u64,
     published: HashSet<Url>,
@@ -42,13 +44,19 @@ pub struct Server {
 }
 
 impl Server {
-    /// New server over `connection`, rooted at `root` (project mode) or `None`.
+    /// New server over `connection`, rooted at `root` (project mode) or `None`,
+    /// with `libraries` mounted.
     #[must_use]
-    pub fn new(connection: Connection, root: Option<PathBuf>) -> Self {
+    pub fn new(
+        connection: Connection,
+        root: Option<PathBuf>,
+        libraries: Vec<(String, PathBuf)>,
+    ) -> Self {
         Self {
             connection,
             documents: Documents::new(),
             root,
+            libraries,
             dirty: false,
             generation: 0,
             published: HashSet::new(),
@@ -250,7 +258,7 @@ impl Server {
         let mut new_per_file: HashMap<Url, Retained> = HashMap::new();
 
         if let Some(root) = self.root.clone() {
-            let mut session = new_session();
+            let mut session = new_session(&self.libraries);
             let mut fs = OverlayFs { overlay: &overlay };
             let mut stages = LirStages::default();
             let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
@@ -294,11 +302,23 @@ impl Server {
                 if project_uris.contains(uri) || project_uris.contains(&canonical_file_uri(uri)) {
                     continue;
                 }
-                compile_standalone(uri, document, &mut by_uri, &mut new_per_file);
+                compile_standalone(
+                    uri,
+                    document,
+                    &self.libraries,
+                    &mut by_uri,
+                    &mut new_per_file,
+                );
             }
         } else {
             for (uri, document) in self.documents.iter() {
-                compile_standalone(uri, document, &mut by_uri, &mut new_per_file);
+                compile_standalone(
+                    uri,
+                    document,
+                    &self.libraries,
+                    &mut by_uri,
+                    &mut new_per_file,
+                );
             }
         }
 
@@ -354,8 +374,9 @@ impl Server {
 /// terminals, but an editor wants the full diagnostic list, so lift it here.
 /// The session also analyzes tolerantly so hover/definition keep working while
 /// the buffer has syntax or type errors.
-fn new_session() -> Session {
+fn new_session(libraries: &[(String, PathBuf)]) -> Session {
     let mut session = Session::new();
+    session.libraries = libraries.to_vec();
     session.diags.max_errors = usize::MAX;
     session.retain_partial_analysis = true;
     session
@@ -367,10 +388,11 @@ fn new_session() -> Session {
 fn compile_standalone(
     uri: &Url,
     document: &Document,
+    libraries: &[(String, PathBuf)],
     by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
     per_file: &mut HashMap<Url, Retained>,
 ) {
-    let mut session = new_session();
+    let mut session = new_session(libraries);
     let name = document.path.to_string_lossy().into_owned();
     let mut stages = LirStages::default();
     let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {
