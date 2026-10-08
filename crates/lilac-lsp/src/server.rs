@@ -109,6 +109,11 @@ impl Server {
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(request.id, result)))?;
+        } else if request.method == "textDocument/semanticTokens/full" {
+            let result = self.semantic_tokens_response(&request);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(request.id, result)))?;
         } else if request.method == "lilac/lir" {
             let result = self.lir_response(&request);
             self.connection
@@ -162,6 +167,22 @@ impl Server {
             Some(response) => serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
             None => serde_json::Value::Null,
         }
+    }
+
+    /// The `textDocument/semanticTokens/full` reply: encoded tokens, or `null`.
+    fn semantic_tokens_response(&self, request: &Request) -> serde_json::Value {
+        let Ok(params) =
+            serde_json::from_value::<lsp_types::SemanticTokensParams>(request.params.clone())
+        else {
+            return serde_json::Value::Null;
+        };
+        let uri = &params.text_document.uri;
+        let retained = self.per_file.get(uri).or(self.project.as_ref());
+        let Some(retained) = retained else {
+            return serde_json::Value::Null;
+        };
+        let tokens = crate::handlers::semantic_tokens(retained, uri);
+        serde_json::to_value(tokens).unwrap_or(serde_json::Value::Null)
     }
 
     /// The `lilac/lir` reply: a stage payload, or `null`.

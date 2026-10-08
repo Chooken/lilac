@@ -4,9 +4,27 @@ use std::error::Error;
 
 use lsp_server::Connection;
 use lsp_types::{
-    HoverProviderCapability, InitializeParams, OneOf, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind,
+    HoverProviderCapability, InitializeParams, OneOf, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    TextDocumentSyncKind, WorkDoneProgressOptions,
 };
+
+/// Legend token types, in the index order shared by the encoder
+/// (`handlers::semantic_tokens`) and the `VSCode` `semanticTokenScopes`.
+pub(crate) const TOKEN_TYPES: [SemanticTokenType; 7] = [
+    SemanticTokenType::FUNCTION,
+    SemanticTokenType::TYPE,
+    SemanticTokenType::ENUM,
+    SemanticTokenType::PROPERTY,
+    SemanticTokenType::ENUM_MEMBER,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::PARAMETER,
+];
+
+/// Legend token modifiers (index 0 is `defaultLibrary`).
+pub(crate) const TOKEN_MODIFIERS: [SemanticTokenModifier; 1] =
+    [SemanticTokenModifier::DEFAULT_LIBRARY];
 
 pub mod convert;
 pub mod documents;
@@ -29,6 +47,17 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+                legend: SemanticTokensLegend {
+                    token_types: TOKEN_TYPES.to_vec(),
+                    token_modifiers: TOKEN_MODIFIERS.to_vec(),
+                },
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+        )),
         ..ServerCapabilities::default()
     };
     let server_info = ServerInfo {

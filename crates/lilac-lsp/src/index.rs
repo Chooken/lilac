@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
-use lilac_hir::{HirBlock, HirExpr, HirExprKind, HirStmt, NameSite};
+use lilac_hir::{HirBlock, HirExpr, HirExprKind, HirStmt, NameSite, SemanticSite};
 use lilac_ir::LirModule;
 use lilac_resolve::{DefId, ResItem, ResKind, ResolvedProject};
 use lilac_span::{FileId, Span};
@@ -21,6 +21,8 @@ pub struct DefInfo {
     pub kind: &'static str,
     /// Whole-declaration span.
     pub span: Span,
+    /// The declaration name's token span (the whole span's leading token).
+    pub name_span: Span,
 }
 
 /// Derived index: definitions, resolved uses, and expression types.
@@ -32,6 +34,9 @@ pub struct AnalysisIndex {
     pub uses: Vec<NameSite>,
     /// Every checked expression's `(span, type)`.
     pub exprs: Vec<(Span, TypeRef)>,
+    /// Non-item semantic-token sites (locals, parameters, type names,
+    /// builtins), deduped by `(span, kind)` and sorted by `(file, lo)`.
+    pub semantics: Vec<SemanticSite>,
 }
 
 /// The IR modules captured at each pipeline boundary during a compile.
@@ -123,7 +128,25 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
         walk_expr(&konst.value, &mut exprs);
     }
 
-    AnalysisIndex { defs, uses, exprs }
+    let semantics = analysis.semantics.clone();
+
+    AnalysisIndex {
+        defs,
+        uses,
+        exprs,
+        semantics,
+    }
+}
+
+/// The declaration name's token span: a declaration span begins at its name,
+/// so the name is the span's first `name.len()` bytes.
+fn name_span(declaration: Span, name: &str) -> Span {
+    let length = u32::try_from(name.len()).unwrap_or(u32::MAX);
+    Span::new(
+        declaration.lo.0,
+        declaration.lo.0.saturating_add(length),
+        declaration.file,
+    )
 }
 
 /// Records `item` and, recursively, its object members.
@@ -150,6 +173,7 @@ fn add_def(
             qualified: qualified.clone(),
             kind: kind_of(&item.kind),
             span: item.span,
+            name_span: name_span(item.span, &item.name),
         },
     );
     if let ResKind::Object { members, hooks, .. } = &item.kind {

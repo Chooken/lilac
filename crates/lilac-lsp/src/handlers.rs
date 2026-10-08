@@ -1,16 +1,27 @@
-//! Editor request handlers: hover and go-to-definition.
+//! Editor request handlers: hover, go-to-definition, and semantic tokens.
 
-use lilac_hir::NameSite;
+use lilac_hir::{NameSite, SemanticKind};
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
 use lsp_types::{
     GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
-    Range, Url,
+    Range, SemanticToken, SemanticTokens, Url,
 };
 
 use crate::convert::{byte_offset, span_range};
 use crate::index::{AnalysisIndex, Retained};
 use crate::roots::canonical_file_uri;
+
+/// Legend token-type indices, in the order advertised by `initialize`.
+const TOKEN_FUNCTION: u32 = 0;
+const TOKEN_TYPE: u32 = 1;
+const TOKEN_ENUM: u32 = 2;
+const TOKEN_PROPERTY: u32 = 3;
+const TOKEN_VARIABLE: u32 = 5;
+const TOKEN_PARAMETER: u32 = 6;
+
+/// Legend modifier index 0 (`defaultLibrary`) as a bitset.
+const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 0;
 
 /// Hover for the item or expression at `position`, if any.
 #[must_use]
@@ -154,4 +165,118 @@ fn join_types(types: &Types, refs: &[TypeRef]) -> String {
         .map(|ty| types.display_ref(*ty))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Semantic tokens for `uri`'s document, derived from the retained analysis.
+///
+/// Merges the index's item declarations (`defs`), resolved item uses (`uses`),
+/// and the analysis's non-item sites (`semantics`); sorts by `(line, col)`,
+/// drops overlaps, and delta-encodes with UTF-16 lengths.
+#[must_use]
+pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
+    let Some(file) = file_for(retained, uri) else {
+        return SemanticTokens::default();
+    };
+    let sources = &retained.session.source_map;
+
+    let mut raw: Vec<(Range, u32, u32)> = Vec::new();
+    for info in retained.index.defs.values() {
+        if info.name_span.file != file {
+            continue;
+        }
+        if let Some((range, token_type)) = colored(sources, info.name_span, info.kind) {
+            raw.push((range, token_type, 0));
+        }
+    }
+    for site in &retained.index.uses {
+        if site.span.file != file {
+            continue;
+        }
+        let Some(info) = retained.index.defs.get(&site.def) else {
+            continue;
+        };
+        if let Some((range, token_type)) = colored(sources, site.span, info.kind) {
+            raw.push((range, token_type, 0));
+        }
+    }
+    for site in &retained.index.semantics {
+        if site.span.file != file {
+            continue;
+        }
+        let (token_type, modifiers) = semantic_type(site.kind);
+        if let Some(range) = span_range(sources, site.span) {
+            raw.push((range, token_type, modifiers));
+        }
+    }
+
+    raw.sort_by_key(|(range, token_type, modifiers)| {
+        (
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+            *token_type,
+            *modifiers,
+        )
+    });
+
+    let mut data: Vec<SemanticToken> = Vec::new();
+    let mut occupied: Option<(u32, u32)> = None;
+    let mut last_line = 0u32;
+    let mut last_start = 0u32;
+    for (range, token_type, modifiers) in raw {
+        let start = (range.start.line, range.start.character);
+        let end = (range.end.line, range.end.character);
+        // Keep only non-empty tokens that do not overlap the previous one.
+        if start >= end || occupied.is_some_and(|previous| start < previous) {
+            continue;
+        }
+        let length = range.end.character.saturating_sub(range.start.character);
+        let delta_line = range.start.line - last_line;
+        let delta_start = if delta_line == 0 {
+            range.start.character - last_start
+        } else {
+            range.start.character
+        };
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: modifiers,
+        });
+        last_line = range.start.line;
+        last_start = range.start.character;
+        occupied = Some((range.end.line, range.end.character));
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
+    }
+}
+
+/// The legend `(token type, modifier bitset)` for a `DefInfo.kind`, or `None`
+/// for kinds that have no token (there are none today).
+fn colored(sources: &lilac_span::SourceMap, span: Span, kind: &str) -> Option<(Range, u32)> {
+    let token_type = match kind {
+        "function" | "hook" => TOKEN_FUNCTION,
+        "object" => TOKEN_TYPE,
+        "enum" => TOKEN_ENUM,
+        "field" => TOKEN_PROPERTY,
+        "const" => TOKEN_VARIABLE,
+        _ => return None,
+    };
+    span_range(sources, span).map(|range| (range, token_type))
+}
+
+/// The legend `(token type, modifier bitset)` for a non-item [`SemanticKind`].
+fn semantic_type(kind: SemanticKind) -> (u32, u32) {
+    match kind {
+        SemanticKind::Local => (TOKEN_VARIABLE, 0),
+        SemanticKind::Param => (TOKEN_PARAMETER, 0),
+        SemanticKind::UserType => (TOKEN_TYPE, 0),
+        SemanticKind::BuiltinType => (TOKEN_TYPE, MODIFIER_DEFAULT_LIBRARY),
+        SemanticKind::BuiltinFunc => (TOKEN_FUNCTION, MODIFIER_DEFAULT_LIBRARY),
+    }
 }
