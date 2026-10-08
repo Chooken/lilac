@@ -75,6 +75,31 @@
   frontend check and `lilac-codegen-llvm`'s signature lowering, so they cannot
   drift.
 
+## Build and link
+
+- `lilac build [<file-or-dir>]` compiles, writes an object file
+  (`Backend::emit_object`, with an `Entry` and a `CodegenStep` callback) and
+  links an executable. The CLI takes all build configuration as flags;
+  `lilac.json` is for the language server only.
+- The build folder is `<project>/build` (folder project) or `./build`
+  (single file), with one folder per mode (`debug`, `release`,
+  `release-small`) and a `<triple>/` level for a cross target. The mode folder
+  holds the executable and `obj/` with the kept object file. `--build-dir`
+  and `-o` override it.
+- `Target::link_info` in `lilac-target` is the single table of per-OS link
+  facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
+- `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
+  else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`). It is the
+  permanent opt-in for static C libraries. Native mode (the sysroot's `lld`,
+  found via `LILAC_SYSROOT` or `<exe dir>/../lib/lilac`, with `.lilac.start`)
+  is not implemented yet; see `docs/build-command-plan.md`.
+- `build` sets `Session.require_entry` (no root `main` is `E032`) and
+  `Session.progress`, a `Stage`/`StageEvent` callback. The driver only calls
+  it; timing and printing stay in `lilac-cli` (`progress.rs`), so the driver
+  stays I/O-free.
+- Run tests build with `lilac build --libc -q -o …`, with `LILAC_LINKER` set
+  to the toolchain `clang`.
+
 ## Language server (lilac-lsp)
 
 - `lilac-lsp` is the editor language server: a stdio binary that speaks the

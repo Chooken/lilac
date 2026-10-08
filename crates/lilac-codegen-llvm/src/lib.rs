@@ -10,11 +10,11 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
-    CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use inkwell::OptimizationLevel;
 
-use lilac_codegen::{Backend, OptLevel};
+use lilac_codegen::{Backend, CodegenStep, Entry, OptLevel};
 use lilac_error::Emitter;
 use lilac_ir::LirModule;
 use lilac_target::is_64_bit_triple;
@@ -54,10 +54,11 @@ impl LlvmBackend {
 
     /// Builds an empty module carrying the target triple and data layout, and
     /// returns it with the target machine the pass pipeline needs. Lowering
-    /// populates the module; [`Backend::emit_llvm`] verifies and optimizes it.
+    /// populates the module; [`Self::build_module`] verifies and optimizes it.
     fn prepare_module<'ctx>(
         &self,
         context: &'ctx Context,
+        reloc: RelocMode,
     ) -> Result<(Module<'ctx>, TargetMachine), String> {
         let module = context.create_module("lilac");
         let triple = TargetTriple::create(&self.triple);
@@ -68,18 +69,53 @@ impl LlvmBackend {
             .map_err(|e| format!("unknown target triple `{}`: {e}", self.triple))?;
         let (optimize, _) = self.optimize_settings();
         let machine: TargetMachine = target
-            .create_target_machine(
-                &triple,
-                "generic",
-                "",
-                optimize,
-                RelocMode::Default,
-                CodeModel::Default,
-            )
+            .create_target_machine(&triple, "generic", "", optimize, reloc, CodeModel::Default)
             .ok_or_else(|| format!("failed to create target machine for `{}`", self.triple))?;
         module.set_data_layout(&machine.get_target_data().get_data_layout());
 
         Ok((module, machine))
+    }
+
+    /// Lowers, verifies and optimizes `lir` into a fresh LLVM module, calling
+    /// `on_step` before each step. Shared by [`Backend::emit_llvm`] and
+    /// [`Backend::emit_object`].
+    fn build_module<'ctx>(
+        &self,
+        context: &'ctx Context,
+        lir: &LirModule,
+        reloc: RelocMode,
+        on_step: &mut dyn FnMut(CodegenStep),
+    ) -> Result<(Module<'ctx>, TargetMachine), String> {
+        let (module, machine) = self.prepare_module(context, reloc)?;
+        on_step(CodegenStep::Lower);
+        let mut lower = lower::Lower::new(context, module, lir, is_64_bit_triple(&self.triple));
+        if let Err(diagnostic) = lower.run() {
+            return Err(lilac_error::EmitterHuman::new()
+                .render(&diagnostic, &lilac_span::SourceMap::default()));
+        }
+        let module = lower.into_module();
+        on_step(CodegenStep::Verify);
+        module
+            .verify()
+            .map_err(|e| format!("module verification failed: {e}"))?;
+        if let Some(pipeline) = self.optimize_settings().1 {
+            on_step(CodegenStep::Optimize);
+            module
+                .run_passes(pipeline, &machine, PassBuilderOptions::create())
+                .map_err(|e| format!("optimization pipeline `{pipeline}` failed: {e}"))?;
+        }
+        Ok((module, machine))
+    }
+
+    /// The relocation model for object files: position-independent on ELF
+    /// targets (PIE is the default executable kind there), else the default.
+    /// Textual IR does not record it.
+    fn object_reloc(&self) -> RelocMode {
+        if self.triple.contains("linux") {
+            RelocMode::PIC
+        } else {
+            RelocMode::Default
+        }
     }
 }
 
@@ -88,27 +124,27 @@ impl Backend for LlvmBackend {
         "llvm"
     }
 
-    fn codegen(&self, _module: &LirModule) -> Result<(), String> {
-        Err("LLVM object codegen is not implemented; `emit-llvm` emits textual IR".to_owned())
+    fn emit_object(
+        &self,
+        lir: &LirModule,
+        entry: Entry,
+        on_step: &mut dyn FnMut(CodegenStep),
+    ) -> Result<Vec<u8>, String> {
+        if entry == Entry::Native {
+            return Err("the native entry point is not implemented yet; use --libc".to_owned());
+        }
+        let context = Context::create();
+        let (module, machine) = self.build_module(&context, lir, self.object_reloc(), on_step)?;
+        on_step(CodegenStep::Emit);
+        let buffer = machine
+            .write_to_memory_buffer(&module, FileType::Object)
+            .map_err(|e| format!("object emission failed: {e}"))?;
+        Ok(buffer.as_slice().to_vec())
     }
 
     fn emit_llvm(&self, lir: &LirModule) -> Result<String, String> {
         let context = Context::create();
-        let (module, machine) = self.prepare_module(&context)?;
-        let mut lower = lower::Lower::new(&context, module, lir, is_64_bit_triple(&self.triple));
-        if let Err(diagnostic) = lower.run() {
-            return Err(lilac_error::EmitterHuman::new()
-                .render(&diagnostic, &lilac_span::SourceMap::default()));
-        }
-        let module = lower.into_module();
-        module
-            .verify()
-            .map_err(|e| format!("module verification failed: {e}"))?;
-        if let Some(pipeline) = self.optimize_settings().1 {
-            module
-                .run_passes(pipeline, &machine, PassBuilderOptions::create())
-                .map_err(|e| format!("optimization pipeline `{pipeline}` failed: {e}"))?;
-        }
+        let (module, _) = self.build_module(&context, lir, RelocMode::Default, &mut |_| {})?;
         Ok(module.print_to_string().to_string())
     }
 }
@@ -120,7 +156,7 @@ mod tests {
     }
 
     use crate as lilac_codegen_llvm;
-    use lilac_codegen::{Backend, OptLevel};
+    use lilac_codegen::{Backend, CodegenStep, Entry, OptLevel};
     use lilac_ir::{
         ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
         LirTerm,
@@ -1505,13 +1541,71 @@ mod tests {
             fn name(&self) -> &'static str {
                 "noop"
             }
-            fn codegen(&self, _m: &lilac_ir::LirModule) -> Result<(), String> {
-                Ok(())
-            }
         }
         let m = lilac_ir::LirModule::new("x86_64-pc-windows-msvc");
         let err = Noop.emit_llvm(&m).expect_err("noop cannot emit LLVM IR");
         assert!(err.contains("noop"), "error must name the backend: {err}");
+        let err = Noop
+            .emit_object(&m, Entry::CMain, &mut |_| {})
+            .expect_err("noop cannot emit objects");
+        assert!(err.contains("noop"), "error must name the backend: {err}");
+    }
+
+    fn main_module(triple: &str) -> LirModule {
+        let mut module = LirModule::new(triple);
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
+        module
+    }
+
+    /// A COFF x86-64 object starts with the AMD64 machine field, and the
+    /// steps fire in order (no `Optimize` at O0).
+    #[test]
+    fn emits_coff_object_with_steps() {
+        let mut steps = Vec::new();
+        let bytes = backend()
+            .emit_object(
+                &main_module("x86_64-pc-windows-msvc"),
+                Entry::CMain,
+                &mut |step| steps.push(step),
+            )
+            .expect("object");
+        assert_eq!(&bytes[..2], &[0x64, 0x86]);
+        assert_eq!(
+            steps,
+            [CodegenStep::Lower, CodegenStep::Verify, CodegenStep::Emit]
+        );
+    }
+
+    /// An ELF target gets an ELF object; `Optimize` fires above O0.
+    #[test]
+    fn emits_elf_object_when_optimizing() {
+        let backend =
+            lilac_codegen_llvm::LlvmBackend::new("x86_64-unknown-linux-gnu", OptLevel::O2);
+        let mut steps = Vec::new();
+        let bytes = backend
+            .emit_object(
+                &main_module("x86_64-unknown-linux-gnu"),
+                Entry::CMain,
+                &mut |step| steps.push(step),
+            )
+            .expect("object");
+        assert_eq!(&bytes[..4], b"\x7fELF");
+        assert!(steps.contains(&CodegenStep::Optimize));
+    }
+
+    /// The native entry point arrives with the native runtime.
+    #[test]
+    fn native_entry_is_not_yet_supported() {
+        let err = backend()
+            .emit_object(
+                &main_module("x86_64-pc-windows-msvc"),
+                Entry::Native,
+                &mut |_| {},
+            )
+            .expect_err("native entry");
+        assert!(err.contains("--libc"), "{err}");
     }
 
     /// Every target is initialized, not just the host: emitting for a triple

@@ -1,8 +1,9 @@
-//! Target identity and the pointer-width rule.
+//! Target identity, the pointer-width rule, and the per-target link facts.
 //!
 //! This crate is the single source of truth for target triples. It parses a
 //! triple into its four structured components (`arch`, `vendor`, `os`, `abi`)
-//! and renders it back in canonical form.
+//! and renders it back in canonical form. [`Target::link_info`] is the one
+//! table of per-OS linking facts.
 
 /// Instruction-set architecture component of a target triple.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -310,6 +311,40 @@ impl Target {
         }
     }
 
+    /// The linking facts for this target, or `None` when `lilac build` cannot
+    /// link for it (bare metal, WebAssembly, 32-bit targets).
+    #[must_use]
+    pub fn link_info(&self) -> Option<LinkInfo> {
+        if !matches!(self.arch, Arch::X86_64 | Arch::Aarch64) {
+            return None;
+        }
+        let info = match self.os {
+            Os::Windows => LinkInfo {
+                flavor: LinkFlavor::Coff,
+                exe_suffix: ".exe",
+                obj_suffix: ".obj",
+                entry_symbol: ".lilac.start",
+                system_libs: &["kernel32.lib"],
+            },
+            Os::Linux => LinkInfo {
+                flavor: LinkFlavor::Elf,
+                exe_suffix: "",
+                obj_suffix: ".o",
+                entry_symbol: ".lilac.start",
+                system_libs: &[],
+            },
+            Os::Macos => LinkInfo {
+                flavor: LinkFlavor::MachO,
+                exe_suffix: "",
+                obj_suffix: ".o",
+                entry_symbol: ".lilac.start",
+                system_libs: &["libSystem.tbd"],
+            },
+            Os::None | Os::Unknown => return None,
+        };
+        Some(info)
+    }
+
     /// Returns the native pointer width in bits for this target.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {
@@ -333,6 +368,46 @@ impl Default for Target {
             abi: Abi::None,
         }
     }
+}
+
+/// The object-file format a target links, which picks lld's flavor.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum LinkFlavor {
+    /// PE/COFF (Windows): `lld -flavor link`.
+    Coff,
+    /// ELF (Linux): `lld -flavor gnu`.
+    Elf,
+    /// Mach-O (macOS): `lld -flavor darwin`.
+    MachO,
+}
+
+impl LinkFlavor {
+    /// The `-flavor` argument lld takes for this format.
+    #[must_use]
+    pub fn lld_flavor(self) -> &'static str {
+        match self {
+            Self::Coff => "link",
+            Self::Elf => "gnu",
+            Self::MachO => "darwin",
+        }
+    }
+}
+
+/// How to link an executable for a target: the single place for per-OS
+/// linking facts.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct LinkInfo {
+    /// The object format and lld flavor.
+    pub flavor: LinkFlavor,
+    /// The executable file suffix (`.exe` or empty).
+    pub exe_suffix: &'static str,
+    /// The object file suffix (`.obj` or `.o`).
+    pub obj_suffix: &'static str,
+    /// The native entry symbol (Mach-O adds its own `_` prefix).
+    pub entry_symbol: &'static str,
+    /// The system stubs a native link adds, found in the sysroot's
+    /// `<triple>/` folder.
+    pub system_libs: &'static [&'static str],
 }
 
 /// Failure modes of [`Target::parse`].
@@ -507,6 +582,39 @@ mod tests {
     #[test]
     fn default_is_canonical_bare_metal() {
         assert_eq!(Target::default().to_triple(), "x86_64-unknown-none");
+    }
+
+    #[test]
+    fn link_info_per_supported_triple() {
+        let info = |t: &str| Target::parse(t).expect("valid").link_info();
+        let windows = info("x86_64-pc-windows-msvc").expect("windows links");
+        assert_eq!(windows.flavor, LinkFlavor::Coff);
+        assert_eq!((windows.exe_suffix, windows.obj_suffix), (".exe", ".obj"));
+        assert_eq!(windows.system_libs, ["kernel32.lib"]);
+        let linux = info("x86_64-unknown-linux-gnu").expect("linux links");
+        assert_eq!(linux.flavor, LinkFlavor::Elf);
+        assert_eq!((linux.exe_suffix, linux.obj_suffix), ("", ".o"));
+        assert!(linux.system_libs.is_empty());
+        assert_eq!(
+            info("aarch64-unknown-linux-gnu").map(|i| i.flavor),
+            Some(LinkFlavor::Elf)
+        );
+        let macos = info("aarch64-apple-darwin").expect("macos links");
+        assert_eq!(macos.flavor, LinkFlavor::MachO);
+        assert_eq!(macos.system_libs, ["libSystem.tbd"]);
+        for info in [windows, linux, macos] {
+            assert_eq!(info.entry_symbol, ".lilac.start");
+        }
+        for unsupported in [
+            "x86_64-unknown-none",
+            "wasm32-unknown-unknown",
+            "x86-unknown-linux-gnu",
+        ] {
+            assert_eq!(info(unsupported), None, "{unsupported}");
+        }
+        assert_eq!(LinkFlavor::Coff.lld_flavor(), "link");
+        assert_eq!(LinkFlavor::Elf.lld_flavor(), "gnu");
+        assert_eq!(LinkFlavor::MachO.lld_flavor(), "darwin");
     }
 
     #[test]

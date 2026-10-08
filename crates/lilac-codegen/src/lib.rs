@@ -25,13 +25,51 @@ pub enum OptLevel {
     Os,
 }
 
+/// How a program enters: which entry symbol the backend emits around the
+/// Lilac `main` (`.lilac.main`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// A C `i32 main()` wrapper, entered through the C runtime's startup code
+    /// (`--libc` builds and `emit-llvm`).
+    CMain,
+    /// Lilac's own process entry, `.lilac.start`, with no C runtime.
+    Native,
+}
+
+/// A step of object emission, reported to [`Backend::emit_object`]'s
+/// callback before it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodegenStep {
+    /// LIR to backend IR.
+    Lower,
+    /// Verifying the backend IR.
+    Verify,
+    /// The optimization pipeline.
+    Optimize,
+    /// Writing machine code.
+    Emit,
+}
+
 /// Code-generation backend over verified [`LirModule`]s.
 pub trait Backend {
     /// Backend name for `--backend=` selection.
     fn name(&self) -> &'static str;
 
-    /// Lowers a verified module to the target.
-    fn codegen(&self, module: &LirModule) -> Result<(), String>;
+    /// Compiles a verified module to an object file for the target, entered
+    /// through `entry`. `on_step` is called before each [`CodegenStep`].
+    ///
+    /// Backends that cannot write objects keep the default error.
+    fn emit_object(
+        &self,
+        _module: &LirModule,
+        _entry: Entry,
+        _on_step: &mut dyn FnMut(CodegenStep),
+    ) -> Result<Vec<u8>, String> {
+        Err(format!(
+            "backend `{}` cannot emit object files",
+            self.name()
+        ))
+    }
 
     /// Emits textual LLVM IR for a verified module.
     ///

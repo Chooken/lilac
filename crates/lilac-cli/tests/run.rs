@@ -1,5 +1,6 @@
-//! Run tests: every `tests/run/*.lilac` is compiled with `emit-llvm`, linked
-//! with the toolchain `clang`, executed, and compared against its header.
+//! Run tests: every `tests/run/*.lilac` is built with `lilac build --libc`
+//! (linking through the toolchain `clang`, passed as `LILAC_LINKER`),
+//! executed, and compared against its header.
 //!
 //! Header comments (any order, before or between items):
 //!
@@ -120,32 +121,20 @@ fn run_one(source: &Path, expect: &Expect, clang: &Path, scratch: &Path) -> Resu
         return Ok(());
     }
 
+    let exe = scratch.join(format!("{name}.exe"));
     let out = lilac()
-        .arg("emit-llvm")
+        .args(["build", "--libc", "-q", "-o"])
+        .arg(&exe)
+        .arg(format!("--build-dir={}", scratch.join("build").display()))
         .args(&expect.libs)
         .arg(source)
+        .env("LILAC_LINKER", clang)
         .output()
         .expect("runs lilac");
     if !out.status.success() {
         return Err(format!(
-            "emit-llvm failed:\n{}",
+            "build failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let ll = scratch.join(format!("{name}.ll"));
-    std::fs::write(&ll, &out.stdout).expect("writes IR");
-    let exe = scratch.join(format!("{name}.exe"));
-    let link = Command::new(clang)
-        .arg("-Wno-override-module")
-        .arg(&ll)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("runs clang");
-    if !link.status.success() {
-        return Err(format!(
-            "link failed:\n{}",
-            String::from_utf8_lossy(&link.stderr)
         ));
     }
     let run = Command::new(&exe).output().expect("runs executable");

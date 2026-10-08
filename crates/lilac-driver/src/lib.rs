@@ -6,12 +6,12 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use lilac_error::{Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
+use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed};
 use lilac_ir::LirModule;
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
 
-pub use lilac_target::Target;
+pub use lilac_target::{LinkFlavor, LinkInfo, Target};
 
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -46,6 +46,72 @@ impl OptimizeMode {
             "release-small" => Some(Self::ReleaseSmall),
             _ => None,
         }
+    }
+
+    /// The mode's name, as [`OptimizeMode::parse`] reads it and as `lilac
+    /// build` names its output folder.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+            Self::ReleaseSmall => "release-small",
+        }
+    }
+}
+
+/// A pipeline stage, reported to [`Session::progress`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// Loading the source files (the module loader, or the one file).
+    Load,
+    /// Parsing every file.
+    Parse,
+    /// Building the definition table.
+    Resolve,
+    /// Type checking.
+    Check,
+    /// HIR to LIR.
+    Lower,
+    /// Constant folding.
+    Fold,
+    /// Injecting the `.lilac.*` runtime.
+    Runtime,
+    /// Dead-code elimination.
+    Prune,
+    /// The live `@compile_error` check and IR verification.
+    Verify,
+}
+
+/// A progress event for one [`Stage`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StageEvent {
+    /// The stage is starting.
+    Begin,
+    /// The stage finished. `count` is the files loaded ([`Stage::Load`]),
+    /// the functions checked ([`Stage::Check`]) or the functions left after
+    /// pruning ([`Stage::Prune`]); `None` for the other stages.
+    End {
+        /// The stage's item count, if it has one.
+        count: Option<usize>,
+    },
+}
+
+/// A progress callback. The driver only calls it; timing and printing are
+/// the caller's (the driver stays I/O-free and clock-free).
+pub struct Progress(Box<dyn FnMut(Stage, StageEvent)>);
+
+impl Progress {
+    /// Wraps `hook` as a progress callback.
+    #[must_use]
+    pub fn new(hook: impl FnMut(Stage, StageEvent) + 'static) -> Self {
+        Self(Box::new(hook))
+    }
+}
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Progress(..)")
     }
 }
 
@@ -116,6 +182,11 @@ pub struct Session {
     /// analysis (editor tooling). Strict (the CLI) leaves this `false`, so the
     /// stage gates reproduce today's stop-at-the-first-failing-stage behavior.
     pub retain_partial_analysis: bool,
+    /// Whether the program must have an entry point (`lilac build`): a
+    /// non-`extern` `main` in the root namespace, else `E032`.
+    pub require_entry: bool,
+    /// Called at the start and end of each pipeline [`Stage`].
+    pub progress: Option<Progress>,
 }
 
 impl Default for Session {
@@ -136,6 +207,8 @@ impl Default for Session {
             libraries: Vec::new(),
             analysis: None,
             retain_partial_analysis: false,
+            require_entry: false,
+            progress: None,
         }
     }
 }
@@ -165,7 +238,9 @@ impl Session {
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
         self.project_files.clear();
+        self.report(Stage::Load, StageEvent::Begin);
         let project = lilac_module::single_file(name, src, &mut self.source_map);
+        self.report(Stage::Load, StageEvent::End { count: Some(1) });
         self.run(&project, on_stage)
     }
 
@@ -189,6 +264,7 @@ impl Session {
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
         self.project_files.clear();
+        self.report(Stage::Load, StageEvent::Begin);
         let (project, failed) = lilac_module::load_with_status(
             root,
             &self.libraries,
@@ -201,6 +277,12 @@ impl Session {
             .iter()
             .map(|file| (file.file, file.path.clone()))
             .collect();
+        self.report(
+            Stage::Load,
+            StageEvent::End {
+                count: Some(project.files.len()),
+            },
+        );
         if failed {
             return Err(ErrorGuaranteed::new());
         }
@@ -251,24 +333,38 @@ impl Session {
         self.analysis.as_ref()
     }
 
+    /// Calls the progress hook, if any.
+    fn report(&mut self, stage: Stage, event: StageEvent) {
+        if let Some(Progress(hook)) = &mut self.progress {
+            hook(stage, event);
+        }
+    }
+
     /// Parse → resolve → check → lower → fold → inject runtime → prune →
     /// live `@compile_error` check → verify. Strict mode (the CLI) stops at the
     /// first failing stage; tolerant mode (editor tooling) keeps going through
     /// checking so the partial analysis is retained.
+    #[allow(clippy::too_many_lines)]
     fn run(
         &mut self,
         project: &lilac_module::Project,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
+        const DONE: StageEvent = StageEvent::End { count: None };
         let strict = !self.retain_partial_analysis;
+        self.report(Stage::Parse, StageEvent::Begin);
         let (programs, failed) = lilac_module::parse_all(project, &mut self.diags, strict);
         if failed && strict {
             return Err(ErrorGuaranteed::new());
         }
+        self.report(Stage::Parse, DONE);
+        self.report(Stage::Resolve, StageEvent::Begin);
         let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
         if self.diags.has_errors() && strict {
             return Err(ErrorGuaranteed::new());
         }
+        self.report(Stage::Resolve, DONE);
+        self.report(Stage::Check, StageEvent::Begin);
         let mut types = lilac_ty::Types::new();
         let check = if self.retain_partial_analysis {
             lilac_typeck::check_for_editor
@@ -297,22 +393,52 @@ impl Session {
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
+        self.report(
+            Stage::Check,
+            StageEvent::End {
+                count: Some(checked.hir.funcs.len()),
+            },
+        );
+        self.report(Stage::Lower, StageEvent::Begin);
         let ptr_bytes = u64::from(self.target.bit_native_width() / 8);
         let triple = self.target.to_triple();
         let mut lir = lilac_lower::lower(&checked.hir, &resolved, &types, &triple, ptr_bytes);
+        if self.require_entry && !has_entry(&lir) {
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    "E032",
+                    "no `main` function; `lilac build` needs an entry point",
+                )
+                .help("add `main: function () nothing { … }`, or use `lilac check` for a library"),
+            ));
+        }
         on_stage("lower", &lir);
+        self.report(Stage::Lower, DONE);
+        self.report(Stage::Fold, StageEvent::Begin);
         let report = lilac_const::fold(&mut lir);
         on_stage("fold", &lir);
+        self.report(Stage::Fold, DONE);
+        self.report(Stage::Runtime, StageEvent::Begin);
         lir.funcs.extend(lilac_ir::runtime::build_runtime(
             self.target.bit_native_width() / 8,
         ));
         on_stage("runtime", &lir);
+        self.report(Stage::Runtime, DONE);
+        self.report(Stage::Prune, StageEvent::Begin);
         lilac_ir::prune_unreachable(&mut lir, &self.exports);
+        self.report(
+            Stage::Prune,
+            StageEvent::End {
+                count: Some(lir.funcs.len()),
+            },
+        );
+        self.report(Stage::Verify, StageEvent::Begin);
         lilac_const::check_live_compile_errors(&lir, &report, &mut self.diags)?;
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
+        self.report(Stage::Verify, DONE);
         on_stage("final", &lir);
         Ok(lir)
     }
@@ -342,6 +468,14 @@ impl Session {
         }
         out
     }
+}
+
+/// Whether `lir` has the program entry point: a non-`extern` `main` in the
+/// root namespace (whose symbols carry no prefix).
+fn has_entry(lir: &LirModule) -> bool {
+    lir.funcs
+        .iter()
+        .any(|func| func.name == "main" && !func.is_extern)
 }
 
 #[cfg(test)]
@@ -777,6 +911,64 @@ mod tests {
         let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
         assert!(names.contains(&"api"), "{names:?}");
         assert!(!names.contains(&"dead"), "{names:?}");
+    }
+
+    /// `require_entry` (set by `lilac build`) turns a missing `main` into
+    /// `E032`; other compiles accept a library without one.
+    #[test]
+    fn require_entry_reports_e032() {
+        let lib = "helper: function () nothing {\n}\n";
+        let mut session = Session::new();
+        session.exports.insert("helper".to_owned());
+        assert!(session.compile_lir("lib.lilac", lib).is_ok());
+
+        let mut session = Session::new();
+        session.require_entry = true;
+        assert!(session.compile_lir("lib.lilac", lib).is_err());
+        let rendered = session.render_diagnostics();
+        assert!(rendered.contains("error[E032]"), "{rendered}");
+
+        let mut session = Session::new();
+        session.require_entry = true;
+        let result = session.compile_lir("main.lilac", "main: function () nothing {\n}\n");
+        assert!(result.is_ok(), "{}", session.render_diagnostics());
+    }
+
+    /// The progress hook sees every stage begin and end, in pipeline order,
+    /// with the load, check and prune counts.
+    #[test]
+    fn progress_reports_every_stage_in_order() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&events);
+        let mut session = Session::new();
+        session.progress = Some(Progress::new(move |stage, event| {
+            sink.borrow_mut().push((stage, event));
+        }));
+        session
+            .compile_lir("p.lilac", "main: function () nothing {\n}\n")
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let events = events.borrow();
+        let stages = [
+            Stage::Load,
+            Stage::Parse,
+            Stage::Resolve,
+            Stage::Check,
+            Stage::Lower,
+            Stage::Fold,
+            Stage::Runtime,
+            Stage::Prune,
+            Stage::Verify,
+        ];
+        assert_eq!(events.len(), stages.len() * 2, "{events:?}");
+        for (pair, stage) in events.chunks(2).zip(stages) {
+            assert_eq!(pair[0], (stage, StageEvent::Begin), "{events:?}");
+            assert_eq!(pair[1].0, stage, "{events:?}");
+        }
+        assert_eq!(events[1].1, StageEvent::End { count: Some(1) });
+        assert_eq!(events[7].1, StageEvent::End { count: Some(1) });
+        assert_eq!(events[15].1, StageEvent::End { count: Some(1) });
     }
 
     struct TestFs {

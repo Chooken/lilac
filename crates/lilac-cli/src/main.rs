@@ -1,6 +1,8 @@
-//! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` (more subcommands land
-//! per milestone).
+//! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` / `build`.
 
+mod build;
+mod link;
+mod progress;
 mod std_fs;
 
 use lilac_codegen::Backend as _;
@@ -12,7 +14,8 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]..."
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
+  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--dump-lir=<dir>]"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -35,6 +38,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
+        "build" => build::cmd_build(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS

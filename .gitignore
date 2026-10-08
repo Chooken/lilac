@@ -4,3 +4,4 @@ target/
 .superpowers/
 .idea/
 .cargo/
+build/
