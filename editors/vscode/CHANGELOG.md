@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
+- Add the `lilac.libraries` setting and `lilac.json` `libraries` field: mount
+  libraries (the CLI's `--lib=Name=dir`) for the language server.
+- Library files are checked as their namespace, so opening `lib/Standard`
+  files no longer reports every sibling type as unknown.
+- Generic bodies nothing instantiates are highlighted too, and tokens are
+  refreshed after each compile (they were missing until the first edit).
 - Add semantic highlighting: map the language server's semantic token types to
   standard TextMate scopes so themes color functions, types, enums, fields,
   variants, variables, and parameters.

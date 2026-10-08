@@ -47,8 +47,8 @@
   are `NsId`s, and each file has a `FileScope` (its visible-name map, already
   filtered by visibility and reach). Typeck and lowering look names up through
   `Resolved::lookup` with the file's id (`E029` on an ambiguous use).
-- Libraries: `--lib=Name=dir` (CLI) / `lilac.libraries` (LSP
-  `initializationOptions`) mount `dir` as the top-level namespace `Name`;
+- Libraries: `--lib=Name=dir` (CLI) / `lilac.json` `"libraries"` and the
+  `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
   `Session.libraries` carries them into `lilac_module::load_with_status`.
   `using *.A` is relative to the importing file's namespace. `lib/Standard`
   is only usable mounted (`--lib=Standard=lib/Standard`); the run test
@@ -84,6 +84,14 @@
   and `serde_json` (and thus serde). The compiler crates stay std-only.
 - The VSCode extension under `editors/vscode/` launches it via the
   `lilac.serverPath` setting (default `lilac-lsp` on PATH).
+- Compile units: the project (`lilac.json` `root`, else the workspace
+  folder); an open file it does not reach is compiled as its library
+  namespace (`Session::compile_namespace_with_stages`), else its folder, else
+  alone (`server::unit_of`). Sessions run tolerant
+  (`retain_partial_analysis`), which also checks uninstantiated generic
+  bodies for highlighting (`lilac_typeck::check_for_editor`; diagnostics
+  discarded, never lowered). URIs are compared via
+  `roots::canonical_file_uri`.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.

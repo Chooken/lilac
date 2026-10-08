@@ -483,7 +483,9 @@ using Standard
 
 **Ancestor/descendant reach.** The folder tree orders namespaces into ancestor
 chains and descendant sets; only namespaces in the compilation unit participate
-and the root is always in it. A namespace automatically sees every item of its
+and the root is always in it. Loading a namespace also loads its ancestors
+(`using Standard.C` loads `Standard` too), so ancestor reach never depends on
+another import. A namespace automatically sees every item of its
 ancestor namespaces — public items by *ancestor reach* and private items by
 *descendant reach* (a `private` item is visible to its defining namespace and its
 descendants). The root is an ancestor of all, so root declarations are usable

@@ -124,22 +124,69 @@ pub fn load_with_status(
             true,
         );
     };
+    load_from(root, root_entries, None, libraries, fs, sources, diags)
+}
 
-    let mut namespaces = vec![Namespace {
-        path: String::new(),
-        dir: root.to_path_buf(),
-        files: Vec::new(),
-    }];
-    let mut listings = vec![root_entries];
+/// Loads one namespace (`Standard.Heap`) and everything it `using`s, with an
+/// empty root namespace: how an editor checks a library folder that no
+/// project uses. `root` still anchors absolute non-library `using`s.
+pub fn load_namespace(
+    root: &Path,
+    namespace: &str,
+    libraries: &[(String, PathBuf)],
+    fs: &mut dyn Fs,
+    sources: &mut SourceMap,
+    diags: &mut Diags,
+) -> (Project, bool) {
+    load_from(
+        root,
+        Vec::new(),
+        Some(namespace),
+        libraries,
+        fs,
+        sources,
+        diags,
+    )
+}
+
+/// The `using` fixpoint, starting from the root namespace's `root_entries`
+/// and, when given, the namespace `seed`. Reaching a namespace also reaches
+/// its ancestors, so ancestor reach never depends on what else was imported.
+fn load_from(
+    root: &Path,
+    root_entries: Vec<PathBuf>,
+    seed: Option<&str>,
+    libraries: &[(String, PathBuf)],
+    fs: &mut dyn Fs,
+    sources: &mut SourceMap,
+    diags: &mut Diags,
+) -> (Project, bool) {
+    let mut loader = Loader {
+        root,
+        libraries,
+        namespaces: vec![Namespace {
+            path: String::new(),
+            dir: root.to_path_buf(),
+            files: Vec::new(),
+        }],
+        listings: vec![root_entries],
+        ns_by_path: HashMap::from([(String::new(), 0)]),
+        queue: VecDeque::from([0]),
+    };
     let mut files: Vec<FileUnit> = Vec::new();
-    let mut ns_by_path: HashMap<String, usize> = HashMap::new();
-    ns_by_path.insert(String::new(), 0);
-    let mut queue = VecDeque::new();
-    queue.push_back(0_usize);
     let mut failed = false;
+    if let Some(seed) = seed {
+        if !loader.reach(seed, fs) {
+            diags.emit(Diagnostic::error(
+                "E025",
+                format!("cannot find module folder `{seed}`"),
+            ));
+            failed = true;
+        }
+    }
 
-    while let Some(ns) = queue.pop_front() {
-        let mut file_paths: Vec<PathBuf> = listings[ns]
+    while let Some(ns) = loader.queue.pop_front() {
+        let mut file_paths: Vec<PathBuf> = loader.listings[ns]
             .iter()
             .filter(|path| is_lilac_file(path))
             .cloned()
@@ -152,18 +199,11 @@ pub fn load_with_status(
                     "E025",
                     format!("cannot read module file `{}`", path.display()),
                 ));
-                return (
-                    Project {
-                        root: root.to_path_buf(),
-                        namespaces,
-                        files,
-                    },
-                    true,
-                );
+                return (loader.project(files), true);
             };
             let name = file_name_str(&path);
             let file_id = sources.add_file(&name, &src);
-            let usings = scan_usings(&src, file_id, &namespaces[ns].path);
+            let usings = scan_usings(&src, file_id, &loader.namespaces[ns].path);
             let index = files.len();
             files.push(FileUnit {
                 name,
@@ -174,24 +214,10 @@ pub fn load_with_status(
                 usings: usings.iter().map(|(path, _)| path.clone()).collect(),
                 using_spans: usings.iter().map(|(_, span)| *span).collect(),
             });
-            namespaces[ns].files.push(index);
+            loader.namespaces[ns].files.push(index);
 
             for (target_path, span) in usings {
-                if ns_by_path.contains_key(&target_path) {
-                    continue;
-                }
-                let target_dir = resolve_dir(root, libraries, &target_path);
-                if let Ok(entries) = fs.list_dir(&target_dir) {
-                    let new_ns = namespaces.len();
-                    namespaces.push(Namespace {
-                        path: target_path.clone(),
-                        dir: target_dir,
-                        files: Vec::new(),
-                    });
-                    listings.push(entries);
-                    ns_by_path.insert(target_path, new_ns);
-                    queue.push_back(new_ns);
-                } else {
+                if !loader.reach(&target_path, fs) {
                     diags.emit(
                         Diagnostic::error(
                             "E025",
@@ -205,14 +231,55 @@ pub fn load_with_status(
         }
     }
 
-    (
+    (loader.project(files), failed)
+}
+
+/// Namespace bookkeeping for [`load_from`].
+struct Loader<'a> {
+    root: &'a Path,
+    libraries: &'a [(String, PathBuf)],
+    namespaces: Vec<Namespace>,
+    /// Directory listing per namespace.
+    listings: Vec<Vec<PathBuf>>,
+    ns_by_path: HashMap<String, usize>,
+    /// Namespaces whose files are still to be read.
+    queue: VecDeque<usize>,
+}
+
+impl Loader<'_> {
+    /// Queues the namespace at dotted `path` and its ancestors (each once).
+    /// Returns `false` when `path`'s own folder cannot be listed; a missing
+    /// ancestor folder (a library's parent) is skipped.
+    fn reach(&mut self, path: &str, fs: &mut dyn Fs) -> bool {
+        if self.ns_by_path.contains_key(path) {
+            return true;
+        }
+        let dir = resolve_dir(self.root, self.libraries, path);
+        let Ok(entries) = fs.list_dir(&dir) else {
+            return false;
+        };
+        if let Some((parent, _)) = path.rsplit_once('.') {
+            let _ = self.reach(parent, fs);
+        }
+        self.ns_by_path
+            .insert(path.to_owned(), self.namespaces.len());
+        self.queue.push_back(self.namespaces.len());
+        self.namespaces.push(Namespace {
+            path: path.to_owned(),
+            dir,
+            files: Vec::new(),
+        });
+        self.listings.push(entries);
+        true
+    }
+
+    fn project(self, files: Vec<FileUnit>) -> Project {
         Project {
-            root: root.to_path_buf(),
-            namespaces,
+            root: self.root.to_path_buf(),
+            namespaces: self.namespaces,
             files,
-        },
-        failed,
-    )
+        }
+    }
 }
 
 /// Lexes and parses every file of `project` (diagnostics into `diags`).
@@ -614,6 +681,82 @@ mod tests {
             .map(|ns| ns.path.as_str())
             .collect();
         assert_eq!(paths, ["", "Std.Heap", "Std.Heap.Raw"]);
+    }
+
+    #[test]
+    fn a_library_namespace_loads_without_a_root_project() {
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(
+            &lib,
+            "Heap/alloc.lilac",
+            "using *.Raw
+",
+        );
+        fs.add(
+            &lib,
+            "Heap/Raw/raw.lilac",
+            "raw: function () nothing {}
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) = super::load_namespace(
+            Path::new("proj"),
+            "Std.Heap",
+            &libraries,
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
+        assert!(!failed, "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Std.Heap", "Std.Heap.Raw"]);
+        assert_eq!(project.files.len(), 2);
+    }
+
+    #[test]
+    fn reaching_a_namespace_loads_its_ancestors() {
+        let root = PathBuf::from("proj");
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "main.lilac",
+            "using Std.C
+",
+        );
+        fs.add(
+            &lib,
+            "int.lilac",
+            "Int: object { data: @bit32 }
+",
+        );
+        fs.add(
+            &lib,
+            "C/c_int.lilac",
+            "CInt: object { data: Int }
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Std", "Std.C"]);
     }
 
     #[test]

@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 use lilac_module::Fs;
 
-/// Filesystem whose `read` prefers an open document's text.
+/// Filesystem whose `read` prefers an open document's text. A path the
+/// loader built (`D:\lib\x.lilac` from a library setting) can spell the
+/// same file differently from the editor (`d:\lib\x.lilac`), so a miss is
+/// retried with the canonical path.
 #[derive(Debug)]
 pub struct OverlayFs<'a> {
     /// Open documents: path to current text.
@@ -17,6 +20,12 @@ pub struct OverlayFs<'a> {
 impl Fs for OverlayFs<'_> {
     fn read(&mut self, path: &Path) -> io::Result<String> {
         if let Some(text) = self.overlay.get(path) {
+            return Ok(text.clone());
+        }
+        if let Some(text) = fs::canonicalize(path)
+            .ok()
+            .and_then(|canonical| self.overlay.get(&canonical))
+        {
             return Ok(text.clone());
         }
         fs::read_to_string(path)

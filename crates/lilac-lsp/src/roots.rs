@@ -18,19 +18,23 @@ pub fn libraries_from_params(
     params: &InitializeParams,
     workspace: Option<&Path>,
 ) -> Vec<(String, PathBuf)> {
-    let Some(map) = params
+    params
         .initialization_options
         .as_ref()
         .and_then(|options| options.get("libraries"))
-        .and_then(|libraries| libraries.as_object())
-    else {
+        .map_or_else(Vec::new, |libraries| parse_libraries(libraries, workspace))
+}
+
+/// Parses a `{ "Name": "dir" }` map; a relative `dir` is joined to `base`.
+fn parse_libraries(value: &serde_json::Value, base: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let Some(map) = value.as_object() else {
         return Vec::new();
     };
     let mut libraries: Vec<(String, PathBuf)> = map
         .iter()
         .filter_map(|(name, dir)| {
             let dir = PathBuf::from(dir.as_str()?);
-            let dir = match workspace {
+            let dir = match base {
                 Some(base) if dir.is_relative() => base.join(dir),
                 _ => dir,
             };
@@ -55,16 +59,49 @@ pub fn root_from_params(params: &InitializeParams) -> Option<PathBuf> {
     params.root_uri.as_ref().and_then(url_to_path)
 }
 
+/// Merges two library lists; `overrides` wins on a name both mount.
+#[must_use]
+pub fn merge_libraries(
+    base: Vec<(String, PathBuf)>,
+    overrides: Vec<(String, PathBuf)>,
+) -> Vec<(String, PathBuf)> {
+    let mut libraries: Vec<(String, PathBuf)> = base
+        .into_iter()
+        .filter(|(name, _)| !overrides.iter().any(|(other, _)| other == name))
+        .collect();
+    libraries.extend(overrides);
+    libraries.sort();
+    libraries
+}
+
+/// The workspace's `lilac.json`, if it exists and parses:
+///
+/// ```json
+/// { "root": "src", "libraries": { "Standard": "lib/Standard" } }
+/// ```
+fn config(workspace: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(workspace.join("lilac.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The libraries `lilac.json` mounts (`"libraries": { "Name": "dir" }`, a
+/// relative `dir` taken from the workspace folder).
+#[must_use]
+pub fn config_libraries(workspace: &Path) -> Vec<(String, PathBuf)> {
+    config(workspace)
+        .and_then(|value| value.get("libraries").cloned())
+        .map_or_else(Vec::new, |libraries| {
+            parse_libraries(&libraries, Some(workspace))
+        })
+}
+
 /// The effective project root for a workspace folder: the directory named by
 /// `lilac.json`'s `root` field when that file exists, parses, and points at a
 /// directory; otherwise the workspace folder itself. `root` may be relative to
 /// the workspace folder or absolute.
 #[must_use]
 pub fn project_root(workspace: &Path) -> PathBuf {
-    let Ok(text) = std::fs::read_to_string(workspace.join("lilac.json")) else {
-        return workspace.to_path_buf();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Some(value) = config(workspace) else {
         return workspace.to_path_buf();
     };
     let Some(root) = value.get("root").and_then(serde_json::Value::as_str) else {
@@ -87,17 +124,27 @@ pub fn project_root(workspace: &Path) -> PathBuf {
     }
 }
 
-/// Canonicalizes a `file:` URI to the server's stored form — the result of
-/// [`Url::from_file_path`] on the decoded path. A client spells Windows file
-/// URIs as `file:///c%3A/...` (lowercase drive, percent-encoded colon) while
-/// the server stores `file:///C:/...`; this makes the two compare equal.
-/// Non-`file:` URIs are returned unchanged.
+/// Canonicalizes a `file:` URI to the server's stored form: the result of
+/// [`Url::from_file_path`] on the decoded path, with a lowercase drive
+/// letter. A client spells Windows file URIs as `file:///c%3A/...` while
+/// paths from the loader or a library setting give `file:///C:/...`; this
+/// makes them compare equal. Non-`file:` URIs are returned unchanged.
 #[must_use]
 pub fn canonical_file_uri(uri: &Url) -> Url {
-    uri.to_file_path()
+    let Some(mut url) = uri
+        .to_file_path()
         .ok()
         .and_then(|path| Url::from_file_path(path).ok())
-        .unwrap_or_else(|| uri.clone())
+    else {
+        return uri.clone();
+    };
+    let path = url.path();
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_uppercase() && bytes[2] == b':' {
+        let lowered = format!("/{}{}", path[1..2].to_ascii_lowercase(), &path[2..]);
+        url.set_path(&lowered);
+    }
+    url
 }
 
 #[cfg(test)]
@@ -147,6 +194,40 @@ mod tests {
             vec![("Standard".to_owned(), base.join("lib/Standard"))]
         );
         assert!(libraries_from_params(&params(None, None), None).is_empty());
+    }
+
+    #[test]
+    fn config_libraries_merge_under_the_setting() {
+        let dir = temp_dir("cfg-libs");
+        std::fs::write(
+            dir.join("lilac.json"),
+            r#"{ "libraries": { "Standard": "lib/Standard", "Extra": "x" } }"#,
+        )
+        .expect("write");
+        let from_config = config_libraries(&dir);
+        assert_eq!(
+            from_config,
+            vec![
+                ("Extra".to_owned(), dir.join("x")),
+                ("Standard".to_owned(), dir.join("lib/Standard")),
+            ]
+        );
+        let setting = vec![("Standard".to_owned(), PathBuf::from("other"))];
+        assert_eq!(
+            merge_libraries(from_config, setting),
+            vec![
+                ("Extra".to_owned(), dir.join("x")),
+                ("Standard".to_owned(), PathBuf::from("other")),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn canonical_uri_ignores_drive_case_and_encoding() {
+        let client = Url::parse("file:///c%3A/Proj/main.lilac").expect("url");
+        let server = Url::parse("file:///C:/Proj/main.lilac").expect("url");
+        assert_eq!(canonical_file_uri(&client), canonical_file_uri(&server));
     }
 
     #[test]

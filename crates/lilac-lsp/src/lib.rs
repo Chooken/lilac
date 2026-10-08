@@ -70,8 +70,20 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     )?;
 
     let workspace = roots::root_from_params(&params);
-    let libraries = roots::libraries_from_params(&params, workspace.as_deref());
+    let libraries = roots::merge_libraries(
+        workspace
+            .as_deref()
+            .map_or_else(Vec::new, roots::config_libraries),
+        roots::libraries_from_params(&params, workspace.as_deref()),
+    );
     let root = workspace.map(|workspace| roots::project_root(&workspace));
-    let mut server = server::Server::new(connection, root, libraries);
+    let refresh_tokens = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.semantic_tokens.as_ref())
+        .and_then(|tokens| tokens.refresh_support)
+        .unwrap_or(false);
+    let mut server = server::Server::new(connection, root, libraries, refresh_tokens);
     server.main_loop()
 }

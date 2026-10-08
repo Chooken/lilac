@@ -66,7 +66,8 @@ pub struct Analysis {
     pub types: lilac_ty::Types,
     /// Declared signature of every function and hook.
     pub sigs: std::collections::HashMap<lilac_resolve::DefId, lilac_ty::FuncSig>,
-    /// Checked HIR (carries `uses`).
+    /// Checked HIR (carries `uses`), plus the editor-only bodies of
+    /// uninstantiated generic functions (`Checked::templates`).
     pub hir: lilac_hir::HirProgram,
     /// Non-item semantic-token sites, deduped by `(span, kind)` and sorted by
     /// `(file, lo)`.
@@ -206,6 +207,36 @@ impl Session {
         self.run(&project, on_stage)
     }
 
+    /// Checks the namespace `namespace` (typically a mounted library folder)
+    /// and everything it `using`s, with an empty root namespace. Editor
+    /// tooling uses this for library files no project reaches.
+    pub fn compile_namespace_with_stages(
+        &mut self,
+        root: &Path,
+        namespace: &str,
+        fs: &mut dyn Fs,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        self.project_files.clear();
+        let (project, failed) = lilac_module::load_namespace(
+            root,
+            namespace,
+            &self.libraries,
+            fs,
+            &mut self.source_map,
+            &mut self.diags,
+        );
+        self.project_files = project
+            .files
+            .iter()
+            .map(|file| (file.file, file.path.clone()))
+            .collect();
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
+        self.run(&project, on_stage)
+    }
+
     /// The loaded project's file identities and paths (empty outside project
     /// compiles); maps diagnostic spans to file paths.
     #[must_use]
@@ -239,18 +270,25 @@ impl Session {
             return Err(ErrorGuaranteed::new());
         }
         let mut types = lilac_ty::Types::new();
-        let checked = lilac_typeck::check(
+        let check = if self.retain_partial_analysis {
+            lilac_typeck::check_for_editor
+        } else {
+            lilac_typeck::check
+        };
+        let checked = check(
             &resolved,
             &mut types,
             &mut self.diags,
             self.target.bit_native_width(),
         );
+        let mut hir = checked.hir.clone();
+        hir.funcs.extend(checked.templates.iter().cloned());
         self.analysis = Some(Analysis {
             resolved: resolved.clone(),
             types: types.clone(),
             sigs: checked.sigs.clone(),
             semantics: merge_semantics(&checked.hir.semantics),
-            hir: checked.hir.clone(),
+            hir,
         });
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());

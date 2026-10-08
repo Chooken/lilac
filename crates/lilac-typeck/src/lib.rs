@@ -26,7 +26,7 @@ mod tests;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
-use lilac_hir::{FuncKey, HirProgram};
+use lilac_hir::{FuncKey, HirFunc, HirProgram};
 use lilac_resolve::{DefId, DefKind, Lookup, Resolved};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef, Types};
@@ -39,11 +39,35 @@ pub struct Checked {
     /// Declared signature of every function and hook (generic ones as
     /// templates), for editor hovers.
     pub sigs: HashMap<DefId, FuncSig>,
+    /// Editor only ([`check_for_editor`]): bodies of generic functions that
+    /// no instance reached, checked with their parameters left abstract.
+    /// Never lowered; they exist for semantic tokens and hovers.
+    pub templates: Vec<HirFunc>,
 }
 
 /// Checks every definition in `res`. `native_bits` is the target's pointer
 /// width (`@bit_native` literal range).
 pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, native_bits: u32) -> Checked {
+    check_impl(res, types, diags, native_bits, false)
+}
+
+/// [`check`], plus [`Checked::templates`] for editor tooling.
+pub fn check_for_editor(
+    res: &Resolved,
+    types: &mut Types,
+    diags: &mut Diags,
+    native_bits: u32,
+) -> Checked {
+    check_impl(res, types, diags, native_bits, true)
+}
+
+fn check_impl(
+    res: &Resolved,
+    types: &mut Types,
+    diags: &mut Diags,
+    native_bits: u32,
+    templates: bool,
+) -> Checked {
     let mut checker = Checker {
         res,
         types,
@@ -63,10 +87,16 @@ pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, native_bits: 
         reported: HashSet::new(),
     };
     checker.run();
+    let templates = if templates {
+        checker.check_templates()
+    } else {
+        Vec::new()
+    };
     let sigs = checker.sigs.clone();
     Checked {
         hir: std::mem::take(&mut checker.out),
         sigs,
+        templates,
     }
 }
 
@@ -219,6 +249,43 @@ impl Checker<'_> {
             self.check_instance(&key);
         }
         self.finish_type_hooks();
+    }
+
+    /// Checks each generic function no instance reached, with its generic
+    /// parameters as abstract `T`s, so the editor sees its locals, uses and
+    /// expression types. Diagnostics are discarded (a duck-typed `T.member`
+    /// cannot be proven without arguments) and the output is kept apart from
+    /// the lowered program.
+    fn check_templates(&mut self) -> Vec<HirFunc> {
+        let mut scratch = Diags::new();
+        scratch.max_errors = usize::MAX;
+        std::mem::swap(self.diags, &mut scratch);
+        let funcs = self.out.funcs.len();
+        let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
+        let reached: HashSet<DefId> = self.instances.keys().map(|key| key.def).collect();
+        for id in self.res.ids() {
+            let def = self.res.def(id);
+            if !matches!(def.kind, DefKind::Func(_)) || reached.contains(&id) {
+                continue;
+            }
+            let scope = self.scope_of(id);
+            if scope.is_empty() {
+                continue;
+            }
+            let args = scope
+                .iter()
+                .zip(0u32..)
+                .map(|(name, index)| TypeRef::value(self.types.intern_param(index, name)))
+                .collect();
+            let span = def.span;
+            let _ = self.request(FuncKey { def: id, args }, span);
+            while let Some(key) = self.queue.pop_front() {
+                self.check_instance(&key);
+            }
+        }
+        self.out.layouts.retain(|ty, _| layouts.contains(ty));
+        std::mem::swap(self.diags, &mut scratch);
+        self.out.funcs.split_off(funcs)
     }
 
     // ---- environment ---------------------------------------------------

@@ -2,7 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use lilac_driver::Session;
@@ -15,7 +16,7 @@ use lsp_types::{
 };
 
 use crate::convert::to_lsp_diagnostic;
-use crate::documents::{Document, Documents};
+use crate::documents::Documents;
 use crate::fs::OverlayFs;
 use crate::index::{LirStages, Retained};
 use crate::roots::canonical_file_uri;
@@ -31,32 +32,42 @@ pub struct Server {
     connection: Connection,
     documents: Documents,
     root: Option<PathBuf>,
-    /// Mounted libraries (`lilac.libraries`), passed to every session.
+    /// Mounted libraries (`lilac.json` and `lilac.libraries`), passed to
+    /// every session.
     libraries: Vec<(String, PathBuf)>,
+    /// Whether the client accepts `workspace/semanticTokens/refresh`.
+    refresh_tokens: bool,
+    /// Id of the next server-to-client request.
+    next_request: i32,
     dirty: bool,
     generation: u64,
     published: HashSet<Url>,
     shutdown: bool,
     /// Retained project compile (project mode).
     project: Option<Retained>,
-    /// Retained per-document compiles (single-file mode).
-    per_file: HashMap<Url, Retained>,
+    /// Compiles of open files the project does not reach, by canonical URI
+    /// (files of one unit share a compile).
+    per_file: HashMap<Url, Rc<Retained>>,
 }
 
 impl Server {
     /// New server over `connection`, rooted at `root` (project mode) or `None`,
-    /// with `libraries` mounted.
+    /// with `libraries` mounted. With `refresh_tokens`, the client is asked to
+    /// re-request semantic tokens after every compile.
     #[must_use]
     pub fn new(
         connection: Connection,
         root: Option<PathBuf>,
         libraries: Vec<(String, PathBuf)>,
+        refresh_tokens: bool,
     ) -> Self {
         Self {
             connection,
             documents: Documents::new(),
             root,
             libraries,
+            refresh_tokens,
+            next_request: 0,
             dirty: false,
             generation: 0,
             published: HashSet::new(),
@@ -140,6 +151,14 @@ impl Server {
         Ok(())
     }
 
+    /// The compile that covers `uri`: its own unit's, else the project's.
+    fn retained_for(&self, uri: &Url) -> Option<&Retained> {
+        self.per_file
+            .get(&canonical_file_uri(uri))
+            .map(|retained| &**retained)
+            .or(self.project.as_ref())
+    }
+
     /// The `textDocument/hover` reply: a hover object, or `null`.
     fn hover_response(&self, request: &Request) -> serde_json::Value {
         let Ok(params) = serde_json::from_value::<lsp_types::HoverParams>(request.params.clone())
@@ -148,7 +167,7 @@ impl Server {
         };
         let position = params.text_document_position_params.position;
         let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.per_file.get(uri).or(self.project.as_ref());
+        let retained = self.retained_for(uri);
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -167,7 +186,7 @@ impl Server {
         };
         let position = params.text_document_position_params.position;
         let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.per_file.get(uri).or(self.project.as_ref());
+        let retained = self.retained_for(uri);
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -185,7 +204,7 @@ impl Server {
             return serde_json::Value::Null;
         };
         let uri = &params.text_document.uri;
-        let retained = self.per_file.get(uri).or(self.project.as_ref());
+        let retained = self.retained_for(uri);
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -206,7 +225,7 @@ impl Server {
         let Some(stage) = params.get("stage").and_then(serde_json::Value::as_str) else {
             return serde_json::Value::Null;
         };
-        let retained = self.per_file.get(&uri).or(self.project.as_ref());
+        let retained = self.retained_for(&uri);
         let Some(retained) = retained else {
             return serde_json::Value::Null;
         };
@@ -255,8 +274,8 @@ impl Server {
         let overlay = self.documents.overlay();
         let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> = HashMap::new();
         let mut new_project = None;
-        let mut new_per_file: HashMap<Url, Retained> = HashMap::new();
 
+        let mut covered: HashSet<Url> = HashSet::new();
         if let Some(root) = self.root.clone() {
             let mut session = new_session(&self.libraries);
             let mut fs = OverlayFs { overlay: &overlay };
@@ -264,63 +283,36 @@ impl Server {
             let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
                 stages.modules.push((name, lir.clone()));
             });
-            let file_uris: HashMap<FileId, Url> = session
-                .project_files()
-                .iter()
-                .filter_map(|(id, path)| Url::from_file_path(path).ok().map(|uri| (*id, uri)))
-                .collect();
             // Project-load errors (E025) can have no source span; attach those
             // to the first open document so they are not dropped silently.
             let fallback = self.documents.iter().next().map(|(uri, _)| uri.clone());
-            for diagnostic in session.diags.diagnostics() {
-                let target = primary_file(diagnostic)
-                    .and_then(|id| file_uris.get(&id).cloned())
-                    .or_else(|| fallback.clone());
-                let Some(uri) = target else {
-                    continue;
-                };
-                if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
-                    file_uris.get(&file).cloned()
-                }) {
-                    by_uri.entry(uri).or_default().push(lsp);
-                }
-            }
-            let uri_files = file_uris
-                .iter()
-                .map(|(id, uri)| (uri.clone(), *id))
-                .collect();
-            let project_uris: HashSet<Url> = file_uris.values().cloned().collect();
-            new_project = Some(Retained::build_with_stages(
-                session, file_uris, uri_files, stages,
+            new_project = Some(retain(
+                session,
+                stages,
+                fallback.as_ref(),
+                &mut covered,
+                &mut by_uri,
             ));
-
-            // Fallback: an open `.lilac` file that is not part of the project
-            // (e.g. the workspace folder is not the project root) is compiled
-            // standalone so diagnostics, hover, definition, and the IR view
-            // still work for it.
-            for (uri, document) in self.documents.iter() {
-                if project_uris.contains(uri) || project_uris.contains(&canonical_file_uri(uri)) {
-                    continue;
-                }
-                compile_standalone(
-                    uri,
-                    document,
-                    &self.libraries,
-                    &mut by_uri,
-                    &mut new_per_file,
-                );
-            }
-        } else {
-            for (uri, document) in self.documents.iter() {
-                compile_standalone(
-                    uri,
-                    document,
-                    &self.libraries,
-                    &mut by_uri,
-                    &mut new_per_file,
-                );
-            }
         }
+
+        let new_per_file = self.compile_units(&overlay, &mut covered, &mut by_uri);
+
+        // Key everything by the client's spelling of an open document's URI
+        // (`file:///c%3A/...`), so one document never gets two diagnostic
+        // sets that overwrite each other.
+        let open: HashMap<Url, Url> = self
+            .documents
+            .iter()
+            .map(|(uri, _)| (canonical_file_uri(uri), uri.clone()))
+            .collect();
+        let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> =
+            by_uri
+                .into_iter()
+                .fold(HashMap::new(), |mut acc, (uri, diagnostics)| {
+                    let uri = open.get(&canonical_file_uri(&uri)).cloned().unwrap_or(uri);
+                    acc.entry(uri).or_default().extend(diagnostics);
+                    acc
+                });
 
         // Publish open documents even when clean, so stale sets are cleared.
         for (uri, _) in self.documents.iter() {
@@ -350,6 +342,90 @@ impl Server {
                 method: "lilac/lirInvalidated".to_owned(),
                 params: serde_json::Value::Null,
             }));
+
+        // Tokens the client asked for before this compile (on open, or
+        // mid-edit) came from no analysis or a stale one; ask again.
+        if self.refresh_tokens {
+            self.next_request += 1;
+            let _ = self.connection.sender.send(Message::Request(Request {
+                id: format!("lilac-refresh-{}", self.next_request).into(),
+                method: "workspace/semanticTokens/refresh".to_owned(),
+                params: serde_json::Value::Null,
+            }));
+        }
+    }
+
+    /// Compiles the open files the project did not cover (`covered`), one
+    /// compile per unit, and returns each file's compile by canonical URI.
+    fn compile_units(
+        &self,
+        overlay: &HashMap<PathBuf, String>,
+        covered: &mut HashSet<Url>,
+        by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
+    ) -> HashMap<Url, Rc<Retained>> {
+        // An open file the project does not reach is checked on its own unit
+        // (see `unit_of`). Files sharing a unit share one compile, and a
+        // compile also covers the open files of every unit it loads (a
+        // library's root namespace loads its subfolders), so outer units go
+        // first and covered files are neither recompiled nor re-published.
+        let mut new_per_file: HashMap<Url, Rc<Retained>> = HashMap::new();
+        let mut units: HashMap<Unit, Vec<Url>> = HashMap::new();
+        for (uri, document) in self.documents.iter() {
+            if covered.contains(&canonical_file_uri(uri)) {
+                continue;
+            }
+            units
+                .entry(unit_of(&document.path, &document.text, &self.libraries))
+                .or_default()
+                .push(uri.clone());
+        }
+        let mut units: Vec<(Unit, Vec<Url>)> = units.into_iter().collect();
+        units.sort_by_key(|(unit, _)| unit.order());
+        for (unit, uris) in units {
+            if uris
+                .iter()
+                .all(|uri| new_per_file.contains_key(&canonical_file_uri(uri)))
+            {
+                continue;
+            }
+            let mut session = new_session(&self.libraries);
+            let mut stages = LirStages::default();
+            let mut capture = |name, lir: &lilac_ir::LirModule| {
+                stages.modules.push((name, lir.clone()));
+            };
+            let mut fs = OverlayFs { overlay };
+            let retained = Rc::new(match &unit {
+                Unit::Namespace(namespace) => {
+                    let root = self.root.clone().unwrap_or_default();
+                    let _ = session.compile_namespace_with_stages(
+                        &root,
+                        namespace,
+                        &mut fs,
+                        &mut capture,
+                    );
+                    retain(session, stages, uris.first(), covered, by_uri)
+                }
+                Unit::Folder(dir) => {
+                    let _ = session.compile_project_with_stages(dir, &mut fs, &mut capture);
+                    retain(session, stages, uris.first(), covered, by_uri)
+                }
+                Unit::File(_) => {
+                    let uri = &uris[0];
+                    let Some(document) = self.documents.get(uri) else {
+                        continue;
+                    };
+                    let name = document.path.to_string_lossy().into_owned();
+                    let _ = session.compile_lir_with_stages(&name, &document.text, &mut capture);
+                    retain_single(session, stages, uri, covered, by_uri)
+                }
+            });
+            for uri in retained.uri_files.keys().chain(&uris) {
+                new_per_file
+                    .entry(canonical_file_uri(uri))
+                    .or_insert_with(|| Rc::clone(&retained));
+            }
+        }
+        new_per_file
     }
 
     fn send_diagnostics(&self, uri: &Url, diagnostics: Vec<LspDiagnostic>) {
@@ -382,22 +458,109 @@ fn new_session(libraries: &[(String, PathBuf)]) -> Session {
     session
 }
 
-/// Compiles one open document standalone (single-file mode) and records its
-/// diagnostics and retained compile, so hover/definition/IR work for it even
-/// when it is not part of the project.
-fn compile_standalone(
-    uri: &Url,
-    document: &Document,
-    libraries: &[(String, PathBuf)],
+/// What an open file outside the project is compiled as.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Unit {
+    /// A mounted library namespace (`Standard.Heap`).
+    Namespace(String),
+    /// A program folder (one with a `main.lilac`).
+    Folder(PathBuf),
+    /// The file alone (single-file mode).
+    File(PathBuf),
+}
+
+impl Unit {
+    /// Compile order: outer library namespaces first (they load their
+    /// subfolders), then folders, then single files.
+    fn order(&self) -> (usize, usize, Self) {
+        match self {
+            Self::Namespace(path) => (0, path.matches('.').count(), self.clone()),
+            Self::Folder(_) => (1, 0, self.clone()),
+            Self::File(_) => (2, 0, self.clone()),
+        }
+    }
+}
+
+/// The unit an open file belongs to: its namespace when it lies in a mounted
+/// library; its folder when the folder is a program (has a `main.lilac`) or
+/// the file declares no `main` (library-style code that needs its siblings);
+/// else the file alone (a loose program next to other programs).
+fn unit_of(path: &Path, text: &str, libraries: &[(String, PathBuf)]) -> Unit {
+    let Some(dir) = path.parent() else {
+        return Unit::File(path.to_path_buf());
+    };
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir_canonical = canonical(dir);
+    for (name, lib) in libraries {
+        if let Ok(rest) = dir_canonical.strip_prefix(canonical(lib)) {
+            let mut namespace = name.clone();
+            for segment in rest.components() {
+                namespace.push('.');
+                namespace.push_str(&segment.as_os_str().to_string_lossy());
+            }
+            return Unit::Namespace(namespace);
+        }
+    }
+    let declares_main = text.lines().any(|line| line.starts_with("main:"));
+    if dir.join("main.lilac").is_file() || !declares_main {
+        return Unit::Folder(dir.to_path_buf());
+    }
+    Unit::File(path.to_path_buf())
+}
+
+/// Publishes a finished multi-file compile's diagnostics into `by_uri` and
+/// retains it. Diagnostics without a file go to `fallback`. Files already in
+/// `covered` (published by an earlier compile) are skipped; this compile's
+/// files are added to it.
+fn retain(
+    session: Session,
+    stages: LirStages,
+    fallback: Option<&Url>,
+    covered: &mut HashSet<Url>,
     by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
-    per_file: &mut HashMap<Url, Retained>,
-) {
-    let mut session = new_session(libraries);
-    let name = document.path.to_string_lossy().into_owned();
-    let mut stages = LirStages::default();
-    let _ = session.compile_lir_with_stages(&name, &document.text, &mut |name, lir| {
-        stages.modules.push((name, lir.clone()));
-    });
+) -> Retained {
+    let file_uris: HashMap<FileId, Url> = session
+        .project_files()
+        .iter()
+        .filter_map(|(id, path)| {
+            Url::from_file_path(path)
+                .ok()
+                .map(|uri| (*id, canonical_file_uri(&uri)))
+        })
+        .collect();
+    for diagnostic in session.diags.diagnostics() {
+        let target = primary_file(diagnostic)
+            .and_then(|id| file_uris.get(&id).cloned())
+            .or_else(|| fallback.cloned());
+        let Some(uri) = target else {
+            continue;
+        };
+        if covered.contains(&canonical_file_uri(&uri)) {
+            continue;
+        }
+        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
+            file_uris.get(&file).cloned()
+        }) {
+            by_uri.entry(uri).or_default().push(lsp);
+        }
+    }
+    covered.extend(file_uris.values().cloned());
+    let uri_files = file_uris
+        .iter()
+        .map(|(id, uri)| (uri.clone(), *id))
+        .collect();
+    Retained::build_with_stages(session, file_uris, uri_files, stages)
+}
+
+/// Like [`retain`] for a single-file compile of the document at `uri`.
+fn retain_single(
+    session: Session,
+    stages: LirStages,
+    uri: &Url,
+    covered: &mut HashSet<Url>,
+    by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
+) -> Retained {
+    covered.insert(canonical_file_uri(uri));
     let entry = by_uri.entry(uri.clone()).or_default();
     for diagnostic in session.diags.diagnostics() {
         if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
@@ -408,10 +571,7 @@ fn compile_standalone(
     }
     let file_uris = HashMap::from([(FileId(0), uri.clone())]);
     let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
-    per_file.insert(
-        uri.clone(),
-        Retained::build_with_stages(session, file_uris, uri_files, stages),
-    );
+    Retained::build_with_stages(session, file_uris, uri_files, stages)
 }
 
 /// The file of a diagnostic's primary label (else its first label).

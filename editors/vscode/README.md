@@ -9,8 +9,32 @@ Syntax highlighting for the [Lilac](../../) programming language and Lilac IR.
 | Lilac | `.lilac` | `source.lilac` |
 | Lilac IR | `.lir` | `source.lilac-ir` |
 
-Highlighting is a pure TextMate grammar — no language server, no runtime code.
-It works with any color theme.
+Base highlighting is a TextMate grammar and works with any color theme; the
+language server adds semantic highlighting on top.
+
+## Language server and project settings
+
+The extension starts `lilac-lsp` (the `lilac.serverPath` setting) for
+diagnostics, hover, go-to-definition and semantic highlighting. Put a
+`lilac.json` in the workspace folder to describe the project:
+
+```json
+{
+  "root": "src",
+  "libraries": { "Standard": "lib/Standard" }
+}
+```
+
+- `root`: the project's root folder (default: the workspace folder).
+- `libraries`: libraries to mount, as the CLI's `--lib=Name=dir`. A relative
+  `dir` is taken from the workspace folder.
+
+The `lilac.libraries` setting mounts libraries the same way and wins on a name
+both define. Restart the server (reload the window) after changing either.
+
+An open file the project does not reach is checked as the library namespace
+it lies in, else as its folder (when the folder has a `main.lilac` or the file
+has no `main`), else on its own.
 
 ## Install
 
@@ -20,7 +44,7 @@ Build the extension and install the VSIX:
 cd editors/vscode
 npm install
 npm run package
-code --install-extension lilac-0.1.0.vsix
+code --install-extension lilac-0.4.0.vsix
 ```
 
 Or, for development, open this folder in VS Code and press `F5` to launch an

@@ -60,19 +60,30 @@ impl Documents {
         self.map.remove(uri);
     }
 
-    /// Snapshot of open documents: path to current text.
+    /// Snapshot of open documents: path to current text, under both the
+    /// document's own path and its canonical form (see `OverlayFs`).
     #[must_use]
     pub fn overlay(&self) -> HashMap<PathBuf, String> {
-        self.map
-            .values()
-            .map(|document| (document.path.clone(), document.text.clone()))
-            .collect()
+        let mut overlay = HashMap::new();
+        for document in self.map.values() {
+            if let Ok(canonical) = std::fs::canonicalize(&document.path) {
+                overlay.insert(canonical, document.text.clone());
+            }
+            overlay.insert(document.path.clone(), document.text.clone());
+        }
+        overlay
     }
 
     /// The filesystem path of an open document.
     #[must_use]
     pub fn path_of(&self, uri: &Url) -> Option<&Path> {
         self.map.get(uri).map(|document| document.path.as_path())
+    }
+
+    /// The open document at `uri`.
+    #[must_use]
+    pub fn get(&self, uri: &Url) -> Option<&Document> {
+        self.map.get(uri)
     }
 
     /// Iterates open documents as `(uri, document)`.
