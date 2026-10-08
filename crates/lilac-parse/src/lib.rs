@@ -23,7 +23,7 @@ pub struct Parser {
     pos: usize,
     file: FileId,
     eof: Token,
-    failed: bool,
+    had_errors: bool,
     /// Whether `Ident { ... }` parses as a struct literal (Rust-style
     /// brace restriction: `if`/`loop` heads and `match` scrutinees parse
     /// with this off, so a trailing `{` opens a block; parentheses and
@@ -46,12 +46,22 @@ impl Parser {
                 u32::MAX as usize,
                 file,
             ),
-            failed: false,
+            had_errors: false,
             allow_struct_lit: true,
         }
     }
 
-    /// Parses a whole file, recovering past broken items.
+    /// Whether any construct failed to parse (the "a construct failed" signal).
+    /// Distinct from [`lilac_error::Diags::has_errors`]: a lex error may parse
+    /// cleanly and must not flip this flag.
+    #[must_use]
+    pub fn had_errors(&self) -> bool {
+        self.had_errors
+    }
+
+    /// Parses a whole file, recovering past broken items. Always returns `Ok`;
+    /// a failed item becomes an [`ItemKind::Error`] and [`Parser::had_errors`]
+    /// records that a construct failed.
     pub fn parse_program(
         &mut self,
         diags: &mut lilac_error::Diags,
@@ -62,11 +72,12 @@ impl Parser {
             if let Ok(item) = self.parse_item(diags, false) {
                 items.push(item);
             } else {
-                self.failed = true;
+                self.had_errors = true;
                 self.synchronize();
                 if self.pos == before {
                     self.pos += 1;
                 }
+                items.push(self.error_item(before));
             }
         }
         let span = items
@@ -75,10 +86,27 @@ impl Parser {
             .map_or_else(Span::dummy, |(first, last)| {
                 join_spans(first.span, last.span)
             });
-        if self.failed {
-            return Err(ErrorGuaranteed::new());
-        }
         Ok(Program { items, span })
+    }
+
+    /// An [`ItemKind::Error`] item spanning the tokens consumed for a failed
+    /// item, from `start` through the current position.
+    fn error_item(&self, start: usize) -> Item {
+        let first = self.tokens.get(start).map(|token| token.span);
+        let last = self
+            .pos
+            .checked_sub(1)
+            .and_then(|end| self.tokens.get(end))
+            .map(|token| token.span);
+        let span = match (first, last) {
+            (Some(first), Some(last)) => join_spans(first, last),
+            _ => Span::dummy(),
+        };
+        Item {
+            name: String::new(),
+            kind: ItemKind::Error,
+            span,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -371,11 +399,12 @@ impl Parser {
             if let Ok(item) = self.parse_item(diags, in_object) {
                 items.push(item);
             } else {
-                self.failed = true;
+                self.had_errors = true;
                 self.synchronize();
                 if self.pos == before {
                     self.pos += 1;
                 }
+                items.push(self.error_item(before));
             }
         }
         let close = self.bump();
@@ -405,11 +434,12 @@ impl Parser {
             if let Ok(item) = self.parse_item(diags, true) {
                 members.push(item);
             } else {
-                self.failed = true;
+                self.had_errors = true;
                 self.synchronize();
                 if self.pos == before {
                     self.pos += 1;
                 }
+                members.push(self.error_item(before));
             }
         }
         self.bump();
@@ -1544,6 +1574,43 @@ mod tests {
         let src = "broken1: function ( nothing {}\nbroken2: object {\n";
         let (_, diags, _) = parse(src);
         assert!(diags.diagnostics().len() >= 2);
+    }
+
+    #[test]
+    fn item_error_recovery() {
+        let src = "ok: function () nothing {\n}\nbad: function (\n";
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("test.lilac", src);
+        let (tokens, lex_errors) = Lexer::lex_all(src, file);
+        let mut diags = Diags::new();
+        for error in lex_errors {
+            diags.emit(error);
+        }
+        let mut parser = Parser::new(tokens, file);
+        let program = parser
+            .parse_program(&mut diags)
+            .expect("parse_program must recover rather than return Err");
+        assert_eq!(program.items.len(), 2, "one good item plus one error item");
+        assert!(
+            matches!(program.items[0].kind, ItemKind::Func(_)),
+            "the good item survives: {:?}",
+            program.items[0].kind
+        );
+        assert!(
+            matches!(program.items[1].kind, ItemKind::Error),
+            "the broken item recovers into `ItemKind::Error`: {:?}",
+            program.items[1].kind
+        );
+        assert!(parser.had_errors(), "a failed construct is recorded");
+        let parse_diag = diags
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "E001")
+            .expect("the broken item still reports E001");
+        assert_eq!(
+            parse_diag.msg, "unterminated parameter list; add a closing `)`",
+            "same message as today"
+        );
     }
 
     #[test]

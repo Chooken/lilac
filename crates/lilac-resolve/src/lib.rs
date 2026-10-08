@@ -738,7 +738,7 @@ impl Collector<'_> {
                     })
                     .collect(),
             },
-            ItemKind::Using { .. } | ItemKind::Private { .. } => return None,
+            ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
             ItemKind::Const { .. } => ResKind::Const,
             ItemKind::Field { .. } => ResKind::Field,
         };

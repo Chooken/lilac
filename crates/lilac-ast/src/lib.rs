@@ -71,6 +71,9 @@ pub enum ItemKind {
         /// `true` for `=>` (inline; folds through substitution).
         is_inline: bool,
     },
+    /// An item that failed to parse; its `span` covers the consumed tokens.
+    /// Carries no name and defines nothing downstream.
+    Error,
 }
 
 /// One enum variant: `One` or `Some: @bit32` (payload).
@@ -506,7 +509,10 @@ pub fn walk_item<V: Visitor + ?Sized>(visitor: &mut V, item: &Item) {
                 visitor.visit_item(member);
             }
         }
-        ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
+        ItemKind::Enum { .. }
+        | ItemKind::Using { .. }
+        | ItemKind::Field { .. }
+        | ItemKind::Error => {}
         ItemKind::Const { value, .. } => visitor.visit_expr(value),
     }
 }
@@ -677,7 +683,10 @@ pub fn walk_item_mut<V: MutVisitor + ?Sized>(visitor: &mut V, item: &mut Item) {
                 visitor.visit_item_mut(member);
             }
         }
-        ItemKind::Enum { .. } | ItemKind::Using { .. } | ItemKind::Field { .. } => {}
+        ItemKind::Enum { .. }
+        | ItemKind::Using { .. }
+        | ItemKind::Field { .. }
+        | ItemKind::Error => {}
         ItemKind::Const { value, .. } => visitor.visit_expr_mut(value),
     }
 }

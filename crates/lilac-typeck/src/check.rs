@@ -1486,7 +1486,8 @@ impl Checker<'_> {
             ItemKind::Enum { .. }
             | ItemKind::Using { .. }
             | ItemKind::Private { .. }
-            | ItemKind::Field { .. } => {}
+            | ItemKind::Field { .. }
+            | ItemKind::Error => {}
         }
     }
 

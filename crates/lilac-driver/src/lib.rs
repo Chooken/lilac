@@ -102,6 +102,10 @@ pub struct Session {
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Retained analysis from the last compile (best-effort; editor tooling).
     pub analysis: Option<Analysis>,
+    /// Whether to run the passes past parse/type errors and keep the partial
+    /// analysis (editor tooling). Strict (the CLI) leaves this `false`, so the
+    /// stage gates reproduce today's stop-at-the-first-failing-stage behavior.
+    pub retain_partial_analysis: bool,
 }
 
 impl Default for Session {
@@ -120,6 +124,7 @@ impl Default for Session {
             exports: HashSet::new(),
             project_files: Vec::new(),
             analysis: None,
+            retain_partial_analysis: false,
         }
     }
 }
@@ -205,6 +210,7 @@ impl Session {
             items: Vec::new(),
             span: Span::dummy(),
         };
+        let mut had_parse_errors = false;
         for unit in &project.files {
             let file = unit.file;
             let (tokens, lex_errors) = Lexer::lex_all(&unit.src, file);
@@ -213,8 +219,12 @@ impl Session {
             }
             let mut parser = Parser::new(tokens, file);
             let program = parser.parse_program(&mut self.diags)?;
+            had_parse_errors |= parser.had_errors();
             merged.items.extend(program.items.iter().cloned());
             programs.push((file, program));
+        }
+        if had_parse_errors && !self.retain_partial_analysis {
+            return Err(ErrorGuaranteed::new());
         }
         let resolved = lilac_resolve::collect_project(&project, &programs, &mut self.diags);
         self.finish_pipeline(&merged, &resolved, on_stage)
@@ -255,6 +265,9 @@ impl Session {
         }
         let mut parser = Parser::new(tokens, file);
         let program = parser.parse_program(&mut self.diags)?;
+        if parser.had_errors() && !self.retain_partial_analysis {
+            return Err(ErrorGuaranteed::new());
+        }
         let module = lilac_resolve::collect(&program, &mut self.diags);
         let project = lilac_resolve::ResolvedProject::single(module, file);
         let lir = self.finish_pipeline(&program, &project, on_stage)?;

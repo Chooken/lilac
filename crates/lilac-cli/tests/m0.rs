@@ -39,6 +39,41 @@ fn check_broken_parse_fails_with_e001() {
 }
 
 #[test]
+fn check_broken_item_recovers_without_extra_errors() {
+    // Item-level recovery: the file has one good item plus one broken item.
+    // Strict mode still stops before `collect`, so `check` fails with exactly
+    // the same single E001 (same message and span) as before recovery, and the
+    // good item is not reported as an extra error.
+    let output = lilac()
+        .args(["check", &ui("recovers_parse.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(
+        !output.status.success(),
+        "the broken item must fail `check`"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[E001]: unterminated parameter list; add a closing `)`"),
+        "stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("recovers_parse.lilac:4:1"),
+        "stderr was:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("error[").count(),
+        1,
+        "only the broken item is reported:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("-->").count(),
+        1,
+        "only one diagnostic span is reported:\n{stderr}"
+    );
+}
+
+#[test]
 fn check_broken_lex_fails_with_e000() {
     let output = lilac()
         .args(["check", &ui("fails_lex.lilac")])

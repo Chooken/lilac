@@ -678,7 +678,8 @@ fn collect_item(
         | ItemKind::Using { .. }
         | ItemKind::Private { .. }
         | ItemKind::Const { .. }
-        | ItemKind::Field { .. } => {}
+        | ItemKind::Field { .. }
+        | ItemKind::Error => {}
     }
 }
 
