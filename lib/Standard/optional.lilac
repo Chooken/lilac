@@ -24,8 +24,7 @@ Optional[T]: enum {
         }
     }
 
-    // Idk if this will work or not. If not then just delete
-    // Depends on if generics check functions on use or not.
+    // Only usable when T has a static `default()`; checked when called.
     unwrap_or_default: function(self) has_value: Bool, value: T {
         match self {
             .Some -> some_value: T {
