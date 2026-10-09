@@ -521,6 +521,18 @@ function startClient(context, serverPath) {
     return next;
 }
 
+// Stops the running server (if any; a crashed one may refuse) and starts a
+// fresh one from the current `lilac.serverPath`.
+async function restartClient(context) {
+    if (client) {
+        try {
+            await client.stop();
+        } catch {
+        }
+    }
+    client = startClient(context, serverPath());
+}
+
 function serverPath() {
     return workspace.getConfiguration("lilac").get("serverPath", "lilac-lsp");
 }
@@ -535,6 +547,9 @@ async function activate(context) {
     context.subscriptions.push(commands.registerCommand("lilac.showLir", showLir));
     context.subscriptions.push(
         commands.registerCommand("lilac.selectLirStage", selectLirStage)
+    );
+    context.subscriptions.push(
+        commands.registerCommand("lilac.restartServer", () => restartClient(context))
     );
     context.subscriptions.push(lirChange);
     context.subscriptions.push(
@@ -552,13 +567,9 @@ async function activate(context) {
 
     context.subscriptions.push(
         workspace.onDidChangeConfiguration(async (event) => {
-            if (!event.affectsConfiguration("lilac.serverPath")) {
-                return;
+            if (event.affectsConfiguration("lilac.serverPath")) {
+                await restartClient(context);
             }
-            if (client) {
-                await client.stop();
-            }
-            client = startClient(context, serverPath());
         })
     );
 }

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Lilac: Restart Language Server** command, to pick up a rebuilt
+  `lilac-lsp` or recover a stuck server without reloading the window.
+- `as` (the cast keyword) is highlighted.
+
 - The server compiles on a background thread: hovers, completion and other
   requests are answered right away, from the last compile, while the next
   one runs. Diagnostics from a compile that an edit has already overtaken

@@ -11,12 +11,14 @@
   "activationEvents": [
     "onLanguage:lilac",
     "onCommand:lilac.showLir",
-    "onCommand:lilac.selectLirStage"
+    "onCommand:lilac.selectLirStage",
+    "onCommand:lilac.restartServer"
   ],
   "contributes": {
     "commands": [
       { "command": "lilac.showLir", "title": "Lilac: Show IR" },
-      { "command": "lilac.selectLirStage", "title": "Lilac: Select IR Stage" }
+      { "command": "lilac.selectLirStage", "title": "Lilac: Select IR Stage" },
+      { "command": "lilac.restartServer", "title": "Lilac: Restart Language Server" }
     ],
     "languages": [
       {

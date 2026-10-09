@@ -39,6 +39,9 @@ and
 // <-- keyword.operator.lilac
 or
 // <- keyword.operator.lilac
+x as ref Block
+//^^ keyword.other.as.lilac
+//   ^^^ storage.type.lilac
     private
 //  ^^^^^^^ storage.modifier.lilac
     using A
