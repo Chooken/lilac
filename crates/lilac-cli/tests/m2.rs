@@ -274,6 +274,40 @@ fn generic_compile_error_chain_names_the_instance() {
     }
 }
 
+/// A constant out-of-bounds index is `E037` in a function only a dead
+/// function calls; the trace lists that caller. The guarded arm is silent.
+#[test]
+fn constant_index_out_of_bounds_is_e037_even_unused() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_array_constant_index.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("error[E037]").count(),
+        1,
+        "stderr:
+{stderr}"
+    );
+    assert!(
+        stderr.contains("index 4 is out of bounds for an array of length 4"),
+        "stderr:
+{stderr}"
+    );
+    assert!(
+        stderr.contains("FAILS_array_constant_index.lilac:5:31"),
+        "stderr:
+{stderr}"
+    );
+    assert!(
+        stderr.contains("at never_called (")
+            && stderr.contains("FAILS_array_constant_index.lilac:9:13)"),
+        "stderr:
+{stderr}"
+    );
+}
+
 /// By default an unreachable `api` is swept from `export_entry.lilac`.
 #[test]
 fn unexported_function_is_pruned() {

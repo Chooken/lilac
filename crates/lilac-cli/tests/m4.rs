@@ -115,13 +115,18 @@ fn fails_generic_object_cycle_is_e051() {
 #[test]
 fn no_cascade_single_e042() {
     // One failed instantiation reached from two call sites is exactly one
-    // `E042`: the second site reuses the poisoned memo and stays silent.
+    // `E042`, whose trace lists both sites.
     let (ok, stderr) = check("FAILS_generic_no_cascade.lilac", &[]);
     assert!(!ok, "should fail");
     assert_eq!(
         stderr.matches("error[E042]").count(),
         1,
         "expected exactly one E042:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("FAILS_generic_no_cascade.lilac:6:21)")
+            && stderr.contains("FAILS_generic_no_cascade.lilac:7:22)"),
+        "both call sites traced:\n{stderr}"
     );
 }
 
@@ -139,6 +144,9 @@ const DUCK_TYPING_SHORT: &str = concat!(
     "12 |     variable: @bit32 = gen_function[@bit32]()\n",
     "   |                        ---------------------- required by instantiation of gen_function[@bit32] here\n",
     "   |\n",
+    "   = note: reached from:\n",
+    "             at gen_function[@bit32] (../../tests/ui/FAILS_generic_duck_typing.lilac:2:11)\n",
+    "               at main (../../tests/ui/FAILS_generic_duck_typing.lilac:12:24)\n",
     "   = note: based on this usage, the generic body requires a method matching:\n",
     "               fn other() -> T\n",
     "\n",
@@ -154,9 +162,8 @@ fn fails_generic_duck_typing_short_snapshot() {
 
 #[test]
 fn fails_generic_duck_typing_verbose_snapshot() {
-    // With a single instantiation frame the `--verbose` render is identical;
-    // the frame is named by the sourced instantiation note, so no separate
-    // `in instantiation of` line is emitted.
+    // A two-frame trace is under the elision depth, so the `--verbose`
+    // render is identical.
     let (ok, stderr) = check("FAILS_generic_duck_typing.lilac", &["--verbose"]);
     assert!(!ok, "should fail");
     assert_eq!(stderr, DUCK_TYPING_SHORT);
@@ -164,9 +171,9 @@ fn fails_generic_duck_typing_verbose_snapshot() {
     assert!(!stderr.contains("note: in instantiation of gen_function[@bit32]"));
 }
 
-/// A >5-frame instantiation chain (`level0` -> ... -> `level5`): the
+/// A >5-level trace (`main` -> `level0` -> ... -> `level5`): the
 /// `--verbose` render prints every frame while the default elides the
-/// trailing ones.
+/// deepest ones.
 const DEEP_CHAIN_VERBOSE: &str = concat!(
     "error[E042]: type `@bit32` does not satisfy `level5[T]` requirements\n",
     "  --> ../../tests/ui/FAILS_generic_deep_chain.lilac:22:11\n",
@@ -177,12 +184,14 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "22 |     out = x.missing()\n",
     "   |           ^^^^^^^^^^^ missing method `missing` on `@bit32`\n",
     "   |\n",
-    "   = note: in instantiation of level0[@bit32]\n",
-    "   = note: in instantiation of level1[@bit32]\n",
-    "   = note: in instantiation of level2[@bit32]\n",
-    "   = note: in instantiation of level3[@bit32]\n",
-    "   = note: in instantiation of level4[@bit32]\n",
-    "   = note: in instantiation of level5[@bit32]\n",
+    "   = note: reached from:\n",
+    "             at level5[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:22:11)\n",
+    "               at level4[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:18:11)\n",
+    "                 at level3[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:14:11)\n",
+    "                   at level2[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:10:11)\n",
+    "                     at level1[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:6:11)\n",
+    "                       at level0[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:2:11)\n",
+    "                         at main (../../tests/ui/FAILS_generic_deep_chain.lilac:26:17)\n",
     "   = note: based on this usage, the generic body requires a method matching:\n",
     "               fn missing(self: ref T) -> T\n",
     "\n",
@@ -200,7 +209,7 @@ fn fails_generic_deep_chain_verbose_snapshot() {
     let (_, short) = check("FAILS_generic_deep_chain.lilac", &[]);
     assert_ne!(short, verbose, "verbose must differ from default:\n{short}");
     assert!(
-        short.contains("1 more frame elided (use --verbose)"),
+        short.contains("2 more frames elided (use --verbose)"),
         "{short}"
     );
 }

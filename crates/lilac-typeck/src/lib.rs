@@ -101,6 +101,8 @@ fn check_impl(
         env: Env::default(),
         requirements: Vec::new(),
         reported: HashSet::new(),
+        origins: HashMap::new(),
+        failures: Vec::new(),
     };
     checker.run();
     let templates = if templates {
@@ -240,6 +242,12 @@ pub(crate) struct Checker<'a> {
     pub requirements: Vec<(usize, Requirement)>,
     /// `E042`s already reported, by instance (one per instance).
     pub reported: HashSet<FuncKey>,
+    /// Every site that requested each instance: the requesting instance
+    /// (`None` outside a function body) and the use. `E042` traces them.
+    pub origins: HashMap<FuncKey, Vec<(Option<FuncKey>, Span)>>,
+    /// `E042`s waiting for the worklist to drain, so their traces list every
+    /// origin, also ones requested after the failing body was checked.
+    pub failures: Vec<(FuncKey, Diagnostic)>,
     /// [`Options::require_entry`].
     pub require_entry: bool,
     /// Set when the `@entry` body being checked names a missing root item
@@ -269,11 +277,18 @@ impl Checker<'_> {
                 let _ = self.request(FuncKey::plain(id), span);
             }
         }
+        self.drain_queue();
+        self.finish_type_hooks();
+        self.check_array_hooks();
+        self.drain_queue();
+    }
+
+    /// Checks every queued instance, then emits the `E042`s they produced.
+    fn drain_queue(&mut self) {
         while let Some(key) = self.queue.pop_front() {
             self.check_instance(&key);
         }
-        self.finish_type_hooks();
-        self.check_array_hooks();
+        self.emit_failures();
     }
 
     /// Checks each generic function no instance reached, with its generic
@@ -304,9 +319,7 @@ impl Checker<'_> {
                 .collect();
             let span = def.span;
             let _ = self.request(FuncKey { def: id, args }, span);
-            while let Some(key) = self.queue.pop_front() {
-                self.check_instance(&key);
-            }
+            self.drain_queue();
         }
         self.out.layouts.retain(|ty, _| layouts.contains(ty));
         std::mem::swap(self.diags, &mut scratch);
@@ -363,6 +376,11 @@ impl Checker<'_> {
         key: FuncKey,
         use_span: Span,
     ) -> Result<FuncSig, ErrorGuaranteed> {
+        let origin = (self.env.key.clone(), use_span);
+        let origins = self.origins.entry(key.clone()).or_default();
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
         if let Some(instance) = self.instances.get(&key) {
             return match instance.state {
                 State::Failed => Err(ErrorGuaranteed::new()),

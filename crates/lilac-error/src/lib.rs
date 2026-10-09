@@ -174,14 +174,29 @@ impl Diagnostic {
 
 /// The `reached from:` note text for `trace`: one `at` line per frame, two
 /// spaces deeper per caller level, without a trailing newline. Empty when
-/// `trace` is.
+/// `trace` is. Levels past `max_depth` are elided with a count. A frame
+/// with no function name (a use outside any function) shows only its
+/// location.
 #[must_use]
-pub fn trace_text(trace: &[TraceFrame], source_map: &SourceMap) -> String {
-    fn push(frame: &TraceFrame, depth: usize, source_map: &SourceMap, lines: &mut Vec<String>) {
-        let mut line = format!("{:width$}at {}", "", frame.func, width = 2 + depth * 2);
-        if let Some(location) = source_map.location(frame.span) {
-            let _ = write!(line, " ({location})");
-        }
+pub fn trace_text(
+    trace: &[TraceFrame],
+    source_map: &SourceMap,
+    max_depth: Option<usize>,
+) -> String {
+    fn push(
+        frame: &TraceFrame,
+        depth: usize,
+        max_depth: Option<usize>,
+        source_map: &SourceMap,
+        lines: &mut Vec<String>,
+    ) {
+        let indent = 2 + depth * 2;
+        let location = source_map.location(frame.span);
+        let mut line = match (&location, frame.func.is_empty()) {
+            (Some(location), true) => format!("{:indent$}at {location}", ""),
+            (Some(location), false) => format!("{:indent$}at {} ({location})", "", frame.func),
+            (None, _) => format!("{:indent$}at {}", "", frame.func),
+        };
         if frame.address {
             line.push_str(" [address taken]");
         }
@@ -189,13 +204,27 @@ pub fn trace_text(trace: &[TraceFrame], source_map: &SourceMap) -> String {
             line.push_str(" [see above]");
         }
         lines.push(line);
+        if max_depth.is_some_and(|max| depth + 1 >= max) && !frame.callers.is_empty() {
+            let elided: usize = frame
+                .callers
+                .iter()
+                .map(|caller| caller.walk().count())
+                .sum();
+            let noun = if elided == 1 { "frame" } else { "frames" };
+            lines.push(format!(
+                "{:width$}... {elided} more {noun} elided (use --verbose)",
+                "",
+                width = indent + 2
+            ));
+            return;
+        }
         for caller in &frame.callers {
-            push(caller, depth + 1, source_map, lines);
+            push(caller, depth + 1, max_depth, source_map, lines);
         }
     }
     let mut lines = Vec::new();
     for frame in trace {
-        push(frame, 0, source_map, &mut lines);
+        push(frame, 0, max_depth, source_map, &mut lines);
     }
     if lines.is_empty() {
         return String::new();
@@ -339,10 +368,6 @@ impl Default for Diags {
         Self::new()
     }
 }
-
-/// Stable prefix on instantiation-stack notes so [`EmitterHuman`] can elide
-/// all but the first few unless `verbose`.
-pub const CHAIN_FRAME_PREFIX: &str = "in instantiation of ";
 
 /// Renders a [`Diagnostic`] against a [`SourceMap`].
 pub trait Emitter {
@@ -566,7 +591,7 @@ mod tests {
             ],
         ));
         assert_eq!(
-            trace_text(diagnostic.trace_roots(), &sm),
+            trace_text(diagnostic.trace_roots(), &sm, None),
             "reached from:\n  at boom (main.lilac:1:1)\n    at a (main.lilac:2:1)\n    at b (main.lilac:3:1)\n      at a (main.lilac:4:1) [see above]"
         );
         let frames: Vec<&str> = diagnostic
@@ -618,29 +643,32 @@ mod tests {
     }
 
     #[test]
-    fn verbose_stack_full() {
+    fn verbose_trace_full() {
         let mut sm = SourceMap::new();
         let file = sm.add_file("main.lilac", "x\n");
-        let mut diagnostic = Diagnostic::error("E042", "requirements").label(
-            Span::new(0, 1, file),
-            true,
-            "instantiated here",
-        );
-        for frame in 0..7 {
-            diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}frame{frame}"));
+        let span = Span::new(0, 1, file);
+        let mut chain = frame("frame7", span, Vec::new());
+        for level in (0..7).rev() {
+            chain = frame(&format!("frame{level}"), span, vec![chain]);
         }
+        let diagnostic = Diagnostic::error("E042", "requirements")
+            .label(span, true, "here")
+            .trace(chain);
 
         let short = EmitterHuman::new().render(&diagnostic, &sm);
-        assert!(short.contains("in instantiation of frame0"), "{short}");
-        assert!(!short.contains("in instantiation of frame6"), "{short}");
-        assert!(short.contains("more frames elided"), "{short}");
+        assert!(short.contains("at frame4 ("), "{short}");
+        assert!(!short.contains("at frame5 ("), "{short}");
+        assert!(
+            short.contains("... 3 more frames elided (use --verbose)"),
+            "{short}"
+        );
 
         let full = EmitterHuman {
             verbose: true,
             ..EmitterHuman::new()
         }
         .render(&diagnostic, &sm);
-        assert!(full.contains("in instantiation of frame6"), "{full}");
+        assert!(full.contains("at frame7 ("), "{full}");
         assert!(!full.contains("elided"), "{full}");
     }
 

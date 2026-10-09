@@ -43,6 +43,46 @@ pub struct Lowered {
     /// LIR symbol -> name as written in source (`Holder[@bit32].make`);
     /// stack traces print these.
     pub names: HashMap<String, String>,
+    /// Constant `@array_at` indexes past the array's end, in lowering order
+    /// ([`check_constant_indices`] reports them).
+    pub bad_indices: Vec<BadIndex>,
+}
+
+/// A constant `@array_at` index that is out of bounds: `E037`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadIndex {
+    /// LIR symbol of the function holding the access.
+    pub func: String,
+    /// The index argument.
+    pub span: Span,
+    /// The index's value.
+    pub index: u64,
+    /// The array's length.
+    pub len: u64,
+}
+
+/// Reports every [`Lowered::bad_indices`] entry as `E037`, traced through
+/// every caller in `lowered`'s module, live or not: a constant index is
+/// wrong whether or not anything calls the function yet. Run it before DCE.
+/// It only emits, so the live checks after DCE still report too.
+pub fn check_constant_indices(lowered: &Lowered, diags: &mut Diags) {
+    if lowered.bad_indices.is_empty() {
+        return;
+    }
+    let graph = lilac_ir::CallGraph::new(&lowered.module);
+    for bad in &lowered.bad_indices {
+        diags.emit(
+            Diagnostic::error(
+                "E037",
+                format!(
+                    "index {} is out of bounds for an array of length {}",
+                    bad.index, bad.len
+                ),
+            )
+            .label(bad.span, true, format!("the last index is {}", bad.len - 1))
+            .trace(graph.trace(&bad.func, bad.span, &lowered.names)),
+        );
+    }
 }
 
 /// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
@@ -62,6 +102,7 @@ pub fn lower(
         types,
         sources,
         names: HashMap::new(),
+        bad_indices: Vec::new(),
         ptr_bytes,
         module: LirModule::new(triple),
         symbols: HashMap::new(),
@@ -120,6 +161,7 @@ pub fn lower(
     Lowered {
         module: lower.module,
         names: lower.names,
+        bad_indices: lower.bad_indices,
     }
 }
 
@@ -144,6 +186,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         types,
         sources: &sources,
         names: HashMap::new(),
+        bad_indices: Vec::new(),
         ptr_bytes: 8,
         module: LirModule::new(""),
         symbols: HashMap::new(),
@@ -339,6 +382,8 @@ struct Lower<'a> {
     sources: &'a SourceMap,
     /// Source name of every function with a body, by LIR symbol.
     names: HashMap<String, String>,
+    /// Constant out-of-bounds `@array_at` indexes (`E037`).
+    bad_indices: Vec<BadIndex>,
     ptr_bytes: u64,
     module: LirModule,
     /// LIR symbol of every function instance.
@@ -2592,10 +2637,19 @@ impl Lower<'_> {
         let TypeKind::Array { elem, len } = *self.types.kind(args[0].ty.id) else {
             lilac_error::bug!(span, "`@array_at` of a non-array");
         };
-        let in_bounds = matches!(
-            self.constant(&args[1]),
-            Some(constant::Value::Int(index, _)) if index < len
-        );
+        let index = match self.constant(&args[1]) {
+            Some(constant::Value::Int(index, _)) => Some(index),
+            _ => None,
+        };
+        let in_bounds = index.is_some_and(|index| index < len);
+        if let Some(index) = index.filter(|_| !in_bounds) {
+            self.bad_indices.push(BadIndex {
+                func: self.symbols[&func.key].clone(),
+                span: args[1].span,
+                index,
+                len,
+            });
+        }
         let operands = self.regs(fs, func, args);
         let ty = self.lir_ty(TypeRef::reference(elem));
         let addr = fs.reg();

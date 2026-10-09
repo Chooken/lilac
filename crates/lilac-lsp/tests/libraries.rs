@@ -413,3 +413,42 @@ fn a_library_compile_error_marks_the_users_call() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// An `E042` in a library generic marks the user's instantiating call too.
+#[test]
+fn a_library_generic_failure_marks_the_users_call() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("lsp_trace_generic");
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("lib").join("Make.lilac");
+    std::fs::create_dir_all(lib.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &lib,
+        "make[T]: function () out: T {\n    out = T.other()\n}\n",
+    )
+    .expect("write");
+    let main = dir.join("app").join("main.lilac");
+    std::fs::create_dir_all(main.parent().expect("parent")).expect("mkdir");
+    let text = "main: function () nothing {\n    value: @bit32 = Lib.make[@bit32]()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        &serde_json::json!({ "libraries": { "Lib": dir.join("lib").to_string_lossy() } }),
+    );
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    let site = published
+        .diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("this call leads to an error"))
+        .unwrap_or_else(|| panic!("{:?}", published.diagnostics));
+    assert_eq!(site.range.start.line, 1, "{site:?}");
+    assert_eq!(
+        site.code,
+        Some(lsp_types::NumberOrString::String("E042".to_owned()))
+    );
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

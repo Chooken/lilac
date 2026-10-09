@@ -281,8 +281,20 @@ bug fix that changes generated code.
   callers), with `trace::is_hidden` (`.lilac.*`) glue spliced out. Each
   function's callers are listed once; a later frame of it is a `repeat`
   (`[see above]`), which also ends recursion. `lilac_error::trace_text` is
-  the `reached from:` caller tree; the JSON emitter nests it as `trace`.
-  The checks run right after DCE, before `trace::instrument`.
+  the `reached from:` caller tree (levels past five elided unless
+  `--verbose`); the JSON emitter nests it as `trace`. The checks run right
+  after DCE, before `trace::instrument`.
+- `E037` (a constant `@array_at` index out of bounds) is found while
+  lowering (`Lowered::bad_indices`) and reported by
+  `lilac_lower::check_constant_indices` before DCE, traced through the full
+  call graph, so it fires in functions nothing calls. Arms a constant
+  condition rules out are never lowered, so they are not checked.
+- `E042` traces every site that requested the failing instance
+  (`Checker::origins`, recorded on every `request`, cached or not), through
+  generic requesters down to plain functions (`Checker::instance_trace`).
+  `E042`s are held in `Checker::failures` until the worklist drains
+  (`drain_queue`), so origins requested later are included. `E051` keeps its
+  first-origin `instantiation chain:` note.
 - Drops carry real spans so both traces can place them: a scope-end drop is
   at the block's closing `}` (`end_of`), an early exit's drops at the
   `return`/`break`/`continue`, and statement temporaries at the statement's expression

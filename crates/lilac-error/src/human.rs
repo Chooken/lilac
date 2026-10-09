@@ -13,9 +13,9 @@ use std::fmt::Write as _;
 
 use lilac_span::{FileId, SourceFile, SourceMap};
 
-use crate::{Diagnostic, Emitter, Label, Level, CHAIN_FRAME_PREFIX};
+use crate::{Diagnostic, Emitter, Label, Level};
 
-/// Chain frames shown before [`EmitterHuman`] elides the rest (non-`verbose`).
+/// Trace levels shown before [`EmitterHuman`] elides the rest (non-`verbose`).
 const MAX_FRAMES: usize = 5;
 
 /// Display width of a tab; source tabs are expanded to this many spaces.
@@ -99,11 +99,17 @@ impl Emitter for EmitterHuman {
         let mut footer: Vec<(Style, &str, String)> = unplaced
             .map(|msg| (Style::Note, "note", msg.to_owned()))
             .collect();
-        let trace = crate::trace_text(diagnostic.trace_roots(), source_map);
+        let depth = (!self.verbose).then_some(MAX_FRAMES);
+        let trace = crate::trace_text(diagnostic.trace_roots(), source_map, depth);
         if !trace.is_empty() {
             footer.push((Style::Note, "note", trace));
         }
-        footer.extend(notes(diagnostic, self.verbose));
+        footer.extend(
+            diagnostic
+                .notes
+                .iter()
+                .map(|note| (Style::Note, "note", note.clone())),
+        );
         footer.extend(
             diagnostic
                 .helps
@@ -130,39 +136,6 @@ fn draw_header(canvas: &mut Canvas, diagnostic: &Diagnostic) {
         col = canvas.put(row, col, &format!("[{}]", diagnostic.code), level);
     }
     canvas.put(row, col, &format!(": {}", diagnostic.msg), Style::Bold);
-}
-
-/// The notes to print, with instantiation frames past [`MAX_FRAMES`] elided
-/// unless `verbose`.
-fn notes(diagnostic: &Diagnostic, verbose: bool) -> Vec<(Style, &'static str, String)> {
-    let frames = diagnostic
-        .notes
-        .iter()
-        .filter(|note| note.starts_with(CHAIN_FRAME_PREFIX))
-        .count();
-    let elide = !verbose && frames > MAX_FRAMES;
-    let mut seen = 0usize;
-    let mut out = Vec::new();
-    for note in &diagnostic.notes {
-        if note.starts_with(CHAIN_FRAME_PREFIX) {
-            seen += 1;
-            if elide && seen > MAX_FRAMES {
-                // The marker stands where the first elided frame was.
-                if seen == MAX_FRAMES + 1 {
-                    let elided = frames - MAX_FRAMES;
-                    let noun = if elided == 1 { "frame" } else { "frames" };
-                    out.push((
-                        Style::Note,
-                        "note",
-                        format!("... {elided} more {noun} elided (use --verbose)"),
-                    ));
-                }
-                continue;
-            }
-        }
-        out.push((Style::Note, "note", note.clone()));
-    }
-    out
 }
 
 /// `   = note: text`, with continuation lines aligned under the text.

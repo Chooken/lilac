@@ -6,8 +6,11 @@
 //! use that requested the instance. Requirements are recorded when emitted, so
 //! nothing here parses diagnostic text.
 
-use lilac_error::{Diagnostic, CHAIN_FRAME_PREFIX};
+use std::collections::HashSet;
+
+use lilac_error::{Diagnostic, TraceFrame};
 use lilac_hir::FuncKey;
+use lilac_span::Span;
 use lilac_ty::{TypeId, TypeRef};
 
 use crate::{Checker, Requirement};
@@ -55,13 +58,78 @@ impl Checker<'_> {
         frames
     }
 
+    /// The trace of a failure at `span` in instance `key`: every site that
+    /// requested it, through requesting generic instances, down to the
+    /// non-generic functions (user code) that started each chain.
+    pub(crate) fn instance_trace(&self, key: &FuncKey, span: Span) -> TraceFrame {
+        let mut expanded = HashSet::from([key.clone()]);
+        TraceFrame {
+            func: self.instance_display(key),
+            span,
+            address: false,
+            repeat: false,
+            callers: self.origin_frames(key, &mut expanded),
+        }
+    }
+
+    /// One frame per recorded origin of `key`, a generic requester expanded
+    /// once (later frames of it are repeats).
+    fn origin_frames(&self, key: &FuncKey, expanded: &mut HashSet<FuncKey>) -> Vec<TraceFrame> {
+        let Some(origins) = self.origins.get(key) else {
+            return Vec::new();
+        };
+        origins
+            .iter()
+            .map(|(parent, span)| {
+                let Some(parent) = parent else {
+                    return TraceFrame {
+                        func: String::new(),
+                        span: *span,
+                        address: false,
+                        repeat: false,
+                        callers: Vec::new(),
+                    };
+                };
+                let generic = !parent.args.is_empty();
+                let repeat = generic && !expanded.insert(parent.clone());
+                let callers = if generic && !repeat {
+                    self.origin_frames(parent, expanded)
+                } else {
+                    Vec::new()
+                };
+                TraceFrame {
+                    func: self.instance_display(parent),
+                    span: *span,
+                    address: false,
+                    repeat,
+                    callers,
+                }
+            })
+            .collect()
+    }
+
+    /// Emits the held `E042`s, each traced through every origin recorded so
+    /// far.
+    pub(crate) fn emit_failures(&mut self) {
+        for (key, diagnostic) in std::mem::take(&mut self.failures) {
+            let span = diagnostic
+                .labels
+                .iter()
+                .find(|label| label.primary)
+                .map_or_else(Span::dummy, |label| label.span);
+            let trace = self.instance_trace(&key, span);
+            self.diags.emit(diagnostic.trace(trace));
+        }
+    }
+
     /// The `E051` chain text for `key`.
     pub(crate) fn chain_text(&self, key: &FuncKey) -> String {
         crate::types::elide_chain(&self.frames(key))
     }
 
     /// Folds the requirement failures captured since `mark` (while checking
-    /// `key`'s body) into one `E042` at the use that requested `key`. Other
+    /// `key`'s body) into one `E042` at the use that first requested `key`,
+    /// held until the worklist drains ([`Self::emit_failures`]). Other
     /// captured diagnostics are re-emitted unchanged.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn instance_failure(&mut self, key: &FuncKey, mark: usize) {
@@ -151,12 +219,6 @@ impl Checker<'_> {
                 }
             }
         }
-        let frames = self.frames(key);
-        if !(missing.is_some() && frames.len() <= 1) {
-            for frame in frames {
-                diagnostic = diagnostic.note(format!("{CHAIN_FRAME_PREFIX}{frame}"));
-            }
-        }
         for (captured, _) in &requirements {
             for note in &captured.notes {
                 diagnostic = diagnostic.note(note.clone());
@@ -165,7 +227,7 @@ impl Checker<'_> {
         for help in self.requirement_helps(&requirements) {
             diagnostic = diagnostic.help(help);
         }
-        self.diags.emit(diagnostic);
+        self.failures.push((key.clone(), diagnostic));
     }
 
     /// Did-you-mean, conversion, arity and `ref` hints for the requirements.

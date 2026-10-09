@@ -469,6 +469,7 @@ impl Session {
             &triple,
             ptr_bytes,
         );
+        lilac_lower::check_constant_indices(&lowered, &mut self.diags);
         let mut lir = lowered.module;
         on_stage("lower", &lir);
         self.report(Stage::Lower, DONE);

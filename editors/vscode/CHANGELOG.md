@@ -4,7 +4,10 @@
 
 - A `@compile_error` (or `@syscall` on a target without one) is also marked
   at every call that reaches it, in the caller's file, linking back to the
-  error. An error inside a library now shows in your code.
+  error. An error inside a library now shows in your code. Unsatisfied
+  generic requirements (`E042`) mark every instantiating call the same way.
+- A constant `@array_at` index out of bounds is an error (`E037`) in every
+  function, called or not.
 
 ## 0.4.0
 

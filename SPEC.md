@@ -367,7 +367,7 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@atomic_compare_swap_W`** | `(ref @bitW, expected: @bitW, desired: @bitW): @bitW` | Atomically replaces the value with `desired` if it equals `expected`; returns the old value (it succeeded iff that equals `expected`). Strong: it never fails spuriously. |
 | **`@atomic_add_W`**, **`_sub_`**, **`_and_`**, **`_or_`**, **`_xor_`**, **`_max_`**, **`_min_`**, **`_max_u_`**, **`_min_u_`** | `(ref @bitW, @bitW): @bitW` | Atomic read-modify-write (`max`/`min` signed, `max_u`/`min_u` unsigned); returns the old value. |
 | **`@atomic_fence`** | `()` | A memory fence. |
-| **`@array_at`** | `(ref @array(T, N), index: @bit_native): ref T` | A reference to element `index`. An index of `N` or more panics with `index out of bounds`; a constant index in bounds is not checked at run time. |
+| **`@array_at`** | `(ref @array(T, N), index: @bit_native): ref T` | A reference to element `index`. An index of `N` or more panics with `index out of bounds`; a constant index in bounds is not checked at run time, and a constant index out of bounds is `E037`, in every function, called or not (an arm a constant condition rules out is not checked). |
 | **`@array_len`** | `(T)` or `(value)` | The length `N` of an array type, or of a value's array type, as a `@bit_native` constant. |
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
 | **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
