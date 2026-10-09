@@ -33,6 +33,25 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// hook).
 const REQUEST_FAILED: i32 = -32803;
 
+/// A request result as JSON (`null` for `None`).
+macro_rules! value {
+    ($result:expr $(,)?) => {
+        $result
+            .and_then(|result| serde_json::to_value(result).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+}
+
+/// A request's params, or an early `null` reply when they are malformed.
+macro_rules! params {
+    ($request:expr, $ty:ty) => {
+        match serde_json::from_value::<$ty>($request.params.clone()) {
+            Ok(params) => params,
+            Err(_) => return Some(Ok(serde_json::Value::Null)),
+        }
+    };
+}
+
 /// Language-server state.
 pub struct Server {
     connection: Connection,
@@ -210,21 +229,6 @@ impl Server {
 
         use crate::{handlers, navigate};
 
-        macro_rules! value {
-            ($result:expr $(,)?) => {
-                $result
-                    .and_then(|result| serde_json::to_value(result).ok())
-                    .unwrap_or(serde_json::Value::Null)
-            };
-        }
-        macro_rules! params {
-            ($ty:ty) => {
-                match serde_json::from_value::<$ty>(request.params.clone()) {
-                    Ok(params) => params,
-                    Err(_) => return Some(Ok(serde_json::Value::Null)),
-                }
-            };
-        }
         let at = |position: &TextDocumentPositionParams| {
             let uri = &position.text_document.uri;
             Some((self.retained_for(uri)?, uri.clone(), position.position))
@@ -232,25 +236,25 @@ impl Server {
 
         let result = match request.method.as_str() {
             "textDocument/hover" => {
-                let params = params!(lsp_types::HoverParams);
+                let params = params!(request, lsp_types::HoverParams);
                 value!(at(&params.text_document_position_params).and_then(
                     |(retained, uri, position)| handlers::hover(retained, &uri, position)
                 ))
             }
             "textDocument/definition" => {
-                let params = params!(GotoDefinitionParams);
+                let params = params!(request, GotoDefinitionParams);
                 value!(at(&params.text_document_position_params).and_then(
                     |(retained, uri, position)| handlers::definition(retained, &uri, position)
                 ))
             }
             "textDocument/typeDefinition" => {
-                let params = params!(GotoDefinitionParams);
+                let params = params!(request, GotoDefinitionParams);
                 value!(at(&params.text_document_position_params).and_then(
                     |(retained, uri, position)| navigate::type_definition(retained, &uri, position)
                 ))
             }
             "textDocument/references" => {
-                let params = params!(ReferenceParams);
+                let params = params!(request, ReferenceParams);
                 value!(
                     at(&params.text_document_position).map(|(retained, uri, position)| {
                         navigate::references(
@@ -263,20 +267,20 @@ impl Server {
                 )
             }
             "textDocument/documentHighlight" => {
-                let params = params!(DocumentHighlightParams);
+                let params = params!(request, DocumentHighlightParams);
                 value!(at(&params.text_document_position_params).map(
                     |(retained, uri, position)| navigate::highlights(retained, &uri, position)
                 ))
             }
             "textDocument/documentSymbol" => {
-                let params = params!(DocumentSymbolParams);
+                let params = params!(request, DocumentSymbolParams);
                 let uri = &params.text_document.uri;
                 value!(self.retained_for(uri).map(|retained| {
                     DocumentSymbolResponse::Nested(navigate::document_symbols(retained, uri))
                 }))
             }
             "workspace/symbol" => {
-                let params = params!(WorkspaceSymbolParams);
+                let params = params!(request, WorkspaceSymbolParams);
                 value!(Some(WorkspaceSymbolResponse::Nested(
                     self.workspace_symbols(&params.query),
                 )))
@@ -285,14 +289,14 @@ impl Server {
                 return Some(self.rename_response(request));
             }
             "textDocument/semanticTokens/full" => {
-                let params = params!(SemanticTokensParams);
+                let params = params!(request, SemanticTokensParams);
                 let uri = &params.text_document.uri;
                 value!(self
                     .retained_for(uri)
                     .map(|retained| handlers::semantic_tokens(retained, uri)),)
             }
             "lilac/lir" => self.lir_response(request),
-            _ => return None,
+            _ => return self.editing_response(request),
         };
         Some(Ok(result))
     }
@@ -338,6 +342,41 @@ impl Server {
             .and_then(|edit| serde_json::to_value(edit).ok())
         };
         Ok(result.unwrap_or(null))
+    }
+
+    /// The replies to completion, signature help and quick fixes (`None`
+    /// for another method).
+    fn editing_response(&self, request: &Request) -> Option<Result<serde_json::Value, String>> {
+        let result = match request.method.as_str() {
+            "textDocument/completion" => {
+                let params = params!(request, lsp_types::CompletionParams);
+                let position = &params.text_document_position;
+                let uri = &position.text_document.uri;
+                value!(self.document_and_compile(uri).and_then(|(text, retained)| {
+                    crate::complete::completion(retained, uri, text, position.position)
+                }))
+            }
+            "textDocument/signatureHelp" => {
+                let params = params!(request, lsp_types::SignatureHelpParams);
+                let position = &params.text_document_position_params;
+                let uri = &position.text_document.uri;
+                value!(self.document_and_compile(uri).and_then(|(text, retained)| {
+                    crate::complete::signature_help(retained, uri, text, position.position)
+                }))
+            }
+            "textDocument/codeAction" => {
+                let params = params!(request, lsp_types::CodeActionParams);
+                value!(Some(crate::actions::code_actions(&params)))
+            }
+            _ => return None,
+        };
+        Some(Ok(result))
+    }
+
+    /// An open document's current text and the compile covering it.
+    fn document_and_compile(&self, uri: &Url) -> Option<(&str, &Retained)> {
+        let text = self.documents.get(uri)?.text.as_str();
+        Some((text, self.retained_for(uri)?))
     }
 
     /// Symbols matching `query` from every retained compile, each once.

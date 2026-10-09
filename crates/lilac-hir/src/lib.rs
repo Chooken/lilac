@@ -144,6 +144,11 @@ pub struct LocalSite {
     pub span: Span,
     /// The declaration's name token (`span` itself at the declaration).
     pub decl: Span,
+    /// The local's type.
+    pub ty: TypeRef,
+    /// Where the name is in scope: its block (the function for a
+    /// parameter); the name is visible from `decl` to the scope's end.
+    pub scope: Span,
 }
 
 /// One resolved item use.

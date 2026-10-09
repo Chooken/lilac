@@ -28,6 +28,10 @@ pub(crate) struct FnCx {
     pub locals: Vec<HirLocal>,
     /// Block scopes, innermost last.
     pub scopes: Vec<HashMap<String, LocalId>>,
+    /// Each scope's source range, parallel to `scopes`.
+    pub scope_spans: Vec<Span>,
+    /// The range each local is in scope over, by [`LocalId`].
+    pub local_scopes: Vec<Span>,
     /// Parameter locals (colored as parameters).
     pub params: HashSet<LocalId>,
     /// `loop` nesting depth.
@@ -35,10 +39,13 @@ pub(crate) struct FnCx {
 }
 
 impl FnCx {
-    pub(crate) fn new() -> Self {
+    /// A function whose outermost scope (its parameters) covers `span`.
+    pub(crate) fn new(span: Span) -> Self {
         Self {
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
+            scope_spans: vec![span],
+            local_scopes: Vec::new(),
             params: HashSet::new(),
             loops: 0,
         }
@@ -47,6 +54,8 @@ impl FnCx {
     /// A fresh local not bound to any name.
     pub(crate) fn hidden(&mut self, ty: TypeRef, span: Span) -> LocalId {
         let id = LocalId(u32::try_from(self.locals.len()).unwrap_or(u32::MAX));
+        let scope = self.scope_spans.last().copied().unwrap_or_else(Span::dummy);
+        self.local_scopes.push(scope);
         self.locals.push(HirLocal {
             name: String::new(),
             ty,
@@ -65,6 +74,26 @@ impl FnCx {
 
     pub(crate) fn ty(&self, id: LocalId) -> TypeRef {
         self.locals[id.0 as usize].ty
+    }
+
+    /// Opens a block scope over `span`.
+    pub(crate) fn open(&mut self, span: Span) {
+        self.scopes.push(HashMap::new());
+        self.scope_spans.push(span);
+    }
+
+    /// Closes the innermost block scope.
+    pub(crate) fn close(&mut self) {
+        self.scopes.pop();
+        self.scope_spans.pop();
+    }
+
+    /// The range `id` is in scope over.
+    pub(crate) fn scope_of(&self, id: LocalId) -> Span {
+        self.local_scopes
+            .get(id.0 as usize)
+            .copied()
+            .unwrap_or_else(Span::dummy)
     }
 
     /// The name token of `id`'s declaration (slots begin at their name).
@@ -123,7 +152,7 @@ impl Checker<'_> {
     }
 
     fn check_func(&mut self, key: &FuncKey, decl: &FuncDecl, sig: &FuncSig, span: Span) -> HirFunc {
-        let mut fcx = FnCx::new();
+        let mut fcx = FnCx::new(span);
         let slot = |c: &mut Self, fcx: &mut FnCx, param: &Param, ty: TypeRef, is_param: bool| {
             let name = if param.name.is_empty() && param.ty.name == "self" {
                 "self".to_owned()
@@ -134,7 +163,7 @@ impl Checker<'_> {
             fcx.locals[id.0 as usize].name.clone_from(&name);
             if !name.is_empty() {
                 let decl = fcx.decl_span(id);
-                c.record_local(decl, decl);
+                c.record_local(fcx, id, decl);
                 if fcx.scopes[0].insert(name.clone(), id).is_some() {
                     c.diags.emit(
                         Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
@@ -211,12 +240,12 @@ impl Checker<'_> {
 
     /// Checks a `{ }` block as a new scope.
     pub(crate) fn check_block(&mut self, fcx: &mut FnCx, block: &Block) -> HirBlock {
-        fcx.scopes.push(HashMap::new());
+        fcx.open(block.span);
         let mut stmts = Vec::new();
         for stmt in &block.stmts {
             self.check_stmt(fcx, stmt, &mut stmts);
         }
-        fcx.scopes.pop();
+        fcx.close();
         HirBlock {
             stmts,
             span: block.span,
@@ -228,10 +257,10 @@ impl Checker<'_> {
         if let Stmt::Block(block) = stmt {
             return self.check_block(fcx, block);
         }
-        fcx.scopes.push(HashMap::new());
+        fcx.open(stmt.span());
         let mut stmts = Vec::new();
         self.check_stmt(fcx, stmt, &mut stmts);
-        fcx.scopes.pop();
+        fcx.close();
         HirBlock {
             stmts,
             span: stmt.span(),
@@ -247,7 +276,7 @@ impl Checker<'_> {
             SemanticKind::Local
         };
         self.record_semantic(span, kind);
-        self.record_local(span, fcx.decl_span(local));
+        self.record_local(fcx, local, span);
     }
 
     /// Declares `name` in the innermost scope (`E020` when already declared
@@ -262,9 +291,10 @@ impl Checker<'_> {
         let id = fcx.hidden(ty, span);
         name.clone_into(&mut fcx.locals[id.0 as usize].name);
         self.record_semantic(leading(span, name), SemanticKind::Local);
-        self.record_local(leading(span, name), leading(span, name));
         let scope = fcx.scopes.last_mut().expect("a scope is always open");
-        if let Some(previous) = scope.insert(name.to_owned(), id) {
+        let previous = scope.insert(name.to_owned(), id);
+        self.record_local(fcx, id, leading(span, name));
+        if let Some(previous) = previous {
             let previous = fcx.locals[previous.0 as usize].span;
             self.diags.emit(
                 Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
@@ -367,13 +397,13 @@ impl Checker<'_> {
                 let arms = arms
                     .iter()
                     .map(|arm| {
-                        fcx.scopes.push(HashMap::new());
+                        fcx.open(arm.span);
                         let (pattern, capture) = self.check_pattern(fcx, arm, scrutinee.ty.id);
                         let body = match &arm.body {
                             MatchArmBody::Block(block) => self.check_block(fcx, block),
                             MatchArmBody::Inline(stmt) => self.check_stmt_block(fcx, stmt),
                         };
-                        fcx.scopes.pop();
+                        fcx.close();
                         HirArm {
                             pattern,
                             capture,
@@ -661,11 +691,11 @@ impl Checker<'_> {
         let cond = self.cond_of(test, "if");
         let captured = local_expr(hidden[position], outs[position], capture.span);
         let value = self.coerce(captured, declared, capture.ty.span);
-        fcx.scopes.push(HashMap::new());
+        fcx.open(then.span);
         let local = self.declare(fcx, &capture.name, declared, capture.span);
         stmts.push(HirStmt::Let { local, value });
         let then = self.check_block(fcx, then);
-        fcx.scopes.pop();
+        fcx.close();
         let els = match els {
             Some(els) => self.check_stmt_block(fcx, els),
             None => empty_block(span),
@@ -837,13 +867,17 @@ impl Checker<'_> {
         };
         let Some(index) = variants.iter().position(|(variant, _)| variant == name) else {
             let owner = self.types.display(ty);
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("no variant `{name}` on `{owner}`")).label(
-                    span,
-                    true,
-                    "no such variant",
-                ),
-            ));
+            let mut diagnostic = Diagnostic::error(
+                "E021",
+                format!("no variant `{name}` on `{owner}`"),
+            )
+            .label(span, true, "no such variant");
+            // Only a span holding just the name can take the fix.
+            if (span.hi.0 - span.lo.0) as usize == name.len() {
+                let names = variants.iter().map(|(variant, _)| variant.as_str());
+                diagnostic = crate::suggest::suggest(diagnostic, name, span, names);
+            }
+            return Err(self.diags.emit(diagnostic));
         };
         Ok((u32::try_from(index).unwrap_or(u32::MAX), variants[index].1))
     }

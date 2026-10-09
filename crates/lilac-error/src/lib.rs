@@ -45,6 +45,25 @@ pub struct Label {
     pub msg: String,
 }
 
+/// A machine-applicable fix: replace `span` with `replacement` (an editor
+/// quick fix).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    /// The source range to replace.
+    pub span: Span,
+    /// The text to put there.
+    pub replacement: String,
+}
+
+/// One `help: ...` line, with the fix it describes when it has one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Help {
+    /// The prose.
+    pub text: String,
+    /// The fix, for an editor to apply.
+    pub fix: Option<Suggestion>,
+}
+
 /// One frame of a diagnostic's [`Diagnostic::trace`]: a function, the site
 /// in it that leads toward the error, and the frames that reach it.
 ///
@@ -91,8 +110,8 @@ pub struct Diagnostic {
     pub labels: Vec<Label>,
     /// `note: ...` follow-ups (e.g. instantiation stack frames).
     pub notes: Vec<String>,
-    /// `help: ...` suggestions (e.g. did-you-mean).
-    pub helps: Vec<String>,
+    /// `help: ...` suggestions (e.g. did-you-mean), some with a fix.
+    pub helps: Vec<Help>,
     /// Where the failing code is reached from: the innermost frame, with its
     /// callers (`E031`, `E035`, `E037`). Rendered as `reached from:`. Boxed
     /// to keep `Diagnostic` small (it is many `Result`s' error type).
@@ -149,8 +168,28 @@ impl Diagnostic {
     /// Adds a `help: ...` line (builder style).
     #[must_use]
     pub fn help(mut self, help: impl Into<String>) -> Self {
-        self.helps.push(help.into());
+        self.helps.push(Help {
+            text: help.into(),
+            fix: None,
+        });
         self
+    }
+
+    /// Adds a fix replacing `span` with `replacement`, shown as
+    /// `help: did you mean `replacement`?` (builder style).
+    #[must_use]
+    pub fn suggest(mut self, span: Span, replacement: impl Into<String>) -> Self {
+        let replacement = replacement.into();
+        self.helps.push(Help {
+            text: format!("did you mean `{replacement}`?"),
+            fix: Some(Suggestion { span, replacement }),
+        });
+        self
+    }
+
+    /// The fixes among [`Self::helps`].
+    pub fn suggestions(&self) -> impl Iterator<Item = &Suggestion> {
+        self.helps.iter().filter_map(|help| help.fix.as_ref())
     }
 
     /// Sets the innermost [`TraceFrame`] (builder style).
@@ -419,12 +458,34 @@ impl Emitter for EmitterJson {
         let helps = diagnostic
             .helps
             .iter()
-            .map(|help| format!("\"{}\"", escape_json(help)))
+            .map(|help| format!("\"{}\"", escape_json(&help.text)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let suggestions = diagnostic
+            .suggestions()
+            .map(|suggestion| {
+                let (file, (line, col), (end_line, end_col)) =
+                    source_map.file(suggestion.span.file).map_or_else(
+                        || ("<unknown>".to_owned(), (0, 0), (0, 0)),
+                        |source| {
+                            (
+                                source.name.clone(),
+                                source.line_col(suggestion.span.lo.0 as usize),
+                                source.line_col(suggestion.span.hi.0 as usize),
+                            )
+                        },
+                    );
+                format!(
+                    "{{\"file\":\"{}\",\"line\":{line},\"col\":{col},\"end_line\":{end_line},\"end_col\":{end_col},\"replacement\":\"{}\"}}",
+                    escape_json(&file),
+                    escape_json(&suggestion.replacement),
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         let trace = json_frames(diagnostic.trace_roots(), source_map);
         format!(
-            "{{\"level\":\"{}\",\"code\":\"{}\",\"message\":\"{}\",\"spans\":{spans},\"notes\":[{notes}],\"helps\":[{helps}],\"trace\":{trace}}}\n",
+            "{{\"level\":\"{}\",\"code\":\"{}\",\"message\":\"{}\",\"spans\":{spans},\"notes\":[{notes}],\"helps\":[{helps}],\"suggestions\":[{suggestions}],\"trace\":{trace}}}\n",
             diagnostic.level.as_str(),
             diagnostic.code,
             escape_json(&diagnostic.msg),

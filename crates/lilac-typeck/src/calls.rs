@@ -223,13 +223,13 @@ impl Checker<'_> {
             if self.in_entry() {
                 return Err(self.entry_unresolved(name, name_span));
             }
-            return Err(self.diags.emit(
-                Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                    name_span,
-                    true,
-                    "not a local, item, or intrinsic",
-                ),
-            ));
+            let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                name_span,
+                true,
+                "not a local, item, or intrinsic",
+            );
+            let diagnostic = self.suggest_value(fcx, diagnostic, name, name_span);
+            return Err(self.diags.emit(diagnostic));
         };
         self.record_use(crate::paths::path_tail(name_span, name), def);
         match &self.res.def(def).kind {
@@ -355,6 +355,8 @@ impl Checker<'_> {
                 format!("no member `{field}` on `{owner}`"),
             )
             .label(span, true, "no such member");
+            diagnostic =
+                self.suggest_member(diagnostic, def, field, tail_span(member_span, field), true);
             if self.is_generic_derived(ty) {
                 let probed = self.probe_args(fcx, args);
                 diagnostic =
@@ -429,6 +431,8 @@ impl Checker<'_> {
                 format!("no member `{field}` on `{owner}`"),
             )
             .label(member_span, true, "no such member");
+            diagnostic =
+                self.suggest_member(diagnostic, def, field, tail_span(member_span, field), true);
             if self.is_generic_derived(base) {
                 let probed = self.probe_args(fcx, args);
                 diagnostic = diagnostic.note(self.required_method_note(

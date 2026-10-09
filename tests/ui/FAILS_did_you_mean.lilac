@@ -1,0 +1,28 @@
+// Each misspelling gets a `did you mean` help and a machine-applicable fix.
+Point: object {
+    x: @bit8
+    total: function (self) out: @bit8 {
+        out = self.x
+    }
+}
+Shape: enum {
+    Dot
+    Line
+}
+helper: function () nothing {
+}
+main: function () nothing {
+    count: @bit8 = 0x1
+    other: @bit8 = cuont
+    helpr()
+    p: Pointt = Point {
+        x = count
+    }
+    q: Point = Point {
+        xx = count
+    }
+    y: @bit8 = q.xx
+    z: @bit8 = q.totl()
+    s: Shape = .Lin
+    w: @bit88 = 0x1
+}

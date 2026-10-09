@@ -5,7 +5,7 @@
 //! node), an exact match passes, and anything else takes exactly one
 //! `@conversion` (`E043` when there is none).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use lilac_ast::{
     BinOp, Expr, FStrPart, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType,
@@ -232,13 +232,13 @@ impl Checker<'_> {
             return HirExpr::poison(span);
         };
         let Some(def) = found else {
-            self.diags.emit(
-                Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                    span,
-                    true,
-                    "not a local or item",
-                ),
+            let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                span,
+                true,
+                "not a local or item",
             );
+            let diagnostic = self.suggest_value(fcx, diagnostic, name, span);
+            self.diags.emit(diagnostic);
             return HirExpr::poison(span);
         };
         self.record_use(path_tail(span, name), def);
@@ -395,19 +395,16 @@ impl Checker<'_> {
         expr: &Expr,
     ) -> Result<HirExpr, ErrorGuaranteed> {
         match expr {
-            Expr::Ident(name, span) => match fcx.lookup(name) {
-                Some(local) => {
+            Expr::Ident(name, span) => {
+                if let Some(local) = fcx.lookup(name) {
                     self.record_local_use(fcx, local, *span);
-                    Ok(local_expr(local, fcx.ty(local), *span))
+                    return Ok(local_expr(local, fcx.ty(local), *span));
                 }
-                None => Err(self.diags.emit(
-                    Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                        *span,
-                        true,
-                        "not a local or item",
-                    ),
-                )),
-            },
+                let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`"))
+                    .label(*span, true, "not a local or item");
+                let diagnostic = self.suggest_value(fcx, diagnostic, name, *span);
+                Err(self.diags.emit(diagnostic))
+            }
             Expr::Member { obj, field, span } => {
                 let base = self.check_place(fcx, obj)?;
                 if base.ty.is_error() {
@@ -459,6 +456,9 @@ impl Checker<'_> {
         let owner = self.types.display(ty);
         let mut diagnostic = Diagnostic::error("E021", format!("no field `{field}` on `{owner}`"))
             .label(span, true, "no such member");
+        if let Some((def, _)) = self.type_parts(ty) {
+            diagnostic = self.suggest_member(diagnostic, def, field, tail_span(span, field), false);
+        }
         if annotate && self.is_generic_derived(base.ty) {
             diagnostic = diagnostic.note(self.required_field_note(field, expected));
         }
@@ -892,7 +892,7 @@ impl Checker<'_> {
         let mut first: Option<TypeRef> = None;
         let mut failed = false;
         for arm in arms {
-            fcx.scopes.push(HashMap::new());
+            fcx.open(arm.span);
             let (pattern, capture) = self.check_pattern(fcx, arm, scrutinee.ty.id);
             let value =
                 match &arm.body {
@@ -917,7 +917,7 @@ impl Checker<'_> {
                         HirExpr::poison(arm.span)
                     }
                 };
-            fcx.scopes.pop();
+            fcx.close();
             if first.is_none() && !value.ty.is_error() {
                 first = Some(value.ty.deref());
             }
@@ -1018,13 +1018,13 @@ impl Checker<'_> {
                     }
                 }
                 _ => {
-                    self.diags.emit(
-                        Diagnostic::error("E023", format!("unknown type `{}`", ty.name)).label(
-                            ty.span,
-                            true,
-                            "no such type in scope",
-                        ),
-                    );
+                    let diagnostic = Diagnostic::error(
+                        "E023",
+                        format!("unknown type `{}`", ty.name),
+                    )
+                    .label(ty.span, true, "no such type in scope");
+                    let diagnostic = self.suggest_type(diagnostic, &ty.name, ty.name_span);
+                    self.diags.emit(diagnostic);
                     return HirExpr::poison(span);
                 }
             }
@@ -1077,11 +1077,21 @@ impl Checker<'_> {
                 } else {
                     ("E021", format!("no field `{}` on `{display}`", field.name))
                 };
-                self.diags.emit(Diagnostic::error(code, msg).label(
+                let mut diagnostic = Diagnostic::error(code, msg).label(
                     field.span,
                     true,
                     "only fields initialize here",
-                ));
+                );
+                if !is_member {
+                    let fields = layout.iter().map(|(name, _)| name.as_str());
+                    diagnostic = crate::suggest::suggest(
+                        diagnostic,
+                        &field.name,
+                        leading_field(field),
+                        fields,
+                    );
+                }
+                self.diags.emit(diagnostic);
                 failed = true;
                 continue;
             };
@@ -1218,7 +1228,7 @@ impl Checker<'_> {
             ..Env::default()
         };
         let hir = self.with_env(env, |c| {
-            let mut fcx = FnCx::new();
+            let mut fcx = FnCx::new(Span::dummy());
             let hir = c.check_expr(&mut fcx, &value, (!ty.is_error()).then_some(ty.id));
             c.coerce(hir, ty, value.span())
         });

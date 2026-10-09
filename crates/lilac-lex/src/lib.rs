@@ -12,6 +12,13 @@ use lilac_span::{FileId, Span};
 /// Lexer diagnostics always carry this stable code.
 pub const LEX_ERROR_CODE: &str = "E000";
 
+/// Every keyword, for editor completion.
+pub const KEYWORDS: [&str; 21] = [
+    "object", "function", "enum", "extern", "using", "private", "ref", "self", "unknown",
+    "nothing", "loop", "if", "then", "else", "match", "break", "continue", "and", "or", "return",
+    "as",
+];
+
 /// The keyword token `word` spells, if it is a keyword.
 #[must_use]
 pub fn keyword(word: &str) -> Option<TokenKind> {
@@ -781,6 +788,13 @@ impl Iterator for Lexer<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keywords_are_keywords() {
+        assert!(super::KEYWORDS
+            .iter()
+            .all(|word| super::keyword(word).is_some()));
+    }
+
     use super::*;
 
     fn tokens_of(src: &str) -> Vec<Token> {

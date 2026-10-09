@@ -192,7 +192,7 @@ fn intrinsic_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Ra
 
 /// `@name(params) result` for an intrinsic; the ones checked specially
 /// spell their operands out.
-fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
+pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
     let special = match intrinsic {
         Intrinsic::SizeOf | Intrinsic::AlignOf => Some("(Type) @bit_native"),
         Intrinsic::ArrayLen => Some("(ref array) @bit_native"),

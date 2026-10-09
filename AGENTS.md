@@ -237,6 +237,15 @@
   is a use of its enum and of the variant; the variant wins (its name is
   the span's text). Hovers show a function's signature, a field, variant or
   constant's declaration, and an intrinsic's signature.
+- Editing (`complete.rs`, `actions.rs`): completion and signature help
+  run before the edit is compiled, so the context is read from the
+  document's current text and names come from the last compile, the cursor
+  mapped into its text (`complete::map_offset`). Locals in scope come from
+  `LocalSite::scope` and `ty` (typeck's `FnCx::open`/`close` track block
+  spans); `.` resolves the receiver path (local, field, type, namespace)
+  to its members; `@` lists `Intrinsic::names()` and the builtin types.
+  A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
+  `textDocument/codeAction` turns them into quick fixes without a compile.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.
@@ -334,6 +343,14 @@ bug fix that changes generated code.
   file keeps its bare (or given) name. Function names in traces come from
   `lilac_lower::Lowered::names` (`Holder[@bit32].make`, not the mangled
   symbol).
+
+## Diagnostics
+
+- A did-you-mean is a fix, not prose: `Diagnostic::suggest(span, name)`
+  adds the `help: did you mean ...?` line and the `Suggestion` the editor
+  applies (and the JSON emitter's `suggestions`). `span` must cover just
+  the misspelled name. Typeck's `suggest.rs` has the candidate lists
+  (`value_names`, `type_names`, `member_names`) and `closest`.
 
 ## Gates
 

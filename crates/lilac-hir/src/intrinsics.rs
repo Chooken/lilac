@@ -367,6 +367,35 @@ pub struct Signature {
 }
 
 impl Intrinsic {
+    /// The intrinsics with a fixed name.
+    const PLAIN: [(&'static str, Self); 25] = [
+        ("@truncate", Self::Truncate),
+        ("@extend_zero", Self::ExtendZero),
+        ("@size_of", Self::SizeOf),
+        ("@load_u8", Self::LoadU8),
+        ("@store_u8", Self::StoreU8),
+        ("@memcpy", Self::Memcpy),
+        ("@memmove", Self::Memmove),
+        ("@memset", Self::Memset),
+        ("@align_of", Self::AlignOf),
+        ("@ptr_add", Self::PtrAdd),
+        ("@ptr_to_address", Self::PtrToAddress),
+        ("@address_to_ptr", Self::AddressToPtr),
+        ("@syscall", Self::Syscall),
+        ("@trap", Self::Trap),
+        ("@byte_buffer_ptr", Self::ByteBufferPtr),
+        ("@byte_buffer_len", Self::ByteBufferLen),
+        ("@byte_buffer_from", Self::ByteBufferFrom),
+        ("@format_args_new", Self::FormatArgsNew),
+        ("@format_args_push", Self::FormatArgsPush),
+        ("@format_args_count", Self::FormatArgsCount),
+        ("@format_args_piece", Self::FormatArgsPiece),
+        ("@compile_error", Self::CompileError),
+        ("@panic", Self::Panic),
+        ("@array_at", Self::ArrayAt),
+        ("@array_len", Self::ArrayLen),
+    ];
+
     /// Looks an intrinsic up by `@`-name.
     #[must_use]
     pub fn lookup(name: &str) -> Option<Self> {
@@ -401,34 +430,66 @@ impl Intrinsic {
             let width = FloatWidth::parse(width).filter(|w| w.bits().is_some())?;
             return Some(Self::BitsToFbit(width));
         }
-        Some(match name {
-            "@truncate" => Self::Truncate,
-            "@extend_zero" => Self::ExtendZero,
-            "@size_of" => Self::SizeOf,
-            "@load_u8" => Self::LoadU8,
-            "@store_u8" => Self::StoreU8,
-            "@memcpy" => Self::Memcpy,
-            "@memmove" => Self::Memmove,
-            "@memset" => Self::Memset,
-            "@align_of" => Self::AlignOf,
-            "@ptr_add" => Self::PtrAdd,
-            "@ptr_to_address" => Self::PtrToAddress,
-            "@address_to_ptr" => Self::AddressToPtr,
-            "@syscall" => Self::Syscall,
-            "@trap" => Self::Trap,
-            "@byte_buffer_ptr" => Self::ByteBufferPtr,
-            "@byte_buffer_len" => Self::ByteBufferLen,
-            "@byte_buffer_from" => Self::ByteBufferFrom,
-            "@format_args_new" => Self::FormatArgsNew,
-            "@format_args_push" => Self::FormatArgsPush,
-            "@format_args_count" => Self::FormatArgsCount,
-            "@format_args_piece" => Self::FormatArgsPiece,
-            "@compile_error" => Self::CompileError,
-            "@panic" => Self::Panic,
-            "@array_at" => Self::ArrayAt,
-            "@array_len" => Self::ArrayLen,
-            _ => return None,
-        })
+        Self::PLAIN
+            .iter()
+            .find(|(plain, _)| *plain == name)
+            .map(|(_, intrinsic)| *intrinsic)
+    }
+
+    /// Every intrinsic name, for editor completion.
+    #[must_use]
+    pub fn names() -> Vec<String> {
+        const INT_WIDTHS: [&str; 5] = ["8", "16", "32", "64", "native"];
+        const FLOAT_WIDTHS: [&str; 4] = ["16", "32", "64", "128"];
+        const NUM_OPS: [&str; 16] = [
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "mod",
+            "negate",
+            "less_than",
+            "greater_than",
+            "less_than_or_equal",
+            "greater_than_or_equal",
+            "div_u",
+            "mod_u",
+            "less_than_u",
+            "greater_than_u",
+            "less_than_or_equal_u",
+            "greater_than_or_equal_u",
+        ];
+        const ORDERINGS: [&str; 5] = ["", "_relaxed", "_acquire", "_release", "_acq_rel"];
+        let mut names: Vec<String> = Self::PLAIN
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        for op in NUM_OPS {
+            names.extend(INT_WIDTHS.iter().map(|width| format!("@i_{op}_{width}")));
+            names.extend(FLOAT_WIDTHS.iter().map(|width| format!("@f_{op}_{width}")));
+        }
+        for (op, _) in AtomicOp::NAMES {
+            for ordering in ORDERINGS {
+                names.extend(
+                    INT_WIDTHS
+                        .iter()
+                        .map(|width| format!("@atomic_{op}{ordering}_{width}")),
+                );
+            }
+        }
+        names.extend(
+            ORDERINGS
+                .iter()
+                .map(|ordering| format!("@atomic_fence{ordering}")),
+        );
+        for width in FLOAT_WIDTHS {
+            names.push(format!("@fbit_to_bits_{width}"));
+            names.push(format!("@bits_to_fbit_{width}"));
+        }
+        names.retain(|name| Self::lookup(name).is_some());
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// The signature every call is checked against. `@size_of`, `@align_of`,
@@ -597,6 +658,23 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@align_of"), Some(Intrinsic::AlignOf));
         assert_eq!(Intrinsic::lookup("@ptr_add"), Some(Intrinsic::PtrAdd));
         assert_eq!(Intrinsic::lookup("@trap"), Some(Intrinsic::Trap));
+    }
+
+    #[test]
+    fn names_are_all_intrinsics() {
+        let names = Intrinsic::names();
+        assert!(names.iter().all(|name| Intrinsic::lookup(name).is_some()));
+        for name in [
+            "@i_add_8",
+            "@f_div_32",
+            "@atomic_load_acquire_64",
+            "@atomic_fence",
+            "@memcpy",
+        ] {
+            assert!(names.iter().any(|known| known == name), "{name}");
+        }
+        assert!(!names.iter().any(|known| known == "@f_div_u_32"));
+        assert!(!names.iter().any(|known| known == "@atomic_load_release_64"));
     }
 
     #[test]

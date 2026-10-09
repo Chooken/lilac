@@ -21,6 +21,7 @@ mod indices;
 mod literals;
 mod paths;
 mod sigs;
+mod suggest;
 mod types;
 
 #[cfg(test)]
@@ -575,11 +576,22 @@ impl Checker<'_> {
         }
     }
 
-    /// Records a local name for the editor: a use at `span` of the local
-    /// declared at `decl`'s name token (`span == decl` declares it).
-    pub(crate) fn record_local(&mut self, span: Span, decl: Span) {
+    /// Records a local name for the editor: a use at `span` of `local`
+    /// (its declaration when `span` is the declared name).
+    pub(crate) fn record_local(
+        &mut self,
+        fcx: &crate::body::FnCx,
+        local: lilac_hir::LocalId,
+        span: Span,
+    ) {
+        let decl = fcx.decl_span(local);
         if !span.is_dummy() && !decl.is_dummy() {
-            self.out.locals.push(lilac_hir::LocalSite { span, decl });
+            self.out.locals.push(lilac_hir::LocalSite {
+                span,
+                decl,
+                ty: fcx.ty(local),
+                scope: fcx.scope_of(local),
+            });
         }
     }
 

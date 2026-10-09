@@ -4,10 +4,12 @@ use std::error::Error;
 
 use lsp_server::Connection;
 use lsp_types::{
+    CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CompletionOptions,
     HoverProviderCapability, InitializeParams, OneOf, RenameOptions, SemanticTokenModifier,
     SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TypeDefinitionProviderCapability, WorkDoneProgressOptions,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SignatureHelpOptions,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TypeDefinitionProviderCapability,
+    WorkDoneProgressOptions,
 };
 
 /// Legend token types, in the index order shared by the encoder
@@ -26,6 +28,8 @@ pub(crate) const TOKEN_TYPES: [SemanticTokenType; 7] = [
 pub(crate) const TOKEN_MODIFIERS: [SemanticTokenModifier; 1] =
     [SemanticTokenModifier::DEFAULT_LIBRARY];
 
+pub mod actions;
+pub mod complete;
 pub mod convert;
 pub mod documents;
 pub mod fs;
@@ -47,6 +51,19 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_owned(), "@".to_owned()]),
+            ..CompletionOptions::default()
+        }),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+            retrigger_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
+        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            ..CodeActionOptions::default()
+        })),
         definition_provider: Some(OneOf::Left(true)),
         type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),

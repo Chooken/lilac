@@ -272,8 +272,8 @@ impl Checker<'_> {
                     owner_def: Some(def),
                     ..
                 } => {
-                    let members: Vec<&String> = self.res.def(*def).members.keys().collect();
-                    if let Some(best) = closest(name, &members) {
+                    let members = self.res.def(*def).members.keys().map(String::as_str);
+                    if let Some(best) = crate::suggest::closest(name, members) {
                         helps.push(format!("`{owner}` has `{best}`, did you mean `{best}`?"));
                     }
                 }
@@ -379,30 +379,4 @@ fn phrase(diagnostic: &Diagnostic, requirement: &Requirement) -> String {
             .find(|label| label.primary)
             .map_or_else(|| diagnostic.msg.to_string(), |label| label.msg.clone()),
     }
-}
-
-/// The closest member by edit distance (at most 2), if any.
-fn closest(name: &str, members: &[&String]) -> Option<String> {
-    members
-        .iter()
-        .map(|member| (levenshtein(name, member), *member))
-        .filter(|(distance, member)| *distance <= 2 && member.as_str() != name)
-        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
-        .map(|(_, member)| member.clone())
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
 }

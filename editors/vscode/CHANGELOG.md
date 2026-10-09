@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Completion: locals, parameters and items in scope, members after `.`
+  (fields and methods of a value, a type's methods and variants, a
+  namespace's items), variants after a bare `.`, intrinsics and builtin
+  types after `@`, and keywords. It works mid-edit, before the file
+  compiles again.
+- Signature help for function, method and intrinsic calls, highlighting
+  the argument being typed.
+- Quick fixes: a misspelled name, type, field, method or variant offers the
+  closest match (also shown as `help: did you mean ...?` by `lilac`).
+
 - Find All References, highlighting of a name's other uses, the outline
   and breadcrumbs, Go to Symbol in Workspace, Go to Type Definition, and
   Rename. These work for locals and parameters as well as items. Rename

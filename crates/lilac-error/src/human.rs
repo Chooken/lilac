@@ -114,7 +114,7 @@ impl Emitter for EmitterHuman {
             diagnostic
                 .helps
                 .iter()
-                .map(|help| (Style::Help, "help", help.clone())),
+                .map(|help| (Style::Help, "help", help.text.clone())),
         );
         let indent = if blocks.is_empty() { None } else { Some(width) };
         if indent.is_some() && !footer.is_empty() {

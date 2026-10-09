@@ -339,6 +339,42 @@ fn constant_index_out_of_bounds_is_e037_even_unused() {
     );
 }
 
+/// A misspelled local, function, type, field, method or variant gets a
+/// did-you-mean help, and the JSON output carries the fix's exact span.
+#[test]
+fn misspellings_suggest_the_closest_name() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_did_you_mean.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for name in ["count", "helper", "Point", "x", "total", "Line", "@bit8"] {
+        assert!(
+            stderr.contains(&format!("help: did you mean `{name}`?")),
+            "missing `{name}` in:
+{stderr}"
+        );
+    }
+
+    let output = lilac()
+        .args([
+            "check",
+            "--error-format=json",
+            &ui("FAILS_did_you_mean.lilac"),
+        ])
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // `q.totl()`: the fix covers `totl` only.
+    assert!(
+        stderr.contains(
+            r#"FAILS_did_you_mean.lilac","line":25,"col":18,"end_line":25,"end_col":22,"replacement":"total"}]"#
+        ),
+        "{stderr}"
+    );
+}
+
 /// By default an unreachable `api` is swept from `export_entry.lilac`.
 #[test]
 fn unexported_function_is_pruned() {

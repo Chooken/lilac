@@ -6,7 +6,7 @@ use lilac_error::{Diagnostic, Level, TraceFrame};
 use lilac_span::{FileId, SourceMap, Span};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
-    NumberOrString, Position, Range, Url,
+    NumberOrString, Position, Range, TextEdit, Url,
 };
 
 /// 0-based line and UTF-16-code-unit column for a byte offset.
@@ -119,7 +119,7 @@ pub fn to_lsp_diagnostic(
     }
     for help in &diag.helps {
         message.push_str("\nhelp: ");
-        message.push_str(help);
+        message.push_str(&help.text);
     }
 
     let labels = diag
@@ -149,8 +149,32 @@ pub fn to_lsp_diagnostic(
         message,
         related_information: (!related_information.is_empty()).then_some(related_information),
         tags: None,
-        data: None,
+        data: fixes(diag, sources, uri_of),
     })
+}
+
+/// The diagnostic's fixes as `{ "fixes": [{ uri, range, newText }] }`, the
+/// data `textDocument/codeAction` turns into quick fixes
+/// ([`crate::actions`]); `None` without any.
+fn fixes(
+    diag: &Diagnostic,
+    sources: &SourceMap,
+    uri_of: &dyn Fn(FileId) -> Option<Url>,
+) -> Option<serde_json::Value> {
+    let fixes: Vec<serde_json::Value> = diag
+        .suggestions()
+        .filter_map(|suggestion| {
+            let edit = TextEdit {
+                range: span_range(sources, suggestion.span)?,
+                new_text: suggestion.replacement.clone(),
+            };
+            Some(serde_json::json!({
+                "uri": uri_of(suggestion.span.file)?,
+                "edit": edit,
+            }))
+        })
+        .collect();
+    (!fixes.is_empty()).then(|| serde_json::json!({ "fixes": fixes }))
 }
 
 /// The trace frames past the innermost one: the call sites that lead to the

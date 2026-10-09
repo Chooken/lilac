@@ -116,6 +116,23 @@ pub enum TypeKind {
     Error,
 }
 
+/// Every builtin type's spelling, in `TypeId` order (the first entries of
+/// every type table).
+pub const BUILTIN_TYPES: [&str; 12] = [
+    "@bit8",
+    "@bit16",
+    "@bit32",
+    "@bit64",
+    "@bit_native",
+    "@fbit16",
+    "@fbit32",
+    "@fbit64",
+    "@fbit128",
+    "@byte_buffer",
+    "@format_args",
+    "unknown",
+];
+
 /// Function signature.
 #[derive(Clone, Debug, Default)]
 pub struct FuncSig {
@@ -160,22 +177,8 @@ impl Types {
 
     /// Looks up a builtin by Lilac spelling (`@bit32`, `@byte_buffer`, `unknown`).
     pub fn builtin(&self, name: &str) -> Option<TypeId> {
-        let id = match name {
-            "@bit8" => 0,
-            "@bit16" => 1,
-            "@bit32" => 2,
-            "@bit64" => 3,
-            "@bit_native" => 4,
-            "@fbit16" => 5,
-            "@fbit32" => 6,
-            "@fbit64" => 7,
-            "@fbit128" => 8,
-            "@byte_buffer" => 9,
-            "@format_args" => 10,
-            "unknown" => 11,
-            _ => return None,
-        };
-        Some(TypeId(id))
+        let id = BUILTIN_TYPES.iter().position(|builtin| *builtin == name)?;
+        Some(TypeId(u32::try_from(id).ok()?))
     }
 
     /// Interns (or finds) the type for a user `object`.

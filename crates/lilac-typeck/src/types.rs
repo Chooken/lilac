@@ -107,13 +107,10 @@ impl Checker<'_> {
             return TypeRef::ERROR;
         };
         let Some(def) = found.filter(|def| self.res.def(*def).is_type()) else {
-            self.diags.emit(
-                Diagnostic::error("E023", format!("unknown type `{}`", ty.name)).label(
-                    ty.span,
-                    true,
-                    "no such type in scope",
-                ),
-            );
+            let diagnostic = Diagnostic::error("E023", format!("unknown type `{}`", ty.name))
+                .label(ty.span, true, "no such type in scope");
+            let diagnostic = self.suggest_type(diagnostic, &ty.name, name_span);
+            self.diags.emit(diagnostic);
             return TypeRef::ERROR;
         };
         self.record_use(name_span, def);
