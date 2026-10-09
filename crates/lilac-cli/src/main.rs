@@ -132,6 +132,10 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 eprintln!("--lib= needs `Name=dir`\n{}", usage());
                 return Err(ExitCode::from(2));
             };
+            if name.starts_with('@') {
+                eprintln!("--lib={name}: `@` names are reserved for the compiler (`@builtin`)");
+                return Err(ExitCode::from(2));
+            }
             session
                 .libraries
                 .push((name.to_owned(), PathBuf::from(dir)));

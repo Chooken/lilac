@@ -161,7 +161,8 @@
 
 ## Pipeline
 
-lex → parse → `lilac-module` load → `lilac-resolve` → `lilac-typeck` (a
+lex → parse → `lilac-module` load (plus the generated `@builtin`
+namespaces) → `lilac-resolve` → `lilac-typeck` (a
 worklist of `(def, type args)` instances emitting HIR directly) →
 `lilac-lower` (HIR → LIR, including the ownership model: copies, moves,
 drops, drop/copy glue, and constant conditions: only the live arm of an
@@ -170,6 +171,17 @@ injection → DCE →
 live `@compile_error` check → stack-trace instrumentation (when on) →
 verify → backend. `Session::run` in `lilac-driver` is the only
 orchestration.
+
+`@builtin` (`lilac-driver/src/builtin.rs`) is Lilac source the driver
+generates from the session (`Target`, `Entry`, `OptimizeMode`) and appends to
+every project as the namespaces `@builtin`, `@builtin.Target` and
+`@builtin.Build`, file name `<builtin>`. Code reaches them only qualified:
+the parser takes dotted type names after `@builtin`, typeck flattens a
+`@builtin.…` member chain into a name, and `Resolved::lookup_path` finds it.
+Its types and constants are checked on first use (not eagerly like user
+items), so a program that never names `@builtin` lowers byte-identically.
+`lilac-target` owns the variant names (`Arch::builtin_name`,
+`Os::builtin_name`) and `Target::page_size`.
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`

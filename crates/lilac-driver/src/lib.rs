@@ -1,5 +1,5 @@
 //! Driver: `Session` plus the one pipeline (`Session::run`): module load,
-//! parse, resolve, check, lower, runtime injection, DCE, the live
+//! the generated `@builtin` namespace ([`builtin`]), parse, resolve, check, lower, runtime injection, DCE, the live
 //! `@compile_error` check, stack-trace instrumentation, and verification.
 
 use std::collections::HashSet;
@@ -9,6 +9,8 @@ use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGu
 use lilac_ir::{LirModule, Syscalls, System};
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
+
+pub mod builtin;
 
 pub use lilac_ir::Entry;
 pub use lilac_target::{Arch, LinkFlavor, LinkInfo, Os, Target};
@@ -398,6 +400,12 @@ impl Session {
     ) -> Result<LirModule, ErrorGuaranteed> {
         const DONE: StageEvent = StageEvent::End { count: None };
         let strict = !self.retain_partial_analysis;
+        let facts = builtin::Facts {
+            target: self.target,
+            entry: self.entry,
+            mode: self.optimize,
+        };
+        let project = &builtin::with_builtin(project, facts, &mut self.source_map);
         self.report(Stage::Parse, StageEvent::Begin);
         let (programs, failed) = lilac_module::parse_all(project, &mut self.diags, strict);
         if failed && strict {
@@ -612,6 +620,97 @@ fn has_entry(lir: &LirModule) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The generated `@builtin.Target`/`Build` constants follow the session.
+    #[test]
+    fn builtin_sources_follow_the_target() {
+        let facts = |triple: &str, entry, mode| builtin::Facts {
+            target: Target::parse(triple).expect("triple"),
+            entry,
+            mode,
+        };
+        let [(_, types), (_, target), (_, build)] = builtin::sources(facts(
+            "x86_64-pc-windows-msvc",
+            Entry::Native,
+            OptimizeMode::Release,
+        ));
+        assert!(types.contains("Os: enum {\n    Windows\n"), "{types}");
+        assert!(types.contains("    X86_64\n"), "{types}");
+        assert!(target.contains("os: Os => .Windows\n"), "{target}");
+        assert!(target.contains("arch: Arch => .X86_64\n"), "{target}");
+        assert!(
+            target.contains("pointer_size: @bit_native => 0x8\n"),
+            "{target}"
+        );
+        assert!(
+            target.contains("page_size: @bit_native => 0x1000\n"),
+            "{target}"
+        );
+        assert!(target.contains("libc: @bit8 => 0x0\n"), "{target}");
+        assert!(build.contains("mode: Mode => .Release\n"), "{build}");
+
+        let [_, (_, target), (_, build)] = builtin::sources(facts(
+            "aarch64-apple-darwin",
+            Entry::Native,
+            OptimizeMode::Debug,
+        ));
+        assert!(target.contains("os: Os => .MacOs\n"), "{target}");
+        assert!(
+            target.contains("page_size: @bit_native => 0x4000\n"),
+            "{target}"
+        );
+        assert!(target.contains("libc: @bit8 => 0x1\n"), "{target}");
+        assert!(build.contains("mode: Mode => .Debug\n"), "{build}");
+
+        let [_, (_, target), _] = builtin::sources(facts(
+            "x86_64-unknown-linux-gnu",
+            Entry::CMain,
+            OptimizeMode::Debug,
+        ));
+        assert!(target.contains("libc: @bit8 => 0x1\n"), "{target}");
+
+        let [_, (_, target), _] = builtin::sources(facts(
+            "riscv32-unknown-none",
+            Entry::Native,
+            OptimizeMode::Debug,
+        ));
+        assert!(target.contains("os: Os => .None\n"), "{target}");
+        assert!(
+            target.contains("pointer_size: @bit_native => 0x4\n"),
+            "{target}"
+        );
+    }
+
+    /// A `match` on `@builtin.Target.os` compiles only the target's arm, and
+    /// a `@compile_error` in a dead arm is silent.
+    #[test]
+    fn builtin_target_match_keeps_the_live_arm() {
+        let src = "win: function () nothing {\n    @compile_error(\"dead\")\n}\nlin: function () nothing {}\nmain: function () nothing {\n    match @builtin.Target.os {\n        .Windows => win()\n        .Linux => lin()\n    }\n}\n";
+        let mut session = Session::new();
+        session.target = Target::parse("x86_64-unknown-linux-gnu").expect("triple");
+        let text = session
+            .compile_lir("m.lilac", src)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()))
+            .to_text();
+        assert!(text.contains("call @lin"), "{text}");
+        assert!(!text.contains("@win"), "{text}");
+
+        let mut session = Session::new();
+        session.target = Target::parse("x86_64-pc-windows-msvc").expect("triple");
+        assert!(session.compile_lir("m.lilac", src).is_err());
+        assert!(session.render_diagnostics().contains("error[E031]: dead"));
+    }
+
+    /// A program that never names `@builtin` gets none of its types.
+    #[test]
+    fn unused_builtin_adds_nothing() {
+        let mut session = Session::new();
+        let text = session
+            .compile_lir("hello.lilac", "main: function () nothing {\n}\n")
+            .expect("compiles")
+            .to_text();
+        assert!(!text.contains("@builtin"), "{text}");
+    }
 
     #[test]
     fn hello_compiles() {

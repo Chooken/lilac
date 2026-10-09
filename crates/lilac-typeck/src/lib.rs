@@ -414,13 +414,17 @@ impl Checker<'_> {
 
     // ---- name lookup ---------------------------------------------------
 
-    /// Resolves an item name in the current file. `Ok(None)`: no binding;
-    /// `Err`: ambiguous (`E029` emitted).
+    /// Resolves an item name in the current file, or a qualified
+    /// `@builtin.…` name. `Ok(None)`: no binding; `Err`: ambiguous (`E029`
+    /// emitted).
     pub(crate) fn lookup_item(
         &mut self,
         name: &str,
         span: Span,
     ) -> Result<Option<DefId>, ErrorGuaranteed> {
+        if name.contains('.') {
+            return Ok(self.res.lookup_path(name));
+        }
         match self.res.lookup(self.file(), name) {
             Some(Lookup::One(id)) => Ok(Some(*id)),
             Some(Lookup::Ambiguous(sites)) => {

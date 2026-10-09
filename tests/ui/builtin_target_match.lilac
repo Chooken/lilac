@@ -1,0 +1,27 @@
+// `@builtin.Target` constants are compile-time: only the live arm of a
+// `match` or `if` on one is compiled, so each target keeps one call. The
+// snapshots use the default target `x86_64-unknown-none` (`os` is `.None`),
+// and `emit-*` enters through a C `main`, so `libc` is set.
+
+on_windows: function () nothing {}
+
+on_linux: function () nothing {}
+
+on_macos: function () nothing {}
+
+on_bare: function () nothing {}
+
+with_libc: function () nothing {}
+
+main: function () nothing {
+    match @builtin.Target.os {
+        .Windows => on_windows()
+        .Linux => on_linux()
+        .MacOs => on_macos()
+        .None => on_bare()
+    }
+    if @builtin.Target.libc {
+        with_libc()
+    }
+    os: @builtin.Os = @builtin.Target.os
+}

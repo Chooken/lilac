@@ -27,6 +27,33 @@ pub enum Arch {
 }
 
 impl Arch {
+    /// Every architecture, in declaration order.
+    pub const ALL: [Self; 8] = [
+        Self::X86,
+        Self::X86_64,
+        Self::Arm,
+        Self::Aarch64,
+        Self::Riscv32,
+        Self::Riscv64,
+        Self::Wasm32,
+        Self::Wasm64,
+    ];
+
+    /// The variant name in `@builtin.Arch` (`X86_64`).
+    #[must_use]
+    pub fn builtin_name(self) -> &'static str {
+        match self {
+            Self::X86 => "X86",
+            Self::X86_64 => "X86_64",
+            Self::Arm => "Arm",
+            Self::Aarch64 => "Aarch64",
+            Self::Riscv32 => "Riscv32",
+            Self::Riscv64 => "Riscv64",
+            Self::Wasm32 => "Wasm32",
+            Self::Wasm64 => "Wasm64",
+        }
+    }
+
     /// Parses an architecture name.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -131,6 +158,18 @@ impl Os {
             "windows" => Some(Self::Windows),
             "darwin" | "macos" => Some(Self::Macos),
             _ => None,
+        }
+    }
+
+    /// The variant name in `@builtin.Os` (`Windows`, `Linux`, `MacOs`, or
+    /// `None` for no or an unknown operating system).
+    #[must_use]
+    pub fn builtin_name(self) -> &'static str {
+        match self {
+            Self::None | Self::Unknown => "None",
+            Self::Linux => "Linux",
+            Self::Windows => "Windows",
+            Self::Macos => "MacOs",
         }
     }
 
@@ -350,6 +389,17 @@ impl Target {
             Os::None | Os::Unknown => return None,
         };
         Some(info)
+    }
+
+    /// The memory page size in bytes: 16 KiB on Apple arm64, 64 KiB on
+    /// WebAssembly, 4 KiB elsewhere.
+    #[must_use]
+    pub fn page_size(&self) -> u64 {
+        match (self.arch, self.os) {
+            (Arch::Aarch64, Os::Macos) => 0x4000,
+            (Arch::Wasm32 | Arch::Wasm64, _) => 0x1_0000,
+            _ => 0x1000,
+        }
     }
 
     /// Returns the native pointer width in bits for this target.

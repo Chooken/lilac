@@ -930,10 +930,22 @@ impl Parser {
         match token.kind {
             TokenKind::At => {
                 let ident = self.expect(diags, TokenKind::Ident, "type name after `@`")?;
-                let span = join_spans(token.span, ident.span);
+                let mut name = format!("@{}", ident.text);
+                let mut span = join_spans(token.span, ident.span);
+                // `@builtin.Os`: a type in the compiler's `@builtin` namespace.
+                if name == "@builtin" {
+                    while self.peek().kind == TokenKind::Dot
+                        && self.peek_at(1).kind == TokenKind::Ident
+                    {
+                        self.bump();
+                        let segment = self.bump();
+                        name = format!("{name}.{}", segment.text);
+                        span = join_spans(span, segment.span);
+                    }
+                }
                 Ok(Token::new(
                     TokenKind::Ident,
-                    &format!("@{}", ident.text),
+                    &name,
                     span.lo.0 as usize,
                     span.hi.0 as usize,
                     self.file,
@@ -2254,6 +2266,18 @@ mod tests {
         };
         assert!(matches!(then.stmts[..], [Stmt::Continue { .. }]));
         assert!(matches!(els.as_ref(), Stmt::Continue { .. }));
+    }
+
+    #[test]
+    fn builtin_type_names_take_dotted_segments() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    os: @builtin.Os = @builtin.Target.os\n}\n",
+        );
+        let Stmt::Let { ty, value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert_eq!(ty.name, "@builtin.Os");
+        assert!(matches!(value, Expr::Member { field, .. } if field == "os"));
     }
 
     #[test]

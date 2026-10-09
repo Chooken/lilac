@@ -176,6 +176,16 @@ impl Resolved {
         self.files.get(&file)?.visible.get(name)
     }
 
+    /// The public top-level item a qualified name (`@builtin.Target.os`)
+    /// denotes: the namespace path, then the item name.
+    #[must_use]
+    pub fn lookup_path(&self, path: &str) -> Option<DefId> {
+        let (ns, name) = path.rsplit_once('.')?;
+        let ns = self.namespaces.iter().find(|data| data.path == ns)?;
+        let id = *ns.items.get(name)?;
+        (self.def(id).vis == Visibility::Public).then_some(id)
+    }
+
     /// The dotted path of `ns` (`""` for the root).
     #[must_use]
     pub fn namespace_path(&self, ns: NsId) -> &str {

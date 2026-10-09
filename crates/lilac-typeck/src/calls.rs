@@ -51,6 +51,17 @@ impl Checker<'_> {
                 field,
                 span: member_span,
             } => {
+                if let Some((name, name_span)) = self.qualified_name(callee) {
+                    return self.check_named_call(
+                        fcx,
+                        &name,
+                        name_span,
+                        generic_args,
+                        args,
+                        span,
+                        expected,
+                    );
+                }
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let receiver = receiver?;
                     return self.static_call(
@@ -159,7 +170,7 @@ impl Checker<'_> {
                 outs: returns,
             });
         }
-        if name.starts_with('@') {
+        if name.starts_with('@') && !name.contains('.') {
             if let Some(intrinsic) = Intrinsic::lookup(name) {
                 self.record_semantic(name_span, SemanticKind::BuiltinFunc);
                 if !generic_args.is_empty() {

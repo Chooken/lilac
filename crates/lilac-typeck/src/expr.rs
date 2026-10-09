@@ -75,6 +75,9 @@ impl Checker<'_> {
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
             Expr::Member { obj, field, span } => {
+                if let Some((name, span)) = self.qualified_name(expr) {
+                    return self.check_ident(fcx, &name, span);
+                }
                 self.check_member(fcx, obj, field, *span, expected)
             }
             Expr::Call {
@@ -258,6 +261,7 @@ impl Checker<'_> {
                 }
             }
             DefKind::Const { .. } => {
+                self.use_builtin_const(def);
                 let ty = self.const_type(def);
                 HirExpr {
                     ty,
@@ -362,6 +366,26 @@ impl Checker<'_> {
                 }
                 let ty = self.type_of_def(def, Vec::new());
                 Some(self.ensure_type(ty, *span).map(|()| Receiver::Type(ty)))
+            }
+            Expr::Member { .. } => {
+                let (name, span) = self.qualified_name(obj)?;
+                self.static_receiver(fcx, &Expr::Ident(name, span))
+            }
+            _ => None,
+        }
+    }
+
+    /// The qualified name a `@builtin.A.b` member chain spells, while no
+    /// prefix of it names an item (past that, `.b` is a member access).
+    pub(crate) fn qualified_name(&self, expr: &Expr) -> Option<(String, Span)> {
+        match expr {
+            Expr::Ident(name, span) if name == "@builtin" => Some((name.clone(), *span)),
+            Expr::Member { obj, field, span } => {
+                let (path, _) = self.qualified_name(obj)?;
+                if self.res.lookup_path(&path).is_some() {
+                    return None;
+                }
+                Some((format!("{path}.{field}"), *span))
             }
             _ => None,
         }
@@ -1165,29 +1189,57 @@ impl Checker<'_> {
     }
 
     /// Checks every constant's initializer, then rejects reference cycles.
+    /// `@builtin` constants are checked on first use instead
+    /// ([`Checker::use_builtin_const`]).
     pub(crate) fn check_consts(&mut self) {
         for def in self.res.ids() {
-            let DefKind::Const { value, .. } = &self.res.def(def).kind else {
-                continue;
-            };
-            let value = value.clone();
-            let ty = self.const_type(def);
-            let env = Env {
-                file: Some(self.res.def(def).file),
-                ..Env::default()
-            };
-            let hir = self.with_env(env, |c| {
-                let mut fcx = FnCx::new();
-                let hir = c.check_expr(&mut fcx, &value, (!ty.is_error()).then_some(ty.id));
-                c.coerce(hir, ty, value.span())
-            });
-            self.out.consts.insert(def, hir);
+            if matches!(self.res.def(def).kind, DefKind::Const { .. })
+                && !self.is_builtin(def)
+                && !self.out.consts.contains_key(&def)
+            {
+                self.check_const(def);
+            }
         }
         let mut done = HashSet::new();
         let consts: Vec<DefId> = self.out.consts.keys().copied().collect();
         for def in consts {
             self.const_cycle(def, &mut Vec::new(), &mut done);
         }
+    }
+
+    /// Checks one constant's initializer into the output.
+    fn check_const(&mut self, def: DefId) {
+        let DefKind::Const { value, .. } = &self.res.def(def).kind else {
+            return;
+        };
+        let value = value.clone();
+        let ty = self.const_type(def);
+        let env = Env {
+            file: Some(self.res.def(def).file),
+            ..Env::default()
+        };
+        let hir = self.with_env(env, |c| {
+            let mut fcx = FnCx::new();
+            let hir = c.check_expr(&mut fcx, &value, (!ty.is_error()).then_some(ty.id));
+            c.coerce(hir, ty, value.span())
+        });
+        self.out.consts.insert(def, hir);
+    }
+
+    /// Checks a `@builtin` constant the first time code names it, so its
+    /// type is laid out only in programs that use it. They never refer to
+    /// each other, so this cannot recurse into itself.
+    fn use_builtin_const(&mut self, def: DefId) {
+        if self.is_builtin(def) && !self.out.consts.contains_key(&def) {
+            self.check_const(def);
+        }
+    }
+
+    /// Whether `def` is declared in the generated `@builtin` namespace.
+    pub(crate) fn is_builtin(&self, def: DefId) -> bool {
+        self.res
+            .namespace_path(self.res.def(def).ns)
+            .starts_with("@builtin")
     }
 
     fn const_cycle(&mut self, def: DefId, stack: &mut Vec<DefId>, done: &mut HashSet<DefId>) {

@@ -332,7 +332,8 @@ impl Checker<'_> {
         }
     }
 
-    /// Checks every non-generic type declaration (layouts, variant tokens).
+    /// Checks every non-generic type declaration (layouts, variant tokens),
+    /// except the generated `@builtin` ones.
     pub(crate) fn check_types(&mut self) {
         for id in self.res.ids() {
             let def = self.res.def(id);
@@ -341,6 +342,9 @@ impl Checker<'_> {
                     let span = def.name_span;
                     self.record_semantic(span, SemanticKind::Variant);
                 }
+                // `@builtin`'s generated types are laid out on first use, so
+                // they stay out of programs that never name them.
+                DefKind::Object | DefKind::Enum if self.is_builtin(id) => {}
                 DefKind::Object | DefKind::Enum if def.generic_params.is_empty() => {
                     let span = def.span;
                     let ty = self.type_of_def(id, Vec::new());

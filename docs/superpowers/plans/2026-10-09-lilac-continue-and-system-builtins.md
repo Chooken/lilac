@@ -282,22 +282,34 @@ three hooks.
 
 ### Part B: `@builtin`
 
-- [ ] `lilac-target`: add a `page_size()` and a way to name the OS/arch
+- [x] `lilac-target`: add a `page_size()` and a way to name the OS/arch
       variants for generated source.
-- [ ] Driver: generate the `@builtin` source from `Target`, `Entry` and the
+- [x] Driver: generate the `@builtin` source from `Target`, `Entry` and the
       optimize mode, and add it to the load as namespace `@builtin` with the
       display path `<builtin>`.
-- [ ] Lexer/parser/resolve: accept `@builtin` as the first segment of a
+- [x] Lexer/parser/resolve: accept `@builtin` as the first segment of a
       path. Reject a user declaration of the namespace.
-- [ ] Tests:
+- [x] Tests:
   - a driver unit test (the generated text per target);
   - a UI test that `match @builtin.Target.os` keeps one arm (`emit-ir`
     shows only that arm's call);
   - a `@compile_error` in the dead OS arm is silent.
-- [ ] Docs:
+- [x] Docs:
   - a SPEC section "The `@builtin` namespace";
   - the constant-conditions table gains `@builtin` constants;
   - an AGENTS.md pipeline note.
+
+Done (2026-10-09). Differences from the tasks above:
+- Lilac had no qualified names, so typeck flattens a `@builtin.…` member
+  chain into one name and `Resolved::lookup_path` finds it; the parser
+  takes dotted type names only after `@builtin`.
+- `@builtin` types and constants are checked on first use, so programs
+  that never name them lower byte-identically (no new layouts in
+  snapshots).
+- "Reject a user declaration": the CLI rejects `--lib=@…` names; a
+  folder cannot be reached by `using @…`.
+- The dead-arm `@compile_error` test is a driver unit test, since UI
+  success fixtures must also build and run on the host.
 
 ### Part C: externs
 

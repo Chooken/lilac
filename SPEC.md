@@ -216,6 +216,7 @@ An expression is constant when it is one of:
 | an integer literal | its bits at the expression's width |
 | `@size_of(T)` | the size of `T` (per generic instance) |
 | an inline constant (`name: T => expr`) | its initializer, which must be constant |
+| a `@builtin` constant (`@builtin.Target.os`) | the target or build fact it states |
 | an object or enum-variant literal | if every field / the payload is constant |
 | `value.field` | the field of a constant object |
 | `a == b` | bit equality of two constant integers |
@@ -245,6 +246,46 @@ compile.
 `true` and `false` in `Standard` are inline constants built from `=>`
 functions over a hook-free `Bool`, so `if true { … } else { … }` compiles one
 arm. The former camelCase alias `@compilerError` is no longer accepted.
+
+### The `@builtin` namespace
+
+The compiler supplies one namespace of facts about the target and the build.
+It needs no `using`, and since `@` names are reserved it cannot collide with
+user code. Its names are always written qualified:
+
+```lilac
+@builtin.Os: enum { Windows, Linux, MacOs, None }
+@builtin.Arch: enum { X86, X86_64, Arm, Aarch64, Riscv32, Riscv64, Wasm32, Wasm64 }
+@builtin.Mode: enum { Debug, Release, ReleaseSmall }
+
+@builtin.Target.os: Os                    // None for bare and unknown targets
+@builtin.Target.arch: Arch
+@builtin.Target.pointer_size: @bit_native // in bytes
+@builtin.Target.page_size: @bit_native    // 16 KiB on Apple arm64, 64 KiB on wasm, else 4 KiB
+@builtin.Target.libc: @bit8               // 0x1 when the C library is linked
+
+@builtin.Build.mode: Mode
+```
+
+Every `Target` and `Build` member is an inline constant, so a `match` or
+`if` on one compiles only the live arm (see Constant conditions above). A
+`@compile_error` in another platform's arm is never an error:
+
+```lilac
+write: function (fd: @bit32, text: @byte_buffer) nothing {
+    match @builtin.Target.os {
+        .Windows => write_windows(fd, text)
+        .Linux => write_linux(fd, text)
+    } else {
+        @compile_error("write: unsupported OS")
+    }
+}
+```
+
+`libc` is set for `--libc` builds, on macOS (which links `libSystem`), and for
+`check`/`emit-*`, which compile with a C entry. The namespace's source is
+generated per compile, and diagnostics name its file `<builtin>`. A library
+cannot be mounted under an `@` name.
 
 ## 3. Compiler Intrinsics
 
