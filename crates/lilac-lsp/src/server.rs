@@ -15,7 +15,7 @@ use lsp_types::{
     DidOpenTextDocumentParams, PublishDiagnosticsParams, Url,
 };
 
-use crate::convert::to_lsp_diagnostic;
+use crate::convert::{to_lsp_diagnostic, trace_diagnostics};
 use crate::documents::Documents;
 use crate::fs::OverlayFs;
 use crate::index::{LirStages, Retained};
@@ -528,20 +528,20 @@ fn retain(
                 .map(|uri| (*id, canonical_file_uri(&uri)))
         })
         .collect();
+    let uri_of = |file| file_uris.get(&file).cloned();
     for diagnostic in session.diags.diagnostics() {
         let target = primary_file(diagnostic)
-            .and_then(|id| file_uris.get(&id).cloned())
+            .and_then(uri_of)
             .or_else(|| fallback.cloned());
-        let Some(uri) = target else {
-            continue;
-        };
-        if covered.contains(&canonical_file_uri(&uri)) {
-            continue;
+        if let Some(uri) = target.filter(|uri| !covered.contains(&canonical_file_uri(uri))) {
+            if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &uri_of) {
+                by_uri.entry(uri).or_default().push(lsp);
+            }
         }
-        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
-            file_uris.get(&file).cloned()
-        }) {
-            by_uri.entry(uri).or_default().push(lsp);
+        for (uri, lsp) in trace_diagnostics(diagnostic, &session.source_map, &uri_of) {
+            if !covered.contains(&canonical_file_uri(&uri)) {
+                by_uri.entry(uri).or_default().push(lsp);
+            }
         }
     }
     covered.extend(file_uris.values().cloned());
@@ -562,12 +562,13 @@ fn retain_single(
 ) -> Retained {
     covered.insert(canonical_file_uri(uri));
     let entry = by_uri.entry(uri.clone()).or_default();
+    let uri_of = |file| (file == FileId(0)).then(|| uri.clone());
     for diagnostic in session.diags.diagnostics() {
-        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &|file| {
-            (file == FileId(0)).then(|| uri.clone())
-        }) {
+        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &uri_of) {
             entry.push(lsp);
         }
+        let sites = trace_diagnostics(diagnostic, &session.source_map, &uri_of);
+        entry.extend(sites.into_iter().map(|(_, lsp)| lsp));
     }
     let file_uris = HashMap::from([(FileId(0), uri.clone())]);
     let uri_files = HashMap::from([(uri.clone(), FileId(0))]);

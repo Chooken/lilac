@@ -485,7 +485,7 @@ impl Session {
         if self.require_entry {
             roots.insert(".lilac.start".to_owned());
         }
-        let reach = lilac_ir::prune_unreachable(&mut lir, &roots);
+        lilac_ir::prune_unreachable(&mut lir, &roots);
         self.report(
             Stage::Prune,
             StageEvent::End {
@@ -493,18 +493,10 @@ impl Session {
             },
         );
         self.report(Stage::Verify, StageEvent::Begin);
-        lilac_ir::check_live_compile_errors(
-            &lir,
-            reach.as_ref(),
-            &self.source_map,
-            &lowered.names,
-            &mut self.diags,
-        )?;
+        lilac_ir::check_live_compile_errors(&lir, &lowered.names, &mut self.diags)?;
         lilac_ir::check_live_syscalls(
             &lir,
             self.target.has_syscall(),
-            reach.as_ref(),
-            &self.source_map,
             &lowered.names,
             &mut self.diags,
         )?;
@@ -1298,6 +1290,27 @@ main: function () nothing {}
                 && rendered.contains("at main (live.lilac:6:5)"),
             "{rendered}"
         );
+    }
+
+    /// Every live call site is traced, not only the shortest chain; a
+    /// function whose callers are already listed is marked `[see above]`.
+    #[test]
+    fn compile_error_traces_every_call_site() {
+        let mut session = Session::new();
+        let result = session.compile_lir(
+            "many.lilac",
+            "boom: function () nothing {\n    @compile_error(\"many\")\n}\n\nagain: function () nothing {\n    boom()\n    again()\n}\n\nmain: function () nothing {\n    boom()\n    again()\n}\n",
+        );
+        assert!(result.is_err());
+        let rendered = session.render_diagnostics();
+        let expected = "reached from:
+            at boom (many.lilac:2:5)
+              at again (many.lilac:6:5)
+                at again (many.lilac:7:5) [see above]
+                at main (many.lilac:12:5)
+              at main (many.lilac:11:5) [see above]";
+        assert!(rendered.contains(expected), "{rendered}");
+        assert_eq!(rendered.matches("error[E031]").count(), 1, "{rendered}");
     }
 
     /// A function reached only through `addr.func` marks that frame.

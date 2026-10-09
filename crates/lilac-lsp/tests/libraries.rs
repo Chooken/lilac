@@ -371,3 +371,45 @@ fn an_unused_library_namespace_reports_its_errors() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A `@compile_error` in a library function marks the user's call to it too,
+/// not only the library line, and the two link to each other.
+#[test]
+fn a_library_compile_error_marks_the_users_call() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("lsp_trace_library");
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("lib").join("Guard.lilac");
+    std::fs::create_dir_all(lib.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &lib,
+        "refuse: function () nothing {\n    @compile_error(\"not supported here\")\n}\n",
+    )
+    .expect("write");
+    let main = dir.join("app").join("main.lilac");
+    std::fs::create_dir_all(main.parent().expect("parent")).expect("mkdir");
+    let text = "main: function () nothing {\n    Lib.refuse()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        &serde_json::json!({ "libraries": { "Lib": dir.join("lib").to_string_lossy() } }),
+    );
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    let site = published
+        .diagnostics
+        .iter()
+        .find(|d| d.message.contains("not supported here"))
+        .unwrap_or_else(|| panic!("{:?}", published.diagnostics));
+    assert_eq!(site.range.start.line, 1, "{site:?}");
+    assert_eq!(site.range.start.character, 4, "{site:?}");
+    let back = site.related_information.as_ref().expect("links back");
+    assert!(
+        back[0].location.uri.path().ends_with("/lib/Guard.lilac"),
+        "{back:?}"
+    );
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

@@ -5,14 +5,16 @@
 //! The frontend lowers every declaration, so a function that nothing calls and a
 //! `!data` const nothing references still survive into `verify`. This pass is
 //! conservative and infallible: with no `main` it leaves the module untouched.
-//! The walk is breadth-first and remembers each function's first caller, so
-//! [`Reach::chain`] gives a shortest call path from a root (the `E031` trace).
+//! [`CallGraph`] keeps every edge, for the caller trees of `E031`, `E035`
+//! and `E037`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
+use lilac_error::TraceFrame;
 use lilac_span::Span;
 
+use crate::trace::is_hidden;
 use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTy};
 
 /// How a caller reaches a callee: a direct `call` or a taken `addr.func`.
@@ -36,53 +38,123 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
-/// One frame of a [`Reach::chain`]: a function and the edge it takes toward
-/// the previous (deeper) frame. The innermost frame has no edge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Frame {
-    /// Function name (LIR symbol).
-    pub func: String,
-    /// Span and kind of the edge to the previous frame.
-    pub edge: Option<(Span, EdgeKind)>,
-}
-
-/// Functions reachable from the roots, each with its first-found parent edge
-/// (`None` for a root). Breadth-first, so every chain is a shortest path.
+/// The functions reachable from the roots.
 #[derive(Clone, Debug, Default)]
 pub struct Reach {
-    parent: HashMap<String, Option<Edge>>,
+    reached: HashSet<String>,
 }
 
 impl Reach {
     /// Whether `func` is reachable.
     #[must_use]
     pub fn contains(&self, func: &str) -> bool {
-        self.parent.contains_key(func)
+        self.reached.contains(func)
     }
+}
 
-    /// The path from `func` up to its root, innermost first. Each frame past
-    /// the first carries the edge it takes toward the frame before it. Empty
-    /// when `func` is unreachable.
+/// Every `call` and `addr.func` edge between a module's functions, by
+/// callee, in module order. [`Self::trace`] turns it into a diagnostic's
+/// caller tree.
+#[derive(Clone, Debug, Default)]
+pub struct CallGraph {
+    callers: HashMap<String, Vec<Edge>>,
+}
+
+impl CallGraph {
+    /// The call graph of `module` as it stands (run it after DCE to see only
+    /// live callers, before it to see every caller).
     #[must_use]
-    pub fn chain(&self, func: &str) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        let mut current = func;
-        let mut edge_in: Option<(Span, EdgeKind)> = None;
-        while let Some(parent) = self.parent.get(current) {
-            frames.push(Frame {
-                func: current.to_owned(),
-                edge: edge_in,
-            });
-            match parent {
-                Some(edge) => {
-                    edge_in = Some((edge.span, edge.kind));
-                    current = &edge.caller;
-                }
-                None => break,
+    pub fn new(module: &LirModule) -> Self {
+        let mut callers: HashMap<String, Vec<Edge>> = HashMap::new();
+        for func in &module.funcs {
+            for (target, span, kind) in callees(func) {
+                callers.entry(target).or_default().push(Edge {
+                    caller: func.name.clone(),
+                    span,
+                    kind,
+                });
             }
         }
-        frames
+        Self { callers }
     }
+
+    /// Every edge into `func`, in module order.
+    #[must_use]
+    pub fn callers(&self, func: &str) -> &[Edge] {
+        self.callers.get(func).map_or(&[], Vec::as_slice)
+    }
+
+    /// The caller tree of `func`, whose own site is `site`: every call site
+    /// that reaches it, with `.lilac.*` glue spliced out (its callers stand in
+    /// its place). Each function's callers are expanded once; a later frame of
+    /// it is a `repeat`. Names come from `names` (LIR symbol to source name).
+    #[must_use]
+    pub fn trace<S: BuildHasher>(
+        &self,
+        func: &str,
+        site: Span,
+        names: &HashMap<String, String, S>,
+    ) -> TraceFrame {
+        let mut expanded = HashSet::from([func.to_owned()]);
+        TraceFrame {
+            func: display(func, names),
+            span: site,
+            address: false,
+            repeat: false,
+            callers: self.frames(func, &mut expanded, names),
+        }
+    }
+
+    /// The visible frames calling `func`.
+    fn frames<S: BuildHasher>(
+        &self,
+        func: &str,
+        expanded: &mut HashSet<String>,
+        names: &HashMap<String, String, S>,
+    ) -> Vec<TraceFrame> {
+        let mut edges = Vec::new();
+        let mut spliced = HashSet::from([func.to_owned()]);
+        self.visible_edges(func, &mut spliced, &mut edges);
+        edges
+            .into_iter()
+            .map(|edge| {
+                let repeat = !expanded.insert(edge.caller.clone());
+                let callers = if repeat {
+                    Vec::new()
+                } else {
+                    self.frames(&edge.caller, expanded, names)
+                };
+                TraceFrame {
+                    func: display(&edge.caller, names),
+                    span: edge.span,
+                    address: edge.kind == EdgeKind::Address,
+                    repeat,
+                    callers,
+                }
+            })
+            .collect()
+    }
+
+    /// Edges into `func` from visible callers, looking through hidden ones.
+    fn visible_edges<'a>(
+        &'a self,
+        func: &str,
+        spliced: &mut HashSet<String>,
+        out: &mut Vec<&'a Edge>,
+    ) {
+        for edge in self.callers(func) {
+            if !is_hidden(&edge.caller) {
+                out.push(edge);
+            } else if spliced.insert(edge.caller.clone()) {
+                self.visible_edges(&edge.caller, spliced, out);
+            }
+        }
+    }
+}
+
+/// `func`'s source name, else the symbol itself.
+fn display<S: BuildHasher>(func: &str, names: &HashMap<String, String, S>) -> String {
+    names.get(func).cloned().unwrap_or_else(|| func.to_owned())
 }
 
 /// Walks the call graph breadth-first from `main` and `extra_roots`.
@@ -97,19 +169,17 @@ pub fn reach<S: BuildHasher>(
         .iter()
         .map(|func| (func.name.as_str(), func))
         .collect();
-    let mut parent: HashMap<String, Option<Edge>> = HashMap::new();
+    let mut reached: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
     for func in &module.funcs {
-        if func.name == "main" && !parent.contains_key(&func.name) {
-            parent.insert(func.name.clone(), None);
+        if func.name == "main" && reached.insert(func.name.clone()) {
             queue.push_back(func.name.clone());
         }
     }
     let mut extra: Vec<&String> = extra_roots.iter().collect();
     extra.sort();
     for root in extra {
-        if !parent.contains_key(root) {
-            parent.insert(root.clone(), None);
+        if reached.insert(root.clone()) {
             queue.push_back(root.clone());
         }
     }
@@ -121,21 +191,13 @@ pub fn reach<S: BuildHasher>(
         let Some(func) = funcs.get(name.as_str()) else {
             continue;
         };
-        for (target, span, kind) in callees(func) {
-            if funcs.contains_key(target.as_str()) && !parent.contains_key(&target) {
-                parent.insert(
-                    target.clone(),
-                    Some(Edge {
-                        caller: name.clone(),
-                        span,
-                        kind,
-                    }),
-                );
+        for (target, _, _) in callees(func) {
+            if funcs.contains_key(target.as_str()) && reached.insert(target.clone()) {
                 queue.push_back(target);
             }
         }
     }
-    Some(Reach { parent })
+    Some(Reach { reached })
 }
 
 /// Removes functions unreachable from a root and data consts nothing names,
@@ -443,51 +505,74 @@ mod tests {
         assert_eq!(names, ["api"]);
     }
 
-    fn chain_names(reach: &Reach, func: &str) -> Vec<String> {
-        reach
-            .chain(func)
-            .into_iter()
-            .map(|frame| frame.func)
-            .collect()
+    /// `func [&] [^] (callers...)` for a trace, one level per parenthesis.
+    fn shape(frame: &TraceFrame) -> String {
+        let mut text = frame.func.clone();
+        if frame.address {
+            text.push_str(" &");
+        }
+        if frame.repeat {
+            text.push_str(" ^");
+        }
+        if !frame.callers.is_empty() {
+            let callers: Vec<String> = frame.callers.iter().map(shape).collect();
+            text.push_str(" (");
+            text.push_str(&callers.join(", "));
+            text.push(')');
+        }
+        text
+    }
+
+    fn trace_of(module: &LirModule, func: &str) -> String {
+        let names: HashMap<String, String> = HashMap::new();
+        shape(&CallGraph::new(module).trace(func, Span::dummy(), &names))
     }
 
     #[test]
-    fn chain_is_the_shortest_path() {
-        // main -> a -> b -> c and main -> c: the chain skips a and b.
+    fn trace_lists_every_call_site() {
+        // main -> a -> c, main -> c, b -> c: c has three callers.
         let mut module = LirModule::new("x86_64-unknown-none");
         module.funcs.push(func("main", &["a", "c"], &[]));
-        module.funcs.push(func("a", &["b"], &[]));
+        module.funcs.push(func("a", &["c"], &[]));
         module.funcs.push(func("b", &["c"], &[]));
         module.funcs.push(func("c", &[], &[]));
-        let reach = prune_unreachable(&mut module, &HashSet::new()).expect("rooted");
-        assert_eq!(chain_names(&reach, "c"), ["c", "main"]);
-        assert_eq!(chain_names(&reach, "b"), ["b", "a", "main"]);
-        let frames = reach.chain("b");
-        assert_eq!(frames[0].edge, None);
-        assert_eq!(frames[1].edge.map(|(_, kind)| kind), Some(EdgeKind::Call));
+        assert_eq!(trace_of(&module, "c"), "c (main, a (main ^), b)");
     }
 
     #[test]
-    fn chain_ends_at_an_extra_root() {
+    fn trace_marks_recursion_as_repeat() {
         let mut module = LirModule::new("x86_64-unknown-none");
-        module.funcs.push(func("api", &["leaf"], &[]));
-        module.funcs.push(func("leaf", &[], &[]));
-        let roots = HashSet::from(["api".to_owned()]);
-        let reach = prune_unreachable(&mut module, &roots).expect("rooted");
-        assert_eq!(chain_names(&reach, "leaf"), ["leaf", "api"]);
-        assert!(reach.chain("missing").is_empty());
+        module.funcs.push(func("main", &["f"], &[]));
+        module.funcs.push(func("f", &["f"], &[]));
+        assert_eq!(trace_of(&module, "f"), "f (main, f ^)");
     }
 
     #[test]
-    fn chain_follows_an_address_edge() {
-        let mut module = module_with(&["main", "only_indirect"], &[]);
-        let reach = prune_unreachable(&mut module, &HashSet::new()).expect("rooted");
-        let frames = reach.chain("only_indirect");
-        assert_eq!(frames.len(), 2);
-        assert_eq!(
-            frames[1].edge.map(|(_, kind)| kind),
-            Some(EdgeKind::Address)
-        );
+    fn trace_splices_out_hidden_glue() {
+        // main -> .lilac.drop.T -> hook, and the glue recurses on itself.
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(func("main", &[".lilac.drop.T"], &[]));
+        module
+            .funcs
+            .push(func(".lilac.drop.T", &["hook", ".lilac.drop.T"], &[]));
+        module.funcs.push(func("hook", &[], &[]));
+        assert_eq!(trace_of(&module, "hook"), "hook (main)");
+    }
+
+    #[test]
+    fn trace_marks_an_address_edge() {
+        let module = module_with(&["main", "only_indirect"], &[]);
+        assert_eq!(trace_of(&module, "only_indirect"), "only_indirect (main &)");
+    }
+
+    #[test]
+    fn trace_names_come_from_the_map() {
+        let mut module = LirModule::new("x86_64-unknown-none");
+        module.funcs.push(func(".root.f", &["g"], &[]));
+        module.funcs.push(func("g", &[], &[]));
+        let names = HashMap::from([(".root.f".to_owned(), "f".to_owned())]);
+        let trace = CallGraph::new(&module).trace("g", Span::dummy(), &names);
+        assert_eq!(trace.callers[0].func, "f");
     }
 
     #[test]

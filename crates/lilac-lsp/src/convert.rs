@@ -1,6 +1,8 @@
 //! Diagnostic and position conversion.
 
-use lilac_error::{Diagnostic, Level};
+use std::collections::HashSet;
+
+use lilac_error::{Diagnostic, Level, TraceFrame};
 use lilac_span::{FileId, SourceMap, Span};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
@@ -110,7 +112,7 @@ pub fn to_lsp_diagnostic(
         .and_then(|label| span_range(sources, label.span))
         .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
 
-    let mut message = diag.msg.clone();
+    let mut message = diag.msg.to_string();
     for note in &diag.notes {
         message.push_str("\nnote: ");
         message.push_str(note);
@@ -120,26 +122,27 @@ pub fn to_lsp_diagnostic(
         message.push_str(help);
     }
 
-    let related_information = diag
+    let labels = diag
         .labels
         .iter()
         .filter(|label| !label.primary)
-        .filter_map(|label| {
-            let uri = uri_of(label.span.file)?;
-            let range = span_range(sources, label.span)?;
+        .map(|label| (label.span, label.msg.clone()));
+    let frames = callers(diag).map(|frame| (frame.span, format!("reached from {}", frame.func)));
+    let related_information = labels
+        .chain(frames)
+        .filter_map(|(span, message)| {
+            let uri = uri_of(span.file)?;
+            let range = span_range(sources, span)?;
             Some(DiagnosticRelatedInformation {
                 location: Location { uri, range },
-                message: label.msg.clone(),
+                message,
             })
         })
         .collect::<Vec<_>>();
 
     Some(LspDiagnostic {
         range,
-        severity: Some(match diag.level {
-            Level::Error => DiagnosticSeverity::ERROR,
-            Level::Warning => DiagnosticSeverity::WARNING,
-        }),
+        severity: Some(severity(diag.level)),
         code: Some(NumberOrString::String(diag.code.to_owned())),
         code_description: None,
         source: Some("lilac".to_owned()),
@@ -148,6 +151,73 @@ pub fn to_lsp_diagnostic(
         tags: None,
         data: None,
     })
+}
+
+/// The trace frames past the innermost one: the call sites that lead to the
+/// error (the innermost frame's site is the diagnostic's own).
+fn callers(diag: &Diagnostic) -> impl Iterator<Item = &TraceFrame> {
+    diag.trace_roots()
+        .iter()
+        .flat_map(|frame| frame.callers.iter().flat_map(TraceFrame::walk))
+}
+
+/// One diagnostic per call site in `diag`'s trace, in that site's file, so
+/// the code that triggers an error is marked too, not only the error. Each
+/// links back to the error; a site is reported once, and sites `uri_of`
+/// cannot place are skipped.
+#[must_use]
+pub fn trace_diagnostics(
+    diag: &Diagnostic,
+    sources: &SourceMap,
+    uri_of: &dyn Fn(FileId) -> Option<Url>,
+) -> Vec<(Url, LspDiagnostic)> {
+    let origin = diag
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .and_then(|label| Some((uri_of(label.span.file)?, span_range(sources, label.span)?)));
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for frame in callers(diag) {
+        if !seen.insert(frame.span) {
+            continue;
+        }
+        let (Some(uri), Some(range)) = (uri_of(frame.span.file), span_range(sources, frame.span))
+        else {
+            continue;
+        };
+        let what = if frame.address {
+            "this function reference leads to an error"
+        } else {
+            "this call leads to an error"
+        };
+        let related_information = origin.clone().map(|(uri, range)| {
+            vec![DiagnosticRelatedInformation {
+                location: Location { uri, range },
+                message: diag.msg.to_string(),
+            }]
+        });
+        let lsp = LspDiagnostic {
+            range,
+            severity: Some(severity(diag.level)),
+            code: Some(NumberOrString::String(diag.code.to_owned())),
+            code_description: None,
+            source: Some("lilac".to_owned()),
+            message: format!("{what}: {}", diag.msg),
+            related_information,
+            tags: None,
+            data: None,
+        };
+        out.push((uri, lsp));
+    }
+    out
+}
+
+fn severity(level: Level) -> DiagnosticSeverity {
+    match level {
+        Level::Error => DiagnosticSeverity::ERROR,
+        Level::Warning => DiagnosticSeverity::WARNING,
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +278,60 @@ mod tests {
             Range::new(Position::new(0, 0), Position::new(0, 3))
         );
         assert!(lsp.message.contains("boom"));
+    }
+
+    #[test]
+    fn trace_marks_each_call_site_once() {
+        let mut sources = SourceMap::new();
+        let lib = sources.add_file("lib.lilac", "boom\n");
+        let user = sources.add_file("main.lilac", "a()\nb()\n");
+        let frame = |func: &str, span: Span, callers: Vec<TraceFrame>| TraceFrame {
+            func: func.to_owned(),
+            span,
+            address: false,
+            repeat: false,
+            callers,
+        };
+        let call = Span::new(0, 3, user);
+        let diag = Diagnostic::error("E031", "no")
+            .label(Span::new(0, 4, lib), true, "message here")
+            .trace(frame(
+                "boom",
+                Span::new(0, 4, lib),
+                vec![
+                    frame("main", call, Vec::new()),
+                    frame("main", Span::new(4, 7, user), Vec::new()),
+                    frame("main", call, Vec::new()),
+                ],
+            ));
+        let lib_uri = Url::parse("file:///lib.lilac").expect("uri");
+        let user_uri = Url::parse("file:///main.lilac").expect("uri");
+        let uri_of = |id: FileId| {
+            if id == lib {
+                Some(lib_uri.clone())
+            } else if id == user {
+                Some(user_uri.clone())
+            } else {
+                None
+            }
+        };
+        let sites = trace_diagnostics(&diag, &sources, &uri_of);
+        assert_eq!(sites.len(), 2, "{sites:?}");
+        let (uri, lsp) = &sites[0];
+        assert_eq!(uri, &user_uri);
+        assert_eq!(
+            lsp.range,
+            Range::new(Position::new(0, 0), Position::new(0, 3))
+        );
+        assert_eq!(lsp.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(lsp.message, "this call leads to an error: no");
+        let back = lsp.related_information.as_ref().expect("links back");
+        assert_eq!(back[0].location.uri, lib_uri);
+
+        let origin = to_lsp_diagnostic(&diag, &sources, &uri_of).expect("mapped");
+        let related = origin.related_information.expect("frames");
+        assert_eq!(related.len(), 3);
+        assert_eq!(related[0].message, "reached from main");
     }
 
     #[test]

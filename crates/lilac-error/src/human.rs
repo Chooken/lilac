@@ -99,6 +99,10 @@ impl Emitter for EmitterHuman {
         let mut footer: Vec<(Style, &str, String)> = unplaced
             .map(|msg| (Style::Note, "note", msg.to_owned()))
             .collect();
+        let trace = crate::trace_text(diagnostic.trace_roots(), source_map);
+        if !trace.is_empty() {
+            footer.push((Style::Note, "note", trace));
+        }
         footer.extend(notes(diagnostic, self.verbose));
         footer.extend(
             diagnostic

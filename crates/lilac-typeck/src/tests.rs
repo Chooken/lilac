@@ -49,7 +49,11 @@ fn has_code(diags: &Diags, code: &str) -> bool {
 }
 
 fn messages(diags: &Diags) -> Vec<String> {
-    diags.diagnostics().iter().map(|d| d.msg.clone()).collect()
+    diags
+        .diagnostics()
+        .iter()
+        .map(|d| d.msg.to_string())
+        .collect()
 }
 
 fn render_all(diags: &Diags, sm: &SourceMap) -> String {
@@ -1385,7 +1389,11 @@ fn missing_conversion_is_e043() {
     let diags =
         check_src("main: function () nothing {\n    a: @bit32 = 0x1\n    b: @bit8 = a\n}\n");
     assert!(has_code(&diags, "E043"), "{diags:?}");
-    let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+    let msgs: Vec<String> = diags
+        .diagnostics()
+        .iter()
+        .map(|d| d.msg.to_string())
+        .collect();
     assert!(
         msgs.iter()
             .any(|m| m.contains("@bit32") && m.contains("@bit8")),

@@ -216,6 +216,10 @@
   bodies for highlighting (`lilac_typeck::check_for_editor`; diagnostics
   discarded, never lowered). URIs are compared via
   `roots::canonical_file_uri`.
+- A diagnostic with a trace is also published at each call site in it, in
+  that site's file (`convert::trace_diagnostics`), linking back to the
+  error, and the error lists the sites as related information. So a
+  `@compile_error` in a library marks the user's call too.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.
@@ -271,11 +275,14 @@ bug fix that changes generated code.
   a builtin layout). `lilac build` turns it on in debug and
   `--stack-traces=on|off` overrides; `check`/`emit-*` leave it off unless
   asked, so IR dumps stay readable.
-- `E031` notes a compile-time call chain in the same form: `prune_unreachable`
-  walks breadth-first and returns a `Reach` (each function's first caller
-  edge), and `check_live_compile_errors` renders `Reach::chain` with
-  `site_text`, hiding `trace::is_hidden` (`.lilac.*`) frames. It runs right
-  after DCE, before `trace::instrument`.
+- `E031` and `E035` carry a compile-time trace: `Diagnostic::trace`, a
+  `TraceFrame` tree of every call site that reaches the error, built by
+  `lilac_ir::CallGraph::trace` from the module after DCE (so only live
+  callers), with `trace::is_hidden` (`.lilac.*`) glue spliced out. Each
+  function's callers are listed once; a later frame of it is a `repeat`
+  (`[see above]`), which also ends recursion. `lilac_error::trace_text` is
+  the `reached from:` caller tree; the JSON emitter nests it as `trace`.
+  The checks run right after DCE, before `trace::instrument`.
 - Drops carry real spans so both traces can place them: a scope-end drop is
   at the block's closing `}` (`end_of`), an early exit's drops at the
   `return`/`break`/`continue`, and statement temporaries at the statement's expression

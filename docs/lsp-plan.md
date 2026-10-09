@@ -1,6 +1,6 @@
 # Language Server Plan
 
-> Status: planned (2026-10-09). Nothing started.
+> Status: in progress (2026-10-09). Phase 1 steps 1, 2 and 5 done.
 >
 > Goal: finish `lilac-lsp` as a daily editor: errors show up where the user
 > caused them, navigation and completion work, and edits stay responsive.

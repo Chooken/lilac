@@ -45,6 +45,39 @@ pub struct Label {
     pub msg: String,
 }
 
+/// One frame of a diagnostic's [`Diagnostic::trace`]: a function, the site
+/// in it that leads toward the error, and the frames that reach it.
+///
+/// The innermost frame's site is the error itself; each caller's site is its
+/// call (or address-taking) of the frame it lists under. A function's callers
+/// are listed once per diagnostic: a later frame of the same function has
+/// `repeat` set and no callers (it also ends recursion).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceFrame {
+    /// Display name of the function.
+    pub func: String,
+    /// The site in `func`.
+    pub span: Span,
+    /// The site takes the inner function's address instead of calling it.
+    pub address: bool,
+    /// This function's callers are listed earlier in the trace.
+    pub repeat: bool,
+    /// Frames that reach `func`, each with its own call site.
+    pub callers: Vec<TraceFrame>,
+}
+
+impl TraceFrame {
+    /// Every frame of the tree rooted here, depth-first, this one first.
+    pub fn walk(&self) -> impl Iterator<Item = &Self> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            let frame = stack.pop()?;
+            stack.extend(frame.callers.iter().rev());
+            Some(frame)
+        })
+    }
+}
+
 /// A single user-facing diagnostic: level + stable code + message + context.
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
@@ -52,14 +85,18 @@ pub struct Diagnostic {
     pub level: Level,
     /// Stable code (`E0xx` errors, `W0xx` lints).
     pub code: &'static str,
-    /// Headline message.
-    pub msg: String,
+    /// Headline message (boxed: see [`Self::trace`]).
+    pub msg: Box<str>,
     /// Source annotations (exactly one primary in well-formed diagnostics).
     pub labels: Vec<Label>,
     /// `note: ...` follow-ups (e.g. instantiation stack frames).
     pub notes: Vec<String>,
     /// `help: ...` suggestions (e.g. did-you-mean).
     pub helps: Vec<String>,
+    /// Where the failing code is reached from: the innermost frame, with its
+    /// callers (`E031`, `E035`, `E037`). Rendered as `reached from:`. Boxed
+    /// to keep `Diagnostic` small (it is many `Result`s' error type).
+    pub trace: Option<Box<TraceFrame>>,
 }
 
 impl Diagnostic {
@@ -69,10 +106,11 @@ impl Diagnostic {
         Self {
             level: Level::Error,
             code,
-            msg: msg.into(),
+            msg: msg.into().into_boxed_str(),
             labels: Vec::new(),
             notes: Vec::new(),
             helps: Vec::new(),
+            trace: None,
         }
     }
 
@@ -82,10 +120,11 @@ impl Diagnostic {
         Self {
             level: Level::Warning,
             code,
-            msg: msg.into(),
+            msg: msg.into().into_boxed_str(),
             labels: Vec::new(),
             notes: Vec::new(),
             helps: Vec::new(),
+            trace: None,
         }
     }
 
@@ -113,6 +152,62 @@ impl Diagnostic {
         self.helps.push(help.into());
         self
     }
+
+    /// Sets the innermost [`TraceFrame`] (builder style).
+    #[must_use]
+    pub fn trace(mut self, frame: TraceFrame) -> Self {
+        self.trace = Some(Box::new(frame));
+        self
+    }
+
+    /// The trace's innermost frame as a slice (empty without a trace).
+    #[must_use]
+    pub fn trace_roots(&self) -> &[TraceFrame] {
+        self.trace.as_deref().map_or(&[], std::slice::from_ref)
+    }
+
+    /// Every frame of [`Self::trace`] in display order.
+    pub fn trace_frames(&self) -> impl Iterator<Item = &TraceFrame> {
+        self.trace_roots().iter().flat_map(TraceFrame::walk)
+    }
+}
+
+/// The `reached from:` note text for `trace`: one `at` line per frame, two
+/// spaces deeper per caller level, without a trailing newline. Empty when
+/// `trace` is.
+#[must_use]
+pub fn trace_text(trace: &[TraceFrame], source_map: &SourceMap) -> String {
+    fn push(frame: &TraceFrame, depth: usize, source_map: &SourceMap, lines: &mut Vec<String>) {
+        let mut line = format!("{:width$}at {}", "", frame.func, width = 2 + depth * 2);
+        if let Some(location) = source_map.location(frame.span) {
+            let _ = write!(line, " ({location})");
+        }
+        if frame.address {
+            line.push_str(" [address taken]");
+        }
+        if frame.repeat {
+            line.push_str(" [see above]");
+        }
+        lines.push(line);
+        for caller in &frame.callers {
+            push(caller, depth + 1, source_map, lines);
+        }
+    }
+    let mut lines = Vec::new();
+    for frame in trace {
+        push(frame, 0, source_map, &mut lines);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "reached from:
+{}",
+        lines.join(
+            "
+"
+        )
+    )
 }
 
 /// Proof that an error was already emitted; forces callers to stop normally.
@@ -302,13 +397,45 @@ impl Emitter for EmitterJson {
             .map(|help| format!("\"{}\"", escape_json(help)))
             .collect::<Vec<_>>()
             .join(",");
+        let trace = json_frames(diagnostic.trace_roots(), source_map);
         format!(
-            "{{\"level\":\"{}\",\"code\":\"{}\",\"message\":\"{}\",\"spans\":{spans},\"notes\":[{notes}],\"helps\":[{helps}]}}\n",
+            "{{\"level\":\"{}\",\"code\":\"{}\",\"message\":\"{}\",\"spans\":{spans},\"notes\":[{notes}],\"helps\":[{helps}],\"trace\":{trace}}}\n",
             diagnostic.level.as_str(),
             diagnostic.code,
             escape_json(&diagnostic.msg),
         )
     }
+}
+
+/// `[{"func","file","line","col","address","repeat","callers":[...]}, ...]`.
+fn json_frames(frames: &[TraceFrame], source_map: &SourceMap) -> String {
+    let mut out = String::from("[");
+    for (i, frame) in frames.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let (file, line, col) = source_map
+            .file(frame.span.file)
+            .filter(|_| !frame.span.is_dummy())
+            .map_or_else(
+                || ("<unknown>".to_owned(), 0, 0),
+                |source| {
+                    let (line, col) = source.line_col(frame.span.lo.0 as usize);
+                    (source.name.clone(), line, col)
+                },
+            );
+        let _ = write!(
+            out,
+            "{{\"func\":\"{}\",\"file\":\"{}\",\"line\":{line},\"col\":{col},\"address\":{},\"repeat\":{},\"callers\":{}}}",
+            escape_json(&frame.func),
+            escape_json(&file),
+            frame.address,
+            frame.repeat,
+            json_frames(&frame.callers, source_map),
+        );
+    }
+    out.push(']');
+    out
 }
 
 /// Minimal JSON string escaper (the compiler crates stay `serde`-free).
@@ -412,6 +539,47 @@ mod tests {
         let rendered = EmitterJson.render(&diagnostic, &sm);
         assert!(rendered.contains("\"code\":\"E042\""));
         assert!(rendered.contains("\"line\":1"));
+    }
+
+    fn frame(func: &str, span: Span, callers: Vec<TraceFrame>) -> TraceFrame {
+        TraceFrame {
+            func: func.to_owned(),
+            span,
+            address: false,
+            repeat: false,
+            callers,
+        }
+    }
+
+    #[test]
+    fn trace_renders_a_caller_tree() {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("main.lilac", "boom\na()\nboom\nb()\n");
+        let mut again = frame("a", Span::new(14, 15, file), Vec::new());
+        again.repeat = true;
+        let diagnostic = Diagnostic::error("E031", "no").trace(frame(
+            "boom",
+            Span::new(0, 4, file),
+            vec![
+                frame("a", Span::new(5, 6, file), Vec::new()),
+                frame("b", Span::new(9, 10, file), vec![again]),
+            ],
+        ));
+        assert_eq!(
+            trace_text(diagnostic.trace_roots(), &sm),
+            "reached from:\n  at boom (main.lilac:1:1)\n    at a (main.lilac:2:1)\n    at b (main.lilac:3:1)\n      at a (main.lilac:4:1) [see above]"
+        );
+        let frames: Vec<&str> = diagnostic
+            .trace_frames()
+            .map(|frame| frame.func.as_str())
+            .collect();
+        assert_eq!(frames, ["boom", "a", "b", "a"]);
+        let json = EmitterJson.render(&diagnostic, &sm);
+        assert!(
+            json.contains("\"trace\":[{\"func\":\"boom\",\"file\":\"main.lilac\",\"line\":1"),
+            "{json}"
+        );
+        assert!(json.contains("\"repeat\":true,\"callers\":[]"), "{json}");
     }
 
     #[test]

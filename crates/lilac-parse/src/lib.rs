@@ -2194,7 +2194,7 @@ sum: function (values: ref @array(@bit32, 4)) nothing {
             .find(|d| d.code == "E001")
             .expect("the broken item still reports E001");
         assert_eq!(
-            parse_diag.msg, "unterminated parameter list; add a closing `)`",
+            &*parse_diag.msg, "unterminated parameter list; add a closing `)`",
             "same message as today"
         );
     }

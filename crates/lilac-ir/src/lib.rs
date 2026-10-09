@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
-use lilac_span::{SourceMap, Span};
+use lilac_span::Span;
 
 mod codec;
 mod dce;
@@ -21,7 +21,7 @@ pub mod trace;
 mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
-pub use dce::{prune_unreachable, reach, Edge, EdgeKind, Frame, Reach};
+pub use dce::{prune_unreachable, reach, CallGraph, Edge, EdgeKind, Reach};
 pub use runtime::{build_runtime, entry_point, hook_externs, panic_runtime, Entry};
 pub use ty::LirTy;
 
@@ -1231,20 +1231,18 @@ pub fn size_align<S: std::hash::BuildHasher>(
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
 /// a site is an error exactly when its function is reachable. The diagnostic
-/// labels both the message literal and the call, and, given the pruning
-/// [`Reach`], notes the shortest call chain from a root in stack-trace form
-/// ([`trace::site_text`], `.lilac.*` frames hidden, names from `names`).
+/// labels both the message literal and the call, and traces every live call
+/// site that reaches it ([`CallGraph::trace`], names from `names`).
 ///
 /// # Errors
 ///
 /// Returns [`ErrorGuaranteed`] when at least one site was reported.
 pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
     module: &LirModule,
-    reach: Option<&Reach>,
-    sources: &SourceMap,
     names: &HashMap<String, String, S>,
     diags: &mut Diags,
 ) -> Result<(), ErrorGuaranteed> {
+    let graph = CallGraph::new(module);
     let mut failed = false;
     for func in &module.funcs {
         for inst in func.blocks.iter().flat_map(|block| &block.insts) {
@@ -1255,19 +1253,12 @@ pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
             } = inst
             {
                 failed = true;
-                let mut diagnostic = Diagnostic::error("E031", msg.clone())
-                    .label(*msg_span, true, "message here".to_owned())
-                    .label(*call_span, false, "evaluated here".to_owned());
-                if let Some(reach) = reach {
-                    let chain = reach_chain_text(reach, &func.name, *call_span, sources, names);
-                    if !chain.is_empty() {
-                        diagnostic = diagnostic.note(format!(
-                            "reached from:
-{chain}"
-                        ));
-                    }
-                }
-                diags.emit(diagnostic);
+                diags.emit(
+                    Diagnostic::error("E031", msg.clone())
+                        .label(*msg_span, true, "message here".to_owned())
+                        .label(*call_span, false, "evaluated here".to_owned())
+                        .trace(graph.trace(&func.name, *call_span, names)),
+                );
             }
         }
     }
@@ -1288,14 +1279,13 @@ pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
 pub fn check_live_syscalls<S: std::hash::BuildHasher>(
     module: &LirModule,
     has_syscall: bool,
-    reach: Option<&Reach>,
-    sources: &SourceMap,
     names: &HashMap<String, String, S>,
     diags: &mut Diags,
 ) -> Result<(), ErrorGuaranteed> {
     if has_syscall {
         return Ok(());
     }
+    let graph = CallGraph::new(module);
     let mut failed = false;
     for func in module
         .funcs
@@ -1315,22 +1305,15 @@ pub fn check_live_syscalls<S: std::hash::BuildHasher>(
                 continue;
             }
             failed = true;
-            let mut diagnostic = Diagnostic::error(
-                "E035",
-                format!("`@syscall` is not available on `{}`", module.target),
-            )
-            .label(*span, true, "no system-call instruction on this target".to_owned())
-            .help("`@syscall` needs Linux on x86-64 or aarch64; choose another arm with `@builtin.Target`");
-            if let Some(reach) = reach {
-                let chain = reach_chain_text(reach, &func.name, *span, sources, names);
-                if !chain.is_empty() {
-                    diagnostic = diagnostic.note(format!(
-                        "reached from:
-{chain}"
-                    ));
-                }
-            }
-            diags.emit(diagnostic);
+            diags.emit(
+                Diagnostic::error(
+                    "E035",
+                    format!("`@syscall` is not available on `{}`", module.target),
+                )
+                .label(*span, true, "no system-call instruction on this target".to_owned())
+                .help("`@syscall` needs Linux on x86-64 or aarch64; choose another arm with `@builtin.Target`")
+                .trace(graph.trace(&func.name, *span, names)),
+            );
         }
     }
     if failed {
@@ -1338,38 +1321,6 @@ pub fn check_live_syscalls<S: std::hash::BuildHasher>(
     } else {
         Ok(())
     }
-}
-
-/// The `at` lines from `func` (located at `site`) up to its root, one per
-/// line without a trailing newline. A frame reached by `addr.func` is marked
-/// `[address taken]`.
-fn reach_chain_text<S: std::hash::BuildHasher>(
-    reach: &Reach,
-    func: &str,
-    site: Span,
-    sources: &SourceMap,
-    names: &HashMap<String, String, S>,
-) -> String {
-    let mut lines = Vec::new();
-    for frame in reach.chain(func) {
-        if trace::is_hidden(&frame.func) {
-            continue;
-        }
-        let (span, kind) = frame.edge.unwrap_or((site, EdgeKind::Call));
-        let name = names.get(&frame.func).unwrap_or(&frame.func);
-        let location = sources.location(span);
-        let mut line = trace::site_text(name, location.as_deref())
-            .trim_end()
-            .to_owned();
-        if kind == EdgeKind::Address {
-            line.push_str(" [address taken]");
-        }
-        lines.push(line);
-    }
-    lines.join(
-        "
-",
-    )
 }
 
 /// Verifies a module: every rule failure is a spanned `E070` diagnostic.
@@ -2465,7 +2416,11 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
-        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        let msgs: Vec<String> = diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.msg.to_string())
+            .collect();
         assert!(msgs.iter().any(|m| m.contains("copy")), "{msgs:?}");
     }
 
@@ -2504,7 +2459,11 @@ mod tests {
         module.funcs.push(func);
         let mut diags = lilac_error::Diags::new();
         let _ = verify(&module, &mut diags);
-        diags.diagnostics().iter().map(|d| d.msg.clone()).collect()
+        diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.msg.to_string())
+            .collect()
     }
 
     #[test]
@@ -2545,7 +2504,7 @@ mod tests {
             diags
                 .diagnostics()
                 .iter()
-                .map(|d| d.msg.clone())
+                .map(|d| d.msg.to_string())
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -2716,7 +2675,11 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
-        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        let msgs: Vec<String> = diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.msg.to_string())
+            .collect();
         assert!(
             msgs.iter().any(|m| m.contains("duplicate function")),
             "{msgs:?}"
@@ -2787,7 +2750,11 @@ mod tests {
         assert!(verify(&module, &mut diags).is_err());
         // The dropped `copy &1 -> %out` also starves the out place; pin the
         // constant-branch error by message instead of by count.
-        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        let msgs: Vec<String> = diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.msg.to_string())
+            .collect();
         assert!(
             diags.diagnostics().iter().any(|d| d.code == "E070")
                 && msgs.iter().any(|m| m.contains("constant")),
@@ -2821,7 +2788,11 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         assert!(verify(&module, &mut diags).is_err());
         assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
-        let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+        let msgs: Vec<String> = diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.msg.to_string())
+            .collect();
         assert!(msgs.iter().any(|m| m.contains("else")), "{msgs:?}");
     }
 
@@ -2893,7 +2864,11 @@ mod tests {
                 "{label}: {:?}",
                 diags.diagnostics()
             );
-            let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
+            let msgs: Vec<String> = diags
+                .diagnostics()
+                .iter()
+                .map(|d| d.msg.to_string())
+                .collect();
             assert!(
                 msgs.iter().any(|m| m.contains("float")),
                 "{label}: {msgs:?}"

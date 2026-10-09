@@ -279,12 +279,12 @@ fn phrase(diagnostic: &Diagnostic, requirement: &Requirement) -> String {
             let kind = if *method { "method" } else { "member" };
             format!("missing {kind} `{name}` on `{owner}`")
         }
-        Requirement::Arity { .. } => diagnostic.msg.clone(),
+        Requirement::Arity { .. } => diagnostic.msg.to_string(),
         _ => diagnostic
             .labels
             .iter()
             .find(|label| label.primary)
-            .map_or_else(|| diagnostic.msg.clone(), |label| label.msg.clone()),
+            .map_or_else(|| diagnostic.msg.to_string(), |label| label.msg.clone()),
     }
 }
 

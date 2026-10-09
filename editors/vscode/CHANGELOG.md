@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A `@compile_error` (or `@syscall` on a target without one) is also marked
+  at every call that reaches it, in the caller's file, linking back to the
+  error. An error inside a library now shows in your code.
+
 ## 0.4.0
 
 - Add the `lilac.libraries` setting and `lilac.json` `libraries` field: mount
