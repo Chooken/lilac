@@ -78,6 +78,9 @@ pub struct HirProgram {
     pub uses: Vec<NameSite>,
     /// Non-item semantic-token sites.
     pub semantics: Vec<SemanticSite>,
+    /// Every named local's declaration and uses, each linked to its
+    /// declaration (editor references and rename).
+    pub locals: Vec<LocalSite>,
 }
 
 /// A concrete type's layout.
@@ -132,6 +135,15 @@ pub struct SemanticSite {
     pub span: Span,
     /// What the name is.
     pub kind: SemanticKind,
+}
+
+/// One local or parameter name: its declaration, or a use of it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LocalSite {
+    /// The name token.
+    pub span: Span,
+    /// The declaration's name token (`span` itself at the declaration).
+    pub decl: Span,
 }
 
 /// One resolved item use.

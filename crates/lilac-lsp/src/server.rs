@@ -29,6 +29,10 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 /// JSON-RPC code for an unknown method.
 const METHOD_NOT_FOUND: i32 = -32601;
 
+/// LSP code for a request the server understood but refuses (a rename of a
+/// hook).
+const REQUEST_FAILED: i32 = -32803;
+
 /// Language-server state.
 pub struct Server {
     connection: Connection,
@@ -175,26 +179,12 @@ impl Server {
                     request.id,
                     serde_json::Value::Null,
                 )))?;
-        } else if request.method == "textDocument/hover" {
-            let result = self.hover_response(&request);
-            self.connection
-                .sender
-                .send(Message::Response(Response::new_ok(request.id, result)))?;
-        } else if request.method == "textDocument/definition" {
-            let result = self.definition_response(&request);
-            self.connection
-                .sender
-                .send(Message::Response(Response::new_ok(request.id, result)))?;
-        } else if request.method == "textDocument/semanticTokens/full" {
-            let result = self.semantic_tokens_response(&request);
-            self.connection
-                .sender
-                .send(Message::Response(Response::new_ok(request.id, result)))?;
-        } else if request.method == "lilac/lir" {
-            let result = self.lir_response(&request);
-            self.connection
-                .sender
-                .send(Message::Response(Response::new_ok(request.id, result)))?;
+        } else if let Some(result) = self.query_response(&request) {
+            let response = match result {
+                Ok(value) => Response::new_ok(request.id, value),
+                Err(message) => Response::new_err(request.id, REQUEST_FAILED, message),
+            };
+            self.connection.sender.send(Message::Response(response))?;
         } else {
             let method = request.method;
             self.connection
@@ -208,65 +198,181 @@ impl Server {
         Ok(())
     }
 
+    /// The reply to an editor query (`None` for another method): a result,
+    /// `null` when nothing is under the cursor (or the params are malformed),
+    /// or a refusal.
+    fn query_response(&self, request: &Request) -> Option<Result<serde_json::Value, String>> {
+        use lsp_types::{
+            DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
+            GotoDefinitionParams, ReferenceParams, SemanticTokensParams,
+            TextDocumentPositionParams, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+        };
+
+        use crate::{handlers, navigate};
+
+        macro_rules! value {
+            ($result:expr $(,)?) => {
+                $result
+                    .and_then(|result| serde_json::to_value(result).ok())
+                    .unwrap_or(serde_json::Value::Null)
+            };
+        }
+        macro_rules! params {
+            ($ty:ty) => {
+                match serde_json::from_value::<$ty>(request.params.clone()) {
+                    Ok(params) => params,
+                    Err(_) => return Some(Ok(serde_json::Value::Null)),
+                }
+            };
+        }
+        let at = |position: &TextDocumentPositionParams| {
+            let uri = &position.text_document.uri;
+            Some((self.retained_for(uri)?, uri.clone(), position.position))
+        };
+
+        let result = match request.method.as_str() {
+            "textDocument/hover" => {
+                let params = params!(lsp_types::HoverParams);
+                value!(at(&params.text_document_position_params).and_then(
+                    |(retained, uri, position)| handlers::hover(retained, &uri, position)
+                ))
+            }
+            "textDocument/definition" => {
+                let params = params!(GotoDefinitionParams);
+                value!(at(&params.text_document_position_params).and_then(
+                    |(retained, uri, position)| handlers::definition(retained, &uri, position)
+                ))
+            }
+            "textDocument/typeDefinition" => {
+                let params = params!(GotoDefinitionParams);
+                value!(at(&params.text_document_position_params).and_then(
+                    |(retained, uri, position)| navigate::type_definition(retained, &uri, position)
+                ))
+            }
+            "textDocument/references" => {
+                let params = params!(ReferenceParams);
+                value!(
+                    at(&params.text_document_position).map(|(retained, uri, position)| {
+                        navigate::references(
+                            retained,
+                            &uri,
+                            position,
+                            params.context.include_declaration,
+                        )
+                    })
+                )
+            }
+            "textDocument/documentHighlight" => {
+                let params = params!(DocumentHighlightParams);
+                value!(at(&params.text_document_position_params).map(
+                    |(retained, uri, position)| navigate::highlights(retained, &uri, position)
+                ))
+            }
+            "textDocument/documentSymbol" => {
+                let params = params!(DocumentSymbolParams);
+                let uri = &params.text_document.uri;
+                value!(self.retained_for(uri).map(|retained| {
+                    DocumentSymbolResponse::Nested(navigate::document_symbols(retained, uri))
+                }))
+            }
+            "workspace/symbol" => {
+                let params = params!(WorkspaceSymbolParams);
+                value!(Some(WorkspaceSymbolResponse::Nested(
+                    self.workspace_symbols(&params.query),
+                )))
+            }
+            "textDocument/prepareRename" | "textDocument/rename" => {
+                return Some(self.rename_response(request));
+            }
+            "textDocument/semanticTokens/full" => {
+                let params = params!(SemanticTokensParams);
+                let uri = &params.text_document.uri;
+                value!(self
+                    .retained_for(uri)
+                    .map(|retained| handlers::semantic_tokens(retained, uri)),)
+            }
+            "lilac/lir" => self.lir_response(request),
+            _ => return None,
+        };
+        Some(Ok(result))
+    }
+
+    /// The `textDocument/prepareRename` and `textDocument/rename` replies:
+    /// the name's range or the edit, `null` when nothing is under the
+    /// cursor, or why the name cannot be renamed.
+    fn rename_response(&self, request: &Request) -> Result<serde_json::Value, String> {
+        let null = serde_json::Value::Null;
+        let refused = |refusal: String| format!("cannot rename: {refusal}");
+        let result = if request.method == "textDocument/prepareRename" {
+            let Ok(params) = serde_json::from_value::<lsp_types::TextDocumentPositionParams>(
+                request.params.clone(),
+            ) else {
+                return Ok(null);
+            };
+            let uri = &params.text_document.uri;
+            let Some(retained) = self.retained_for(uri) else {
+                return Ok(null);
+            };
+            crate::navigate::prepare_rename(retained, uri, params.position, &self.libraries)
+                .map_err(refused)?
+                .and_then(|range| serde_json::to_value(range).ok())
+        } else {
+            let Ok(params) =
+                serde_json::from_value::<lsp_types::RenameParams>(request.params.clone())
+            else {
+                return Ok(null);
+            };
+            let position = params.text_document_position;
+            let uri = &position.text_document.uri;
+            let Some(retained) = self.retained_for(uri) else {
+                return Ok(null);
+            };
+            crate::navigate::rename(
+                retained,
+                uri,
+                position.position,
+                &params.new_name,
+                &self.libraries,
+            )
+            .map_err(refused)?
+            .and_then(|edit| serde_json::to_value(edit).ok())
+        };
+        Ok(result.unwrap_or(null))
+    }
+
+    /// Symbols matching `query` from every retained compile, each once.
+    fn workspace_symbols(&self, query: &str) -> Vec<lsp_types::WorkspaceSymbol> {
+        let mut seen = HashSet::new();
+        let compiles = self
+            .project
+            .iter()
+            .chain(self.per_file.values().map(|retained| &**retained));
+        let mut symbols = Vec::new();
+        for retained in compiles {
+            for symbol in crate::navigate::workspace_symbols(retained, query) {
+                let lsp_types::OneOf::Left(location) = &symbol.location else {
+                    continue;
+                };
+                let key = (
+                    canonical_file_uri(&location.uri),
+                    location.range.start.line,
+                    location.range.start.character,
+                );
+                if seen.insert(key) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        symbols
+    }
+
     /// The compile that covers `uri`: its own unit's, else the project's.
     fn retained_for(&self, uri: &Url) -> Option<&Retained> {
         self.per_file
             .get(&canonical_file_uri(uri))
             .map(|retained| &**retained)
             .or(self.project.as_ref())
-    }
-
-    /// The `textDocument/hover` reply: a hover object, or `null`.
-    fn hover_response(&self, request: &Request) -> serde_json::Value {
-        let Ok(params) = serde_json::from_value::<lsp_types::HoverParams>(request.params.clone())
-        else {
-            return serde_json::Value::Null;
-        };
-        let position = params.text_document_position_params.position;
-        let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.retained_for(uri);
-        let Some(retained) = retained else {
-            return serde_json::Value::Null;
-        };
-        match crate::handlers::hover(retained, uri, position) {
-            Some(hover) => serde_json::to_value(hover).unwrap_or(serde_json::Value::Null),
-            None => serde_json::Value::Null,
-        }
-    }
-
-    /// The `textDocument/definition` reply: a location, or `null`.
-    fn definition_response(&self, request: &Request) -> serde_json::Value {
-        let Ok(params) =
-            serde_json::from_value::<lsp_types::GotoDefinitionParams>(request.params.clone())
-        else {
-            return serde_json::Value::Null;
-        };
-        let position = params.text_document_position_params.position;
-        let uri = &params.text_document_position_params.text_document.uri;
-        let retained = self.retained_for(uri);
-        let Some(retained) = retained else {
-            return serde_json::Value::Null;
-        };
-        match crate::handlers::definition(retained, uri, position) {
-            Some(response) => serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
-            None => serde_json::Value::Null,
-        }
-    }
-
-    /// The `textDocument/semanticTokens/full` reply: encoded tokens, or `null`.
-    fn semantic_tokens_response(&self, request: &Request) -> serde_json::Value {
-        let Ok(params) =
-            serde_json::from_value::<lsp_types::SemanticTokensParams>(request.params.clone())
-        else {
-            return serde_json::Value::Null;
-        };
-        let uri = &params.text_document.uri;
-        let retained = self.retained_for(uri);
-        let Some(retained) = retained else {
-            return serde_json::Value::Null;
-        };
-        let tokens = crate::handlers::semantic_tokens(retained, uri);
-        serde_json::to_value(tokens).unwrap_or(serde_json::Value::Null)
     }
 
     /// The `lilac/lir` reply: a stage payload, or `null`.

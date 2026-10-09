@@ -150,7 +150,7 @@ impl Checker<'_> {
             }
         }
         if let Some(local) = fcx.lookup(name) {
-            self.record_semantic(name_span, SemanticKind::Local);
+            self.record_local_use(fcx, local, name_span);
             if !generic_args.is_empty() {
                 return Err(self.generic_arity(span, name, 0, generic_args.len()));
             }

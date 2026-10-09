@@ -66,6 +66,12 @@ impl FnCx {
     pub(crate) fn ty(&self, id: LocalId) -> TypeRef {
         self.locals[id.0 as usize].ty
     }
+
+    /// The name token of `id`'s declaration (slots begin at their name).
+    pub(crate) fn decl_span(&self, id: LocalId) -> Span {
+        let local = &self.locals[id.0 as usize];
+        leading(local.span, &local.name)
+    }
 }
 
 /// A local place expression.
@@ -127,6 +133,8 @@ impl Checker<'_> {
             let id = fcx.hidden(ty, param.span);
             fcx.locals[id.0 as usize].name.clone_from(&name);
             if !name.is_empty() {
+                let decl = fcx.decl_span(id);
+                c.record_local(decl, decl);
                 if fcx.scopes[0].insert(name.clone(), id).is_some() {
                     c.diags.emit(
                         Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
@@ -230,6 +238,18 @@ impl Checker<'_> {
         }
     }
 
+    /// Records a use of `local` at `span` for the editor: its token and
+    /// its link to the declaration.
+    pub(crate) fn record_local_use(&mut self, fcx: &FnCx, local: LocalId, span: Span) {
+        let kind = if fcx.params.contains(&local) {
+            SemanticKind::Param
+        } else {
+            SemanticKind::Local
+        };
+        self.record_semantic(span, kind);
+        self.record_local(span, fcx.decl_span(local));
+    }
+
     /// Declares `name` in the innermost scope (`E020` when already declared
     /// there).
     pub(crate) fn declare(
@@ -242,6 +262,7 @@ impl Checker<'_> {
         let id = fcx.hidden(ty, span);
         name.clone_into(&mut fcx.locals[id.0 as usize].name);
         self.record_semantic(leading(span, name), SemanticKind::Local);
+        self.record_local(leading(span, name), leading(span, name));
         let scope = fcx.scopes.last_mut().expect("a scope is always open");
         if let Some(previous) = scope.insert(name.to_owned(), id) {
             let previous = fcx.locals[previous.0 as usize].span;

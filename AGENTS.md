@@ -227,6 +227,16 @@
   `**/*.lilac` and `**/lilac.json` (recompile; a `lilac.json` change
   re-reads the root and libraries) and takes `lilac.libraries` from
   `workspace/didChangeConfiguration` without a restart.
+- Navigation (`navigate.rs`): a name is an item (`DefId`: the index's
+  `defs` and `uses`) or a local, keyed by its declaration's name span
+  (`HirProgram::locals`, a `LocalSite` per declaration and use, recorded by
+  typeck's `record_local`/`record_local_use`). References, highlights,
+  definition, type definition, rename (`prepareRename` refuses hooks and any
+  edit in the builtins or in a library other than the requesting file's),
+  document and workspace symbols are all built from those. A `.Variant` tag
+  is a use of its enum and of the variant; the variant wins (its name is
+  the span's text). Hovers show a function's signature, a field, variant or
+  constant's declaration, and an intrinsic's signature.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.

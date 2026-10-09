@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Find All References, highlighting of a name's other uses, the outline
+  and breadcrumbs, Go to Symbol in Workspace, Go to Type Definition, and
+  Rename. These work for locals and parameters as well as items. Rename
+  refuses hooks and names used in a library or defined by the compiler.
+- Go to Definition works on locals and parameters.
+- Hovers show a field's type, a variant's payload, a constant's value and
+  an intrinsic's signature.
+
 - Diagnostics no longer wait for a burst of hovers or highlighting requests
   to end, and are tagged with the document version they were computed for.
 - Errors without a location (an unreadable library folder) are shown on

@@ -1,6 +1,6 @@
 # Language Server Plan
 
-> Status: in progress (2026-10-09). Phases 1, 1b and 2 done. Phase 1 has one
+> Status: in progress (2026-10-09). Phases 1, 1b, 2 and 3 done. Phase 1 has one
 > documented limitation; `E051` keeps its single-chain note (a recursion
 > depth error has one chain worth showing). Phase 1b step 5 needed no
 > change: `Diags` already drops identical diagnostics.

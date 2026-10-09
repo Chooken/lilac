@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
-use lilac_hir::{NameSite, SemanticSite};
+use lilac_hir::{LocalSite, NameSite, SemanticSite};
 use lilac_ir::LirModule;
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::{FileId, Span};
@@ -23,6 +23,8 @@ pub struct DefInfo {
     pub span: Span,
     /// The declaration name's token span (the whole span's leading token).
     pub name_span: Span,
+    /// Owning object or enum, for members and variants.
+    pub parent: Option<DefId>,
 }
 
 /// Derived index: definitions, resolved uses, and expression types.
@@ -37,6 +39,9 @@ pub struct AnalysisIndex {
     /// Non-item semantic-token sites (locals, parameters, type names,
     /// builtins), deduped by `(span, kind)` and sorted by `(file, lo)`.
     pub semantics: Vec<SemanticSite>,
+    /// Local and parameter names, each linked to its declaration; deduped
+    /// and sorted by `(file, lo)`.
+    pub locals: Vec<LocalSite>,
 }
 
 /// The IR modules captured at each pipeline boundary during a compile.
@@ -115,6 +120,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
                 kind,
                 span: def.span,
                 name_span: def.name_span,
+                parent: def.parent,
             },
         );
     }
@@ -122,6 +128,10 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
     let mut uses = analysis.hir.uses.clone();
     uses.sort_by_key(|s| (s.span.file.0, s.span.lo.0, s.span.hi.0, s.def.0));
     uses.dedup_by_key(|s| (s.span.file.0, s.span.lo.0, s.span.hi.0, s.def.0));
+
+    let mut locals = analysis.hir.locals.clone();
+    locals.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
+    locals.dedup();
 
     let mut exprs = Vec::new();
     let mut record = |expr: &lilac_hir::HirExpr| exprs.push((expr.span, expr.ty));
@@ -139,6 +149,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
         uses,
         exprs,
         semantics: analysis.semantics.clone(),
+        locals,
     }
 }
 

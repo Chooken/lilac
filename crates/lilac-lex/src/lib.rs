@@ -12,6 +12,35 @@ use lilac_span::{FileId, Span};
 /// Lexer diagnostics always carry this stable code.
 pub const LEX_ERROR_CODE: &str = "E000";
 
+/// The keyword token `word` spells, if it is a keyword.
+#[must_use]
+pub fn keyword(word: &str) -> Option<TokenKind> {
+    Some(match word {
+        "object" => TokenKind::KwObject,
+        "function" => TokenKind::KwFunction,
+        "enum" => TokenKind::KwEnum,
+        "extern" => TokenKind::KwExtern,
+        "using" => TokenKind::KwUsing,
+        "private" => TokenKind::KwPrivate,
+        "ref" => TokenKind::KwRef,
+        "self" => TokenKind::KwSelf,
+        "unknown" => TokenKind::KwUnknown,
+        "nothing" => TokenKind::KwNothing,
+        "loop" => TokenKind::KwLoop,
+        "if" => TokenKind::KwIf,
+        "then" => TokenKind::KwThen,
+        "else" => TokenKind::KwElse,
+        "match" => TokenKind::KwMatch,
+        "break" => TokenKind::KwBreak,
+        "continue" => TokenKind::KwContinue,
+        "and" => TokenKind::KwAnd,
+        "or" => TokenKind::KwOr,
+        "return" => TokenKind::KwReturn,
+        "as" => TokenKind::KwAs,
+        _ => return None,
+    })
+}
+
 /// Token category; surface text lives in [`Token::text`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TokenKind {
@@ -306,30 +335,7 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
         let word = &self.src[start..self.pos];
-        let kind = match word {
-            "object" => TokenKind::KwObject,
-            "function" => TokenKind::KwFunction,
-            "enum" => TokenKind::KwEnum,
-            "extern" => TokenKind::KwExtern,
-            "using" => TokenKind::KwUsing,
-            "private" => TokenKind::KwPrivate,
-            "ref" => TokenKind::KwRef,
-            "self" => TokenKind::KwSelf,
-            "unknown" => TokenKind::KwUnknown,
-            "nothing" => TokenKind::KwNothing,
-            "loop" => TokenKind::KwLoop,
-            "if" => TokenKind::KwIf,
-            "then" => TokenKind::KwThen,
-            "else" => TokenKind::KwElse,
-            "match" => TokenKind::KwMatch,
-            "break" => TokenKind::KwBreak,
-            "continue" => TokenKind::KwContinue,
-            "and" => TokenKind::KwAnd,
-            "or" => TokenKind::KwOr,
-            "return" => TokenKind::KwReturn,
-            "as" => TokenKind::KwAs,
-            _ => TokenKind::Ident,
-        };
+        let kind = keyword(word).unwrap_or(TokenKind::Ident);
         Token::new(kind, word, start, self.pos, self.file)
     }
 

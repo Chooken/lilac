@@ -326,6 +326,7 @@ dependencies = [
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
+ "lilac-lex",
  "lilac-module",
  "lilac-resolve",
  "lilac-span",

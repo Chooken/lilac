@@ -4,10 +4,10 @@ use std::error::Error;
 
 use lsp_server::Connection;
 use lsp_types::{
-    HoverProviderCapability, InitializeParams, OneOf, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    HoverProviderCapability, InitializeParams, OneOf, RenameOptions, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
     SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkDoneProgressOptions,
+    TextDocumentSyncKind, TypeDefinitionProviderCapability, WorkDoneProgressOptions,
 };
 
 /// Legend token types, in the index order shared by the encoder
@@ -32,6 +32,7 @@ pub mod fs;
 pub mod handlers;
 pub mod index;
 pub mod lir;
+pub mod navigate;
 pub mod roots;
 pub mod server;
 
@@ -47,6 +48,15 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        })),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 work_done_progress_options: WorkDoneProgressOptions::default(),

@@ -575,6 +575,14 @@ impl Checker<'_> {
         }
     }
 
+    /// Records a local name for the editor: a use at `span` of the local
+    /// declared at `decl`'s name token (`span == decl` declares it).
+    pub(crate) fn record_local(&mut self, span: Span, decl: Span) {
+        if !span.is_dummy() && !decl.is_dummy() {
+            self.out.locals.push(lilac_hir::LocalSite { span, decl });
+        }
+    }
+
     // ---- small type helpers --------------------------------------------
 
     pub(crate) fn builtin(&self, name: &str) -> TypeId {

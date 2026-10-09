@@ -215,12 +215,7 @@ impl Checker<'_> {
 
     fn check_ident(&mut self, fcx: &mut FnCx, name: &str, span: Span) -> HirExpr {
         if let Some(local) = fcx.lookup(name) {
-            let kind = if fcx.params.contains(&local) {
-                SemanticKind::Param
-            } else {
-                SemanticKind::Local
-            };
-            self.record_semantic(span, kind);
+            self.record_local_use(fcx, local, span);
             return local_expr(local, fcx.ty(local), span);
         }
         if self.env.params.iter().any(|param| param == name) {
@@ -402,12 +397,7 @@ impl Checker<'_> {
         match expr {
             Expr::Ident(name, span) => match fcx.lookup(name) {
                 Some(local) => {
-                    let kind = if fcx.params.contains(&local) {
-                        SemanticKind::Param
-                    } else {
-                        SemanticKind::Local
-                    };
-                    self.record_semantic(*span, kind);
+                    self.record_local_use(fcx, local, *span);
                     Ok(local_expr(local, fcx.ty(local), *span))
                 }
                 None => Err(self.diags.emit(

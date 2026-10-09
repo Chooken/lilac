@@ -1,6 +1,9 @@
 //! Editor request handlers: hover, go-to-definition, and semantic tokens.
+//! Navigation (references, rename, symbols) is in [`crate::navigate`].
 
-use lilac_hir::{NameSite, SemanticKind};
+use lilac_hir::intrinsics::{Intrinsic, Slot};
+use lilac_hir::SemanticKind;
+use lilac_resolve::DefId;
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
 use lsp_types::{
@@ -9,7 +12,8 @@ use lsp_types::{
 };
 
 use crate::convert::{byte_offset, line_len_utf16, span_range};
-use crate::index::{AnalysisIndex, Retained};
+use crate::index::{AnalysisIndex, DefInfo, Retained};
+use crate::navigate::smallest_use;
 use crate::roots::canonical_file_uri;
 
 /// Legend token-type indices, in the order advertised by `initialize`.
@@ -24,24 +28,21 @@ const TOKEN_PARAMETER: u32 = 6;
 /// Legend modifier index 0 (`defaultLibrary`) as a bitset.
 const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 0;
 
-/// Hover for the item or expression at `position`, if any.
+/// Hover for the intrinsic, item or expression at `position`, if any.
 #[must_use]
 pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover> {
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
     let byte = byte_offset(&source.src, position)?;
-    let index = &retained.index;
+    let sources = &retained.session.source_map;
 
-    let (range, value) = match smallest_use(index, file, byte) {
-        Some(site) => match (
-            span_range(&retained.session.source_map, site.span),
-            item_hover(retained, site, byte),
-        ) {
-            (Some(range), Some(text)) => (range, text),
-            _ => expr_hover(retained, file, byte)?,
-        },
-        None => expr_hover(retained, file, byte)?,
+    let item = || {
+        let (span, def) = smallest_use(retained, file, byte)?;
+        Some((span_range(sources, span)?, item_hover(retained, def)?))
     };
+    let (range, value) = intrinsic_hover(retained, file, byte)
+        .or_else(item)
+        .or_else(|| expr_hover(retained, file, byte))?;
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -52,18 +53,21 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
     })
 }
 
-/// Go-to-definition for the item use at `position`, if any.
+/// Go-to-definition for the item use or local at `position`, if any.
 #[must_use]
 pub fn definition(
     retained: &Retained,
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
+    if let Some(location) = crate::navigate::local_definition(retained, uri, position) {
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
     let byte = byte_offset(&source.src, position)?;
-    let site = smallest_use(&retained.index, file, byte)?;
-    let info = retained.index.defs.get(&site.def)?;
+    let (_, def) = smallest_use(retained, file, byte)?;
+    let info = retained.index.defs.get(&def)?;
     let target = retained.file_uris.get(&info.span.file)?;
     let range = span_range(&retained.session.source_map, info.span)?;
     Some(GotoDefinitionResponse::Scalar(Location {
@@ -76,7 +80,7 @@ pub fn definition(
 /// `file:` spelling (`VSCode` sends `file:///c%3A/...`; the server stores
 /// `file:///C:/...`). The raw key is tried first so single-file mode, whose
 /// map is keyed by the `didOpen` URI, keeps working.
-fn file_for(retained: &Retained, uri: &Url) -> Option<FileId> {
+pub(crate) fn file_for(retained: &Retained, uri: &Url) -> Option<FileId> {
     retained
         .uri_files
         .get(uri)
@@ -84,18 +88,12 @@ fn file_for(retained: &Retained, uri: &Url) -> Option<FileId> {
         .copied()
 }
 
-/// The smallest resolved use whose span contains `byte`.
-fn smallest_use(index: &AnalysisIndex, file: FileId, byte: usize) -> Option<NameSite> {
-    index
-        .uses
-        .iter()
-        .filter(|site| site.span.file == file && contains(site.span, byte))
-        .min_by_key(|site| (site.span.hi.0 - site.span.lo.0, site.span.lo.0))
-        .copied()
-}
-
 /// The smallest checked expression whose span contains `byte`.
-fn smallest_expr(index: &AnalysisIndex, file: FileId, byte: usize) -> Option<(Span, TypeRef)> {
+pub(crate) fn smallest_expr(
+    index: &AnalysisIndex,
+    file: FileId,
+    byte: usize,
+) -> Option<(Span, TypeRef)> {
     index
         .exprs
         .iter()
@@ -105,7 +103,7 @@ fn smallest_expr(index: &AnalysisIndex, file: FileId, byte: usize) -> Option<(Sp
 }
 
 /// Whether a half-open span contains `byte`.
-fn contains(span: Span, byte: usize) -> bool {
+pub(crate) fn contains(span: Span, byte: usize) -> bool {
     let Ok(byte) = u32::try_from(byte) else {
         return false;
     };
@@ -113,12 +111,21 @@ fn contains(span: Span, byte: usize) -> bool {
 }
 
 /// Renders a hover for a resolved item use.
-fn item_hover(retained: &Retained, site: NameSite, byte: usize) -> Option<String> {
-    let info = retained.index.defs.get(&site.def)?;
+fn item_hover(retained: &Retained, def: DefId) -> Option<String> {
+    let info = retained.index.defs.get(&def)?;
+    let text = signature(retained, def, info)?;
+    Some(format!("```lilac\n{text}\n```"))
+}
+
+/// A one-line description of a definition: a function's signature, else its
+/// kind, qualified name and the rest of its declaration (`: @bit32 = 0x2A`
+/// for a constant, a field's type, a variant's payload).
+#[must_use]
+pub(crate) fn signature(retained: &Retained, def: DefId, info: &DefInfo) -> Option<String> {
     let analysis = retained.session.analysis()?;
-    let text = match info.kind {
+    Some(match info.kind {
         "function" | "hook" => {
-            let sig = analysis.sigs.get(&site.def)?;
+            let sig = analysis.sigs.get(&def)?;
             let params = join_types(&analysis.types, &sig.params);
             let returns = join_types(&analysis.types, &sig.returns);
             if returns.is_empty() {
@@ -127,19 +134,31 @@ fn item_hover(retained: &Retained, site: NameSite, byte: usize) -> Option<String
                 format!("function {}({}) -> {}", info.qualified, params, returns)
             }
         }
-        "object" => format!("object {}", info.qualified),
-        "enum" => format!("enum {}", info.qualified),
+        "object" | "enum" => format!("{} {}", info.kind, info.qualified),
         _ => {
-            let mut text = format!("{} {}", info.kind, info.qualified);
-            if let Some((_, ty)) = smallest_expr(&retained.index, site.span.file, byte) {
-                text.push('\n');
-                text.push_str(&analysis.types.display_ref(ty));
-            }
-            text
+            let declared = retained
+                .session
+                .source_map
+                .file(info.span.file)
+                .and_then(|source| {
+                    source
+                        .src
+                        .get(info.span.lo.0 as usize..info.span.hi.0 as usize)
+                })
+                .and_then(|text| text.strip_prefix(info.name.as_str()))
+                .map(|rest| rest.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default();
+            let declared = match declared.char_indices().nth(MAX_DECLARATION) {
+                Some((cut, _)) => format!("{} ...", &declared[..cut]),
+                None => declared,
+            };
+            format!("{} {}{}", info.kind, info.qualified, declared)
         }
-    };
-    Some(format!("```lilac\n{text}\n```"))
+    })
 }
+
+/// How much of a declaration a hover shows, in characters.
+const MAX_DECLARATION: usize = 160;
 
 /// Renders a hover for a bare expression (its type).
 fn expr_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
@@ -150,6 +169,57 @@ fn expr_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, 
         range,
         format!("```lilac\n{}\n```", analysis.types.display_ref(ty)),
     ))
+}
+
+/// Renders a hover for an intrinsic's name: its signature.
+fn intrinsic_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
+    let site = retained.index.semantics.iter().find(|site| {
+        site.kind == SemanticKind::BuiltinFunc
+            && site.span.file == file
+            && contains(site.span, byte)
+    })?;
+    let source = retained.session.source_map.file(file)?;
+    let name = source
+        .src
+        .get(site.span.lo.0 as usize..site.span.hi.0 as usize)?;
+    let intrinsic = Intrinsic::lookup(name)?;
+    let range = span_range(&retained.session.source_map, site.span)?;
+    Some((
+        range,
+        format!("```lilac\n{}\n```", intrinsic_signature(name, intrinsic)),
+    ))
+}
+
+/// `@name(params) result` for an intrinsic; the ones checked specially
+/// spell their operands out.
+fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
+    let special = match intrinsic {
+        Intrinsic::SizeOf | Intrinsic::AlignOf => Some("(Type) @bit_native"),
+        Intrinsic::ArrayLen => Some("(ref array) @bit_native"),
+        Intrinsic::ArrayAt => Some("(ref array, index: @bit_native) ref element"),
+        Intrinsic::CompileError => Some("(message) nothing"),
+        _ => None,
+    };
+    if let Some(special) = special {
+        return format!("{name}{special}");
+    }
+    let sig = intrinsic.signature();
+    let params = sig.params.iter().map(slot).collect::<Vec<_>>().join(", ");
+    let result = sig
+        .result
+        .as_ref()
+        .map_or_else(|| "nothing".to_owned(), slot);
+    format!("{name}({params}) {result}")
+}
+
+/// One intrinsic slot as source spells it.
+fn slot(slot: &Slot) -> String {
+    match slot {
+        Slot::Builtin(name) => (*name).to_owned(),
+        Slot::Ref(name) => format!("ref {name}"),
+        Slot::AnyBit => "@bitN".to_owned(),
+        Slot::ExpectedBit => "@bitN (the expected type)".to_owned(),
+    }
 }
 
 /// Joins rendered type refs with `, `.

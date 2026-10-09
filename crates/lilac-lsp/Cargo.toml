@@ -12,6 +12,7 @@ lilac-driver = { path = "../lilac-driver" }
 lilac-error = { path = "../lilac-error" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-ir = { path = "../lilac-ir" }
+lilac-lex = { path = "../lilac-lex" }
 lilac-resolve = { path = "../lilac-resolve" }
 lilac-span = { path = "../lilac-span" }
 lilac-module = { path = "../lilac-module" }
