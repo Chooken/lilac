@@ -1,0 +1,27 @@
+// libc
+// lib: Standard=lib/Standard
+// expect-stdout: 7-42 1.5
+// expect-exit: 8
+// A variadic `extern`: `snprintf` formats an `@bit32` literal, an `@bit32`
+// local and an `@fbit64` into a buffer, and `puts` prints it.
+
+using Standard.Process
+
+Buffer: object {
+    a: @bit64
+    b: @bit64
+    c: @bit64
+    d: @bit64
+}
+
+format_into: extern "snprintf" function (out: ref Buffer, size: @bit_native, format: ref @bit8, ...) written: @bit32
+print_line: extern "puts" function (text: ref Buffer) result: @bit32
+
+main: function () nothing {
+    buffer: Buffer = Buffer { a = 0x0, b = 0x0, c = 0x0, d = 0x0 }
+    answer: @bit32 = 0x2a
+    format: @byte_buffer = "%d-%d %.1f\x00"
+    written: @bit32 = format_into(ref buffer, 0x20, @byte_buffer_ptr(format), 0x7 as @bit32, answer, 1.5 as @fbit64)
+    printed: @bit32 = print_line(ref buffer)
+    exit(written)
+}

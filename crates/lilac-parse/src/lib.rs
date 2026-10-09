@@ -280,8 +280,25 @@ impl Parser {
                 ItemKind::Func(self.parse_func_rest(diags, false, generic_params)?)
             }
             TokenKind::KwExtern => {
+                let link_name = if self.peek().kind == TokenKind::StringLit {
+                    let token = self.bump();
+                    match String::from_utf8(token.bytes) {
+                        Ok(name) if !name.is_empty() && !name.contains('\0') => Some(name),
+                        _ => {
+                            return Err(Self::err(
+                                diags,
+                                token.span,
+                                "an `extern` link name must be non-empty UTF-8 with no NUL",
+                            ))
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.expect(diags, TokenKind::KwFunction, "`function` after `extern`")?;
-                ItemKind::Func(self.parse_func_rest(diags, true, generic_params)?)
+                let mut decl = self.parse_func_rest(diags, true, generic_params)?;
+                decl.link_name = link_name;
+                ItemKind::Func(decl)
             }
             TokenKind::KwObject => {
                 let members = self.parse_object_members(diags)?;
@@ -597,6 +614,8 @@ impl Parser {
                             returns: func.returns,
                             body,
                             is_extern: false,
+                            link_name: None,
+                            variadic: false,
                         }),
                         span: join_spans(name_span, self.prev_span()),
                     });
@@ -626,7 +645,24 @@ impl Parser {
     ) -> Result<FuncDecl, ErrorGuaranteed> {
         self.expect(diags, TokenKind::LParen, "`(` to open parameter list")?;
         let mut params = Vec::new();
+        let mut variadic = false;
         while self.peek().kind != TokenKind::RParen {
+            if self.peek().kind == TokenKind::Ellipsis {
+                let dots = self.bump();
+                if !is_extern {
+                    return Err(Self::err(
+                        diags,
+                        dots.span,
+                        "only `extern` functions can take `...`",
+                    ));
+                }
+                if self.peek().kind != TokenKind::RParen {
+                    let span = self.peek().span;
+                    return Err(Self::err(diags, span, "`...` must be the last parameter"));
+                }
+                variadic = true;
+                break;
+            }
             if self.peek().kind == TokenKind::Eof {
                 let span = self.peek().span;
                 return Err(Self::err(
@@ -656,6 +692,8 @@ impl Parser {
             returns,
             body,
             is_extern,
+            link_name: None,
+            variadic,
         })
     }
 
@@ -2266,6 +2304,33 @@ mod tests {
         };
         assert!(matches!(then.stmts[..], [Stmt::Continue { .. }]));
         assert!(matches!(els.as_ref(), Stmt::Continue { .. }));
+    }
+
+    #[test]
+    fn extern_link_name_and_variadic() {
+        let (program, diags, _) = parse(
+            "open: extern \"open\" function (path: ref @bit8, flags: @bit32, ...) fd: @bit32\nwrite: extern function (fd: @bit32) nothing\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let ItemKind::Func(open) = &program.items[0].kind else {
+            panic!("{:?}", program.items[0].kind);
+        };
+        assert_eq!(open.link_name.as_deref(), Some("open"));
+        assert!(open.variadic);
+        assert_eq!(open.params.len(), 2);
+        let ItemKind::Func(write) = &program.items[1].kind else {
+            panic!("{:?}", program.items[1].kind);
+        };
+        assert_eq!(write.link_name, None);
+        assert!(!write.variadic);
+    }
+
+    #[test]
+    fn ellipsis_needs_an_extern_and_the_last_slot() {
+        let (_, diags, _) = parse("f: function (a: @bit32, ...) nothing {}\n");
+        assert!(diags.has_errors());
+        let (_, diags, _) = parse("f: extern function (..., a: @bit32) nothing\n");
+        assert!(diags.has_errors());
     }
 
     #[test]

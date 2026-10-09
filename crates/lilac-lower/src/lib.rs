@@ -107,8 +107,14 @@ pub fn lower(
         };
         lower.module.layouts.insert(name, fields);
     }
+    let mut externs = HashSet::new();
     for func in &hir.funcs {
         let lowered = lower.lower_func(func);
+        // Externs sharing a link name are one declaration (their signatures
+        // match: `check_extern_signatures` rejected any that differ).
+        if lowered.is_extern && !externs.insert(lowered.name.clone()) {
+            continue;
+        }
         lower.module.funcs.push(lowered);
     }
     Lowered {
@@ -117,9 +123,19 @@ pub fn lower(
     }
 }
 
+/// The symbol an `extern` links under: its `extern "name"` link name, else
+/// its declared name (never namespace-qualified).
+fn extern_symbol(res: &Resolved, def: lilac_resolve::DefId) -> String {
+    let def = res.def(def);
+    def.func()
+        .and_then(|decl| decl.link_name.clone())
+        .unwrap_or_else(|| def.name.clone())
+}
+
 /// Diagnoses `extern` signatures the C ABI cannot carry (`E028`): parameters
 /// and returns must be bit integers, floats, `ref T`, or an object wrapping
-/// exactly one such field; at most one return; never named `main`.
+/// exactly one such field; at most one return; never linked as `main`. Two
+/// externs with one link name must declare the same C signature.
 pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, diags: &mut Diags) {
     let sources = SourceMap::new();
     let lower = Lower {
@@ -138,8 +154,9 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         needs_copy: HashMap::new(),
         funcs: HashMap::new(),
     };
+    check_link_names(&lower, diags);
     for func in hir.funcs.iter().filter(|func| func.body.is_none()) {
-        let name = &res.def(func.key.def).name;
+        let name = &extern_symbol(res, func.key.def);
         if name == "main" {
             diags.emit(
                 Diagnostic::error(
@@ -198,6 +215,84 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
             }
         }
     }
+}
+
+/// `E028` for two externs that link one symbol with different C signatures.
+fn check_link_names(lower: &Lower<'_>, diags: &mut Diags) {
+    // Link name -> (C signature, its Lilac spelling, declaration span) of
+    // the first extern linking it.
+    let mut linked: HashMap<String, (ExternSig, String, Span)> = HashMap::new();
+    for func in lower.hir.funcs.iter().filter(|func| func.body.is_none()) {
+        let name = extern_symbol(lower.res, func.key.def);
+        let variadic = lower
+            .res
+            .def(func.key.def)
+            .func()
+            .is_some_and(|decl| decl.variadic);
+        let abi = |ids: &[LocalId]| -> Vec<LirTy> {
+            ids.iter()
+                .map(|id| lower.abi_ty(func.local(*id).ty).0)
+                .collect()
+        };
+        let sig = ExternSig {
+            ins: abi(&func.params),
+            outs: abi(&func.returns),
+            variadic,
+        };
+        let text = extern_sig_text(func, lower.types, variadic);
+        match linked.get(&name) {
+            Some((first, first_text, first_span)) if *first != sig => {
+                diags.emit(
+                    Diagnostic::error(
+                        "E028",
+                        format!("`{name}` is declared with two different signatures"),
+                    )
+                    .label(func.span, true, format!("declared here as `{text}`"))
+                    .label(
+                        *first_span,
+                        false,
+                        format!("first declared as `{first_text}`"),
+                    )
+                    .help("externs that share a link name must declare the same C signature"),
+                );
+            }
+            Some(_) => {}
+            None => {
+                linked.insert(name, (sig, text, func.span));
+            }
+        }
+    }
+}
+
+/// An `extern`'s C signature, as two declarations of one link name compare.
+#[derive(PartialEq)]
+struct ExternSig {
+    ins: Vec<LirTy>,
+    outs: Vec<LirTy>,
+    variadic: bool,
+}
+
+/// An `extern`'s signature in Lilac types (`(@bit32, ...) @bit32`).
+fn extern_sig_text(func: &HirFunc, types: &Types, variadic: bool) -> String {
+    let mut ins: Vec<String> = func
+        .params
+        .iter()
+        .map(|id| types.display_ref(func.local(*id).ty))
+        .collect();
+    if variadic {
+        ins.push("...".to_owned());
+    }
+    let outs: Vec<String> = func
+        .returns
+        .iter()
+        .map(|id| types.display_ref(func.local(*id).ty))
+        .collect();
+    let outs = if outs.is_empty() {
+        "nothing".to_owned()
+    } else {
+        outs.join(", ")
+    };
+    format!("({}) {outs}", ins.join(", "))
 }
 
 struct Lower<'a> {
@@ -425,6 +520,7 @@ impl Fs {
             ins: self.ins,
             outs: self.outs,
             is_extern: false,
+            variadic: false,
             inline,
             blocks: self.blocks,
         }
@@ -552,7 +648,7 @@ impl Lower<'_> {
     fn symbol_of(&self, func: &HirFunc) -> String {
         let def = self.res.def(func.key.def);
         if func.body.is_none() {
-            return def.name.clone();
+            return extern_symbol(self.res, func.key.def);
         }
         let is_hook = matches!(def.kind, DefKind::Hook(_));
         let (prefix, own) = match def.parent {
@@ -744,6 +840,11 @@ impl Lower<'_> {
                 ins: fs.ins,
                 outs: fs.outs,
                 is_extern: true,
+                variadic: self
+                    .res
+                    .def(func.key.def)
+                    .func()
+                    .is_some_and(|decl| decl.variadic),
                 inline: false,
                 blocks: Vec::new(),
             };

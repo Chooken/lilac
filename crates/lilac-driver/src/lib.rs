@@ -701,6 +701,45 @@ mod tests {
         assert!(session.render_diagnostics().contains("error[E031]: dead"));
     }
 
+    /// Two externs linking one symbol with one signature become one
+    /// declaration under the link name; a variadic one prints `in ...`.
+    #[test]
+    fn externs_merge_by_link_name() {
+        let src = "a: extern \"abs\" function (v: @bit32) r: @bit32\nb: extern \"abs\" function (x: @bit32) y: @bit32\nopen: extern function (path: ref @bit8, flags: @bit32, ...) fd: @bit32\nmain: function () nothing {\n    p: @bit8 = 0x0\n    m: @bit32 = 0x1b6\n    s: @bit32 = @i_add_32(a(0x1), b(0x2))\n    fd: @bit32 = open(ref p, 0x0, m)\n}\n";
+        let mut session = Session::new();
+        let text = session
+            .compile_lir("e.lilac", src)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()))
+            .to_text();
+        assert_eq!(text.matches("extern @abs\n").count(), 1, "{text}");
+        assert_eq!(text.matches("call @abs").count(), 2, "{text}");
+        assert!(!text.contains("@a "), "{text}");
+        assert!(text.contains("extern @open\n"), "{text}");
+        assert!(text.contains("  in ...\n"), "{text}");
+    }
+
+    /// Two externs linking one symbol with different signatures are `E028`,
+    /// labelling both declarations.
+    #[test]
+    fn extern_link_name_mismatch_is_e028() {
+        let src = "a: extern \"abs\" function (v: @bit32) r: @bit32\nb: extern \"abs\" function (v: @bit64) r: @bit64\nmain: function () nothing {}\n";
+        let mut session = Session::new();
+        assert!(session.compile_lir("e.lilac", src).is_err());
+        let text = session.render_diagnostics();
+        assert!(
+            text.contains("error[E028]: `abs` is declared with two different signatures"),
+            "{text}"
+        );
+        assert!(
+            text.contains("first declared as `(@bit32) @bit32`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("declared here as `(@bit64) @bit64`"),
+            "{text}"
+        );
+    }
+
     /// A program that never names `@builtin` gets none of its types.
     #[test]
     fn unused_builtin_adds_nothing() {

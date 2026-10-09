@@ -1,0 +1,5 @@
+magnitude: extern "abs" function (value: @bit32) result: @bit32
+
+left_abs: function (value: @bit32) result: @bit32 {
+    result = magnitude(value)
+}

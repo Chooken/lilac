@@ -85,6 +85,8 @@ pub enum TokenKind {
     Arrow,
     /// `.` (member access, enum tags).
     Dot,
+    /// `...` (an `extern`'s variadic parameter list).
+    Ellipsis,
     /// `{`.
     LBrace,
     /// `}`.
@@ -643,6 +645,16 @@ impl<'a> Lexer<'a> {
 
     fn lex_symbol(&mut self) -> Result<Token, Diagnostic> {
         let start = self.pos;
+        if [self.peek(), self.peek_at(1), self.peek_at(2)] == [b'.'; 3] {
+            self.pos += 3;
+            return Ok(Token::new(
+                TokenKind::Ellipsis,
+                "...",
+                start,
+                self.pos,
+                self.file,
+            ));
+        }
         let two = [self.peek(), self.peek_at(1)];
         let two_kind = match two {
             [b'=', b'='] => Some((TokenKind::EqEq, "==")),

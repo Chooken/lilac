@@ -1,0 +1,5 @@
+c_abs: extern "abs" function (n: @bit32) m: @bit32
+
+right_abs: function (value: @bit32) result: @bit32 {
+    result = c_abs(value)
+}

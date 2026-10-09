@@ -1,0 +1,7 @@
+// expect-error: E028
+// Two externs linking `abs` must declare the same signature.
+
+narrow: extern "abs" function (value: @bit32) result: @bit32
+wide: extern "abs" function (value: @bit64) result: @bit64
+
+main: function () nothing {}

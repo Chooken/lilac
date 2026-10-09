@@ -578,6 +578,7 @@ fn lir_func(
             .map(|(place, ty)| ((*place).to_owned(), ty.clone()))
             .collect(),
         is_extern: false,
+        variadic: false,
         inline: false,
         blocks,
     }
@@ -586,6 +587,7 @@ fn lir_func(
 fn extern_func(name: &str, ins: &[(&str, LirTy)], outs: &[(&str, LirTy)]) -> LirFunc {
     LirFunc {
         is_extern: true,
+        variadic: false,
         ..lir_func(name, ins, outs, Vec::new())
     }
 }
@@ -1306,6 +1308,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![super::block("entry", Vec::new(), super::ret())],
         };

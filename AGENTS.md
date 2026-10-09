@@ -68,8 +68,16 @@
 
 - `extern` declarations and calls use the platform C ABI on the LLVM backend:
   bit integers by value, `ref T` → pointer, 0 outs = `void`, 1 out = the C
-  return value, and an unmangled symbol equal to the declared name. `>1` out or
-  an unsupported param/return is `E028`.
+  return value, and an unmangled symbol: the `extern "name"` link name, else
+  the declared name (`lilac_lower::extern_symbol`). `>1` out or an
+  unsupported param/return is `E028`.
+- Externs sharing a link name lower to one `LirFunc` (named by the link
+  name); `check_extern_signatures` makes a signature mismatch `E028`.
+- Variadic externs (`...`, `FuncDecl::variadic` → `LirFunc::variadic`,
+  printed `in ...`): typeck checks the extra arguments
+  (`check_variadic_arg`), `lilac_ir::is_variadic_arg_type` is the accept-set
+  the verifier shares, and LLVM gets `fn_type(…, true)` with the extras
+  passed by value.
 - `E028` is validated pre-codegen in the driver via
   `lilac_lower::check_extern_signatures`, so `check`/`emit-llvm` report it as an
   ordinary diagnostic rather than a backend failure. `lilac_ir::is_c_abi_type` is the single accept-set shared by that

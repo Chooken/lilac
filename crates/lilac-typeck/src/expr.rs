@@ -243,6 +243,17 @@ impl Checker<'_> {
         };
         self.record_use(span, def);
         match &self.res.def(def).kind {
+            DefKind::Func(decl) if decl.variadic => {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E028",
+                        format!("cannot use variadic extern `{name}` as a value"),
+                    )
+                    .label(span, true, "function types have no `...`")
+                    .help("call it directly, or wrap it in a function with fixed parameters"),
+                );
+                HirExpr::poison(span)
+            }
             DefKind::Func(_) => {
                 let generic = self.res.def(def).generic_params.len();
                 if generic > 0 {

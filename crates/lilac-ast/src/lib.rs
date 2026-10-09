@@ -107,6 +107,11 @@ pub struct FuncDecl {
     pub body: Option<FuncBody>,
     /// Whether this is an `extern` (foreign, C ABI) declaration.
     pub is_extern: bool,
+    /// An `extern`'s link name (`extern "write" function …`); `None` links
+    /// under the declared name.
+    pub link_name: Option<String>,
+    /// Whether an `extern` ends its parameters with `...` (C varargs).
+    pub variadic: bool,
 }
 
 /// Function body: block or single-expression inline (`=>`).

@@ -22,7 +22,7 @@ use crate::{
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
 /// `IGtU`/`IDivU`/`IModU` tags (16–18).
-pub const LIR_CODEC_VERSION: u32 = 6;
+pub const LIR_CODEC_VERSION: u32 = 7;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -439,6 +439,7 @@ fn put_func(w: &mut impl Write, func: &LirFunc) -> io::Result<()> {
     put_pairs(w, &func.ins)?;
     put_pairs(w, &func.outs)?;
     put_bool(w, func.is_extern)?;
+    put_bool(w, func.variadic)?;
     put_bool(w, func.inline)?;
     put_len(w, func.blocks.len())?;
     for block in &func.blocks {
@@ -846,6 +847,7 @@ fn get_func(r: &mut impl Read) -> Result<LirFunc, CodecError> {
     let ins = get_pairs(r)?;
     let outs = get_pairs(r)?;
     let is_extern = get_bool(r)?;
+    let variadic = get_bool(r)?;
     let inline = get_bool(r)?;
     let count = get_len(r)?;
     let mut blocks = Vec::new();
@@ -857,6 +859,7 @@ fn get_func(r: &mut impl Read) -> Result<LirFunc, CodecError> {
         ins,
         outs,
         is_extern,
+        variadic,
         inline,
         blocks,
     })
@@ -1248,6 +1251,7 @@ mod tests {
             ins: vec![("p0".to_owned(), t("#bit32"))],
             outs: vec![("p1".to_owned(), t("ref #bit32"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks,
         });

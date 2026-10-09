@@ -258,6 +258,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks,
         }
@@ -311,6 +312,7 @@ mod tests {
         ));
         module.funcs.push(LirFunc {
             is_extern: true,
+            variadic: false,
             ..func("e", Vec::new())
         });
         module

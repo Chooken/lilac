@@ -357,9 +357,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 ))
             }
         };
+        // A variadic prototype lets LLVM apply each target's varargs rules
+        // (stack slots on Apple arm64, `%al` on x86-64 System V).
         Ok(match returns {
-            Some(return_ty) => return_ty.fn_type(&params, false),
-            None => self.context.void_type().fn_type(&params, false),
+            Some(return_ty) => return_ty.fn_type(&params, func.variadic),
+            None => self.context.void_type().fn_type(&params, func.variadic),
         })
     }
 
@@ -710,7 +712,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// C-ABI arguments for an `extern` call: scalar `in` places are loaded and
     /// passed by value; a `ref T` parameter gets a pointer (the load of a `ref`
-    /// place, or the address of a non-`ref` one).
+    /// place, or the address of a non-`ref` one). A variadic extern's extra
+    /// places are loaded at their own type (a `ref` place yields its pointer).
     fn extern_call_args(
         &self,
         callee: &LirFunc,
@@ -732,6 +735,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     BasicMetadataValueEnum::from(self.load_as(place, param_ty, builder, state))
                 }
             })
+            .chain(
+                ins.iter().skip(callee.ins.len()).map(|place| {
+                    BasicMetadataValueEnum::from(self.load_place(place, builder, state))
+                }),
+            )
             .collect()
     }
 

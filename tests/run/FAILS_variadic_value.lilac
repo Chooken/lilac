@@ -1,0 +1,8 @@
+// expect-error: E028
+// Function types have no `...`, so a variadic extern is not a value.
+
+open: extern function (path: ref @bit8, flags: @bit32, ...) fd: @bit32
+
+main: function () nothing {
+    f: function (path: ref @bit8, flags: @bit32) fd: @bit32 = open
+}

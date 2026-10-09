@@ -15,6 +15,7 @@ use lilac_ty::{TypeId, TypeKind, TypeRef};
 
 use crate::body::FnCx;
 use crate::expr::{tail_span, Receiver};
+use crate::literals::is_foldable_literal;
 use crate::{Checker, Hook, Requirement};
 
 /// A checked call.
@@ -278,7 +279,24 @@ impl Checker<'_> {
             return Err(ErrorGuaranteed::new());
         }
         let mut hir_args: Vec<HirExpr> = receiver.into_iter().collect();
-        hir_args.extend(self.check_args(fcx, &sig.params[skip..], args, span)?);
+        let fixed = &sig.params[skip..];
+        let variadic = self.res.def(def).func().is_some_and(|decl| decl.variadic);
+        let (args, extra) = if variadic && args.len() > fixed.len() {
+            args.split_at(fixed.len())
+        } else {
+            (args, &[][..])
+        };
+        hir_args.extend(self.check_args(fcx, fixed, args, span)?);
+        let mut failed = false;
+        for arg in extra {
+            match self.check_variadic_arg(fcx, arg) {
+                Ok(value) => hir_args.push(value),
+                Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(ErrorGuaranteed::new());
+        }
         Ok(Called::Call {
             callee: HirCallee::Func(key),
             args: hir_args,
@@ -682,6 +700,39 @@ impl Checker<'_> {
         } else {
             Ok(checked)
         }
+    }
+
+    /// One argument in a variadic extern's `...`: it has no parameter type, so
+    /// it must carry its own, and C must not promote it (`E028`).
+    fn check_variadic_arg(
+        &mut self,
+        fcx: &mut FnCx,
+        arg: &Expr,
+    ) -> Result<HirExpr, ErrorGuaranteed> {
+        if is_foldable_literal(arg) {
+            return Err(self.diags.emit(
+                Diagnostic::error("E028", "a variadic argument needs a type")
+                    .label(arg.span(), true, "this literal has no type to pass")
+                    .help("give it one with `as`, e.g. `0x1b6 as @bit32`"),
+            ));
+        }
+        let value = self.check_expr(fcx, arg, None);
+        if value.ty.is_error() {
+            return Err(ErrorGuaranteed::new());
+        }
+        let passes = value.ty.is_ref
+            || ["@bit32", "@bit64", "@bit_native", "@fbit64"]
+                .iter()
+                .any(|name| self.types.builtin(name) == Some(value.ty.id));
+        if passes {
+            return Ok(value);
+        }
+        let ty = self.types.display_ref(value.ty);
+        Err(self.diags.emit(
+            Diagnostic::error("E028", format!("`{ty}` cannot be a variadic argument"))
+                .label(arg.span(), true, "not passable through `...`")
+                .help("C promotes narrow integers and floats; pass a `@bit32`, `@bit64`, `@bit_native`, `@fbit64` or a `ref`, widening explicitly with `as`"),
+        ))
     }
 
     fn arity(&mut self, expected: usize, found: usize, span: Span) -> Result<(), ErrorGuaranteed> {

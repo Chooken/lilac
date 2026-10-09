@@ -78,6 +78,9 @@ pub struct LirFunc {
     pub outs: Vec<(String, LirTy)>,
     /// Whether this is an `extern` (foreign) declaration with no body.
     pub is_extern: bool,
+    /// Whether an `extern` takes C varargs after its `ins` (`...`); a call
+    /// may then pass extra `ins` of a [`is_variadic_arg_type`] type.
+    pub variadic: bool,
     /// Whether backends must always inline it (`=>` functions).
     pub inline: bool,
     /// Blocks in layout order (empty only for extern declarations).
@@ -803,6 +806,9 @@ fn print_func(func: &LirFunc) -> Vec<(String, Option<Span>)> {
     for (place, ty) in &func.ins {
         lines.push((format!("  in {ty} %{place}"), None));
     }
+    if func.variadic {
+        lines.push(("  in ...".to_owned(), None));
+    }
     for (place, ty) in &func.outs {
         lines.push((format!("  out {ty} %{place}"), None));
     }
@@ -862,6 +868,18 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
 #[must_use]
 pub fn is_c_abi_type(ty: &LirTy) -> bool {
     !matches!(ty, LirTy::Named(_))
+}
+
+/// Whether `ty` may be passed as a C variadic argument: C promotes narrower
+/// integers and `float`, and Lilac integers carry no sign to promote with, so
+/// only `#bit32`, `#bit64`, `#bit_native`, `#fbit64` and references pass.
+/// Typeck's `E028` check and the verifier share this rule.
+#[must_use]
+pub fn is_variadic_arg_type(ty: &LirTy) -> bool {
+    matches!(
+        ty,
+        LirTy::Bit(32 | 64) | LirTy::BitNative | LirTy::FBit(64) | LirTy::Ref(_)
+    )
 }
 
 /// Fixed field layouts of the builtin aggregate types (`#byte_buffer`,
@@ -1090,6 +1108,12 @@ impl Verifier<'_> {
     }
 
     fn verify_func<'a>(&mut self, func: &'a LirFunc) {
+        if func.variadic && !func.is_extern {
+            self.error(
+                format!("only an extern may be variadic, but `@{}` is", func.name),
+                Span::dummy(),
+            );
+        }
         if func.is_extern {
             if !func.blocks.is_empty() {
                 self.error(
@@ -1493,10 +1517,16 @@ impl Verifier<'_> {
                     self.error(format!("call to unknown function `@{target}`"), span);
                     return;
                 };
-                if ins.len() != found.ins.len() || outs.len() != found.outs.len() {
+                let ins_fit = if found.variadic {
+                    ins.len() >= found.ins.len()
+                } else {
+                    ins.len() == found.ins.len()
+                };
+                if !ins_fit || outs.len() != found.outs.len() {
+                    let at_least = if found.variadic { "at least " } else { "" };
                     self.error(
                         format!(
-                            "call to `@{target}` takes {} in and {} out, found {} in and {} out",
+                            "call to `@{target}` takes {at_least}{} in and {} out, found {} in and {} out",
                             found.ins.len(),
                             found.outs.len(),
                             ins.len(),
@@ -1504,6 +1534,17 @@ impl Verifier<'_> {
                         ),
                         span,
                     );
+                    return;
+                }
+                for place in &ins[found.ins.len()..] {
+                    if let Some(ty) = places.get(place.as_str()) {
+                        if !is_variadic_arg_type(ty) {
+                            self.error(
+                                format!("variadic argument `%{place}` to `@{target}` has type `{ty}`, which C would promote"),
+                                span,
+                            );
+                        }
+                    }
                 }
             }
             LirCallee::Builtin(name) => {
@@ -1793,6 +1834,7 @@ mod tests {
                 ins: vec![("in".to_owned(), t("#bit32"))],
                 outs: vec![("out".to_owned(), t("#bit32"))],
                 is_extern: false,
+                variadic: false,
                 inline: false,
                 blocks: vec![LirBlock {
                     label: "entry".to_owned(),
@@ -1906,6 +1948,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -1943,6 +1986,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -1978,6 +2022,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2208,6 +2253,7 @@ mod tests {
                 ins: vec![("s".to_owned(), t("#byte_buffer"))],
                 outs: Vec::new(),
                 is_extern: true,
+                variadic: false,
                 inline: false,
                 blocks: Vec::new(),
             }],
@@ -2243,6 +2289,7 @@ mod tests {
                 ins: vec![("s".to_owned(), t("#byte_buffer"))],
                 outs: Vec::new(),
                 is_extern: true,
+                variadic: false,
                 inline: false,
                 blocks: Vec::new(),
             }],
@@ -2314,6 +2361,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2380,6 +2428,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2405,6 +2454,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2442,6 +2492,7 @@ mod tests {
             ins: vec![("buffer".to_owned(), t("#byte_buffer"))],
             outs: vec![("out".to_owned(), t("ref #bit8"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2524,6 +2575,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -2609,6 +2661,7 @@ mod tests {
             ins: vec![("s".to_owned(), t("#bit8"))],
             outs: vec![],
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: vec![],
         });

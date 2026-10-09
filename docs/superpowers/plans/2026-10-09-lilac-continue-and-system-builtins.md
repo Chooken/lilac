@@ -313,23 +313,23 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part C: externs
 
-- [ ] AST/parser:
+- [x] AST/parser:
   - an optional string after `extern`, stored as the link name;
   - a trailing `...` parameter, recorded as `variadic`.
-- [ ] Carry the link name and `variadic` through HIR and LIR
+- [x] Carry the link name and `variadic` through HIR and LIR
       (`LirFunc::link_name`, `LirFunc::variadic`).
   - Lowering uses the link name as the extern's symbol.
   - The verifier allows variadic only on externs.
   - The verifier and lowering merge identical declarations; a signature
     mismatch is `E028`.
-- [ ] `lilac-codegen-llvm`:
+- [x] `lilac-codegen-llvm`:
   - a variadic `fn_type`;
   - call lowering passes the extra arguments, checked by
     `check_extern_signatures`.
-- [ ] Typeck: check each extra argument against decision 10's rules (an
+- [x] Typeck: check each extra argument against decision 10's rules (an
       untyped literal is an error; narrow types are `E028`). Taking a
       variadic extern as a function value is `E028`.
-- [ ] Tests:
+- [x] Tests:
   - parser tests, including `...` rejected on a non-extern;
   - two namespaces declaring `write` with the same signature link once;
   - a mismatch is `E028`;
@@ -338,7 +338,19 @@ Done (2026-10-09). Differences from the tasks above:
     extra argument;
   - a run test under `// libc` that calls `snprintf` into a buffer and
     prints the result.
-- [ ] Docs: SPEC §9 extern; `docs/errors/E028.md`; AGENTS.md "Extern C ABI".
+- [x] Docs: SPEC §9 extern; `docs/errors/E028.md`; AGENTS.md "Extern C ABI".
+
+Done (2026-10-09). Differences from the tasks above:
+- No `LirFunc::link_name`: an extern's LIR name *is* its link name
+  (`lilac_lower::extern_symbol`), so merging is keeping one `LirFunc` per
+  name. The mismatch check is in `check_extern_signatures`, before
+  lowering, and also covers externs nothing calls.
+- The untyped-literal error is `E028` too, so every variadic rule has one
+  code.
+- `...` lexes as one `Ellipsis` token.
+- Tests: the `emit-llvm` shape is a codegen unit test; run tests
+  `extern_variadic` (`snprintf` with an `@fbit64`) and `extern_link_merge`
+  (two namespaces, one `abs`), plus four `FAILS_*` cases.
 
 ### Part D: instruction builtins
 

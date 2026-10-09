@@ -924,12 +924,44 @@ outside that set (an aggregate such as `@byte_buffer`, say), is `E028`,
 validated before codegen so it reports as an ordinary diagnostic. An `extern`
 may not be named `main`: extern symbols are unmangled, so the C symbol `main`
 would collide with the entry point the LLVM backend emits, and that is also
-`E028`. The symbol is
-unmangled and equals the declared name; calls typecheck only against the
-declared signature (a wrong declaration is user error and is diagnosed
-nowhere — declare carefully); libraries to link (`link = ["c"]`) are declared
-in the package manifest, never in code. No overloads, no calling-convention
-  annotations in v1.
+`E028`. Calls typecheck only against the declared signature (a wrong
+declaration is user error and is diagnosed nowhere — declare carefully);
+libraries to link (`link = ["c"]`) are declared in the package manifest,
+never in code. No overloads, no calling-convention annotations in v1.
+
+**Link names.** The symbol an `extern` links is its declared name, unmangled
+(no namespace prefix), unless a string after `extern` names it:
+
+```lilac
+os_write: extern "write" function (fd: @bit32, data: ref @bit8, len: @bit_native) written: @bit_native
+```
+
+The Lilac name (`os_write`) is an ordinary, namespaced item; only the linker
+sees `write`. Externs that link the same symbol, in any namespaces, are one
+declaration when their C signatures match (parameter and return types, and
+`...`), and `E028` when they differ. The link name `main` is `E028`, like an
+`extern` named `main`.
+
+**Variadic externs.** A trailing `...` lets an `extern` take C varargs:
+
+```lilac
+format_into: extern "snprintf" function (out: ref @bit8, size: @bit_native, format: ref @bit8, ...) written: @bit32
+```
+
+`...` is allowed only as the last parameter of an `extern`; Lilac functions
+are never variadic. Arguments past the fixed parameters have no parameter type
+to check against, so each must carry its own:
+
+- an untyped literal is `E028` (write `0x1b6 as @bit32`);
+- only `@bit32`, `@bit64`, `@bit_native`, `@fbit64` and `ref T` may be
+  passed. C promotes narrower integers and `float`, and Lilac integers carry
+  no sign to promote with, so `@bit8`, `@bit16` and `@fbit32` are `E028`
+  (widen them with `as`).
+
+A variadic `extern` cannot be used as a function value (`E028`): function
+types have no `...`. The backend declares it with a C variadic prototype,
+so each target's varargs convention applies (on Apple arm64, varargs go on the
+stack, which a fixed prototype gets wrong).
 
 ### export (reserved)
 

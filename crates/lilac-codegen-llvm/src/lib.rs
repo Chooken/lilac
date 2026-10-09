@@ -221,6 +221,7 @@ mod tests {
             ],
             outs: vec![("out".to_owned(), t("#bit32"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -298,6 +299,7 @@ mod tests {
             ],
             outs: vec![("written".to_owned(), t("#bit_native"))],
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -317,6 +319,7 @@ mod tests {
             ins: vec![("x".to_owned(), t("#fbit64"))],
             outs: vec![("out".to_owned(), t("#fbit32"))],
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -329,6 +332,7 @@ mod tests {
             ins: vec![("s".to_owned(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -359,6 +363,7 @@ mod tests {
             ],
             outs: vec![("written".to_owned(), t("#bit_native"))],
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -428,6 +433,54 @@ mod tests {
         assert!(text.contains("store i64 %3, ptr %written"), "{text}");
     }
 
+    /// A variadic `extern` gets a `...` prototype, and a call passes its extra
+    /// places by value after the fixed ones.
+    #[test]
+    fn variadic_extern_call_passes_extras() {
+        let mut module = LirModule::new("x86_64-unknown-linux-gnu");
+        module.funcs.push(LirFunc {
+            name: "open".to_owned(),
+            ins: vec![
+                ("path".to_owned(), t("ref #bit8")),
+                ("flags".to_owned(), t("#bit32")),
+            ],
+            outs: vec![("fd".to_owned(), t("#bit32"))],
+            is_extern: true,
+            variadic: true,
+            inline: false,
+            blocks: Vec::new(),
+        });
+        let mut insts = Vec::new();
+        for (place, ty) in [
+            ("path", "ref #bit8"),
+            ("flags", "#bit32"),
+            ("mode", "#bit32"),
+            ("fd", "#bit32"),
+        ] {
+            alloca(&mut insts, place, ty);
+        }
+        call(
+            &mut insts,
+            LirCallee::Func("open".to_owned()),
+            &["path", "flags", "mode"],
+            &["fd"],
+        );
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = emit(&module);
+        assert!(text.contains("declare i32 @open(ptr, i32, ...)"), "{text}");
+        let call = text
+            .lines()
+            .find(|line| line.contains("call") && line.contains("@open("))
+            .expect("variadic call");
+        assert_eq!(
+            call.trim(),
+            "%3 = call i32 (ptr, i32, ...) @open(ptr %0, i32 %1, i32 %2)",
+            "{text}"
+        );
+    }
+
     /// An `extern` parameter outside the scalar/pointer set is `E028`, not a
     /// mis-compiled struct pointer.
     #[test]
@@ -438,6 +491,7 @@ mod tests {
             ins: vec![("s".to_owned(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -456,6 +510,7 @@ mod tests {
             ins: Vec::new(),
             outs: vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit32"))],
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -478,6 +533,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: true,
+            variadic: false,
             inline: false,
             blocks: Vec::new(),
         });
@@ -553,6 +609,7 @@ mod tests {
                 .map(|(place, ty)| ((*place).to_owned(), t(ty)))
                 .collect(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks,
         }
@@ -782,6 +839,7 @@ mod tests {
             ins: vec![("p".to_owned(), t("ref #bit32"))],
             outs: vec![("o".to_owned(), t("#bit32"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -862,6 +920,7 @@ mod tests {
             ins: vec![("rp".to_owned(), t("ref #Pair"))],
             outs: vec![("o".to_owned(), t("#bit32"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -1421,6 +1480,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -1495,6 +1555,7 @@ mod tests {
             ins: vec![("x".to_owned(), t("#bit32"))],
             outs: vec![("out".to_owned(), t("#fbit32"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),
@@ -1548,6 +1609,7 @@ mod tests {
             ],
             outs: vec![("out".to_owned(), t("#bit8"))],
             is_extern: false,
+            variadic: false,
             inline: false,
             blocks: vec![LirBlock {
                 label: "entry".to_owned(),

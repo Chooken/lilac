@@ -1,0 +1,14 @@
+// libc
+// lib: Standard=lib/Standard
+// expect-exit: 7
+// Two namespaces declare C's `abs` under their own names; the identical
+// declarations link as one symbol.
+
+using Standard.Process
+using Left
+using Right
+
+main: function () nothing {
+    // -3 and -4.
+    exit(@i_add_32(left_abs(0xFFFFFFFD), right_abs(0xFFFFFFFC)))
+}
