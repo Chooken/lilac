@@ -843,8 +843,12 @@ pub struct BuiltinSig {
 #[must_use]
 pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
     let (ins, outs) = match name {
-        "@memcpy" => (
+        "@memcpy" | "@memmove" => (
             vec![LirTy::byte_ref(), LirTy::byte_ref(), LirTy::BitNative],
+            vec![],
+        ),
+        "@memset" => (
+            vec![LirTy::byte_ref(), LirTy::Bit(8), LirTy::BitNative],
             vec![],
         ),
         "@ptr_add" => (
@@ -983,6 +987,68 @@ pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
                 }
                 diags.emit(diagnostic);
             }
+        }
+    }
+    if failed {
+        Err(ErrorGuaranteed::new())
+    } else {
+        Ok(())
+    }
+}
+
+/// `E035` for each `@syscall` a reachable user function makes when the
+/// target has no system-call instruction (`has_syscall` is false). The
+/// runtime's own `.lilac.*` calls are the compiler's business, not the user's.
+///
+/// # Errors
+///
+/// Returns `Err` after emitting a diagnostic for every such call.
+pub fn check_live_syscalls<S: std::hash::BuildHasher>(
+    module: &LirModule,
+    has_syscall: bool,
+    reach: Option<&Reach>,
+    sources: &SourceMap,
+    names: &HashMap<String, String, S>,
+    diags: &mut Diags,
+) -> Result<(), ErrorGuaranteed> {
+    if has_syscall {
+        return Ok(());
+    }
+    let mut failed = false;
+    for func in module
+        .funcs
+        .iter()
+        .filter(|func| !trace::is_hidden(&func.name))
+    {
+        for inst in func.blocks.iter().flat_map(|block| &block.insts) {
+            let LirInst::Call {
+                func: LirCallee::Builtin(name),
+                span,
+                ..
+            } = inst
+            else {
+                continue;
+            };
+            if name != "@syscall" {
+                continue;
+            }
+            failed = true;
+            let mut diagnostic = Diagnostic::error(
+                "E035",
+                format!("`@syscall` is not available on `{}`", module.target),
+            )
+            .label(*span, true, "no system-call instruction on this target".to_owned())
+            .help("`@syscall` needs Linux on x86-64 or aarch64; choose another arm with `@builtin.Target`");
+            if let Some(reach) = reach {
+                let chain = reach_chain_text(reach, &func.name, *span, sources, names);
+                if !chain.is_empty() {
+                    diagnostic = diagnostic.note(format!(
+                        "reached from:
+{chain}"
+                    ));
+                }
+            }
+            diags.emit(diagnostic);
         }
     }
     if failed {

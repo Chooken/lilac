@@ -1,0 +1,68 @@
+lilac_ir = "0.4"
+target = "x86_64-unknown-none"
+type #Pair {
+    low: #bit64,
+    high: #bit64,
+}
+function @main
+{
+  $entry:
+    alloca #Pair %pair : zeroed
+    alloca #Pair %tmp.1 : zeroed
+    alloca ref #unknown %base : zeroed
+    alloca ref #bit8 %bytes : zeroed
+    alloca ref #bit8 %tmp.2 : zeroed
+    alloca ref #bit8 %tmp.3 : zeroed
+    alloca #bit_native %tmp.4 : zeroed
+    alloca ref #bit8 %tmp.5 : zeroed
+    alloca #bit8 %tmp.6 : zeroed
+    alloca #bit_native %tmp.7 : zeroed
+    alloca #bit_native %address : zeroed
+    alloca ref #unknown %again : zeroed
+    zero %tmp.1
+    &1: #bit64 = const 0x0706050403020100
+    copy &1 -> %tmp.1.low  // idx 0
+    &2: #bit64 = const 0x0
+    copy &2 -> %tmp.1.high  // idx 1
+    copy %tmp.1 -> %pair
+    &3: ref #Pair = addr %pair
+    &4: ref #unknown = copy &3
+    copy &4 -> %base
+    &5: ref #bit8 = copy %base
+    copy &5 -> %bytes
+    &6: ref #unknown = copy %base
+    &7: #bit_native = bitcast &6
+    &8: #bit_native = const 0x2
+    &9: #bit_native = i.add &7, &8
+    &10: ref #unknown = bitcast &9
+    &11: ref #bit8 = copy &10
+    copy &11 -> %tmp.2
+    copy %bytes -> %tmp.3
+    &12: #bit_native = const 0x8
+    copy &12 -> %tmp.4
+    call @memmove (in %tmp.2, %tmp.3, %tmp.4) (out)
+    copy %bytes -> %tmp.5
+    &13: #bit8 = const 0x0
+    copy &13 -> %tmp.6
+    &14: #bit_native = const 0x8
+    copy &14 -> %tmp.7
+    call @memset (in %tmp.5, %tmp.6, %tmp.7) (out)
+    &15: ref #unknown = copy %base
+    &16: #bit_native = bitcast &15
+    copy &16 -> %address
+    &17: #bit_native = copy %address
+    &18: ref #unknown = bitcast &17
+    copy &18 -> %again
+    &19: ref #unknown = copy %again
+    &20: #bit_native = bitcast &19
+    &21: #bit_native = copy %address
+    &22: #bit8 = i.cmp.lt.u &20, &21
+    branch.if &22, $l.1, $l.2
+  $l.1:
+    call @lilac_abort (in) (out)
+    unreachable
+  $l.2:
+    branch $l.3
+  $l.3:
+    return
+}

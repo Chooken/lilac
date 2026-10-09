@@ -14,6 +14,8 @@
 //! - `// expect-stderr: <line>` — one expected stderr line, like
 //!   `expect-stdout`. With none, stderr is not checked.
 //! - `// expect-exit: <n>` — the expected exit code (default `0`).
+//!   `expect-exit: trap` instead expects the program to stop on a trap
+//!   instruction (a signal on Unix, an exception status on Windows).
 //! - `// expect-error: <code>` — the program must fail `lilac check` with this
 //!   diagnostic code; nothing is linked or run.
 //! - `// pending: <reason>` — a known bug: skipped by `run_programs` and
@@ -60,6 +62,7 @@ struct Expect {
     stderr: Vec<String>,
     build_args: Vec<String>,
     exit: i32,
+    trap: bool,
     error: Option<String>,
     pending: Option<String>,
     libs: Vec<String>,
@@ -84,7 +87,11 @@ fn parse_header(text: &str) -> Expect {
         } else if let Some(rest) = comment.strip_prefix("build-arg:") {
             expect.build_args.push(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("expect-exit:") {
-            expect.exit = rest.trim().parse().expect("expect-exit is an integer");
+            if rest.trim() == "trap" {
+                expect.trap = true;
+            } else {
+                expect.exit = rest.trim().parse().expect("expect-exit is an integer");
+            }
         } else if let Some(rest) = comment.strip_prefix("expect-error:") {
             expect.error = Some(rest.trim().to_owned());
         } else if comment.trim_end() == "libc" {
@@ -185,6 +192,12 @@ fn run_one(
             ));
         }
     }
+    if expect.trap {
+        if !ended_by_trap(run.status) {
+            return Err(format!("exit code {:?}, want a trap", run.status.code()));
+        }
+        return Ok(());
+    }
     if run.status.code() != Some(expect.exit) {
         return Err(format!(
             "exit code {:?}, want {}",
@@ -193,6 +206,17 @@ fn run_one(
         ));
     }
     Ok(())
+}
+
+/// Whether a process stopped on a trap instruction rather than exiting:
+/// killed by a signal on Unix, or ended with an exception status (a negative
+/// code, such as `STATUS_ILLEGAL_INSTRUCTION`) on Windows.
+fn ended_by_trap(status: std::process::ExitStatus) -> bool {
+    if cfg!(windows) {
+        status.code().is_some_and(|code| code < 0)
+    } else {
+        status.code().is_none()
+    }
 }
 
 fn run_all(pending: bool) {

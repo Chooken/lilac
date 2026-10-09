@@ -1,0 +1,10 @@
+// expect-exit: trap
+// lib: Standard=lib/Standard
+// `@trap` stops the program at once: nothing after it runs.
+
+using Standard.Process
+
+main: function () nothing {
+    @trap()
+    exit(0x0)
+}

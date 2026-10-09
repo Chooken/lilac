@@ -402,6 +402,13 @@ impl Target {
         }
     }
 
+    /// Whether `@syscall` has an instruction here: Linux on x86-64 or
+    /// aarch64 (`E035` elsewhere).
+    #[must_use]
+    pub fn has_syscall(&self) -> bool {
+        self.os == Os::Linux && matches!(self.arch, Arch::X86_64 | Arch::Aarch64)
+    }
+
     /// Returns the native pointer width in bits for this target.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {

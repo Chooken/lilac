@@ -452,6 +452,19 @@ impl Fs {
         self.insts.push(inst);
     }
 
+    /// `convert bitcast` of `src` to `ty` into a fresh register.
+    fn bitcast(&mut self, src: String, ty: LirTy, span: Span) -> String {
+        let dst = self.reg();
+        self.emit(LirInst::Convert {
+            op: ConvertOp::Bitcast,
+            src,
+            dst: dst.clone(),
+            ty,
+            span,
+        });
+        dst
+    }
+
     fn end(&mut self, term: LirTerm) {
         if !self.open {
             return;
@@ -2018,13 +2031,19 @@ impl Lower<'_> {
                 Some(value) => self.value(fs, func, value),
                 None => lilac_error::bug!(span, "use of an unchecked constant"),
             },
-            HirExprKind::SizeOf(ty) => {
+            HirExprKind::SizeOf(ty) | HirExprKind::AlignOf(ty) => {
                 let lir_ty = self.lir_ty(*ty);
-                let (size, _) = lilac_ir::size_align(&self.module.layouts, &lir_ty, self.ptr_bytes);
+                let (size, align) =
+                    lilac_ir::size_align(&self.module.layouts, &lir_ty, self.ptr_bytes);
+                let value = if matches!(expr.kind, HirExprKind::SizeOf(_)) {
+                    size
+                } else {
+                    align
+                };
                 let reg = fs.reg();
                 fs.emit(LirInst::Const {
                     dst: reg.clone(),
-                    lit: format!("0x{size:x}"),
+                    lit: format!("0x{value:x}"),
                     ty: lir,
                     span,
                 });
@@ -2354,15 +2373,47 @@ impl Lower<'_> {
                 });
                 LirOperand::Reg(reg)
             }
-            Intrinsic::Memcpy => {
-                let ins = args.iter().map(|arg| self.arg(fs, func, arg)).collect();
-                fs.emit(LirInst::Call {
-                    func: LirCallee::Builtin("@memcpy".to_owned()),
-                    ins,
-                    outs: Vec::new(),
+            Intrinsic::PtrToAddress | Intrinsic::AddressToPtr => {
+                let src = self.value_reg(fs, func, &args[0]);
+                LirOperand::Reg(fs.bitcast(src, lir, span))
+            }
+            Intrinsic::PtrAdd => {
+                // `ptrtoint`, add, `inttoptr`: what the `@ptr_add` leaf does,
+                // inline, so the operand keeps its `ref #unknown` type.
+                let base = self.value_reg(fs, func, &args[0]);
+                let address = fs.bitcast(base, LirTy::BitNative, span);
+                let offset = self.value_reg(fs, func, &args[1]);
+                let sum = fs.reg();
+                fs.emit(LirInst::Arith {
+                    op: ArithOp::IAdd,
+                    lhs: address,
+                    rhs: offset,
+                    dst: sum.clone(),
+                    ty: LirTy::BitNative,
                     span,
                 });
-                LirOperand::Reg(String::new())
+                LirOperand::Reg(fs.bitcast(sum, lir, span))
+            }
+            Intrinsic::Memcpy
+            | Intrinsic::Memmove
+            | Intrinsic::Memset
+            | Intrinsic::Syscall
+            | Intrinsic::Trap => {
+                let Some(name) = intrinsic.leaf_builtin() else {
+                    lilac_error::bug!(span, "intrinsic `{intrinsic:?}` has no leaf");
+                };
+                let ins = args.iter().map(|arg| self.arg(fs, func, arg)).collect();
+                let out = (!ty.is_error()).then(|| self.tmp(fs, ty, span));
+                fs.emit(LirInst::Call {
+                    func: LirCallee::Builtin(name.to_owned()),
+                    ins,
+                    outs: out.iter().cloned().collect(),
+                    span,
+                });
+                if intrinsic == Intrinsic::Trap {
+                    fs.end(LirTerm::Unreachable { span });
+                }
+                out.map_or(LirOperand::Reg(String::new()), LirOperand::Place)
             }
             Intrinsic::Panic => {
                 let msg = self.arg(fs, func, &args[0]);

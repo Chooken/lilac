@@ -20,8 +20,15 @@
 - The builtin runtime (byte buffers, `@load_u8`/`@store_u8`, format-args
   tables) is written once as ordinary LIR in `lilac-ir::runtime` and shared by
   all backends. Backends hand-write only the leaf intrinsics
-  (`@ptr_add`, `@memcpy`, `@lilac_abort`, and `@syscall`: the Linux
-  system-call instruction, which only the runtime calls).
+  (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`, `@lilac_abort`, and
+  `@syscall`: the Linux system-call instruction).
+- Instruction builtins (`Intrinsic::leaf_builtin`): `@memcpy`/`@memmove`/
+  `@memset`/`@syscall` call their leaf, `@trap` calls `@lilac_abort` then
+  ends the block `unreachable`, and the pointer builtins (`@ptr_add`,
+  `@ptr_to_address`, `@address_to_ptr`) lower inline to `bitcast`s (and an
+  `i.add`). `@align_of` is a constant like `@size_of`. A reachable user
+  `@syscall` off Linux x86-64/aarch64 (`Target::has_syscall`) is `E035`,
+  checked after DCE like `E031` (`lilac_ir::check_live_syscalls`).
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR

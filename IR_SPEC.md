@@ -222,16 +222,21 @@ call &f (in %a) (out %b)
 
 ### builtin calls
 * Callee is a `@`-builtin **leaf** name (`call @ptr_add (in %base, %off) (out %s)`)
-* Only three target-specific leaves remain builtins, verified against the
+* Only the target-specific leaves are builtins, verified against the
   signature table below. They lower to the `.lilac.*` backend symbols shown.
-  `@size_of` is a `const` and `@compile_error` a marker, never builtin calls
+  `@size_of`/`@align_of` are `const`s, `@ptr_add`/`@ptr_to_address`/
+  `@address_to_ptr` are `bitcast` (plus an `i.add`), and `@compile_error`
+  is a marker, never builtin calls
   (see `compile.error`)
 
 | builtin | in-args | out | LLVM lowering |
 | --- | --- | --- | --- |
 | `@ptr_add` | `ref #bit8`, `#bit_native` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
 | `@memcpy` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
-| `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`) |
+| `@memmove` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memmove` (as `.lilac.memmove`) |
+| `@memset` | `ref #bit8`, `#bit8`, `#bit_native` | — | `llvm.memset` (as `.lilac.memset`) |
+| `@syscall` | `#bit_native` × 7 | `#bit_native` | the Linux system-call instruction, as inline assembly (as `.lilac.syscall`; x86-64 and aarch64 Linux only, `E035` from user code elsewhere) |
+| `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`); `@trap()` lowers to it, then `unreachable` |
 | `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`) |
 
 The byte-buffer and format-args operations are **not** builtins: they are
@@ -321,7 +326,8 @@ marker is `E031`, so verified IR reaching a backend contains no marker
 (`tests/ui/cfold_dead_compile_error.lir` shows the erased shape). A marker
 that survives is a live error, diagnosed after reachability pruning — never
 during verification (reaching the verifier is an internal error). `@size_of`
-never reaches LIR: lowering computes it from the layouts as a `const`.
+and `@align_of` never reach LIR: lowering computes them from the layouts as
+`const`s.
 
 ## Casts
 
@@ -342,6 +348,12 @@ extend.zero #, &, #, [%, &]
 ```lilac-ir
 truncate #, &, #, [%, &]
 ```
+
+### bitcast
+* `&r: # = bitcast &src`: the same bits under another type. Between an
+  integer and a reference it is `ptrtoint`/`inttoptr` (`@ptr_to_address`,
+  `@address_to_ptr`); between two references, or same-width integers and
+  floats, it is a plain reinterpretation.
 
 ## Field Access
 

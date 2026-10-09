@@ -1301,6 +1301,8 @@ pub(crate) fn symbol(name: &str) -> &str {
 fn builtin_symbol(name: &str) -> &str {
     match name {
         "@memcpy" => ".lilac.memcpy",
+        "@memmove" => ".lilac.memmove",
+        "@memset" => ".lilac.memset",
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
         "@syscall" => ".lilac.syscall",

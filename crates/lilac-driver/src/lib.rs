@@ -500,6 +500,14 @@ impl Session {
             &lowered.names,
             &mut self.diags,
         )?;
+        lilac_ir::check_live_syscalls(
+            &lir,
+            self.target.has_syscall(),
+            reach.as_ref(),
+            &self.source_map,
+            &lowered.names,
+            &mut self.diags,
+        )?;
         if self.stack_traces {
             lilac_ir::trace::instrument(&mut lir, &self.source_map, &lowered.names);
         }
@@ -737,6 +745,51 @@ mod tests {
         assert!(
             text.contains("declared here as `(@bit64) @bit64`"),
             "{text}"
+        );
+    }
+
+    /// A live `@syscall` off Linux x86-64/aarch64 is `E035`, with the call
+    /// chain; an unreachable one, or one on Linux, is fine.
+    #[test]
+    fn syscall_needs_linux() {
+        let src = "call: function () r: @bit_native {
+    r = @syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+}
+main: function () nothing {
+    r: @bit_native = call()
+}
+";
+        let mut session = Session::new();
+        session.target = Target::parse("x86_64-pc-windows-msvc").expect("triple");
+        assert!(session.compile_lir("s.lilac", src).is_err());
+        let text = session.render_diagnostics();
+        assert!(
+            text.contains("error[E035]: `@syscall` is not available on `x86_64-pc-windows-msvc`"),
+            "{text}"
+        );
+        assert!(text.contains("at main (s.lilac:5:22)"), "{text}");
+
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+            let mut session = Session::new();
+            session.target = Target::parse(triple).expect("triple");
+            assert!(
+                session.compile_lir("s.lilac", src).is_ok(),
+                "{}",
+                session.render_diagnostics()
+            );
+        }
+
+        let dead = "call: function () r: @bit_native {
+    r = @syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+}
+main: function () nothing {}
+";
+        let mut session = Session::new();
+        session.target = Target::parse("x86_64-pc-windows-msvc").expect("triple");
+        assert!(
+            session.compile_lir("s.lilac", dead).is_ok(),
+            "{}",
+            session.render_diagnostics()
         );
     }
 

@@ -192,6 +192,23 @@ pub enum Intrinsic {
     StoreU8,
     /// `@memcpy(dst, src, len)`.
     Memcpy,
+    /// `@memmove(dst, src, len)`: `@memcpy` for overlapping ranges.
+    Memmove,
+    /// `@memset(dst, byte, len)`.
+    Memset,
+    /// `@align_of(Type)` / `@align_of(value)`.
+    AlignOf,
+    /// `@ptr_add(ptr, offset)`: the address `offset` bytes past `ptr`.
+    PtrAdd,
+    /// `@ptr_to_address(ptr)`: a reference's address as an integer.
+    PtrToAddress,
+    /// `@address_to_ptr(address)`: an integer address as a reference.
+    AddressToPtr,
+    /// `@syscall(number, a0, a1, a2, a3, a4, a5)`: the Linux system-call
+    /// instruction (`E035` on other targets).
+    Syscall,
+    /// `@trap()`: stops the program at once with a trap instruction.
+    Trap,
     /// `@byte_buffer_ptr(buffer)`.
     ByteBufferPtr,
     /// `@byte_buffer_len(buffer)`.
@@ -274,6 +291,14 @@ impl Intrinsic {
             "@load_u8" => Self::LoadU8,
             "@store_u8" => Self::StoreU8,
             "@memcpy" => Self::Memcpy,
+            "@memmove" => Self::Memmove,
+            "@memset" => Self::Memset,
+            "@align_of" => Self::AlignOf,
+            "@ptr_add" => Self::PtrAdd,
+            "@ptr_to_address" => Self::PtrToAddress,
+            "@address_to_ptr" => Self::AddressToPtr,
+            "@syscall" => Self::Syscall,
+            "@trap" => Self::Trap,
             "@byte_buffer_ptr" => Self::ByteBufferPtr,
             "@byte_buffer_len" => Self::ByteBufferLen,
             "@byte_buffer_from" => Self::ByteBufferFrom,
@@ -291,8 +316,8 @@ impl Intrinsic {
         })
     }
 
-    /// The signature every call is checked against. `@size_of` and
-    /// `@compile_error` take a type/literal operand and are checked specially,
+    /// The signature every call is checked against. `@size_of`, `@align_of`
+    /// and `@compile_error` take a type/literal operand and are checked specially,
     /// so their parameter list is empty here.
     #[must_use]
     pub fn signature(self) -> Signature {
@@ -336,8 +361,8 @@ impl Intrinsic {
                 Some(Builtin(width.builtin())),
             ),
             Self::Truncate | Self::ExtendZero => sig(vec![AnyBit], Some(ExpectedBit)),
-            Self::SizeOf => sig(Vec::new(), Some(Builtin("@bit_native"))),
-            Self::CompileError => sig(Vec::new(), None),
+            Self::SizeOf | Self::AlignOf => sig(Vec::new(), Some(Builtin("@bit_native"))),
+            Self::CompileError | Self::Trap => sig(Vec::new(), None),
             Self::LoadU8 => sig(
                 vec![Ref("@bit8"), Builtin("@bit_native")],
                 Some(Builtin("@bit8")),
@@ -346,9 +371,25 @@ impl Intrinsic {
                 vec![Ref("@bit8"), Builtin("@bit_native"), Builtin("@bit8")],
                 None,
             ),
-            Self::Memcpy => sig(
+            Self::Memcpy | Self::Memmove => sig(
                 vec![Ref("@bit8"), Ref("@bit8"), Builtin("@bit_native")],
                 None,
+            ),
+            Self::Memset => sig(
+                vec![Ref("@bit8"), Builtin("@bit8"), Builtin("@bit_native")],
+                None,
+            ),
+            Self::PtrAdd => sig(
+                vec![Ref("unknown"), Builtin("@bit_native")],
+                Some(Ref("unknown")),
+            ),
+            Self::PtrToAddress => sig(vec![Ref("unknown")], Some(Builtin("@bit_native"))),
+            Self::AddressToPtr | Self::OsAlloc => {
+                sig(vec![Builtin("@bit_native")], Some(Ref("unknown")))
+            }
+            Self::Syscall => sig(
+                vec![Builtin("@bit_native"); 7],
+                Some(Builtin("@bit_native")),
             ),
             Self::ByteBufferPtr => sig(vec![Builtin("@byte_buffer")], Some(Ref("@bit8"))),
             Self::ByteBufferLen => sig(vec![Builtin("@byte_buffer")], Some(Builtin("@bit_native"))),
@@ -370,10 +411,23 @@ impl Intrinsic {
                 None,
             ),
             Self::OsExit => sig(vec![Builtin("@bit32")], None),
-            Self::OsAlloc => sig(vec![Builtin("@bit_native")], Some(Ref("unknown"))),
             Self::OsFree => sig(vec![Ref("unknown")], None),
             Self::Panic => sig(vec![Builtin("@byte_buffer")], None),
         }
+    }
+
+    /// The backend leaf builtin (`lilac_ir::builtin_sig`) this intrinsic
+    /// calls, if it is one.
+    #[must_use]
+    pub fn leaf_builtin(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Memcpy => "@memcpy",
+            Self::Memmove => "@memmove",
+            Self::Memset => "@memset",
+            Self::Syscall => "@syscall",
+            Self::Trap => "@lilac_abort",
+            _ => return None,
+        })
     }
 
     /// The LIR runtime function implementing this intrinsic, if it is one.
@@ -423,6 +477,32 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@compilerError"), None);
         assert_eq!(Intrinsic::lookup("@size_of"), Some(Intrinsic::SizeOf));
         assert_eq!(Intrinsic::lookup("@panic"), Some(Intrinsic::Panic));
+        assert_eq!(Intrinsic::lookup("@align_of"), Some(Intrinsic::AlignOf));
+        assert_eq!(Intrinsic::lookup("@ptr_add"), Some(Intrinsic::PtrAdd));
+        assert_eq!(Intrinsic::lookup("@trap"), Some(Intrinsic::Trap));
+    }
+
+    #[test]
+    fn instruction_builtin_signatures() {
+        let sig = Intrinsic::PtrAdd.signature();
+        assert_eq!(
+            sig.params,
+            vec![Slot::Ref("unknown"), Slot::Builtin("@bit_native")]
+        );
+        assert_eq!(sig.result, Some(Slot::Ref("unknown")));
+        assert_eq!(
+            Intrinsic::AddressToPtr.signature().result,
+            Some(Slot::Ref("unknown"))
+        );
+        let sig = Intrinsic::Syscall.signature();
+        assert_eq!(sig.params, vec![Slot::Builtin("@bit_native"); 7]);
+        assert_eq!(sig.result, Some(Slot::Builtin("@bit_native")));
+        assert_eq!(
+            Intrinsic::Memset.signature().params[1],
+            Slot::Builtin("@bit8")
+        );
+        assert_eq!(Intrinsic::Trap.leaf_builtin(), Some("@lilac_abort"));
+        assert_eq!(Intrinsic::Memmove.leaf_builtin(), Some("@memmove"));
     }
 
     #[test]

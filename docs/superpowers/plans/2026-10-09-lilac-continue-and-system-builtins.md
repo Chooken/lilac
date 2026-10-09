@@ -354,21 +354,21 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part D: instruction builtins
 
-- [ ] `intrinsics.rs`:
+- [x] `intrinsics.rs`:
   - add `PtrAdd`, `PtrToAddress`, `AddressToPtr`, `AlignOf`, `Memmove`,
     `Memset`, `Syscall` and `Trap`;
   - `AlignOf` gets the `SizeOf`-style typeck special case.
-- [ ] Lowering:
+- [x] Lowering:
   - `@ptr_add` → `Builtin("@ptr_add")`;
   - the address builtins → `Convert` (ptr→int `Bitcast`, as
     `runtime::is_null` does, and int→ptr);
   - `@align_of` comes from the layout code;
   - `@syscall` → `Builtin("@syscall")`, `E035` off Linux x86-64/aarch64;
   - `@trap` → `@lilac_abort`.
-- [ ] `lilac-ir`: `builtin_sig` rows for `@memmove` and `@memset`; the
+- [x] `lilac-ir`: `builtin_sig` rows for `@memmove` and `@memset`; the
       verifier accepts int→ptr `Convert`.
-- [ ] `lilac-codegen-llvm`: `llvm.memmove`/`llvm.memset`; `inttoptr`.
-- [ ] Tests:
+- [x] `lilac-codegen-llvm`: `llvm.memmove`/`llvm.memset`; `inttoptr`.
+- [x] Tests:
   - lookup/signature unit tests;
   - an IR snapshot;
   - `tests/run/allocator/`: a free-list allocator over the existing
@@ -378,7 +378,22 @@ Done (2026-10-09). Differences from the tasks above:
     alignment;
   - `@memmove` with overlapping ranges, and `@memset`;
   - `@trap` exits abnormally.
-- [ ] Docs: SPEC §3 rows; IR_SPEC.
+- [x] Docs: SPEC §3 rows; IR_SPEC.
+
+Done (2026-10-09). Differences from the tasks above:
+
+- `@ptr_add` lowers inline (`bitcast` to `#bit_native`, `i.add`, `bitcast`
+  back) rather than calling the `@ptr_add` leaf, whose signature is
+  `ref #bit8`; the operand keeps its `ref #unknown` type without extra casts.
+- `E035` is checked after DCE in the driver (`check_live_syscalls`, beside
+  `E031`) rather than during lowering, which has no diagnostics. So only a
+  reachable `@syscall` is an error, and the runtime's own calls are exempt.
+- The verifier already accepted any `Convert`, and the backend already
+  emitted `inttoptr` for an int→ref `bitcast`, so neither needed changes.
+- `@trap` is tested by a new run-test directive, `// expect-exit: trap`
+  (a signal on Unix, a negative exception status on Windows). `E035` is
+  covered by a driver unit test, since `expect-error` runs `check` without
+  a `--target`.
 
 ### Part E: eager library loading
 

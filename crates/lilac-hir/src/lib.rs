@@ -359,6 +359,8 @@ pub enum HirExprKind {
     Const(DefId),
     /// `@size_of(T)`.
     SizeOf(TypeRef),
+    /// `@align_of(T)`.
+    AlignOf(TypeRef),
     /// A `@compile_error` site (`E031` if lowered in a reachable function).
     CompileError {
         /// Message.
@@ -439,6 +441,7 @@ impl HirExpr {
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)
             | HirExprKind::SizeOf(_)
+            | HirExprKind::AlignOf(_)
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }

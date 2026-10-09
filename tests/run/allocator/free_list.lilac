@@ -1,0 +1,146 @@
+// A first-fit free-list allocator over one `@os_alloc` arena, written with
+// the instruction builtins: blocks are found by address (`@address_to_ptr`),
+// and `@ptr_to_address` turns the arena back into an address.
+//
+// Every block starts with a 16-byte `Block` header and is a multiple of 16
+// bytes long, so blocks tile the arena and the next block is at
+// `address + size`. Payloads are 16-byte aligned; a larger alignment frees
+// the space in front of the block as a block of its own.
+
+Block: object {
+    // The whole block, header included.
+    size: @bit_native
+    // `0x1` while allocated.
+    used: @bit_native
+}
+
+FreeList: object {
+    start: @bit_native
+    end: @bit_native
+}
+
+header_size: @bit_native => 0x10
+
+// `value` rounded up to a multiple of `align`.
+align_up: function (value: @bit_native, align: @bit_native) rounded: @bit_native {
+    rounded = @i_mul_native(@i_div_u_native(@i_sub_native(@i_add_native(value, align), 0x1), align), align)
+}
+
+block_at: function (address: @bit_native) block: ref Block {
+    block = @address_to_ptr(address) as ref Block
+}
+
+// Makes the block at `address` `size` bytes, freeing the rest of its old
+// size as a new block when that is big enough to hold one.
+shrink: function (address: @bit_native, size: @bit_native) nothing {
+    block: ref Block = block_at(address)
+    spare: @bit_native = @i_sub_native(block.size, size)
+    if @i_greater_than_or_equal_u_native(spare, 0x20) {
+        block.size = size
+        rest: ref Block = block_at(@i_add_native(address, size))
+        rest.size = spare
+        rest.used = 0x0
+    }
+}
+
+create_free_list: function (bytes: @bit_native) list: FreeList {
+    raw: @bit_native = @ptr_to_address(@os_alloc(bytes))
+    start: @bit_native = align_up(raw, header_size)
+    end: @bit_native = @i_mul_native(@i_div_u_native(@i_add_native(raw, bytes), header_size), header_size)
+    first: ref Block = block_at(start)
+    first.size = @i_sub_native(end, start)
+    first.used = 0x0
+    list = FreeList { start = start, end = end }
+}
+
+// The address of `size` bytes aligned to `align` (a power of two), or
+// `0x0` when no free block is big enough.
+alloc: function (list: ref FreeList, size: @bit_native, align: @bit_native) payload: @bit_native {
+    payload = 0x0
+    need: @bit_native = @i_add_native(align_up(size, header_size), header_size)
+    if @i_less_than_u_native(align, header_size) {
+        align = header_size
+    }
+    address: @bit_native = list.start
+    loop if @i_less_than_u_native(address, list.end) {
+        block: ref Block = block_at(address)
+        size_here: @bit_native = block.size
+        if @i_greater_than_u_native(block.used, 0x0) {
+            address = @i_add_native(address, size_here)
+            continue
+        }
+        start: @bit_native = @i_sub_native(align_up(@i_add_native(address, header_size), align), header_size)
+        gap: @bit_native = @i_sub_native(start, address)
+        if @i_greater_than_u_native(@i_add_native(gap, need), size_here) {
+            address = @i_add_native(address, size_here)
+            continue
+        }
+        // Free the alignment gap as a block of its own.
+        if @i_greater_than_u_native(gap, 0x0) {
+            block.size = gap
+            moved: ref Block = block_at(start)
+            moved.size = @i_sub_native(size_here, gap)
+        }
+        shrink(start, need)
+        taken: ref Block = block_at(start)
+        taken.used = 0x1
+        payload = @i_add_native(start, header_size)
+        return
+    } else break
+}
+
+// Merges every run of adjacent free blocks into one.
+coalesce: function (list: ref FreeList) nothing {
+    address: @bit_native = list.start
+    loop if @i_less_than_u_native(address, list.end) {
+        block: ref Block = block_at(address)
+        next: @bit_native = @i_add_native(address, block.size)
+        if @i_less_than_u_native(block.used, 0x1) {
+            if @i_less_than_u_native(next, list.end) {
+                after: ref Block = block_at(next)
+                if @i_less_than_u_native(after.used, 0x1) {
+                    block.size = @i_add_native(block.size, after.size)
+                    continue
+                }
+            }
+        }
+        address = next
+    } else break
+}
+
+free: function (list: ref FreeList, payload: @bit_native) nothing {
+    block: ref Block = block_at(@i_sub_native(payload, header_size))
+    block.used = 0x0
+    coalesce(list)
+}
+
+// Resizes the allocation at `payload` to `size` bytes, keeping its
+// contents: in place when it fits or the next block is free and big enough,
+// else by moving it.
+realloc: function (list: ref FreeList, payload: @bit_native, size: @bit_native, align: @bit_native) moved: @bit_native {
+    address: @bit_native = @i_sub_native(payload, header_size)
+    block: ref Block = block_at(address)
+    need: @bit_native = @i_add_native(align_up(size, header_size), header_size)
+    old_size: @bit_native = block.size
+    if @i_greater_than_or_equal_u_native(old_size, need) {
+        moved = payload
+        return
+    }
+    next: @bit_native = @i_add_native(address, old_size)
+    if @i_less_than_u_native(next, list.end) {
+        after: ref Block = block_at(next)
+        if @i_less_than_u_native(after.used, 0x1) {
+            if @i_greater_than_or_equal_u_native(@i_add_native(old_size, after.size), need) {
+                block.size = @i_add_native(old_size, after.size)
+                shrink(address, need)
+                moved = payload
+                return
+            }
+        }
+    }
+    moved = alloc(list, size, align)
+    if @i_greater_than_u_native(moved, 0x0) {
+        @memcpy(@address_to_ptr(moved) as ref @bit8, @address_to_ptr(payload) as ref @bit8, @i_sub_native(old_size, header_size))
+        free(list, payload)
+    }
+}

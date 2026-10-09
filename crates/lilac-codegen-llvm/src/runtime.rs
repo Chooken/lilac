@@ -4,6 +4,7 @@
 //! (`.lilac.*` functions built by `lilac_ir::runtime` and lowered through the
 //! normal pointer-ABI function path), so the backend defines only the
 //! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`),
+//! `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
 //! `@lilac_abort` (`llvm.trap` + `unreachable`), `@syscall` (the Linux
 //! system-call instruction, as inline assembly), and `@trace_head` (the
 //! address of the shadow-stack head global). Each uses the value ABI from
@@ -31,6 +32,12 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     let used = lower.used_builtins();
     if used.contains("@memcpy") {
         memcpy(lower);
+    }
+    if used.contains("@memmove") {
+        memmove(lower);
+    }
+    if used.contains("@memset") {
+        memset(lower);
     }
     if used.contains("@ptr_add") {
         ptr_add(lower);
@@ -106,6 +113,46 @@ fn memcpy(lower: &Lower<'_, '_>) {
     src.set_name("src");
     len.set_name("len");
     checked(builder.build_memcpy(dest, 1, src, 1, len), "llvm.memcpy");
+    checked(builder.build_return(None), "return void");
+}
+
+/// `@memmove(ref i8, ref i8, iNative)`: `llvm.memmove`, under
+/// `.lilac.memmove` for the same reason as [`memcpy`].
+fn memmove(lower: &Lower<'_, '_>) {
+    let native = lower.native_int();
+    let ptr = lower.ptr_type();
+    let void = lower.context().void_type();
+    let params = [
+        BasicMetadataTypeEnum::from(ptr),
+        BasicMetadataTypeEnum::from(ptr),
+        BasicMetadataTypeEnum::from(native),
+    ];
+    let function = lower.runtime_fn(".lilac.memmove", void.fn_type(&params, false));
+    let builder = entry(lower, function);
+    let dest = param(function, 0, "memmove").into_pointer_value();
+    let src = param(function, 1, "memmove").into_pointer_value();
+    let len = param(function, 2, "memmove").into_int_value();
+    checked(builder.build_memmove(dest, 1, src, 1, len), "llvm.memmove");
+    checked(builder.build_return(None), "return void");
+}
+
+/// `@memset(ref i8, i8, iNative)`: `llvm.memset`, under `.lilac.memset`.
+fn memset(lower: &Lower<'_, '_>) {
+    let native = lower.native_int();
+    let ptr = lower.ptr_type();
+    let byte = lower.context().i8_type();
+    let void = lower.context().void_type();
+    let params = [
+        BasicMetadataTypeEnum::from(ptr),
+        BasicMetadataTypeEnum::from(byte),
+        BasicMetadataTypeEnum::from(native),
+    ];
+    let function = lower.runtime_fn(".lilac.memset", void.fn_type(&params, false));
+    let builder = entry(lower, function);
+    let dest = param(function, 0, "memset").into_pointer_value();
+    let value = param(function, 1, "memset").into_int_value();
+    let len = param(function, 2, "memset").into_int_value();
+    checked(builder.build_memset(dest, 1, value, len), "llvm.memset");
     checked(builder.build_return(None), "return void");
 }
 

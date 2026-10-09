@@ -215,6 +215,7 @@ An expression is constant when it is one of:
 | --- | --- |
 | an integer literal | its bits at the expression's width |
 | `@size_of(T)` | the size of `T` (per generic instance) |
+| `@align_of(T)` | the alignment of `T` (per generic instance) |
 | an inline constant (`name: T => expr`) | its initializer, which must be constant |
 | a `@builtin` constant (`@builtin.Target.os`) | the target or build fact it states |
 | an object or enum-variant literal | if every field / the payload is constant |
@@ -324,11 +325,19 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@fbit_to_bits_W`** | `(@fbitW): @bitW` | Reinterprets a float's bits as the same-width integer (`W` ∈ 16/32/64 only: `@bit128` does not exist). |
 | **`@bits_to_fbit_W`** | `(@bitW): @fbitW` | Reinterprets integer bits as the same-width float (`W` ∈ 16/32/64 only). |
 | **`@size_of`** | `(T)` or `(value)` | The size in bytes of a type, or of a value's type, as a `@bit_native` constant (target C layout: fields in order, each aligned, padded to the largest alignment). Inside a generic body it is the size of the instantiated type. |
+| **`@align_of`** | `(T)` or `(value)` | The alignment in bytes of a type, or of a value's type, as a `@bit_native` constant (the same target C layout as `@size_of`). |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). |
 | **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
 | **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
 | **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bit_native`) from `ref @bit8` to `ref @bit8`. |
+| **`@memmove`** | `(dst, src, len)` | `@memcpy` for ranges that may overlap. |
+| **`@memset`** | `(dst, byte, len)` | Fills `len` bytes (`@bit_native`) at `ref @bit8` with `byte` (`@bit8`). |
+| **`@ptr_add`** | `(ptr, offset)` | The `ref unknown` that is `offset` bytes (`@bit_native`) past `ptr` (`ref unknown`). |
+| **`@ptr_to_address`** | `(ptr)` | The address of `ptr` (`ref unknown`) as a `@bit_native`. |
+| **`@address_to_ptr`** | `(address)` | The `ref unknown` at `address` (`@bit_native`); `@address_to_ptr(0x0)` is null. |
+| **`@syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
+| **`@trap()`** | `()` | Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
 | **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
 | **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bit_native` length. Same lifetime caveat as any `ref`. |
@@ -342,7 +351,10 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@os_alloc`** | `(size)` | Allocates `size` zeroed bytes (`@bit_native`) on the heap. Returns `ref unknown`. |
 | **`@os_free`** | `(ptr)` | Frees `ref unknown` memory from `@os_alloc`. |
 
-`@size_of` is computed during lowering and is always a constant.
+`@size_of` and `@align_of` are computed during lowering and are always
+constants. Pointer math goes through `ref unknown`: cast a typed reference
+to it (`ref value as ref unknown`), move it with `@ptr_add`, and cast it back
+(`as ref T`), which auto-dereferences like any reference.
 The `@os_*` intrinsics are the OS layer: the compiler implements them per
 target with the operating system's own interface (`kernel32` on Windows,
 system calls on Linux, `libSystem` on macOS, where Apple supports no other),

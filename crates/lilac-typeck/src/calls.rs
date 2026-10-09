@@ -759,13 +759,18 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
         match intrinsic {
-            Intrinsic::SizeOf => {
+            Intrinsic::SizeOf | Intrinsic::AlignOf => {
                 self.intrinsic_arity(name, 1, args.len(), span)?;
                 let ty = self.size_of_operand(fcx, &args[0])?;
+                let kind = if intrinsic == Intrinsic::SizeOf {
+                    HirExprKind::SizeOf(ty)
+                } else {
+                    HirExprKind::AlignOf(ty)
+                };
                 return Ok(Called::Value(HirExpr {
                     ty: self.value_of("@bit_native"),
                     span,
-                    kind: HirExprKind::SizeOf(ty),
+                    kind,
                 }));
             }
             Intrinsic::CompileError => {
@@ -924,7 +929,7 @@ impl Checker<'_> {
         }
     }
 
-    /// `@size_of`'s operand: a type (`@bit32`, `T`, `Box[T]`, `ref T`) or a
+    /// `@size_of`'s and `@align_of`'s operand: a type (`@bit32`, `T`, `Box[T]`, `ref T`) or a
     /// value (its type).
     fn size_of_operand(&mut self, fcx: &mut FnCx, arg: &Expr) -> Result<TypeRef, ErrorGuaranteed> {
         let as_type = match arg {

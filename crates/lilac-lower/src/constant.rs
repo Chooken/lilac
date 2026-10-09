@@ -217,11 +217,17 @@ impl<'a> Lower<'a> {
                 let width = self.int_width(expr.ty)?;
                 Some(Value::Int(parse_int(text)? & mask_of(width), width))
             }
-            HirExprKind::SizeOf(ty) => {
+            HirExprKind::SizeOf(ty) | HirExprKind::AlignOf(ty) => {
                 let lir = self.lir_ty(*ty);
-                let (size, _) = lilac_ir::size_align(&self.module.layouts, &lir, self.ptr_bytes);
+                let (size, align) =
+                    lilac_ir::size_align(&self.module.layouts, &lir, self.ptr_bytes);
+                let value = if matches!(expr.kind, HirExprKind::SizeOf(_)) {
+                    size
+                } else {
+                    align
+                };
                 let width = self.int_width(expr.ty)?;
-                Some(Value::Int(size & mask_of(width), width))
+                Some(Value::Int(value & mask_of(width), width))
             }
             HirExprKind::Const(def) => {
                 let hir = self.hir;
