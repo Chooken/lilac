@@ -113,6 +113,15 @@ impl Def {
     }
 }
 
+/// What one segment of a qualified path names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Segment {
+    /// A namespace (`A.B`).
+    Ns(NsId),
+    /// A definition (an item, or a member of a type).
+    Def(DefId),
+}
+
 /// The result of resolving one name in a file.
 #[derive(Clone, Debug)]
 pub enum Lookup {
@@ -156,6 +165,8 @@ pub struct Resolved {
     pub files: HashMap<FileId, FileScope>,
     /// Every hook definition (top-level and member), in declaration order.
     pub hooks: Vec<DefId>,
+    /// Namespaces by dotted path.
+    pub ns_by_path: HashMap<String, NsId>,
 }
 
 impl Resolved {
@@ -184,6 +195,65 @@ impl Resolved {
         let ns = self.namespaces.iter().find(|data| data.path == ns)?;
         let id = *ns.items.get(name)?;
         (self.def(id).vis == Visibility::Public).then_some(id)
+    }
+
+    /// The namespace a path's first segment `name` names from namespace
+    /// `from`: a child of `from`, else of its nearest ancestor that has one.
+    /// The root is every namespace's ancestor, so a top-level namespace is
+    /// reachable from anywhere unless a closer one shadows it.
+    #[must_use]
+    pub fn namespace_named(&self, from: NsId, name: &str) -> Option<NsId> {
+        let mut current = Some(from);
+        while let Some(ns) = current {
+            if let Some(child) = self.child_namespace(ns, name) {
+                return Some(child);
+            }
+            current = self.namespaces.get(ns.0 as usize)?.parent;
+        }
+        None
+    }
+
+    /// The direct child namespace `name` of `ns`.
+    #[must_use]
+    pub fn child_namespace(&self, ns: NsId, name: &str) -> Option<NsId> {
+        let parent = self.namespace_path(ns);
+        let path = if parent.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent}.{name}")
+        };
+        self.ns_by_path.get(&path).copied()
+    }
+
+    /// What `name` names inside namespace `ns`, seen from namespace `from`:
+    /// an item first (a `private` one only within reach), else a child
+    /// namespace.
+    #[must_use]
+    pub fn ns_member(&self, ns: NsId, name: &str, from: NsId) -> Option<Segment> {
+        let item = self.namespaces.get(ns.0 as usize)?.items.get(name);
+        if let Some(&id) = item {
+            if self.def(id).vis == Visibility::Public || self.reaches(from, ns) {
+                return Some(Segment::Def(id));
+            }
+        }
+        self.child_namespace(ns, name).map(Segment::Ns)
+    }
+
+    /// Whether code in `from` reaches `to`'s private items: `to` is `from`
+    /// or one of its ancestors.
+    #[must_use]
+    pub fn reaches(&self, from: NsId, to: NsId) -> bool {
+        let mut current = Some(from);
+        while let Some(ns) = current {
+            if ns == to {
+                return true;
+            }
+            current = self
+                .namespaces
+                .get(ns.0 as usize)
+                .and_then(|data| data.parent);
+        }
+        false
     }
 
     /// The top-level item `name` in the root namespace, whatever its
@@ -248,6 +318,7 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
     for ns in &mut resolved.namespaces {
         ns.parent = nearest_ancestor(&ns.path, &by_path);
     }
+    resolved.ns_by_path.clone_from(&by_path);
 
     let asts: HashMap<FileId, &Program> = programs.iter().map(|(file, p)| (*file, p)).collect();
     for unit in &project.files {
@@ -417,6 +488,10 @@ impl Collector<'_> {
                 self.members(owner, items, Visibility::Private);
                 continue;
             }
+            if matches!(item.kind, ItemKind::Object { .. } | ItemKind::Enum { .. }) {
+                self.nested_type(owner, item);
+                continue;
+            }
             let Some(id) = self.item(item, vis, Some(owner)) else {
                 continue;
             };
@@ -429,6 +504,36 @@ impl Collector<'_> {
                 _ => self.add_member(owner, &item.name, id, item.span),
             }
         }
+    }
+
+    /// `E036`: types are declared only at the top level of a file.
+    fn nested_type(&mut self, owner: DefId, item: &Item) {
+        let kind = if matches!(item.kind, ItemKind::Object { .. }) {
+            "object"
+        } else {
+            "enum"
+        };
+        let owner = self.resolved.def(owner);
+        let (owner_name, owner_span) = (owner.name.clone(), owner.name_span);
+        self.diags.emit(
+            Diagnostic::error(
+                "E036",
+                format!(
+                    "`{}` is an {kind} declared inside `{owner_name}`",
+                    item.name
+                ),
+            )
+            .label(
+                leading_name_span(item.span, &item.name),
+                true,
+                "types are declared only at the top level",
+            )
+            .label(owner_span, false, format!("inside `{owner_name}`"))
+            .help(format!(
+                "move `{}` to the top level of the file, or into a folder namespace",
+                item.name
+            )),
+        );
     }
 
     fn add_member(&mut self, owner: DefId, name: &str, id: DefId, span: Span) {
@@ -712,6 +817,66 @@ mod tests {
         assert!(resolved.lookup(files[1], "b_fn").is_none());
         let a_fn = one(&resolved, files[0], "a_fn");
         assert_eq!(resolved.qualified_name(a_fn), "a.a_fn");
+    }
+
+    #[test]
+    fn namespace_paths_resolve_relative_then_absolute() {
+        let (resolved, _, diags) = resolve_files(
+            &["", "a", "a.b", "b", "c"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}
+",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    src: "private {
+    hidden: function () nothing {}
+}
+shown: function () nothing {}
+",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "inner: function () nothing {}
+",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 3,
+                    src: "top: function () nothing {}
+",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 4,
+                    src: "other: function () nothing {}
+",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let (root, a, a_b, b, c) = (NsId(0), NsId(1), NsId(2), NsId(3), NsId(4));
+        // From `a`, `b` is the closer `a.b`; from the root it is `b`.
+        assert_eq!(resolved.namespace_named(a, "b"), Some(a_b));
+        assert_eq!(resolved.namespace_named(root, "b"), Some(b));
+        assert_eq!(resolved.namespace_named(c, "b"), Some(b));
+        assert_eq!(resolved.namespace_named(a_b, "a"), Some(a));
+        assert_eq!(resolved.namespace_named(root, "missing"), None);
+        // A step into a namespace finds items, then child namespaces.
+        assert!(matches!(
+            resolved.ns_member(a, "shown", c),
+            Some(Segment::Def(_))
+        ));
+        assert_eq!(resolved.ns_member(a, "b", c), Some(Segment::Ns(a_b)));
+        // A private item is found only within reach.
+        assert_eq!(resolved.ns_member(a, "hidden", c), None);
+        assert!(resolved.ns_member(a, "hidden", a).is_some());
+        assert!(resolved.ns_member(a, "hidden", a_b).is_some());
     }
 
     #[test]

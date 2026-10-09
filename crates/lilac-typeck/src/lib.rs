@@ -18,6 +18,7 @@ mod calls;
 mod expr;
 mod generics;
 mod literals;
+mod paths;
 mod sigs;
 mod types;
 
@@ -28,7 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_hir::{FuncKey, HirFunc, HirProgram};
-use lilac_resolve::{DefId, DefKind, Lookup, Resolved};
+use lilac_resolve::{DefId, DefKind, Resolved};
 use lilac_span::{FileId, Span};
 use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef, Types};
 
@@ -437,32 +438,6 @@ impl Checker<'_> {
     }
 
     // ---- name lookup ---------------------------------------------------
-
-    /// Resolves an item name in the current file, or a qualified
-    /// `@builtin.…` name. `Ok(None)`: no binding; `Err`: ambiguous (`E029`
-    /// emitted).
-    pub(crate) fn lookup_item(
-        &mut self,
-        name: &str,
-        span: Span,
-    ) -> Result<Option<DefId>, ErrorGuaranteed> {
-        if name.contains('.') {
-            return Ok(self.res.lookup_path(name));
-        }
-        match self.res.lookup(self.file(), name) {
-            None if self.in_entry() => Ok(self.res.root_item(name)),
-            Some(Lookup::One(id)) => Ok(Some(*id)),
-            Some(Lookup::Ambiguous(sites)) => {
-                let mut diagnostic = Diagnostic::error("E029", format!("`{name}` is ambiguous"))
-                    .label(span, true, "ambiguous reference here");
-                for site in sites {
-                    diagnostic = diagnostic.label(*site, false, "imported here");
-                }
-                Err(self.diags.emit(diagnostic))
-            }
-            None => Ok(None),
-        }
-    }
 
     /// Whether the body being checked is the top-level `@entry` hook, whose
     /// unfound names fall back to the program's root namespace (so a

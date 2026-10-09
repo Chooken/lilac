@@ -103,6 +103,18 @@
   top-level `private { … }` excludes an item from `using` (importers see it as
   unresolved, not `E026`); an object-member `private { … }` gates external access
   with `E026`. Top-level hooks are unit-global and carry no namespace prefix.
+- Paths (`lilac-typeck/src/paths.rs`): a type name is a dotted path
+  (`A.B.Type`), and an expression member chain is flattened into one
+  (`Checker::qualified_name`) while it walks namespaces;
+  `Checker::lookup_item` resolves every name and path. The head is the
+  file's name, else a namespace by reach (`Resolved::namespace_named`), and
+  each step is `Resolved::ns_member` (an item, a `private` one only within
+  reach, else a child namespace); an item ends the path. `@builtin` is an
+  ordinary top-level namespace in this.
+- Types are top-level only: the resolver rejects an `object`/`enum` in a
+  type's body as `E036` (`Collector::nested_type`) and defines nothing for
+  it. The parser still accepts the syntax (also in enum bodies) so the
+  error is that one, not a parse error.
 - Namespace qualification: every non-root symbol/type is prefixed by its dotted
   namespace path (`A.B.foo`, `A.Object.Method`). A **root free function is
   `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it

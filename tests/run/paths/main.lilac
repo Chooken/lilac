@@ -1,0 +1,32 @@
+// expect-stdout: paths
+// Namespaces named by path in types, struct literals and expressions:
+// `Geo.Shapes` is loaded by `Geo` but never `using`d here, and `Standard`
+// is reached without a `using`.
+
+using Geo
+
+check: function (actual: @bit32, want: @bit32, code: @bit32) nothing {
+    if @i_less_than_u_32(actual, want) {
+        Standard.Process.exit(code)
+    }
+    if @i_greater_than_u_32(actual, want) {
+        Standard.Process.exit(code)
+    }
+}
+
+main: function () nothing {
+    sq: Geo.Shapes.Square = Geo.Shapes.Square { side = 0x4 }
+    check(Geo.Shapes.area(sq), 0x10, 0x1)
+    check(Geo.Shapes.Square.perimeter(ref sq), 0x10, 0x2)
+    check(sq.perimeter(), 0x10, 0x3)
+    check(Geo.Shapes.UNIT, 0x1, 0x4)
+    b: Geo.Shapes.Pair[@bit32] = Geo.Shapes.Pair[@bit32] { a = 0x2, b = 0x3 }
+    check(b.a, 0x2, 0x5)
+    s: Geo.Shapes.Shape = Geo.Shapes.Shape.Circle(0x6)
+    match s {
+        Geo.Shapes.Shape.Circle -> r: @bit32 => check(r, 0x6, 0x6)
+        .Dot => Standard.Process.exit(0x7)
+    }
+    check(corner_sum(), 0x3, 0x8)
+    Standard.Io.print_line("paths")
+}

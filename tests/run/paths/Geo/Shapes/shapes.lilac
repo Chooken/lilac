@@ -1,0 +1,18 @@
+UNIT: @bit32 = 0x1
+
+Square: object {
+    side: @bit32
+    perimeter: function (self) n: @bit32 => @i_mul_32(self.side, 0x4)
+}
+
+Pair[T]: object {
+    a: T
+    b: T
+}
+
+Shape: enum {
+    Dot
+    Circle: @bit32
+}
+
+area: function (square: Square) n: @bit32 => @i_mul_32(square.side, square.side)

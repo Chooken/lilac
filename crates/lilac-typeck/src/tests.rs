@@ -1648,3 +1648,61 @@ fn arrays_check_elements_lengths_and_operands() {
         assert!(has_code(&diags, "E010"), "{src}\n{diags:?}");
     }
 }
+
+#[test]
+fn nested_types_are_e036() {
+    let sources = [
+        "Outer: object {
+    Inner: object {
+        x: @bit8
+    }
+}
+
+main: function () nothing {}
+",
+        "Status: enum {
+    Idle
+    Kind: enum { A, B }
+}
+
+main: function () nothing {}
+",
+        "Outer: object {
+    private {
+        Secret: enum { A }
+    }
+}
+
+main: function () nothing {}
+",
+    ];
+    for src in sources {
+        let diags = check_src(src);
+        let codes: Vec<&str> = diags.diagnostics().iter().map(|d| d.code).collect();
+        assert_eq!(
+            codes,
+            ["E036"],
+            "{src}
+{diags:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_type_name_is_unknown() {
+    // The rejected declaration defines nothing, so its uses do not resolve.
+    let src = "Outer: object {
+    Inner: object {
+        x: @bit8
+    }
+    inner: Inner
+}
+
+main: function () nothing {
+    a: Outer.Inner = Outer.Inner { x = 0x1 }
+}
+";
+    let diags = check_src(src);
+    assert!(has_code(&diags, "E036"), "{diags:?}");
+    assert!(has_code(&diags, "E023"), "{diags:?}");
+}

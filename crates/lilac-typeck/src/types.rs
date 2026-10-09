@@ -12,6 +12,7 @@ use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
 use lilac_ty::{TypeId, TypeKind, TypeRef};
 
+use crate::paths::path_tail;
 use crate::{Checker, TypeState, MAX_DEPTH};
 
 impl Checker<'_> {
@@ -61,13 +62,14 @@ impl Checker<'_> {
         if let Some((len, len_span)) = &ty.array_len {
             return self.resolve_array(ty, len, *len_span);
         }
+        let name_span = path_tail(ty.name_span, &ty.name);
         if !ty.name_span.is_dummy() {
             let kind = if self.types.builtin(&ty.name).is_some() {
                 SemanticKind::BuiltinType
             } else {
                 SemanticKind::UserType
             };
-            self.record_semantic(ty.name_span, kind);
+            self.record_semantic(name_span, kind);
         }
         if let Some(index) = self.env.params.iter().position(|name| *name == ty.name) {
             if !ty.generic_args.is_empty() {
@@ -114,7 +116,7 @@ impl Checker<'_> {
             );
             return TypeRef::ERROR;
         };
-        self.record_use(ty.name_span, def);
+        self.record_use(name_span, def);
         let declared = self.res.def(def).generic_params.len();
         if ty.generic_args.len() != declared {
             self.arity_error(ty, Some(def), ty.generic_args.len());

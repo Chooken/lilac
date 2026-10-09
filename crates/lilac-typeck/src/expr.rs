@@ -19,6 +19,7 @@ use lilac_ty::{TypeId, TypeKind, TypeRef};
 use crate::body::{local_expr, FnCx};
 use crate::calls::Called;
 use crate::literals::is_foldable_literal;
+use crate::paths::path_tail;
 use crate::sigs::BINARY_HOOKS;
 use crate::{Checker, Env, Requirement};
 
@@ -75,7 +76,7 @@ impl Checker<'_> {
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
             Expr::Member { obj, field, span } => {
-                if let Some((name, span)) = self.qualified_name(expr) {
+                if let Some((name, span)) = self.qualified_name(fcx, expr) {
                     return self.check_ident(fcx, &name, span);
                 }
                 self.check_member(fcx, obj, field, *span, expected)
@@ -241,7 +242,7 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         };
-        self.record_use(span, def);
+        self.record_use(path_tail(span, name), def);
         match &self.res.def(def).kind {
             DefKind::Func(decl) if decl.variadic => {
                 self.diags.emit(
@@ -371,7 +372,7 @@ impl Checker<'_> {
                     Ok(_) => return None,
                     Err(guaranteed) => return Some(Err(guaranteed)),
                 };
-                self.record_use(*span, def);
+                self.record_use(path_tail(*span, name), def);
                 if !self.res.def(def).generic_params.is_empty() {
                     return Some(Ok(Receiver::Bare(def)));
                 }
@@ -379,24 +380,8 @@ impl Checker<'_> {
                 Some(self.ensure_type(ty, *span).map(|()| Receiver::Type(ty)))
             }
             Expr::Member { .. } => {
-                let (name, span) = self.qualified_name(obj)?;
+                let (name, span) = self.qualified_name(fcx, obj)?;
                 self.static_receiver(fcx, &Expr::Ident(name, span))
-            }
-            _ => None,
-        }
-    }
-
-    /// The qualified name a `@builtin.A.b` member chain spells, while no
-    /// prefix of it names an item (past that, `.b` is a member access).
-    pub(crate) fn qualified_name(&self, expr: &Expr) -> Option<(String, Span)> {
-        match expr {
-            Expr::Ident(name, span) if name == "@builtin" => Some((name.clone(), *span)),
-            Expr::Member { obj, field, span } => {
-                let (path, _) = self.qualified_name(obj)?;
-                if self.res.lookup_path(&path).is_some() {
-                    return None;
-                }
-                Some((format!("{path}.{field}"), *span))
             }
             _ => None,
         }

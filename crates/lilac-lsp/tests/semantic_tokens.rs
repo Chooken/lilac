@@ -391,25 +391,6 @@ fn payloaded_variant_colors_name_and_payload_type_separately() {
 }
 
 #[test]
-fn variant_declaration_nested_in_an_object_is_an_enum_member() {
-    let (client, handle) = start_server();
-    initialize(&client);
-    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "Outer: object {\n    Kind: enum {\n        Alpha\n        Beta\n    }\n    value: @bit8\n}\nmain: function () nothing {\n}\n";
-    did_open(&client, &uri, text);
-    let _ = publish_for(&client, &uri);
-
-    let decoded = decode(&semantic_tokens_at(&client, &uri));
-    let alpha = token_after(&decoded, text, "Alpha\n", 0);
-    assert_eq!((alpha.token_type, alpha.length), (ENUM_MEMBER, 5));
-    let beta = token_after(&decoded, text, "Beta\n", 0);
-    assert_eq!(beta.token_type, ENUM_MEMBER);
-
-    shutdown(&client);
-    handle.join().expect("server thread");
-}
-
-#[test]
 fn ref_type_colors_only_the_name() {
     let (client, handle) = start_server();
     initialize(&client);

@@ -52,7 +52,7 @@ impl Checker<'_> {
                 field,
                 span: member_span,
             } => {
-                if let Some((name, name_span)) = self.qualified_name(callee) {
+                if let Some((name, name_span)) = self.qualified_name(fcx, callee) {
                     return self.check_named_call(
                         fcx,
                         &name,
@@ -231,7 +231,7 @@ impl Checker<'_> {
                 ),
             ));
         };
-        self.record_use(name_span, def);
+        self.record_use(crate::paths::path_tail(name_span, name), def);
         match &self.res.def(def).kind {
             DefKind::Func(_) => {
                 self.func_call(fcx, def, Vec::new(), generic_args, args, span, None)

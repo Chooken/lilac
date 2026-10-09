@@ -1,0 +1,8 @@
+using *.Shapes
+
+// `Shapes.Square` is `Geo.Shapes.Square`: a path relative to `Geo`.
+corner_sum: function () n: @bit32 {
+    a: Shapes.Square = Shapes.Square { side = 0x1 }
+    b: Square = Square { side = 0x2 }
+    n = @i_add_32(a.side, b.side)
+}

@@ -1,0 +1,10 @@
+// expect-error: E036
+// Types are declared only at the top level of a file.
+
+Outer: object {
+    Inner: object {
+        x: @bit8
+    }
+}
+
+main: function () nothing {}

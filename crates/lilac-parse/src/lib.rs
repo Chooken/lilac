@@ -557,7 +557,8 @@ impl Parser {
 
     /// Parses an enum body: variants (`One`, `Some: T`) interleaved with
     /// members. A member is a hook (`@name: ...`), a `private { ... }` block,
-    /// a generic declaration (`name[T]: ...`), or a `function` with a body; any
+    /// a generic declaration (`name[T]: ...`), a nested `object`/`enum`
+    /// (rejected by the resolver, `E036`), or a `function` with a body; any
     /// other `name: Type` is a payload variant.
     fn parse_enum_body(
         &mut self,
@@ -577,7 +578,13 @@ impl Parser {
             }
             let is_member = matches!(self.peek().kind, TokenKind::At | TokenKind::KwPrivate)
                 || (self.peek().kind == TokenKind::Ident
-                    && self.peek_at(1).kind == TokenKind::LBracket);
+                    && self.peek_at(1).kind == TokenKind::LBracket)
+                || (self.peek().kind == TokenKind::Ident
+                    && self.peek_at(1).kind == TokenKind::Colon
+                    && matches!(
+                        self.peek_at(2).kind,
+                        TokenKind::KwObject | TokenKind::KwEnum
+                    ));
             if is_member {
                 let before = self.pos;
                 if let Ok(item) = self.parse_item(diags, true) {
@@ -997,33 +1004,36 @@ impl Parser {
         diags: &mut lilac_error::Diags,
         token: Token,
     ) -> Result<Token, ErrorGuaranteed> {
-        match token.kind {
+        let (mut name, mut span) = match token.kind {
             TokenKind::At => {
                 let ident = self.expect(diags, TokenKind::Ident, "type name after `@`")?;
-                let mut name = format!("@{}", ident.text);
-                let mut span = join_spans(token.span, ident.span);
-                // `@builtin.Os`: a type in the compiler's `@builtin` namespace.
-                if name == "@builtin" {
-                    while self.peek().kind == TokenKind::Dot
-                        && self.peek_at(1).kind == TokenKind::Ident
-                    {
-                        self.bump();
-                        let segment = self.bump();
-                        name = format!("{name}.{}", segment.text);
-                        span = join_spans(span, segment.span);
-                    }
-                }
-                Ok(Token::new(
-                    TokenKind::Ident,
-                    &name,
-                    span.lo.0 as usize,
-                    span.hi.0 as usize,
-                    self.file,
-                ))
+                (
+                    format!("@{}", ident.text),
+                    join_spans(token.span, ident.span),
+                )
             }
-            TokenKind::Ident | TokenKind::KwUnknown | TokenKind::KwSelf => Ok(token),
-            _ => Err(Self::err(diags, token.span, "expected a type name")),
+            TokenKind::Ident => (token.text, token.span),
+            TokenKind::KwUnknown | TokenKind::KwSelf => return Ok(token),
+            _ => return Err(Self::err(diags, token.span, "expected a type name")),
+        };
+        // A path (`A.B.Type`, `@builtin.Os`). A `.` on a new line starts a
+        // match arm (`.Tag`), not a segment.
+        while self.peek().kind == TokenKind::Dot
+            && !self.peek().newline_before
+            && self.peek_at(1).kind == TokenKind::Ident
+        {
+            self.bump();
+            let segment = self.bump();
+            name = format!("{name}.{}", segment.text);
+            span = join_spans(span, segment.span);
         }
+        Ok(Token::new(
+            TokenKind::Ident,
+            &name,
+            span.lo.0 as usize,
+            span.hi.0 as usize,
+            self.file,
+        ))
     }
 
     fn parse_block(&mut self, diags: &mut lilac_error::Diags) -> Result<Block, ErrorGuaranteed> {
@@ -1199,19 +1209,40 @@ impl Parser {
                     dot.span,
                 )
             }
-            TokenKind::Ident => {
-                let qualifier = self.parse_type_inner(diags)?;
-                self.expect(
-                    diags,
-                    TokenKind::Dot,
-                    "`.` after the enum name in a pattern",
-                )?;
-                let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
+            TokenKind::Ident | TokenKind::At => {
+                let mut qualifier = self.parse_type_inner(diags)?;
                 let start = qualifier.span;
+                // A dotted qualifier swallowed the tag (`A.Enum.Tag`).
+                let split = qualifier.generic_args.is_empty()
+                    && !qualifier.is_ref
+                    && self.peek().kind != TokenKind::Dot;
+                let tag = match qualifier.name.rsplit_once('.') {
+                    Some((path, tag)) if split => {
+                        let tag = tag.to_owned();
+                        let len = u32::try_from(path.len()).unwrap_or(u32::MAX);
+                        qualifier.name = path.to_owned();
+                        qualifier.name_span = Span::new(
+                            qualifier.name_span.lo.0,
+                            qualifier.name_span.lo.0.saturating_add(len),
+                            qualifier.name_span.file,
+                        );
+                        qualifier.span = qualifier.name_span;
+                        tag
+                    }
+                    _ => {
+                        self.expect(
+                            diags,
+                            TokenKind::Dot,
+                            "`.` after the enum name in a pattern",
+                        )?;
+                        self.expect(diags, TokenKind::Ident, "match tag after `.`")?
+                            .text
+                    }
+                };
                 (
                     MatchPattern::Tag {
                         qualifier: Some(qualifier),
-                        name: tag.text,
+                        name: tag,
                     },
                     start,
                 )
@@ -1617,9 +1648,11 @@ impl Parser {
                         break;
                     }
                     let ty = match &expr {
-                        Expr::Ident(name, span) => named_type(name.clone(), *span, Vec::new()),
                         Expr::TypeApp(ty) => ty.clone(),
-                        _ => break,
+                        _ => match path_of(&expr) {
+                            Some((name, span)) => named_type(name, span, Vec::new()),
+                            None => break,
+                        },
                     };
                     expr = self.parse_struct_lit(diags, ty)?;
                 }
@@ -1653,7 +1686,7 @@ impl Parser {
                     // `Name[args]` not followed by a call is a type in value
                     // position: a static receiver (`Box[T].make()`) or a struct
                     // literal head (`Box[T] { ... }`).
-                    let Expr::Ident(name, name_span) = expr else {
+                    let Some((name, name_span)) = path_of(&expr) else {
                         return Err(Self::err(
                             diags,
                             open.span,
@@ -1948,6 +1981,18 @@ fn named_type(name: String, name_span: Span, generic_args: Vec<Type>) -> Type {
         func: None,
         array_len: None,
         span: name_span,
+    }
+}
+
+/// The dotted name a plain-name chain spells (`A.B.Type`), with its span.
+fn path_of(expr: &Expr) -> Option<(String, Span)> {
+    match expr {
+        Expr::Ident(name, span) => Some((name.clone(), *span)),
+        Expr::Member { obj, field, span } => {
+            let (path, _) = path_of(obj)?;
+            Some((format!("{path}.{field}"), *span))
+        }
+        _ => None,
     }
 }
 
@@ -2458,6 +2503,103 @@ sum: function (values: ref @array(@bit32, 4)) nothing {
         };
         assert_eq!(ty.name, "@builtin.Os");
         assert!(matches!(value, Expr::Member { field, .. } if field == "os"));
+    }
+
+    #[test]
+    fn type_paths_and_path_literals() {
+        let stmts = main_stmts(
+            "main: function () nothing {
+    a: A.B.Box[@bit8] = A.B.Box[@bit8] {}
+    b: Outer.Inner = Outer.Inner { x = 0x1 }
+    c: @bit8 = A.Box[@bit8].make()
+}
+",
+        );
+        let Stmt::Let { ty, value, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert_eq!(ty.name, "A.B.Box");
+        assert_eq!(ty.generic_args.len(), 1);
+        assert!(
+            matches!(value, Expr::StructLit { ty, .. } if ty.name == "A.B.Box" && ty.generic_args.len() == 1),
+            "{value:?}"
+        );
+        let Stmt::Let { ty, value, .. } = &stmts[1] else {
+            panic!("{:?}", stmts[1]);
+        };
+        assert_eq!(ty.name, "Outer.Inner");
+        assert!(
+            matches!(value, Expr::StructLit { ty, .. } if ty.name == "Outer.Inner"),
+            "{value:?}"
+        );
+        let Stmt::Let { value, .. } = &stmts[2] else {
+            panic!("{:?}", stmts[2]);
+        };
+        let Expr::Call { callee, .. } = value else {
+            panic!("{value:?}");
+        };
+        assert!(
+            matches!(callee.as_ref(), Expr::Member { obj, .. } if matches!(obj.as_ref(), Expr::TypeApp(ty) if ty.name == "A.Box")),
+            "{callee:?}"
+        );
+    }
+
+    #[test]
+    fn path_patterns_split_off_the_tag() {
+        let stmts = main_stmts(
+            "main: function () nothing {
+    match m {
+        A.Mode.On -> v: Outer.Inner => {}
+        .Off => {}
+        Opt[@bit8].Some => {}
+    }
+}
+",
+        );
+        let Stmt::Match { arms, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        assert!(
+            matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.name == "A.Mode" && name == "On"),
+            "{:?}",
+            arms[0].pattern
+        );
+        assert!(
+            matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: None, name } if name == "Off"),
+            "{:?}",
+            arms[1].pattern
+        );
+        assert!(
+            matches!(&arms[2].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.name == "Opt" && name == "Some"),
+            "{:?}",
+            arms[2].pattern
+        );
+    }
+
+    #[test]
+    fn enum_bodies_parse_nested_types() {
+        // Parsed so the resolver can reject them (`E036`).
+        let (program, diags, _) = parse(
+            "Status: enum {
+    Idle
+    Busy: Job
+    Job: object {
+        id: @bit32
+    }
+    Kind: enum { A, B }
+}
+",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let ItemKind::Enum {
+            variants, members, ..
+        } = &program.items[0].kind
+        else {
+            panic!("{:?}", program.items[0]);
+        };
+        assert_eq!(variants.len(), 2);
+        let names: Vec<&str> = members.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, ["Job", "Kind"]);
     }
 
     #[test]

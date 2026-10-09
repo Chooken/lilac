@@ -610,6 +610,10 @@ Object: object {
 }
 ```
 
+Types are declared only at the top level of a file: an `object` or `enum`
+declared inside another type's body is `E036`. Group related types with a
+folder namespace instead.
+
 ### Namespaces & Visibility
 
 Namespaces mirror folders; no declaration introduces one. Every `*.lilac` file
@@ -664,8 +668,34 @@ binding wins. A local (or ancestor-reached) name shadows an imported one. If two
 `using`d namespaces export the same name, referencing it is `E029`; an
 unreferenced collision is not an error.
 
-**Qualification.** Namespaces are compile-time scopes only: there are no
-qualified paths in expressions (`A.B.foo` is not syntax). For code generation
+**Paths.** A dotted path names an item through its namespace, in type
+positions (`x: A.B.Type`, `A.Box[@bit8]`, with generic arguments on the
+last segment) and in expressions (`A.B.foo()`, `A.B.Type { … }`,
+`A.B.Type.method()`, `A.Enum.Variant`, `match` patterns `A.Enum.Tag`). The
+first segment is looked up innermost first:
+
+1. a local or parameter (the chain is then a field access);
+2. a generic parameter or builtin type;
+3. a name the file sees (its namespace, its ancestors, its `using`s;
+   `E029` when ambiguous);
+4. a namespace: a child of the file's namespace, else of its nearest
+   ancestor that has one. The root is every namespace's ancestor, so a
+   top-level namespace (`Standard.Io`) can be named anywhere unless a closer
+   one of that name shadows it, and a library names its own subfolders
+   relative to itself (`Os.write` inside `Standard` is `Standard.Os.write`).
+
+Each later segment steps into the namespace the previous one named: its
+item, else its child namespace. A path ends at an item; a `.member` after
+a type is the usual static member access. A path reaches a
+namespace's `private` items only from that namespace or a descendant, as
+`using` does (others see an unresolved name). A path needs no `using`, so it
+also tells two colliding imports apart (`A.shared()` where `shared()` is
+`E029`), but it names only loaded namespaces: a mounted library always is,
+while a folder of the project's own tree still needs a `using` somewhere in
+the program. `@builtin.Target.os` is such a path: `@builtin` is a top-level
+namespace.
+
+**Qualification.** Namespaces are compile-time scopes only. For code generation
 every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
 `A.Object.Method`, `A.GenBox.1..bit32.@on_drop`). A root-namespace free
 function is prefixed `.root` (`.root.foo`), which no user name or C symbol
