@@ -152,12 +152,10 @@ cargo test --workspace
 ## Status (2026-10-09)
 
 Implemented with the default answers below: `[address taken]` suffix, no
-elision, one string note. One gap: `lilac-lower` emits scope-end and
-statement-temp drop calls with `Span::dummy()` (`drop_scope`, the temp loop
-in `lower_stmt`), so a hook reached through drop glue prints its caller as
-`at main` with no location. `@panic` traces through a drop hook have the
-same gap. Fixing it (give drops the block's end span, or an early exit's
-span) is a separate lowering change.
+elision, one string note. Follow-up done: drops now carry real spans (the
+closing `}`, the `return`/`break`, or the statement for temporaries), so a
+hook reached through a drop prints its caller's location in both `E031`
+chains and `@panic` traces (`tests/run/panic_drop_*`).
 
 ## Open questions
 

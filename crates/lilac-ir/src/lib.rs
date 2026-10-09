@@ -456,6 +456,19 @@ pub enum LirTerm {
     },
 }
 
+impl LirTerm {
+    /// The terminator's source span.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Return { span }
+            | Self::Branch { span, .. }
+            | Self::BranchIf { span, .. }
+            | Self::Unreachable { span } => *span,
+        }
+    }
+}
+
 impl LirModule {
     /// Creates a module for `target` under the current IR version.
     #[must_use]

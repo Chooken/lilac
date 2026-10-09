@@ -25,15 +25,15 @@ use std::collections::{HashMap, HashSet};
 use lilac_error::{Diagnostic, Diags};
 use lilac_hir::intrinsics::{Intrinsic, NumOp};
 use lilac_hir::{
-    FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirProgram,
-    HirStmt, HirValueArm, Layout, LocalId,
+    FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirPattern,
+    HirProgram, HirStmt, HirValueArm, Layout, LocalId,
 };
 use lilac_ir::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
     LirTerm, LirTy,
 };
 use lilac_resolve::{DefKind, Resolved};
-use lilac_span::{SourceMap, Span};
+use lilac_span::{BytePos, SourceMap, Span};
 use lilac_ty::{TypeId, TypeKind, TypeRef, Types};
 
 /// Lowered LIR plus each function's source name.
@@ -364,8 +364,8 @@ impl Fs {
         self.blocks.push(LirBlock {
             label: std::mem::take(&mut self.label),
             insts: std::mem::take(&mut self.insts),
+            span: term.span(),
             term,
-            span: Span::dummy(),
         });
         self.open = false;
     }
@@ -412,10 +412,9 @@ impl Fs {
         });
     }
 
-    fn finish(mut self, name: String, inline: bool) -> LirFunc {
-        self.end(LirTerm::Return {
-            span: Span::dummy(),
-        });
+    /// Closes the function; an open block falls off the end at `span`.
+    fn finish(mut self, name: String, inline: bool, span: Span) -> LirFunc {
+        self.end(LirTerm::Return { span });
         if let Some(first) = self.blocks.first_mut() {
             let mut insts = std::mem::take(&mut self.allocas);
             insts.append(&mut first.insts);
@@ -429,6 +428,35 @@ impl Fs {
             inline,
             blocks: self.blocks,
         }
+    }
+}
+
+/// The last byte of `span`: a block's closing `}`, where its scope ends.
+fn end_of(span: Span) -> Span {
+    if span.is_dummy() || span.is_empty() {
+        return span;
+    }
+    Span {
+        lo: BytePos(span.hi.0 - 1),
+        ..span
+    }
+}
+
+/// Where a statement's temporaries die: the statement's own expression.
+fn stmt_span(stmt: &HirStmt) -> Span {
+    match stmt {
+        HirStmt::MultiLet { call, .. } => call.span,
+        HirStmt::Assign { place, value } if place.span.file == value.span.file => Span {
+            lo: place.span.lo.min(value.span.lo),
+            hi: place.span.hi.max(value.span.hi),
+            file: place.span.file,
+        },
+        HirStmt::Let { value, .. } | HirStmt::Assign { value, .. } => value.span,
+        HirStmt::Expr(expr) => expr.span,
+        HirStmt::Return(span) | HirStmt::Break(span) => *span,
+        HirStmt::If { cond, .. } => cond.span,
+        HirStmt::Loop(block) | HirStmt::Block(block) => block.span,
+        HirStmt::Match { scrutinee, .. } => scrutinee.span,
     }
 }
 
@@ -736,10 +764,11 @@ impl Lower<'_> {
         for stmt in &body.stmts {
             self.lower_stmt(&mut fs, func, stmt);
         }
+        let end = end_of(body.span);
         if fs.open {
-            self.drop_scope(&mut fs, 0);
+            self.drop_scope(&mut fs, 0, end);
         }
-        fs.finish(symbol, func.inline)
+        fs.finish(symbol, func.inline, end)
     }
 
     /// Declares a local's place (zeroed alloca) and returns it.
@@ -791,8 +820,10 @@ impl Lower<'_> {
         }
     }
 
-    /// Drops everything scope `index` owns (temps, then locals, newest first).
-    fn drop_scope(&mut self, fs: &mut Fs, index: usize) {
+    /// Drops everything scope `index` owns (temps, then locals, newest
+    /// first); `span` is where the scope ends (its closing `}`, or the
+    /// `return`/`break` leaving it).
+    fn drop_scope(&mut self, fs: &mut Fs, index: usize, span: Span) {
         let owned: Vec<(String, TypeRef)> = fs.scopes[index]
             .temps
             .iter()
@@ -801,7 +832,7 @@ impl Lower<'_> {
             .cloned()
             .collect();
         for (place, ty) in owned {
-            self.drop_place(fs, &Place::Direct(place), ty, Span::dummy());
+            self.drop_place(fs, &Place::Direct(place), ty, span);
         }
     }
 
@@ -814,7 +845,7 @@ impl Lower<'_> {
         }
         if fs.open {
             let index = fs.scopes.len() - 1;
-            self.drop_scope(fs, index);
+            self.drop_scope(fs, index, end_of(block.span));
         }
         fs.scopes.pop();
     }
@@ -880,7 +911,7 @@ impl Lower<'_> {
             },
             HirStmt::Return(span) => {
                 for index in (0..fs.scopes.len()).rev() {
-                    self.drop_scope(fs, index);
+                    self.drop_scope(fs, index, *span);
                 }
                 fs.end(LirTerm::Return { span: *span });
             }
@@ -889,7 +920,7 @@ impl Lower<'_> {
                     lilac_error::bug!(*span, "break outside a loop");
                 };
                 for index in (depth..fs.scopes.len()).rev() {
-                    self.drop_scope(fs, index);
+                    self.drop_scope(fs, index, *span);
                 }
                 fs.branch(&exit, *span);
             }
@@ -924,8 +955,9 @@ impl Lower<'_> {
                 .rev()
                 .cloned()
                 .collect();
+            let span = stmt_span(stmt);
             for (place, ty) in temps {
-                self.drop_place(fs, &Place::Direct(place), ty, Span::dummy());
+                self.drop_place(fs, &Place::Direct(place), ty, span);
             }
         }
         fs.scopes[scope].temps.truncate(mark);
@@ -1018,7 +1050,7 @@ impl Lower<'_> {
             }
             if fs.open {
                 let index = fs.scopes.len() - 1;
-                self.drop_scope(fs, index);
+                self.drop_scope(fs, index, end_of(arm.body.span));
             }
             fs.scopes.pop();
             return;
@@ -1060,7 +1092,7 @@ impl Lower<'_> {
             }
             if fs.open {
                 let index = fs.scopes.len() - 1;
-                self.drop_scope(fs, index);
+                self.drop_scope(fs, index, end_of(arm.body.span));
             }
             fs.scopes.pop();
             fs.branch(&join, arm.body.span);
@@ -1156,14 +1188,18 @@ impl Lower<'_> {
             lilac_error::bug!(Span::dummy(), "capture on a byte pattern");
         };
         let place = self.declare(fs, func, capture);
-        let capture_ty = func.local(capture).ty;
+        let HirLocal {
+            ty: capture_ty,
+            span,
+            ..
+        } = *func.local(capture);
         let (field, name) = self.payload_field(ty.id, *index);
-        let payload = self.field_place(fs, subject, field, &name, capture_ty, Span::dummy());
-        let value = self.copy_out(fs, &payload, capture_ty, Span::dummy());
+        let payload = self.field_place(fs, subject, field, &name, capture_ty, span);
+        let value = self.copy_out(fs, &payload, capture_ty, span);
         fs.emit(LirInst::CopyPlace {
             src: value,
             dst: place.clone(),
-            span: Span::dummy(),
+            span,
         });
         self.own(fs, &place, capture_ty);
     }
@@ -1379,7 +1415,7 @@ impl Lower<'_> {
                 lower.drop_place(fs, slot, slot_ty, span);
             }
         });
-        let func = fs.finish(name.clone(), false);
+        let func = fs.finish(name.clone(), false, span);
         self.module.funcs.push(func);
         name
     }
@@ -1434,7 +1470,7 @@ impl Lower<'_> {
                 fs.at(skip);
             }
         }
-        let func = fs.finish(name.clone(), false);
+        let func = fs.finish(name.clone(), false, span);
         self.module.funcs.push(func);
         name
     }
@@ -1915,7 +1951,7 @@ impl Lower<'_> {
             span: value.span,
         });
         let index = fs.scopes.len() - 1;
-        self.drop_scope(fs, index);
+        self.drop_scope(fs, index, value.span);
         fs.scopes.pop();
     }
 
@@ -1948,7 +1984,7 @@ impl Lower<'_> {
                         span,
                     });
                     let scope = fs.scopes.len() - 1;
-                    self.drop_scope(fs, scope);
+                    self.drop_scope(fs, scope, arm.value.span);
                     fs.scopes.pop();
                 }
                 None => self.region(fs, func, els, &result),
@@ -1988,7 +2024,7 @@ impl Lower<'_> {
                 span,
             });
             let scope = fs.scopes.len() - 1;
-            self.drop_scope(fs, scope);
+            self.drop_scope(fs, scope, arm.value.span);
             fs.scopes.pop();
             fs.branch(&join, span);
         }

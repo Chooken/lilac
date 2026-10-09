@@ -238,7 +238,12 @@ fn used_hook_compile_error_is_e031() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E031]"), "stderr:\n{stderr}");
     assert!(stderr.contains("at Object.@on_drop ("), "stderr:\n{stderr}");
-    assert!(stderr.contains("at main"), "stderr:\n{stderr}");
+    // The drop runs at `main`'s closing `}`.
+    assert!(stderr.contains("at main ("), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("FAILS_hook_used_compile_error.lilac:12:1)"),
+        "stderr:\n{stderr}"
+    );
     assert!(!stderr.contains(".lilac."), "stderr:\n{stderr}");
 }
 

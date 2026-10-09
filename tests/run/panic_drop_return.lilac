@@ -1,0 +1,24 @@
+// expect-exit: 101
+// expect-stderr: panic: dropped
+// expect-stderr:   at Guard.@on_drop (panic_drop_return.lilac:10:9)
+// expect-stderr:   at leave (panic_drop_return.lilac:17:9)
+// expect-stderr:   at main (panic_drop_return.lilac:23:5)
+
+// An early `return` drops the scope's locals at the `return`.
+Guard: object {
+    @on_drop: function (from: ref Guard) nothing {
+        @panic("dropped")
+    }
+}
+
+leave: function (n: @bit32) nothing {
+    g: Guard = Guard {}
+    if @i_less_than_u_32(n, 0x1) {
+        return
+    }
+    n = 0x0
+}
+
+main: function () nothing {
+    leave(0x0)
+}

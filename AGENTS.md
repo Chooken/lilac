@@ -198,6 +198,11 @@ bug fix that changes generated code.
   edge), and `check_live_compile_errors` renders `Reach::chain` with
   `site_text`, hiding `trace::is_hidden` (`.lilac.*`) frames. It runs right
   after DCE, before `trace::instrument`.
+- Drops carry real spans so both traces can place them: a scope-end drop is
+  at the block's closing `}` (`end_of`), an early exit's drops at the
+  `return`/`break`, and statement temporaries at the statement's expression
+  (`stmt_span`, in `lilac-lower`). Only compiler-generated glue and runtime
+  code use `Span::dummy()`; a `LirBlock`'s span is its terminator's.
 - `SourceMap::location` (`file:line:col`) and `trace::site_text` (the `at`
   line) are the only formatters. Source-map file names are namespace display
   paths (`Checks/checks.lilac`, `Standard/Io/io.lilac`); a root-namespace
