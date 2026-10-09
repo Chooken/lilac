@@ -97,7 +97,11 @@ impl Checker<'_> {
                     format!("mismatched types: expected a `ref` array, found `{found}`"),
                 )
                 .label(args[0].span(), true, "pass `ref array`");
-                return Err(self.emit_requirement(diagnostic, Requirement::Mismatch));
+                return Err(self.emit_requirement(
+                    diagnostic,
+                    Requirement::Mismatch,
+                    &[array.ty.id],
+                ));
             }
         };
         let index = self

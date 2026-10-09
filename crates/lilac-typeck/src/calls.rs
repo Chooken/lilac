@@ -347,7 +347,7 @@ impl Checker<'_> {
                 diagnostic =
                     diagnostic.note(self.required_method_note(field, None, &probed, expected));
             }
-            return Err(self.missing(diagnostic, true, field, owner, None));
+            return Err(self.missing(diagnostic, true, field, owner, None, &[ty.id]));
         };
         let Some(member) = self.res.member(def, field) else {
             let mut diagnostic = Diagnostic::error(
@@ -360,7 +360,7 @@ impl Checker<'_> {
                 diagnostic =
                     diagnostic.note(self.required_method_note(field, None, &probed, expected));
             }
-            return Err(self.missing(diagnostic, true, field, owner, Some(def)));
+            return Err(self.missing(diagnostic, true, field, owner, Some(def), &[]));
         };
         let member_name = tail_span(member_span, field);
         match &self.res.def(member).kind {
@@ -421,7 +421,7 @@ impl Checker<'_> {
                     expected,
                 ));
             }
-            return Err(self.missing(diagnostic, true, field, owner, None));
+            return Err(self.missing(diagnostic, true, field, owner, None, &[base.id]));
         };
         let Some(member) = self.res.member(def, field) else {
             let mut diagnostic = Diagnostic::error(
@@ -438,7 +438,7 @@ impl Checker<'_> {
                     expected,
                 ));
             }
-            return Err(self.missing(diagnostic, true, field, owner, Some(def)));
+            return Err(self.missing(diagnostic, true, field, owner, Some(def), &[]));
         };
         if !matches!(self.res.def(member).kind, DefKind::Func(_)) {
             return Err(self.diags.emit(
@@ -487,6 +487,8 @@ impl Checker<'_> {
     }
 
     /// Emits a missing-member diagnostic and records the requirement.
+    /// `involved` is the receiver type when it has no members of its own
+    /// (a type's member set does not depend on its arguments).
     fn missing(
         &mut self,
         diagnostic: Diagnostic,
@@ -494,6 +496,7 @@ impl Checker<'_> {
         name: &str,
         owner: String,
         owner_def: Option<DefId>,
+        involved: &[TypeId],
     ) -> ErrorGuaranteed {
         self.emit_requirement(
             diagnostic,
@@ -503,6 +506,7 @@ impl Checker<'_> {
                 owner,
                 owner_def,
             },
+            involved,
         )
     }
 
@@ -515,9 +519,11 @@ impl Checker<'_> {
     fn probe(&mut self, fcx: &mut FnCx, expr: &Expr) -> Option<TypeRef> {
         let mark = self.diags.checkpoint();
         let requirements = self.requirements.len();
+        let dependent = self.dependent.len();
         let ty = self.check_expr(fcx, expr, None).ty;
         let _ = self.diags.take_since(mark);
         self.requirements.truncate(requirements);
+        self.dependent.truncate(dependent);
         (!ty.is_error()).then_some(ty)
     }
 
@@ -536,9 +542,10 @@ impl Checker<'_> {
             .filter(|hook| hook.sig.returns.first().is_some_and(|ret| ret.id == ty.id))
             .collect();
         if overloads.is_empty() {
-            return Err(self.diags.emit(
+            return Err(self.emit_involving(
                 Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
                     .label(span, true, "define `@init` or use `= { ... }`"),
+                &[ty.id],
             ));
         }
         let Some(hook) = self.select_overload(fcx, &overloads, args) else {
@@ -747,7 +754,7 @@ impl Checker<'_> {
             format!("wrong number of arguments: expected {expected}, found {found}"),
         )
         .label(span, true, "arity mismatch here");
-        Err(self.emit_requirement(diagnostic, Requirement::Arity { expected, found }))
+        Err(self.emit_requirement(diagnostic, Requirement::Arity { expected, found }, &[]))
     }
 
     // ---- intrinsics -------------------------------------------------------
@@ -891,7 +898,7 @@ impl Checker<'_> {
                         ),
                     )
                     .label(arg.span(), true, "wrong operand type here");
-                    self.emit_requirement(diagnostic, Requirement::Mismatch);
+                    self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
                     return None;
                 }
                 Some(value)
@@ -909,7 +916,7 @@ impl Checker<'_> {
                     Diagnostic::error("E010", format!("mismatched types: expected ref {name}"))
                         .label(span, false, format!("expected `ref {name}` here"))
                         .label(arg.span(), true, "needs an explicit `ref`");
-                self.emit_requirement(diagnostic, Requirement::Mismatch);
+                self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
                 None
             }
             Slot::AnyBit | Slot::ExpectedBit => {
@@ -929,7 +936,7 @@ impl Checker<'_> {
                     ),
                 )
                 .label(arg.span(), true, "not a bit container");
-                self.emit_requirement(diagnostic, Requirement::Mismatch);
+                self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
                 None
             }
         }

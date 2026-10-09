@@ -1,8 +1,9 @@
 # Language Server Plan
 
-> Status: in progress (2026-10-09). Phase 1 done except the documented
-> limitation; `E051` keeps its single-chain note (a recursion depth error
-> has one chain worth showing).
+> Status: in progress (2026-10-09). Phases 1 and 1b done. Phase 1 has one
+> documented limitation; `E051` keeps its single-chain note (a recursion
+> depth error has one chain worth showing). Phase 1b step 5 needed no
+> change: `Diags` already drops identical diagnostics.
 >
 > Goal: finish `lilac-lsp` as a daily editor: errors show up where the user
 > caused them, navigation and completion work, and edits stay responsive.

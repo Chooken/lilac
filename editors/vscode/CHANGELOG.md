@@ -8,6 +8,9 @@
   generic requirements (`E042`) mark every instantiating call the same way.
 - A constant `@array_at` index out of bounds is an error (`E037`) in every
   function, called or not.
+- Generic functions nothing instantiates yet are type-checked: errors that
+  depend on `T` are skipped, everything else (a misspelled name, a wrong
+  concrete type, an out-of-bounds index) is reported.
 
 ## 0.4.0
 

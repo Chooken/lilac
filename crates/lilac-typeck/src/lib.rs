@@ -17,6 +17,7 @@ mod body;
 mod calls;
 mod expr;
 mod generics;
+mod indices;
 mod literals;
 mod paths;
 mod sigs;
@@ -41,9 +42,9 @@ pub struct Checked {
     /// Declared signature of every function and hook (generic ones as
     /// templates), for editor hovers.
     pub sigs: HashMap<DefId, FuncSig>,
-    /// Editor only ([`check_for_editor`]): bodies of generic functions that
-    /// no instance reached, checked with their parameters left abstract.
-    /// Never lowered; they exist for semantic tokens and hovers.
+    /// Bodies of generic functions that no instance reached, checked with
+    /// their parameters left abstract ([`Checker::check_templates`]). Never
+    /// lowered; they exist for semantic tokens and hovers.
     pub templates: Vec<HirFunc>,
 }
 
@@ -59,28 +60,9 @@ pub struct Options {
     pub require_entry: bool,
 }
 
-/// Checks every definition in `res`.
+/// Checks every definition in `res`, generic functions nothing instantiates
+/// included (as templates).
 pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Options) -> Checked {
-    check_impl(res, types, diags, options, false)
-}
-
-/// [`check`], plus [`Checked::templates`] for editor tooling.
-pub fn check_for_editor(
-    res: &Resolved,
-    types: &mut Types,
-    diags: &mut Diags,
-    options: Options,
-) -> Checked {
-    check_impl(res, types, diags, options, true)
-}
-
-fn check_impl(
-    res: &Resolved,
-    types: &mut Types,
-    diags: &mut Diags,
-    options: Options,
-    templates: bool,
-) -> Checked {
     let mut checker = Checker {
         res,
         types,
@@ -100,16 +82,14 @@ fn check_impl(
         out: HirProgram::default(),
         env: Env::default(),
         requirements: Vec::new(),
+        dependent: Vec::new(),
+        instantiated: HashSet::new(),
         reported: HashSet::new(),
         origins: HashMap::new(),
         failures: Vec::new(),
     };
     checker.run();
-    let templates = if templates {
-        checker.check_templates()
-    } else {
-        Vec::new()
-    };
+    let templates = checker.check_templates();
     let sigs = checker.sigs.clone();
     Checked {
         hir: std::mem::take(&mut checker.out),
@@ -240,6 +220,11 @@ pub(crate) struct Checker<'a> {
     pub env: Env,
     /// Requirement failures by diagnostic index.
     pub requirements: Vec<(usize, Requirement)>,
+    /// Diagnostics (by index) about a type containing a generic parameter.
+    pub dependent: Vec<usize>,
+    /// Generic functions with a concrete instance, whose errors that
+    /// instance reports (so a template check of them stays silent).
+    pub instantiated: HashSet<DefId>,
     /// `E042`s already reported, by instance (one per instance).
     pub reported: HashSet<FuncKey>,
     /// Every site that requested each instance: the requesting instance
@@ -292,38 +277,70 @@ impl Checker<'_> {
     }
 
     /// Checks each generic function no instance reached, with its generic
-    /// parameters as abstract `T`s, so the editor sees its locals, uses and
-    /// expression types. Diagnostics are discarded (a duck-typed `T.member`
-    /// cannot be proven without arguments) and the output is kept apart from
-    /// the lowered program.
+    /// parameters as abstract `T`s: a best-effort check of code nothing
+    /// uses yet, which also gives the editor its locals, uses and expression
+    /// types. An error about a type containing a parameter is dropped (a
+    /// duck-typed `T.member` cannot be proven without arguments); every
+    /// other error is reported ([`Self::template_failure`]). The output is
+    /// kept apart from the lowered program.
     fn check_templates(&mut self) -> Vec<HirFunc> {
+        // A fresh, uncapped sink: instance failure detection reads the
+        // diagnostics back, and indices recorded so far refer to the old one.
         let mut scratch = Diags::new();
         scratch.max_errors = usize::MAX;
         std::mem::swap(self.diags, &mut scratch);
+        let requirements = std::mem::take(&mut self.requirements);
+        let dependent = std::mem::take(&mut self.dependent);
         let funcs = self.out.funcs.len();
         let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
-        let reached: HashSet<DefId> = self.instances.keys().map(|key| key.def).collect();
+        self.instantiated = self.instances.keys().map(|key| key.def).collect();
         for id in self.res.ids() {
             let def = self.res.def(id);
-            if !matches!(def.kind, DefKind::Func(_)) || reached.contains(&id) {
+            if !matches!(def.kind, DefKind::Func(_)) || self.instantiated.contains(&id) {
                 continue;
             }
-            let scope = self.scope_of(id);
-            if scope.is_empty() {
+            let args = self.template_args(id);
+            if args.is_empty() {
                 continue;
             }
-            let args = scope
-                .iter()
-                .zip(0u32..)
-                .map(|(name, index)| TypeRef::value(self.types.intern_param(index, name)))
-                .collect();
             let span = def.span;
             let _ = self.request(FuncKey { def: id, args }, span);
             self.drain_queue();
         }
         self.out.layouts.retain(|ty, _| layouts.contains(ty));
         std::mem::swap(self.diags, &mut scratch);
-        self.out.funcs.split_off(funcs)
+        self.requirements = requirements;
+        self.dependent = dependent;
+        for diagnostic in scratch.take_since(0) {
+            self.diags.emit(diagnostic);
+        }
+        let templates = self.out.funcs.split_off(funcs);
+        for func in &templates {
+            if self.reports_template(&func.key) {
+                self.check_template_indices(func);
+            }
+        }
+        templates
+    }
+
+    /// Whether template instance `key` reports its errors: it is the
+    /// template instance of a generic nothing instantiates. An instance at
+    /// other parameters (another template's call), or of an instantiated
+    /// generic, would repeat errors reported elsewhere.
+    pub(crate) fn reports_template(&mut self, key: &FuncKey) -> bool {
+        !key.args.is_empty()
+            && !self.instantiated.contains(&key.def)
+            && key.args == self.template_args(key.def)
+    }
+
+    /// `def`'s generic parameters as abstract types: the arguments of its
+    /// template instance (empty when `def` is not generic).
+    pub(crate) fn template_args(&mut self, def: DefId) -> Vec<TypeRef> {
+        self.scope_of(def)
+            .iter()
+            .zip(0u32..)
+            .map(|(name, index)| TypeRef::value(self.types.intern_param(index, name)))
+            .collect()
     }
 
     // ---- environment ---------------------------------------------------
@@ -490,15 +507,35 @@ impl Checker<'_> {
     // ---- diagnostics ---------------------------------------------------
 
     /// Emits a diagnostic that also records a duck-typing requirement.
+    /// `involved` are the types the failure is about ([`Self::emit_involving`]).
     pub(crate) fn emit_requirement(
         &mut self,
         diagnostic: Diagnostic,
         requirement: Requirement,
+        involved: &[TypeId],
+    ) -> ErrorGuaranteed {
+        let index = self.diags.checkpoint();
+        let guaranteed = self.emit_involving(diagnostic, involved);
+        if self.diags.checkpoint() > index {
+            self.requirements.push((index, requirement));
+        }
+        guaranteed
+    }
+
+    /// Emits a diagnostic about `involved` types, recording it as
+    /// [`Self::dependent`] when one contains a generic parameter (so a
+    /// template check, which cannot know the parameter, drops it).
+    pub(crate) fn emit_involving(
+        &mut self,
+        diagnostic: Diagnostic,
+        involved: &[TypeId],
     ) -> ErrorGuaranteed {
         let index = self.diags.checkpoint();
         let guaranteed = self.diags.emit(diagnostic);
-        if self.diags.checkpoint() > index {
-            self.requirements.push((index, requirement));
+        if self.diags.checkpoint() > index
+            && involved.iter().any(|ty| self.types.contains_param(*ty))
+        {
+            self.dependent.push(index);
         }
         guaranteed
     }
@@ -519,7 +556,7 @@ impl Checker<'_> {
         )
         .label(expected_span, false, format!("expected `{exp}` here"))
         .label(found_span, true, format!("found `{got}` here"));
-        self.emit_requirement(diagnostic, Requirement::Mismatch)
+        self.emit_requirement(diagnostic, Requirement::Mismatch, &[expected.id, found.id])
     }
 
     /// Records an item use for the editor.

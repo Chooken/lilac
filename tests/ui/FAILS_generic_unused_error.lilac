@@ -1,0 +1,12 @@
+// Nothing instantiates `lookup`, but its body is still checked with `T`
+// abstract: `x.key()` could hold for some `T` and is not reported; the
+// unresolved name and the out-of-bounds index hold for every `T`.
+lookup[T]: function (x: T) out: @bit32 {
+    out = x.key()
+    out = misspelled()
+    slots: @array(T, 2) = @array(T, 2) {}
+    first: ref T = @array_at(ref slots, 0x2)
+}
+
+main: function () nothing {
+}

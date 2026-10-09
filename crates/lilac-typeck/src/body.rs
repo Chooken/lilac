@@ -675,7 +675,7 @@ impl Checker<'_> {
             return converted;
         }
         let found = self.types.display(hir.ty.id);
-        self.diags.emit(
+        self.emit_involving(
             Diagnostic::error(
                 "E010",
                 format!("`{what}` condition must be `@bit8`, found {found}"),
@@ -684,6 +684,7 @@ impl Checker<'_> {
             .help(format!(
                 "define `@conversion: function (from: {found}) to: @bit8` or compare explicitly"
             )),
+            &[hir.ty.id],
         );
         HirExpr::poison(hir.span)
     }

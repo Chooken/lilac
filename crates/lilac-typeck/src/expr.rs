@@ -172,7 +172,11 @@ impl Checker<'_> {
             Diagnostic::error("E043", format!("no conversion from {from} to {target}"))
                 .label(want_span, false, format!("expected `{target}` here"))
                 .label(expr.span, true, "conversion attempted here");
-        self.emit_requirement(diagnostic, Requirement::Conversion { from });
+        self.emit_requirement(
+            diagnostic,
+            Requirement::Conversion { from },
+            &[expr.ty.id, want.id],
+        );
         HirExpr::poison(expr.span)
     }
 
@@ -469,6 +473,7 @@ impl Checker<'_> {
             diagnostic = diagnostic.note(self.required_field_note(field, expected));
         }
         let owner_def = self.type_parts(ty).map(|(def, _)| def);
+        let involved = if owner_def.is_some() { &[][..] } else { &[ty] };
         self.emit_requirement(
             diagnostic,
             Requirement::Missing {
@@ -477,6 +482,7 @@ impl Checker<'_> {
                 owner,
                 owner_def,
             },
+            involved,
         );
         HirExpr::poison(span)
     }
@@ -777,7 +783,11 @@ impl Checker<'_> {
                 ),
             )
             .label(span, true, "no exact operator overload");
-            self.emit_requirement(diagnostic, Requirement::Mismatch);
+            self.emit_requirement(
+                diagnostic,
+                Requirement::Mismatch,
+                &[left.ty.id, right.ty.id],
+            );
             return HirExpr::poison(span);
         };
         HirExpr {

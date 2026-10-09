@@ -277,6 +277,37 @@ fn generic_compile_error_chain_names_the_instance() {
 /// A constant out-of-bounds index is `E037` in a function only a dead
 /// function calls; the trace lists that caller. The guarded arm is silent.
 #[test]
+fn unused_generic_body_is_checked() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_generic_unused_error.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "error[E021]: unresolved name `misspelled`",
+        "FAILS_generic_unused_error.lilac:6:11",
+        "error[E037]: index 2 is out of bounds for an array of length 2",
+        "FAILS_generic_unused_error.lilac:8:41",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in:
+{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("key"),
+        "`T`-dependent error leaked:
+{stderr}"
+    );
+    assert!(
+        stderr.contains("aborting due to 2 previous errors"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn constant_index_out_of_bounds_is_e037_even_unused() {
     let output = lilac()
         .args(["check", &ui("FAILS_array_constant_index.lilac")])

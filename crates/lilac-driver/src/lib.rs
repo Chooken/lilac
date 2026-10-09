@@ -134,7 +134,7 @@ pub struct Analysis {
     pub types: lilac_ty::Types,
     /// Declared signature of every function and hook.
     pub sigs: std::collections::HashMap<lilac_resolve::DefId, lilac_ty::FuncSig>,
-    /// Checked HIR (carries `uses`), plus the editor-only bodies of
+    /// Checked HIR (carries `uses`), plus the never-lowered bodies of
     /// uninstantiated generic functions (`Checked::templates`).
     pub hir: lilac_hir::HirProgram,
     /// Non-item semantic-token sites, deduped by `(span, kind)` and sorted by
@@ -423,16 +423,11 @@ impl Session {
         self.report(Stage::Resolve, DONE);
         self.report(Stage::Check, StageEvent::Begin);
         let mut types = lilac_ty::Types::new();
-        let check = if self.retain_partial_analysis {
-            lilac_typeck::check_for_editor
-        } else {
-            lilac_typeck::check
-        };
         let options = lilac_typeck::Options {
             native_bits: self.target.bit_native_width(),
             require_entry: self.require_entry,
         };
-        let checked = check(&resolved, &mut types, &mut self.diags, options);
+        let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
         self.analysis = Some(Analysis {

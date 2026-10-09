@@ -769,8 +769,19 @@ parse; rename them to `enum`.)
 ### Generics
 
 Generics provide compile-time templating for any declaration. The generic
-parameter `T` is a placeholder; the compiler ignores it until the declaration
-is instantiated, which is what allows duck-typing inside a generic body.
+parameter `T` is a placeholder whose requirements are proven only when the
+declaration is instantiated, which is what allows duck-typing inside a
+generic body.
+
+A generic function nothing instantiates is still checked, with `T` left
+abstract: an error about a type that contains a parameter (`T`,
+`GenObj[T]`, a member looked up on `T`, a value converted to or from `T`) is
+dropped, since some argument might satisfy it; every other error (an
+unresolved name, a mismatch between concrete types, an unknown member of
+`GenObj[T]`, a literal index past an array's length, `E037`) is reported as
+usual. An `@array_at` under a condition that reads no local is not checked
+there, since such a condition may be constant once `T` is known. A generic
+that is instantiated is checked only through its instances.
 
 Type arguments are **explicit**: v1 has no type-argument inference, so every
 generic reference spells its arguments (`gen_function[@bit32]`,
@@ -789,7 +800,7 @@ GenObj[T]: object {
 }
 
 GenFunc[T]: function (value: T) nothing {
-    // Validated only at instantiation time
+    // Validated at instantiation time
     value.call_something() 
 }
 ```

@@ -212,9 +212,8 @@
   folder); an open file it does not reach is compiled as its library
   namespace (`Session::compile_namespace_with_stages`), else its folder, else
   alone (`server::unit_of`). Sessions run tolerant
-  (`retain_partial_analysis`), which also checks uninstantiated generic
-  bodies for highlighting (`lilac_typeck::check_for_editor`; diagnostics
-  discarded, never lowered). URIs are compared via
+  (`retain_partial_analysis`); the template HIR of uninstantiated generics
+  (`Checked::templates`) feeds highlighting and hovers. URIs are compared via
   `roots::canonical_file_uri`.
 - A diagnostic with a trace is also published at each call site in it, in
   that site's file (`convert::trace_diagnostics`), linking back to the
@@ -295,6 +294,17 @@ bug fix that changes generated code.
   `E042`s are held in `Checker::failures` until the worklist drains
   (`drain_queue`), so origins requested later are included. `E051` keeps its
   first-origin `instantiation chain:` note.
+- Every compile checks each uninstantiated generic as a template
+  (`Checker::check_templates`: its own parameters as abstract `T`s, never
+  lowered). Diagnostics emitted through `emit_requirement`/`emit_involving`
+  with a type that `contains_param` are recorded in `Checker::dependent`;
+  `template_failure` drops those and reports the rest plainly (never
+  `E042`), but only for the template instance of a generic with no concrete
+  instance (`reports_template`), so nothing is reported twice. A new error
+  site whose cause can be `T` must go through `emit_involving`, or unused
+  generics in `lib/Standard` start failing. Templates also get `E037` from
+  typeck (`indices.rs`): a literal or `const` index, skipping arms whose
+  condition reads no local.
 - Drops carry real spans so both traces can place them: a scope-end drop is
   at the block's closing `}` (`end_of`), an early exit's drops at the
   `return`/`break`/`continue`, and statement temporaries at the statement's expression

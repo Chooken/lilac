@@ -133,6 +133,11 @@ impl Checker<'_> {
     /// captured diagnostics are re-emitted unchanged.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn instance_failure(&mut self, key: &FuncKey, mark: usize) {
+        if key.args.iter().any(|arg| self.types.contains_param(arg.id)) {
+            self.template_failure(key, mark);
+            return;
+        }
+        self.dependent.retain(|index| *index < mark);
         let captured = self.diags.take_since(mark);
         let mut recorded = Vec::new();
         self.requirements.retain(|(index, requirement)| {
@@ -228,6 +233,32 @@ impl Checker<'_> {
             diagnostic = diagnostic.help(help);
         }
         self.failures.push((key.clone(), diagnostic));
+    }
+
+    /// The errors of a template instance (arguments containing parameters):
+    /// those about a parameter's type are dropped and the rest reported as
+    /// they are, never folded into `E042`, since no argument failed, when
+    /// [`Self::reports_template`].
+    fn template_failure(&mut self, key: &FuncKey, mark: usize) {
+        let captured = self.diags.take_since(mark);
+        self.requirements.retain(|(index, _)| *index < mark);
+        let mut dependent = Vec::new();
+        self.dependent.retain(|index| {
+            if *index >= mark {
+                dependent.push(*index - mark);
+                false
+            } else {
+                true
+            }
+        });
+        if !self.reports_template(key) {
+            return;
+        }
+        for (position, diagnostic) in captured.into_iter().enumerate() {
+            if !dependent.contains(&position) {
+                self.diags.emit(diagnostic);
+            }
+        }
     }
 
     /// Did-you-mean, conversion, arity and `ref` hints for the requirements.

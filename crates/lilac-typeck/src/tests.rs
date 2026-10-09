@@ -1714,3 +1714,120 @@ main: function () nothing {
     assert!(has_code(&diags, "E036"), "{diags:?}");
     assert!(has_code(&diags, "E023"), "{diags:?}");
 }
+
+#[test]
+fn unused_generic_drops_errors_about_its_parameter() {
+    // Nothing instantiates these, so `T` is abstract: each failure is about
+    // a type containing `T` and could hold for some argument.
+    let diags = check_src(
+        "Box[T]: object {\n    value: T\n}\n\
+         p1[T]: function () out: T {\n    out = T.default()\n}\n\
+         p2[T]: function (x: T) out: @bit32 {\n    out = x.foo()\n}\n\
+         p3[T]: function (x: T) out: @bit32 {\n    out = x\n}\n\
+         p4[T]: function () out: T {\n    out = 0x5\n}\n\
+         p5[T]: function () out: T {\n    out = T(0x1)\n}\n\
+         p6[T]: function (x: T) out: @bit32 {\n    out = 0x0\n    if x {\n        out = 0x1\n    }\n}\n\
+         p7[T]: function (x: T) out: Box[T] {\n    out = Box[T] { value = 0x1 }\n}\n\
+         main: function () nothing {\n}\n",
+    );
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+}
+
+#[test]
+fn unused_generic_reports_errors_independent_of_its_parameter() {
+    let diags = check_src(
+        "Box[T]: object {\n    value: T\n}\n\
+         q1[T]: function (x: T) out: @bit32 {\n    out = nonexistent()\n}\n\
+         q2[T]: function (x: T) out: @bit32 {\n    small: @bit8 = 0x1\n    out = small\n}\n\
+         q3[T]: function (x: T) out: Box[T] {\n    out = Box[T] { valeu = x }\n}\n\
+         main: function () nothing {\n}\n",
+    );
+    let messages = messages(&diags);
+    assert!(
+        messages.contains(&"unresolved name `nonexistent`".to_owned()),
+        "{messages:?}"
+    );
+    assert!(
+        messages.contains(&"no conversion from @bit8 to @bit32".to_owned()),
+        "{messages:?}"
+    );
+    assert!(
+        messages.contains(&"no field `valeu` on `Box[T]`".to_owned()),
+        "{messages:?}"
+    );
+    assert!(!has_code(&diags, "E042"), "{messages:?}");
+}
+
+#[test]
+fn unused_generic_error_reported_once() {
+    // `outer` checks `inner[T]` (the same abstract `T` as `inner`'s own
+    // template) and `other[T]` (a different parameter than `other[U]`):
+    // each body error is still reported once.
+    let diags = check_src(
+        "inner[T]: function (x: T) nothing {\n    a: @bit32 = missing_a()\n}\n\
+         other[U]: function (u: U) nothing {\n    b: @bit32 = missing_b()\n}\n\
+         outer[T]: function (x: T) nothing {\n    inner[T](x)\n    other[T](x)\n}\n\
+         main: function () nothing {\n}\n",
+    );
+    let messages = messages(&diags);
+    for name in ["missing_a", "missing_b"] {
+        let text = format!("unresolved name `{name}`");
+        assert_eq!(
+            messages.iter().filter(|m| **m == text).count(),
+            1,
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn instantiated_generic_keeps_reporting_through_its_instance() {
+    // A used generic is not checked as a template: its error is the
+    // instance's, `E042` at the call.
+    let diags = check_src(
+        "g[T]: function (x: T) out: @bit32 {\n    out = x.foo()\n}\n\
+         main: function () nothing {\n    v: @bit32 = g[@bit32](0x1)\n}\n",
+    );
+    assert_eq!(
+        diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
+        ["E042"]
+    );
+}
+
+#[test]
+fn unused_generic_constant_index_out_of_bounds_is_e037() {
+    let diags = check_src(
+        "LIMIT: @bit_native = 0x9\n\
+         bad[T]: function (x: T) nothing {\n    a: @array(T, 4) = @array(T, 4) {}\n    \
+         b: ref T = @array_at(ref a, 0x4)\n    c: ref T = @array_at(ref a, LIMIT)\n    \
+         d: ref T = @array_at(ref a, 0x3)\n}\n\
+         runtime[T]: function (x: T, flag: @bit8) nothing {\n    a: @array(T, 4) = @array(T, 4) {}\n    \
+         if flag {\n        b: ref T = @array_at(ref a, 0x5)\n    }\n}\n\
+         main: function () nothing {\n}\n",
+    );
+    assert_eq!(
+        messages(&diags),
+        [
+            "index 4 is out of bounds for an array of length 4",
+            "index 9 is out of bounds for an array of length 4",
+            "index 5 is out of bounds for an array of length 4",
+        ]
+    );
+}
+
+#[test]
+fn unused_generic_index_under_a_possibly_constant_condition_is_skipped() {
+    // `@size_of(T)` is constant once `T` is known, so lowering may drop the
+    // arm for every argument actually used.
+    let diags = check_src(
+        "guarded[T]: function (x: T) nothing {\n    a: @array(T, 4) = @array(T, 4) {}\n    \
+         if @i_greater_than_u_native(@size_of(T), 0x8) {\n        \
+         b: ref T = @array_at(ref a, 0x7)\n    }\n}\n\
+         main: function () nothing {\n}\n",
+    );
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+}
