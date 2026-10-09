@@ -12,7 +12,7 @@ function @.root.add_one
     copy &3 -> %result
     return
 }
-function @main
+function @.root.run
   in #bit32 %n
 {
   $entry:
@@ -22,5 +22,14 @@ function @main
     copy %n -> %tmp.2
     call @.root.add_one (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %y
+    return
+}
+function @main
+{
+  $entry:
+    alloca #bit32 %tmp.1 : zeroed
+    &1: #bit32 = const 0x0
+    copy &1 -> %tmp.1
+    call @.root.run (in %tmp.1) (out)
     return
 }

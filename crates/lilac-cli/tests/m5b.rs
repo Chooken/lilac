@@ -1,7 +1,9 @@
 //! M5b UI tests: `.ll` snapshots are byte-stable under the canonical
 //! `x86_64-unknown-none` triple, every success program links and runs on the
-//! host in the debug and release modes, and the zero-init plus RAII `@on_drop` call is
+//! host in the debug and release modes (built with `--libc` and `Standard`), and the zero-init plus RAII `@on_drop` call is
 //! visible in `generic_hook_drop.ll`.
+
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -117,9 +119,9 @@ fn emit_host_ir(source: &Path, opt: &str, dest: &Path) {
     std::fs::write(dest, &output.stdout).expect("writes IR");
 }
 
-/// Every success program links (toolchain `clang`) and runs to exit 0 on the
-/// host, in the debug and release modes. A failure here is a real backend bug, so it is
-/// reported rather than skipped.
+/// Every success program builds (`--libc`, toolchain `clang`) and runs to
+/// exit 0 on the host, in the debug and release modes. A failure here is a
+/// real backend bug, so it is reported rather than skipped.
 #[test]
 fn compiles_and_runs_on_host() {
     let clang = clang();
@@ -129,23 +131,8 @@ fn compiles_and_runs_on_host() {
     for source in success_fixtures() {
         let name = stem(&source);
         for (label, opt) in [("debug", "--mode=debug"), ("release", "--mode=release")] {
-            let ll = scratch.join(format!("{name}-{label}.ll"));
-            emit_host_ir(&source, opt, &ll);
-
             let exe = scratch.join(format!("{name}-{label}.exe"));
-            let link = Command::new(&clang)
-                .arg(&ll)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("runs clang");
-            assert!(
-                link.status.success(),
-                "{name} ({label}) failed to link:\n{}",
-                String::from_utf8_lossy(&link.stderr)
-            );
-
-            let run = Command::new(&exe).output().expect("runs executable");
+            let run = support::build_and_run(&clang, &source, &exe, &[opt]);
             assert!(
                 run.status.success(),
                 "{name} ({label}) exited with {:?}",
@@ -201,8 +188,8 @@ fn no_runtime_fixture_emits_no_runtime_text() {
     }
 }
 
-/// `fstring.lilac` reaches the format-args runtime; its `emit-llvm` compiles
-/// with the toolchain clang and runs to exit 0 on the host.
+/// `fstring.lilac` reaches the format-args runtime; it builds with the
+/// toolchain clang and runs to exit 0 on the host.
 #[test]
 fn fstring_runtime_compiles_and_runs_on_host() {
     let clang = clang();
@@ -216,19 +203,7 @@ fn fstring_runtime_compiles_and_runs_on_host() {
     assert!(text.contains(".lilac.format_args_push"), "{text}");
 
     let exe = scratch.join("fstring.exe");
-    let link = Command::new(&clang)
-        .arg(&ll)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("runs clang");
-    assert!(
-        link.status.success(),
-        "fstring failed to link:\n{}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-
-    let run = Command::new(&exe).output().expect("runs executable");
+    let run = support::build_and_run(&clang, &source, &exe, &["--mode=debug"]);
     assert!(
         run.status.success(),
         "fstring exited with {:?}",

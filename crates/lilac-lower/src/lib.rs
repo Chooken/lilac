@@ -700,6 +700,13 @@ impl Lower<'_> {
             return extern_symbol(self.res, func.key.def);
         }
         let is_hook = matches!(def.kind, DefKind::Hook(_));
+        if let (true, None, Some(symbol)) = (
+            is_hook,
+            def.parent,
+            lilac_hir::platform_hook_symbol(&def.name),
+        ) {
+            return symbol.to_owned();
+        }
         let (prefix, own) = match def.parent {
             Some(parent) => {
                 let count = self.res.def(parent).generic_params.len();

@@ -113,12 +113,6 @@ l.3:                                              ; preds = %l.2
   ret void
 }
 
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}
-
 attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
 attributes #1 = { nocallback nofree nounwind willreturn memory(argmem: write) }
 attributes #2 = { cold noreturn nounwind memory(inaccessiblemem: write) }

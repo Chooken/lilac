@@ -1,0 +1,33 @@
+// A minimal runtime library for the run tests: the three platform hooks
+// without Standard. `@entry` runs the program's `start` rather than `main`,
+// and panics print nothing.
+
+@entry: function () nothing {
+    start()
+}
+
+@exit: function (code: @bit32) nothing {
+    match @builtin.Target.os {
+        .Windows => ExitProcess(code)
+        .Linux => match @builtin.Target.arch {
+            .X86_64 => {
+                result: @bit_native = @syscall(0xe7, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+            }
+            .Aarch64 => {
+                result: @bit_native = @syscall(0x5e, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+            }
+        } else {
+            exit(code)
+        }
+        .MacOs => exit(code)
+        .None => exit(code)
+    }
+}
+
+@compiler_print: function (text: @byte_buffer) nothing {
+}
+
+private {
+    ExitProcess: extern function (code: @bit32) nothing
+    exit: extern function (code: @bit32) nothing
+}

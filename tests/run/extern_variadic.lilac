@@ -1,5 +1,4 @@
 // libc
-// lib: Standard=lib/Standard
 // expect-stdout: 7-42 1.5
 // expect-exit: 8
 // A variadic `extern`: `snprintf` formats an `@bit32` literal, an `@bit32`

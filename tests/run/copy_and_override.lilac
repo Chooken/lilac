@@ -1,6 +1,5 @@
 // expect-stdout: co
 // expect-exit: 1
-// lib: Standard=lib/Standard
 
 using Standard.Io
 using Standard.Process

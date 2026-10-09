@@ -22,7 +22,10 @@
 //!   exercised by the ignored `run_pending_programs` instead. Remove the line
 //!   when the fix lands.
 //! - `// lib: <Name>=<dir>` — mounts a library (`--lib`); `<dir>` is relative
-//!   to the repository root (repeatable).
+//!   to the repository root (repeatable). `Standard` (`lib/Standard`) is
+//!   mounted for every program, so it supplies the platform hooks.
+//! - `// no-standard` — does not mount `Standard` (the program brings its own
+//!   runtime).
 //! - `// libc` — builds with `--libc` (the program uses `Standard.C`).
 //! - `// build-arg: <flag>` — an extra `lilac build` flag (repeatable).
 //!
@@ -67,6 +70,7 @@ struct Expect {
     pending: Option<String>,
     libs: Vec<String>,
     libc: bool,
+    no_standard: bool,
 }
 
 fn parse_header(text: &str) -> Expect {
@@ -96,17 +100,27 @@ fn parse_header(text: &str) -> Expect {
             expect.error = Some(rest.trim().to_owned());
         } else if comment.trim_end() == "libc" {
             expect.libc = true;
+        } else if comment.trim_end() == "no-standard" {
+            expect.no_standard = true;
         } else if let Some(rest) = comment.strip_prefix("pending:") {
             expect.pending = Some(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("lib:") {
             let (name, dir) = rest.trim().split_once('=').expect("lib: is Name=dir");
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(dir);
-            expect.libs.push(format!("--lib={name}={}", dir.display()));
+            expect.libs.push(lib_flag(name, dir));
         }
     }
+    if !expect.no_standard {
+        expect.libs.push(lib_flag("Standard", "lib/Standard"));
+    }
     expect
+}
+
+/// `--lib=<name>=<dir>`, with `dir` relative to the repository root.
+fn lib_flag(name: &str, dir: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(dir);
+    format!("--lib={name}={}", dir.display())
 }
 
 fn programs() -> Vec<PathBuf> {

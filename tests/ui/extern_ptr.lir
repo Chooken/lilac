@@ -1,7 +1,7 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
 extern @malloc
-  in #bit64 %size
+  in #bit_native %size
   out ref #unknown %result
 extern @free
   in ref #unknown %p
@@ -10,11 +10,11 @@ function @main
   $entry:
     alloca ref #bit8 %p : zeroed
     alloca ref #bit8 %tmp.1 : zeroed
-    alloca #bit64 %tmp.2 : zeroed
+    alloca #bit_native %tmp.2 : zeroed
     alloca ref #unknown %tmp.3 : zeroed
     alloca ref #bit8 %tmp.4 : zeroed
     alloca ref #unknown %tmp.5 : zeroed
-    &1: #bit64 = const 0x10
+    &1: #bit_native = const 0x10
     copy &1 -> %tmp.2
     call @malloc (in %tmp.2) (out %tmp.3)
     &2: ref #unknown = copy %tmp.3

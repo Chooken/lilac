@@ -1,7 +1,35 @@
-//! Toolchain lookup shared by the integration tests.
+//! Toolchain lookup and building shared by the integration tests.
+
+// Each test binary uses its own subset.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+
+/// Builds `source` (a file or a project folder) as `exe` with `lilac build
+/// --libc`, `Standard` mounted for the platform hooks and `clang` as the
+/// linker, then runs it. `args` are extra build flags (`--mode=release`).
+pub fn build_and_run(clang: &Path, source: &Path, exe: &Path, args: &[&str]) -> Output {
+    let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
+    let build = Command::new(env!("CARGO_BIN_EXE_lilac"))
+        .args(["build", "-q", "--libc"])
+        .arg(format!("--lib=Standard={}", standard.display()))
+        .args(args)
+        .arg("-o")
+        .arg(exe)
+        .arg(source)
+        .env("LILAC_LINKER", clang)
+        .output()
+        .expect("runs lilac build");
+    assert!(
+        build.status.success(),
+        "{} failed to build:
+{}",
+        source.display(),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    Command::new(exe).output().expect("runs the executable")
+}
 
 /// Locates the toolchain `clang`: `%LLVM_SYS_181_PREFIX%\bin\clang[.exe]`, else
 /// `clang` on `PATH`. `None` when neither runs.

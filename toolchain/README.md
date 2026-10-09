@@ -6,7 +6,7 @@ the install's `lib/lilac/`; the tests assemble a development sysroot from it.
 
 ## Windows: `kernel32.lib`
 
-An import library for the `kernel32.dll` functions the runtime calls, built
+An import library for the `kernel32.dll` functions `Standard.Os` calls, built
 from `windows/kernel32.def`. After editing the `.def`, regenerate both with
 the LLVM tree's `llvm-lib`:
 
@@ -23,8 +23,8 @@ own import library with `--link-arg=`.
 ## macOS: `libSystem.tbd`
 
 A hand-written text stub (TAPI v4) for `/usr/lib/libSystem.B.dylib`, one
-per architecture, listing only the symbols the runtime and the backend use:
-`write`, `exit`, `calloc`/`malloc`/`free`, `memcpy`/`memmove`/`memset`/`bzero`
+per architecture, listing only the symbols `Standard.Os` and the backend use:
+`write`, `exit`, `calloc`/`malloc`/`free`, `mmap`/`munmap`, `memcpy`/`memmove`/`memset`/`bzero`
 (LLVM lowers copies and zeroing to them), `fmod`/`fmodf` (float `%`),
 `___chkstk_darwin`, and `dyld_stub_binder`. lld needs nothing else from an
 SDK. Keep the two files' symbol lists the same; a symbol missing here is an

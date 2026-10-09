@@ -2,11 +2,15 @@
     to = @truncate(from)
 }
 
-main: function (v: @bit32) nothing {
+run: function (v: @bit32) nothing {
     truncated: @bit16 = v as @bit16
     pinned: @bit16 = 0x1 as @bit16
     same: @bit16 = truncated as @bit16
     v_ref: ref @bit32 = ref v
     erased: ref unknown = v_ref as ref unknown
     round_trip: ref @bit32 = erased as ref @bit32
+}
+
+main: function () nothing {
+    run(0x0)
 }

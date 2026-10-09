@@ -1,4 +1,4 @@
-main: function (a: @bit32, b: @bit32, w: @bit_native) nothing {
+run: function (a: @bit32, b: @bit32, w: @bit_native) nothing {
     one: @bit32 = 0x1
     divisor: @bit32 = @i_add_32(b, one)
     quotient: @bit32 = @i_div_u_32(a, divisor)
@@ -13,4 +13,8 @@ main: function (a: @bit32, b: @bit32, w: @bit_native) nothing {
     wide_divisor: @bit_native = @i_add_native(w, native_one)
     wide_quotient: @bit_native = @i_div_u_native(w, wide_divisor)
     wide_remainder: @bit_native = @i_mod_u_native(w, wide_divisor)
+}
+
+main: function () nothing {
+    run(0x0, 0x0, 0x0)
 }

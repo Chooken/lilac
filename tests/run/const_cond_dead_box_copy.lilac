@@ -1,4 +1,3 @@
-// lib: Standard=lib/Standard
 // A `Box` copy (whose `@on_copy` is a `@compile_error`) behind `if false` is
 // never lowered, so the hook stays unreachable.
 

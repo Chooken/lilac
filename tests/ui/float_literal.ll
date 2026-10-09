@@ -19,9 +19,3 @@ entry:
   store float 0x40091EB860000000, ptr %single, align 4
   ret void
 }
-
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}

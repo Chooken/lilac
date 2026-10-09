@@ -220,6 +220,9 @@ impl Checker<'_> {
             return self.init_call(fcx, ty, args, span);
         }
         let Some(def) = self.lookup_item(name, name_span)? else {
+            if self.in_entry() {
+                return Err(self.entry_unresolved(name, name_span));
+            }
             return Err(self.diags.emit(
                 Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
                     name_span,

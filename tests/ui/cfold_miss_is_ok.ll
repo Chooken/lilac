@@ -12,7 +12,7 @@ entry:
   ret void
 }
 
-define void @.lilac.main(ptr %in0) {
+define void @.root.run(ptr %in0) {
 entry:
   %y = alloca i32, align 4
   store i32 0, ptr %y, align 4
@@ -28,15 +28,16 @@ entry:
   ret void
 }
 
+define void @.lilac.main() {
+entry:
+  %tmp.1 = alloca i32, align 4
+  store i32 0, ptr %tmp.1, align 4
+  store i32 0, ptr %tmp.1, align 4
+  call void @.root.run(ptr %tmp.1)
+  ret void
+}
+
 ; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
 declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
-
-define i32 @main() {
-entry:
-  %n = alloca i32, align 4
-  store i32 0, ptr %n, align 4
-  call void @.lilac.main(ptr %n)
-  ret i32 0
-}
 
 attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

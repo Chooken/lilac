@@ -432,53 +432,79 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part F: platform hooks and the OS layer
 
-- [ ] Hooks:
+- [x] Hooks:
   - recognize top-level `@entry`, `@exit` and `@compiler_print`, checked
     against the decision 19 signatures (`E010` on a mismatch);
   - `E034` for a duplicate, `E033` for a missing one under `require_entry`;
   - add `docs/errors/E033.md` and `E034.md`.
-- [ ] `@entry` lookup: a name that is not found falls back to the root
+- [x] `@entry` lookup: a name that is not found falls back to the root
       namespace inside an `@entry` body. A missing `main` is the reworded
       `E032`.
-- [ ] Emit the hooks under fixed symbols (`.lilac.entry`, `.lilac.exit`,
+- [x] Emit the hooks under fixed symbols (`.lilac.entry`, `.lilac.exit`,
       `.lilac.compiler_print`). When a hook is absent and not required,
       declare the symbol as an `extern`.
-- [ ] `lilac_ir::entry_point`: the stub calls `.lilac.entry`, then
+- [x] `lilac_ir::entry_point`: the stub calls `.lilac.entry`, then
       `.lilac.exit(0)`, then traps. Under `Entry::CMain` the C `main` does
       the same.
-- [ ] Panic handler: `.lilac.write` → `.lilac.compiler_print`, then
+- [x] Panic handler: `.lilac.write` → `.lilac.compiler_print`, then
       `.lilac.exit(101)`, then `@lilac_abort`.
-- [ ] DCE roots: `.lilac.entry` (and therefore `main`) replaces `main` when
+- [x] DCE roots: `.lilac.entry` (and therefore `main`) replaces `main` when
       building an executable. `--export` roots are unchanged. The `E031`
       chain hides `.lilac.*` frames, so it still ends at `main` →
       `@entry`. Check this.
-- [ ] Remove:
+- [x] Remove:
   - the `@os_*` intrinsics;
   - `System`, `Syscalls` and the OS-layer functions in `lilac-ir::runtime`,
     with their tests;
   - the driver's `System` choice.
-- [ ] `lib/Standard`:
+- [x] `lib/Standard`:
   - `Runtime/runtime.lilac`: the three hooks. `@entry` calls `main()`.
   - `Os/`: per-OS bindings. Windows: `kernel32` externs with link names.
     Linux: `@syscall` (`write`, `exit_group`, `mmap`, `munmap`). Libc:
     `write`, `exit`, `calloc`, `free`.
   - `Io`, `Process` and `Heap.Allocator` call `Standard.Os`.
   - The allocator run test moves onto `Standard.Os` page mapping.
-- [ ] Toolchain stubs: `kernel32.lib` and `libSystem.tbd` list every symbol
+- [x] Toolchain stubs: `kernel32.lib` and `libSystem.tbd` list every symbol
       `Standard.Os` uses.
-- [ ] Run-test harness: mount `Standard` by default. Migrate the tests that
+- [x] Run-test harness: mount `Standard` by default. Migrate the tests that
       call `@os_*`. Re-bless any LIR snapshots that change.
-- [ ] Tests:
+- [x] Tests:
   - a missing hook is `E033`, and a duplicate is `E034`;
   - a program without `main` gives the reworded `E032`;
   - a custom runtime library that names its entry `start` builds and runs;
   - panic output and exit code 101 still hold (the existing
     `tests/run/panic_*`);
   - an `@exit` that returns hits the trap.
-- [ ] Docs:
+- [x] Docs:
   - SPEC: a new "Platform hooks" section, with the §3 `@os_*` rows removed;
   - AGENTS.md: rewrite "Runtime and symbols", the OS-layer bullets of "Build
     and link", and "Panics and stack traces".
+
+Done (2026-10-09). Differences from the tasks above:
+
+- A shape mismatch is `E022` (like the other hook shapes), not `E010`.
+- DCE still roots `main` as well as `.lilac.start`, so the `E031` chain is
+  unchanged (it ends at `main`; `.lilac.*` frames stay hidden).
+- `typeck::check` takes `Options { native_bits, require_entry }`. Outside an
+  executable, an `@entry` naming a missing root item is dropped silently
+  instead of reporting `E032`, so a library mounting `Standard` still checks.
+- The hook `extern`s (`lilac_ir::hook_externs`) keep the Lilac place ABI:
+  a `.lilac.`-named `extern` is not C (`LirFunc::uses_c_abi`).
+- The C `main` (under `--libc`) calls `.lilac.start` and ends
+  `unreachable`; `emit-*` has no stub, so the `.ll` snapshots lost their
+  `i32 @main()` wrapper. Tests that linked `emit-llvm` output now use
+  `lilac build --libc` (`support::build_and_run`); `as_cast`,
+  `cfold_miss_is_ok` and `unsigned_ops` moved their parameterized `main`
+  into `run`, and `extern_ptr`'s `malloc` takes `@bit_native` (it clashed
+  with `Standard.C`'s).
+- `Standard.Os` names its functions `write_stream`, `exit_process`,
+  `allocate`/`deallocate` and `map_pages`/`unmap_pages` (there are no
+  qualified calls, so they must not shadow `Standard.Process.exit`). A bare
+  target needs `--libc`. `kernel32.def` gains `VirtualAlloc`/`VirtualFree`,
+  and `libSystem.tbd` `mmap`/`munmap`.
+- The run harness has `// no-standard`. New run tests: `custom_runtime`
+  (with `tests/libs/TinyRuntime`, entering at `start`) and
+  `exit_returns_traps`.
 
 ### Part G: atomics
 

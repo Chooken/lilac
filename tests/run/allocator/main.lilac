@@ -1,5 +1,4 @@
 // expect-exit: 0
-// lib: Standard=lib/Standard
 // A free-list allocator in Lilac (`free_list.lilac`): aligned allocation,
 // `realloc` in place and by moving, `free` with coalescing. Each failed
 // check exits with its own code.

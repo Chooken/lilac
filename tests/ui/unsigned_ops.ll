@@ -3,7 +3,7 @@ source_filename = "lilac"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-none"
 
-define void @.lilac.main(ptr %in0, ptr %in1, ptr %in2) {
+define void @.root.run(ptr %in0, ptr %in1, ptr %in2) {
 entry:
   %one = alloca i32, align 4
   store i32 0, ptr %one, align 4
@@ -80,14 +80,17 @@ l.6:                                              ; preds = %l.5, %l.4
   ret void
 }
 
-define i32 @main() {
+define void @.lilac.main() {
 entry:
-  %a = alloca i32, align 4
-  store i32 0, ptr %a, align 4
-  %b = alloca i32, align 4
-  store i32 0, ptr %b, align 4
-  %w = alloca i64, align 8
-  store i64 0, ptr %w, align 8
-  call void @.lilac.main(ptr %a, ptr %b, ptr %w)
-  ret i32 0
+  %tmp.1 = alloca i32, align 4
+  store i32 0, ptr %tmp.1, align 4
+  %tmp.2 = alloca i32, align 4
+  store i32 0, ptr %tmp.2, align 4
+  %tmp.3 = alloca i64, align 8
+  store i64 0, ptr %tmp.3, align 8
+  store i32 0, ptr %tmp.1, align 4
+  store i32 0, ptr %tmp.2, align 4
+  store i64 0, ptr %tmp.3, align 8
+  call void @.root.run(ptr %tmp.1, ptr %tmp.2, ptr %tmp.3)
+  ret void
 }

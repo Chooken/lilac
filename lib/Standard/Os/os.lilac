@@ -1,0 +1,218 @@
+// The operating-system calls Standard is built on, picked per target at
+// compile time from `@builtin.Target`: `kernel32` on Windows, system calls
+// on Linux, and the C library on macOS, on Linux under `--libc`, and on a
+// bare target that links one. Only the live arm of each `match` is
+// compiled, so a program only links what its target uses.
+
+// Writes `len` bytes at `data` to standard stream `fd` (1 = stdout,
+// 2 = stderr).
+write_stream: function (fd: @bit32, data: ref @bit8, len: @bit_native) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            handle: ref unknown = GetStdHandle(@i_sub_32(std_handle_base, fd))
+            written: @bit32 = 0x0
+            ok: @bit32 = WriteFile(handle, data, @truncate(len), ref written, @address_to_ptr(0x0))
+        }
+        .Linux => if @builtin.Target.libc {
+            written: @bit_native = write(fd, data, len)
+        } else {
+            written: @bit_native = @syscall(linux_call(0x1, 0x40), @extend_zero(fd), @ptr_to_address(data as ref unknown), len, 0x0, 0x0, 0x0)
+        }
+        .MacOs => {
+            written: @bit_native = write(fd, data, len)
+        }
+        .None => {
+            needs_libc()
+            written: @bit_native = write(fd, data, len)
+        }
+    }
+}
+
+// Ends the process with `code`. Does not return.
+exit_process: function (code: @bit32) nothing {
+    match @builtin.Target.os {
+        .Windows => if @builtin.Target.libc {
+            // The C library's `exit` flushes C `stdio` first.
+            exit(code)
+        } else {
+            ExitProcess(code)
+        }
+        .Linux => if @builtin.Target.libc {
+            exit(code)
+        } else {
+            result: @bit_native = @syscall(linux_call(0xe7, 0x5e), @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+        }
+        .MacOs => exit(code)
+        .None => {
+            needs_libc()
+            exit(code)
+        }
+    }
+}
+
+// `size` zeroed bytes, or null when out of memory. Free them with
+// `deallocate`.
+allocate: function (size: @bit_native) memory: ref unknown {
+    match @builtin.Target.os {
+        .Windows => {
+            memory = HeapAlloc(GetProcessHeap(), heap_zero_memory, size)
+        }
+        .Linux => if @builtin.Target.libc {
+            memory = calloc(0x1, size)
+        } else {
+            // One mapping per allocation, its length in a header in front.
+            total: @bit_native = @i_add_native(size, alloc_header)
+            mapped: ref unknown = map_pages(total)
+            if @i_greater_than_u_native(@ptr_to_address(mapped), 0x0) {
+                header: ref AllocHeader = mapped as ref AllocHeader
+                header.length = total
+                memory = @ptr_add(mapped, alloc_header)
+            } else {
+                memory = mapped
+            }
+        }
+        .MacOs => {
+            memory = calloc(0x1, size)
+        }
+        .None => {
+            needs_libc()
+            memory = calloc(0x1, size)
+        }
+    }
+}
+
+// Frees memory from `allocate`.
+deallocate: function (memory: ref unknown) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            ok: @bit32 = HeapFree(GetProcessHeap(), 0x0, memory)
+        }
+        .Linux => if @builtin.Target.libc {
+            free(memory)
+        } else {
+            mapped: ref unknown = @address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
+            header: ref AllocHeader = mapped as ref AllocHeader
+            unmap_pages(mapped, header.length)
+        }
+        .MacOs => free(memory)
+        .None => {
+            needs_libc()
+            free(memory)
+        }
+    }
+}
+
+// `size` bytes of fresh zeroed pages (`size` is rounded up to whole pages),
+// or null when out of memory. Release them with `unmap_pages`.
+map_pages: function (size: @bit_native) memory: ref unknown {
+    match @builtin.Target.os {
+        .Windows => {
+            memory = VirtualAlloc(@address_to_ptr(0x0), size, mem_commit_reserve, page_read_write)
+        }
+        .Linux => if @builtin.Target.libc {
+            memory = c_map(size, 0x22)
+        } else {
+            address: @bit_native = @syscall(linux_call(0x9, 0xde), 0x0, size, 0x3, 0x22, @i_sub_native(0x0, 0x1), 0x0)
+            if @i_greater_than_u_native(address, @i_sub_native(0x0, 0x1000)) {
+                address = 0x0
+            }
+            memory = @address_to_ptr(address)
+        }
+        .MacOs => {
+            memory = c_map(size, 0x1002)
+        }
+        .None => {
+            // No virtual memory: plain zeroed memory from the C library.
+            needs_libc()
+            memory = calloc(0x1, size)
+        }
+    }
+}
+
+// Releases `size` bytes of pages from `map_pages`.
+unmap_pages: function (memory: ref unknown, size: @bit_native) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            ok: @bit32 = VirtualFree(memory, 0x0, mem_release)
+        }
+        .Linux => if @builtin.Target.libc {
+            result: @bit32 = munmap(memory, size)
+        } else {
+            result: @bit_native = @syscall(linux_call(0xb, 0xd7), @ptr_to_address(memory), size, 0x0, 0x0, 0x0, 0x0)
+        }
+        .MacOs => {
+            result: @bit32 = munmap(memory, size)
+        }
+        .None => {
+            needs_libc()
+            free(memory)
+        }
+    }
+}
+
+private {
+    // The bytes in front of each Linux allocation, holding the mapping's
+    // length for `munmap` (16 keeps the allocation 16-byte aligned).
+    AllocHeader: object {
+        length: @bit_native
+    }
+
+    alloc_header: @bit_native => 0x10
+
+    // `GetStdHandle` takes `-10 - fd`: stdout (1) is `-11`, stderr `-12`.
+    std_handle_base: @bit32 => 0xfffffff6
+    heap_zero_memory: @bit32 => 0x8
+    mem_commit_reserve: @bit32 => 0x3000
+    mem_release: @bit32 => 0x8000
+    page_read_write: @bit32 => 0x4
+
+    // The Linux system-call number: `x86` on x86-64, `arm` on 64-bit Arm.
+    linux_call: function (x86: @bit_native, arm: @bit_native) number: @bit_native {
+        match @builtin.Target.arch {
+            .X86_64 => {
+                number = x86
+            }
+            .Aarch64 => {
+                number = arm
+            }
+        } else {
+            @compile_error("Standard.Os makes Linux system calls only on x86-64 and 64-bit Arm; build with `--libc`")
+        }
+    }
+
+    // A bare target has no OS of its own: Standard needs a C library there.
+    needs_libc: function () nothing {
+        if @builtin.Target.libc {
+        } else {
+            @compile_error("Standard.Os needs a C library on a target with no OS; build with `--libc`")
+        }
+    }
+
+    // `mmap` of fresh read-write pages with the target's `flags`
+    // (`MAP_PRIVATE | MAP_ANONYMOUS`), or null.
+    c_map: function (size: @bit_native, flags: @bit32) memory: ref unknown {
+        memory = mmap(@address_to_ptr(0x0), size, 0x3, flags, 0xffffffff, 0x0)
+        // `MAP_FAILED` is `-1`.
+        if @i_greater_than_u_native(@ptr_to_address(memory), @i_sub_native(0x0, 0x1000)) {
+            memory = @address_to_ptr(0x0)
+        }
+    }
+
+    // kernel32.
+    GetStdHandle: extern function (id: @bit32) handle: ref unknown
+    WriteFile: extern function (handle: ref unknown, data: ref @bit8, len: @bit32, written: ref @bit32, overlapped: ref unknown) ok: @bit32
+    ExitProcess: extern function (code: @bit32) nothing
+    GetProcessHeap: extern function () heap: ref unknown
+    HeapAlloc: extern function (heap: ref unknown, flags: @bit32, size: @bit_native) memory: ref unknown
+    HeapFree: extern function (heap: ref unknown, flags: @bit32, memory: ref unknown) ok: @bit32
+    VirtualAlloc: extern function (address: ref unknown, size: @bit_native, kind: @bit32, protect: @bit32) memory: ref unknown
+    VirtualFree: extern function (address: ref unknown, size: @bit_native, kind: @bit32) ok: @bit32
+
+    // The C library.
+    write: extern function (fd: @bit32, data: ref @bit8, len: @bit_native) written: @bit_native
+    exit: extern function (code: @bit32) nothing
+    calloc: extern function (count: @bit_native, size: @bit_native) memory: ref unknown
+    free: extern function (memory: ref unknown) nothing
+    mmap: extern function (address: ref unknown, len: @bit_native, prot: @bit32, flags: @bit32, fd: @bit32, offset: @bit64) memory: ref unknown
+    munmap: extern function (address: ref unknown, len: @bit_native) result: @bit32
+}

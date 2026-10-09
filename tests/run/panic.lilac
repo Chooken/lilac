@@ -1,10 +1,9 @@
 // expect-stdout: before
 // expect-exit: 101
 // expect-stderr: panic: index 3 is out of range
-// expect-stderr:   at check (panic.lilac:13:9)
-// expect-stderr:   at middle (panic.lilac:18:5)
-// expect-stderr:   at main (panic.lilac:23:5)
-// lib: Standard=lib/Standard
+// expect-stderr:   at check (panic.lilac:12:9)
+// expect-stderr:   at middle (panic.lilac:17:5)
+// expect-stderr:   at main (panic.lilac:22:5)
 
 using Standard.Io
 

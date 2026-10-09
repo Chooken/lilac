@@ -186,6 +186,14 @@ impl Resolved {
         (self.def(id).vis == Visibility::Public).then_some(id)
     }
 
+    /// The top-level item `name` in the root namespace, whatever its
+    /// visibility (`@entry` falls back to it).
+    #[must_use]
+    pub fn root_item(&self, name: &str) -> Option<DefId> {
+        let root = self.namespaces.iter().find(|data| data.path.is_empty())?;
+        root.items.get(name).copied()
+    }
+
     /// The dotted path of `ns` (`""` for the root).
     #[must_use]
     pub fn namespace_path(&self, ns: NsId) -> &str {

@@ -189,10 +189,4 @@ load:                                             ; preds = %entry
   ret void
 }
 
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}
-
 attributes #0 = { cold noreturn nounwind memory(inaccessiblemem: write) }

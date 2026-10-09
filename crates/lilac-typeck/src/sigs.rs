@@ -9,7 +9,7 @@ use lilac_error::Diagnostic;
 use lilac_hir::{FuncKey, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{FuncSig, TypeRef};
+use lilac_ty::{FuncSig, TypeId, TypeRef};
 
 use crate::{Checker, Hook};
 
@@ -110,11 +110,20 @@ impl Checker<'_> {
             .find(|hook| hook.sig.params == sig.params && hook.sig.returns == sig.returns)
         {
             let previous = previous.span;
-            self.diags.emit(
+            let diagnostic = if is_platform_hook(&name) {
+                Diagnostic::error(
+                    "E034",
+                    format!("`{name}` is defined more than once in the program"),
+                )
+                .label(span, true, "defined again here")
+                .label(previous, false, "first defined here")
+                .note("a program has one of each platform hook; mount at most one runtime library")
+            } else {
                 Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
                     .label(span, true, "redefined here")
-                    .label(previous, false, "first defined here"),
-            );
+                    .label(previous, false, "first defined here")
+            };
+            self.diags.emit(diagnostic);
             return;
         }
         overloads.push(Hook {
@@ -141,6 +150,9 @@ impl Checker<'_> {
             false
         };
         let by_value = |ty: &TypeRef| !ty.is_ref;
+        if is_platform_hook(name) {
+            return self.platform_hook_shape_ok(name, key, sig);
+        }
         match name {
             "@conversion" => {
                 let shaped = sig.params.len() == 1
@@ -225,6 +237,50 @@ impl Checker<'_> {
         true
     }
 
+    /// Checks a platform hook: top-level, with its fixed signature
+    /// (`@entry()`, `@exit(@bit32)`, `@compiler_print(@byte_buffer)`, no
+    /// returns), else `E022`.
+    fn platform_hook_shape_ok(&mut self, name: &str, key: &FuncKey, sig: &FuncSig) -> bool {
+        let def = self.res.def(key.def);
+        let span = def.span;
+        let (message, label) = if def.parent.is_some() {
+            (
+                format!("`{name}` must be defined at the top level"),
+                "platform hooks belong to the program, not a type".to_owned(),
+            )
+        } else {
+            let (param, want) = match name {
+                "@entry" => (None, "`@entry: function() nothing`"),
+                "@exit" => (Some("@bit32"), "`@exit: function(code: @bit32) nothing`"),
+                _ => (
+                    Some("@byte_buffer"),
+                    "`@compiler_print: function(text: @byte_buffer) nothing`",
+                ),
+            };
+            let expected: Vec<TypeId> = param
+                .and_then(|ty| self.types.builtin(ty))
+                .into_iter()
+                .collect();
+            let shaped = sig.returns.is_empty()
+                && sig.params.len() == expected.len()
+                && sig
+                    .params
+                    .iter()
+                    .zip(&expected)
+                    .all(|(param, ty)| !param.is_ref && param.id == *ty);
+            if shaped {
+                return true;
+            }
+            (
+                format!("`{name}` must be {want}"),
+                format!("bad `{name}` shape"),
+            )
+        };
+        self.diags
+            .emit(Diagnostic::error("E022", message).label(span, true, label));
+        false
+    }
+
     /// The overloads of hook `name` (empty when none exist).
     pub(crate) fn overloads(&self, name: &str) -> Vec<Hook> {
         self.hooks.get(name).cloned().unwrap_or_default()
@@ -235,4 +291,9 @@ impl Checker<'_> {
 pub(crate) fn leading(span: Span, name: &str) -> Span {
     let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
     Span::new(span.lo.0, span.lo.0.saturating_add(len), span.file)
+}
+
+/// Whether `name` is a platform hook ([`lilac_hir::platform_hook_symbol`]).
+pub(crate) fn is_platform_hook(name: &str) -> bool {
+    lilac_hir::platform_hook_symbol(name).is_some()
 }

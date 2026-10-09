@@ -1,5 +1,4 @@
 // expect-exit: 4
-// lib: Standard=lib/Standard
 // `@size_of(T)` is constant per instance, so a generic guard on it decides
 // at lowering.
 

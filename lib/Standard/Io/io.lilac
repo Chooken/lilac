@@ -1,8 +1,10 @@
 // Writing bytes to the standard output and error streams, through the OS
-// (no C library).
+// (`Standard.Os`).
+
+using Standard.Os
 
 print: function (text: @byte_buffer) nothing {
-    @os_write(0x1, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    write_stream(0x1, @byte_buffer_ptr(text), @byte_buffer_len(text))
 }
 
 print_line: function (text: @byte_buffer) nothing {
@@ -12,7 +14,7 @@ print_line: function (text: @byte_buffer) nothing {
 
 print_byte: function (byte: @bit8) nothing {
     b: @bit8 = byte
-    @os_write(0x1, ref b, 0x1)
+    write_stream(0x1, ref b, 0x1)
 }
 
 // Writes the code point `c` (a character literal such as 'H') as UTF-8.
@@ -42,7 +44,7 @@ private {
 }
 
 print_error: function (text: @byte_buffer) nothing {
-    @os_write(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
 }
 
 print_error_line: function (text: @byte_buffer) nothing {

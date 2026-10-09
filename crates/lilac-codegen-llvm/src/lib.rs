@@ -1270,7 +1270,8 @@ mod tests {
     #[test]
     fn panic_handler_lowers() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.funcs = lilac_ir::build_runtime(8, lilac_ir::System::Windows, Entry::Native);
+        module.funcs = lilac_ir::build_runtime(8);
+        module.funcs.extend(lilac_ir::hook_externs());
         let (handler, data) = lilac_ir::panic_runtime();
         module.funcs.push(handler);
         module.data = data;
@@ -1320,7 +1321,7 @@ mod tests {
     #[test]
     fn format_args_bounds_checks_are_unsigned() {
         let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.funcs = lilac_ir::runtime::build_runtime(8, lilac_ir::System::None, Entry::CMain);
+        module.funcs = lilac_ir::runtime::build_runtime(8);
         let text = emit(&module);
         for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
             let body = text
@@ -1649,6 +1650,26 @@ mod tests {
         module
     }
 
+    /// An executable: `main` with `insts`, an `@entry` hook (`.lilac.entry`)
+    /// calling it, the other two hooks declared, and the entry stub.
+    fn executable_module(triple: &str, insts: Vec<LirInst>) -> LirModule {
+        let mut module = LirModule::new(triple);
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let mut entry = Vec::new();
+        call(&mut entry, LirCallee::Func("main".to_owned()), &[], &[]);
+        module.funcs.push(func(
+            ".lilac.entry",
+            &[],
+            &[],
+            vec![ret_block("entry", entry)],
+        ));
+        module.funcs.extend(lilac_ir::hook_externs());
+        module.funcs.push(lilac_ir::entry_point());
+        module
+    }
+
     /// A COFF x86-64 object starts with the AMD64 machine field, and the
     /// steps fire in order (no `Optimize` at O0).
     #[test]
@@ -1726,11 +1747,11 @@ mod tests {
         assert!(linux.contains("define ptr @memcpy("), "{linux}");
     }
 
-    /// The Linux OS layer reaches the kernel through `.lilac.syscall`, the
+    /// `@syscall` reaches the kernel through `.lilac.syscall`, the
     /// architecture's system-call instruction, and x86-64 realigns the stack
     /// `.lilac.start` is entered with.
     #[test]
-    fn linux_runtime_makes_system_calls() {
+    fn linux_system_calls_and_entry() {
         for (triple, instruction, realigns) in [
             (
                 "x86_64-unknown-linux-gnu",
@@ -1743,19 +1764,18 @@ mod tests {
                 false,
             ),
         ] {
-            let numbers = if realigns {
-                lilac_ir::Syscalls::X86_64
-            } else {
-                lilac_ir::Syscalls::AARCH64
-            };
-            let mut module = main_module(triple);
-            let main = module.funcs[0].clone();
-            module.funcs.extend(lilac_ir::build_runtime(
-                8,
-                lilac_ir::System::Linux(numbers),
-                Entry::Native,
-            ));
-            module.funcs.push(lilac_ir::entry_point(&main));
+            let mut insts = Vec::new();
+            let args = ["n", "a0", "a1", "a2", "a3", "a4", "a5"];
+            for place in args.iter().chain(&["r"]) {
+                alloca(&mut insts, place, "#bit_native");
+            }
+            call(
+                &mut insts,
+                LirCallee::Builtin("@syscall".to_owned()),
+                &args,
+                &["r"],
+            );
+            let module = executable_module(triple, insts);
             let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
             let context = inkwell::context::Context::create();
             let (built, _) = backend
@@ -1770,26 +1790,16 @@ mod tests {
             let text = built.print_to_string().to_string();
             assert!(text.contains("define i64 @.lilac.syscall("), "{text}");
             assert!(text.contains(instruction), "{triple}: {text}");
-            assert!(text.contains("ptrtoint ptr"), "{text}");
-            assert!(text.contains("inttoptr i64"), "{text}");
             assert_eq!(text.contains("\"stackrealign\""), realigns, "{triple}");
         }
     }
 
     /// A native macOS module defines none of the C-runtime replacements: it
-    /// links `libSystem`, which has them, and its OS layer calls the C
-    /// functions.
+    /// links `libSystem`, which has them.
     #[test]
     fn macos_native_uses_libsystem() {
         let triple = "aarch64-apple-darwin";
-        let mut module = main_module(triple);
-        let main = module.funcs[0].clone();
-        module.funcs.extend(lilac_ir::build_runtime(
-            8,
-            lilac_ir::System::Libc,
-            Entry::Native,
-        ));
-        module.funcs.push(lilac_ir::entry_point(&main));
+        let module = executable_module(triple, Vec::new());
         let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
         let context = inkwell::context::Context::create();
         let (built, _) = backend
@@ -1854,40 +1864,15 @@ mod tests {
         lilac_codegen_llvm::LlvmBackend::new("x86_64-pc-windows-msvc", optimize)
     }
 
-    /// A LIR `main` is emitted as `.lilac.main` and the module gains an `i32
-    /// @main()` wrapper that calls it and returns 0.
+    /// A LIR `main` is emitted as `.lilac.main`, and an executable gains an
+    /// `i32 @main()` wrapper that calls the entry stub, which never returns.
     #[test]
     fn emits_main_entry_wrapper() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module
-            .funcs
-            .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
-        let text = emit(&module);
+        let text = emit(&executable_module("x86_64-pc-windows-msvc", Vec::new()));
         assert!(text.contains("define void @.lilac.main()"), "{text}");
         assert!(text.contains("define i32 @main()"), "{text}");
+        assert!(text.contains("call void @.lilac.start()"), "{text}");
         assert!(text.contains("call void @.lilac.main()"), "{text}");
-        assert!(text.contains("ret i32 0"), "{text}");
-    }
-
-    /// A `main` with an `in` place still gets a valid C entry wrapper: the
-    /// wrapper allocates a zeroed slot and passes its address (the pointer
-    /// ABI), so the call's argument count matches `.lilac.main`'s signature.
-    #[test]
-    fn emits_main_wrapper_with_parameter_slots() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
-        module.funcs.push(func(
-            "main",
-            &[("n", "#bit32")],
-            &[],
-            vec![ret_block("entry", Vec::new())],
-        ));
-        let text = emit(&module);
-        assert!(
-            text.contains("define void @.lilac.main(ptr %in0)"),
-            "{text}"
-        );
-        assert!(text.contains("store i32 0, ptr %n"), "{text}");
-        assert!(text.contains("call void @.lilac.main(ptr %n)"), "{text}");
     }
 
     /// A value place passed to a `ref` parameter is spilled into a pointer
@@ -1917,12 +1902,15 @@ mod tests {
         assert!(text.contains("call void @hook(ptr %ref.arg)"), "{text}");
     }
 
-    /// A module with no `main` gets no `.lilac.main` and no entry wrapper, yet
-    /// still verifies (Empty module has only the runtime).
+    /// A module without the entry stub (not an executable) gets no C entry
+    /// wrapper, even with a `main`.
     #[test]
-    fn omits_entry_wrapper_without_main() {
+    fn omits_entry_wrapper_without_the_stub() {
         let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
         assert!(!text.contains(".lilac.main"), "{text}");
+        assert!(!text.contains("define i32 @main"), "{text}");
+        let text = emit(&main_module("x86_64-pc-windows-msvc"));
+        assert!(text.contains("define void @.lilac.main()"), "{text}");
         assert!(!text.contains("define i32 @main"), "{text}");
     }
 

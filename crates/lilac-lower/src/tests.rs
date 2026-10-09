@@ -10,7 +10,11 @@ fn lower_src(src: &str) -> (String, Diags) {
     let (programs, _) = lilac_module::parse_all(&project, &mut diags, false);
     let res = lilac_resolve::resolve(&project, &programs, &mut diags);
     let mut types = Types::new();
-    let checked = lilac_typeck::check(&res, &mut types, &mut diags, 64);
+    let options = lilac_typeck::Options {
+        native_bits: 64,
+        require_entry: false,
+    };
+    let checked = lilac_typeck::check(&res, &mut types, &mut diags, options);
     assert!(!diags.has_errors(), "{diags:?}");
     let lir = lower(
         &checked.hir,

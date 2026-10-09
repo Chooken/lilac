@@ -5,4 +5,6 @@ EXPORTS
     GetStdHandle
     HeapAlloc
     HeapFree
+    VirtualAlloc
+    VirtualFree
     WriteFile

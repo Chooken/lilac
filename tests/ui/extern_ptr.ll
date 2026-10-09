@@ -37,9 +37,3 @@ entry:
   call void @free(ptr %6)
   ret void
 }
-
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}

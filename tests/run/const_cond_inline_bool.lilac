@@ -1,5 +1,4 @@
 // expect-exit: 1
-// lib: Standard=lib/Standard
 // `true` and `false` are inline constants, so an `if` on them is a constant
 // condition: only the live arm is lowered, and the dead arm's
 // `@compile_error` never exists.

@@ -132,30 +132,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         Ok(())
     }
 
-    /// Appends the C entry point when the LIR defines `main`: `i32 @main()`
-    /// calls the renamed `.lilac.main` and returns 0. A module without `main`
-    /// gets no wrapper.
-    ///
-    /// Only a non-`extern` `main` is the Lilac entry point. An `extern` named
-    /// `main` keeps the unmangled C symbol `main` (until the frontend rejects
-    /// it as `E028`), so it must not be mistaken for the entry and trigger the
-    /// `.lilac.main` lookup — that would ICE on user input.
-    ///
-    /// `.lilac.main` uses the pointer ABI, so a `main` with `in`/`out` places
-    /// would take pointer arguments. The wrapper supplies a zero-initialized
-    /// stack slot for each (in declaration order, ins then outs) and passes its
-    /// address, so a parameterized `main` still verifies and runs.
+    /// Appends the C entry point when the LIR has the entry stub
+    /// `.lilac.start` (an executable): `i32 @main()` calls it. The stub ends
+    /// the process through `@exit` and never returns, so the wrapper ends
+    /// `unreachable`. A module without the stub gets no wrapper.
     fn emit_entry_wrapper(&self) {
-        let Some(lir_main) = self
-            .lir
-            .funcs
-            .iter()
-            .find(|func| func.name == "main" && !func.is_extern)
-        else {
+        let Some(start) = self.module.get_function(".lilac.start") else {
             return;
-        };
-        let Some(entry_fn) = self.module.get_function(symbol("main")) else {
-            bug!(Span::dummy(), "`main` was not declared");
         };
         let i32_ty = self.context.i32_type();
         let main = self
@@ -164,21 +147,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let builder = self.context.create_builder();
         let entry = self.context.append_basic_block(main, "entry");
         builder.position_at_end(entry);
-        let mut args = Vec::with_capacity(lir_main.ins.len() + lir_main.outs.len());
-        for (place, ty) in lir_main.ins.iter().chain(&lir_main.outs) {
-            let value_ty = self.lir_type(ty);
-            let slot = checked(builder.build_alloca(value_ty, place), "main arg alloca");
-            checked(
-                builder.build_store(slot, value_ty.const_zero()),
-                "main arg zero-init",
-            );
-            args.push(slot.into());
-        }
-        checked(builder.build_call(entry_fn, &args, ""), "main wrapper call");
-        checked(
-            builder.build_return(Some(&i32_ty.const_zero())),
-            "main wrapper return",
-        );
+        checked(builder.build_call(start, &[], ""), "main wrapper call");
+        checked(builder.build_unreachable(), "main wrapper end");
     }
 
     /// The leaf builtins this module references, so the runtime emits only the
@@ -302,10 +272,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Declares one function without lowering its body. Internal functions get
     /// the pointer-place ABI `void @name(ptr %in0, …, ptr %out0, …)`; an
     /// `extern` function gets its platform C signature under its **unmangled**
-    /// declared name. Declaring every function up front lets calls and
-    /// `addr.func` reference functions defined later.
+    /// declared name (a `.lilac.` hook declaration keeps the pointer-place
+    /// ABI, [`LirFunc::uses_c_abi`]). Declaring every function up front lets
+    /// calls and `addr.func` reference functions defined later.
     fn declare_func(&self, func: &LirFunc) -> Result<(), Diagnostic> {
-        if func.is_extern {
+        if func.uses_c_abi() {
             let fn_type = self.extern_fn_type(func)?;
             self.module.add_function(&func.name, fn_type, None);
             return Ok(());
@@ -689,7 +660,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let Some(function) = self.module.get_function(llvm_name) else {
             bug!(Span::dummy(), "call to unknown function `@{name}`");
         };
-        if callee.is_extern {
+        if callee.uses_c_abi() {
             let args = self.extern_call_args(callee, ins, builder, state);
             let result = checked(builder.build_call(function, &args, ""), "extern call");
             if let Some(out) = outs.first() {

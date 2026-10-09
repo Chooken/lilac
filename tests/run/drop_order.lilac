@@ -2,7 +2,6 @@
 // Drop order: a by-value parameter is dropped by the callee, `return`
 // drops live locals, an object drops itself before its fields (in
 // declaration order), and locals drop in reverse declaration order.
-// lib: Standard=lib/Standard
 
 using Standard.Io
 

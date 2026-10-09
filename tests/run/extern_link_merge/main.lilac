@@ -1,5 +1,4 @@
 // libc
-// lib: Standard=lib/Standard
 // expect-exit: 7
 // Two namespaces declare C's `abs` under their own names; the identical
 // declarations link as one symbol.

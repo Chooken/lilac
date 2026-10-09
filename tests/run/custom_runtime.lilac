@@ -1,0 +1,10 @@
+// no-standard
+// lib: TinyRuntime=tests/libs/TinyRuntime
+// expect-exit: 7
+// A runtime library other than Standard supplies the platform hooks, and its
+// `@entry` enters the program at `start`: there is no `main`. Code may call
+// a hook directly.
+
+start: function () nothing {
+    @exit(0x7)
+}

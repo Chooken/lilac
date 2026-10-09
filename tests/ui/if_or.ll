@@ -11,9 +11,3 @@ entry:
   store i32 1, ptr %conditional, align 4
   ret void
 }
-
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}

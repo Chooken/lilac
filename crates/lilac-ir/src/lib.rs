@@ -22,7 +22,7 @@ mod ty;
 
 pub use codec::{CodecError, LIR_CODEC_VERSION};
 pub use dce::{prune_unreachable, reach, Edge, EdgeKind, Frame, Reach};
-pub use runtime::{build_runtime, entry_point, panic_runtime, Entry, Syscalls, System};
+pub use runtime::{build_runtime, entry_point, hook_externs, panic_runtime, Entry};
 pub use ty::LirTy;
 
 /// IR version header; bump on any normative IR change.
@@ -76,7 +76,8 @@ pub struct LirFunc {
     pub ins: Vec<(String, LirTy)>,
     /// `(place, type)` outputs (print as `out #t %p`).
     pub outs: Vec<(String, LirTy)>,
-    /// Whether this is an `extern` (foreign) declaration with no body.
+    /// Whether this is an `extern` declaration with no body (see
+    /// [`Self::uses_c_abi`]).
     pub is_extern: bool,
     /// Whether an `extern` takes C varargs after its `ins` (`...`); a call
     /// may then pass extra `ins` of a [`is_variadic_arg_type`] type.
@@ -85,6 +86,17 @@ pub struct LirFunc {
     pub inline: bool,
     /// Blocks in layout order (empty only for extern declarations).
     pub blocks: Vec<LirBlock>,
+}
+
+impl LirFunc {
+    /// Whether calls to this function use the platform C ABI: every
+    /// `extern` except a `.lilac.`-named one, which declares a Lilac function
+    /// defined elsewhere (a platform hook another object supplies) and keeps
+    /// the place ABI.
+    #[must_use]
+    pub fn uses_c_abi(&self) -> bool {
+        self.is_extern && !self.name.starts_with(".lilac.")
+    }
 }
 
 /// One labeled block: straight-line instructions plus one terminator.

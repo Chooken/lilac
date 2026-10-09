@@ -1,0 +1,20 @@
+// The platform hooks a Lilac executable needs: the compiler's entry stub
+// calls `@entry` and then `@exit(0)`, and its panic handler writes through
+// `@compiler_print` and then calls `@exit(101)`. Mounting Standard supplies
+// all three.
+
+using Standard.Os
+
+// Runs the program: its root-namespace `main`.
+@entry: function () nothing {
+    main()
+}
+
+@exit: function (code: @bit32) nothing {
+    exit_process(code)
+}
+
+// Panic messages and stack traces go to standard error.
+@compiler_print: function (text: @byte_buffer) nothing {
+    write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+}

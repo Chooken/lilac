@@ -1,5 +1,4 @@
 // expect-stdout: dddd!
-// lib: Standard=lib/Standard
 
 using Standard.Io
 

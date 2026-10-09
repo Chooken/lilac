@@ -1,4 +1,3 @@
-// lib: Standard=lib/Standard
 // libc
 // expect-stdout: OK
 // Uses every `Standard` type so the whole library is instantiated, checked

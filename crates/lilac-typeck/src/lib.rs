@@ -45,10 +45,21 @@ pub struct Checked {
     pub templates: Vec<HirFunc>,
 }
 
-/// Checks every definition in `res`. `native_bits` is the target's pointer
-/// width (`@bit_native` literal range).
-pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, native_bits: u32) -> Checked {
-    check_impl(res, types, diags, native_bits, false)
+/// What a unit is checked for.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// The target's pointer width (`@bit_native` literal range).
+    pub native_bits: u32,
+    /// Whether the unit is an executable (`lilac build`): a name `@entry`
+    /// cannot find in the root namespace is then `E032`. Otherwise an
+    /// `@entry` that names a missing root item is dropped silently, since
+    /// nothing enters the program.
+    pub require_entry: bool,
+}
+
+/// Checks every definition in `res`.
+pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Options) -> Checked {
+    check_impl(res, types, diags, options, false)
 }
 
 /// [`check`], plus [`Checked::templates`] for editor tooling.
@@ -56,23 +67,25 @@ pub fn check_for_editor(
     res: &Resolved,
     types: &mut Types,
     diags: &mut Diags,
-    native_bits: u32,
+    options: Options,
 ) -> Checked {
-    check_impl(res, types, diags, native_bits, true)
+    check_impl(res, types, diags, options, true)
 }
 
 fn check_impl(
     res: &Resolved,
     types: &mut Types,
     diags: &mut Diags,
-    native_bits: u32,
+    options: Options,
     templates: bool,
 ) -> Checked {
     let mut checker = Checker {
         res,
         types,
         diags,
-        native_bits,
+        native_bits: options.native_bits,
+        require_entry: options.require_entry,
+        entry_unresolved: false,
         sigs: HashMap::new(),
         failed_sigs: HashSet::new(),
         hooks: HashMap::new(),
@@ -221,6 +234,11 @@ pub(crate) struct Checker<'a> {
     pub requirements: Vec<(usize, Requirement)>,
     /// `E042`s already reported, by instance (one per instance).
     pub reported: HashSet<FuncKey>,
+    /// [`Options::require_entry`].
+    pub require_entry: bool,
+    /// Set when the `@entry` body being checked names a missing root item
+    /// outside an executable, so the hook is dropped rather than reported.
+    pub entry_unresolved: bool,
 }
 
 /// Production instantiation depth cap; the test cap keeps `E051` cheap.
@@ -426,6 +444,7 @@ impl Checker<'_> {
             return Ok(self.res.lookup_path(name));
         }
         match self.res.lookup(self.file(), name) {
+            None if self.in_entry() => Ok(self.res.root_item(name)),
             Some(Lookup::One(id)) => Ok(Some(*id)),
             Some(Lookup::Ambiguous(sites)) => {
                 let mut diagnostic = Diagnostic::error("E029", format!("`{name}` is ambiguous"))
@@ -437,6 +456,36 @@ impl Checker<'_> {
             }
             None => Ok(None),
         }
+    }
+
+    /// Whether the body being checked is the top-level `@entry` hook, whose
+    /// unfound names fall back to the program's root namespace (so a
+    /// runtime library's `@entry` can call the program's `main`).
+    pub(crate) fn in_entry(&self) -> bool {
+        self.env.key.as_ref().is_some_and(|key| {
+            let def = self.res.def(key.def);
+            def.name == "@entry" && def.parent.is_none() && matches!(def.kind, DefKind::Hook(_))
+        })
+    }
+
+    /// The error for a name `@entry` finds nowhere: `E032` in an
+    /// executable; otherwise nothing, and the hook is dropped
+    /// ([`Options::require_entry`]).
+    pub(crate) fn entry_unresolved(&mut self, name: &str, span: Span) -> ErrorGuaranteed {
+        if !self.require_entry {
+            self.entry_unresolved = true;
+            return ErrorGuaranteed::new();
+        }
+        self.diags.emit(
+            Diagnostic::error(
+                "E032",
+                format!("the program has no `{name}`, which `@entry` calls"),
+            )
+            .label(span, true, format!("`@entry` calls `{name}` here"))
+            .note(format!(
+                "`@entry` looks names up in the program's root namespace; define `{name}` in a file at the project root"
+            )),
+        )
     }
 
     // ---- diagnostics ---------------------------------------------------

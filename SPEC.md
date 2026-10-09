@@ -346,22 +346,17 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
-| **`@os_write`** | `(fd, data, len)` | Writes `len` bytes (`@bit_native`) from `ref @bit8` to standard stream `fd` (`@bit32`: 1 is stdout, 2 is stderr). |
-| **`@os_exit`** | `(code)` | Ends the process with exit code `code` (`@bit32`). Does not return. |
-| **`@os_alloc`** | `(size)` | Allocates `size` zeroed bytes (`@bit_native`) on the heap. Returns `ref unknown`. |
-| **`@os_free`** | `(ptr)` | Frees `ref unknown` memory from `@os_alloc`. |
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference
 to it (`ref value as ref unknown`), move it with `@ptr_add`, and cast it back
 (`as ref T`), which auto-dereferences like any reference.
-The `@os_*` intrinsics are the OS layer: the compiler implements them per
-target with the operating system's own interface (`kernel32` on Windows,
-system calls on Linux, `libSystem` on macOS, where Apple supports no other),
-so programs do not depend on a separate C library. `Standard.Io`,
-`Standard.Process` and `Standard.Heap.Allocator` are built on them. On a target with no operating
-system they are left for the platform to define, and a program that uses one
-fails to link without it.
+The compiler has no operating-system intrinsics. OS access is library code:
+`extern`s and `@syscall`s chosen by `@builtin.Target` (`Standard.Os` uses
+`kernel32` on Windows, system calls on Linux, and the C library on macOS,
+where Apple supports no other), so programs do not depend on a separate C
+library. What the compiler itself needs from the platform, it asks for
+through the platform hooks (§8).
 `@compile_error` is a **compile-time marker**, not a runtime builtin call: it
 is never compiled in the dead arm of a constant condition, it is removed with
 its function when that function is unreachable, and otherwise it is reported
@@ -635,7 +630,7 @@ every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
 `A.Object.Method`, `A.GenBox.1..bit32.@on_drop`). A root-namespace free
 function is prefixed `.root` (`.root.foo`), which no user name or C symbol
 can spell, so it never takes a symbol an `extern` links against; root `main`
-stays `main`, the entry point. Root types and their methods take no prefix
+stays `main` (`Standard`'s `@entry` calls it). Root types and their methods take no prefix
 (`Object.Method`): they already contain a `.`.
 User-defined type names and generic instances are qualified the same way, so
 same-named types in different namespaces stay distinct, while builtin types are
@@ -925,6 +920,40 @@ Buffer: object {
     }
 }
 ```
+
+### Platform hooks
+
+Three top-level hooks connect a program to its platform. The compiler calls
+them; a runtime library (normally `Standard`, through `Standard.Runtime`)
+defines them:
+
+| Hook | Signature | Called |
+| --- | --- | --- |
+| **`@entry`** | `function () nothing` | By the process entry stub. It runs the program. |
+| **`@exit`** | `function (code: @bit32) nothing` | After `@entry` returns (code 0), and by the panic handler (code 101). It must end the process. |
+| **`@compiler_print`** | `function (text: @byte_buffer) nothing` | By the panic handler, for the message and each stack-trace line. |
+
+- **The entry stub** (`.lilac.start` natively, called from the C `main`
+  under `--libc`) makes no OS call: it calls `@entry`, then `@exit(0x0)`,
+  then traps. The panic handler writes through `@compiler_print`, calls
+  `@exit(0x65)`, then traps. So an `@exit` that returns stops at a trap
+  rather than running on.
+- **`@entry` calls `main` itself.** Inside an `@entry` body, a name not
+  found in the hook's own scope is looked up in the program's root
+  namespace, so `Standard`'s `@entry` calls the program's `main`. Another
+  runtime library may enter the program under any name.
+- **Each hook is defined at most once** in the program (`E034`), at the top
+  level, with exactly its signature (`E022`). Hooks are unit-global and carry
+  no namespace prefix; they are emitted as `.lilac.entry`, `.lilac.exit` and
+  `.lilac.compiler_print`, and user code may call them (`@exit(0x1)`).
+- **An executable** (`lilac build`) needs all three: a missing one is
+  `E033`, and an `@entry` that names a missing `main` is `E032`. The stub
+  roots reachability.
+- **Anything else** (`check`, `emit-*`, and static libraries later) needs
+  none. `@entry` is not a root, and an `@entry` that names a missing `main`
+  is left out silently. A missing `@exit` or `@compiler_print` is declared as
+  an external symbol under its fixed name, so the panics of code linked into
+  another program resolve against that program's hooks.
 
 ## 9. Foreign functions and async
 

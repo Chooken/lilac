@@ -22,6 +22,25 @@ use lilac_ty::{TypeId, TypeRef};
 
 pub use intrinsics::Intrinsic;
 
+/// The platform hooks the compiler calls on the program's behalf, with the
+/// fixed symbols they are emitted under: the entry stub calls `@entry` then
+/// `@exit(0)`, and the panic handler writes through `@compiler_print` then
+/// calls `@exit(101)`. Each is top-level and defined at most once.
+pub const PLATFORM_HOOKS: [(&str, &str); 3] = [
+    ("@entry", ".lilac.entry"),
+    ("@exit", ".lilac.exit"),
+    ("@compiler_print", ".lilac.compiler_print"),
+];
+
+/// The fixed symbol of platform hook `name`, if it is one.
+#[must_use]
+pub fn platform_hook_symbol(name: &str) -> Option<&'static str> {
+    PLATFORM_HOOKS
+        .iter()
+        .find(|(hook, _)| *hook == name)
+        .map(|(_, symbol)| *symbol)
+}
+
 /// A function instance: a definition plus its generic arguments (empty for
 /// non-generic functions; for a method of a generic type, the type's
 /// arguments come first, then the method's own).

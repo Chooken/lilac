@@ -74,7 +74,9 @@ Standard/                 root prelude: scalars, operators, Option/Result, panic
 ├── Text/                 strings, unicode, parse/format
 ├── Collections/          containers, iterators, algorithms
 ├── Io/                   files, paths, streams, console
-├── C/                    platform layer: libc externs, C types, pointer/atomic primitives, OS access
+├── Os/                   OS calls (kernel32 / Linux system calls / libc), picked by @builtin.Target
+├── Runtime/              the platform hooks: @entry (calls main), @exit, @compiler_print
+├── C/                    libc externs, C types, pointer/atomic primitives (--libc)
 ├── Threading/            threads, mutex, rwlock, channel (over C)
 ├── Math/                 numeric math + random
 ├── Diagnostics/          error types, formatting, color, tracing
@@ -91,8 +93,9 @@ Standard  ←  C  ←  Io / Threading / Math
 Standard  ←  Diagnostics  ←  Testing / Compiler
 ```
 
-`Standard.C` is the **only** non-portable namespace; everything above it is
-portable Lilac.
+`Standard.Os` and `Standard.C` are the non-portable namespaces; everything
+above them is portable Lilac. `Standard.Os` picks each OS call per target at
+compile time, so code using it is portable too.
 
 A typical program imports the prelude plus the domains it uses:
 
@@ -289,9 +292,12 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 ### 3.5 `Standard.Io`
 
 > **Today:** `print`, `print_line`, `print_char` (a code point, as UTF-8),
-> `print_byte`, `print_error` and `print_error_line`, over the compiler's
-> `@os_write`. `Standard.Process.exit` and `Standard.Heap.Allocator` likewise
-> sit on `@os_exit` and `@os_alloc`/`@os_free`, not on `Standard.C`. The
+> `print_byte`, `print_error` and `print_error_line`, over
+> `Standard.Os.write_stream`. `Standard.Process.exit` and
+> `Standard.Heap.Allocator` likewise sit on `Standard.Os` (`exit_process`,
+> `allocate`/`deallocate`), not on `Standard.C`. `Standard.Os` also has
+> `map_pages`/`unmap_pages`, and `Standard.Runtime` defines the platform
+> hooks (SPEC §8) over it. The
 > inventory below is the target design.
 
 | Type | Purpose | Key methods |
@@ -316,7 +322,7 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 ### 3.6 `Standard.C` (platform layer — libc FFI)
 
 > **Being phased out.** Programs no longer link a C library by default; the
-> compiler's OS layer (`@os_*`) replaces it piece by piece, and code that
+> library's own OS bindings (`Standard.Os`) replace it piece by piece, and code that
 > still uses `Standard.C` builds with `lilac build --libc`. See
 > `docs/build-command-plan.md`.
 

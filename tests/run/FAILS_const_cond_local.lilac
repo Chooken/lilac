@@ -1,5 +1,4 @@
 // expect-error: E031
-// lib: Standard=lib/Standard
 // A local is never a constant expression, even one initialized from `false`:
 // the guarded `@compile_error` is reachable.
 

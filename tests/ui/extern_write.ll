@@ -62,9 +62,3 @@ entry:
   store i64 %1, ptr %out0, align 8
   ret void
 }
-
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}

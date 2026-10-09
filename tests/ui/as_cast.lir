@@ -11,7 +11,7 @@ function @@conversion:bit32:bit16
     copy &2 -> %to
     return
 }
-function @main
+function @.root.run
   in #bit32 %v
 {
   $entry:
@@ -35,5 +35,14 @@ function @main
     copy &3 -> %erased
     &4: ref #bit32 = copy %erased
     copy &4 -> %round_trip
+    return
+}
+function @main
+{
+  $entry:
+    alloca #bit32 %tmp.1 : zeroed
+    &1: #bit32 = const 0x0
+    copy &1 -> %tmp.1
+    call @.root.run (in %tmp.1) (out)
     return
 }

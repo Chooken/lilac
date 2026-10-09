@@ -98,10 +98,4 @@ entry:
 ; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: write)
 declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #0
 
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}
-
 attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: write) }

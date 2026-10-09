@@ -1,5 +1,4 @@
 // expect-exit: 8
-// lib: Standard=lib/Standard
 
 using Standard.Process
 

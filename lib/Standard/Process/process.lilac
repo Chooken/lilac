@@ -1,6 +1,8 @@
 // Ending the process.
 
+using Standard.Os
+
 // Ends the process with `code`. Does not return.
 exit: function (code: @bit32) nothing {
-    @os_exit(code)
+    exit_process(code)
 }

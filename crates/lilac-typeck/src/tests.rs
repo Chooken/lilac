@@ -16,7 +16,11 @@ fn run_native(
     let (programs, _) = lilac_module::parse_all(&project, &mut diags, false);
     let res = lilac_resolve::resolve(&project, &programs, &mut diags);
     let mut types = Types::new();
-    let checked = crate::check(&res, &mut types, &mut diags, native_bits);
+    let options = crate::Options {
+        native_bits,
+        require_entry: false,
+    };
+    let checked = crate::check(&res, &mut types, &mut diags, options);
     (diags, checked.hir, types, sm, res)
 }
 

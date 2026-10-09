@@ -133,9 +133,14 @@ name; no instruction carries a generic parameter type.
 
 Every compiler-generated function or runtime symbol lives in the `.lilac.`
 namespace: the LIR runtime (`.lilac.byte_buffer_from`, `.lilac.load_u8`,
-`.lilac.format_args_push`, …), the entry point (`.lilac.main`), and the
-backend's three leaf intrinsics (`.lilac.ptr_add`, `.lilac.memcpy`,
-`.lilac.abort`). LLVM 18 prints `.`-leading and dotted names unquoted. The
+`.lilac.format_args_push`, …), the entry stub `.lilac.start` (calls
+`.lilac.entry`, then `.lilac.exit` with 0, then `@lilac_abort`), the
+platform hooks (`.lilac.entry`, `.lilac.exit`, `.lilac.compiler_print`: the
+program's `@entry`, `@exit` and `@compiler_print`), the renamed Lilac
+`main` in LLVM (`.lilac.main`), and the backend's three leaf intrinsics
+(`.lilac.ptr_add`, `.lilac.memcpy`, `.lilac.abort`). An `extern` whose name
+starts `.lilac.` declares a hook defined elsewhere and keeps the place ABI
+(`LirFunc::uses_c_abi`); every other `extern` uses the C ABI. LLVM 18 prints `.`-leading and dotted names unquoted. The
 verifier rejects two functions with the same name (`E070`), so a residual
 mangle collision or a user/prelude clash cannot reach a backend.
 
@@ -299,7 +304,8 @@ There is no panic terminator. `@panic(msg)` lowers to a call to the runtime
 function `.lilac.panic` (in `msg`, then the panic site as a `!const` line
 such as `"  at main (main.lilac:3:5)\n"`) followed by `unreachable`.
 `.lilac.panic` (`lilac_ir::panic_runtime`) writes `panic: <msg>`, then the
-stack trace, then exits through `.lilac.exit` with code 101.
+stack trace, through `.lilac.compiler_print`, then calls `.lilac.exit` with
+code 101 and traps (`@lilac_abort`).
 
 The trace is a shadow stack. When stack traces are on, the driver runs
 `lilac_ir::trace::instrument` after `prune_unreachable`. It gives every

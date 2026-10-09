@@ -6,6 +6,6 @@ current-version: 1345
 exports:
   - targets:         [ arm64-macos ]
     symbols:         [ ___chkstk_darwin, _bzero, _calloc, _exit, _fmod, _fmodf, _free,
-                       _malloc, _memcpy, _memmove, _memset, _write,
+                       _malloc, _memcpy, _memmove, _memset, _mmap, _munmap, _write,
                        dyld_stub_binder ]
 ...

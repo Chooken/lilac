@@ -2,6 +2,8 @@
 //! for a `using` whose target folder is missing. Module fixtures also have
 //! merged `.lir`/`.ll` snapshots and a clang end-to-end run.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -569,92 +571,44 @@ fn clang() -> PathBuf {
 
 /// A `private_reach` project whose root `main` reaches `util.write_byte` (which
 /// itself reaches the root `root_bump` by ancestor reach and the namespace-
-/// private `secret`) compiles to host IR, links with the toolchain `clang`, and
-/// runs to exit 0.
+/// private `secret`) builds with the toolchain `clang` and runs to exit 0.
 #[test]
 fn module_project_compiles_links_and_runs() {
-    let clang = clang();
     let scratch = std::env::temp_dir().join(format!("lilac-m6-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
-
-    let output = lilac()
-        .args(["emit-llvm", "--mode=debug"])
-        .arg(modules("private_reach"))
-        .output()
-        .expect("runs lilac");
-    assert!(
-        output.status.success(),
-        "emit-llvm failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let ll = scratch.join("private_reach.ll");
-    std::fs::write(&ll, &output.stdout).expect("writes IR");
-
     let exe = scratch.join("private_reach.exe");
-    let link = Command::new(&clang)
-        .arg(&ll)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("runs clang");
-    assert!(
-        link.status.success(),
-        "private_reach failed to link:\n{}",
-        String::from_utf8_lossy(&link.stderr)
+    let run = support::build_and_run(
+        &clang(),
+        Path::new(&modules("private_reach")),
+        &exe,
+        &["--mode=debug"],
     );
-
-    let run = Command::new(&exe).output().expect("runs executable");
     assert_eq!(
         run.status.code(),
         Some(0),
         "private_reach exited with {:?}",
         run.status.code()
     );
-
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// A libc `write(1, ptr, len)` program compiles to host IR, links against the
-/// host C runtime with the toolchain `clang`, runs, and prints exactly the bytes
-/// of its `@byte_buffer` (`"hi\n"`). This exercises the extern C-ABI call end to
+/// A libc `write(1, ptr, len)` program builds against the host C runtime
+/// with the toolchain `clang`, runs, and prints exactly the bytes of its
+/// `@byte_buffer` (`"hi\n"`). This exercises the extern C-ABI call end to
 /// end: `write`'s return value lands in its out place, and the pointer/length
 /// arguments come from the user-callable `@byte_buffer_ptr`/`@byte_buffer_len`
 /// intrinsics.
 #[test]
 fn libc_write_prints_bytes_to_stdout() {
-    let clang = clang();
     let scratch = std::env::temp_dir().join(format!("lilac-m6-extern-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
-
-    let output = lilac()
-        .args(["emit-llvm", "--mode=debug"])
-        .arg(ui("extern_write.lilac"))
-        .output()
-        .expect("runs lilac");
-    assert!(
-        output.status.success(),
-        "emit-llvm failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let ll = scratch.join("extern_write.ll");
-    std::fs::write(&ll, &output.stdout).expect("writes IR");
-
     let exe = scratch.join("extern_write.exe");
-    let link = Command::new(&clang)
-        .arg(&ll)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("runs clang");
-    assert!(
-        link.status.success(),
-        "extern_write failed to link:\n{}",
-        String::from_utf8_lossy(&link.stderr)
+    let run = support::build_and_run(
+        &clang(),
+        Path::new(&ui("extern_write.lilac")),
+        &exe,
+        &["--mode=debug"],
     );
-
-    let run = Command::new(&exe).output().expect("runs executable");
     assert!(
         run.status.success(),
         "extern_write exited with {:?}; stderr:\n{}",
@@ -677,41 +631,14 @@ fn libc_write_prints_bytes_to_stdout() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// Emits host-triple IR for `source`, links it with the toolchain `clang`, runs
-/// the executable, and returns its output. `name` disambiguates the scratch
-/// directory across the tests in this binary.
+/// Builds `source` with the toolchain `clang`, runs the executable, and
+/// returns its output. `name` disambiguates the scratch directory across the
+/// tests in this binary.
 fn link_and_run(name: &str, source: &str) -> std::process::Output {
-    let clang = clang();
     let scratch = std::env::temp_dir().join(format!("lilac-m6-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
-
-    let output = lilac()
-        .args(["emit-llvm", "--mode=debug"])
-        .arg(source)
-        .output()
-        .expect("runs lilac");
-    assert!(
-        output.status.success(),
-        "{name} emit-llvm failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let ll = scratch.join("out.ll");
-    std::fs::write(&ll, &output.stdout).expect("writes IR");
     let exe = scratch.join(if cfg!(windows) { "out.exe" } else { "out" });
-    let link = Command::new(&clang)
-        .arg(&ll)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("runs clang");
-    assert!(
-        link.status.success(),
-        "{name} failed to link:\n{}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-
-    let run = Command::new(&exe).output().expect("runs executable");
+    let run = support::build_and_run(&clang(), Path::new(source), &exe, &["--mode=debug"]);
     let _ = std::fs::remove_dir_all(&scratch);
     run
 }

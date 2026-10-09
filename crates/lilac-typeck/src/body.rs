@@ -94,7 +94,16 @@ impl Checker<'_> {
         let span = def.span;
         let env = self.env_of(key.def, key.args.clone(), Some(key.clone()));
         let mark = self.diags.checkpoint();
+        self.entry_unresolved = false;
         let func = self.with_env(env, |c| c.check_func(key, &decl, &sig, span));
+        if std::mem::take(&mut self.entry_unresolved) {
+            // An `@entry` naming a missing root item, outside an executable:
+            // nothing enters the program, so the hook is left out.
+            if let Some(instance) = self.instances.get_mut(key) {
+                instance.state = State::Failed;
+            }
+            return;
+        }
         let failed = self.diags.diagnostics()[mark.min(self.diags.checkpoint())..]
             .iter()
             .any(|d| d.level == lilac_error::Level::Error);

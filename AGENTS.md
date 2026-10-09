@@ -18,10 +18,11 @@
 ## Runtime and symbols
 
 - The builtin runtime (byte buffers, `@load_u8`/`@store_u8`, format-args
-  tables) is written once as ordinary LIR in `lilac-ir::runtime` and shared by
-  all backends. Backends hand-write only the leaf intrinsics
-  (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`, `@lilac_abort`, and
-  `@syscall`: the Linux system-call instruction).
+  tables, the entry stub `.lilac.start` and the panic handler) is written
+  once as ordinary LIR in `lilac-ir::runtime` and shared by all backends. It
+  makes no OS call: the compiler has no OS layer. Backends hand-write only
+  the leaf intrinsics (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`,
+  `@lilac_abort`, and `@syscall`: the Linux system-call instruction).
 - Instruction builtins (`Intrinsic::leaf_builtin`): `@memcpy`/`@memmove`/
   `@memset`/`@syscall` call their leaf, `@trap` calls `@lilac_abort` then
   ends the block `unreachable`, and the pointer builtins (`@ptr_add`,
@@ -29,6 +30,22 @@
   `i.add`). `@align_of` is a constant like `@size_of`. A reachable user
   `@syscall` off Linux x86-64/aarch64 (`Target::has_syscall`) is `E035`,
   checked after DCE like `E031` (`lilac_ir::check_live_syscalls`).
+- **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
+  `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
+  `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes
+  (`E022`, `sigs::platform_hook_shape_ok`) and duplicates (`E034`); an
+  `@entry` body falls back to the root namespace for names
+  (`Checker::in_entry`, `Resolved::root_item`), so `Standard`'s `@entry`
+  calls `main`, and a miss is `E032` under `Options::require_entry` or drops
+  the hook otherwise. The driver reports a missing hook under
+  `require_entry` as `E033` (`check_platform_hooks`). The stub calls
+  `.lilac.entry`, `.lilac.exit(0)`, then traps; the panic handler prints
+  through `.lilac.compiler_print`, calls `.lilac.exit(101)`, then traps. A
+  missing `@exit`/`@compiler_print` outside an executable is declared by
+  `lilac_ir::hook_externs`: a `.lilac.`-named `extern`, which keeps the
+  place ABI (`LirFunc::uses_c_abi`). `lib/Standard/Runtime` defines the hooks
+  over `Standard.Os` (per-OS `extern`s and `@syscall`s picked by
+  `@builtin.Target`).
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR
@@ -118,10 +135,11 @@
   facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
 - **Native mode is the default** (`Entry::Native`, on Windows, Linux and
   macOS). It links with the sysroot's `lld` and `toolchain/` stubs
-  (`kernel32.lib`, a hand-written `libSystem.tbd`), no C library: the
-  sysroot is `LILAC_SYSROOT`, else `<exe dir>/../lib/lilac`
-  (`scripts/package.sh` builds that layout). The program is entered at
-  `.lilac.start` (`lilac_ir::entry_point`: calls `main`, then exits 0), and
+  (`kernel32.lib`, a hand-written `libSystem.tbd`, listing what
+  `Standard.Os` calls), no C library: the sysroot is `LILAC_SYSROOT`, else
+  `<exe dir>/../lib/lilac` (`scripts/package.sh` builds that layout). The
+  program is entered at `.lilac.start` (`lilac_ir::entry_point`, added and
+  rooted only under `require_entry`), and
   the backend defines `memcpy`/`memmove`/`memset` (marked `no-builtins`),
   plus `_fltused` and `__chkstk` on Windows (`lilac-codegen-llvm`'s
   `native.rs`; on x86-64 Linux it also gives `.lilac.start` the
@@ -133,23 +151,15 @@
   defines none of the C-runtime replacements there; a `libSystem` function
   the stub does not list needs adding to `toolchain/*-apple-darwin/`.
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
-  else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`). It is the
+  else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`) that calls
+  `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
+  uses the C library (and Windows exits through C `exit`). It is the
   permanent opt-in for static C libraries, and how code using `Standard.C`
   builds while that is phased out. Shared C libraries work in native mode
   (an `extern` plus `--link-arg=`); free their memory with their own free
   function, and note a native exit skips C `atexit`/`stdio` flushing.
-- **The OS layer** is the `@os_write`/`@os_exit`/`@os_alloc`/`@os_free`
-  intrinsics, which call the runtime's `.lilac.write`/`.exit`/`.alloc`/`.free`.
-  Those are LIR (`lilac_ir::runtime`, chosen by `System`): `kernel32` calls
-  on Windows (with the C library's `exit` under `--libc`, so `stdio`
-  flushes), Linux system calls (`System::Linux`: `write`, `exit_group`,
-  one `mmap`/`munmap` per allocation with a 16-byte length header; the C
-  library under `--libc`), the C library on macOS for now, and bare `extern`
-  declarations on OS-less targets. The driver's `Session.entry` picks
-  the entry; a runtime `extern` the program already declares is not
-  duplicated. `Standard.Io`, `Standard.Process` and `Standard.Heap.Allocator`
-  sit on these.
-- `build` sets `Session.require_entry` (no root `main` is `E032`) and
+- `build` sets `Session.require_entry` (all three hooks required, see
+  "Runtime and symbols") and
   `Session.progress`, a `Stage`/`StageEvent` callback. The driver only calls
   it; timing and printing stay in `lilac-cli` (`progress.rs`), so the driver
   stays I/O-free.
@@ -160,6 +170,10 @@
   sysroot assembled under cargo's test scratch folder from `toolchain/` and
   `$LLVM_SYS_181_PREFIX/bin/lld` (`tests/support`); `// libc` programs and
   other hosts use `--libc` with `LILAC_LINKER` set to the toolchain `clang`.
+  The harness mounts `Standard` for every program (`// no-standard` opts
+  out; `tests/libs/TinyRuntime` is a minimal runtime library). Tests that
+  link and run a program use `lilac build` (`support::build_and_run`):
+  `emit-llvm` output has no entry stub.
 
 ## Language server (lilac-lsp)
 
@@ -223,8 +237,9 @@ bug fix that changes generated code.
   `unreachable`; `site` is the panic's own `"  at <fn> (<file:line:col>)\n"`
   line as a data constant. The handler is LIR in
   `lilac_ir::panic_runtime` (injected beside `build_runtime`, pruned when
-  unused). It writes `panic: <msg>` and the trace to stderr, then exits with
-  code **101**. A panic is an abort: no drops run.
+  unused). It writes `panic: <msg>` and the trace through `@compiler_print`
+  (stderr in `Standard`), then calls `@exit(101)` and traps. A panic is an
+  abort: no drops run.
 - Stack traces are a shadow stack, not native unwinding:
   `lilac_ir::trace::instrument` runs after DCE when `Session.stack_traces` is
   set and links a `#.lilac.frame` record per user function call (the head

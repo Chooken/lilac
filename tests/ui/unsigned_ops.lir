@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-function @main
+function @.root.run
   in #bit32 %a
   in #bit32 %b
   in #bit_native %w
@@ -64,5 +64,20 @@ function @main
     &27: #bit_native = copy %wide_divisor
     &28: #bit_native = i.mod.u &26, &27
     copy &28 -> %wide_remainder
+    return
+}
+function @main
+{
+  $entry:
+    alloca #bit32 %tmp.1 : zeroed
+    alloca #bit32 %tmp.2 : zeroed
+    alloca #bit_native %tmp.3 : zeroed
+    &1: #bit32 = const 0x0
+    copy &1 -> %tmp.1
+    &2: #bit32 = const 0x0
+    copy &2 -> %tmp.2
+    &3: #bit_native = const 0x0
+    copy &3 -> %tmp.3
+    call @.root.run (in %tmp.1, %tmp.2, %tmp.3) (out)
     return
 }

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed, Level};
-use lilac_ir::{LirModule, Syscalls, System};
+use lilac_ir::LirModule;
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
 
@@ -186,12 +186,13 @@ pub struct Session {
     /// analysis (editor tooling). Strict (the CLI) leaves this `false`, so the
     /// stage gates reproduce today's stop-at-the-first-failing-stage behavior.
     pub retain_partial_analysis: bool,
-    /// Whether the program must have an entry point (`lilac build`): a
-    /// non-`extern` `main` in the root namespace, else `E032`.
+    /// Whether the unit is an executable (`lilac build`): it needs the three
+    /// platform hooks (`E033`), its `@entry` must find what it calls
+    /// (`E032`), and the entry stub `.lilac.start` is added as the root.
     pub require_entry: bool,
-    /// How the program enters. [`Entry::Native`] (`lilac build` without
-    /// `--libc`) adds the `.lilac.start` entry and exits through the OS
-    /// rather than the C library.
+    /// How the program enters: [`Entry::Native`] (`lilac build` without
+    /// `--libc`) enters at `.lilac.start`; [`Entry::CMain`] has the C
+    /// `main` call it, and sets `@builtin.Target.libc`.
     pub entry: Entry,
     /// Called at the start and end of each pipeline [`Stage`].
     pub progress: Option<Progress>,
@@ -427,12 +428,11 @@ impl Session {
         } else {
             lilac_typeck::check
         };
-        let checked = check(
-            &resolved,
-            &mut types,
-            &mut self.diags,
-            self.target.bit_native_width(),
-        );
+        let options = lilac_typeck::Options {
+            native_bits: self.target.bit_native_width(),
+            require_entry: self.require_entry,
+        };
+        let checked = check(&resolved, &mut types, &mut self.diags, options);
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
         self.analysis = Some(Analysis {
@@ -446,6 +446,9 @@ impl Session {
             return Err(ErrorGuaranteed::new());
         }
         lilac_lower::check_extern_signatures(&checked.hir, &resolved, &types, &mut self.diags);
+        if self.require_entry {
+            self.check_platform_hooks(&resolved);
+        }
         if self.diags.has_errors() {
             return Err(ErrorGuaranteed::new());
         }
@@ -467,15 +470,6 @@ impl Session {
             ptr_bytes,
         );
         let mut lir = lowered.module;
-        if self.require_entry && !has_entry(&lir) {
-            return Err(self.diags.emit(
-                Diagnostic::error(
-                    "E032",
-                    "no `main` function; `lilac build` needs an entry point",
-                )
-                .help("add `main: function () nothing { … }`, or use `lilac check` for a library"),
-            ));
-        }
         on_stage("lower", &lir);
         self.report(Stage::Lower, DONE);
         self.report(Stage::Runtime, StageEvent::Begin);
@@ -488,7 +482,7 @@ impl Session {
             .iter()
             .map(|name| lilac_lower::export_symbol(name))
             .collect();
-        if self.entry == Entry::Native && has_entry(&lir) {
+        if self.require_entry {
             roots.insert(".lilac.start".to_owned());
         }
         let reach = lilac_ir::prune_unreachable(&mut lir, &roots);
@@ -582,53 +576,48 @@ impl Session {
 }
 
 impl Session {
-    /// Appends the runtime for the target's OS layer and entry, the panic
-    /// handler `.lilac.panic` and its data, plus the native `.lilac.start`
-    /// when the program has a `main`. A runtime
-    /// `extern` the program already declares (say, the C library's `exit`)
-    /// is not declared twice.
+    /// `E033` for each platform hook (`lilac_hir::PLATFORM_HOOKS`) the
+    /// program does not define. An executable needs all three; duplicates
+    /// are `E034` in the checker.
+    fn check_platform_hooks(&mut self, resolved: &lilac_resolve::Resolved) {
+        for (hook, _) in lilac_hir::PLATFORM_HOOKS {
+            let defined = resolved.hooks.iter().any(|&id| {
+                let def = resolved.def(id);
+                def.name == hook && def.parent.is_none()
+            });
+            if !defined {
+                self.diags.emit(
+                    Diagnostic::error(
+                        "E033",
+                        format!("the program defines no `{hook}`; an executable needs one"),
+                    )
+                    .note("a runtime library supplies `@entry`, `@exit` and `@compiler_print`")
+                    .help("mount `Standard` (`--lib=Standard=<dir>`), or define the hook yourself"),
+                );
+            }
+        }
+    }
+
+    /// Appends the runtime helpers, the panic handler `.lilac.panic` and its
+    /// data, and, for an executable, the entry stub `.lilac.start`. An
+    /// `@exit` or `@compiler_print` hook the program does not define (only
+    /// allowed outside an executable) is declared `extern` under its fixed
+    /// symbol, so the panic handler links against whatever defines it.
     fn inject_runtime(&self, lir: &mut LirModule) {
-        let system = match (self.target.os, self.target.arch, self.entry) {
-            (Os::Windows, _, _) => System::Windows,
-            (Os::Linux, Arch::X86_64, Entry::Native) => System::Linux(Syscalls::X86_64),
-            (Os::Linux, Arch::Aarch64, Entry::Native) => System::Linux(Syscalls::AARCH64),
-            (Os::Linux | Os::Macos, _, _) => System::Libc,
-            (Os::None | Os::Unknown, _, _) => System::None,
-        };
-        let runtime =
-            lilac_ir::build_runtime(self.target.bit_native_width() / 8, system, self.entry);
-        for func in runtime {
-            let declared = func.is_extern
-                && lir
-                    .funcs
-                    .iter()
-                    .any(|other| other.is_extern && other.name == func.name);
-            if !declared {
-                lir.funcs.push(func);
+        lir.funcs
+            .extend(lilac_ir::build_runtime(self.target.bit_native_width() / 8));
+        for hook in lilac_ir::hook_externs() {
+            if !lir.funcs.iter().any(|func| func.name == hook.name) {
+                lir.funcs.push(hook);
             }
         }
         let (panic, data) = lilac_ir::panic_runtime();
         lir.funcs.push(panic);
         lir.data.extend(data);
-        if self.entry == Entry::Native {
-            if let Some(main) = lir
-                .funcs
-                .iter()
-                .find(|func| func.name == "main" && !func.is_extern)
-            {
-                let start = lilac_ir::entry_point(main);
-                lir.funcs.push(start);
-            }
+        if self.require_entry {
+            lir.funcs.push(lilac_ir::entry_point());
         }
     }
-}
-
-/// Whether `lir` has the program entry point: a non-`extern` `main` in the
-/// root namespace (whose symbols carry no prefix).
-fn has_entry(lir: &LirModule) -> bool {
-    lir.funcs
-        .iter()
-        .any(|func| func.name == "main" && !func.is_extern)
 }
 
 #[cfg(test)]
@@ -1361,25 +1350,145 @@ main: function () nothing {}
         assert!(!names.contains(&".root.dead"), "{names:?}");
     }
 
-    /// `require_entry` (set by `lilac build`) turns a missing `main` into
-    /// `E032`; other compiles accept a library without one.
+    /// The platform hooks a program can define itself.
+    const HOOKS: &str = "@entry: function () nothing {
+    main()
+}
+
+                         @exit: function (code: @bit32) nothing {
+}
+
+                         @compiler_print: function (text: @byte_buffer) nothing {
+}
+";
+
+    fn codes(session: &Session) -> Vec<&str> {
+        session
+            .diags
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    }
+
+    /// `require_entry` (set by `lilac build`) needs all three platform hooks:
+    /// each missing one is `E033`. Other compiles need none.
     #[test]
-    fn require_entry_reports_e032() {
-        let lib = "helper: function () nothing {\n}\n";
+    fn require_entry_needs_every_hook() {
+        let main = "main: function () nothing {
+}
+";
         let mut session = Session::new();
-        session.exports.insert("helper".to_owned());
-        assert!(session.compile_lir("lib.lilac", lib).is_ok());
+        assert!(session.compile_lir("main.lilac", main).is_ok());
 
         let mut session = Session::new();
         session.require_entry = true;
-        assert!(session.compile_lir("lib.lilac", lib).is_err());
+        assert!(session.compile_lir("main.lilac", main).is_err());
+        assert_eq!(codes(&session), ["E033", "E033", "E033"]);
+
+        let mut session = Session::new();
+        session.require_entry = true;
+        let module = session
+            .compile_lir(
+                "main.lilac",
+                &format!(
+                    "{HOOKS}
+{main}"
+                ),
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
+        for name in [".lilac.start", ".lilac.entry", ".lilac.exit", "main"] {
+            assert!(names.contains(&name), "{name}: {names:?}");
+        }
+    }
+
+    /// An `@entry` that calls a missing `main` is `E032` in an executable;
+    /// elsewhere the hook is dropped silently, so a library checks.
+    #[test]
+    fn entry_without_main_is_e032_only_in_an_executable() {
+        let lib = format!(
+            "{HOOKS}
+helper: function () nothing {{
+}}
+"
+        );
+        let mut session = Session::new();
+        let module = session
+            .compile_lir("lib.lilac", &lib)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        assert!(module.funcs.iter().all(|func| func.name != ".lilac.entry"));
+
+        let mut session = Session::new();
+        session.require_entry = true;
+        assert!(session.compile_lir("lib.lilac", &lib).is_err());
         let rendered = session.render_diagnostics();
-        assert!(rendered.contains("error[E032]"), "{rendered}");
+        assert_eq!(codes(&session), ["E032"], "{rendered}");
+        assert!(
+            rendered.contains("the program has no `main`, which `@entry` calls"),
+            "{rendered}"
+        );
+    }
 
+    /// A second definition of a platform hook is `E034`, and a wrong
+    /// signature or a member hook is `E022`.
+    #[test]
+    fn platform_hook_duplicates_and_shapes() {
         let mut session = Session::new();
-        session.require_entry = true;
-        let result = session.compile_lir("main.lilac", "main: function () nothing {\n}\n");
-        assert!(result.is_ok(), "{}", session.render_diagnostics());
+        let src = "@exit: function (code: @bit32) nothing {
+}
+
+                   @exit: function (code: @bit32) nothing {
+}
+";
+        assert!(session.compile_lir("dup.lilac", src).is_err());
+        assert_eq!(codes(&session), ["E034"]);
+
+        for src in [
+            "@exit: function (code: @bit8) nothing {
+}
+",
+            "@entry: function () code: @bit32 {
+}
+",
+            "@compiler_print: function (text: ref @byte_buffer) nothing {
+}
+",
+            "Thing: object {
+    @entry: function () nothing {
+    }
+}
+",
+        ] {
+            let mut session = Session::new();
+            assert!(session.compile_lir("shape.lilac", src).is_err(), "{src}");
+            assert_eq!(codes(&session), ["E022"], "{src}");
+        }
+    }
+
+    /// Without `@exit` or `@compiler_print`, outside an executable, the panic
+    /// handler calls them as `extern` hook declarations that keep the Lilac
+    /// place ABI.
+    #[test]
+    fn missing_hooks_are_declared_for_the_panic_handler() {
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "p.lilac",
+                "main: function () nothing {
+    @panic(\"no\")
+}
+",
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        for name in [".lilac.exit", ".lilac.compiler_print"] {
+            let hook = module
+                .funcs
+                .iter()
+                .find(|func| func.name == name)
+                .unwrap_or_else(|| panic!("{name} is declared"));
+            assert!(hook.is_extern && !hook.uses_c_abi(), "{name}");
+        }
     }
 
     /// The progress hook sees every stage begin and end, in pipeline order,

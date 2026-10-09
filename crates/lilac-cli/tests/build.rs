@@ -1,8 +1,9 @@
 //! `lilac build`: the build folder, progress output, and failure modes.
 //!
-//! Every case runs in its own temporary folder. Cases that link use
-//! `--libc` with the toolchain `clang` (as `LILAC_LINKER`), or the native
-//! development sysroot, and are skipped when it is missing.
+//! Every case runs in its own temporary folder, with `Standard` mounted for
+//! the platform hooks. Cases that link use `--libc` with the toolchain
+//! `clang` (as `LILAC_LINKER`), or the native development sysroot, and are
+//! skipped when it is missing.
 
 mod support;
 
@@ -14,9 +15,15 @@ use support::clang;
 const HELLO: &str = "putchar: extern function (c: @bit32) result: @bit32\n\
                      main: function () nothing {\n    r: @bit32 = putchar('H')\n    r = putchar(0xA)\n}\n";
 
-/// Prints through the OS layer, so it builds natively.
-const NATIVE_HELLO: &str = "main: function () nothing {\n    s: @byte_buffer = \"Hi\\n\"\n    \
-                            @os_write(0x1, @byte_buffer_ptr(s), @byte_buffer_len(s))\n    @os_exit(0x3)\n}\n";
+/// Prints through `Standard.Io` (no C library), so it builds natively.
+const NATIVE_HELLO: &str = "using Standard.Io\nusing Standard.Process\n\n\
+                            main: function () nothing {\n    print(\"Hi\\n\")\n    exit(0x3)\n}\n";
+
+/// `--lib=Standard=<repo>/lib/Standard`.
+fn standard() -> String {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
+    format!("--lib=Standard={}", dir.display())
+}
 
 /// A fresh temporary folder for one case.
 fn scratch(case: &str) -> PathBuf {
@@ -29,7 +36,11 @@ fn scratch(case: &str) -> PathBuf {
 /// Runs `lilac build <args>` in `dir`, linking with `clang` when given.
 fn build(dir: &Path, args: &[&str], clang: Option<&Path>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
-    command.arg("build").args(args).current_dir(dir);
+    command
+        .arg("build")
+        .arg(standard())
+        .args(args)
+        .current_dir(dir);
     command.env_remove("LILAC_LINKER").env("NO_COLOR", "1");
     if let Some(clang) = clang {
         command.env("LILAC_LINKER", clang);
@@ -223,6 +234,7 @@ fn missing_main_is_e032_with_no_output() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("error[E032]"), "{err}");
+    assert!(err.contains("which `@entry` calls"), "{err}");
     assert!(err.contains("could not compile `lib` (1 error)"), "{err}");
     assert!(!dir.join("build").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -279,6 +291,7 @@ fn native_build_runs_without_libc() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
         command
             .args(["build", mode, "hi.lilac"])
+            .arg(standard())
             .current_dir(&dir)
             .env("NO_COLOR", "1")
             .env("LILAC_SYSROOT", &sysroot);
@@ -308,6 +321,7 @@ fn missing_sysroot_is_a_clear_error() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
     command
         .args(["build", "-q", "hi.lilac"])
+        .arg(standard())
         .current_dir(&dir)
         .env("LILAC_SYSROOT", dir.join("missing"));
     let out = command.output().expect("runs lilac");
@@ -331,7 +345,9 @@ fn native_linux_cross_links() {
         let exe = dir.join(triple);
         let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
         command
-            .args(["build", "-q", "--release", "-o"])
+            .arg("build")
+            .arg(standard())
+            .args(["-q", "--release", "-o"])
             .arg(&exe)
             .arg(format!("--target={triple}"))
             .arg("hi.lilac")
@@ -390,16 +406,18 @@ fn native_linux_links_shared_libraries() {
     }
     std::fs::write(
         dir.join("main.lilac"),
-        "greet: extern function (x: @bit32) result: @bit32
-         main: function () nothing {
+        "using Standard.Process
+greet: extern function (x: @bit32) result: @bit32
+main: function () nothing {
     r: @bit32 = greet(0x2)
-    @os_exit(r)
+    exit(r)
 }
 ",
     )
     .expect("writes main.lilac");
     let out = Command::new(env!("CARGO_BIN_EXE_lilac"))
         .args(["build", "-q", "-o", "greeter", "--link-arg=libgreet.so"])
+        .arg(standard())
         .arg(format!("--target={triple}"))
         .arg("main.lilac")
         .current_dir(&dir)
@@ -436,7 +454,9 @@ fn native_macos_cross_links() {
         let exe = dir.join(triple);
         let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
         command
-            .args(["build", "-q", "--release", "-o"])
+            .arg("build")
+            .arg(standard())
+            .args(["-q", "--release", "-o"])
             .arg(&exe)
             .arg(format!("--target={triple}"))
             .arg("hi.lilac")

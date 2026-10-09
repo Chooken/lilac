@@ -14,9 +14,3 @@ entry:
   call void @srand(i32 %0)
   ret void
 }
-
-define i32 @main() {
-entry:
-  call void @.lilac.main()
-  ret i32 0
-}

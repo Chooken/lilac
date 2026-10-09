@@ -225,15 +225,6 @@ pub enum Intrinsic {
     FormatArgsPiece,
     /// `@compile_error("message")`.
     CompileError,
-    /// `@os_write(fd, data, len)`: writes bytes to a standard stream
-    /// (1 = stdout, 2 = stderr).
-    OsWrite,
-    /// `@os_exit(code)`: ends the process.
-    OsExit,
-    /// `@os_alloc(size)`: zeroed heap memory, as `ref unknown`.
-    OsAlloc,
-    /// `@os_free(ptr)`: frees `@os_alloc` memory.
-    OsFree,
     /// `@panic(message)`: ends the program with a message and a stack trace
     /// (see `.lilac.panic`).
     Panic,
@@ -307,10 +298,6 @@ impl Intrinsic {
             "@format_args_count" => Self::FormatArgsCount,
             "@format_args_piece" => Self::FormatArgsPiece,
             "@compile_error" => Self::CompileError,
-            "@os_write" => Self::OsWrite,
-            "@os_exit" => Self::OsExit,
-            "@os_alloc" => Self::OsAlloc,
-            "@os_free" => Self::OsFree,
             "@panic" => Self::Panic,
             _ => return None,
         })
@@ -384,9 +371,7 @@ impl Intrinsic {
                 Some(Ref("unknown")),
             ),
             Self::PtrToAddress => sig(vec![Ref("unknown")], Some(Builtin("@bit_native"))),
-            Self::AddressToPtr | Self::OsAlloc => {
-                sig(vec![Builtin("@bit_native")], Some(Ref("unknown")))
-            }
+            Self::AddressToPtr => sig(vec![Builtin("@bit_native")], Some(Ref("unknown"))),
             Self::Syscall => sig(
                 vec![Builtin("@bit_native"); 7],
                 Some(Builtin("@bit_native")),
@@ -406,12 +391,6 @@ impl Intrinsic {
                 vec![Builtin("@format_args"), Builtin("@bit_native")],
                 Some(Builtin("@byte_buffer")),
             ),
-            Self::OsWrite => sig(
-                vec![Builtin("@bit32"), Ref("@bit8"), Builtin("@bit_native")],
-                None,
-            ),
-            Self::OsExit => sig(vec![Builtin("@bit32")], None),
-            Self::OsFree => sig(vec![Ref("unknown")], None),
             Self::Panic => sig(vec![Builtin("@byte_buffer")], None),
         }
     }
@@ -443,10 +422,6 @@ impl Intrinsic {
             Self::FormatArgsPush => ".lilac.format_args_push",
             Self::FormatArgsCount => ".lilac.format_args_count",
             Self::FormatArgsPiece => ".lilac.format_args_piece",
-            Self::OsWrite => ".lilac.write",
-            Self::OsExit => ".lilac.exit",
-            Self::OsAlloc => ".lilac.alloc",
-            Self::OsFree => ".lilac.free",
             _ => return None,
         })
     }

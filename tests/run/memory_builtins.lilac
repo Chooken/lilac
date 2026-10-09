@@ -1,5 +1,4 @@
 // expect-exit: 0
-// lib: Standard=lib/Standard
 // The instruction builtins: `@memmove` over overlapping ranges, `@memset`,
 // pointer math through `@ptr_add`, `@ptr_to_address` and
 // `@address_to_ptr`, and `@align_of`.

@@ -1,11 +1,14 @@
-// A first-fit free-list allocator over one `@os_alloc` arena, written with
-// the instruction builtins: blocks are found by address (`@address_to_ptr`),
-// and `@ptr_to_address` turns the arena back into an address.
+// A first-fit free-list allocator over one arena of pages from
+// `Standard.Os.map_pages`, written with the instruction builtins: blocks are
+// found by address (`@address_to_ptr`), and `@ptr_to_address` turns the
+// arena back into an address.
 //
 // Every block starts with a 16-byte `Block` header and is a multiple of 16
 // bytes long, so blocks tile the arena and the next block is at
 // `address + size`. Payloads are 16-byte aligned; a larger alignment frees
 // the space in front of the block as a block of its own.
+
+using Standard.Os
 
 Block: object {
     // The whole block, header included.
@@ -44,7 +47,7 @@ shrink: function (address: @bit_native, size: @bit_native) nothing {
 }
 
 create_free_list: function (bytes: @bit_native) list: FreeList {
-    raw: @bit_native = @ptr_to_address(@os_alloc(bytes))
+    raw: @bit_native = @ptr_to_address(map_pages(bytes))
     start: @bit_native = align_up(raw, header_size)
     end: @bit_native = @i_mul_native(@i_div_u_native(@i_add_native(raw, bytes), header_size), header_size)
     first: ref Block = block_at(start)
