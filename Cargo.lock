@@ -322,6 +322,7 @@ dependencies = [
 name = "lilac-lsp"
 version = "0.2.0"
 dependencies = [
+ "crossbeam-channel",
  "lilac-driver",
  "lilac-error",
  "lilac-hir",

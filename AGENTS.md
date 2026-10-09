@@ -220,8 +220,14 @@
   error, and the error lists the sites as related information. So a
   `@compile_error` in a library marks the user's call too.
 - Diagnostics: a compile runs once no change has arrived for 200 ms (a
-  deadline, so requests never postpone it), and each publish carries the
-  open document's `version`. A diagnostic without a span goes to
+  deadline, so requests never postpone it), on the worker thread
+  (`compile.rs`: a `Job` snapshots the documents, root and libraries), so
+  requests are answered from the last compile meanwhile. One compile runs
+  at a time; its analysis is installed when it finishes, but its
+  diagnostics are published only if no edit arrived since (`generation`).
+  Each publish carries the version of the document it compiled. The
+  retained analysis must stay `Send + Sync` (no `Rc` in `Resolved`, and
+  `lilac_driver::Progress` is `Send + Sync`). A diagnostic without a span goes to
   `lilac.json`, else the unit's `main.lilac`, else its first open file by
   URI (`Server::project_anchor`). The server registers watchers for
   `**/*.lilac` and `**/lilac.json` (recompile; a `lilac.json` change

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The server compiles on a background thread: hovers, completion and other
+  requests are answered right away, from the last compile, while the next
+  one runs. Diagnostics from a compile that an edit has already overtaken
+  are no longer shown.
+
 - Completion: locals, parameters and items in scope, members after `.`
   (fields and methods of a value, a type's methods and variants, a
   namespace's items), variants after a bare `.`, intrinsics and builtin

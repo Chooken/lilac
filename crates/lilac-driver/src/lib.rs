@@ -99,12 +99,12 @@ pub enum StageEvent {
 
 /// A progress callback. The driver only calls it; timing and printing are
 /// the caller's (the driver stays I/O-free and clock-free).
-pub struct Progress(Box<dyn FnMut(Stage, StageEvent)>);
+pub struct Progress(Box<dyn FnMut(Stage, StageEvent) + Send + Sync>);
 
 impl Progress {
     /// Wraps `hook` as a progress callback.
     #[must_use]
-    pub fn new(hook: impl FnMut(Stage, StageEvent) + 'static) -> Self {
+    pub fn new(hook: impl FnMut(Stage, StageEvent) + Send + Sync + 'static) -> Self {
         Self(Box::new(hook))
     }
 }
@@ -1504,18 +1504,17 @@ helper: function () nothing {{
     /// with the load, check and prune counts.
     #[test]
     fn progress_reports_every_stage_in_order() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let sink = Rc::clone(&events);
+        use std::sync::{Arc, Mutex};
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
         let mut session = Session::new();
         session.progress = Some(Progress::new(move |stage, event| {
-            sink.borrow_mut().push((stage, event));
+            sink.lock().expect("unpoisoned").push((stage, event));
         }));
         session
             .compile_lir("p.lilac", "main: function () nothing {\n}\n")
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
-        let events = events.borrow();
+        let events = events.lock().expect("unpoisoned");
         let stages = [
             Stage::Load,
             Stage::Parse,

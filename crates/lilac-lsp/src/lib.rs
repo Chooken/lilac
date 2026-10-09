@@ -29,6 +29,7 @@ pub(crate) const TOKEN_MODIFIERS: [SemanticTokenModifier; 1] =
     [SemanticTokenModifier::DEFAULT_LIBRARY];
 
 pub mod actions;
+pub mod compile;
 pub mod complete;
 pub mod convert;
 pub mod documents;

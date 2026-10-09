@@ -17,7 +17,7 @@ pub struct Document {
 }
 
 /// All open documents, keyed by URI.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Documents {
     map: HashMap<Url, Document>,
 }

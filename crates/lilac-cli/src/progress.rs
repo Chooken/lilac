@@ -6,9 +6,8 @@
 //! into Optimizing and Writing. `--timings` also prints every individual
 //! stage with its duration.
 
-use std::cell::RefCell;
 use std::io::IsTerminal as _;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lilac_codegen::CodegenStep;
@@ -42,12 +41,12 @@ struct State {
 /// The progress reporter. Clones share one state, so the driver's hook and
 /// the build command print through the same reporter.
 #[derive(Clone)]
-pub struct Reporter(Rc<RefCell<State>>);
+pub struct Reporter(Arc<Mutex<State>>);
 
 impl Reporter {
     /// A reporter printing at `verbosity`, coloured when `color`.
     pub fn new(verbosity: Verbosity, color: bool) -> Self {
-        Self(Rc::new(RefCell::new(State {
+        Self(Arc::new(Mutex::new(State {
             verbosity,
             color,
             started: Instant::now(),
@@ -55,15 +54,23 @@ impl Reporter {
         })))
     }
 
+    /// The shared state (a panic while printing poisons nothing worth
+    /// refusing).
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn verbosity(&self) -> Verbosity {
-        self.0.borrow().verbosity
+        self.state().verbosity
     }
 
     /// Prints one status line (not in quiet mode), closing the open timed
     /// step first so its duration prints above the new line.
     pub fn status(&self, verb: &str, message: &str) {
         self.end();
-        let state = self.0.borrow();
+        let state = self.state();
         if state.verbosity == Verbosity::Quiet {
             return;
         }
@@ -72,7 +79,7 @@ impl Reporter {
 
     /// Prints `error: <message>` (always, even in quiet mode).
     pub fn error(&self, message: &str) {
-        let color = self.0.borrow().color;
+        let color = self.state().color;
         if color {
             eprintln!("\x1b[1;31merror\x1b[0m\x1b[1m: {message}\x1b[0m");
         } else {
@@ -84,15 +91,15 @@ impl Reporter {
     /// the durations.
     fn begin(&self, label: &str) {
         self.end();
-        self.0.borrow_mut().open = Some((label.to_owned(), Instant::now()));
+        self.state().open = Some((label.to_owned(), Instant::now()));
     }
 
     /// Closes the open timed step, printing its duration under `--timings`.
     pub fn end(&self) {
-        let open = self.0.borrow_mut().open.take();
+        let open = self.state().open.take();
         if let Some((label, start)) = open {
             if self.verbosity() == Verbosity::Timings {
-                let color = self.0.borrow().color;
+                let color = self.state().color;
                 let text = format!("{:>12} {label} {}", "", format_duration(start.elapsed()));
                 if color {
                     eprintln!("\x1b[2m{text}\x1b[0m");
@@ -151,7 +158,7 @@ impl Reporter {
     /// Prints the final `Finished` line.
     pub fn finished(&self, mode: &str, exe: &str) {
         self.end();
-        let elapsed = self.0.borrow().started.elapsed();
+        let elapsed = self.state().started.elapsed();
         self.status(
             "Finished",
             &format!("{mode} in {} → {exe}", format_duration(elapsed)),

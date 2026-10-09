@@ -2,13 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lilac_driver::Session;
-use lilac_error::Diagnostic;
-use lilac_span::FileId;
+use crossbeam_channel::{Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
@@ -16,10 +14,9 @@ use lsp_types::{
     PublishDiagnosticsParams, Url,
 };
 
-use crate::convert::{to_lsp_diagnostic, trace_diagnostics};
+use crate::compile::{self, Compiled, Job};
 use crate::documents::Documents;
-use crate::fs::OverlayFs;
-use crate::index::{LirStages, Retained};
+use crate::index::Retained;
 use crate::roots::{self, canonical_file_uri};
 
 /// Quiet time after the last change before recompiling. Requests (hover,
@@ -70,15 +67,24 @@ pub struct Server {
     /// Id of the next server-to-client request.
     next_request: i32,
     /// When to recompile: [`DEBOUNCE`] after the last change, `None` when
-    /// the published diagnostics are current.
+    /// no compile is due.
     deadline: Option<Instant>,
+    /// Counts changes; a compile is current when it saw the latest.
+    generation: u64,
+    /// Whether the worker is compiling (one compile runs at a time; a due
+    /// one starts when it finishes).
+    compiling: bool,
+    /// Compile jobs for the worker thread.
+    jobs: Sender<Job>,
+    /// Finished compiles from the worker, by generation.
+    results: Receiver<(u64, Option<Compiled>)>,
     published: HashSet<Url>,
     shutdown: bool,
     /// Retained project compile (project mode).
     project: Option<Retained>,
     /// Compiles of open files the project does not reach, by canonical URI
     /// (files of one unit share a compile).
-    per_file: HashMap<Url, Rc<Retained>>,
+    per_file: HashMap<Url, Arc<Retained>>,
 }
 
 impl Server {
@@ -93,6 +99,7 @@ impl Server {
         setting_libraries: Vec<(String, PathBuf)>,
         refresh_tokens: bool,
     ) -> Self {
+        let (jobs, results) = compile::spawn_worker();
         let mut server = Self {
             connection,
             documents: Documents::new(),
@@ -103,6 +110,10 @@ impl Server {
             refresh_tokens,
             next_request: 0,
             deadline: None,
+            generation: 0,
+            compiling: false,
+            jobs,
+            results,
             published: HashSet::new(),
             shutdown: false,
             project: None,
@@ -152,25 +163,28 @@ impl Server {
     pub fn main_loop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         loop {
             // A deadline, not a timeout per receive: a stream of requests
-            // must not keep postponing the compile.
-            let message = match self.deadline {
-                Some(deadline) if deadline <= Instant::now() => {
-                    self.publish();
+            // must not keep postponing the compile. Requests are answered
+            // from the last compile while the worker runs the next.
+            let due = match self.deadline {
+                Some(_) if self.compiling => crossbeam_channel::never(),
+                Some(deadline) => crossbeam_channel::at(deadline),
+                None => crossbeam_channel::never(),
+            };
+            let message = crossbeam_channel::select! {
+                recv(self.connection.receiver) -> message => match message {
+                    Ok(message) => message,
+                    Err(_) => return Ok(()),
+                },
+                recv(self.results) -> result => {
+                    if let Ok((generation, compiled)) = result {
+                        self.finish_compile(generation, compiled);
+                    }
                     continue;
                 }
-                Some(deadline) => match self
-                    .connection
-                    .receiver
-                    .recv_timeout(deadline - Instant::now())
-                {
-                    Ok(message) => message,
-                    Err(err) if err.is_timeout() => continue,
-                    Err(_) => return Ok(()),
-                },
-                None => match self.connection.receiver.recv() {
-                    Ok(message) => message,
-                    Err(_) => return Ok(()),
-                },
+                recv(due) -> _ => {
+                    self.start_compile();
+                    continue;
+                }
             };
             match message {
                 Message::Request(request) => self.handle_request(request)?,
@@ -500,72 +514,49 @@ impl Server {
         }
     }
 
-    /// Schedules a recompile [`DEBOUNCE`] from now.
+    /// Schedules a recompile [`DEBOUNCE`] from now; a compile already
+    /// running is now stale.
     fn touch(&mut self) {
+        self.generation += 1;
         self.deadline = Some(Instant::now() + DEBOUNCE);
     }
 
-    fn publish(&mut self) {
+    /// Starts a compile of the current state on the worker.
+    fn start_compile(&mut self) {
         self.deadline = None;
-        let overlay = self.documents.overlay();
-        let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> = HashMap::new();
-        let mut new_project = None;
-
-        let mut covered: HashSet<Url> = HashSet::new();
-        if let Some(root) = self.root.clone() {
-            let mut session = new_session(&self.libraries);
-            let mut fs = OverlayFs { overlay: &overlay };
-            let mut stages = LirStages::default();
-            let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
-                stages.modules.push((name, lir.clone()));
-            });
-            // Project-load errors (E025) can have no source span.
-            let anchor = self.project_anchor(&root);
-            new_project = Some(retain(
-                session,
-                stages,
-                anchor.as_ref(),
-                &mut covered,
-                &mut by_uri,
-            ));
+        let job = Job {
+            generation: self.generation,
+            documents: self.documents.clone(),
+            workspace: self.workspace.clone(),
+            root: self.root.clone(),
+            libraries: self.libraries.clone(),
+        };
+        if self.jobs.send(job).is_ok() {
+            self.compiling = true;
         }
+    }
 
-        let new_per_file = self.compile_units(&overlay, &mut covered, &mut by_uri);
-
-        // Key everything by the client's spelling of an open document's URI
-        // (`file:///c%3A/...`), so one document never gets two diagnostic
-        // sets that overwrite each other.
-        let open: HashMap<Url, Url> = self
-            .documents
-            .iter()
-            .map(|(uri, _)| (canonical_file_uri(uri), uri.clone()))
-            .collect();
-        let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> =
-            by_uri
-                .into_iter()
-                .fold(HashMap::new(), |mut acc, (uri, diagnostics)| {
-                    let uri = open.get(&canonical_file_uri(&uri)).cloned().unwrap_or(uri);
-                    acc.entry(uri).or_default().extend(diagnostics);
-                    acc
-                });
-
-        // Publish open documents even when clean, so stale sets are cleared.
-        for (uri, _) in self.documents.iter() {
-            by_uri.entry(uri.clone()).or_default();
+    /// Takes a finished compile: its analysis answers requests from now on
+    /// (it is newer than what the server had), and its diagnostics are
+    /// published unless an edit arrived meanwhile (the next compile, already
+    /// scheduled, publishes instead). `None` is a compile that panicked.
+    fn finish_compile(&mut self, generation: u64, compiled: Option<Compiled>) {
+        self.compiling = false;
+        let Some(compiled) = compiled else {
+            return;
+        };
+        self.project = compiled.project;
+        self.per_file = compiled.per_file;
+        if generation == self.generation {
+            let current: HashSet<Url> = compiled.diagnostics.keys().cloned().collect();
+            for (uri, (diagnostics, version)) in compiled.diagnostics {
+                self.send_diagnostics(&uri, diagnostics, version);
+            }
+            for uri in self.published.difference(&current) {
+                self.send_diagnostics(uri, Vec::new(), None);
+            }
+            self.published = current;
         }
-
-        self.project = new_project;
-        self.per_file = new_per_file;
-
-        let current: HashSet<Url> = by_uri.keys().cloned().collect();
-        for (uri, diagnostics) in by_uri {
-            let version = self.documents.get(&uri).map(|document| document.version);
-            self.send_diagnostics(&uri, diagnostics, version);
-        }
-        for uri in self.published.difference(&current) {
-            self.send_diagnostics(uri, Vec::new(), None);
-        }
-        self.published = current;
 
         let _ = self
             .connection
@@ -585,116 +576,6 @@ impl Server {
                 params: serde_json::Value::Null,
             }));
         }
-    }
-
-    /// Where the project's diagnostics without a source span go: the
-    /// workspace's `lilac.json`, else the root's `main.lilac`, else the
-    /// first open document under the root (by URI, so the choice is stable).
-    fn project_anchor(&self, root: &Path) -> Option<Url> {
-        let config = self
-            .workspace
-            .as_deref()
-            .map(|workspace| workspace.join("lilac.json"))
-            .filter(|config| config.is_file());
-        if let Some(config) = config {
-            return Url::from_file_path(config).ok();
-        }
-        let open: Vec<&Url> = self
-            .documents
-            .iter()
-            .filter(|(_, document)| document.path.starts_with(root))
-            .map(|(uri, _)| uri)
-            .collect();
-        self.unit_anchor(root, &open)
-    }
-
-    /// Where a unit's diagnostics without a source span go: `dir`'s
-    /// `main.lilac` when it exists or is open, else the first of `uris`.
-    fn unit_anchor(&self, dir: &Path, uris: &[&Url]) -> Option<Url> {
-        let main = dir.join("main.lilac");
-        let main_open = self
-            .documents
-            .iter()
-            .any(|(_, document)| document.path == main);
-        if main.is_file() || main_open {
-            return Url::from_file_path(main).ok();
-        }
-        uris.iter().min().map(|uri| (*uri).clone())
-    }
-
-    /// Compiles the open files the project did not cover (`covered`), one
-    /// compile per unit, and returns each file's compile by canonical URI.
-    fn compile_units(
-        &self,
-        overlay: &HashMap<PathBuf, String>,
-        covered: &mut HashSet<Url>,
-        by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
-    ) -> HashMap<Url, Rc<Retained>> {
-        // An open file the project does not reach is checked on its own unit
-        // (see `unit_of`). Files sharing a unit share one compile, and a
-        // compile also covers the open files of every unit it loads (a
-        // library's root namespace loads its subfolders), so outer units go
-        // first and covered files are neither recompiled nor re-published.
-        let mut new_per_file: HashMap<Url, Rc<Retained>> = HashMap::new();
-        let mut units: HashMap<Unit, Vec<Url>> = HashMap::new();
-        for (uri, document) in self.documents.iter() {
-            if covered.contains(&canonical_file_uri(uri)) {
-                continue;
-            }
-            units
-                .entry(unit_of(&document.path, &document.text, &self.libraries))
-                .or_default()
-                .push(uri.clone());
-        }
-        let mut units: Vec<(Unit, Vec<Url>)> = units.into_iter().collect();
-        units.sort_by_key(|(unit, _)| unit.order());
-        for (unit, uris) in units {
-            if uris
-                .iter()
-                .all(|uri| new_per_file.contains_key(&canonical_file_uri(uri)))
-            {
-                continue;
-            }
-            let mut session = new_session(&self.libraries);
-            let mut stages = LirStages::default();
-            let mut capture = |name, lir: &lilac_ir::LirModule| {
-                stages.modules.push((name, lir.clone()));
-            };
-            let mut fs = OverlayFs { overlay };
-            let retained = Rc::new(match &unit {
-                Unit::Namespace(namespace) => {
-                    let root = self.root.clone().unwrap_or_default();
-                    let _ = session.compile_namespace_with_stages(
-                        &root,
-                        namespace,
-                        &mut fs,
-                        &mut capture,
-                    );
-                    let anchor = uris.iter().min();
-                    retain(session, stages, anchor, covered, by_uri)
-                }
-                Unit::Folder(dir) => {
-                    let _ = session.compile_project_with_stages(dir, &mut fs, &mut capture);
-                    let anchor = self.unit_anchor(dir, &uris.iter().collect::<Vec<_>>());
-                    retain(session, stages, anchor.as_ref(), covered, by_uri)
-                }
-                Unit::File(_) => {
-                    let uri = &uris[0];
-                    let Some(document) = self.documents.get(uri) else {
-                        continue;
-                    };
-                    let name = document.path.to_string_lossy().into_owned();
-                    let _ = session.compile_lir_with_stages(&name, &document.text, &mut capture);
-                    retain_single(session, stages, uri, covered, by_uri)
-                }
-            });
-            for uri in retained.uri_files.keys().chain(&uris) {
-                new_per_file
-                    .entry(canonical_file_uri(uri))
-                    .or_insert_with(|| Rc::clone(&retained));
-            }
-        }
-        new_per_file
     }
 
     /// Publishes `diagnostics` for `uri`, computed from the open
@@ -717,141 +598,90 @@ impl Server {
     }
 }
 
-/// A compiler session for editor use: the CLI's `max_errors` cap (10) is for
-/// terminals, but an editor wants the full diagnostic list, so lift it here.
-/// The session also analyzes tolerantly so hover/definition keep working while
-/// the buffer has syntax or type errors.
-fn new_session(libraries: &[(String, PathBuf)]) -> Session {
-    let mut session = Session::new();
-    session.libraries = libraries.to_vec();
-    session.diags.max_errors = usize::MAX;
-    session.retain_partial_analysis = true;
-    session
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lsp_types::{TextDocumentItem, VersionedTextDocumentIdentifier};
 
-/// What an open file outside the project is compiled as.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Unit {
-    /// A mounted library namespace (`Standard.Heap`).
-    Namespace(String),
-    /// A program folder (one with a `main.lilac`).
-    Folder(PathBuf),
-    /// The file alone (single-file mode).
-    File(PathBuf),
-}
+    fn open(server: &mut Server, uri: &Url, text: &str) {
+        let params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "lilac".to_owned(),
+                version: 1,
+                text: text.to_owned(),
+            },
+        };
+        server.handle_notification(Notification {
+            method: "textDocument/didOpen".to_owned(),
+            params: serde_json::to_value(params).expect("params"),
+        });
+    }
 
-impl Unit {
-    /// Compile order: outer library namespaces first (they load their
-    /// subfolders), then folders, then single files.
-    fn order(&self) -> (usize, usize, Self) {
-        match self {
-            Self::Namespace(path) => (0, path.matches('.').count(), self.clone()),
-            Self::Folder(_) => (1, 0, self.clone()),
-            Self::File(_) => (2, 0, self.clone()),
+    fn job(server: &Server) -> Job {
+        Job {
+            generation: server.generation,
+            documents: server.documents.clone(),
+            workspace: None,
+            root: None,
+            libraries: Vec::new(),
         }
     }
-}
 
-/// The unit an open file belongs to: its namespace when it lies in a mounted
-/// library; its folder when the folder is a program (has a `main.lilac`) or
-/// the file declares no `main` (library-style code that needs its siblings);
-/// else the file alone (a loose program next to other programs).
-fn unit_of(path: &Path, text: &str, libraries: &[(String, PathBuf)]) -> Unit {
-    let Some(dir) = path.parent() else {
-        return Unit::File(path.to_path_buf());
-    };
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let dir_canonical = canonical(dir);
-    for (name, lib) in libraries {
-        if let Ok(rest) = dir_canonical.strip_prefix(canonical(lib)) {
-            let mut namespace = name.clone();
-            for segment in rest.components() {
-                namespace.push('.');
-                namespace.push_str(&segment.as_os_str().to_string_lossy());
-            }
-            return Unit::Namespace(namespace);
-        }
+    fn published(client: &Connection) -> Vec<i32> {
+        client
+            .receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Notification(notification)
+                    if notification.method == "textDocument/publishDiagnostics" =>
+                {
+                    serde_json::from_value::<PublishDiagnosticsParams>(notification.params)
+                        .ok()
+                        .and_then(|params| params.version)
+                }
+                _ => None,
+            })
+            .collect()
     }
-    let declares_main = text.lines().any(|line| line.starts_with("main:"));
-    if dir.join("main.lilac").is_file() || !declares_main {
-        return Unit::Folder(dir.to_path_buf());
-    }
-    Unit::File(path.to_path_buf())
-}
 
-/// Publishes a finished multi-file compile's diagnostics into `by_uri` and
-/// retains it. Diagnostics without a file go to `anchor`. Files already in
-/// `covered` (published by an earlier compile) are skipped; this compile's
-/// files are added to it.
-fn retain(
-    session: Session,
-    stages: LirStages,
-    anchor: Option<&Url>,
-    covered: &mut HashSet<Url>,
-    by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
-) -> Retained {
-    let file_uris: HashMap<FileId, Url> = session
-        .project_files()
-        .iter()
-        .filter_map(|(id, path)| {
-            Url::from_file_path(path)
-                .ok()
-                .map(|uri| (*id, canonical_file_uri(&uri)))
-        })
-        .collect();
-    let uri_of = |file| file_uris.get(&file).cloned();
-    for diagnostic in session.diags.diagnostics() {
-        let target = primary_file(diagnostic)
-            .and_then(uri_of)
-            .or_else(|| anchor.cloned());
-        if let Some(uri) = target.filter(|uri| !covered.contains(&canonical_file_uri(uri))) {
-            if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &uri_of) {
-                by_uri.entry(uri).or_default().push(lsp);
-            }
-        }
-        for (uri, lsp) in trace_diagnostics(diagnostic, &session.source_map, &uri_of) {
-            if !covered.contains(&canonical_file_uri(&uri)) {
-                by_uri.entry(uri).or_default().push(lsp);
-            }
-        }
-    }
-    covered.extend(file_uris.values().cloned());
-    let uri_files = file_uris
-        .iter()
-        .map(|(id, uri)| (uri.clone(), *id))
-        .collect();
-    Retained::build_with_stages(session, file_uris, uri_files, stages)
-}
+    /// A compile that an edit overtook installs its analysis (newer than
+    /// what the server had) but publishes nothing; the current one
+    /// publishes.
+    #[test]
+    fn a_stale_compile_answers_requests_but_is_not_published() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-stale-compile");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(
+            &mut server,
+            &uri,
+            "main: function () nothing {\n    x: @bit8 = y\n}\n",
+        );
+        let stale = job(&server).run();
 
-/// Like [`retain`] for a single-file compile of the document at `uri`.
-fn retain_single(
-    session: Session,
-    stages: LirStages,
-    uri: &Url,
-    covered: &mut HashSet<Url>,
-    by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
-) -> Retained {
-    covered.insert(canonical_file_uri(uri));
-    let entry = by_uri.entry(uri.clone()).or_default();
-    let uri_of = |file| (file == FileId(0)).then(|| uri.clone());
-    for diagnostic in session.diags.diagnostics() {
-        if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &uri_of) {
-            entry.push(lsp);
-        }
-        let sites = trace_diagnostics(diagnostic, &session.source_map, &uri_of);
-        entry.extend(sites.into_iter().map(|(_, lsp)| lsp));
-    }
-    let file_uris = HashMap::from([(FileId(0), uri.clone())]);
-    let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
-    Retained::build_with_stages(session, file_uris, uri_files, stages)
-}
+        server.handle_notification(Notification {
+            method: "textDocument/didChange".to_owned(),
+            params: serde_json::to_value(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: "main: function () nothing {\n}\n".to_owned(),
+                }],
+            })
+            .expect("params"),
+        });
+        server.finish_compile(stale.generation, Some(stale));
+        assert!(server.retained_for(&uri).is_some());
+        assert_eq!(published(&client), Vec::<i32>::new());
 
-/// The file of a diagnostic's primary label (else its first label).
-fn primary_file(diagnostic: &Diagnostic) -> Option<FileId> {
-    diagnostic
-        .labels
-        .iter()
-        .find(|label| label.primary)
-        .or_else(|| diagnostic.labels.first())
-        .map(|label| label.span.file)
+        let current = job(&server).run();
+        server.finish_compile(current.generation, Some(current));
+        assert_eq!(published(&client), vec![2]);
+    }
 }

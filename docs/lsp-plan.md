@@ -1,6 +1,7 @@
 # Language Server Plan
 
-> Status: in progress (2026-10-09). Phases 1 to 4 done. Phase 1 has one
+> Status: done (2026-10-09). Phases 1 to 5 done; Phase 5's caching is
+> deferred (see there). Phase 1 has one
 > documented limitation; `E051` keeps its single-chain note (a recursion
 > depth error has one chain worth showing). Phase 1b step 5 needed no
 > change: `Diags` already drops identical diagnostics.
@@ -117,8 +118,16 @@ generics that it accepts today. Record it in `SPEC.md`.
 ## Phase 5: Performance
 
 - Compile on a worker thread; answer requests from the last retained
-  compile meanwhile and drop stale compiles by generation.
+  compile meanwhile and drop stale compiles by generation. **Done**: one
+  compile runs at a time (`compile::Job`, a snapshot of the documents,
+  root and libraries); a finished compile's analysis is always installed,
+  but its diagnostics are published only when no edit arrived meanwhile.
 - Then cache unchanged files' parses and mounted libraries' analysis.
+  **Deferred**: a whole compile of a project with all of `Standard`
+  mounted takes about 10 ms in release (26 ms in debug), parsing about
+  1 ms of it, so a cache would save little while typeck is whole-program
+  (a library's instances depend on its users). Revisit when a real project
+  compiles in over 100 ms.
 
 ## Optional
 

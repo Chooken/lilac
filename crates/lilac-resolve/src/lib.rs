@@ -13,7 +13,7 @@
 //! *signatures* are `E020` in typeck, where types are known.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use lilac_ast::{Expr, FuncDecl, Item, ItemKind, Program, Type as AstType};
 use lilac_error::{Diagnostic, Diags};
@@ -47,9 +47,9 @@ pub enum Visibility {
 #[derive(Clone, Debug)]
 pub enum DefKind {
     /// `name: function ...` (also `extern` and `=>` functions, and methods).
-    Func(Rc<FuncDecl>),
+    Func(Arc<FuncDecl>),
     /// `@name: function ...` (operator, conversion, or RAII hook).
-    Hook(Rc<FuncDecl>),
+    Hook(Arc<FuncDecl>),
     /// `name: object { ... }`.
     Object,
     /// `name: enum { ... }`.
@@ -63,7 +63,7 @@ pub enum DefKind {
         /// Declared type.
         ty: AstType,
         /// Initializer (inlined at every use).
-        value: Rc<Expr>,
+        value: Arc<Expr>,
     },
 }
 
@@ -99,7 +99,7 @@ pub struct Def {
 impl Def {
     /// The function declaration of a function or hook.
     #[must_use]
-    pub fn func(&self) -> Option<&Rc<FuncDecl>> {
+    pub fn func(&self) -> Option<&Arc<FuncDecl>> {
         match &self.kind {
             DefKind::Func(decl) | DefKind::Hook(decl) => Some(decl),
             _ => None,
@@ -434,15 +434,15 @@ impl Collector<'_> {
     fn item(&mut self, item: &Item, vis: Visibility, parent: Option<DefId>) -> Option<DefId> {
         let kind = match &item.kind {
             ItemKind::Func(decl) if item.name.starts_with('@') => {
-                DefKind::Hook(Rc::new(decl.clone()))
+                DefKind::Hook(Arc::new(decl.clone()))
             }
-            ItemKind::Func(decl) => DefKind::Func(Rc::new(decl.clone())),
+            ItemKind::Func(decl) => DefKind::Func(Arc::new(decl.clone())),
             ItemKind::Object { .. } => DefKind::Object,
             ItemKind::Enum { .. } => DefKind::Enum,
             ItemKind::Field { ty } => DefKind::Field(ty.clone()),
             ItemKind::Const { ty, value, .. } => DefKind::Const {
                 ty: ty.clone(),
-                value: Rc::new(value.clone()),
+                value: Arc::new(value.clone()),
             },
             ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
         };
