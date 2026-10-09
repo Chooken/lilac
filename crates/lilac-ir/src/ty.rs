@@ -14,6 +14,8 @@ pub enum LirTy {
     FBit(u16),
     /// `ref T`: a pointer to a `T`.
     Ref(Box<LirTy>),
+    /// `[N x T]`: `N` elements of `T` in a row.
+    Array(Box<LirTy>, u64),
     /// Any other `#name`, stored without the `#`: a module layout
     /// (`#Object`), a builtin aggregate (`#byte_buffer`, `#format_args`), or
     /// `#unknown` (only valid behind a `ref`).
@@ -92,7 +94,7 @@ impl LirTy {
         match self {
             Self::Bit(bits) | Self::FBit(bits) => Some(u32::from(*bits)),
             Self::BitNative | Self::Ref(_) => Some(ptr_bits),
-            Self::Named(_) => None,
+            Self::Named(_) | Self::Array(..) => None,
         }
     }
 
@@ -105,12 +107,17 @@ impl LirTy {
         }
     }
 
-    /// Parses a type spelling (`#bit32`, `ref #Object`). `None` when it does
-    /// not start with `#` or `ref `.
+    /// Parses a type spelling (`#bit32`, `ref #Object`, `[4 x #bit8]`).
+    /// `None` when it does not start with `#`, `ref ` or `[`.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         if let Some(inner) = text.strip_prefix("ref ") {
             return Self::parse(inner).map(Self::to_ref);
+        }
+        if let Some(inner) = text.strip_prefix('[') {
+            let (len, elem) = inner.strip_suffix(']')?.split_once(" x ")?;
+            let len = len.parse::<u64>().ok().filter(|n| *n.to_string() == *len)?;
+            return Some(Self::Array(Box::new(Self::parse(elem)?), len));
         }
         let name = text.strip_prefix('#')?;
         let width = |digits: &str, allowed: &[u16]| {
@@ -145,6 +152,7 @@ impl fmt::Display for LirTy {
             Self::BitNative => f.write_str("#bit_native"),
             Self::FBit(bits) => write!(f, "#fbit{bits}"),
             Self::Ref(inner) => write!(f, "ref {inner}"),
+            Self::Array(elem, len) => write!(f, "[{len} x {elem}]"),
             Self::Named(name) => write!(f, "#{name}"),
         }
     }
@@ -164,6 +172,9 @@ mod tests {
             "ref ref #bit32",
             "#GenBox.1..bit32",
             "#byte_buffer",
+            "[4 x #bit32]",
+            "[2 x [3 x ref #bit8]]",
+            "ref [16 x #Object]",
         ] {
             let ty = LirTy::parse(text).expect(text);
             assert_eq!(ty.to_string(), text);
@@ -171,5 +182,7 @@ mod tests {
         assert_eq!(LirTy::parse("#bit32"), Some(LirTy::Bit(32)));
         assert_eq!(LirTy::parse("#bit7"), Some(LirTy::Named("bit7".to_owned())));
         assert_eq!(LirTy::parse("bit32"), None);
+        assert_eq!(LirTy::parse("[04 x #bit8]"), None);
+        assert_eq!(LirTy::parse("[4 #bit8]"), None);
     }
 }

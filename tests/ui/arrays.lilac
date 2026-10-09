@@ -1,0 +1,11 @@
+Holder: object {
+    tag: @bit8
+    items: @array(@bit32, 4)
+}
+
+main: function () nothing {
+    holder: Holder { tag = 0x1, items = @array(@bit32, 4) {} }
+    slot: ref @bit32 = @array_at(ref holder.items, 0x2)
+    slot = 0x7
+    count: @bit_native = @array_len(holder.items)
+}

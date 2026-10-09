@@ -1050,6 +1050,9 @@ impl Checker<'_> {
             }
             resolved.deref()
         };
+        if matches!(self.types.kind(object.id), TypeKind::Array { .. }) {
+            return self.array_literal(object, fields, span);
+        }
         let display = self.types.display(object.id);
         let Some(layout) = self.fields_of(object.id) else {
             self.diags.emit(

@@ -1,0 +1,16 @@
+// expect-exit: 101
+// expect-stderr: panic: index out of bounds
+// expect-stderr:   at read (array_out_of_bounds.lilac:9:13)
+// expect-stderr:   at main (array_out_of_bounds.lilac:15:10)
+
+using Standard.Process
+
+read: function (values: ref @array(@bit32, 4), index: @bit_native) value: @bit32 {
+    value = @array_at(values, index)
+}
+
+main: function () nothing {
+    values: @array(@bit32, 4) {}
+    first: @bit32 = read(ref values, 0x3)
+    exit(read(ref values, 0x4))
+}

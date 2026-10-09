@@ -149,6 +149,9 @@ pub struct Type {
     pub generic_args: Vec<Type>,
     /// Function type (`function (params) returns`); `None` for named types.
     pub func: Option<FuncType>,
+    /// `@array(T, N)`: the length literal's text and span (`name` is
+    /// `@array` and `generic_args` holds `T`).
+    pub array_len: Option<(String, Span)>,
     /// Whole-type span.
     pub span: Span,
 }

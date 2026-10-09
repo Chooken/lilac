@@ -636,6 +636,9 @@ impl Lower<'_> {
             TypeKind::FormatArgs => LirTy::format_args(),
             TypeKind::Unknown => LirTy::Named("unknown".to_owned()),
             TypeKind::Object(_) | TypeKind::Instance { .. } => LirTy::Named(self.type_name(ty.id)),
+            TypeKind::Array { elem, len } => {
+                LirTy::Array(Box::new(self.lir_ty(TypeRef::value(*elem))), *len)
+            }
             TypeKind::Param { .. } | TypeKind::Error => LirTy::Named("error".to_owned()),
         };
         if ty.is_ref {
@@ -1788,7 +1791,13 @@ impl Lower<'_> {
     fn branches(&self, expr: &HirExpr) -> bool {
         let mut found = false;
         expr.walk(&mut |e| match &e.kind {
-            HirExprKind::If { .. } | HirExprKind::Match { .. } | HirExprKind::Logic { .. } => {
+            HirExprKind::If { .. }
+            | HirExprKind::Match { .. }
+            | HirExprKind::Logic { .. }
+            | HirExprKind::Call {
+                callee: HirCallee::Intrinsic(Intrinsic::ArrayAt),
+                ..
+            } => {
                 found = true;
             }
             HirExprKind::Const(def) => {
@@ -2503,25 +2512,12 @@ impl Lower<'_> {
             }
             Intrinsic::Panic => {
                 let msg = self.arg(fs, func, &args[0]);
-                let location = self.sources.location(span);
-                let site = lilac_ir::trace::site_text(&self.display_of(func), location.as_deref());
-                let name = self.intern_data(site.as_bytes());
-                let reg = fs.reg();
-                fs.emit(LirInst::Const {
-                    dst: reg.clone(),
-                    lit: format!("!{name}"),
-                    ty: LirTy::byte_buffer(),
-                    span,
-                });
-                let site = self.fresh_place(fs, LirOperand::Reg(reg), args[0].ty, span);
-                fs.emit(LirInst::Call {
-                    func: LirCallee::Func(".lilac.panic".to_owned()),
-                    ins: vec![msg, site],
-                    outs: Vec::new(),
-                    span,
-                });
-                fs.end(LirTerm::Unreachable { span });
+                self.panic_with(fs, func, msg, span);
                 LirOperand::Reg(String::new())
+            }
+            Intrinsic::ArrayAt => self.lower_array_at(fs, func, args, span),
+            Intrinsic::ArrayLen => {
+                lilac_error::bug!(span, "`@array_len` folds to a literal in typeck")
             }
             _ => {
                 let Some(symbol) = intrinsic.runtime_symbol() else {
@@ -2551,6 +2547,111 @@ impl Lower<'_> {
 }
 
 impl Lower<'_> {
+    /// Ends the block with `.lilac.panic(msg, site)` and `unreachable`,
+    /// where `msg` is a `#byte_buffer` place and `site` is this call's
+    /// stack-trace line.
+    fn panic_with(&mut self, fs: &mut Fs, func: &HirFunc, msg: String, span: Span) {
+        let location = self.sources.location(span);
+        let site = lilac_ir::trace::site_text(&self.display_of(func), location.as_deref());
+        let site = self.byte_buffer_place(fs, site.as_bytes(), span);
+        fs.emit(LirInst::Call {
+            func: LirCallee::Func(".lilac.panic".to_owned()),
+            ins: vec![msg, site],
+            outs: Vec::new(),
+            span,
+        });
+        fs.end(LirTerm::Unreachable { span });
+    }
+
+    /// A fresh `#byte_buffer` place over the data constant `bytes`.
+    fn byte_buffer_place(&mut self, fs: &mut Fs, bytes: &[u8], span: Span) -> String {
+        let name = self.intern_data(bytes);
+        let reg = fs.reg();
+        fs.emit(LirInst::Const {
+            dst: reg.clone(),
+            lit: format!("!{name}"),
+            ty: LirTy::byte_buffer(),
+            span,
+        });
+        let Some(buffer) = self.types.builtin("@byte_buffer") else {
+            lilac_error::bug!(span, "`@byte_buffer` is not interned");
+        };
+        self.fresh_place(fs, LirOperand::Reg(reg), TypeRef::value(buffer), span)
+    }
+
+    /// Lowers `@array_at(ref array, index)`: the element address, kept in a
+    /// place across an unsigned bounds check that panics with "index out
+    /// of bounds". A constant index in bounds needs no check.
+    fn lower_array_at(
+        &mut self,
+        fs: &mut Fs,
+        func: &HirFunc,
+        args: &[HirExpr],
+        span: Span,
+    ) -> LirOperand {
+        let TypeKind::Array { elem, len } = *self.types.kind(args[0].ty.id) else {
+            lilac_error::bug!(span, "`@array_at` of a non-array");
+        };
+        let in_bounds = matches!(
+            self.constant(&args[1]),
+            Some(constant::Value::Int(index, _)) if index < len
+        );
+        let operands = self.regs(fs, func, args);
+        let ty = self.lir_ty(TypeRef::reference(elem));
+        let addr = fs.reg();
+        if in_bounds {
+            fs.emit(LirInst::ElemAddr {
+                array: operands[0].clone(),
+                index: operands[1].clone(),
+                dst: addr.clone(),
+                ty,
+                span,
+            });
+            return LirOperand::Reg(addr);
+        }
+        fs.emit(LirInst::ElemAddr {
+            array: operands[0].clone(),
+            index: operands[1].clone(),
+            dst: addr.clone(),
+            ty: ty.clone(),
+            span,
+        });
+        let result = fs.tmp_lir(ty, span);
+        fs.emit(LirInst::CopyPlace {
+            src: LirOperand::Reg(addr),
+            dst: result.clone(),
+            span,
+        });
+        let count = fs.reg();
+        fs.emit(LirInst::Const {
+            dst: count.clone(),
+            lit: format!("{len:#x}"),
+            ty: LirTy::BitNative,
+            span,
+        });
+        let in_bounds = fs.reg();
+        fs.emit(LirInst::Arith {
+            op: ArithOp::ILtU,
+            lhs: operands[1].clone(),
+            rhs: count,
+            dst: in_bounds.clone(),
+            ty: LirTy::Bit(8),
+            span,
+        });
+        let (ok, fail) = (fs.label(), fs.label());
+        fs.end(LirTerm::BranchIf {
+            cond: in_bounds,
+            then: ok.clone(),
+            els: Some(fail.clone()),
+            span,
+        });
+        fs.at(fail);
+        let msg = self.byte_buffer_place(fs, b"index out of bounds", span);
+        self.panic_with(fs, func, msg, span);
+        fs.at(ok);
+        LirOperand::Place(result)
+    }
+
     /// Lowers `@atomic_<op>_W(ref place, operands…)`: the operands become
     /// registers of the element type and the address a `ref` register.
     fn lower_atomic(
@@ -2562,12 +2663,9 @@ impl Lower<'_> {
         args: &[HirExpr],
         span: Span,
     ) -> LirOperand {
-        let ptr = self.value_reg(fs, func, &args[0]);
+        let mut operands = self.regs(fs, func, args);
+        let ptr = operands.remove(0);
         let ty = self.lir_ty(TypeRef::value(args[0].ty.id));
-        let operands: Vec<String> = args[1..]
-            .iter()
-            .map(|arg| self.value_reg(fs, func, arg))
-            .collect();
         if op == AtomicOp::Store {
             fs.emit(LirInst::AtomicStore {
                 value: operands[0].clone(),

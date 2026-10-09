@@ -232,7 +232,7 @@ fn syscall(lower: &Lower<'_, '_>) {
 
 /// Byte-addressed pointer `base + offset`, using safe integer arithmetic in
 /// place of a dynamic GEP.
-fn byte_ptr<'ctx>(
+pub(crate) fn byte_ptr<'ctx>(
     lower: &Lower<'ctx, '_>,
     builder: &Builder<'ctx>,
     base: PointerValue<'ctx>,

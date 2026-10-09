@@ -538,20 +538,42 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part H: `@array(T, N)`
 
-- [ ] Parser: `@array(Type, constant)` in type position.
-- [ ] Types: `TypeRef` gains an array form; layout is `N × size`, aligned to
+- [x] Parser: `@array(Type, constant)` in type position.
+- [x] Types: `TypeRef` gains an array form; layout is `N × size`, aligned to
       `T`; `E010` when `T` has hooks.
-- [ ] LIR: `LirTy::Array(elem, n)`; the verifier and LLVM `[N x T]`.
-- [ ] Intrinsics:
+- [x] LIR: `LirTy::Array(elem, n)`; the verifier and LLVM `[N x T]`.
+- [x] Intrinsics:
   - `@array_at` → field address plus a bounds check that panics with
     "index out of bounds";
   - `@array_len` → a constant.
-- [ ] Tests:
+- [x] Tests:
   - `@size_of`/`@align_of` of an object holding an array matches C;
   - copying an object copies the array;
   - out-of-bounds panics;
   - `T` with a hook is `E010`.
-- [ ] Docs: SPEC §1 types and §3; IR_SPEC.
+- [x] Docs: SPEC §1 types and §3; IR_SPEC.
+
+Done (2026-10-09). Differences from the tasks above:
+
+- The length is a number literal (1 to `0xffffffff`, LLVM's limit); named
+  constants are not accepted yet. A `ref` element is `E010` too, since
+  `@array_at` returns `ref T` and a type is never doubly `ref`.
+- An array value is `@array(T, N) {}` (zeroed), needed because a struct
+  literal must set every field; the parser reads `@array(` in expression
+  position as that literal.
+- The element hook check runs after hooks bind (`check_array_hooks`) and
+  looks through fields, so an object holding a hooked value is rejected
+  as well.
+- `@array_at` lowers to the new `elem.addr` instruction (LIR codec version
+  9, tag 22), not a field address; LLVM computes it with
+  `ptrtoint`/`inttoptr` because a dynamic GEP is `unsafe` in inkwell. A
+  constant in-bounds index skips the check.
+- Tests: `tests/run/arrays.lilac` (layouts against C, copies, nested
+  arrays), `tests/run/array_out_of_bounds.lilac`, `tests/ui/arrays` and
+  unit tests in the parser, `lilac-ty`, typeck (the `E010` cases) and the
+  verifier.
+- Fixed `lower_atomic` (Part G) to spill operands across branches like
+  other multi-operand calls.
 
 ### Order
 

@@ -188,7 +188,7 @@ fn prune_layouts(module: &mut LirModule) {
     let mut used: HashSet<&str> = HashSet::new();
     while let Some(ty) = pending.pop() {
         match ty {
-            LirTy::Ref(inner) => pending.push(inner),
+            LirTy::Ref(inner) | LirTy::Array(inner, _) => pending.push(inner),
             LirTy::Named(name) => {
                 if used.insert(name) {
                     if let Some(fields) = module.layouts.get(name) {
@@ -214,6 +214,7 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::Field { ty, .. }
         | LirInst::Convert { ty, .. }
         | LirInst::FieldAddr { ty, .. }
+        | LirInst::ElemAddr { ty, .. }
         | LirInst::Alloca { ty, .. }
         | LirInst::Arith { ty, .. }
         | LirInst::AtomicLoad { ty, .. }

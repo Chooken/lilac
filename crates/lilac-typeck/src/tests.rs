@@ -1623,3 +1623,28 @@ fn atomics_check_orderings_and_widths() {
     );
     assert!(has_code(&diags, "E010"), "{diags:?}");
 }
+
+#[test]
+fn arrays_check_elements_lengths_and_operands() {
+    let ok = check_src(
+        "Box: object {\n    items: @array(@bit32, 0x4)\n}\n\nmain: function () nothing {\n    b: Box { items = @array(@bit32, 4) {} }\n    slot: ref @bit32 = @array_at(ref b.items, 0x1)\n    n: @bit_native = @array_len(b.items)\n}\n",
+    );
+    assert!(ok.diagnostics().is_empty(), "{ok:?}");
+    let errors = [
+        // An element with an RAII hook, itself or in a field.
+        "Noisy: object {\n    v: @bit8\n\n    @on_drop: function (self) nothing {}\n}\n\nOuter: object {\n    n: Noisy\n}\n\nmain: function () nothing {\n    a: @array(Outer, 2) {}\n}\n",
+        // A `ref` element, a zero length and a length past `u32`.
+        "main: function () nothing {\n    a: @array(ref @bit8, 2) {}\n}\n",
+        "main: function () nothing {\n    a: @array(@bit8, 0) {}\n}\n",
+        "main: function () nothing {\n    a: @array(@bit8, 0x100000000) {}\n}\n",
+        // An array literal has no fields.
+        "main: function () nothing {\n    a: @array(@bit8, 2) { x = 0x1 }\n}\n",
+        // `@array_at` needs a `ref` array; `@array_len` an array.
+        "main: function () nothing {\n    a: @array(@bit8, 2) {}\n    b: ref @bit8 = @array_at(a, 0x0)\n}\n",
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    n: @bit_native = @array_len(a)\n}\n",
+    ];
+    for src in errors {
+        let diags = check_src(src);
+        assert!(has_code(&diags, "E010"), "{src}\n{diags:?}");
+    }
+}

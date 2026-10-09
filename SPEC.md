@@ -42,6 +42,29 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing object type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
 
+### Fixed-size arrays
+
+* **`@array(T, N)`**: `N` values of `T` in a row, laid out like a C array
+  (size `N` times the size of `T`, aligned to `T`). `N` is a number literal
+  from 1 to `0xffffffff`. `T` is held by value: a `ref` element is `E010`
+  (wrap it in an object), and so is an element with an RAII hook, itself or
+  in a field, because an array copies and drops as plain bytes.
+* An array value is written `@array(T, N) {}` and starts zeroed, like all
+  memory; `name: @array(T, N) {}` declares one. Elements are reached through
+  `@array_at` and the length through `@array_len` (see §3); there is no
+  bracket syntax.
+
+```lilac
+Buffer: object {
+    used: @bit_native
+    bytes: @array(@bit8, 64)
+}
+
+buffer: Buffer { used = 0x0, bytes = @array(@bit8, 64) {} }
+first: ref @bit8 = @array_at(ref buffer.bytes, 0x0)
+first = 0x41
+```
+
 ### Universal Zero-Initialization
 
 All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac. This eliminates read before write bugs and guarantees deterministic padding bits, ensuring 100% reliability for bit equality checks.
@@ -149,8 +172,8 @@ first: @bit8 = s.at(0x0)
 view: String = s.slice(0x0, 0x2) // new {Size, Buffer} view, no copy
 ```
 
-Fixed-size arrays use generic objects plus `@init` constructors
-(e.g. `Array(T, len)`), not `T[N]` const-generics.
+Fixed-size storage is the builtin `@array(T, N)` (§1), reached through
+`@array_at`/`@array_len`, not `T[N]` syntax.
 
 ### Formatted strings
 
@@ -344,6 +367,8 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@atomic_compare_swap_W`** | `(ref @bitW, expected: @bitW, desired: @bitW): @bitW` | Atomically replaces the value with `desired` if it equals `expected`; returns the old value (it succeeded iff that equals `expected`). Strong: it never fails spuriously. |
 | **`@atomic_add_W`**, **`_sub_`**, **`_and_`**, **`_or_`**, **`_xor_`**, **`_max_`**, **`_min_`**, **`_max_u_`**, **`_min_u_`** | `(ref @bitW, @bitW): @bitW` | Atomic read-modify-write (`max`/`min` signed, `max_u`/`min_u` unsigned); returns the old value. |
 | **`@atomic_fence`** | `()` | A memory fence. |
+| **`@array_at`** | `(ref @array(T, N), index: @bit_native): ref T` | A reference to element `index`. An index of `N` or more panics with `index out of bounds`; a constant index in bounds is not checked at run time. |
+| **`@array_len`** | `(T)` or `(value)` | The length `N` of an array type, or of a value's array type, as a `@bit_native` constant. |
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
 | **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
 | **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bit_native` length. Same lifetime caveat as any `ref`. |

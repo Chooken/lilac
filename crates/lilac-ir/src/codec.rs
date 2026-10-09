@@ -22,8 +22,9 @@ use crate::{
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
 /// `IGtU`/`IDivU`/`IModU` tags (16–18). Version 8 adds the atomic
-/// instructions (tags 17–21).
-pub const LIR_CODEC_VERSION: u32 = 8;
+/// instructions (tags 17–21). Version 9 adds `elem.addr` (tag 22) and the
+/// array type spelling `[N x T]`.
+pub const LIR_CODEC_VERSION: u32 = 9;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -451,6 +452,20 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_ordering(w, *order)?;
             put_span(w, *span)
         }
+        LirInst::ElemAddr {
+            array,
+            index,
+            dst,
+            ty,
+            span,
+        } => {
+            put_u8(w, 22)?;
+            put_str(w, array)?;
+            put_str(w, index)?;
+            put_str(w, dst)?;
+            put_ty(w, ty)?;
+            put_span(w, *span)
+        }
     }
 }
 
@@ -868,6 +883,13 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             Ok(LirInst::Zero { place, span })
         }
         17..=21 => get_atomic(r, tag),
+        22 => Ok(LirInst::ElemAddr {
+            array: get_str(r)?,
+            index: get_str(r)?,
+            dst: get_str(r)?,
+            ty: get_ty(r)?,
+            span: get_span(r)?,
+        }),
         _ => Err(CodecError::Malformed("invalid LirInst tag")),
     }
 }
@@ -1274,6 +1296,18 @@ mod tests {
                 idx: 3,
                 dst: "r9".to_owned(),
                 ty: t("ref #bit32"),
+                span,
+            },
+            LirInst::ElemAddr {
+                array: "r4".to_owned(),
+                index: "r0".to_owned(),
+                dst: "e0".to_owned(),
+                ty: t("ref #bit32"),
+                span,
+            },
+            LirInst::Alloca {
+                ty: t("[4 x #bit32]"),
+                place: "arr".to_owned(),
                 span,
             },
             LirInst::Alloca {

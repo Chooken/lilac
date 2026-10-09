@@ -98,6 +98,13 @@ pub enum TypeKind {
         /// Concrete or parameter arguments in order.
         args: Vec<TypeRef>,
     },
+    /// `@array(elem, len)`: `len` by-value elements in a row.
+    Array {
+        /// Element type (never a `ref`).
+        elem: TypeId,
+        /// Element count.
+        len: u64,
+    },
     /// `function (params) returns` value type.
     Func {
         /// Parameter types in order.
@@ -127,6 +134,7 @@ pub struct Types {
     funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>), TypeId>,
     params: HashMap<(u32, String), TypeId>,
     instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
+    arrays: HashMap<(TypeId, u64), TypeId>,
 }
 
 impl Types {
@@ -211,6 +219,17 @@ impl Types {
         id
     }
 
+    /// Interns (or finds) `@array(elem, len)`.
+    pub fn intern_array(&mut self, elem: TypeId, len: u64) -> TypeId {
+        if let Some(&id) = self.arrays.get(&(elem, len)) {
+            return id;
+        }
+        let id = TypeId(next_id(self.kinds.len()));
+        self.kinds.push(TypeKind::Array { elem, len });
+        self.arrays.insert((elem, len), id);
+        id
+    }
+
     /// Rewrites `Param(i)` to `args[i]` throughout `ty`, recursively
     /// re-interning nested `Instance`/`Func` types. The outer `ref` flag is
     /// preserved (and never doubled).
@@ -232,6 +251,14 @@ impl Types {
                     .map(|arg| self.substitute(*arg, args))
                     .collect();
                 let id = self.intern_instance(base, args);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            TypeKind::Array { elem, len } => {
+                let elem = self.substitute(TypeRef::value(elem), args);
+                let id = self.intern_array(elem.id, len);
                 TypeRef {
                     id,
                     is_ref: ty.is_ref,
@@ -261,6 +288,7 @@ impl Types {
         match self.kind(id) {
             TypeKind::Param { .. } => true,
             TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
+            TypeKind::Array { elem, .. } => self.contains_param(*elem),
             TypeKind::Func { params, returns } => params
                 .iter()
                 .chain(returns.iter())
@@ -298,6 +326,7 @@ impl Types {
                 }
                 out
             }
+            TypeKind::Array { elem, len } => format!("array.{len}.{}", self.mangle(*elem)),
             TypeKind::Func { params, returns } => {
                 let mut out = format!("function.{}", params.len());
                 for param in params {
@@ -381,6 +410,7 @@ impl Types {
                 let args: Vec<String> = args.iter().map(|a| self.display_ref(*a)).collect();
                 format!("{}[{}]", self.object_name(*base), args.join(", "))
             }
+            TypeKind::Array { elem, len } => format!("@array({}, {len})", self.display(*elem)),
             TypeKind::Func { params, returns } => {
                 let ps: Vec<String> = params.iter().map(|p| self.display_ref(*p)).collect();
                 let rs: Vec<String> = returns.iter().map(|r| self.display_ref(*r)).collect();
@@ -489,6 +519,24 @@ mod tests {
         let nullary = types.intern_func(Vec::new(), Vec::new());
         assert_ne!(one, nullary);
         assert_eq!(types.display(nullary), "function () -> nothing");
+    }
+
+    #[test]
+    fn arrays_intern_display_mangle_and_substitute() {
+        let mut types = Types::new();
+        let bit32 = types.builtin("@bit32").expect("has @bit32");
+        let array = types.intern_array(bit32, 4);
+        assert_eq!(types.intern_array(bit32, 4), array);
+        assert_ne!(types.intern_array(bit32, 5), array);
+        assert_eq!(types.display(array), "@array(@bit32, 4)");
+        assert_eq!(types.mangle(array), "array.4..bit32");
+        let param = types.intern_param(0, "T");
+        let template = types.intern_array(param, 4);
+        assert!(types.contains_param(template));
+        assert_eq!(
+            types.substitute(TypeRef::reference(template), &[TypeRef::value(bit32)]),
+            TypeRef::reference(array)
+        );
     }
 
     #[test]

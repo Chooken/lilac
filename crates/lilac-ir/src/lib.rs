@@ -372,6 +372,21 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
+    /// `&d: ref #t = elem.addr &a, &i`: the address of element `&i` (a
+    /// `#bit_native`) of the array that `&a` (a `ref [N x #t]`) points to.
+    /// Lowering checks the bounds first.
+    ElemAddr {
+        /// Array address register (without sigil).
+        array: String,
+        /// Index register (without sigil).
+        index: String,
+        /// Destination register (without sigil).
+        dst: String,
+        /// Pointer type (`ref #t`).
+        ty: LirTy,
+        /// Instruction span.
+        span: Span,
+    },
     /// `alloca #t %x : zeroed` (every place starts zeroed).
     Alloca {
         /// Place type.
@@ -913,14 +928,7 @@ fn print_inst(inst: &LirInst) -> String {
             };
             format!("&{dst}: {ty} = {op} &{src}")
         }
-        LirInst::FieldAddr {
-            obj,
-            name,
-            idx,
-            dst,
-            ty,
-            ..
-        } => format!("&{dst}: {ty} = field.addr %{obj} .{name}  // idx {idx}"),
+        LirInst::FieldAddr { .. } | LirInst::ElemAddr { .. } => print_addr(inst),
         LirInst::Alloca { ty, place, .. } => format!("alloca {ty} %{place} : zeroed"),
         LirInst::Drop { place, .. } => format!("drop %{place}"),
         LirInst::Arith {
@@ -938,6 +946,28 @@ fn print_inst(inst: &LirInst) -> String {
         | LirInst::AtomicRmw { .. }
         | LirInst::CmpXchg { .. }
         | LirInst::Fence { .. } => print_atomic(inst),
+    }
+}
+
+/// Prints `field.addr` or `elem.addr`.
+fn print_addr(inst: &LirInst) -> String {
+    match inst {
+        LirInst::FieldAddr {
+            obj,
+            name,
+            idx,
+            dst,
+            ty,
+            ..
+        } => format!("&{dst}: {ty} = field.addr %{obj} .{name}  // idx {idx}"),
+        LirInst::ElemAddr {
+            array,
+            index,
+            dst,
+            ty,
+            ..
+        } => format!("&{dst}: {ty} = elem.addr &{array}, &{index}"),
+        _ => lilac_error::bug!(Span::dummy(), "non-address instruction in print_addr"),
     }
 }
 
@@ -1018,6 +1048,7 @@ fn inst_span(inst: &LirInst) -> Span {
         | LirInst::Store { span, .. }
         | LirInst::Convert { span, .. }
         | LirInst::FieldAddr { span, .. }
+        | LirInst::ElemAddr { span, .. }
         | LirInst::Alloca { span, .. }
         | LirInst::Drop { span, .. }
         | LirInst::Arith { span, .. }
@@ -1118,7 +1149,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
 /// lowering (`lilac-codegen-llvm`), so the two cannot drift.
 #[must_use]
 pub fn is_c_abi_type(ty: &LirTy) -> bool {
-    !matches!(ty, LirTy::Named(_))
+    !matches!(ty, LirTy::Named(_) | LirTy::Array(..))
 }
 
 /// Whether `ty` may be passed as a C variadic argument: C promotes narrower
@@ -1183,6 +1214,10 @@ pub fn size_align<S: std::hash::BuildHasher>(
     if let Some(bits) = ty.bits(ptr_bits) {
         let size = u64::from(bits / 8);
         return (size, size);
+    }
+    if let LirTy::Array(elem, len) = ty {
+        let (size, align) = size_align(layouts, elem, ptr_bytes);
+        return (size * len, align);
     }
     let mut size = 0u64;
     let mut align = 1u64;
@@ -1414,6 +1449,7 @@ impl Verifier<'_> {
         match ty {
             LirTy::Bit(_) | LirTy::BitNative | LirTy::FBit(_) => true,
             LirTy::Ref(inner) => inner.name() == Some("unknown") || self.valid_type(inner),
+            LirTy::Array(elem, _) => self.valid_type(elem),
             LirTy::Named(name) => {
                 builtin_layout(ty).is_some() || self.module.layouts.contains_key(name)
             }
@@ -1610,6 +1646,47 @@ impl Verifier<'_> {
             | LirInst::AtomicRmw { .. }
             | LirInst::CmpXchg { .. }
             | LirInst::Fence { .. } => self.verify_atomic(func, inst, regs),
+            LirInst::ElemAddr {
+                array,
+                index,
+                dst,
+                ty,
+                span,
+            } => {
+                self.verify_elem_addr(array, index, ty, *span, regs);
+                self.check_type(ty, *span);
+                self.define_reg(regs, dst, ty, false, *span, func);
+            }
+        }
+    }
+
+    /// Checks `elem.addr`: `&array` is a `ref [N x T]`, `&index` a
+    /// `#bit_native`, and the result `ref T`.
+    fn verify_elem_addr(&mut self, array: &str, index: &str, ty: &LirTy, span: Span, regs: &Regs) {
+        match regs.get(array).map(|def| def.ty) {
+            None => self.error(format!("use of undefined register `&{array}`"), span),
+            Some(LirTy::Ref(inner)) if matches!(**inner, LirTy::Array(..)) => {
+                if let LirTy::Array(elem, _) = &**inner {
+                    if !ty.is_ref() || **elem != *ty.strip_ref() {
+                        self.error(
+                            format!("`elem.addr` of `{inner}` must be `ref {elem}`, found `{ty}`"),
+                            span,
+                        );
+                    }
+                }
+            }
+            Some(found) => self.error(
+                format!("`elem.addr` array `&{array}` must be a `ref` array, found `{found}`"),
+                span,
+            ),
+        }
+        match regs.get(index).map(|def| def.ty) {
+            None => self.error(format!("use of undefined register `&{index}`"), span),
+            Some(LirTy::BitNative) => {}
+            Some(found) => self.error(
+                format!("`elem.addr` index `&{index}` must be `#bit_native`, found `{found}`"),
+                span,
+            ),
         }
     }
 
@@ -2428,6 +2505,79 @@ mod tests {
         let mut diags = lilac_error::Diags::new();
         let _ = verify(&module, &mut diags);
         diags.diagnostics().iter().map(|d| d.msg.clone()).collect()
+    }
+
+    #[test]
+    fn verify_checks_elem_addr() {
+        let span = test_span();
+        let elem_errors = |array_ty: &str, index_ty: &str, ty: &str| {
+            let mut module = LirModule::new("x86_64-unknown-none");
+            let mut func = trivial_func("arrays");
+            func.blocks[0].insts = vec![
+                LirInst::Alloca {
+                    ty: t("[4 x #bit32]"),
+                    place: "a".to_owned(),
+                    span,
+                },
+                LirInst::Addr {
+                    place: "a".to_owned(),
+                    dst: "p".to_owned(),
+                    ty: t(array_ty),
+                    span,
+                },
+                LirInst::Const {
+                    dst: "i".to_owned(),
+                    lit: "0x1".to_owned(),
+                    ty: t(index_ty),
+                    span,
+                },
+                LirInst::ElemAddr {
+                    array: "p".to_owned(),
+                    index: "i".to_owned(),
+                    dst: "e".to_owned(),
+                    ty: t(ty),
+                    span,
+                },
+            ];
+            module.funcs.push(func);
+            let mut diags = lilac_error::Diags::new();
+            let _ = verify(&module, &mut diags);
+            diags
+                .diagnostics()
+                .iter()
+                .map(|d| d.msg.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            elem_errors("ref [4 x #bit32]", "#bit_native", "ref #bit32"),
+            Vec::<String>::new()
+        );
+        for (array, index, ty, want) in [
+            (
+                "ref [4 x #bit32]",
+                "#bit_native",
+                "ref #bit8",
+                "must be `ref #bit32`",
+            ),
+            (
+                "ref [4 x #bit32]",
+                "#bit32",
+                "ref #bit32",
+                "must be `#bit_native`",
+            ),
+            (
+                "ref #bit32",
+                "#bit_native",
+                "ref #bit32",
+                "must be a `ref` array",
+            ),
+        ] {
+            let errors = elem_errors(array, index, ty);
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
     }
 
     #[test]

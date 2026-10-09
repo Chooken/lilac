@@ -776,6 +776,8 @@ impl Checker<'_> {
                     kind,
                 }));
             }
+            Intrinsic::ArrayAt => return self.check_array_at(fcx, args, span),
+            Intrinsic::ArrayLen => return self.check_array_len(fcx, args, span),
             Intrinsic::CompileError => {
                 self.intrinsic_arity(name, 1, args.len(), span)?;
                 let Expr::Str(msg, msg_span) = &args[0] else {
@@ -840,7 +842,7 @@ impl Checker<'_> {
         })
     }
 
-    fn intrinsic_arity(
+    pub(crate) fn intrinsic_arity(
         &mut self,
         name: &str,
         want: usize,
@@ -859,7 +861,7 @@ impl Checker<'_> {
         ))
     }
 
-    fn intrinsic_arg(
+    pub(crate) fn intrinsic_arg(
         &mut self,
         fcx: &mut FnCx,
         arg: &Expr,
@@ -935,7 +937,11 @@ impl Checker<'_> {
 
     /// `@size_of`'s and `@align_of`'s operand: a type (`@bit32`, `T`, `Box[T]`, `ref T`) or a
     /// value (its type).
-    fn size_of_operand(&mut self, fcx: &mut FnCx, arg: &Expr) -> Result<TypeRef, ErrorGuaranteed> {
+    pub(crate) fn size_of_operand(
+        &mut self,
+        fcx: &mut FnCx,
+        arg: &Expr,
+    ) -> Result<TypeRef, ErrorGuaranteed> {
         let as_type = match arg {
             Expr::RefOf { value, .. } => self.static_receiver(fcx, value).map(|receiver| {
                 receiver.and_then(|receiver| match receiver {

@@ -58,6 +58,9 @@ impl Checker<'_> {
                 is_ref: ty.is_ref,
             };
         }
+        if let Some((len, len_span)) = &ty.array_len {
+            return self.resolve_array(ty, len, *len_span);
+        }
         if !ty.name_span.is_dummy() {
             let kind = if self.types.builtin(&ty.name).is_some() {
                 SemanticKind::BuiltinType
@@ -204,6 +207,11 @@ impl Checker<'_> {
                 for slot in params.iter().chain(returns.iter()) {
                     self.ensure_type(*slot, span)?;
                 }
+                return Ok(());
+            }
+            TypeKind::Array { elem, .. } => {
+                self.ensure_type(TypeRef::value(elem), span)?;
+                self.note_array(ty.id, span);
                 return Ok(());
             }
             TypeKind::Object(_) | TypeKind::Instance { .. } => {}

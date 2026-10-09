@@ -337,6 +337,11 @@ pub enum Intrinsic {
     Atomic(AtomicOp, Ordering, IntWidth),
     /// `@atomic_fence[_<order>]` (any ordering but `relaxed`).
     Fence(Ordering),
+    /// `@array_at(ref array, index)`: a `ref` to one element, bounds
+    /// checked.
+    ArrayAt,
+    /// `@array_len(Type)` / `@array_len(value)`: an array's length.
+    ArrayLen,
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -420,13 +425,16 @@ impl Intrinsic {
             "@format_args_piece" => Self::FormatArgsPiece,
             "@compile_error" => Self::CompileError,
             "@panic" => Self::Panic,
+            "@array_at" => Self::ArrayAt,
+            "@array_len" => Self::ArrayLen,
             _ => return None,
         })
     }
 
-    /// The signature every call is checked against. `@size_of`, `@align_of`
-    /// and `@compile_error` take a type/literal operand and are checked specially,
-    /// so their parameter list is empty here.
+    /// The signature every call is checked against. `@size_of`, `@align_of`,
+    /// `@array_len` and `@compile_error` take a type/literal operand and
+    /// `@array_at` any array, so they are checked specially and their
+    /// parameter list is empty here.
     #[must_use]
     pub fn signature(self) -> Signature {
         use Slot::{AnyBit, Builtin, ExpectedBit, Ref};
@@ -469,8 +477,12 @@ impl Intrinsic {
                 Some(Builtin(width.builtin())),
             ),
             Self::Truncate | Self::ExtendZero => sig(vec![AnyBit], Some(ExpectedBit)),
-            Self::SizeOf | Self::AlignOf => sig(Vec::new(), Some(Builtin("@bit_native"))),
-            Self::CompileError | Self::Trap | Self::Fence(_) => sig(Vec::new(), None),
+            Self::SizeOf | Self::AlignOf | Self::ArrayLen => {
+                sig(Vec::new(), Some(Builtin("@bit_native")))
+            }
+            Self::CompileError | Self::Trap | Self::Fence(_) | Self::ArrayAt => {
+                sig(Vec::new(), None)
+            }
             Self::Atomic(op, _, width) => {
                 let ty = width.builtin();
                 let params = match op {

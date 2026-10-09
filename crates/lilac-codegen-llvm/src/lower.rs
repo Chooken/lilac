@@ -191,6 +191,12 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirTy::FBit(64) => self.context.f64_type().into(),
             LirTy::FBit(128) => self.context.f128_type().into(),
             LirTy::Named(name) if self.named.contains_key(name) => self.named[name].into(),
+            LirTy::Array(elem, len) => {
+                let Ok(len) = u32::try_from(*len) else {
+                    bug!(Span::dummy(), "array length `{len}` exceeds LLVM's limit");
+                };
+                self.lir_type(elem).array_type(len).into()
+            }
             other => bug!(Span::dummy(), "unknown LIR type `{other}`"),
         }
     }
@@ -464,6 +470,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 let field = self.field_ptr(obj, *idx, builder, state);
                 state.regs.insert(dst.clone(), field.into());
             }
+            LirInst::ElemAddr { .. } => self.lower_elem_addr(inst, builder, state),
             LirInst::StoreField {
                 value, obj, idx, ..
             } => {
@@ -1047,6 +1054,33 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             builder.build_struct_gep(struct_ty, base, idx, ""),
             "field gep",
         )
+    }
+
+    /// `elem.addr`: the array's base plus `index` times the element size,
+    /// in integer arithmetic (no dynamic GEP).
+    fn lower_elem_addr(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
+        let LirInst::ElemAddr {
+            array,
+            index,
+            dst,
+            ty,
+            ..
+        } = inst
+        else {
+            bug!(Span::dummy(), "non-`elem.addr` instruction `{inst:?}`");
+        };
+        let ptr_bytes = u64::from(self.native.get_bit_width() / 8);
+        let (size, _) = lilac_ir::size_align(&self.lir.layouts, ty.strip_ref(), ptr_bytes);
+        let offset = checked(
+            builder.build_int_mul(
+                reg_int(index, state),
+                self.native.const_int(size, false),
+                "",
+            ),
+            "element offset",
+        );
+        let elem = crate::runtime::byte_ptr(self, builder, reg_ptr(array, state), offset);
+        state.regs.insert(dst.clone(), elem.into());
     }
 
     /// Materializes a `const` literal: a data-symbol address (or `#byte_buffer`

@@ -35,6 +35,13 @@
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/
   `AtomicRmw`/`CmpXchg`/`Fence` (the verifier checks types and orderings)
   and to LLVM atomics aligned to their width.
+- Arrays (`TypeKind::Array`, `LirTy::Array`, spelled `[N x #t]`): the
+  element is by value and hook-free (`E010`, checked after hooks bind,
+  `Checker::check_array_hooks`), so arrays copy and drop as bytes and need
+  no glue. `@array(T, N) {}` is a zeroed `Struct` with no fields.
+  `@array_at` lowers to an unsigned bounds check that panics, then the
+  `elem.addr` instruction (LLVM: `ptrtoint`/`inttoptr` arithmetic, since a
+  dynamic GEP is `unsafe` in inkwell); `@array_len` folds in typeck.
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
   `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
   `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes

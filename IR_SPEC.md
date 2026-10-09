@@ -57,13 +57,17 @@ a `type` section:
 types.
 
 `#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
-LIR has no array type, so the table is spelled out as sixteen named fields.
+The table is spelled out as sixteen named fields rather than an array.
 The verifier resolves `field`/`field.addr` against these layouts
 (`lilac_ir::builtin_layout`); the backend builds matching structs.
 
 The opaque type `#unknown` has no size and is valid only behind a reference:
 `ref #unknown` is the erased pointer (C `void*`), lowered to an LLVM `ptr`. A
 bare `#unknown` place is unsized and rejected by the verifier.
+
+An array type is spelled `[N x #t]`: `N` elements of `#t` (any sized type,
+including another array), laid out like a C array and lowered to LLVM
+`[N x T]`. Its elements are addressed with `elem.addr`.
 
 Functions can be declared as:
 ```lilac-ir
@@ -234,6 +238,18 @@ atomic.store.release #bit32 &5 -> &4
 fence.seq_cst
 ```
 as produced by `tests/ui/atomics.lir`.
+
+### elem.addr
+* `&d: ref #t = elem.addr &a, &i` yields the address of element `&i` (a
+  `#bit_native`) of the array that `&a` (a `ref [N x #t]`) points to. It
+  does not check the bounds: lowering emits an unsigned `i.cmp.lt.u`
+  against `N` and a branch to a panic first, unless the index is a constant
+  below `N`.
+```lilac-ir
+&2: ref [4 x #bit32] = field.addr %holder .items  // idx 1
+&5: ref #bit32 = elem.addr &3, &4
+```
+as produced by `tests/ui/arrays.lir`.
 
 ## Control Flow
 
@@ -437,3 +453,5 @@ Same width rule as integer arithmetic.
 10. Atomics: the address register is `ref #t` and the operands `#t` for
     a bit container `#t`; a load is not `release`/`acq_rel`, a store not
     `acquire`/`acq_rel`, and a fence not `relaxed`.
+11. `elem.addr`: the array register is `ref [N x #t]`, the index
+    `#bit_native`, and the result `ref #t`.

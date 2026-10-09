@@ -12,6 +12,7 @@
 //! (expressions and places), `calls` (call and member resolution), `literals`
 //! (number literals), `generics` (instance diagnostics).
 
+mod arrays;
 mod body;
 mod calls;
 mod expr;
@@ -93,6 +94,7 @@ fn check_impl(
         queue: VecDeque::new(),
         type_states: HashMap::new(),
         type_stack: Vec::new(),
+        arrays: Vec::new(),
         const_types: HashMap::new(),
         out: HirProgram::default(),
         env: Env::default(),
@@ -224,6 +226,9 @@ pub(crate) struct Checker<'a> {
     pub type_states: HashMap<TypeId, TypeState>,
     /// Types whose layout is being computed (innermost last).
     pub type_stack: Vec<TypeId>,
+    /// Concrete array types met so far, with a span that names each, for
+    /// the element hook check.
+    pub arrays: Vec<(TypeId, Span)>,
     /// Declared types of module constants.
     pub const_types: HashMap<DefId, TypeRef>,
     /// Output being built.
@@ -267,6 +272,7 @@ impl Checker<'_> {
             self.check_instance(&key);
         }
         self.finish_type_hooks();
+        self.check_array_hooks();
     }
 
     /// Checks each generic function no instance reached, with its generic

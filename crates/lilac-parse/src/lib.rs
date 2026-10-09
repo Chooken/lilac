@@ -136,6 +136,7 @@ impl Parser {
             is_ref: false,
             generic_args: Vec::new(),
             func: None,
+            array_len: None,
             span,
         }
     }
@@ -867,6 +868,12 @@ impl Parser {
                 return Err(Self::err(diags, first.span, "expected a type"));
             }
         };
+        if name_token.text == "@array" && self.peek().kind == TokenKind::LParen {
+            let mut ty = self.parse_array_type(diags, name_token)?;
+            ty.is_ref = is_ref;
+            ty.span = join_spans(start, ty.span);
+            return Ok(ty);
+        }
         let mut end = name_token.span;
         let mut generic_args = Vec::new();
         if self.peek().kind == TokenKind::LBracket {
@@ -898,7 +905,31 @@ impl Parser {
             is_ref,
             generic_args,
             func: None,
+            array_len: None,
             span: join_spans(start, end),
+        })
+    }
+
+    /// Parses `(Type, length)` after `@array`; the length is a number
+    /// literal.
+    fn parse_array_type(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        name: Token,
+    ) -> Result<Type, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LParen, "`(` after `@array`")?;
+        let elem = self.parse_type_inner(diags)?;
+        self.expect(diags, TokenKind::Comma, "`,` before the array length")?;
+        let len = self.expect(diags, TokenKind::Number, "an array length literal")?;
+        let close = self.expect(diags, TokenKind::RParen, "`)` to close `@array`")?;
+        Ok(Type {
+            name: name.text,
+            name_span: name.span,
+            is_ref: false,
+            generic_args: vec![elem],
+            func: None,
+            array_len: Some((len.text, len.span)),
+            span: join_spans(name.span, close.span),
         })
     }
 
@@ -948,6 +979,7 @@ impl Parser {
             is_ref,
             generic_args: Vec::new(),
             func: Some(FuncType { params, returns }),
+            array_len: None,
             span: join_spans(start, end),
         })
     }
@@ -1721,6 +1753,9 @@ impl Parser {
             TokenKind::At => {
                 let ident = self.expect(diags, TokenKind::Ident, "name after `@`")?;
                 let span = join_spans(token.span, ident.span);
+                if ident.text == "array" && self.peek().kind == TokenKind::LParen {
+                    return self.parse_array_value(diags, span);
+                }
                 Ok(Expr::Ident(format!("@{}", ident.text), span))
             }
             TokenKind::LParen => {
@@ -1747,6 +1782,30 @@ impl Parser {
             }
             _ => Err(Self::err(diags, token.span, "expected expression")),
         }
+    }
+
+    /// Parses the array value `@array(T, N) {}` after `@array`.
+    fn parse_array_value(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        span: Span,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let name = Token::new(
+            TokenKind::Ident,
+            "@array",
+            span.lo.0 as usize,
+            span.hi.0 as usize,
+            self.file,
+        );
+        let ty = self.parse_array_type(diags, name)?;
+        if self.peek().kind != TokenKind::LBrace {
+            return Err(Self::err(
+                diags,
+                ty.span,
+                "an array value is written `@array(T, N) {}`",
+            ));
+        }
+        self.parse_struct_lit(diags, ty)
     }
 
     /// Parses `{ field = value, ... }` after the literal's type.
@@ -1887,6 +1946,7 @@ fn named_type(name: String, name_span: Span, generic_args: Vec<Type>) -> Type {
         is_ref: false,
         generic_args,
         func: None,
+        array_len: None,
         span: name_span,
     }
 }
@@ -1993,6 +2053,61 @@ mod tests {
         let (program, diags, _) = parse(src);
         assert!(!diags.has_errors());
         assert_eq!(program.items.len(), 2);
+    }
+
+    #[test]
+    fn array_types_and_values_parse() {
+        let src = "Grid: object {
+    rows: @array(@array(@bit16, 3), 0x2)
+}
+
+sum: function (values: ref @array(@bit32, 4)) nothing {
+    copy: @array(@bit32, 4) = @array(@bit32, 4) {}
+}
+";
+        let (program, diags, _) = parse(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        let ItemKind::Object { members, .. } = &program.items[0].kind else {
+            panic!("expected an object");
+        };
+        let ItemKind::Field { ty } = &members[0].kind else {
+            panic!("expected a field");
+        };
+        assert_eq!(ty.name, "@array");
+        assert_eq!(
+            ty.array_len.as_ref().map(|(len, _)| len.as_str()),
+            Some("0x2")
+        );
+        let inner = &ty.generic_args[0];
+        assert_eq!(inner.name, "@array");
+        assert_eq!(
+            inner.array_len.as_ref().map(|(len, _)| len.as_str()),
+            Some("3")
+        );
+        assert_eq!(inner.generic_args[0].name, "@bit16");
+        let ItemKind::Func(func) = &program.items[1].kind else {
+            panic!("expected a function");
+        };
+        assert!(func.params[0].ty.is_ref);
+        assert!(func.params[0].ty.array_len.is_some());
+    }
+
+    #[test]
+    fn array_value_needs_braces() {
+        let (_, diags, _) = parse(
+            "main: function () nothing {
+    a: @bit8 = @array(@bit8, 2)
+}
+",
+        );
+        assert!(diags.has_errors());
+        let (_, diags, _) = parse(
+            "main: function () nothing {
+    a: @array(@bit8) {}
+}
+",
+        );
+        assert!(diags.has_errors());
     }
 
     #[test]
