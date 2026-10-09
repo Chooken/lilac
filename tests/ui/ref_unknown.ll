@@ -17,7 +17,7 @@ declare ptr @malloc(i64)
 
 declare void @free(ptr)
 
-define void @put(ptr %in0, ptr %in1) {
+define void @.root.put(ptr %in0, ptr %in1) {
 entry:
   %p = alloca ptr, align 8
   store ptr null, ptr %p, align 8
@@ -72,7 +72,7 @@ entry:
   %7 = load ptr, ptr %6, align 8
   store ptr %7, ptr %tmp.4, align 8
   store i8 42, ptr %tmp.5, align 1
-  call void @put(ptr %tmp.4, ptr %tmp.5)
+  call void @.root.put(ptr %tmp.4, ptr %tmp.5)
   %8 = getelementptr inbounds %Store, ptr %s, i32 0, i32 0
   %9 = load ptr, ptr %8, align 8
   store ptr %9, ptr %tmp.6, align 8

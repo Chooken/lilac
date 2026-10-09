@@ -173,6 +173,8 @@ pub struct Session {
     pub cache_dir: Option<PathBuf>,
     /// Extra reachability roots (`--export=<name>`): functions to keep alive
     /// even when nothing calls them, so a library can expose entry points.
+    /// Names are qualified source names (`api`, `A.B.api`), mapped to
+    /// symbols by `lilac_lower::export_symbol`.
     pub exports: HashSet<String>,
     /// Loaded project files: identity to path (empty outside project compiles).
     pub project_files: Vec<(FileId, PathBuf)>,
@@ -481,7 +483,11 @@ impl Session {
         on_stage("runtime", &lir);
         self.report(Stage::Runtime, DONE);
         self.report(Stage::Prune, StageEvent::Begin);
-        let mut roots = self.exports.clone();
+        let mut roots: HashSet<String> = self
+            .exports
+            .iter()
+            .map(|name| lilac_lower::export_symbol(name))
+            .collect();
         if self.entry == Entry::Native && has_entry(&lir) {
             roots.insert(".lilac.start".to_owned());
         }
@@ -700,8 +706,8 @@ mod tests {
             .compile_lir("m.lilac", src)
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()))
             .to_text();
-        assert!(text.contains("call @lin"), "{text}");
-        assert!(!text.contains("@win"), "{text}");
+        assert!(text.contains("call @.root.lin"), "{text}");
+        assert!(!text.contains("@.root.win"), "{text}");
 
         let mut session = Session::new();
         session.target = Target::parse("x86_64-pc-windows-msvc").expect("triple");
@@ -746,6 +752,60 @@ mod tests {
             text.contains("declared here as `(@bit64) @bit64`"),
             "{text}"
         );
+    }
+
+    /// C sees only pointers, so externs of one symbol may differ in pointee:
+    /// they merge into one `ref #unknown` declaration and each call casts.
+    #[test]
+    fn externs_differing_in_pointee_merge() {
+        let src = "Text: object {
+    first: @bit8
+}
+a: extern \"puts\" function (s: ref @bit8) r: @bit32
+b: extern \"puts\" function (s: ref Text) r: @bit32
+main: function () nothing {
+    t: Text = Text { first = 0x0 }
+    x: @bit32 = a(ref t.first)
+    y: @bit32 = b(ref t)
+}
+";
+        let mut session = Session::new();
+        let text = session
+            .compile_lir("e.lilac", src)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()))
+            .to_text();
+        assert_eq!(
+            text.matches(
+                "extern @puts
+"
+            )
+            .count(),
+            1,
+            "{text}"
+        );
+        assert!(text.contains("in ref #unknown %s"), "{text}");
+        assert_eq!(text.matches("= bitcast").count(), 2, "{text}");
+    }
+
+    /// A root function's symbol is `.root.`-prefixed, so one named like an
+    /// extern's C symbol does not take it; `main` stays bare.
+    #[test]
+    fn root_function_does_not_take_an_extern_symbol() {
+        let src = "release: extern \"free\" function (p: ref unknown) nothing
+free: function () nothing {}
+main: function () nothing {
+    free()
+    release(@address_to_ptr(0x0))
+}
+";
+        let mut session = Session::new();
+        let lir = session
+            .compile_lir("e.lilac", src)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let names: Vec<&str> = lir.funcs.iter().map(|func| func.name.as_str()).collect();
+        assert!(names.contains(&".root.free"), "{names:?}");
+        assert!(names.contains(&"free"), "{names:?}");
+        assert!(names.contains(&"main"), "{names:?}");
     }
 
     /// A live `@syscall` off Linux x86-64/aarch64 is `E035`, with the call
@@ -1297,8 +1357,8 @@ main: function () nothing {}
             )
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
         let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
-        assert!(names.contains(&"api"), "{names:?}");
-        assert!(!names.contains(&"dead"), "{names:?}");
+        assert!(names.contains(&".root.api"), "{names:?}");
+        assert!(!names.contains(&".root.dead"), "{names:?}");
     }
 
     /// `require_entry` (set by `lilac build`) turns a missing `main` into

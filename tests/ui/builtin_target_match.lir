@@ -3,12 +3,12 @@ target = "x86_64-unknown-none"
 type #@builtin.Os {
     tag: #bit8,
 }
-function @on_bare
+function @.root.on_bare
 {
   $entry:
     return
 }
-function @with_libc
+function @.root.with_libc
 {
   $entry:
     return
@@ -18,8 +18,8 @@ function @main
   $entry:
     alloca #@builtin.Os %os : zeroed
     alloca #@builtin.Os %tmp.1 : zeroed
-    call @on_bare (in) (out)
-    call @with_libc (in) (out)
+    call @.root.on_bare (in) (out)
+    call @.root.with_libc (in) (out)
     zero %tmp.1
     &1: #bit8 = const 0x3
     copy &1 -> %tmp.1.tag  // idx 0

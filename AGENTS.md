@@ -58,7 +58,16 @@
 - Libraries: `--lib=Name=dir` (CLI) / `lilac.json` `"libraries"` and the
   `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
   `Session.libraries` carries them into `lilac_module::load_with_status`.
-  `using *.A` is relative to the importing file's namespace. `lib/Standard`
+  `using *.A` is relative to the importing file's namespace.
+- Mounted libraries load whole: after the `using` fixpoint the loader
+  reaches every identifier-named folder under each library
+  (`Loader::reach_tree`; a missing library folder is `E025`), and typeck
+  already checks every non-generic item, so unused library code is checked.
+  `using` is visibility only (in the project's own tree it still decides
+  what loads). DCE prunes unused functions, data and type layouts
+  (`prune_layouts`), so an unused library emits nothing. Extern `ref` slots
+  lower as `ref #unknown` (casts at each call), so declarations of one C
+  symbol that differ only in pointee merge. `lib/Standard`
   is only usable mounted (`--lib=Standard=lib/Standard`); the run test
   `tests/run/stdlib` exercises all of it.
 - Visibility reach is ancestor-public + descendant-private (Rust's rule). A
@@ -66,9 +75,12 @@
   unresolved, not `E026`); an object-member `private { … }` gates external access
   with `E026`. Top-level hooks are unit-global and carry no namespace prefix.
 - Namespace qualification: every non-root symbol/type is prefixed by its dotted
-  namespace path (`A.B.foo`, `A.Object.Method`); the **root namespace adds no
-  prefix**, so existing single-file snapshots stay byte-identical and `main`
-  stays `main`. `extern` symbols stay unmangled, and a file argument on the CLI
+  namespace path (`A.B.foo`, `A.Object.Method`). A **root free function is
+  `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it
+  can never take a C symbol; root `main` stays `main`, and root types and
+  their methods stay unprefixed (`Object.Method` already has a `.`).
+  `--export=<name>` takes the source name (`lilac_lower::export_symbol`).
+  `extern` symbols stay unmangled, and a file argument on the CLI
   is single-file mode (its parent is not a project root).
 
 ## Extern C ABI (M6b)

@@ -581,9 +581,10 @@ Namespaces mirror folders; no declaration introduces one. Every `*.lilac` file
 directly in a folder belongs to that folder's namespace, and the files in one
 folder **merge**: they see each other's declarations with no import (a same-named
 declaration across them is `E020`). Subfolders are separate namespaces, named by
-their dotted path from the root (`<root>/A/B` is `A.B`). A subfolder is loaded
-only when a file in an already-loaded namespace `using`s it, directly or
-transitively; subfolders are never auto-loaded.
+their dotted path from the root (`<root>/A/B` is `A.B`). In the project's
+own tree a subfolder is loaded only when a file in an already-loaded namespace
+`using`s it, directly or transitively. A mounted library (below) is loaded
+whole.
 
 **`using`.** `using A.B` resolves root-relative to `<root>/A/B` and makes that
 namespace's public (non-`private`) names visible, unqualified, **in the file that
@@ -631,14 +632,18 @@ unreferenced collision is not an error.
 **Qualification.** Namespaces are compile-time scopes only: there are no
 qualified paths in expressions (`A.B.foo` is not syntax). For code generation
 every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
-`A.Object.Method`, `A.GenBox.1..bit32.@on_drop`); the root namespace adds no
-prefix, so single-file programs stay byte-identical and `main` stays `main`.
+`A.Object.Method`, `A.GenBox.1..bit32.@on_drop`). A root-namespace free
+function is prefixed `.root` (`.root.foo`), which no user name or C symbol
+can spell, so it never takes a symbol an `extern` links against; root `main`
+stays `main`, the entry point. Root types and their methods take no prefix
+(`Object.Method`): they already contain a `.`.
 User-defined type names and generic instances are qualified the same way, so
 same-named types in different namespaces stay distinct, while builtin types are
 never qualified. Two exceptions carry no prefix: hooks are unit-global (one
 signature-keyed overload table for the whole compilation unit, whether declared
 at top level or inside an object) and `extern` symbols keep their unmangled
-declared name (§9).
+declared name (§9). So a root `free` and `Standard.C`'s `extern` `free`
+coexist: one is `.root.free`, the other `free`.
 
 A namespace is loaded from a directory argument on the command line: a directory
 selects project mode (that folder is the root namespace). A file argument keeps
@@ -649,7 +654,13 @@ root and contributes no sibling files.
 `lilac.libraries`) mounts `dir` as the top-level namespace `Name`:
 `using Name` loads `dir`, and `using Name.A` loads `dir/A`. A library is an
 ordinary folder tree; its own files reach its subfolders with `using *.A` (or
-`using Name.A`), so it works wherever it is mounted.
+`using Name.A`), so it works wherever it is mounted. Every mounted library is
+loaded and checked whole: every folder under `dir` whose name is an
+identifier is a namespace whether or not anything `using`s it, so an error
+in unused library code is still reported, and `using` only decides which
+names a file sees. Dead-code elimination keeps unused library code out of
+the output, so mounting a library a program does not use changes nothing it
+emits. A missing library folder is `E025`.
 
 ### Enums
 
@@ -951,8 +962,9 @@ os_write: extern "write" function (fd: @bit32, data: ref @bit8, len: @bit_native
 The Lilac name (`os_write`) is an ordinary, namespaced item; only the linker
 sees `write`. Externs that link the same symbol, in any namespaces, are one
 declaration when their C signatures match (parameter and return types, and
-`...`), and `E028` when they differ. The link name `main` is `E028`, like an
-`extern` named `main`.
+`...`), and `E028` when they differ. C sees only a pointer, so `ref T`s
+match whatever their pointee (`ref @bit8` and `ref Text` declare the same
+`puts`). The link name `main` is `E028`, like an `extern` named `main`.
 
 **Variadic externs.** A trailing `...` lets an `extern` take C varargs:
 

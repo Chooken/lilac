@@ -1,5 +1,6 @@
-//! Reachability sweep: drops functions with no path from `main` and data
-//! consts no surviving instruction names.
+//! Reachability sweep: drops functions with no path from `main`, data
+//! consts no surviving instruction names, and layouts no surviving type
+//! names.
 //!
 //! The frontend lowers every declaration, so a function that nothing calls and a
 //! `!data` const nothing references still survive into `verify`. This pass is
@@ -12,7 +13,7 @@ use std::hash::BuildHasher;
 
 use lilac_span::Span;
 
-use crate::{LirCallee, LirFunc, LirInst, LirModule};
+use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTy};
 
 /// How a caller reaches a callee: a direct `call` or a taken `addr.func`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +145,9 @@ pub fn reach<S: BuildHasher>(
 /// (build-system export hints). Reachability follows direct `call` and
 /// `addr.func` targets (an address-taken function survives even when it is
 /// never called directly). Data consts survive only when a surviving
-/// instruction names them: a `Const` literal starting with `'!'`. `layouts` is verifier-only and is left untouched. With no `main`
+/// instruction names them: a `Const` literal starting with `'!'`. Layouts
+/// survive when a surviving function's signature or instruction type names
+/// them, directly or through another surviving layout's fields. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
 /// even when `main` is absent, so an exported entry point roots a library.
 pub fn prune_unreachable<S: BuildHasher>(
@@ -168,7 +171,59 @@ pub fn prune_unreachable<S: BuildHasher>(
         }
     }
     module.data.retain(|datum| referenced.contains(&datum.name));
+    prune_layouts(module);
     Some(reach)
+}
+
+/// Keeps only the layouts the surviving functions use.
+fn prune_layouts(module: &mut LirModule) {
+    let mut pending: Vec<&LirTy> = Vec::new();
+    for func in &module.funcs {
+        pending.extend(func.ins.iter().map(|(_, ty)| ty));
+        pending.extend(func.outs.iter().map(|(_, ty)| ty));
+        for block in &func.blocks {
+            pending.extend(block.insts.iter().filter_map(inst_ty));
+        }
+    }
+    let mut used: HashSet<&str> = HashSet::new();
+    while let Some(ty) = pending.pop() {
+        match ty {
+            LirTy::Ref(inner) => pending.push(inner),
+            LirTy::Named(name) => {
+                if used.insert(name) {
+                    if let Some(fields) = module.layouts.get(name) {
+                        pending.extend(fields.iter().map(|(_, ty)| ty));
+                    }
+                }
+            }
+            LirTy::Bit(_) | LirTy::BitNative | LirTy::FBit(_) => {}
+        }
+    }
+    let used: HashSet<String> = used.into_iter().map(str::to_owned).collect();
+    module.layouts.retain(|name, _| used.contains(name));
+}
+
+/// The type an instruction names, if any.
+fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
+    match inst {
+        LirInst::CopyReg { ty, .. }
+        | LirInst::Const { ty, .. }
+        | LirInst::Load { ty, .. }
+        | LirInst::Addr { ty, .. }
+        | LirInst::AddrFunc { ty, .. }
+        | LirInst::Field { ty, .. }
+        | LirInst::Convert { ty, .. }
+        | LirInst::FieldAddr { ty, .. }
+        | LirInst::Alloca { ty, .. }
+        | LirInst::Arith { ty, .. } => Some(ty),
+        LirInst::CopyPlace { .. }
+        | LirInst::Call { .. }
+        | LirInst::StoreField { .. }
+        | LirInst::Store { .. }
+        | LirInst::Drop { .. }
+        | LirInst::CompileError { .. }
+        | LirInst::Zero { .. } => None,
+    }
 }
 
 /// Direct `call` and `addr.func` targets of every instruction in `func`, in
@@ -292,6 +347,34 @@ mod tests {
         let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["main", "a"]);
         assert!(module.data.iter().all(|d| d.name != "c0"));
+    }
+
+    #[test]
+    fn sweeps_layouts_no_survivor_names() {
+        // main's alloca names #Outer, whose field names #Inner through a
+        // `ref`; #Dead is named only by the dead function `b`.
+        let mut module = module_with(&["main", "a", "b"], &[]);
+        let alloca = |ty: &str| LirInst::Alloca {
+            ty: t(ty),
+            place: "x".to_owned(),
+            span: Span::dummy(),
+        };
+        module.funcs[0].blocks[0].insts.push(alloca("#Outer"));
+        module.funcs[2].blocks[0].insts.push(alloca("#Dead"));
+        module.layouts.insert(
+            "Outer".to_owned(),
+            vec![("inner".to_owned(), t("ref #Inner"))],
+        );
+        module
+            .layouts
+            .insert("Inner".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
+        module
+            .layouts
+            .insert("Dead".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
+        prune_unreachable(&mut module, &HashSet::new());
+        let mut layouts: Vec<&str> = module.layouts.keys().map(String::as_str).collect();
+        layouts.sort_unstable();
+        assert_eq!(layouts, ["Inner", "Outer"]);
     }
 
     #[test]

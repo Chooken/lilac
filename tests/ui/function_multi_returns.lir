@@ -5,10 +5,10 @@ function @main
   $entry:
     alloca #bit32 %condition : zeroed
     alloca #bit32 %result : zeroed
-    call @get_multi (in) (out %condition, %result)
+    call @.root.get_multi (in) (out %condition, %result)
     return
 }
-function @get_multi
+function @.root.get_multi
   out #bit32 %condition
   out #bit32 %result
 {

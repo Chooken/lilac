@@ -33,13 +33,13 @@ entry:
   store %Object %1, ptr %source, align 4
   %2 = load %Object, ptr %source, align 4
   store %Object %2, ptr %tmp.3, align 4
-  call void @gen.1.Object(ptr %tmp.3, ptr %tmp.2)
+  call void @.root.gen.1.Object(ptr %tmp.3, ptr %tmp.2)
   %3 = load %Object, ptr %tmp.2, align 4
   store %Object %3, ptr %result, align 4
   ret void
 }
 
-define void @gen.1.Object(ptr %in0, ptr %out0) {
+define void @.root.gen.1.Object(ptr %in0, ptr %out0) {
 entry:
   %tmp.1 = alloca %Object, align 8
   store %Object zeroinitializer, ptr %tmp.1, align 4

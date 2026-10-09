@@ -11,7 +11,7 @@ function @@conversion:bit32:bit8
     copy &2 -> %to
     return
 }
-function @get_multi
+function @.root.get_multi
   out #bit32 %condition
   out #bit32 %result
 {
@@ -33,7 +33,7 @@ function @main
     alloca #bit8 %tmp.1 : zeroed
     alloca #bit32 %tmp.2 : zeroed
     alloca #bit32 %return_val : zeroed
-    call @get_multi (in) (out %l.0, %l.1)
+    call @.root.get_multi (in) (out %l.0, %l.1)
     copy %l.0 -> %tmp.2
     call @@conversion:bit32:bit8 (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %condition

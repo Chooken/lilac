@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-function @add_one
+function @.root.add_one
   in #bit32 %x
   out #bit32 %result
 {
@@ -20,7 +20,7 @@ function @main
     alloca #bit32 %tmp.1 : zeroed
     alloca #bit32 %tmp.2 : zeroed
     copy %n -> %tmp.2
-    call @add_one (in %tmp.2) (out %tmp.1)
+    call @.root.add_one (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %y
     return
 }

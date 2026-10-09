@@ -7,7 +7,7 @@ type #b.GenBox.1..bit64 {
     b_value: #bit64,
     b_extra: #bit64,
 }
-function @b_use
+function @.root.b_use
 {
   $entry:
     alloca #b.GenBox.1..bit64 %x : zeroed
@@ -49,7 +49,7 @@ function @main
     copy &3 -> %tmp.3
     call @a.tag.1..bit32 (in %tmp.3) (out %tmp.2)
     copy %tmp.2 -> %n
-    call @b_use (in) (out)
+    call @.root.b_use (in) (out)
     return
 }
 function @b.tag.1..bit64

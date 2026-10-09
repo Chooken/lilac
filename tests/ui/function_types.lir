@@ -9,7 +9,7 @@ function @main
     alloca #bit32 %tmp.2 : zeroed
     alloca #bit32 %tmp.3 : zeroed
     alloca #bit32 %tmp.4 : zeroed
-    &1: ref #unknown = addr.func @addOne
+    &1: ref #unknown = addr.func @.root.addOne
     copy &1 -> %add
     &2: #bit32 = const 0x0
     copy &2 -> %value
@@ -17,7 +17,7 @@ function @main
     &3: ref #unknown = copy %add
     call &3 (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %value
-    &4: ref #unknown = addr.func @addTwo
+    &4: ref #unknown = addr.func @.root.addTwo
     copy &4 -> %add
     copy %value -> %tmp.4
     &5: ref #unknown = copy %add
@@ -25,7 +25,7 @@ function @main
     copy %tmp.3 -> %value
     return
 }
-function @addOne
+function @.root.addOne
   in #bit32 %value
   out #bit32 %result
 {
@@ -37,7 +37,7 @@ function @addOne
     copy &3 -> %result
     return
 }
-function @addTwo
+function @.root.addTwo
   in #bit32 %value
   out #bit32 %result
 {

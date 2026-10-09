@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-function @root_bump
+function @.root.root_bump
   in ref #bit8 %cell
 {
   $entry:
@@ -51,7 +51,7 @@ function @util.write_byte
     alloca ref #bit8 %tmp.1 : zeroed
     alloca ref #bit8 %tmp.2 : zeroed
     copy %cell -> %tmp.1
-    call @root_bump (in %tmp.1) (out)
+    call @.root.root_bump (in %tmp.1) (out)
     copy %cell -> %tmp.2
     call @util.secret (in %tmp.2) (out)
     return

@@ -9,8 +9,13 @@
 //! visited once, so cycles terminate. A `using` inside a `private { ... }`
 //! block is honored (it still loads the folder).
 //!
+//! Mounted libraries load whole: after the fixpoint, every folder below each
+//! library whose name is an identifier is reached too, so a library is
+//! checked even where nothing `using`s it. In the project's own folder,
+//! `using` still decides what loads.
+//!
 //! `E025` is the module-load error: a `using` whose target is missing or is not
-//! a directory, an unreadable root folder, or an unreadable file. Each is
+//! a directory, an unreadable root or library folder, or an unreadable file. Each is
 //! reported at the most specific span available (the `using` span where there
 //! is one, a dummy span otherwise, with the path named in the headline) and
 //! fails the load.
@@ -253,27 +258,17 @@ fn load_from(
         );
     }
 
-    while let Some(ns) = loader.queue.pop_front() {
-        let mut file_paths: Vec<PathBuf> = loader.listings[ns]
-            .iter()
-            .filter(|path| is_lilac_file(path))
-            .cloned()
-            .collect();
-        file_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-
-        for path in file_paths {
-            let Ok(src) = fs.read(&path) else {
-                diags.emit(Diagnostic::error(
-                    "E025",
-                    format!("cannot read module file `{}`", path.display()),
-                ));
-                return (loader.project(files), true);
-            };
-            let name = file_name_str(&path);
-            failed |= loader.add_file(&mut files, ns, name, &path, src, fs, sources, diags);
+    failed |= loader.drain(&mut files, fs, sources, diags);
+    for (name, dir) in libraries {
+        if !loader.reach_tree(name, fs) {
+            diags.emit(Diagnostic::error(
+                "E025",
+                format!("cannot read library folder `{}`", dir.display()),
+            ));
+            failed = true;
         }
     }
-
+    failed |= loader.drain(&mut files, fs, sources, diags);
     (loader.project(files), failed)
 }
 
@@ -358,6 +353,62 @@ impl Loader<'_> {
         true
     }
 
+    /// Reads the files of every queued namespace (reaching their `using`s).
+    /// Returns whether anything failed (`E025`).
+    fn drain(
+        &mut self,
+        files: &mut Vec<FileUnit>,
+        fs: &mut dyn Fs,
+        sources: &mut SourceMap,
+        diags: &mut Diags,
+    ) -> bool {
+        let mut failed = false;
+        while let Some(ns) = self.queue.pop_front() {
+            let mut file_paths: Vec<PathBuf> = self.listings[ns]
+                .iter()
+                .filter(|path| is_lilac_file(path))
+                .cloned()
+                .collect();
+            file_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+            for path in file_paths {
+                let Ok(src) = fs.read(&path) else {
+                    diags.emit(Diagnostic::error(
+                        "E025",
+                        format!("cannot read module file `{}`", path.display()),
+                    ));
+                    self.queue.clear();
+                    return true;
+                };
+                let name = file_name_str(&path);
+                failed |= self.add_file(files, ns, name, &path, src, fs, sources, diags);
+            }
+        }
+        failed
+    }
+
+    /// Reaches the namespace at `path` and every folder below it whose name
+    /// is an identifier, so a mounted library loads whole. Returns `false`
+    /// when `path`'s own folder cannot be listed.
+    fn reach_tree(&mut self, path: &str, fs: &mut dyn Fs) -> bool {
+        if !self.reach(path, fs) {
+            return false;
+        }
+        let ns = self.ns_by_path[path];
+        let mut children: Vec<String> = self.listings[ns]
+            .iter()
+            .filter(|entry| !is_lilac_file(entry))
+            .map(|entry| file_name_str(entry))
+            .filter(|name| is_identifier(name))
+            .collect();
+        children.sort();
+        for child in children {
+            // A non-folder entry (a stray file) simply fails to list.
+            let _ = self.reach_tree(&format!("{path}.{child}"), fs);
+        }
+        true
+    }
+
     fn project(self, files: Vec<FileUnit>) -> Project {
         Project {
             root: self.root.to_path_buf(),
@@ -416,6 +467,15 @@ pub fn single_file(name: &str, src: &str, sources: &mut SourceMap) -> Project {
             using_spans: usings.iter().map(|(_, span)| *span).collect(),
         }],
     }
+}
+
+/// Whether a folder name can be a namespace segment.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Whether `path` names a `*.lilac` source file.
@@ -523,11 +583,14 @@ mod tests {
 
         fn add(&mut self, root: &Path, rel: &str, src: &str) {
             let path = join_rel(root, rel);
-            if let Some(parent) = path.parent() {
-                self.dirs
-                    .entry(parent.to_path_buf())
-                    .or_default()
-                    .push(path.clone());
+            // Every ancestor folder lists its child, as a real directory does.
+            let mut child = path.clone();
+            while let Some(parent) = child.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let entries = self.dirs.entry(parent.to_path_buf()).or_default();
+                if !entries.contains(&child) {
+                    entries.push(child.clone());
+                }
+                child = parent.to_path_buf();
             }
             self.files.insert(path, src.to_owned());
         }
@@ -778,7 +841,7 @@ mod tests {
             .iter()
             .map(|ns| ns.path.as_str())
             .collect();
-        assert_eq!(paths, ["", "Std.Heap", "Std.Heap.Raw"]);
+        assert_eq!(paths, ["", "Std", "Std.Heap", "Std.Heap.Raw"]);
     }
 
     #[test]
@@ -815,7 +878,7 @@ mod tests {
             .iter()
             .map(|ns| ns.path.as_str())
             .collect();
-        assert_eq!(paths, ["", "Std.Heap", "Std.Heap.Raw"]);
+        assert_eq!(paths, ["", "Std", "Std.Heap", "Std.Heap.Raw"]);
         assert_eq!(project.files.len(), 2);
     }
 
@@ -880,6 +943,79 @@ mod tests {
         assert!(!failed, "{:?}", diags.diagnostics());
         let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, [main.display().to_string().as_str(), "io.lilac"]);
+    }
+
+    /// A mounted library loads whole: folders no `using` names are read,
+    /// and folders whose names are not identifiers are skipped.
+    #[test]
+    fn a_mounted_library_loads_every_folder() {
+        let root = PathBuf::from("proj");
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "main.lilac",
+            "main: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            "Io/io.lilac",
+            "print: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            "Io/Raw/raw.lilac",
+            "raw: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            ".hidden/x.lilac",
+            "x: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            "notes.txt",
+            "not a folder
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Std", "Std.Io", "Std.Io.Raw"]);
+        assert_eq!(project.files.len(), 3);
+    }
+
+    #[test]
+    fn a_missing_library_folder_is_e025() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "main.lilac",
+            "main: function () nothing {}
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), PathBuf::from("missing"))];
+        let (_, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(e025_count(&diags), 1, "{diags:?}");
     }
 
     #[test]

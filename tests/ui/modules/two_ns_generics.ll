@@ -6,7 +6,7 @@ target triple = "x86_64-unknown-none"
 %b.GenBox.1..bit64 = type { i64 }
 %a.GenBox.1..bit32 = type { i32 }
 
-define void @b_use() {
+define void @.root.b_use() {
 entry:
   %x = alloca %b.GenBox.1..bit64, align 8
   store %b.GenBox.1..bit64 zeroinitializer, ptr %x, align 8
@@ -51,7 +51,7 @@ entry:
   call void @a.GenBox.1..bit32.get(ptr %tmp.3, ptr %tmp.2)
   %2 = load i32, ptr %tmp.2, align 4
   store i32 %2, ptr %y, align 4
-  call void @b_use()
+  call void @.root.b_use()
   ret void
 }
 

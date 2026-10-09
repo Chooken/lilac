@@ -11,7 +11,7 @@ entry:
   ret ptr %2
 }
 
-define void @root_bump(ptr %in0) {
+define void @.root.root_bump(ptr %in0) {
 entry:
   %tmp.1 = alloca ptr, align 8
   store ptr null, ptr %tmp.1, align 8
@@ -67,7 +67,7 @@ entry:
   store ptr null, ptr %tmp.2, align 8
   %0 = load ptr, ptr %in0, align 8
   store ptr %0, ptr %tmp.1, align 8
-  call void @root_bump(ptr %tmp.1)
+  call void @.root.root_bump(ptr %tmp.1)
   %1 = load ptr, ptr %in0, align 8
   store ptr %1, ptr %tmp.2, align 8
   call void @util.secret(ptr %tmp.2)

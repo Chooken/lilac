@@ -1,7 +1,7 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
 !c0: str = "AB"
-function @parse
+function @.root.parse
   in #byte_buffer %buf
   out #bit_native %result
 {
@@ -67,7 +67,7 @@ function @main
     alloca #byte_buffer %tmp.2 : zeroed
     &1: #byte_buffer = const !c0
     copy &1 -> %tmp.2
-    call @parse (in %tmp.2) (out %tmp.1)
+    call @.root.parse (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %total
     return
 }

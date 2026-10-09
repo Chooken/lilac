@@ -28,7 +28,7 @@ function @a.Thing.@on_drop:ref_a.Thing
     copy &1 -> ref %tmp.1
     return
 }
-function @b_use
+function @.root.b_use
 {
   $entry:
     alloca #b.Thing %x : zeroed
@@ -60,7 +60,7 @@ function @main
     copy %tmp.1 -> %x
     &2: #bit32 = field %x .a_field  // idx 0
     copy &2 -> %y
-    call @b_use (in) (out)
+    call @.root.b_use (in) (out)
     &3: ref #a.Thing = addr %x
     copy &3 -> %tmp.2
     call @a.Thing.@on_drop:ref_a.Thing (in %tmp.2) (out)

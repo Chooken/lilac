@@ -267,7 +267,7 @@ fn two_namespaces_same_named_generics_keep_their_own_shapes() {
         "main used b's tag body:\n{main}"
     );
 
-    let b_use = block_after(&ir, "function @b_use");
+    let b_use = block_after(&ir, "function @.root.b_use");
     assert!(b_use.contains("const 0x2"), "{b_use}");
     assert!(
         !b_use.contains("const 0x1"),
@@ -539,17 +539,17 @@ fn module_ll_snapshots_stable() {
     }
 }
 
-/// Non-root symbols carry their namespace prefix while root symbols stay bare:
+/// Every symbol carries its namespace prefix, the root's being `.root`:
 /// `private_reach`'s `util/write_byte` is `@util.write_byte`, its private
-/// `secret` is `@util.secret`, but the root `root_bump` is `@root_bump`, and no
-/// bare `@write_byte`/`@secret` is emitted.
+/// `secret` is `@util.secret`, the root `root_bump` is `@.root.root_bump`,
+/// and no bare `@write_byte`/`@secret`/`@root_bump` is emitted.
 #[test]
 fn module_symbols_are_namespace_prefixed() {
     let ir = emit_ir("private_reach");
-    for needle in ["@util.write_byte", "@util.secret", "@root_bump"] {
+    for needle in ["@util.write_byte", "@util.secret", "@.root.root_bump"] {
         assert!(ir.contains(needle), "missing `{needle}` in:\n{ir}");
     }
-    for bare in ["@write_byte", "@secret"] {
+    for bare in ["@write_byte", "@secret", "@root_bump"] {
         assert!(!ir.contains(bare), "unprefixed `{bare}` in:\n{ir}");
     }
 }

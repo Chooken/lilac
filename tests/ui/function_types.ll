@@ -17,7 +17,7 @@ entry:
   store i32 0, ptr %tmp.3, align 4
   %tmp.4 = alloca i32, align 4
   store i32 0, ptr %tmp.4, align 4
-  store ptr @addOne, ptr %add, align 8
+  store ptr @.root.addOne, ptr %add, align 8
   store i32 0, ptr %value, align 4
   %0 = load i32, ptr %value, align 4
   store i32 %0, ptr %tmp.2, align 4
@@ -25,7 +25,7 @@ entry:
   call void %1(ptr %tmp.2, ptr %tmp.1)
   %2 = load i32, ptr %tmp.1, align 4
   store i32 %2, ptr %value, align 4
-  store ptr @addTwo, ptr %add, align 8
+  store ptr @.root.addTwo, ptr %add, align 8
   %3 = load i32, ptr %value, align 4
   store i32 %3, ptr %tmp.4, align 4
   %4 = load ptr, ptr %add, align 8
@@ -35,7 +35,7 @@ entry:
   ret void
 }
 
-define void @addOne(ptr %in0, ptr %out0) {
+define void @.root.addOne(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
   %0 = load i32, ptr %in0, align 4
@@ -44,7 +44,7 @@ entry:
   ret void
 }
 
-define void @addTwo(ptr %in0, ptr %out0) {
+define void @.root.addTwo(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
   %0 = load i32, ptr %in0, align 4

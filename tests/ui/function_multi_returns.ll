@@ -9,11 +9,11 @@ entry:
   store i32 0, ptr %condition, align 4
   %result = alloca i32, align 4
   store i32 0, ptr %result, align 4
-  call void @get_multi(ptr %condition, ptr %result)
+  call void @.root.get_multi(ptr %condition, ptr %result)
   ret void
 }
 
-define void @get_multi(ptr %out0, ptr %out1) {
+define void @.root.get_multi(ptr %out0, ptr %out1) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
   call void @llvm.memset.p0.i64(ptr align 1 %out1, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)

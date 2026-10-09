@@ -258,7 +258,10 @@ ordinary LIR functions in the `.lilac.` namespace, built once by
 These functions call back into the `@ptr_add` and `@lilac_abort` leaves. The
 driver's pass order is lower → inject the prelude → `prune_unreachable`, so
 the runtime is present during pruning and dead-code elimination removes
-whatever a program does not reach.
+whatever a program does not reach. Pruning also drops every `type` layout no
+surviving function names (in a signature or an instruction type, directly,
+behind a `ref`, or through another surviving layout's fields), so the types
+of an unused library leave no trace.
 
 ### branch 
 * To: Label or register

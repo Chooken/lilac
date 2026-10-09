@@ -287,7 +287,7 @@ fn unexported_function_is_pruned() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
-    assert!(!text.contains("function @api"), "{text}");
+    assert!(!text.contains("function @.root.api"), "{text}");
 }
 
 /// `--export=api` roots `api`, so it survives reachability pruning.
@@ -303,7 +303,7 @@ fn export_flag_roots_named_function() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
-    assert!(text.contains("function @api"), "{text}");
+    assert!(text.contains("function @.root.api"), "{text}");
 }
 
 /// `--export=` with no name is a usage error (exit 2).

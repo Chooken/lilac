@@ -21,25 +21,29 @@ entry:
   store { i64, ptr } zeroinitializer, ptr %tmp.3, align 8
   %tmp.4 = alloca ptr, align 8
   store ptr null, ptr %tmp.4, align 8
-  %tmp.5 = alloca { i64, ptr }, align 8
-  store { i64, ptr } zeroinitializer, ptr %tmp.5, align 8
-  %tmp.6 = alloca i64, align 8
-  store i64 0, ptr %tmp.6, align 8
+  %tmp.5 = alloca ptr, align 8
+  store ptr null, ptr %tmp.5, align 8
+  %tmp.6 = alloca { i64, ptr }, align 8
+  store { i64, ptr } zeroinitializer, ptr %tmp.6, align 8
+  %tmp.7 = alloca i64, align 8
+  store i64 0, ptr %tmp.7, align 8
   store { i64, ptr } { i64 2, ptr @c0 }, ptr %s, align 8
   store i32 1, ptr %tmp.2, align 4
   %0 = load { i64, ptr }, ptr %s, align 8
   store { i64, ptr } %0, ptr %tmp.3, align 8
   call void @.lilac.byte_buffer_ptr(ptr %tmp.3, ptr %tmp.4)
-  %1 = load { i64, ptr }, ptr %s, align 8
-  store { i64, ptr } %1, ptr %tmp.5, align 8
-  call void @.lilac.byte_buffer_len(ptr %tmp.5, ptr %tmp.6)
-  %2 = load i32, ptr %tmp.2, align 4
-  %3 = load ptr, ptr %tmp.4, align 8
-  %4 = load i64, ptr %tmp.6, align 8
-  %5 = call i64 @write(i32 %2, ptr %3, i64 %4)
-  store i64 %5, ptr %tmp.1, align 8
-  %6 = load i64, ptr %tmp.1, align 8
-  store i64 %6, ptr %n, align 8
+  %1 = load ptr, ptr %tmp.4, align 8
+  store ptr %1, ptr %tmp.5, align 8
+  %2 = load { i64, ptr }, ptr %s, align 8
+  store { i64, ptr } %2, ptr %tmp.6, align 8
+  call void @.lilac.byte_buffer_len(ptr %tmp.6, ptr %tmp.7)
+  %3 = load i32, ptr %tmp.2, align 4
+  %4 = load ptr, ptr %tmp.5, align 8
+  %5 = load i64, ptr %tmp.7, align 8
+  %6 = call i64 @write(i32 %3, ptr %4, i64 %5)
+  store i64 %6, ptr %tmp.1, align 8
+  %7 = load i64, ptr %tmp.1, align 8
+  store i64 %7, ptr %n, align 8
   ret void
 }
 

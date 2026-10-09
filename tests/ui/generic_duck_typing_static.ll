@@ -16,13 +16,13 @@ entry:
   store i32 0, ptr %result, align 4
   %tmp.1 = alloca i32, align 4
   store i32 0, ptr %tmp.1, align 4
-  call void @gen.1.Object(ptr %tmp.1)
+  call void @.root.gen.1.Object(ptr %tmp.1)
   %0 = load i32, ptr %tmp.1, align 4
   store i32 %0, ptr %result, align 4
   ret void
 }
 
-define void @gen.1.Object(ptr %out0) {
+define void @.root.gen.1.Object(ptr %out0) {
 entry:
   %tmp.1 = alloca i32, align 4
   store i32 0, ptr %tmp.1, align 4

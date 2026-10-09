@@ -397,18 +397,38 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part E: eager library loading
 
-- [ ] `lilac-module`: walk every folder of every mounted library. `using`
+- [x] `lilac-module`: walk every folder of every mounted library. `using`
       stays a visibility edge only.
-- [ ] Resolve/typeck: check every non-generic item in every loaded file.
-- [ ] Check that all of `lib/Standard` (including `Standard.C`) checks
+- [x] Resolve/typeck: check every non-generic item in every loaded file.
+- [x] Check that all of `lib/Standard` (including `Standard.C`) checks
       cleanly when loaded whole. Fix anything that only worked because it
       was never loaded.
-- [ ] LSP: compile units still work; a library's diagnostics appear without a
+- [x] LSP: compile units still work; a library's diagnostics appear without a
       `using`.
-- [ ] Tests:
+- [x] Tests:
   - a library error in an unused namespace is reported;
   - an unused library adds nothing to `emit-ir`.
-- [ ] Docs: AGENTS.md "Folder modules and visibility"; SPEC namespaces.
+- [x] Docs: AGENTS.md "Folder modules and visibility"; SPEC namespaces.
+
+Done (2026-10-09). Differences from the tasks above:
+
+- Typeck already checked every non-generic item it was given; only the
+  loader changed. The project's own tree still loads through `using`.
+- DCE now also prunes type layouts nothing surviving names. Without that,
+  an unused library's types reached `emit-ir`. The `enum_decl`,
+  `enum_payload_decl`, `generic_duck_typing_static` and
+  `hook_unused_compile_error` snapshots lose their unused layouts.
+- Two problems appeared once `Standard.C` was always loaded:
+  - a root-namespace function named like an `extern`'s link symbol (the
+    allocator test's `free`/`realloc`) collided at the IR level, since root
+    symbols had no prefix. Root free functions are now `.root.`-prefixed
+    (`.root.free`; `main` stays bare, and `--export=api` maps to
+    `.root.api`), so they cannot take a C symbol. Most snapshots changed;
+  - `extern_variadic`'s `puts(ref Buffer)` clashed with `Standard.C`'s
+    `puts(ref Int8)`. Extern `ref` slots now lower as `ref #unknown`, with
+    a cast at each call, so declarations that differ only in pointee merge.
+    The `extern_*` `.lir`/`.ll` snapshots changed accordingly.
+- A missing library folder is `E025`.
 
 ### Part F: platform hooks and the OS layer
 

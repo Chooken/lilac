@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-inline function @f
+inline function @.root.f
   in #fbit32 %a
   in #fbit32 %b
   out #bit8 %out.1
@@ -28,7 +28,7 @@ function @main
     copy &2 -> %b
     copy %a -> %tmp.2
     copy %b -> %tmp.3
-    call @f (in %tmp.2, %tmp.3) (out %tmp.1)
+    call @.root.f (in %tmp.2, %tmp.3) (out %tmp.1)
     copy %tmp.1 -> %eq
     return
 }

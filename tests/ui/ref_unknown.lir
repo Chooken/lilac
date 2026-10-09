@@ -8,7 +8,7 @@ extern @malloc
   out ref #unknown %result
 extern @free
   in ref #unknown %p
-function @put
+function @.root.put
   in ref #unknown %b
   in #bit8 %v
 {
@@ -48,7 +48,7 @@ function @main
     copy &2 -> %tmp.4
     &3: #bit8 = const 0x2A
     copy &3 -> %tmp.5
-    call @put (in %tmp.4, %tmp.5) (out)
+    call @.root.put (in %tmp.4, %tmp.5) (out)
     &4: ref #unknown = field %s .Data  // idx 0
     copy &4 -> %tmp.6
     call @free (in %tmp.6) (out)

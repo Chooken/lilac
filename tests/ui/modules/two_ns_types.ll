@@ -30,7 +30,7 @@ entry:
   ret void
 }
 
-define void @b_use() {
+define void @.root.b_use() {
 entry:
   %x = alloca %b.Thing, align 8
   store %b.Thing zeroinitializer, ptr %x, align 4
@@ -71,7 +71,7 @@ entry:
   %2 = getelementptr inbounds %a.Thing, ptr %x, i32 0, i32 0
   %3 = load i32, ptr %2, align 4
   store i32 %3, ptr %y, align 4
-  call void @b_use()
+  call void @.root.b_use()
   store ptr %x, ptr %tmp.2, align 8
   call void @"a.Thing.@on_drop:ref_a.Thing"(ptr %tmp.2)
   ret void

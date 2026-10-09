@@ -5,12 +5,12 @@ target triple = "x86_64-unknown-none"
 
 %"@builtin.Os" = type { i8 }
 
-define void @on_bare() {
+define void @.root.on_bare() {
 entry:
   ret void
 }
 
-define void @with_libc() {
+define void @.root.with_libc() {
 entry:
   ret void
 }
@@ -21,8 +21,8 @@ entry:
   store %"@builtin.Os" zeroinitializer, ptr %os, align 1
   %tmp.1 = alloca %"@builtin.Os", align 8
   store %"@builtin.Os" zeroinitializer, ptr %tmp.1, align 1
-  call void @on_bare()
-  call void @with_libc()
+  call void @.root.on_bare()
+  call void @.root.with_libc()
   call void @llvm.memset.p0.i64(ptr align 1 %tmp.1, i8 0, i64 ptrtoint (ptr getelementptr (%"@builtin.Os", ptr null, i32 1) to i64), i1 false)
   %0 = getelementptr inbounds %"@builtin.Os", ptr %tmp.1, i32 0, i32 0
   store i8 3, ptr %0, align 1

@@ -54,7 +54,7 @@ fn multi_return_writes_both_outs() {
         "get_multi: function () condition: @bit32, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    condition: @bit32, result: @bit32 = get_multi()\n}\n",
     );
     assert!(
-        text.contains("call @get_multi (in) (out %condition, %result)"),
+        text.contains("call @.root.get_multi (in) (out %condition, %result)"),
         "{text}"
     );
     assert!(text.contains("zero %condition"), "{text}");
@@ -154,8 +154,8 @@ fn inline_functions_are_marked() {
     let (text, _) = lower_src(
         "twice: function (v: @bit32) r: @bit32 => @i_add_32(v, v)\nmain: function () nothing {\n    x: @bit32 = twice(0x2)\n}\n",
     );
-    assert!(text.contains("inline function @twice"), "{text}");
-    assert!(text.contains("call @twice"), "{text}");
+    assert!(text.contains("inline function @.root.twice"), "{text}");
+    assert!(text.contains("call @.root.twice"), "{text}");
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn arguments_are_passed_as_fresh_copies() {
     let (text, _) = lower_src(
         "f: function (x: @bit32) nothing {\n    x = 0x5\n}\nmain: function () nothing {\n    a: @bit32 = 0x1\n    f(a)\n}\n",
     );
-    assert!(!text.contains("call @f (in %a)"), "{text}");
+    assert!(!text.contains("call @.root.f (in %a)"), "{text}");
 }
 
 /// Lowers `prelude` plus a `main` running `if <cond> { live() } else {
@@ -176,7 +176,7 @@ fn assert_arm(prelude: &str, cond: &str, taken: Option<bool>) {
     );
     let (text, _) = lower_src(&src);
     let main = text.split("function @main").nth(1).expect("main");
-    let has = |name: &str| main.contains(&format!("call @{name}"));
+    let has = |name: &str| main.contains(&format!("call @.root.{name}"));
     if let Some(taken) = taken {
         assert!(!main.contains("branch.if"), "{cond}:\n{main}");
         assert_eq!(has("then_arm"), taken, "{cond}:\n{main}");
@@ -226,7 +226,7 @@ fn locals_are_never_constant() {
         "{BOOL}\nboom: function () nothing {{\n}}\nmain: function () nothing {{\n    t: Bool = false\n    if t {{\n        boom()\n    }}\n}}\n"
     ));
     assert!(text.contains("branch.if"), "{text}");
-    assert!(text.contains("call @boom"), "{text}");
+    assert!(text.contains("call @.root.boom"), "{text}");
 }
 
 #[test]
@@ -272,8 +272,8 @@ fn constant_match_statement_lowers_one_arm() {
         "Opt: enum {\n    None\n    Some: @bit8\n}\nboom: function () nothing {\n}\nkeep: function (v: @bit8) nothing {\n}\nmain: function () nothing {\n    match Opt.Some(0x4) {\n        .None => boom()\n        .Some -> v: @bit8 => keep(v)\n    }\n}\n",
     );
     let main = text.split("function @main").nth(1).expect("main");
-    assert!(!main.contains("call @boom"), "{main}");
-    assert!(main.contains("call @keep"), "{main}");
+    assert!(!main.contains("call @.root.boom"), "{main}");
+    assert!(main.contains("call @.root.keep"), "{main}");
     assert!(!main.contains("branch.if"), "{main}");
 }
 

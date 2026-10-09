@@ -1,7 +1,5 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #Object {
-}
 function @Object.get
   out #bit32 %result
 {
@@ -16,11 +14,11 @@ function @main
   $entry:
     alloca #bit32 %result : zeroed
     alloca #bit32 %tmp.1 : zeroed
-    call @gen.1.Object (in) (out %tmp.1)
+    call @.root.gen.1.Object (in) (out %tmp.1)
     copy %tmp.1 -> %result
     return
 }
-function @gen.1.Object
+function @.root.gen.1.Object
   out #bit32 %out
 {
   $entry:

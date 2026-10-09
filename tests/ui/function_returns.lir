@@ -5,11 +5,11 @@ function @main
   $entry:
     alloca #bit32 %result : zeroed
     alloca #bit32 %tmp.1 : zeroed
-    call @get (in) (out %tmp.1)
+    call @.root.get (in) (out %tmp.1)
     copy %tmp.1 -> %result
     return
 }
-function @get
+function @.root.get
   out #bit32 %result
 {
   $entry:

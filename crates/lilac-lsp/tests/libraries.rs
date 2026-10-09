@@ -322,3 +322,52 @@ fn semantic_tokens_are_refreshed_after_a_compile() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A mounted library loads whole, so an error in a library namespace no file
+/// `using`s is published when a project file is compiled.
+#[test]
+fn an_unused_library_namespace_reports_its_errors() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("lsp_unused_library");
+    let _ = std::fs::remove_dir_all(&dir);
+    let bad = dir.join("lib").join("Unused").join("bad.lilac");
+    std::fs::create_dir_all(bad.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&bad, "broken: function () Nope {}\n").expect("write");
+    let main = dir.join("app").join("main.lilac");
+    std::fs::create_dir_all(main.parent().expect("parent")).expect("mkdir");
+    let text = "main: function () nothing {\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        &serde_json::json!({ "libraries": { "Lib": dir.join("lib").to_string_lossy() } }),
+    );
+    did_open(&client, &Url::from_file_path(&main).expect("uri"), text);
+    // The server spells unopened files' URIs canonically (a lowercase drive
+    // letter on Windows), so match on the path.
+    let published = loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                let params: PublishDiagnosticsParams =
+                    serde_json::from_value(notification.params).expect("decode");
+                if params.uri.path().ends_with("/lib/Unused/bad.lilac") {
+                    break params;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no diagnostics for {}: {err}", bad.display()),
+        }
+    };
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Nope")),
+        "{:?}",
+        published.diagnostics
+    );
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

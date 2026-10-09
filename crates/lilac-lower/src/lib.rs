@@ -264,6 +264,42 @@ fn check_link_names(lower: &Lower<'_>, diags: &mut Diags) {
     }
 }
 
+/// The symbol of the non-generic free function with qualified source name
+/// `name` (`api` is `.root.api`, `A.B.api` stays): how `--export` names
+/// a root.
+#[must_use]
+pub fn export_symbol(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some(_) => name.to_owned(),
+        None => match namespace_prefix("", name).as_str() {
+            "" => name.to_owned(),
+            prefix => format!("{prefix}.{name}"),
+        },
+    }
+}
+
+/// The symbol prefix of a free function `name` in namespace `path`: the
+/// path itself, or for the root namespace `.root` (so `foo` is `.root.foo`
+/// and cannot take a C symbol an `extern` links against). Root `main` stays
+/// bare: it is the entry point.
+fn namespace_prefix(path: &str, name: &str) -> String {
+    if !path.is_empty() {
+        path.to_owned()
+    } else if name == "main" {
+        String::new()
+    } else {
+        ".root".to_owned()
+    }
+}
+
+/// `ty` as C sees it: any `ref` is the opaque `ref #unknown`.
+fn c_ty(ty: LirTy) -> LirTy {
+    match ty {
+        LirTy::Ref(_) => LirTy::opaque_ref(),
+        other => other,
+    }
+}
+
 /// An `extern`'s C signature, as two declarations of one link name compare.
 #[derive(PartialEq)]
 struct ExternSig {
@@ -682,7 +718,7 @@ impl Lower<'_> {
             }
             None if is_hook => (String::new(), &func.key.args[..]),
             None => (
-                self.res.namespace_path(def.ns).to_owned(),
+                namespace_prefix(self.res.namespace_path(def.ns), &def.name),
                 &func.key.args[..],
             ),
         };
@@ -716,9 +752,18 @@ impl Lower<'_> {
         }
     }
 
-    /// The C type an `extern` slot uses: the type itself, or for an object
-    /// wrapping exactly one C-representable field, that field (`true`).
+    /// The C type an `extern` slot uses ([`Self::abi_slot`] with every
+    /// `ref` as the opaque `ref #unknown`: C sees only a pointer, so two
+    /// declarations of one symbol may differ in pointee).
     fn abi_ty(&self, ty: TypeRef) -> (LirTy, bool) {
+        let (slot, wrapped) = self.abi_slot(ty);
+        (c_ty(slot), wrapped)
+    }
+
+    /// The Lilac type an `extern` slot carries: the type itself, or for an
+    /// object wrapping exactly one C-representable field, that field
+    /// (`true`).
+    fn abi_slot(&self, ty: TypeRef) -> (LirTy, bool) {
         let lir = self.lir_ty(ty);
         if !ty.is_ref {
             if let Some(Layout::Object { fields }) = self.hir.layouts.get(&ty.id) {
@@ -2236,8 +2281,13 @@ impl Lower<'_> {
         let mut ins = Vec::with_capacity(args.len());
         for arg in args {
             let place = self.arg(fs, func, arg);
-            let (abi, wrapped) = self.abi_ty(arg.ty);
-            if wrapped {
+            let (slot, wrapped) = self.abi_slot(arg.ty);
+            let abi = c_ty(slot.clone());
+            if !wrapped && abi == slot {
+                ins.push(place);
+                continue;
+            }
+            let mut reg = if wrapped {
                 let (name, _) = self.field_name(arg.ty.id, 0);
                 let reg = fs.reg();
                 fs.emit(LirInst::Field {
@@ -2245,19 +2295,23 @@ impl Lower<'_> {
                     name,
                     idx: 0,
                     dst: reg.clone(),
-                    ty: abi.clone(),
+                    ty: slot.clone(),
                     span,
                 });
-                let inner = fs.tmp_lir(abi, span);
-                fs.emit(LirInst::CopyPlace {
-                    src: LirOperand::Reg(reg),
-                    dst: inner.clone(),
-                    span,
-                });
-                ins.push(inner);
+                reg
             } else {
-                ins.push(place);
+                fs.reg_of(LirOperand::Place(place), &slot, span)
+            };
+            if abi != slot {
+                reg = fs.bitcast(reg, abi.clone(), span);
             }
+            let inner = fs.tmp_lir(abi, span);
+            fs.emit(LirInst::CopyPlace {
+                src: LirOperand::Reg(reg),
+                dst: inner.clone(),
+                span,
+            });
+            ins.push(inner);
         }
         let symbol = self.symbol(key);
         let returns: Vec<TypeRef> = self
@@ -2276,10 +2330,11 @@ impl Lower<'_> {
         let mut call_outs = Vec::with_capacity(outs.len());
         let mut rewrap = Vec::new();
         for (out, ty) in outs.iter().zip(&returns) {
-            let (abi, wrapped) = self.abi_ty(*ty);
-            if wrapped {
-                let inner = fs.tmp_lir(abi, span);
-                rewrap.push((out.clone(), inner.clone(), *ty));
+            let (slot, wrapped) = self.abi_slot(*ty);
+            let abi = c_ty(slot.clone());
+            if wrapped || abi != slot {
+                let inner = fs.tmp_lir(abi.clone(), span);
+                rewrap.push((out.clone(), inner.clone(), *ty, slot, abi, wrapped));
                 call_outs.push(inner);
             } else {
                 call_outs.push(out.clone());
@@ -2291,15 +2346,29 @@ impl Lower<'_> {
             outs: call_outs,
             span,
         });
-        for (out, inner, ty) in rewrap {
-            let (name, _) = self.field_name(ty.id, 0);
-            fs.emit(LirInst::StoreField {
-                value: LirOperand::Place(inner),
-                obj: out,
-                name,
-                idx: 0,
-                span,
-            });
+        for (out, inner, ty, slot, abi, wrapped) in rewrap {
+            let value = if abi == slot {
+                LirOperand::Place(inner)
+            } else {
+                let reg = fs.reg_of(LirOperand::Place(inner), &abi, span);
+                LirOperand::Reg(fs.bitcast(reg, slot, span))
+            };
+            if wrapped {
+                let (name, _) = self.field_name(ty.id, 0);
+                fs.emit(LirInst::StoreField {
+                    value,
+                    obj: out,
+                    name,
+                    idx: 0,
+                    span,
+                });
+            } else {
+                fs.emit(LirInst::CopyPlace {
+                    src: value,
+                    dst: out,
+                    span,
+                });
+            }
         }
     }
 

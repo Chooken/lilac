@@ -13,7 +13,7 @@ entry:
   ret ptr %2
 }
 
-define void @parse(ptr %in0, ptr %out0) {
+define void @.root.parse(ptr %in0, ptr %out0) {
 entry:
   %i = alloca i64, align 8
   store i64 0, ptr %i, align 8
@@ -101,7 +101,7 @@ entry:
   %tmp.2 = alloca { i64, ptr }, align 8
   store { i64, ptr } zeroinitializer, ptr %tmp.2, align 8
   store { i64, ptr } { i64 2, ptr @c0 }, ptr %tmp.2, align 8
-  call void @parse(ptr %tmp.2, ptr %tmp.1)
+  call void @.root.parse(ptr %tmp.2, ptr %tmp.1)
   %0 = load i64, ptr %tmp.1, align 8
   store i64 %0, ptr %total, align 8
   ret void
