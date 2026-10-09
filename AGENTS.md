@@ -219,6 +219,14 @@
   that site's file (`convert::trace_diagnostics`), linking back to the
   error, and the error lists the sites as related information. So a
   `@compile_error` in a library marks the user's call too.
+- Diagnostics: a compile runs once no change has arrived for 200 ms (a
+  deadline, so requests never postpone it), and each publish carries the
+  open document's `version`. A diagnostic without a span goes to
+  `lilac.json`, else the unit's `main.lilac`, else its first open file by
+  URI (`Server::project_anchor`). The server registers watchers for
+  `**/*.lilac` and `**/lilac.json` (recompile; a `lilac.json` change
+  re-reads the root and libraries) and takes `lilac.libraries` from
+  `workspace/didChangeConfiguration` without a restart.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.

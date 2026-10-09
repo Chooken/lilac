@@ -511,6 +511,8 @@ function startClient(context, serverPath) {
             initializationOptions: {
                 libraries: workspace.getConfiguration("lilac").get("libraries", {}),
             },
+            // Sends `lilac.*` changes (`lilac.libraries`) to the running server.
+            synchronize: { configurationSection: "lilac" },
         }
     );
     next.onNotification("lilac/lirInvalidated", refreshLir);
@@ -550,10 +552,7 @@ async function activate(context) {
 
     context.subscriptions.push(
         workspace.onDidChangeConfiguration(async (event) => {
-            if (
-                !event.affectsConfiguration("lilac.serverPath") &&
-                !event.affectsConfiguration("lilac.libraries")
-            ) {
+            if (!event.affectsConfiguration("lilac.serverPath")) {
                 return;
             }
             if (client) {

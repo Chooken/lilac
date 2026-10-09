@@ -70,13 +70,14 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     )?;
 
     let workspace = roots::root_from_params(&params);
-    let libraries = roots::merge_libraries(
-        workspace
-            .as_deref()
-            .map_or_else(Vec::new, roots::config_libraries),
-        roots::libraries_from_params(&params, workspace.as_deref()),
-    );
-    let root = workspace.map(|workspace| roots::project_root(&workspace));
+    let libraries = roots::libraries_from_params(&params, workspace.as_deref());
+    let watch_files = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+        .and_then(|watched| watched.dynamic_registration)
+        .unwrap_or(false);
     let refresh_tokens = params
         .capabilities
         .workspace
@@ -84,6 +85,9 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         .and_then(|workspace| workspace.semantic_tokens.as_ref())
         .and_then(|tokens| tokens.refresh_support)
         .unwrap_or(false);
-    let mut server = server::Server::new(connection, root, libraries, refresh_tokens);
+    let mut server = server::Server::new(connection, workspace, libraries, refresh_tokens);
+    if watch_files {
+        server.watch_files();
+    }
     server.main_loop()
 }

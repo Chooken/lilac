@@ -26,7 +26,8 @@ pub fn libraries_from_params(
 }
 
 /// Parses a `{ "Name": "dir" }` map; a relative `dir` is joined to `base`.
-fn parse_libraries(value: &serde_json::Value, base: Option<&Path>) -> Vec<(String, PathBuf)> {
+#[must_use]
+pub fn parse_libraries(value: &serde_json::Value, base: Option<&Path>) -> Vec<(String, PathBuf)> {
     let Some(map) = value.as_object() else {
         return Vec::new();
     };

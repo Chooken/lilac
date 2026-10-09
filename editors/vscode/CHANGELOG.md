@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Diagnostics no longer wait for a burst of hovers or highlighting requests
+  to end, and are tagged with the document version they were computed for.
+- Errors without a location (an unreadable library folder) are shown on
+  `lilac.json`, else the project's `main.lilac`, instead of a random open
+  file.
+- Files created, deleted or changed outside the editor (`git checkout`)
+  and edits to `lilac.json` are picked up without reopening anything.
+  Changing `lilac.libraries` no longer restarts the server.
+
 - A `@compile_error` (or `@syscall` on a target without one) is also marked
   at every call that reaches it, in the caller's file, linking back to the
   error. An error inside a library now shows in your code. Unsatisfied

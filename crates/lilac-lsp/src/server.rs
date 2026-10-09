@@ -4,24 +4,26 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lilac_driver::Session;
 use lilac_error::Diagnostic;
 use lilac_span::FileId;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
-    Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, PublishDiagnosticsParams, Url,
+    Diagnostic as LspDiagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    PublishDiagnosticsParams, Url,
 };
 
 use crate::convert::{to_lsp_diagnostic, trace_diagnostics};
 use crate::documents::Documents;
 use crate::fs::OverlayFs;
 use crate::index::{LirStages, Retained};
-use crate::roots::canonical_file_uri;
+use crate::roots::{self, canonical_file_uri};
 
-/// Debounce window before recompiling after an edit.
+/// Quiet time after the last change before recompiling. Requests (hover,
+/// tokens) do not extend it.
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// JSON-RPC code for an unknown method.
@@ -31,6 +33,11 @@ const METHOD_NOT_FOUND: i32 = -32601;
 pub struct Server {
     connection: Connection,
     documents: Documents,
+    /// The workspace folder (holds `lilac.json`).
+    workspace: Option<PathBuf>,
+    /// The `lilac.libraries` setting.
+    setting_libraries: Vec<(String, PathBuf)>,
+    /// The project root ([`roots::project_root`] of the workspace).
     root: Option<PathBuf>,
     /// Mounted libraries (`lilac.json` and `lilac.libraries`), passed to
     /// every session.
@@ -39,8 +46,9 @@ pub struct Server {
     refresh_tokens: bool,
     /// Id of the next server-to-client request.
     next_request: i32,
-    dirty: bool,
-    generation: u64,
+    /// When to recompile: [`DEBOUNCE`] after the last change, `None` when
+    /// the published diagnostics are current.
+    deadline: Option<Instant>,
     published: HashSet<Url>,
     shutdown: bool,
     /// Retained project compile (project mode).
@@ -51,30 +59,67 @@ pub struct Server {
 }
 
 impl Server {
-    /// New server over `connection`, rooted at `root` (project mode) or `None`,
-    /// with `libraries` mounted. With `refresh_tokens`, the client is asked to
+    /// New server over `connection` for `workspace` (project mode) or `None`,
+    /// with the `lilac.libraries` setting `setting_libraries` (merged over
+    /// `lilac.json`'s). With `refresh_tokens`, the client is asked to
     /// re-request semantic tokens after every compile.
     #[must_use]
     pub fn new(
         connection: Connection,
-        root: Option<PathBuf>,
-        libraries: Vec<(String, PathBuf)>,
+        workspace: Option<PathBuf>,
+        setting_libraries: Vec<(String, PathBuf)>,
         refresh_tokens: bool,
     ) -> Self {
-        Self {
+        let mut server = Self {
             connection,
             documents: Documents::new(),
-            root,
-            libraries,
+            workspace,
+            setting_libraries,
+            root: None,
+            libraries: Vec::new(),
             refresh_tokens,
             next_request: 0,
-            dirty: false,
-            generation: 0,
+            deadline: None,
             published: HashSet::new(),
             shutdown: false,
             project: None,
             per_file: HashMap::new(),
-        }
+        };
+        server.configure();
+        server
+    }
+
+    /// Re-reads `lilac.json`: the project root and the mounted libraries.
+    fn configure(&mut self) {
+        let workspace = self.workspace.as_deref();
+        self.libraries = roots::merge_libraries(
+            workspace.map_or_else(Vec::new, roots::config_libraries),
+            self.setting_libraries.clone(),
+        );
+        self.root = workspace.map(roots::project_root);
+    }
+
+    /// Asks the client to report changes to `.lilac` files and
+    /// `lilac.json` (`workspace/didChangeWatchedFiles`), for a client that
+    /// supports registering watchers.
+    pub fn watch_files(&mut self) {
+        self.next_request += 1;
+        let _ = self.connection.sender.send(Message::Request(Request {
+            id: format!("lilac-watch-{}", self.next_request).into(),
+            method: "client/registerCapability".to_owned(),
+            params: serde_json::json!({
+                "registrations": [{
+                    "id": "lilac-watched-files",
+                    "method": "workspace/didChangeWatchedFiles",
+                    "registerOptions": {
+                        "watchers": [
+                            { "globPattern": "**/*.lilac" },
+                            { "globPattern": "**/lilac.json" },
+                        ],
+                    },
+                }],
+            }),
+        }));
     }
 
     /// Runs until the client sends `exit`.
@@ -83,9 +128,30 @@ impl Server {
     /// `exit` arrives first (the client violated the protocol).
     pub fn main_loop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         loop {
-            match self.connection.receiver.recv_timeout(DEBOUNCE) {
-                Ok(Message::Request(request)) => self.handle_request(request)?,
-                Ok(Message::Notification(notification)) => {
+            // A deadline, not a timeout per receive: a stream of requests
+            // must not keep postponing the compile.
+            let message = match self.deadline {
+                Some(deadline) if deadline <= Instant::now() => {
+                    self.publish();
+                    continue;
+                }
+                Some(deadline) => match self
+                    .connection
+                    .receiver
+                    .recv_timeout(deadline - Instant::now())
+                {
+                    Ok(message) => message,
+                    Err(err) if err.is_timeout() => continue,
+                    Err(_) => return Ok(()),
+                },
+                None => match self.connection.receiver.recv() {
+                    Ok(message) => message,
+                    Err(_) => return Ok(()),
+                },
+            };
+            match message {
+                Message::Request(request) => self.handle_request(request)?,
+                Message::Notification(notification) => {
                     if notification.method == "exit" {
                         return if self.shutdown {
                             Ok(())
@@ -95,16 +161,7 @@ impl Server {
                     }
                     self.handle_notification(notification);
                 }
-                Ok(Message::Response(_)) => {}
-                Err(err) => {
-                    if err.is_timeout() {
-                        if self.dirty {
-                            self.publish();
-                        }
-                    } else {
-                        return Ok(());
-                    }
-                }
+                Message::Response(_) => {}
             }
         }
     }
@@ -259,18 +316,52 @@ impl Server {
                     self.touch();
                 }
             }
+            // Files changed on disk (new, deleted, `git checkout`): files
+            // are read afresh on every compile, so recompiling is enough,
+            // plus re-reading `lilac.json` when it changed.
+            "workspace/didChangeWatchedFiles" => {
+                if let Ok(params) = notification
+                    .extract::<DidChangeWatchedFilesParams>("workspace/didChangeWatchedFiles")
+                {
+                    let config = params.changes.iter().any(|change| {
+                        roots::url_to_path(&change.uri)
+                            .is_some_and(|path| path.file_name() == Some("lilac.json".as_ref()))
+                    });
+                    if config {
+                        self.configure();
+                    }
+                    self.touch();
+                }
+            }
+            // `{ "lilac": { "libraries": { ... } } }`; other settings are
+            // the client's.
+            "workspace/didChangeConfiguration" => {
+                if let Ok(params) = notification
+                    .extract::<DidChangeConfigurationParams>("workspace/didChangeConfiguration")
+                {
+                    if let Some(libraries) = params
+                        .settings
+                        .get("lilac")
+                        .and_then(|lilac| lilac.get("libraries"))
+                    {
+                        self.setting_libraries =
+                            roots::parse_libraries(libraries, self.workspace.as_deref());
+                        self.configure();
+                        self.touch();
+                    }
+                }
+            }
             _ => {}
         }
     }
 
+    /// Schedules a recompile [`DEBOUNCE`] from now.
     fn touch(&mut self) {
-        self.dirty = true;
-        self.generation += 1;
+        self.deadline = Some(Instant::now() + DEBOUNCE);
     }
 
     fn publish(&mut self) {
-        self.dirty = false;
-        let generation = self.generation;
+        self.deadline = None;
         let overlay = self.documents.overlay();
         let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> = HashMap::new();
         let mut new_project = None;
@@ -283,13 +374,12 @@ impl Server {
             let _ = session.compile_project_with_stages(&root, &mut fs, &mut |name, lir| {
                 stages.modules.push((name, lir.clone()));
             });
-            // Project-load errors (E025) can have no source span; attach those
-            // to the first open document so they are not dropped silently.
-            let fallback = self.documents.iter().next().map(|(uri, _)| uri.clone());
+            // Project-load errors (E025) can have no source span.
+            let anchor = self.project_anchor(&root);
             new_project = Some(retain(
                 session,
                 stages,
-                fallback.as_ref(),
+                anchor.as_ref(),
                 &mut covered,
                 &mut by_uri,
             ));
@@ -319,19 +409,16 @@ impl Server {
             by_uri.entry(uri.clone()).or_default();
         }
 
-        if generation != self.generation {
-            return;
-        }
-
         self.project = new_project;
         self.per_file = new_per_file;
 
         let current: HashSet<Url> = by_uri.keys().cloned().collect();
-        for (uri, diagnostics) in &by_uri {
-            self.send_diagnostics(uri, diagnostics.clone());
+        for (uri, diagnostics) in by_uri {
+            let version = self.documents.get(&uri).map(|document| document.version);
+            self.send_diagnostics(&uri, diagnostics, version);
         }
         for uri in self.published.difference(&current) {
-            self.send_diagnostics(uri, Vec::new());
+            self.send_diagnostics(uri, Vec::new(), None);
         }
         self.published = current;
 
@@ -353,6 +440,41 @@ impl Server {
                 params: serde_json::Value::Null,
             }));
         }
+    }
+
+    /// Where the project's diagnostics without a source span go: the
+    /// workspace's `lilac.json`, else the root's `main.lilac`, else the
+    /// first open document under the root (by URI, so the choice is stable).
+    fn project_anchor(&self, root: &Path) -> Option<Url> {
+        let config = self
+            .workspace
+            .as_deref()
+            .map(|workspace| workspace.join("lilac.json"))
+            .filter(|config| config.is_file());
+        if let Some(config) = config {
+            return Url::from_file_path(config).ok();
+        }
+        let open: Vec<&Url> = self
+            .documents
+            .iter()
+            .filter(|(_, document)| document.path.starts_with(root))
+            .map(|(uri, _)| uri)
+            .collect();
+        self.unit_anchor(root, &open)
+    }
+
+    /// Where a unit's diagnostics without a source span go: `dir`'s
+    /// `main.lilac` when it exists or is open, else the first of `uris`.
+    fn unit_anchor(&self, dir: &Path, uris: &[&Url]) -> Option<Url> {
+        let main = dir.join("main.lilac");
+        let main_open = self
+            .documents
+            .iter()
+            .any(|(_, document)| document.path == main);
+        if main.is_file() || main_open {
+            return Url::from_file_path(main).ok();
+        }
+        uris.iter().min().map(|uri| (*uri).clone())
     }
 
     /// Compiles the open files the project did not cover (`covered`), one
@@ -403,11 +525,13 @@ impl Server {
                         &mut fs,
                         &mut capture,
                     );
-                    retain(session, stages, uris.first(), covered, by_uri)
+                    let anchor = uris.iter().min();
+                    retain(session, stages, anchor, covered, by_uri)
                 }
                 Unit::Folder(dir) => {
                     let _ = session.compile_project_with_stages(dir, &mut fs, &mut capture);
-                    retain(session, stages, uris.first(), covered, by_uri)
+                    let anchor = self.unit_anchor(dir, &uris.iter().collect::<Vec<_>>());
+                    retain(session, stages, anchor.as_ref(), covered, by_uri)
                 }
                 Unit::File(_) => {
                     let uri = &uris[0];
@@ -428,11 +552,13 @@ impl Server {
         new_per_file
     }
 
-    fn send_diagnostics(&self, uri: &Url, diagnostics: Vec<LspDiagnostic>) {
+    /// Publishes `diagnostics` for `uri`, computed from the open
+    /// document's `version` (`None` for a file that is not open).
+    fn send_diagnostics(&self, uri: &Url, diagnostics: Vec<LspDiagnostic>, version: Option<i32>) {
         let params = PublishDiagnosticsParams {
             uri: uri.clone(),
             diagnostics,
-            version: None,
+            version,
         };
         if let Ok(params) = serde_json::to_value(params) {
             let _ = self
@@ -509,13 +635,13 @@ fn unit_of(path: &Path, text: &str, libraries: &[(String, PathBuf)]) -> Unit {
 }
 
 /// Publishes a finished multi-file compile's diagnostics into `by_uri` and
-/// retains it. Diagnostics without a file go to `fallback`. Files already in
+/// retains it. Diagnostics without a file go to `anchor`. Files already in
 /// `covered` (published by an earlier compile) are skipped; this compile's
 /// files are added to it.
 fn retain(
     session: Session,
     stages: LirStages,
-    fallback: Option<&Url>,
+    anchor: Option<&Url>,
     covered: &mut HashSet<Url>,
     by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
 ) -> Retained {
@@ -532,7 +658,7 @@ fn retain(
     for diagnostic in session.diags.diagnostics() {
         let target = primary_file(diagnostic)
             .and_then(uri_of)
-            .or_else(|| fallback.cloned());
+            .or_else(|| anchor.cloned());
         if let Some(uri) = target.filter(|uri| !covered.contains(&canonical_file_uri(uri))) {
             if let Some(lsp) = to_lsp_diagnostic(diagnostic, &session.source_map, &uri_of) {
                 by_uri.entry(uri).or_default().push(lsp);

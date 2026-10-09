@@ -34,6 +34,10 @@ fn initialize(client: &Connection, folder: Option<&Url>) {
         }),
         None => serde_json::json!({ "capabilities": {} }),
     };
+    initialize_with(client, params);
+}
+
+fn initialize_with(client: &Connection, params: serde_json::Value) {
     let id = RequestId::from(1);
     client
         .sender
@@ -291,6 +295,248 @@ fn unreadable_root_is_reported_on_the_open_document() {
     let params = publish_for(&client, &uri);
     assert!(has_code(&params, "E025"), "{:?}", params.diagnostics);
 
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A fresh, empty temporary folder for one test.
+fn temp_project(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    dir
+}
+
+fn notify(client: &Connection, method: &str, params: serde_json::Value) {
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: method.to_owned(),
+            params,
+        }))
+        .expect("notify");
+}
+
+#[test]
+fn diagnostics_carry_the_document_version() {
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    did_open(&client, &uri, "main: function () nothing {\n}\n");
+    assert_eq!(publish_for(&client, &uri).version, Some(1));
+    did_change(&client, &uri, 7, "main: function ( {\n}\n");
+    assert_eq!(publish_for(&client, &uri).version, Some(7));
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// Requests arriving faster than the debounce window do not postpone the
+/// compile: the diagnostics come before the last request's reply.
+#[test]
+fn requests_do_not_postpone_diagnostics() {
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    did_open(&client, &uri, "main: function () nothing {\n}\n");
+    let _ = publish_for(&client, &uri);
+    did_change(&client, &uri, 2, "main: function ( {\n}\n");
+    let mut last = RequestId::from(0);
+    for id in 100..120 {
+        last = RequestId::from(id);
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: last.clone(),
+                method: "textDocument/hover".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": 0, "character": 0 },
+                }),
+            }))
+            .expect("hover");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut published = false;
+    loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                published = true;
+            }
+            Ok(Message::Response(response)) if response.id == last => break,
+            Ok(_) => {}
+            Err(err) => panic!("no reply: {err}"),
+        }
+    }
+    assert!(published, "diagnostics waited for the requests to stop");
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A spanless project error goes to `lilac.json` when there is one.
+#[test]
+fn spanless_errors_go_to_lilac_json() {
+    let dir = temp_project("anchor-config");
+    std::fs::write(
+        dir.join("lilac.json"),
+        r#"{ "libraries": { "Gone": "gone" } }"#,
+    )
+    .expect("write");
+    let main = dir.join("main.lilac");
+    std::fs::write(&main, "main: function () nothing {\n}\n").expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        Some(&Url::from_directory_path(&dir).expect("root")),
+    );
+    did_open(
+        &client,
+        &Url::from_file_path(&main).expect("uri"),
+        "main: function () nothing {\n}\n",
+    );
+    let config = Url::from_file_path(dir.join("lilac.json")).expect("uri");
+    let params = publish_for(&client, &config);
+    assert!(has_code(&params, "E025"), "{:?}", params.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Without `lilac.json`, a spanless error goes to the root's `main.lilac`,
+/// not to whichever document is open.
+#[test]
+fn spanless_errors_go_to_the_root_main() {
+    let dir = temp_project("anchor-main");
+    let main = dir.join("main.lilac");
+    std::fs::write(&main, "main: function () nothing {\n}\n").expect("write");
+    let other = dir.join("other.lilac");
+    std::fs::write(&other, "other: function () nothing {\n}\n").expect("write");
+
+    let (client, handle) = start_server();
+    initialize_with(
+        &client,
+        serde_json::json!({
+            "capabilities": {},
+            "workspaceFolders": [{
+                "uri": Url::from_directory_path(&dir).expect("root").as_str(),
+                "name": "ws",
+            }],
+            "initializationOptions": { "libraries": { "Gone": "gone" } },
+        }),
+    );
+    let other_uri = Url::from_file_path(&other).expect("uri");
+    did_open(&client, &other_uri, "other: function () nothing {\n}\n");
+    let params = publish_for(&client, &Url::from_file_path(&main).expect("uri"));
+    assert!(has_code(&params, "E025"), "{:?}", params.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file created on disk is picked up when the client reports it.
+#[test]
+fn watched_file_changes_recompile() {
+    let dir = temp_project("watched");
+    let main = dir.join("main.lilac");
+    let text = "main: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        Some(&Url::from_directory_path(&dir).expect("root")),
+    );
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, text);
+    let broken = publish_for(&client, &uri);
+    assert!(has_code(&broken, "E021"), "{:?}", broken.diagnostics);
+
+    let helper = dir.join("helper.lilac");
+    std::fs::write(&helper, "helper: function () nothing {\n}\n").expect("write");
+    notify(
+        &client,
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({
+            "changes": [{
+                "uri": Url::from_file_path(&helper).expect("uri").as_str(),
+                "type": 1,
+            }],
+        }),
+    );
+    let fixed = publish_for(&client, &uri);
+    assert!(fixed.diagnostics.is_empty(), "{:?}", fixed.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `lilac.libraries` change applies without a restart.
+#[test]
+fn library_setting_changes_apply() {
+    let dir = temp_project("setting");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).expect("mkdir");
+    std::fs::write(lib.join("lib.lilac"), "helper: function () nothing {\n}\n").expect("write");
+    let app = dir.join("app");
+    std::fs::create_dir_all(&app).expect("mkdir");
+    let main = app.join("main.lilac");
+    let text = "using Lib\n\nmain: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        Some(&Url::from_directory_path(&app).expect("root")),
+    );
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, text);
+    let broken = publish_for(&client, &uri);
+    assert!(has_code(&broken, "E025"), "{:?}", broken.diagnostics);
+
+    notify(
+        &client,
+        "workspace/didChangeConfiguration",
+        serde_json::json!({
+            "settings": { "lilac": { "libraries": { "Lib": lib.to_string_lossy() } } },
+        }),
+    );
+    let fixed = publish_for(&client, &uri);
+    assert!(fixed.diagnostics.is_empty(), "{:?}", fixed.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A client that can register watchers is asked to watch `.lilac` files
+/// and `lilac.json`.
+#[test]
+fn file_watchers_are_registered() {
+    let (client, handle) = start_server();
+    initialize_with(
+        &client,
+        serde_json::json!({
+            "capabilities": {
+                "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } },
+            },
+        }),
+    );
+    let request = loop {
+        match client.receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Message::Request(request)) => break request,
+            Ok(_) => {}
+            Err(err) => panic!("no registration: {err}"),
+        }
+    };
+    assert_eq!(request.method, "client/registerCapability");
+    let text = request.params.to_string();
+    assert!(text.contains("workspace/didChangeWatchedFiles"), "{text}");
+    assert!(text.contains("**/lilac.json"), "{text}");
     shutdown(&client);
     handle.join().expect("server thread");
 }
