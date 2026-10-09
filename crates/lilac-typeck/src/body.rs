@@ -288,6 +288,17 @@ impl Checker<'_> {
                 }
                 out.push(HirStmt::Break(*span));
             }
+            Stmt::Continue { span } => {
+                if fcx.loops == 0 {
+                    self.diags
+                        .emit(Diagnostic::error("E022", "continue outside `loop`").label(
+                            *span,
+                            true,
+                            "continue needs an enclosing loop",
+                        ));
+                }
+                out.push(HirStmt::Continue(*span));
+            }
             Stmt::If {
                 cond,
                 capture: Some(capture),

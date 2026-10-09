@@ -1,0 +1,18 @@
+// expect-exit: 101
+// expect-stderr: panic: dropped
+// expect-stderr:   at Guard.@on_drop (panic_drop_continue.lilac:9:9)
+// expect-stderr:   at main (panic_drop_continue.lilac:16:9)
+
+// A `continue` drops the loop body's locals at the `continue`.
+Guard: object {
+    @on_drop: function (from: ref Guard) nothing {
+        @panic("dropped")
+    }
+}
+
+main: function () nothing {
+    loop {
+        g: Guard = Guard {}
+        continue
+    }
+}

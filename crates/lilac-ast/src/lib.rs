@@ -210,6 +210,11 @@ pub enum Stmt {
         /// Keyword span.
         span: Span,
     },
+    /// `continue` (next loop iteration).
+    Continue {
+        /// Keyword span.
+        span: Span,
+    },
     /// `if cond { ... } else <stmt>`.
     If {
         /// Condition (strict non-zero `@bit8` test).
@@ -490,6 +495,7 @@ impl Stmt {
             | Self::Assign { span, .. }
             | Self::Return { span }
             | Self::Break { span }
+            | Self::Continue { span }
             | Self::If { span, .. }
             | Self::Loop { span, .. }
             | Self::Match { span, .. }

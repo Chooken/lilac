@@ -1,0 +1,6 @@
+// expect-error: E022
+// `continue` needs an enclosing `loop`, like `break`.
+
+main: function () nothing {
+    continue
+}

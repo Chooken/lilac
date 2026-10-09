@@ -1010,6 +1010,10 @@ impl Parser {
                 let keyword = self.bump();
                 Ok(Stmt::Break { span: keyword.span })
             }
+            TokenKind::KwContinue => {
+                let keyword = self.bump();
+                Ok(Stmt::Continue { span: keyword.span })
+            }
             TokenKind::KwIf => self.parse_if_stmt(diags),
             TokenKind::KwLoop => self.parse_loop_stmt(diags),
             TokenKind::KwMatch => self.parse_match_stmt(diags),
@@ -1891,7 +1895,7 @@ fn starts_stmt(kind: TokenKind) -> bool {
     starts_expression(kind)
         || matches!(
             kind,
-            TokenKind::KwLoop | TokenKind::KwReturn | TokenKind::KwBreak
+            TokenKind::KwLoop | TokenKind::KwReturn | TokenKind::KwBreak | TokenKind::KwContinue
         )
 }
 
@@ -2230,6 +2234,26 @@ mod tests {
             panic!("{:?}", stmts[2]);
         };
         assert!(matches!(value, Expr::Call { generic_args, .. } if generic_args.len() == 1));
+    }
+
+    #[test]
+    fn continue_is_a_statement() {
+        let stmts = main_stmts(
+            "main: function () nothing {\n    loop if x { continue } else continue\n}\n",
+        );
+        let Stmt::Loop { body, .. } = &stmts[0] else {
+            panic!("{:?}", stmts[0]);
+        };
+        let Stmt::If {
+            then,
+            els: Some(els),
+            ..
+        } = body.as_ref()
+        else {
+            panic!("{body:?}");
+        };
+        assert!(matches!(then.stmts[..], [Stmt::Continue { .. }]));
+        assert!(matches!(els.as_ref(), Stmt::Continue { .. }));
     }
 
     #[test]

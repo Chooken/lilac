@@ -62,8 +62,8 @@ borrow checker:
 * **By-value parameters:** the caller passes a fresh copy and the callee owns
   (and drops) it.
 * **Drops:** locals are dropped in reverse declaration order when their block
-  ends, including on `return` and `break`. Statement temporaries are dropped at
-  the end of their statement. Dropping an object runs its `@on_drop` first,
+  ends, including on `return`, `break` and `continue`. Statement temporaries
+  are dropped at the end of their statement. Dropping an object runs its `@on_drop` first,
   then drops its fields in declaration order; dropping an enum drops its live
   payload. A type therefore only manages what it allocated itself.
 * **Assignment** (`place = value`) evaluates `value`, runs
@@ -406,6 +406,22 @@ loop if @i_less_than_8(val, 0x1) {
 ```
 The intrinsic form needs no operator binding. Once `@less_than` is defined for
 the operand types (see §8), the idiomatic form `loop if val < 0x1` works identically.
+
+`continue` skips the rest of the innermost loop's body and starts the next
+iteration, so a `loop if` re-tests its condition:
+
+```lilac
+i: @bit32 = 0x0
+loop if @i_less_than_32(i, 0xa) {
+    i = @i_add_32(i, 0x1)
+    if @i_less_than_u_32(@i_mod_u_32(i, 0x2), 0x1) {
+        continue // skip even numbers
+    }
+    // odd numbers only
+} else break
+```
+
+`break` and `continue` outside a `loop` are `E022`.
 
 ### Pattern Matching
 

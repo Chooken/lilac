@@ -205,6 +205,8 @@ pub enum HirStmt {
     Return(Span),
     /// `break`.
     Break(Span),
+    /// `continue`.
+    Continue(Span),
     /// `if cond { } else { }`.
     If {
         /// A `@bit8` condition.
@@ -454,7 +456,7 @@ impl HirBlock {
                     place.walk(f);
                     value.walk(f);
                 }
-                HirStmt::Return(_) | HirStmt::Break(_) => {}
+                HirStmt::Return(_) | HirStmt::Break(_) | HirStmt::Continue(_) => {}
                 HirStmt::If { cond, then, els } => {
                     cond.walk(f);
                     then.walk_exprs(f);

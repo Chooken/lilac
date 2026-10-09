@@ -268,8 +268,8 @@ struct Fs {
     /// Place types.
     place_tys: HashMap<String, LirTy>,
     scopes: Vec<Scope>,
-    /// `(exit label, scope depth)` per enclosing loop.
-    loops: Vec<(String, usize)>,
+    /// `(head label, exit label, scope depth)` per enclosing loop.
+    loops: Vec<(String, String, usize)>,
 }
 
 impl Fs {
@@ -453,7 +453,7 @@ fn stmt_span(stmt: &HirStmt) -> Span {
         },
         HirStmt::Let { value, .. } | HirStmt::Assign { value, .. } => value.span,
         HirStmt::Expr(expr) => expr.span,
-        HirStmt::Return(span) | HirStmt::Break(span) => *span,
+        HirStmt::Return(span) | HirStmt::Break(span) | HirStmt::Continue(span) => *span,
         HirStmt::If { cond, .. } => cond.span,
         HirStmt::Loop(block) | HirStmt::Block(block) => block.span,
         HirStmt::Match { scrutinee, .. } => scrutinee.span,
@@ -915,14 +915,19 @@ impl Lower<'_> {
                 }
                 fs.end(LirTerm::Return { span: *span });
             }
-            HirStmt::Break(span) => {
-                let Some((exit, depth)) = fs.loops.last().cloned() else {
-                    lilac_error::bug!(*span, "break outside a loop");
+            HirStmt::Break(span) | HirStmt::Continue(span) => {
+                let Some((head, exit, depth)) = fs.loops.last().cloned() else {
+                    lilac_error::bug!(*span, "break or continue outside a loop");
                 };
                 for index in (depth..fs.scopes.len()).rev() {
                     self.drop_scope(fs, index, *span);
                 }
-                fs.branch(&exit, *span);
+                let target = if matches!(stmt, HirStmt::Break(_)) {
+                    exit
+                } else {
+                    head
+                };
+                fs.branch(&target, *span);
             }
             HirStmt::If { cond, then, els } => {
                 // A constant condition lowers only its live arm.
@@ -936,7 +941,7 @@ impl Lower<'_> {
                 let (head, exit) = (fs.label(), fs.label());
                 fs.branch(&head, body.span);
                 fs.at(head.clone());
-                fs.loops.push((exit.clone(), fs.scopes.len()));
+                fs.loops.push((head.clone(), exit.clone(), fs.scopes.len()));
                 self.lower_block(fs, func, body);
                 fs.loops.pop();
                 fs.branch(&head, body.span);

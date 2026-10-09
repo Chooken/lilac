@@ -200,7 +200,7 @@ bug fix that changes generated code.
   after DCE, before `trace::instrument`.
 - Drops carry real spans so both traces can place them: a scope-end drop is
   at the block's closing `}` (`end_of`), an early exit's drops at the
-  `return`/`break`, and statement temporaries at the statement's expression
+  `return`/`break`/`continue`, and statement temporaries at the statement's expression
   (`stmt_span`, in `lilac-lower`). Only compiler-generated glue and runtime
   code use `Span::dummy()`; a `LirBlock`'s span is its terminator's.
 - `SourceMap::location` (`file:line:col`) and `trace::site_text` (the `at`
