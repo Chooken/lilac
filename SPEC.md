@@ -338,6 +338,12 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@address_to_ptr`** | `(address)` | The `ref unknown` at `address` (`@bit_native`); `@address_to_ptr(0x0)` is null. |
 | **`@syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
 | **`@trap()`** | `()` | Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
+| **`@atomic_load_W`** | `(ref @bitW): @bitW` | Atomic load. |
+| **`@atomic_store_W`** | `(ref @bitW, @bitW)` | Atomic store. |
+| **`@atomic_swap_W`** | `(ref @bitW, @bitW): @bitW` | Atomically replaces the value; returns the old one. |
+| **`@atomic_compare_swap_W`** | `(ref @bitW, expected: @bitW, desired: @bitW): @bitW` | Atomically replaces the value with `desired` if it equals `expected`; returns the old value (it succeeded iff that equals `expected`). Strong: it never fails spuriously. |
+| **`@atomic_add_W`**, **`_sub_`**, **`_and_`**, **`_or_`**, **`_xor_`**, **`_max_`**, **`_min_`**, **`_max_u_`**, **`_min_u_`** | `(ref @bitW, @bitW): @bitW` | Atomic read-modify-write (`max`/`min` signed, `max_u`/`min_u` unsigned); returns the old value. |
+| **`@atomic_fence`** | `()` | A memory fence. |
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
 | **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
 | **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bit_native` length. Same lifetime caveat as any `ref`. |
@@ -346,6 +352,15 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
+
+Atomics are sequentially consistent unless the name carries an ordering
+before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
+`relaxed`, `acquire`, `release` or `acq_rel`. A load cannot be `release` or
+`acq_rel`, a store cannot be `acquire` or `acq_rel`, and a fence cannot be
+`relaxed`; such a name is not an intrinsic (`E021`). Operands must be exactly
+`@bitW`, the address is a `ref @bitW` (`ref place`), and every access is
+aligned to its width. A compare-swap's failure ordering is the strongest one
+valid for its ordering (`acquire` for `acq_rel`, `relaxed` for `release`).
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference

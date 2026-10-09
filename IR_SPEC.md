@@ -216,6 +216,25 @@ print symmetrically (`&3: #bit32 = extend.zero &2`,
 `&4: #bit32 = field.addr %variable .member  // idx 0`); no UI snapshot
 covers them yet.
 
+### atomics
+* `atomic.load.<order>`, `atomic.store.<order>`, the read-modify-writes
+  `atomic.<op>.<order>` (`swap`, `add`, `sub`, `and`, `or`, `xor`, `max`,
+  `min`, `max.u`, `min.u`; each yields the old value),
+  `atomic.cmpxchg.<order>` (strong; yields the old value) and
+  `fence.<order>`. `<order>` is `relaxed`, `acquire`, `release`, `acq_rel`
+  or `seq_cst`. The address is a `ref #t` register, the operands are `#t`
+  registers, and `#t` is a bit container; every access is aligned to its
+  width. A `cmpxchg`'s failure ordering is implied: the strongest valid one
+  (`acquire` for `acq_rel`, `relaxed` for `release`).
+```lilac-ir
+&3: #bit32 = atomic.load.acquire &2
+atomic.store.release #bit32 &5 -> &4
+&8: #bit32 = atomic.add.seq_cst &6, &7
+&15: #bit32 = atomic.cmpxchg.acq_rel &12, &13, &14
+fence.seq_cst
+```
+as produced by `tests/ui/atomics.lir`.
+
 ## Control Flow
 
 ### call 
@@ -415,3 +434,6 @@ Same width rule as integer arithmetic.
    `Diagnostic`s with HIR spans, never backend crashes.
 9. Types are concrete only: no generic declaration and no type parameter
    survives; every applied declaration is monomorphized to a mangle-named item.
+10. Atomics: the address register is `ref #t` and the operands `#t` for
+    a bit container `#t`; a load is not `release`/`acq_rel`, a store not
+    `acquire`/`acq_rel`, and a fence not `relaxed`.

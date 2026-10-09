@@ -20,16 +20,16 @@ use inkwell::types::{
     BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StructType,
 };
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
-    ValueKind,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
+    InstructionValue, IntValue, PointerValue, ValueKind,
 };
-use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 
 use lilac_codegen::Entry;
 use lilac_error::{bug, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, ConvertOp, LirCallee, LirFunc, LirInst, LirModule,
-    LirOperand, LirTerm, LirTy,
+    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirFunc, LirInst,
+    LirModule, LirOperand, LirTerm, LirTy, RmwOp,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Target};
@@ -498,21 +498,125 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 self.lower_call(func, ins, outs, builder, state);
             }
             LirInst::Drop { .. } => {}
-            LirInst::Zero { place, .. } => {
-                let ptr = place_ptr(place, state);
-                let Some(ty) = state.place_types.get(place) else {
-                    bug!(Span::dummy(), "zero of undeclared place `%{place}`");
-                };
-                let Some(size) = self.lir_type(ty).size_of() else {
-                    bug!(Span::dummy(), "zero of unsized place `%{place}`");
-                };
-                let zero = self.context.i8_type().const_zero();
-                checked(builder.build_memset(ptr, 1, zero, size), "zero place");
-            }
+            LirInst::Zero { place, .. } => self.lower_zero(place, builder, state),
             LirInst::CompileError { .. } => bug!(
                 Span::dummy(),
                 "instruction `{inst:?}` is a compile-time marker and must not reach codegen"
             ),
+            LirInst::AtomicLoad { .. }
+            | LirInst::AtomicStore { .. }
+            | LirInst::AtomicRmw { .. }
+            | LirInst::CmpXchg { .. }
+            | LirInst::Fence { .. } => self.lower_atomic(inst, builder, state),
+        }
+    }
+
+    /// Lowers `zero %place`: a `memset` of the place's size.
+    fn lower_zero(&self, place: &str, builder: &Builder<'ctx>, state: &FnState<'ctx>) {
+        let ptr = place_ptr(place, state);
+        let Some(ty) = state.place_types.get(place) else {
+            bug!(Span::dummy(), "zero of undeclared place `%{place}`");
+        };
+        let Some(size) = self.lir_type(ty).size_of() else {
+            bug!(Span::dummy(), "zero of unsized place `%{place}`");
+        };
+        let zero = self.context.i8_type().const_zero();
+        checked(builder.build_memset(ptr, 1, zero, size), "zero place");
+    }
+
+    /// Lowers an atomic instruction. `atomicrmw` and `cmpxchg` take their
+    /// natural alignment from the builder; a load or store is given it.
+    fn lower_atomic(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
+        match inst {
+            LirInst::AtomicLoad {
+                ptr,
+                dst,
+                ty,
+                order,
+                ..
+            } => {
+                let value = checked(
+                    builder.build_load(self.lir_type(ty), reg_ptr(ptr, state), ""),
+                    "atomic load",
+                );
+                self.make_atomic(value.as_instruction_value(), ty, *order);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::AtomicStore {
+                value,
+                ptr,
+                ty,
+                order,
+                ..
+            } => {
+                let store = checked(
+                    builder.build_store(reg_ptr(ptr, state), reg_int(value, state)),
+                    "atomic store",
+                );
+                self.make_atomic(Some(store), ty, *order);
+            }
+            LirInst::AtomicRmw {
+                op,
+                ptr,
+                value,
+                dst,
+                order,
+                ..
+            } => {
+                let old = checked(
+                    builder.build_atomicrmw(
+                        rmw_bin_op(*op),
+                        reg_ptr(ptr, state),
+                        reg_int(value, state),
+                        llvm_ordering(*order),
+                    ),
+                    "atomicrmw",
+                );
+                state.regs.insert(dst.clone(), old.into());
+            }
+            LirInst::CmpXchg {
+                ptr,
+                expected,
+                desired,
+                dst,
+                order,
+                ..
+            } => {
+                let pair = checked(
+                    builder.build_cmpxchg(
+                        reg_ptr(ptr, state),
+                        reg_int(expected, state),
+                        reg_int(desired, state),
+                        llvm_ordering(*order),
+                        llvm_ordering(order.failure()),
+                    ),
+                    "cmpxchg",
+                );
+                let old = checked(builder.build_extract_value(pair, 0, ""), "cmpxchg old");
+                state.regs.insert(dst.clone(), old);
+            }
+            LirInst::Fence { order, .. } => {
+                checked(
+                    builder.build_fence(llvm_ordering(*order), false, ""),
+                    "fence",
+                );
+            }
+            _ => bug!(Span::dummy(), "non-atomic instruction `{inst:?}`"),
+        }
+    }
+
+    /// Makes a load or store atomic, aligned to its width.
+    fn make_atomic(&self, inst: Option<InstructionValue<'ctx>>, ty: &LirTy, order: AtomicOrdering) {
+        let Some(inst) = inst else {
+            bug!(Span::dummy(), "atomic access is not an instruction");
+        };
+        let BasicTypeEnum::IntType(int_type) = self.lir_type(ty) else {
+            bug!(Span::dummy(), "atomic access of non-integer `{ty}`");
+        };
+        let ordered = inst.set_atomic_ordering(llvm_ordering(order));
+        let aligned = inst.set_alignment(int_type.get_bit_width() / 8);
+        if let Err(err) = ordered.and(aligned) {
+            bug!(Span::dummy(), "invalid atomic access: {err}");
         }
     }
 
@@ -1334,6 +1438,45 @@ fn block_at<'ctx>(blocks: &HashMap<&str, BasicBlock<'ctx>>, label: &str) -> Basi
 }
 
 /// Reads a register as an integer value.
+/// The LLVM ordering of a LIR atomic ordering.
+fn llvm_ordering(order: AtomicOrdering) -> inkwell::AtomicOrdering {
+    match order {
+        AtomicOrdering::Relaxed => inkwell::AtomicOrdering::Monotonic,
+        AtomicOrdering::Acquire => inkwell::AtomicOrdering::Acquire,
+        AtomicOrdering::Release => inkwell::AtomicOrdering::Release,
+        AtomicOrdering::AcqRel => inkwell::AtomicOrdering::AcquireRelease,
+        AtomicOrdering::SeqCst => inkwell::AtomicOrdering::SequentiallyConsistent,
+    }
+}
+
+/// The LLVM `atomicrmw` operation of a LIR one.
+fn rmw_bin_op(op: RmwOp) -> AtomicRMWBinOp {
+    match op {
+        RmwOp::Swap => AtomicRMWBinOp::Xchg,
+        RmwOp::Add => AtomicRMWBinOp::Add,
+        RmwOp::Sub => AtomicRMWBinOp::Sub,
+        RmwOp::And => AtomicRMWBinOp::And,
+        RmwOp::Or => AtomicRMWBinOp::Or,
+        RmwOp::Xor => AtomicRMWBinOp::Xor,
+        RmwOp::Max => AtomicRMWBinOp::Max,
+        RmwOp::Min => AtomicRMWBinOp::Min,
+        RmwOp::MaxU => AtomicRMWBinOp::UMax,
+        RmwOp::MinU => AtomicRMWBinOp::UMin,
+    }
+}
+
+fn reg_ptr<'ctx>(name: &str, state: &FnState<'ctx>) -> PointerValue<'ctx> {
+    match state.regs.get(name).copied() {
+        Some(BasicValueEnum::PointerValue(value)) => value,
+        Some(other) => bug!(
+            Span::dummy(),
+            "register `&{name}` is a `{}`, not a pointer",
+            other.get_type().print_to_string()
+        ),
+        None => bug!(Span::dummy(), "use of undefined register `&{name}`"),
+    }
+}
+
 fn reg_int<'ctx>(name: &str, state: &FnState<'ctx>) -> IntValue<'ctx> {
     match state.regs.get(name).copied() {
         Some(BasicValueEnum::IntValue(value)) => value,

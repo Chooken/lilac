@@ -508,24 +508,33 @@ Done (2026-10-09). Differences from the tasks above:
 
 ### Part G: atomics
 
-- [ ] `intrinsics.rs`: `Atomic(AtomicOp, Ordering, IntWidth)` and
+- [x] `intrinsics.rs`: `Atomic(AtomicOp, Ordering, IntWidth)` and
       `Fence(Ordering)`, with the family parser and ordering validity.
-- [ ] `lilac-ir`:
+- [x] `lilac-ir`:
   - `AtomicOrdering` and `RmwOp`;
   - the five instructions (printer, `inst_span`, verifier);
   - DCE and trace pass them through.
-- [ ] Lowering arms.
-- [ ] `lilac-codegen-llvm`:
+- [x] Lowering arms.
+- [x] `lilac-codegen-llvm`:
   - atomic load/store with ordering and alignment;
   - `build_atomicrmw`;
   - `build_cmpxchg`, then `extractvalue 0`;
   - `build_fence`.
-- [ ] Tests:
+- [x] Tests:
   - lookup tests (valid and rejected orderings);
   - verifier tests;
   - `emit-llvm` checks;
   - `tests/run/atomics.lilac` (single-threaded semantics).
-- [ ] Docs: SPEC §3; IR_SPEC.
+- [x] Docs: SPEC §3; IR_SPEC.
+
+Done (2026-10-09). Differences from the tasks above:
+
+- The LIR names are `AtomicOrdering` and `RmwOp`; `atomic.store` carries
+  its type (`atomic.store.<order> #t &v -> &p`) so the verifier needs no
+  inference. Swap is an `RmwOp` (`atomic.swap`), not its own instruction.
+- Operands are exact `@bitW` (like `@i_*`), and an invalid ordering name is
+  `E021` (no such intrinsic). LIR codec version 8 (tags 17–21).
+- The `emit-llvm` check is the `tests/ui/atomics` snapshot pair.
 
 ### Part H: `@array(T, N)`
 

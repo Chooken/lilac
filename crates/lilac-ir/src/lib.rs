@@ -424,6 +424,184 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
+    /// `&d: #t = atomic.load.<order> &p` (an atomic load through the
+    /// reference in `&p`, aligned to its width).
+    AtomicLoad {
+        /// Address register (`ref #t`, without sigil).
+        ptr: String,
+        /// Destination register (without sigil).
+        dst: String,
+        /// Integer type.
+        ty: LirTy,
+        /// Memory ordering (not `release`/`acq_rel`).
+        order: AtomicOrdering,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `atomic.store.<order> #t &v -> &p`.
+    AtomicStore {
+        /// Value register (without sigil).
+        value: String,
+        /// Address register (`ref #t`, without sigil).
+        ptr: String,
+        /// Integer type.
+        ty: LirTy,
+        /// Memory ordering (not `acquire`/`acq_rel`).
+        order: AtomicOrdering,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = atomic.<op>.<order> &p, &v`: a read-modify-write that
+    /// yields the old value.
+    AtomicRmw {
+        /// Operation.
+        op: RmwOp,
+        /// Address register (`ref #t`, without sigil).
+        ptr: String,
+        /// Operand register (without sigil).
+        value: String,
+        /// Destination register: the old value (without sigil).
+        dst: String,
+        /// Integer type.
+        ty: LirTy,
+        /// Memory ordering.
+        order: AtomicOrdering,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = atomic.cmpxchg.<order> &p, &e, &n`: a strong compare and
+    /// swap that yields the old value (it succeeded iff that equals `&e`).
+    /// The failure ordering is the strongest one valid for `order`.
+    CmpXchg {
+        /// Address register (`ref #t`, without sigil).
+        ptr: String,
+        /// Expected-value register (without sigil).
+        expected: String,
+        /// Replacement-value register (without sigil).
+        desired: String,
+        /// Destination register: the old value (without sigil).
+        dst: String,
+        /// Integer type.
+        ty: LirTy,
+        /// Success ordering.
+        order: AtomicOrdering,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `fence.<order>` (not `relaxed`).
+    Fence {
+        /// Memory ordering.
+        order: AtomicOrdering,
+        /// Instruction span.
+        span: Span,
+    },
+}
+
+/// The memory ordering of an atomic instruction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtomicOrdering {
+    /// `relaxed` (LLVM `monotonic`).
+    Relaxed,
+    /// `acquire`.
+    Acquire,
+    /// `release`.
+    Release,
+    /// `acq_rel`.
+    AcqRel,
+    /// `seq_cst`.
+    SeqCst,
+}
+
+impl AtomicOrdering {
+    /// Every ordering, in codec tag order.
+    pub const ALL: [Self; 5] = [
+        Self::Relaxed,
+        Self::Acquire,
+        Self::Release,
+        Self::AcqRel,
+        Self::SeqCst,
+    ];
+
+    /// The printed name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Relaxed => "relaxed",
+            Self::Acquire => "acquire",
+            Self::Release => "release",
+            Self::AcqRel => "acq_rel",
+            Self::SeqCst => "seq_cst",
+        }
+    }
+
+    /// The failure ordering of a compare-swap with this success ordering:
+    /// the strongest one that does not release.
+    #[must_use]
+    pub fn failure(self) -> Self {
+        match self {
+            Self::Relaxed | Self::Release => Self::Relaxed,
+            Self::Acquire | Self::AcqRel => Self::Acquire,
+            Self::SeqCst => Self::SeqCst,
+        }
+    }
+}
+
+/// An `atomic.<op>` read-modify-write operation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RmwOp {
+    /// `swap`.
+    Swap,
+    /// `add`.
+    Add,
+    /// `sub`.
+    Sub,
+    /// `and`.
+    And,
+    /// `or`.
+    Or,
+    /// `xor`.
+    Xor,
+    /// `max` (signed).
+    Max,
+    /// `min` (signed).
+    Min,
+    /// `max.u`.
+    MaxU,
+    /// `min.u`.
+    MinU,
+}
+
+impl RmwOp {
+    /// Every operation, in codec tag order.
+    pub const ALL: [Self; 10] = [
+        Self::Swap,
+        Self::Add,
+        Self::Sub,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+        Self::Max,
+        Self::Min,
+        Self::MaxU,
+        Self::MinU,
+    ];
+
+    /// The printed name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Swap => "swap",
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::MaxU => "max.u",
+            Self::MinU => "min.u",
+        }
+    }
 }
 
 /// Width-conversion operators.
@@ -755,6 +933,58 @@ fn print_inst(inst: &LirInst) -> String {
         } => format!("&{dst}: {ty} = {} &{lhs}, &{rhs}", print_op(op)),
         LirInst::CompileError { .. } => "@compile_error(live)".to_owned(),
         LirInst::Zero { place, .. } => format!("zero %{place}"),
+        LirInst::AtomicLoad { .. }
+        | LirInst::AtomicStore { .. }
+        | LirInst::AtomicRmw { .. }
+        | LirInst::CmpXchg { .. }
+        | LirInst::Fence { .. } => print_atomic(inst),
+    }
+}
+
+/// Prints an atomic instruction.
+fn print_atomic(inst: &LirInst) -> String {
+    match inst {
+        LirInst::AtomicLoad {
+            ptr,
+            dst,
+            ty,
+            order,
+            ..
+        } => format!("&{dst}: {ty} = atomic.load.{} &{ptr}", order.name()),
+        LirInst::AtomicStore {
+            value,
+            ptr,
+            ty,
+            order,
+            ..
+        } => format!("atomic.store.{} {ty} &{value} -> &{ptr}", order.name()),
+        LirInst::AtomicRmw {
+            op,
+            ptr,
+            value,
+            dst,
+            ty,
+            order,
+            ..
+        } => format!(
+            "&{dst}: {ty} = atomic.{}.{} &{ptr}, &{value}",
+            op.name(),
+            order.name()
+        ),
+        LirInst::CmpXchg {
+            ptr,
+            expected,
+            desired,
+            dst,
+            ty,
+            order,
+            ..
+        } => format!(
+            "&{dst}: {ty} = atomic.cmpxchg.{} &{ptr}, &{expected}, &{desired}",
+            order.name()
+        ),
+        LirInst::Fence { order, .. } => format!("fence.{}", order.name()),
+        _ => lilac_error::bug!(Span::dummy(), "non-atomic instruction in print_atomic"),
     }
 }
 
@@ -791,7 +1021,12 @@ fn inst_span(inst: &LirInst) -> Span {
         | LirInst::Alloca { span, .. }
         | LirInst::Drop { span, .. }
         | LirInst::Arith { span, .. }
-        | LirInst::Zero { span, .. } => *span,
+        | LirInst::Zero { span, .. }
+        | LirInst::AtomicLoad { span, .. }
+        | LirInst::AtomicStore { span, .. }
+        | LirInst::AtomicRmw { span, .. }
+        | LirInst::CmpXchg { span, .. }
+        | LirInst::Fence { span, .. } => *span,
         LirInst::CompileError { call_span, .. } => *call_span,
     }
 }
@@ -1370,6 +1605,105 @@ impl Verifier<'_> {
             | LirInst::FieldAddr { .. } => {
                 self.verify_store_ops(func, inst, places, regs);
             }
+            LirInst::AtomicLoad { .. }
+            | LirInst::AtomicStore { .. }
+            | LirInst::AtomicRmw { .. }
+            | LirInst::CmpXchg { .. }
+            | LirInst::Fence { .. } => self.verify_atomic(func, inst, regs),
+        }
+    }
+
+    /// Verifies an atomic instruction: an integer type, a `ref` of that type
+    /// as the address, operands of that type, and an ordering the
+    /// instruction allows.
+    fn verify_atomic<'a>(&mut self, func: &LirFunc, inst: &'a LirInst, regs: &mut Regs<'a>) {
+        let (name, ptr, operands, dst, ty, order, span) = match inst {
+            LirInst::AtomicLoad {
+                ptr,
+                dst,
+                ty,
+                order,
+                span,
+            } => ("atomic.load", ptr, Vec::new(), Some(dst), ty, *order, *span),
+            LirInst::AtomicStore {
+                value,
+                ptr,
+                ty,
+                order,
+                span,
+            } => ("atomic.store", ptr, vec![value], None, ty, *order, *span),
+            LirInst::AtomicRmw {
+                ptr,
+                value,
+                dst,
+                ty,
+                order,
+                span,
+                ..
+            } => ("atomic.rmw", ptr, vec![value], Some(dst), ty, *order, *span),
+            LirInst::CmpXchg {
+                ptr,
+                expected,
+                desired,
+                dst,
+                ty,
+                order,
+                span,
+            } => (
+                "atomic.cmpxchg",
+                ptr,
+                vec![expected, desired],
+                Some(dst),
+                ty,
+                *order,
+                *span,
+            ),
+            LirInst::Fence { order, span } => {
+                if *order == AtomicOrdering::Relaxed {
+                    self.error("`fence` cannot be `relaxed`".to_owned(), *span);
+                }
+                return;
+            }
+            _ => lilac_error::bug!(Span::dummy(), "non-atomic instruction in verify_atomic"),
+        };
+        let bad_order = match inst {
+            LirInst::AtomicLoad { .. } => {
+                matches!(order, AtomicOrdering::Release | AtomicOrdering::AcqRel)
+            }
+            LirInst::AtomicStore { .. } => {
+                matches!(order, AtomicOrdering::Acquire | AtomicOrdering::AcqRel)
+            }
+            _ => false,
+        };
+        if bad_order {
+            self.error(format!("`{name}` cannot be `{}`", order.name()), span);
+        }
+        if !ty.is_int() {
+            self.error(
+                format!("`{name}` needs a bit-container type, found `{ty}`"),
+                span,
+            );
+        }
+        match regs.get(ptr.as_str()).map(|def| def.ty) {
+            None => self.error(format!("use of undefined register `&{ptr}`"), span),
+            Some(found) if !found.is_ref() || found.strip_ref() != ty => self.error(
+                format!("`{name}` address `&{ptr}` must be `ref {ty}`, found `{found}`"),
+                span,
+            ),
+            Some(_) => {}
+        }
+        for reg in operands {
+            match regs.get(reg.as_str()).map(|def| def.ty) {
+                None => self.error(format!("use of undefined register `&{reg}`"), span),
+                Some(found) if found != ty => self.error(
+                    format!("`{name}` operand `&{reg}` must be `{ty}`, found `{found}`"),
+                    span,
+                ),
+                Some(_) => {}
+            }
+        }
+        if let Some(dst) = dst {
+            self.define_reg(regs, dst, ty, false, span, func);
         }
     }
 
@@ -2056,6 +2390,155 @@ mod tests {
         assert_eq!(e070_count(&diags), 1, "{:?}", diags.diagnostics());
         let msgs: Vec<String> = diags.diagnostics().iter().map(|d| d.msg.clone()).collect();
         assert!(msgs.iter().any(|m| m.contains("copy")), "{msgs:?}");
+    }
+
+    /// Verifies `insts` after a `#bit32` place `%x`, its address `&p` and
+    /// the constant `&v`, returning the `E070` messages.
+    fn atomic_errors(insts: Vec<LirInst>) -> Vec<String> {
+        let span = test_span();
+        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut func = trivial_func("atomics");
+        func.blocks[0].insts = vec![
+            LirInst::Alloca {
+                ty: t("#bit32"),
+                place: "x".to_owned(),
+                span,
+            },
+            LirInst::Addr {
+                place: "x".to_owned(),
+                dst: "p".to_owned(),
+                ty: t("ref #bit32"),
+                span,
+            },
+            LirInst::Const {
+                dst: "v".to_owned(),
+                lit: "0x1".to_owned(),
+                ty: t("#bit32"),
+                span,
+            },
+            LirInst::Const {
+                dst: "w".to_owned(),
+                lit: "0x1".to_owned(),
+                ty: t("#bit64"),
+                span,
+            },
+        ];
+        func.blocks[0].insts.extend(insts);
+        module.funcs.push(func);
+        let mut diags = lilac_error::Diags::new();
+        let _ = verify(&module, &mut diags);
+        diags.diagnostics().iter().map(|d| d.msg.clone()).collect()
+    }
+
+    #[test]
+    fn verify_accepts_atomics() {
+        let span = test_span();
+        let mut insts = Vec::new();
+        for (i, order) in AtomicOrdering::ALL.into_iter().enumerate() {
+            insts.push(LirInst::AtomicRmw {
+                op: RmwOp::ALL[i],
+                ptr: "p".to_owned(),
+                value: "v".to_owned(),
+                dst: format!("r{i}"),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+            insts.push(LirInst::CmpXchg {
+                ptr: "p".to_owned(),
+                expected: "v".to_owned(),
+                desired: "v".to_owned(),
+                dst: format!("c{i}"),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+        }
+        for order in [AtomicOrdering::Relaxed, AtomicOrdering::Acquire] {
+            insts.push(LirInst::AtomicLoad {
+                ptr: "p".to_owned(),
+                dst: format!("l{}", order.name()),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+        }
+        insts.push(LirInst::AtomicStore {
+            value: "v".to_owned(),
+            ptr: "p".to_owned(),
+            ty: t("#bit32"),
+            order: AtomicOrdering::Release,
+            span,
+        });
+        insts.push(LirInst::Fence {
+            order: AtomicOrdering::AcqRel,
+            span,
+        });
+        assert_eq!(atomic_errors(insts), Vec::<String>::new());
+    }
+
+    #[test]
+    fn verify_rejects_bad_atomics() {
+        let span = test_span();
+        let load = |order| LirInst::AtomicLoad {
+            ptr: "p".to_owned(),
+            dst: "l".to_owned(),
+            ty: t("#bit32"),
+            order,
+            span,
+        };
+        let store = |order| LirInst::AtomicStore {
+            value: "v".to_owned(),
+            ptr: "p".to_owned(),
+            ty: t("#bit32"),
+            order,
+            span,
+        };
+        let rmw = |ptr: &str, value: &str, ty: &str| LirInst::AtomicRmw {
+            op: RmwOp::Add,
+            ptr: ptr.to_owned(),
+            value: value.to_owned(),
+            dst: "r".to_owned(),
+            ty: t(ty),
+            order: AtomicOrdering::SeqCst,
+            span,
+        };
+        let cases = [
+            (
+                load(AtomicOrdering::Release),
+                "`atomic.load` cannot be `release`",
+            ),
+            (
+                load(AtomicOrdering::AcqRel),
+                "`atomic.load` cannot be `acq_rel`",
+            ),
+            (
+                store(AtomicOrdering::Acquire),
+                "`atomic.store` cannot be `acquire`",
+            ),
+            (
+                LirInst::Fence {
+                    order: AtomicOrdering::Relaxed,
+                    span,
+                },
+                "`fence` cannot be `relaxed`",
+            ),
+            (rmw("v", "v", "#bit32"), "address `&v` must be `ref #bit32`"),
+            (rmw("p", "w", "#bit32"), "operand `&w` must be `#bit32`"),
+            (rmw("p", "w", "#bit64"), "address `&p` must be `ref #bit64`"),
+            (rmw("p", "v", "#fbit32"), "needs a bit-container type"),
+            (
+                rmw("p", "missing", "#bit32"),
+                "undefined register `&missing`",
+            ),
+        ];
+        for (inst, want) in cases {
+            let errors = atomic_errors(vec![inst]);
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
     }
 
     fn trivial_func(name: &str) -> LirFunc {

@@ -169,6 +169,110 @@ impl NumOp {
     }
 }
 
+/// A memory ordering named by an atomic intrinsic's `_<order>` part (none
+/// means sequentially consistent).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Ordering {
+    /// `relaxed`.
+    Relaxed,
+    /// `acquire`.
+    Acquire,
+    /// `release`.
+    Release,
+    /// `acq_rel`.
+    AcqRel,
+    /// No ordering in the name.
+    SeqCst,
+}
+
+impl Ordering {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "relaxed" => Self::Relaxed,
+            "acquire" => Self::Acquire,
+            "release" => Self::Release,
+            "acq_rel" => Self::AcqRel,
+            _ => return None,
+        })
+    }
+}
+
+/// An atomic memory operation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AtomicOp {
+    /// `load`.
+    Load,
+    /// `store`.
+    Store,
+    /// `swap`.
+    Swap,
+    /// `compare_swap`.
+    CompareSwap,
+    /// `add`.
+    Add,
+    /// `sub`.
+    Sub,
+    /// `and`.
+    And,
+    /// `or`.
+    Or,
+    /// `xor`.
+    Xor,
+    /// `max` (signed).
+    Max,
+    /// `min` (signed).
+    Min,
+    /// `max_u`.
+    MaxU,
+    /// `min_u`.
+    MinU,
+}
+
+impl AtomicOp {
+    /// Operation names, `max_u`/`min_u` before `max`/`min` so a prefix match
+    /// takes the longer name.
+    const NAMES: [(&'static str, Self); 13] = [
+        ("compare_swap", Self::CompareSwap),
+        ("max_u", Self::MaxU),
+        ("min_u", Self::MinU),
+        ("load", Self::Load),
+        ("store", Self::Store),
+        ("swap", Self::Swap),
+        ("add", Self::Add),
+        ("sub", Self::Sub),
+        ("and", Self::And),
+        ("xor", Self::Xor),
+        ("max", Self::Max),
+        ("min", Self::Min),
+        ("or", Self::Or),
+    ];
+
+    /// Whether `ordering` is valid for this operation: a load cannot
+    /// release, and a store cannot acquire.
+    #[must_use]
+    pub fn allows(self, ordering: Ordering) -> bool {
+        match self {
+            Self::Load => !matches!(ordering, Ordering::Release | Ordering::AcqRel),
+            Self::Store => !matches!(ordering, Ordering::Acquire | Ordering::AcqRel),
+            _ => true,
+        }
+    }
+
+    /// Parses `<op>[_<order>]_W` (the part after `@atomic_`).
+    fn parse(rest: &str) -> Option<(Self, Ordering, IntWidth)> {
+        let (head, width) = rest.rsplit_once('_')?;
+        let width = IntWidth::parse(width)?;
+        Self::NAMES.iter().find_map(|(name, op)| {
+            let after = head.strip_prefix(name)?;
+            let ordering = match after {
+                "" => Ordering::SeqCst,
+                _ => Ordering::parse(after.strip_prefix('_')?)?,
+            };
+            op.allows(ordering).then_some((*op, ordering, width))
+        })
+    }
+}
+
 /// One compiler intrinsic.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Intrinsic {
@@ -228,6 +332,11 @@ pub enum Intrinsic {
     /// `@panic(message)`: ends the program with a message and a stack trace
     /// (see `.lilac.panic`).
     Panic,
+    /// `@atomic_<op>[_<order>]_W`: an atomic memory operation, naturally
+    /// aligned.
+    Atomic(AtomicOp, Ordering, IntWidth),
+    /// `@atomic_fence[_<order>]` (any ordering but `relaxed`).
+    Fence(Ordering),
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -266,6 +375,18 @@ impl Intrinsic {
                 NumOp::parse(op, true)?,
                 FloatWidth::parse(width)?,
             ));
+        }
+        if name == "@atomic_fence" {
+            return Some(Self::Fence(Ordering::SeqCst));
+        }
+        if let Some(order) = name.strip_prefix("@atomic_fence_") {
+            return Ordering::parse(order)
+                .filter(|order| *order != Ordering::Relaxed)
+                .map(Self::Fence);
+        }
+        if let Some(rest) = name.strip_prefix("@atomic_") {
+            let (op, ordering, width) = AtomicOp::parse(rest)?;
+            return Some(Self::Atomic(op, ordering, width));
         }
         if let Some(width) = name.strip_prefix("@fbit_to_bits_") {
             let width = FloatWidth::parse(width).filter(|w| w.bits().is_some())?;
@@ -349,7 +470,16 @@ impl Intrinsic {
             ),
             Self::Truncate | Self::ExtendZero => sig(vec![AnyBit], Some(ExpectedBit)),
             Self::SizeOf | Self::AlignOf => sig(Vec::new(), Some(Builtin("@bit_native"))),
-            Self::CompileError | Self::Trap => sig(Vec::new(), None),
+            Self::CompileError | Self::Trap | Self::Fence(_) => sig(Vec::new(), None),
+            Self::Atomic(op, _, width) => {
+                let ty = width.builtin();
+                let params = match op {
+                    AtomicOp::Load => vec![Ref(ty)],
+                    AtomicOp::CompareSwap => vec![Ref(ty), Builtin(ty), Builtin(ty)],
+                    _ => vec![Ref(ty), Builtin(ty)],
+                };
+                sig(params, (op != AtomicOp::Store).then_some(Builtin(ty)))
+            }
             Self::LoadU8 => sig(
                 vec![Ref("@bit8"), Builtin("@bit_native")],
                 Some(Builtin("@bit8")),
@@ -455,6 +585,93 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@align_of"), Some(Intrinsic::AlignOf));
         assert_eq!(Intrinsic::lookup("@ptr_add"), Some(Intrinsic::PtrAdd));
         assert_eq!(Intrinsic::lookup("@trap"), Some(Intrinsic::Trap));
+    }
+
+    #[test]
+    fn lookup_parses_atomics() {
+        use AtomicOp::{CompareSwap, Load, MaxU, Or, Store, Swap};
+        let atomic = Intrinsic::lookup;
+        assert_eq!(
+            atomic("@atomic_load_32"),
+            Some(Intrinsic::Atomic(Load, Ordering::SeqCst, IntWidth::W32))
+        );
+        assert_eq!(
+            atomic("@atomic_load_acquire_native"),
+            Some(Intrinsic::Atomic(Load, Ordering::Acquire, IntWidth::Native))
+        );
+        assert_eq!(
+            atomic("@atomic_store_release_8"),
+            Some(Intrinsic::Atomic(Store, Ordering::Release, IntWidth::W8))
+        );
+        assert_eq!(
+            atomic("@atomic_compare_swap_acq_rel_64"),
+            Some(Intrinsic::Atomic(
+                CompareSwap,
+                Ordering::AcqRel,
+                IntWidth::W64
+            ))
+        );
+        assert_eq!(
+            atomic("@atomic_max_u_relaxed_16"),
+            Some(Intrinsic::Atomic(MaxU, Ordering::Relaxed, IntWidth::W16))
+        );
+        assert_eq!(
+            atomic("@atomic_or_32"),
+            Some(Intrinsic::Atomic(Or, Ordering::SeqCst, IntWidth::W32))
+        );
+        assert_eq!(
+            atomic("@atomic_swap_relaxed_32"),
+            Some(Intrinsic::Atomic(Swap, Ordering::Relaxed, IntWidth::W32))
+        );
+        assert_eq!(
+            atomic("@atomic_fence"),
+            Some(Intrinsic::Fence(Ordering::SeqCst))
+        );
+        assert_eq!(
+            atomic("@atomic_fence_acquire"),
+            Some(Intrinsic::Fence(Ordering::Acquire))
+        );
+        for rejected in [
+            "@atomic_load_release_32",
+            "@atomic_load_acq_rel_32",
+            "@atomic_store_acquire_32",
+            "@atomic_store_acq_rel_32",
+            "@atomic_fence_relaxed",
+            "@atomic_add_seq_cst_32",
+            "@atomic_add_128",
+            "@atomic_add",
+            "@atomic_nand_32",
+            "@atomic_maxu_32",
+            "@atomic_fence_32",
+        ] {
+            assert_eq!(atomic(rejected), None, "{rejected}");
+        }
+    }
+
+    #[test]
+    fn atomic_signatures() {
+        let sig = Intrinsic::lookup("@atomic_compare_swap_32")
+            .expect("known")
+            .signature();
+        assert_eq!(
+            sig.params,
+            vec![
+                Slot::Ref("@bit32"),
+                Slot::Builtin("@bit32"),
+                Slot::Builtin("@bit32")
+            ]
+        );
+        assert_eq!(sig.result, Some(Slot::Builtin("@bit32")));
+        let sig = Intrinsic::lookup("@atomic_store_8")
+            .expect("known")
+            .signature();
+        assert_eq!(sig.params, vec![Slot::Ref("@bit8"), Slot::Builtin("@bit8")]);
+        assert_eq!(sig.result, None);
+        let sig = Intrinsic::lookup("@atomic_load_native")
+            .expect("known")
+            .signature();
+        assert_eq!(sig.params, vec![Slot::Ref("@bit_native")]);
+        assert_eq!(sig.result, Some(Slot::Builtin("@bit_native")));
     }
 
     #[test]

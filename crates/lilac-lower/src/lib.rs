@@ -23,14 +23,14 @@ mod constant;
 use std::collections::{HashMap, HashSet};
 
 use lilac_error::{Diagnostic, Diags};
-use lilac_hir::intrinsics::{Intrinsic, NumOp};
+use lilac_hir::intrinsics::{AtomicOp, Intrinsic, NumOp, Ordering};
 use lilac_hir::{
     FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirPattern,
     HirProgram, HirStmt, HirValueArm, Layout, LocalId,
 };
 use lilac_ir::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm, LirTy,
+    ArithOp, AtomicOrdering, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm, LirTy, RmwOp,
 };
 use lilac_resolve::{DefKind, Resolved};
 use lilac_span::{BytePos, SourceMap, Span};
@@ -2491,6 +2491,16 @@ impl Lower<'_> {
                 }
                 out.map_or(LirOperand::Reg(String::new()), LirOperand::Place)
             }
+            Intrinsic::Atomic(op, ordering, _) => {
+                self.lower_atomic(fs, func, op, atomic_ordering(ordering), args, span)
+            }
+            Intrinsic::Fence(ordering) => {
+                fs.emit(LirInst::Fence {
+                    order: atomic_ordering(ordering),
+                    span,
+                });
+                LirOperand::Reg(String::new())
+            }
             Intrinsic::Panic => {
                 let msg = self.arg(fs, func, &args[0]);
                 let location = self.sources.location(span);
@@ -2536,6 +2546,97 @@ impl Lower<'_> {
                 });
                 LirOperand::Place(out)
             }
+        }
+    }
+}
+
+impl Lower<'_> {
+    /// Lowers `@atomic_<op>_W(ref place, operands…)`: the operands become
+    /// registers of the element type and the address a `ref` register.
+    fn lower_atomic(
+        &mut self,
+        fs: &mut Fs,
+        func: &HirFunc,
+        op: AtomicOp,
+        order: AtomicOrdering,
+        args: &[HirExpr],
+        span: Span,
+    ) -> LirOperand {
+        let ptr = self.value_reg(fs, func, &args[0]);
+        let ty = self.lir_ty(TypeRef::value(args[0].ty.id));
+        let operands: Vec<String> = args[1..]
+            .iter()
+            .map(|arg| self.value_reg(fs, func, arg))
+            .collect();
+        if op == AtomicOp::Store {
+            fs.emit(LirInst::AtomicStore {
+                value: operands[0].clone(),
+                ptr,
+                ty,
+                order,
+                span,
+            });
+            return LirOperand::Reg(String::new());
+        }
+        let dst = fs.reg();
+        let inst = match op {
+            AtomicOp::Load => LirInst::AtomicLoad {
+                ptr,
+                dst: dst.clone(),
+                ty,
+                order,
+                span,
+            },
+            AtomicOp::CompareSwap => LirInst::CmpXchg {
+                ptr,
+                expected: operands[0].clone(),
+                desired: operands[1].clone(),
+                dst: dst.clone(),
+                ty,
+                order,
+                span,
+            },
+            _ => LirInst::AtomicRmw {
+                op: rmw_op(op),
+                ptr,
+                value: operands[0].clone(),
+                dst: dst.clone(),
+                ty,
+                order,
+                span,
+            },
+        };
+        fs.emit(inst);
+        LirOperand::Reg(dst)
+    }
+}
+
+/// The LIR ordering of an atomic intrinsic's ordering.
+fn atomic_ordering(ordering: Ordering) -> AtomicOrdering {
+    match ordering {
+        Ordering::Relaxed => AtomicOrdering::Relaxed,
+        Ordering::Acquire => AtomicOrdering::Acquire,
+        Ordering::Release => AtomicOrdering::Release,
+        Ordering::AcqRel => AtomicOrdering::AcqRel,
+        Ordering::SeqCst => AtomicOrdering::SeqCst,
+    }
+}
+
+/// The `atomic.<op>` of a read-modify-write intrinsic.
+fn rmw_op(op: AtomicOp) -> RmwOp {
+    match op {
+        AtomicOp::Add => RmwOp::Add,
+        AtomicOp::Sub => RmwOp::Sub,
+        AtomicOp::And => RmwOp::And,
+        AtomicOp::Or => RmwOp::Or,
+        AtomicOp::Xor => RmwOp::Xor,
+        AtomicOp::Max => RmwOp::Max,
+        AtomicOp::Min => RmwOp::Min,
+        AtomicOp::MaxU => RmwOp::MaxU,
+        AtomicOp::MinU => RmwOp::MinU,
+        AtomicOp::Swap => RmwOp::Swap,
+        AtomicOp::Load | AtomicOp::Store | AtomicOp::CompareSwap => {
+            lilac_error::bug!(Span::dummy(), "`{op:?}` is not a read-modify-write")
         }
     }
 }

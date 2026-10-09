@@ -1601,3 +1601,25 @@ fn same_block_redeclaration_is_e020_but_nested_shadowing_is_fine() {
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
+
+#[test]
+fn atomics_check_orderings_and_widths() {
+    let ok = check_src(
+        "main: function () nothing {\n    x: @bit16 = 0x1\n    old: @bit16 = @atomic_or_release_16(ref x, 0x2)\n    @atomic_store_16(ref x, old)\n    @atomic_fence_acquire()\n}\n",
+    );
+    assert!(ok.diagnostics().is_empty(), "{ok:?}");
+    // A load cannot release: the name is not an intrinsic.
+    let diags = check_src(
+        "main: function () nothing {\n    x: @bit32 = 0x1\n    y: @bit32 = @atomic_load_release_32(ref x)\n}\n",
+    );
+    assert!(has_code(&diags, "E021"), "{diags:?}");
+    // The operand must be exactly `@bitW`, and the address needs a `ref`.
+    let diags = check_src(
+        "main: function () nothing {\n    x: @bit32 = 0x1\n    y: @bit64 = 0x1\n    z: @bit32 = @atomic_add_32(ref x, y)\n}\n",
+    );
+    assert!(has_code(&diags, "E010"), "{diags:?}");
+    let diags = check_src(
+        "main: function () nothing {\n    x: @bit32 = 0x1\n    z: @bit32 = @atomic_load_32(x)\n}\n",
+    );
+    assert!(has_code(&diags, "E010"), "{diags:?}");
+}

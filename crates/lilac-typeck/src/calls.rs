@@ -806,6 +806,7 @@ impl Checker<'_> {
                 | Intrinsic::Float(..)
                 | Intrinsic::FbitToBits(_)
                 | Intrinsic::BitsToFbit(_)
+                | Intrinsic::Atomic(..)
         );
         let mut checked = Vec::with_capacity(args.len());
         let mut failed = false;

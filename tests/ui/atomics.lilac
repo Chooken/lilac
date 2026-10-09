@@ -1,0 +1,11 @@
+main: function () nothing {
+    value: @bit32 = 0x5
+    old: @bit32 = @atomic_load_acquire_32(ref value)
+    @atomic_store_release_32(ref value, 0x7)
+    old = @atomic_add_32(ref value, 0x1)
+    old = @atomic_max_u_relaxed_32(ref value, 0x9)
+    old = @atomic_compare_swap_acq_rel_32(ref value, 0x9, 0x2)
+    @atomic_fence()
+    wide: @bit_native = 0x0
+    count: @bit_native = @atomic_swap_native(ref wide, 0x1)
+}

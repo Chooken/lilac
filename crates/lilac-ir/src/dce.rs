@@ -215,14 +215,19 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::Convert { ty, .. }
         | LirInst::FieldAddr { ty, .. }
         | LirInst::Alloca { ty, .. }
-        | LirInst::Arith { ty, .. } => Some(ty),
+        | LirInst::Arith { ty, .. }
+        | LirInst::AtomicLoad { ty, .. }
+        | LirInst::AtomicStore { ty, .. }
+        | LirInst::AtomicRmw { ty, .. }
+        | LirInst::CmpXchg { ty, .. } => Some(ty),
         LirInst::CopyPlace { .. }
         | LirInst::Call { .. }
         | LirInst::StoreField { .. }
         | LirInst::Store { .. }
         | LirInst::Drop { .. }
         | LirInst::CompileError { .. }
-        | LirInst::Zero { .. } => None,
+        | LirInst::Zero { .. }
+        | LirInst::Fence { .. } => None,
     }
 }
 

@@ -30,6 +30,11 @@
   `i.add`). `@align_of` is a constant like `@size_of`. A reachable user
   `@syscall` off Linux x86-64/aarch64 (`Target::has_syscall`) is `E035`,
   checked after DCE like `E031` (`lilac_ir::check_live_syscalls`).
+- Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
+  `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
+  intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/
+  `AtomicRmw`/`CmpXchg`/`Fence` (the verifier checks types and orderings)
+  and to LLVM atomics aligned to their width.
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
   `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
   `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes

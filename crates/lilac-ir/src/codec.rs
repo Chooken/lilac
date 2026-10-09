@@ -13,16 +13,17 @@ use std::io::{self, Read, Write};
 use lilac_span::{BytePos, FileId, Span};
 
 use crate::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm, LirTy,
+    ArithOp, AtomicOrdering, ConvertOp, LirBlock, LirCallee, LirData, LirFunc, LirInst, LirModule,
+    LirOperand, LirTerm, LirTy, RmwOp,
 };
 
 /// Wire-format version; bump on any normative codec change.
 ///
 /// Version 2 added the `ArithOp::ILtU` tag (15), used by the LIR runtime's
 /// unsigned `format_args` bounds checks. Version 3 appends the unsigned
-/// `IGtU`/`IDivU`/`IModU` tags (16–18).
-pub const LIR_CODEC_VERSION: u32 = 7;
+/// `IGtU`/`IDivU`/`IModU` tags (16–18). Version 8 adds the atomic
+/// instructions (tags 17–21).
+pub const LIR_CODEC_VERSION: u32 = 8;
 
 /// Module magic: `b"LILACIR\0"`.
 const MAGIC: &[u8; 8] = b"LILACIR\0";
@@ -381,7 +382,92 @@ fn put_inst(w: &mut impl Write, inst: &LirInst) -> io::Result<()> {
             put_str(w, place)?;
             put_span(w, *span)
         }
+        LirInst::AtomicLoad {
+            ptr,
+            dst,
+            ty,
+            order,
+            span,
+        } => {
+            put_u8(w, 17)?;
+            put_str(w, ptr)?;
+            put_str(w, dst)?;
+            put_ty(w, ty)?;
+            put_ordering(w, *order)?;
+            put_span(w, *span)
+        }
+        LirInst::AtomicStore {
+            value,
+            ptr,
+            ty,
+            order,
+            span,
+        } => {
+            put_u8(w, 18)?;
+            put_str(w, value)?;
+            put_str(w, ptr)?;
+            put_ty(w, ty)?;
+            put_ordering(w, *order)?;
+            put_span(w, *span)
+        }
+        LirInst::AtomicRmw {
+            op,
+            ptr,
+            value,
+            dst,
+            ty,
+            order,
+            span,
+        } => {
+            put_u8(w, 19)?;
+            put_tag(w, RmwOp::ALL.iter().position(|item| item == op))?;
+            put_str(w, ptr)?;
+            put_str(w, value)?;
+            put_str(w, dst)?;
+            put_ty(w, ty)?;
+            put_ordering(w, *order)?;
+            put_span(w, *span)
+        }
+        LirInst::CmpXchg {
+            ptr,
+            expected,
+            desired,
+            dst,
+            ty,
+            order,
+            span,
+        } => {
+            put_u8(w, 20)?;
+            put_str(w, ptr)?;
+            put_str(w, expected)?;
+            put_str(w, desired)?;
+            put_str(w, dst)?;
+            put_ty(w, ty)?;
+            put_ordering(w, *order)?;
+            put_span(w, *span)
+        }
+        LirInst::Fence { order, span } => {
+            put_u8(w, 21)?;
+            put_ordering(w, *order)?;
+            put_span(w, *span)
+        }
     }
+}
+
+/// Writes an atomic ordering tag (its index in [`AtomicOrdering::ALL`]).
+fn put_ordering(w: &mut impl Write, order: AtomicOrdering) -> io::Result<()> {
+    put_tag(
+        w,
+        AtomicOrdering::ALL.iter().position(|item| *item == order),
+    )
+}
+
+/// Writes an enum tag found by position in its `ALL` table.
+fn put_tag(w: &mut impl Write, index: Option<usize>) -> io::Result<()> {
+    let tag = index
+        .and_then(|index| u8::try_from(index).ok())
+        .unwrap_or(u8::MAX);
+    put_u8(w, tag)
 }
 
 /// Writes one terminator (exhaustive tag + fields in declaration order).
@@ -781,8 +867,62 @@ fn get_inst(r: &mut impl Read) -> Result<LirInst, CodecError> {
             let span = get_span(r)?;
             Ok(LirInst::Zero { place, span })
         }
+        17..=21 => get_atomic(r, tag),
         _ => Err(CodecError::Malformed("invalid LirInst tag")),
     }
+}
+
+/// Reads an atomic instruction (tags 17–21) after its tag.
+fn get_atomic(r: &mut impl Read, tag: u8) -> Result<LirInst, CodecError> {
+    Ok(match tag {
+        17 => LirInst::AtomicLoad {
+            ptr: get_str(r)?,
+            dst: get_str(r)?,
+            ty: get_ty(r)?,
+            order: get_ordering(r)?,
+            span: get_span(r)?,
+        },
+        18 => LirInst::AtomicStore {
+            value: get_str(r)?,
+            ptr: get_str(r)?,
+            ty: get_ty(r)?,
+            order: get_ordering(r)?,
+            span: get_span(r)?,
+        },
+        19 => LirInst::AtomicRmw {
+            op: *RmwOp::ALL
+                .get(usize::from(get_u8(r)?))
+                .ok_or(CodecError::Malformed("invalid RmwOp tag"))?,
+            ptr: get_str(r)?,
+            value: get_str(r)?,
+            dst: get_str(r)?,
+            ty: get_ty(r)?,
+            order: get_ordering(r)?,
+            span: get_span(r)?,
+        },
+        20 => LirInst::CmpXchg {
+            ptr: get_str(r)?,
+            expected: get_str(r)?,
+            desired: get_str(r)?,
+            dst: get_str(r)?,
+            ty: get_ty(r)?,
+            order: get_ordering(r)?,
+            span: get_span(r)?,
+        },
+        21 => LirInst::Fence {
+            order: get_ordering(r)?,
+            span: get_span(r)?,
+        },
+        _ => return Err(CodecError::Malformed("invalid LirInst tag")),
+    })
+}
+
+/// Reads an atomic ordering tag.
+fn get_ordering(r: &mut impl Read) -> Result<AtomicOrdering, CodecError> {
+    AtomicOrdering::ALL
+        .get(usize::from(get_u8(r)?))
+        .copied()
+        .ok_or(CodecError::Malformed("invalid AtomicOrdering tag"))
 }
 
 /// Reads one terminator (exhaustive tag match).
@@ -1188,6 +1328,43 @@ mod tests {
             place: "p0".to_owned(),
             span,
         });
+        for (i, order) in AtomicOrdering::ALL.into_iter().enumerate() {
+            insts.push(LirInst::AtomicLoad {
+                ptr: "r4".to_owned(),
+                dst: format!("l{i}"),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+            insts.push(LirInst::AtomicStore {
+                value: "r0".to_owned(),
+                ptr: "r4".to_owned(),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+            insts.push(LirInst::CmpXchg {
+                ptr: "r4".to_owned(),
+                expected: "r0".to_owned(),
+                desired: "r1".to_owned(),
+                dst: format!("c{i}"),
+                ty: t("#bit32"),
+                order,
+                span,
+            });
+            insts.push(LirInst::Fence { order, span });
+        }
+        for (i, op) in RmwOp::ALL.into_iter().enumerate() {
+            insts.push(LirInst::AtomicRmw {
+                op,
+                ptr: "r4".to_owned(),
+                value: "r0".to_owned(),
+                dst: format!("m{i}"),
+                ty: t("#bit64"),
+                order: AtomicOrdering::AcqRel,
+                span,
+            });
+        }
 
         let blocks = vec![
             LirBlock {
