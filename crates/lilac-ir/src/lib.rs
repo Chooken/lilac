@@ -792,6 +792,19 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
         ),
         "@lilac_abort" => (vec![], vec![]),
         "@syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
+        "@thread_entry" => (vec![], vec![LirTy::opaque_ref()]),
+        "@thread_clone" => (
+            vec![
+                LirTy::BitNative,
+                LirTy::opaque_ref(),
+                LirTy::opaque_ref(),
+                LirTy::opaque_ref(),
+                LirTy::opaque_ref(),
+                LirTy::BitNative,
+                LirTy::opaque_ref(),
+            ],
+            vec![LirTy::BitNative],
+        ),
         "@trace_head" => (vec![], vec![LirTy::trace_frame().to_ref().to_ref()]),
         _ => return None,
     };

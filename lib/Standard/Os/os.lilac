@@ -433,6 +433,6 @@ private {
     }
 
     unsupported: function () nothing {
-        @compile_error("Standard.Os has no file, clock or random support on a target with no OS")
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }

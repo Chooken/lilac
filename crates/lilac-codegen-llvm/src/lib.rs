@@ -21,6 +21,7 @@ use lilac_ir::LirModule;
 mod lower;
 mod native;
 mod runtime;
+mod threads;
 
 /// LLVM backend for a fixed target triple and optimization level.
 #[derive(Debug)]
@@ -1255,7 +1256,7 @@ mod tests {
             .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
         let text = emit(&module);
         assert!(
-            text.contains("@.lilac.trace_head.slot = internal global ptr null"),
+            text.contains("@.lilac.trace_head.slot = internal thread_local global ptr null"),
             "{text}"
         );
         assert!(text.contains("define ptr @.lilac.trace_head()"), "{text}");
@@ -1793,6 +1794,106 @@ mod tests {
                 text.contains("define void @.lilac.native_main(i64"),
                 "{triple}: {text}"
             );
+        }
+    }
+
+    /// The native module text of an executable whose `main` runs `insts`.
+    fn native_text(triple: &str, insts: Vec<LirInst>) -> String {
+        let module = executable_module(triple, insts);
+        let backend = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0);
+        let context = inkwell::context::Context::create();
+        let (built, _) = backend
+            .build_module(
+                &context,
+                &module,
+                inkwell::targets::RelocMode::PIC,
+                Entry::Native,
+                &mut |_| {},
+            )
+            .expect("builds");
+        built.print_to_string().to_string()
+    }
+
+    /// The trace head and a thread's start, in `insts`.
+    fn thread_insts(clone: bool) -> Vec<LirInst> {
+        let mut insts = Vec::new();
+        alloca(&mut insts, "head", "ref ref #.lilac.frame");
+        call(
+            &mut insts,
+            LirCallee::Builtin("@trace_head".to_owned()),
+            &[],
+            &["head"],
+        );
+        alloca(&mut insts, "entry", "ref #unknown");
+        call(
+            &mut insts,
+            LirCallee::Builtin("@thread_entry".to_owned()),
+            &[],
+            &["entry"],
+        );
+        if clone {
+            let args = ["f", "s", "p", "c", "a", "n", "st"];
+            for (place, ty) in args.iter().zip([
+                "#bit_native",
+                "ref #unknown",
+                "ref #unknown",
+                "ref #unknown",
+                "ref #unknown",
+                "#bit_native",
+                "ref #unknown",
+            ]) {
+                alloca(&mut insts, place, ty);
+            }
+            alloca(&mut insts, "id", "#bit_native");
+            call(
+                &mut insts,
+                LirCallee::Builtin("@thread_clone".to_owned()),
+                &args,
+                &["id"],
+            );
+        }
+        insts
+    }
+
+    /// Linux threads: `.lilac.thread_clone` lays out the TLS block and runs
+    /// the assembly `clone`, whose child calls `.lilac.thread_entry`; the
+    /// trace head is a local-exec thread-local, so `.lilac.native_main`
+    /// first sets up the main thread's block. The entry assembly survives
+    /// the clone assembly being appended.
+    #[test]
+    fn linux_threads() {
+        for (triple, entry) in [
+            ("x86_64-unknown-linux-gnu", "leaq 16(%rsp,%rdi,8), %rdx"),
+            ("aarch64-unknown-linux-gnu", "add x2, x1, x0, lsl #3"),
+        ] {
+            let text = native_text(triple, thread_insts(true));
+            for want in [
+                "@.lilac.trace_head.slot = internal thread_local(localexec) global ptr null",
+                "define ptr @.lilac.thread_entry(ptr",
+                "define i64 @.lilac.thread_clone(i64",
+                "define ptr @.lilac.tls_init(ptr",
+                "\\22.lilac.clone_raw\\22:",
+                "call void @.lilac.main_tls()",
+                entry,
+            ] {
+                assert!(text.contains(want), "{triple}: {want}: {text}");
+            }
+        }
+    }
+
+    /// Native Windows: the thread-local trace head brings the TLS directory
+    /// a C runtime would define, beside `__chkstk`.
+    #[test]
+    fn windows_thread_locals() {
+        let text = native_text("x86_64-pc-windows-msvc", thread_insts(false));
+        for want in [
+            "@.lilac.trace_head.slot = internal thread_local global ptr null",
+            "define ptr @.lilac.thread_entry(ptr",
+            "@_tls_used = constant",
+            "@_tls_index = global i32 0",
+            "__chkstk:",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
         }
     }
 

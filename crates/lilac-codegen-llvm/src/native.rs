@@ -9,7 +9,8 @@
 //!
 //! On Linux it also defines the process entry `.lilac.native_entry` in
 //! assembly: only assembly can read the arguments the kernel leaves on the
-//! stack.
+//! stack. On Windows, a module with thread-locals gets the TLS directory a C
+//! runtime would define.
 //!
 //! macOS needs none of this: its system interface is `libSystem`, which a
 //! native program links anyway, and which already defines the memory
@@ -27,6 +28,7 @@ use lilac_error::bug;
 use lilac_span::Span;
 
 use crate::lower::checked;
+use crate::threads::{append_assembly, has_thread_locals, windows_tls_directory};
 
 /// `__chkstk` for x86-64 Windows: probes each page from the stack pointer
 /// down to `rsp - rax`, preserving every register. From compiler-rt's
@@ -134,18 +136,21 @@ pub(crate) fn define<'ctx>(
         fltused.set_initializer(&context.i32_type().const_zero());
         fltused.set_linkage(Linkage::External);
         if triple.starts_with("x86_64") {
-            module.set_inline_assembly(CHKSTK_X86_64);
+            append_assembly(module, "__chkstk", CHKSTK_X86_64);
         } else if triple.starts_with("aarch64") {
-            module.set_inline_assembly(CHKSTK_AARCH64);
+            append_assembly(module, "__chkstk", CHKSTK_AARCH64);
+        }
+        if has_thread_locals(module) {
+            windows_tls_directory(module);
         }
     }
     // Linux enters a process with its arguments on the stack, which only
     // assembly can read: the entry passes them to `.lilac.native_main`.
     if triple.contains("linux") && module.get_function(".lilac.native_main").is_some() {
         if triple.starts_with("x86_64") {
-            module.set_inline_assembly(ENTRY_X86_64);
+            append_assembly(module, ".lilac.native_entry", ENTRY_X86_64);
         } else if triple.starts_with("aarch64") {
-            module.set_inline_assembly(ENTRY_AARCH64);
+            append_assembly(module, ".lilac.native_entry", ENTRY_AARCH64);
         }
     }
 }

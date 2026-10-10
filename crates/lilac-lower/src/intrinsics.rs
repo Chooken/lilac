@@ -140,6 +140,8 @@ impl Lower<'_> {
             | Intrinsic::Memmove
             | Intrinsic::Memset
             | Intrinsic::Syscall
+            | Intrinsic::ThreadEntry
+            | Intrinsic::ThreadClone
             | Intrinsic::Trap => {
                 let Some(name) = intrinsic.leaf_builtin() else {
                     lilac_error::bug!(span, "intrinsic `{intrinsic:?}` has no leaf");

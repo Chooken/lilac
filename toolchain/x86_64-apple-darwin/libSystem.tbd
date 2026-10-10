@@ -5,7 +5,7 @@ install-name:    '/usr/lib/libSystem.B.dylib'
 current-version: 1345
 exports:
   - targets:         [ x86_64-macos ]
-    symbols:         [ __NSGetArgc, __NSGetArgv, __NSGetEnviron, ___chkstk_darwin,
+    symbols:         [ __NSGetArgc, __NSGetArgv, __NSGetEnviron, ___chkstk_darwin, __tlv_bootstrap,
                        ___error, __exit, _abort, _access, _arc4random_buf, _bzero,
                        _calloc, _chdir, _clock_gettime, _clock_gettime_nsec_np, _close,
                        _dup, _dup2, _exit, _fcntl, _fmod, _fmodf, _free, _fsync,

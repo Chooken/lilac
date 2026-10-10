@@ -106,6 +106,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.arch
     }
 
+    /// The target's operating system, when the triple parses.
+    pub(crate) fn os(&self) -> Option<Os> {
+        self.os
+    }
+
     /// The target's `iNative` integer width.
     pub(crate) fn native_int(&self) -> IntType<'ctx> {
         self.native
@@ -146,6 +151,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ///   the assembly entry `.lilac.native_entry` calls with what the kernel
     ///   left on the stack ([`crate::native`]).
     ///
+    /// Native Linux first gives the main thread its thread-local block when
+    /// the module has thread-locals ([`crate::threads::main_tls`]).
+    ///
     /// The stub ends the process through `@exit` and never returns, so the
     /// wrapper ends `unreachable`. A module without the stub gets none.
     fn emit_entry_wrapper(&self, entry: Entry) {
@@ -173,6 +181,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let builder = self.context.create_builder();
         let block = self.context.append_basic_block(wrapper, "entry");
         builder.position_at_end(block);
+        if entry == Entry::Native
+            && self.os == Some(Os::Linux)
+            && crate::threads::has_thread_locals(&self.module)
+        {
+            let main_tls = crate::threads::main_tls(&self.module, self.arch);
+            checked(builder.build_call(main_tls, &[], ""), "main thread TLS");
+        }
         let (count, arguments, environment) = match wrapper.get_params().as_slice() {
             [count, arguments, environment] => (
                 count.into_int_value(),
@@ -1527,6 +1542,8 @@ fn builtin_symbol(name: &str) -> &str {
         "@lilac_abort" => ".lilac.abort",
         "@syscall" => ".lilac.syscall",
         "@trace_head" => ".lilac.trace_head",
+        "@thread_entry" => ".lilac.thread_entry.address",
+        "@thread_clone" => ".lilac.thread_clone",
         other => other.strip_prefix('@').unwrap_or(other),
     }
 }

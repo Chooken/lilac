@@ -16,10 +16,11 @@ use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
 };
+use inkwell::ThreadLocalMode;
 
 use lilac_error::bug;
 use lilac_span::Span;
-use lilac_target::Arch;
+use lilac_target::{Arch, Os};
 
 use crate::lower::{checked, Lower};
 
@@ -51,10 +52,19 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@trace_head") {
         trace_head(lower);
     }
+    if used.contains("@thread_entry") {
+        crate::threads::thread_entry_address(lower);
+    }
+    if used.contains("@thread_clone") {
+        crate::threads::thread_clone(lower);
+    }
 }
 
 /// `@trace_head() -> ref ref #.lilac.frame`: the address of the shadow-stack
-/// head (`lilac_ir::trace`), a zeroed pointer-sized internal global.
+/// head (`lilac_ir::trace`), a zeroed pointer-sized internal global. Each
+/// thread has its own on an operating system (`thread_local`); Linux uses
+/// the local-exec model, which a static executable with no C library
+/// supports ([`crate::threads::main_tls`]).
 fn trace_head(lower: &Lower<'_, '_>) {
     let ptr = lower.ptr_type();
     let slot = lower
@@ -62,6 +72,14 @@ fn trace_head(lower: &Lower<'_, '_>) {
         .add_global(ptr, None, ".lilac.trace_head.slot");
     slot.set_linkage(Linkage::Internal);
     slot.set_initializer(&ptr.const_null());
+    match lower.os() {
+        Some(Os::Linux) => {
+            slot.set_thread_local_mode(Some(ThreadLocalMode::LocalExecTLSModel));
+        }
+        Some(Os::Windows | Os::Macos) => slot.set_thread_local(true),
+        _ => {}
+    }
+
     let function = lower.runtime_fn(".lilac.trace_head", ptr.fn_type(&[], false));
     let builder = entry(lower, function);
     checked(
@@ -71,7 +89,11 @@ fn trace_head(lower: &Lower<'_, '_>) {
 }
 
 /// Reads the `index`th parameter of a runtime function, raising an ICE when absent.
-fn param<'ctx>(function: FunctionValue<'ctx>, index: u32, name: &str) -> BasicValueEnum<'ctx> {
+pub(crate) fn param<'ctx>(
+    function: FunctionValue<'ctx>,
+    index: u32,
+    name: &str,
+) -> BasicValueEnum<'ctx> {
     match function.get_nth_param(index) {
         Some(value) => value,
         None => bug!(
@@ -82,7 +104,7 @@ fn param<'ctx>(function: FunctionValue<'ctx>, index: u32, name: &str) -> BasicVa
 }
 
 /// Creates a builder positioned at a fresh `entry` block of `function`.
-fn entry<'ctx>(lower: &Lower<'ctx, '_>, function: FunctionValue<'ctx>) -> Builder<'ctx> {
+pub(crate) fn entry<'ctx>(lower: &Lower<'ctx, '_>, function: FunctionValue<'ctx>) -> Builder<'ctx> {
     let builder = lower.context().create_builder();
     let block = lower.context().append_basic_block(function, "entry");
     builder.position_at_end(block);

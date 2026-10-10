@@ -53,8 +53,9 @@ pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
     }
 }
 
-/// `E035` for each `@syscall` a reachable user function makes when the
-/// target has no system-call instruction (`has_syscall` is false). The
+/// `E035` for each `@syscall` or `@thread_clone` a reachable user function
+/// makes when the target has no system-call instruction (`has_syscall` is
+/// false). The
 /// runtime's own `.lilac.*` calls are the compiler's business, not the user's.
 ///
 /// # Errors
@@ -85,17 +86,17 @@ pub fn check_live_syscalls<S: std::hash::BuildHasher>(
             else {
                 continue;
             };
-            if name != "@syscall" {
+            if name != "@syscall" && name != "@thread_clone" {
                 continue;
             }
             failed = true;
             diags.emit(
                 Diagnostic::error(
                     codes::E035,
-                    format!("`@syscall` is not available on `{}`", module.target),
+                    format!("`{name}` is not available on `{}`", module.target),
                 )
                 .label(*span, true, "no system-call instruction on this target".to_owned())
-                .help("`@syscall` needs Linux on x86-64 or aarch64; choose another arm with `@builtin.Target`")
+                .help(format!("`{name}` needs Linux on x86-64 or aarch64; choose another arm with `@builtin.Target`"))
                 .trace(graph.trace(func.name.as_str(), *span, names)),
             );
         }

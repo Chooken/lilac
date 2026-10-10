@@ -350,6 +350,18 @@ pub enum Intrinsic {
     /// `@syscall(number, a0, a1, a2, a3, a4, a5)`: the Linux system-call
     /// instruction (`E035` on other targets).
     Syscall,
+    /// `@thread_entry()`: the address of the backend's C-ABI thread start
+    /// routine, `ptr (ptr start)`, which calls `start`'s Lilac
+    /// `function (ref unknown) nothing` with its argument (a
+    /// `{ function, argument }` pair). Hand it to `CreateThread`,
+    /// `pthread_create` or `@thread_clone`.
+    ThreadEntry,
+    /// `@thread_clone(flags, stack, parent_tid, child_tid, tls_area,
+    /// tls_size, start)`: Linux `clone` of a thread that runs
+    /// `@thread_entry`'s routine on `start` on `stack`, then exits. With
+    /// `CLONE_SETTLS`, its thread-local storage is built in the zeroed
+    /// `tls_area` (`E035` off Linux x86-64/aarch64).
+    ThreadClone,
     /// `@trap()`: stops the program at once with a trap instruction.
     Trap,
     /// `@byte_buffer_ptr(buffer)`.
@@ -407,7 +419,7 @@ pub struct Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 26] = [
+    const PLAIN: [(&'static str, Self); 28] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -422,6 +434,8 @@ impl Intrinsic {
         ("@ptr_to_address", Self::PtrToAddress),
         ("@address_to_ptr", Self::AddressToPtr),
         ("@syscall", Self::Syscall),
+        ("@thread_entry", Self::ThreadEntry),
+        ("@thread_clone", Self::ThreadClone),
         ("@trap", Self::Trap),
         ("@byte_buffer_ptr", Self::ByteBufferPtr),
         ("@byte_buffer_len", Self::ByteBufferLen),
@@ -636,10 +650,7 @@ impl Intrinsic {
             ),
             Self::PtrToAddress => sig(vec![Ref(Ty::Unknown)], Some(Builtin(Ty::BitNative))),
             Self::AddressToPtr => sig(vec![Builtin(Ty::BitNative)], Some(Ref(Ty::Unknown))),
-            Self::Syscall => sig(
-                vec![Builtin(Ty::BitNative); 7],
-                Some(Builtin(Ty::BitNative)),
-            ),
+            Self::Syscall | Self::ThreadEntry | Self::ThreadClone => self.system_signature(),
             Self::ByteBufferPtr => sig(vec![Builtin(Ty::ByteBuffer)], Some(Ref(Ty::Bit8))),
             Self::ByteBufferLen => sig(vec![Builtin(Ty::ByteBuffer)], Some(Builtin(Ty::BitNative))),
             Self::ByteBufferFrom => sig(
@@ -659,6 +670,24 @@ impl Intrinsic {
         }
     }
 
+    /// The signatures of the system intrinsics: `@syscall` and the threads.
+    fn system_signature(self) -> Signature {
+        let native = Slot::Builtin(Ty::BitNative);
+        let opaque = Slot::Ref(Ty::Unknown);
+        let (params, result) = match self {
+            Self::Syscall => (vec![native; 7], native),
+            Self::ThreadEntry => (Vec::new(), opaque),
+            _ => (
+                vec![native, opaque, opaque, opaque, opaque, native, opaque],
+                native,
+            ),
+        };
+        Signature {
+            params,
+            result: Some(result),
+        }
+    }
+
     /// The backend leaf builtin (`lilac_ir::builtin_sig`) this intrinsic
     /// calls, if it is one.
     #[must_use]
@@ -668,7 +697,10 @@ impl Intrinsic {
             Self::Memmove => "@memmove",
             Self::Memset => "@memset",
             Self::Syscall => "@syscall",
+            Self::ThreadEntry => "@thread_entry",
+            Self::ThreadClone => "@thread_clone",
             Self::Trap => "@lilac_abort",
+
             _ => return None,
         })
     }

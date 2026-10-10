@@ -293,7 +293,14 @@ call &f (in %a) (out %b)
 | `@memset` | `ref #bit8`, `#bit8`, `#bit_native` | — | `llvm.memset` (as `.lilac.memset`) |
 | `@syscall` | `#bit_native` × 7 | `#bit_native` | the Linux system-call instruction, as inline assembly (as `.lilac.syscall`; x86-64 and aarch64 Linux only, `E035` from user code elsewhere) |
 | `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`); `@trap()` lowers to it, then `unreachable` |
-| `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`) |
+| `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`), `thread_local` on Windows, Linux (local-exec) and macOS |
+| `@thread_entry` | — | `ref #unknown` | address of `.lilac.thread_entry(ptr start) -> ptr` (C ABI), which calls `start`'s function with its argument (as `.lilac.thread_entry.address`) |
+| `@thread_clone` | `#bit_native`, `ref #unknown` × 4, `#bit_native`, `ref #unknown` | `#bit_native` | `.lilac.tls_init` lays out the TLS block from `PT_TLS`, then the `clone` system call in module assembly (`.lilac.clone_raw`), the child calling `.lilac.thread_entry` (as `.lilac.thread_clone`; x86-64 and aarch64 Linux only, `E035`) |
+
+A native Linux executable with thread-locals calls `.lilac.main_tls` first
+in `.lilac.native_main`: unless a loader already set the thread pointer, it
+builds the main thread's block in a static 4 KiB area. A native Windows one
+defines the TLS directory (`_tls_used`, `_tls_index`) a C runtime would.
 
 The byte-buffer and format-args operations are **not** builtins: they are
 ordinary LIR functions in the `.lilac.` namespace, built once by

@@ -15,7 +15,7 @@ print_line: function (text: @byte_buffer) nothing {
 print_byte: function (byte: @bit8) nothing {
     b: @bit8 = byte
     p: ref @bit8 = ref b
-    error: Optional[Os.Error] = Os.write_all(Os.standard_output(), p as ref unknown, 0x1)
+    Os.write_all(Os.standard_output(), p as ref unknown, 0x1)
 }
 
 // Writes the code point `c` (a character literal such as 'H') as UTF-8.
@@ -41,7 +41,7 @@ private {
     // Writes all of `text`; a failure is dropped, as C's `printf` does.
     write_text: function (handle: Os.Handle, text: @byte_buffer) nothing {
         data: ref @bit8 = @byte_buffer_ptr(text)
-        error: Optional[Os.Error] = Os.write_all(handle, data as ref unknown, @byte_buffer_len(text))
+        Os.write_all(handle, data as ref unknown, @byte_buffer_len(text))
     }
 
     // One UTF-8 continuation byte: six bits of `c / scale`.

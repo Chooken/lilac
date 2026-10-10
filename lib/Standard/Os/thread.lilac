@@ -1,0 +1,193 @@
+// Threads: `spawn` starts one running `entry(argument)`, `join` waits for
+// it to finish. Windows uses `CreateThread`, macOS (and Linux under
+// `--libc`) `pthread_create`, and native Linux its own `clone` thread on a
+// 1 MiB mapping that holds its stack and thread-local block
+// (`@thread_clone`). A native Linux program that links a shared C library
+// should use `--libc`: a raw `clone` thread has no C-library thread state.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+
+// A running thread from `spawn`. `join` it exactly once; nothing frees it
+// otherwise.
+Thread: object {
+    // The Windows thread handle, or the `pthread_t`; native Linux keeps
+    // the thread id.
+    value: @bit_native
+    // The start block (from `allocate`), or the native Linux mapping.
+    memory: ref unknown
+}
+
+// Starts a thread running `entry(argument)`.
+spawn: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+    match @builtin.Target.os {
+        .Windows => {
+            start: ref unknown = start_block(allocate(start_size), entry, argument)
+            if @ptr_to_address(start) == 0x0 {
+                result = .Error(.OutOfMemory)
+                return
+            }
+            id: @bit32 = 0x0
+            handle: ref unknown = Windows.CreateThread(null(), 0x0, @thread_entry(), start, 0x0, ref id)
+            if @ptr_to_address(handle) == 0x0 {
+                why: Error = error_of_windows(Windows.GetLastError())
+                deallocate(start)
+                result = .Error(why)
+            } else {
+                thread: Thread { value = @ptr_to_address(handle), memory = start }
+                result = .Ok(thread)
+            }
+        }
+        .Linux => {
+            if @builtin.Target.libc {
+                result = posix_spawn_thread(entry, argument)
+            } else {
+                result = clone_thread(entry, argument)
+            }
+        }
+        .MacOs => {
+            result = posix_spawn_thread(entry, argument)
+        }
+    } else {
+        unsupported()
+        result = .Error(.Unsupported)
+    }
+}
+
+// Waits for `thread` to finish, then releases it.
+join: function (thread: Thread) error: Optional[Error] {
+    error = .None
+    match @builtin.Target.os {
+        .Windows => {
+            handle: ref unknown = @address_to_ptr(thread.value)
+            if Windows.WaitForSingleObject(handle, Windows.INFINITE) == Windows.WAIT_FAILED {
+                error = .Some(error_of_windows(Windows.GetLastError()))
+            }
+            Windows.CloseHandle(handle)
+            deallocate(thread.memory)
+        }
+        .Linux => {
+            if @builtin.Target.libc {
+                error = posix_join_thread(thread)
+            } else {
+                // The kernel zeroes the id word when the thread exits
+                // (`CLONE_CHILD_CLEARTID`) and wakes its futex.
+                id: ref @bit32 = thread.memory as ref @bit32
+                loop {
+                    current: @bit32 = @atomic_load_acquire_32(id)
+                    if current == 0x0 {
+                        break
+                    }
+                    Linux.futex(thread.memory, Linux.FUTEX_WAIT, current, null(), null(), 0x0)
+                }
+                unmap_pages(thread.memory, clone_mapping)
+            }
+        }
+        .MacOs => {
+            error = posix_join_thread(thread)
+        }
+    } else {
+        unsupported()
+    }
+}
+
+// Lets another thread run.
+yield_thread: function () nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            Windows.SwitchToThread()
+        }
+        .Linux => {
+            Linux.sched_yield()
+        }
+        .MacOs => {
+            sched_yield()
+        }
+    } else {
+        unsupported()
+    }
+}
+
+private {
+    // The block `@thread_entry` reads: the function, then its argument.
+    StartBlock: object {
+        entry: @bit_native
+        argument: ref unknown
+    }
+
+    start_size: @bit_native => 0x10
+
+    // Fills the start block at `memory` (null passes through).
+    start_block: function (memory: ref unknown, entry: function (argument: ref unknown) nothing, argument: ref unknown) start: ref unknown {
+        start = memory
+        if @ptr_to_address(memory) == 0x0 {
+            return
+        }
+        block: ref StartBlock = memory as ref StartBlock
+        block.argument = argument
+        slot: ref function (argument: ref unknown) nothing = memory as ref function (argument: ref unknown) nothing
+        slot = entry
+    }
+
+    // The native Linux thread mapping: the id word at 0, the start block
+    // at 0x10, the thread-local area from 0x40 to 0x4000, then the stack
+    // up to the end.
+    clone_mapping: @bit_native => 0x100000
+    clone_start: @bit_native => 0x10
+    clone_tls: @bit_native => 0x40
+    clone_tls_size: @bit_native => 0x3FC0
+
+    clone_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+        mapping: ref unknown = map_pages(clone_mapping)
+        if @ptr_to_address(mapping) == 0x0 {
+            result = .Error(.OutOfMemory)
+            return
+        }
+        start: ref unknown = start_block(@ptr_add(mapping, clone_start), entry, argument)
+        // Shares everything a thread does; the id word is set before
+        // `clone` returns and cleared when the thread exits.
+        flags: @bit_native = @bit_or_native(@bit_or_native(@bit_or_native(Linux.CLONE_VM, Linux.CLONE_FS), @bit_or_native(Linux.CLONE_FILES, Linux.CLONE_SIGHAND)), @bit_or_native(@bit_or_native(Linux.CLONE_THREAD, Linux.CLONE_SYSVSEM), @bit_or_native(Linux.CLONE_SETTLS, @bit_or_native(Linux.CLONE_PARENT_SETTID, Linux.CLONE_CHILD_CLEARTID))))
+        raw: @bit_native = @thread_clone(flags, @ptr_add(mapping, clone_mapping), mapping, mapping, @ptr_add(mapping, clone_tls), clone_tls_size, start)
+        if Linux.is_error(raw) {
+            why: Error = error_of_errno(Linux.errno_of(raw))
+            unmap_pages(mapping, clone_mapping)
+            result = .Error(why)
+        } else {
+            thread: Thread { value = raw, memory = mapping }
+            result = .Ok(thread)
+        }
+    }
+
+    // `pthread_create` and `pthread_join`, the same POSIX functions on
+    // macOS and in a Linux C library.
+    pthread_create: extern function (thread: ref @bit_native, attr: ref unknown, start_routine: ref unknown, arg: ref unknown) result: @bit32
+    pthread_join: extern function (thread: @bit_native, value_ptr: ref unknown) result: @bit32
+    sched_yield: extern function () result: @bit32
+
+    posix_spawn_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+        start: ref unknown = start_block(allocate(start_size), entry, argument)
+        if @ptr_to_address(start) == 0x0 {
+            result = .Error(.OutOfMemory)
+            return
+        }
+        handle: @bit_native = 0x0
+        code: @bit32 = pthread_create(ref handle, null(), @thread_entry(), start)
+        if code == 0x0 {
+            thread: Thread { value = handle, memory = start }
+            result = .Ok(thread)
+        } else {
+            deallocate(start)
+            result = .Error(error_of_errno(code))
+        }
+    }
+
+    posix_join_thread: function (thread: Thread) error: Optional[Error] {
+        error = .None
+        code: @bit32 = pthread_join(thread.value, null())
+        if code == 0x0 {
+            deallocate(thread.memory)
+        } else {
+            error = .Some(error_of_errno(code))
+        }
+    }
+}

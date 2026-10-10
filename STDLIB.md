@@ -341,6 +341,14 @@ exists, else a compile error):
   `environment_vector` (stored by `@entry`).
 * **Time:** `monotonic_nanos()`, `wall_clock_nanos()`, `sleep(nanos)`.
 * **Random:** `fill_random(buffer, length)`.
+* **Threads:** `spawn(entry, argument) Result[Thread, Error]` runs
+  `entry(argument)` (a `function (argument: ref unknown) nothing`) on a new
+  thread, `join(thread) Optional[Error]` waits for it and frees it,
+  `yield_thread()`. Windows uses `CreateThread`, macOS `pthread_create`,
+  and native Linux its own `clone` thread (`@thread_clone`) on a 1 MiB
+  mapping holding its stack and thread-local block; under `--libc`, Linux
+  uses `pthread_create`, and a native program that links a shared C
+  library should too. The stack-trace head is per thread.
 * **Errors:** `Error`, the common cases by name (`NotFound`,
   `PermissionDenied`, ...) plus `Other: @bit32`, from `error_of_errno` and
   `error_of_windows`.
@@ -438,7 +446,7 @@ raw addresses require explicit conversion to `@bit_native`).
 
 | Type | Purpose | Key methods |
 |---|---|---|
-| `Thread` | OS thread (over `pthread_*`) | `spawn(entry, arg) Result[Thread, ThreadError]`, `join() Result[T, ..]`, `yield_now`, `sleep(Duration)` |
+| `Thread` | OS thread (over `Standard.Os`'s `spawn`/`join`, today's raw form) | `spawn(entry, arg) Result[Thread, ThreadError]`, `join() Result[T, ..]`, `yield_now`, `sleep(Duration)` |
 | `Mutex[T]` | mutual exclusion | `new(value)`, `lock() MutexGuard[T]`, `try_lock() Option[MutexGuard[T]]`; guard `@on_drop` unlocks |
 | `RwLock[T]` | reader/writer lock | `read()`, `write()`, `try_read`, `try_write` |
 | `Condvar` | condition variable | `wait(guard)`, `notify_one`, `notify_all` |
