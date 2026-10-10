@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - **Lilac: Restart Language Server** command, to pick up a rebuilt
   `lilac-lsp` or recover a stuck server without reloading the window.

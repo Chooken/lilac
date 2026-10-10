@@ -4,6 +4,8 @@
 //! Adding an intrinsic is one variant here plus its `name`/`signature` rows;
 //! lowering only needs a new arm when it maps to a new IR operation.
 
+use lilac_ty::Builtin as Ty;
+
 /// Integer container width named by a `_W` suffix.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IntWidth {
@@ -22,13 +24,13 @@ pub enum IntWidth {
 impl IntWidth {
     /// The `@bitW` container.
     #[must_use]
-    pub fn builtin(self) -> &'static str {
+    pub fn builtin(self) -> Ty {
         match self {
-            Self::W8 => "@bit8",
-            Self::W16 => "@bit16",
-            Self::W32 => "@bit32",
-            Self::W64 => "@bit64",
-            Self::Native => "@bit_native",
+            Self::W8 => Ty::Bit8,
+            Self::W16 => Ty::Bit16,
+            Self::W32 => Ty::Bit32,
+            Self::W64 => Ty::Bit64,
+            Self::Native => Ty::BitNative,
         }
     }
 
@@ -60,22 +62,22 @@ pub enum FloatWidth {
 impl FloatWidth {
     /// The `@fbitW` container.
     #[must_use]
-    pub fn builtin(self) -> &'static str {
+    pub fn builtin(self) -> Ty {
         match self {
-            Self::W16 => "@fbit16",
-            Self::W32 => "@fbit32",
-            Self::W64 => "@fbit64",
-            Self::W128 => "@fbit128",
+            Self::W16 => Ty::FBit16,
+            Self::W32 => Ty::FBit32,
+            Self::W64 => Ty::FBit64,
+            Self::W128 => Ty::FBit128,
         }
     }
 
     /// The same-width `@bitW` (none for 128: there is no `@bit128`).
     #[must_use]
-    pub fn bits(self) -> Option<&'static str> {
+    pub fn bits(self) -> Option<Ty> {
         match self {
-            Self::W16 => Some("@bit16"),
-            Self::W32 => Some("@bit32"),
-            Self::W64 => Some("@bit64"),
+            Self::W16 => Some(Ty::Bit16),
+            Self::W32 => Some(Ty::Bit32),
+            Self::W64 => Some(Ty::Bit64),
             Self::W128 => None,
         }
     }
@@ -347,10 +349,10 @@ pub enum Intrinsic {
 /// A parameter or result type in an intrinsic signature.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
-    /// A builtin container by spelling (`@bit8`, `@byte_buffer`, ...).
-    Builtin(&'static str),
+    /// A builtin container (`@bit8`, `@byte_buffer`, ...).
+    Builtin(Ty),
     /// `ref` of a builtin container.
-    Ref(&'static str),
+    Ref(Ty),
     /// Any bit container (`@truncate`/`@extend_zero` operand).
     AnyBit,
     /// The expected bit type (`@truncate`/`@extend_zero` result).
@@ -504,7 +506,7 @@ impl Intrinsic {
             Self::Int(op, width) => {
                 let ty = Builtin(width.builtin());
                 let result = if op.is_comparison() {
-                    Builtin("@bit8")
+                    Builtin(Ty::Bit8)
                 } else {
                     ty
                 };
@@ -518,7 +520,7 @@ impl Intrinsic {
             Self::Float(op, width) => {
                 let ty = Builtin(width.builtin());
                 let result = if op.is_comparison() {
-                    Builtin("@bit8")
+                    Builtin(Ty::Bit8)
                 } else {
                     ty
                 };
@@ -531,15 +533,15 @@ impl Intrinsic {
             }
             Self::FbitToBits(width) => sig(
                 vec![Builtin(width.builtin())],
-                Some(Builtin(width.bits().unwrap_or("@bit64"))),
+                Some(Builtin(width.bits().unwrap_or(Ty::Bit64))),
             ),
             Self::BitsToFbit(width) => sig(
-                vec![Builtin(width.bits().unwrap_or("@bit64"))],
+                vec![Builtin(width.bits().unwrap_or(Ty::Bit64))],
                 Some(Builtin(width.builtin())),
             ),
             Self::Truncate | Self::ExtendZero => sig(vec![AnyBit], Some(ExpectedBit)),
             Self::SizeOf | Self::AlignOf | Self::ArrayLen => {
-                sig(Vec::new(), Some(Builtin("@bit_native")))
+                sig(Vec::new(), Some(Builtin(Ty::BitNative)))
             }
             Self::CompileError | Self::Trap | Self::Fence(_) | Self::ArrayAt => {
                 sig(Vec::new(), None)
@@ -554,47 +556,47 @@ impl Intrinsic {
                 sig(params, (op != AtomicOp::Store).then_some(Builtin(ty)))
             }
             Self::LoadU8 => sig(
-                vec![Ref("@bit8"), Builtin("@bit_native")],
-                Some(Builtin("@bit8")),
+                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative)],
+                Some(Builtin(Ty::Bit8)),
             ),
             Self::StoreU8 => sig(
-                vec![Ref("@bit8"), Builtin("@bit_native"), Builtin("@bit8")],
+                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative), Builtin(Ty::Bit8)],
                 None,
             ),
             Self::Memcpy | Self::Memmove => sig(
-                vec![Ref("@bit8"), Ref("@bit8"), Builtin("@bit_native")],
+                vec![Ref(Ty::Bit8), Ref(Ty::Bit8), Builtin(Ty::BitNative)],
                 None,
             ),
             Self::Memset => sig(
-                vec![Ref("@bit8"), Builtin("@bit8"), Builtin("@bit_native")],
+                vec![Ref(Ty::Bit8), Builtin(Ty::Bit8), Builtin(Ty::BitNative)],
                 None,
             ),
             Self::PtrAdd => sig(
-                vec![Ref("unknown"), Builtin("@bit_native")],
-                Some(Ref("unknown")),
+                vec![Ref(Ty::Unknown), Builtin(Ty::BitNative)],
+                Some(Ref(Ty::Unknown)),
             ),
-            Self::PtrToAddress => sig(vec![Ref("unknown")], Some(Builtin("@bit_native"))),
-            Self::AddressToPtr => sig(vec![Builtin("@bit_native")], Some(Ref("unknown"))),
+            Self::PtrToAddress => sig(vec![Ref(Ty::Unknown)], Some(Builtin(Ty::BitNative))),
+            Self::AddressToPtr => sig(vec![Builtin(Ty::BitNative)], Some(Ref(Ty::Unknown))),
             Self::Syscall => sig(
-                vec![Builtin("@bit_native"); 7],
-                Some(Builtin("@bit_native")),
+                vec![Builtin(Ty::BitNative); 7],
+                Some(Builtin(Ty::BitNative)),
             ),
-            Self::ByteBufferPtr => sig(vec![Builtin("@byte_buffer")], Some(Ref("@bit8"))),
-            Self::ByteBufferLen => sig(vec![Builtin("@byte_buffer")], Some(Builtin("@bit_native"))),
+            Self::ByteBufferPtr => sig(vec![Builtin(Ty::ByteBuffer)], Some(Ref(Ty::Bit8))),
+            Self::ByteBufferLen => sig(vec![Builtin(Ty::ByteBuffer)], Some(Builtin(Ty::BitNative))),
             Self::ByteBufferFrom => sig(
-                vec![Ref("@bit8"), Builtin("@bit_native")],
-                Some(Builtin("@byte_buffer")),
+                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative)],
+                Some(Builtin(Ty::ByteBuffer)),
             ),
-            Self::FormatArgsNew => sig(Vec::new(), Some(Builtin("@format_args"))),
-            Self::FormatArgsPush => sig(vec![Ref("@format_args"), Builtin("@byte_buffer")], None),
+            Self::FormatArgsNew => sig(Vec::new(), Some(Builtin(Ty::FormatArgs))),
+            Self::FormatArgsPush => sig(vec![Ref(Ty::FormatArgs), Builtin(Ty::ByteBuffer)], None),
             Self::FormatArgsCount => {
-                sig(vec![Builtin("@format_args")], Some(Builtin("@bit_native")))
+                sig(vec![Builtin(Ty::FormatArgs)], Some(Builtin(Ty::BitNative)))
             }
             Self::FormatArgsPiece => sig(
-                vec![Builtin("@format_args"), Builtin("@bit_native")],
-                Some(Builtin("@byte_buffer")),
+                vec![Builtin(Ty::FormatArgs), Builtin(Ty::BitNative)],
+                Some(Builtin(Ty::ByteBuffer)),
             ),
-            Self::Panic => sig(vec![Builtin("@byte_buffer")], None),
+            Self::Panic => sig(vec![Builtin(Ty::ByteBuffer)], None),
         }
     }
 
@@ -746,22 +748,25 @@ mod tests {
         assert_eq!(
             sig.params,
             vec![
-                Slot::Ref("@bit32"),
-                Slot::Builtin("@bit32"),
-                Slot::Builtin("@bit32")
+                Slot::Ref(Ty::Bit32),
+                Slot::Builtin(Ty::Bit32),
+                Slot::Builtin(Ty::Bit32)
             ]
         );
-        assert_eq!(sig.result, Some(Slot::Builtin("@bit32")));
+        assert_eq!(sig.result, Some(Slot::Builtin(Ty::Bit32)));
         let sig = Intrinsic::lookup("@atomic_store_8")
             .expect("known")
             .signature();
-        assert_eq!(sig.params, vec![Slot::Ref("@bit8"), Slot::Builtin("@bit8")]);
+        assert_eq!(
+            sig.params,
+            vec![Slot::Ref(Ty::Bit8), Slot::Builtin(Ty::Bit8)]
+        );
         assert_eq!(sig.result, None);
         let sig = Intrinsic::lookup("@atomic_load_native")
             .expect("known")
             .signature();
-        assert_eq!(sig.params, vec![Slot::Ref("@bit_native")]);
-        assert_eq!(sig.result, Some(Slot::Builtin("@bit_native")));
+        assert_eq!(sig.params, vec![Slot::Ref(Ty::BitNative)]);
+        assert_eq!(sig.result, Some(Slot::Builtin(Ty::BitNative)));
     }
 
     #[test]
@@ -769,19 +774,19 @@ mod tests {
         let sig = Intrinsic::PtrAdd.signature();
         assert_eq!(
             sig.params,
-            vec![Slot::Ref("unknown"), Slot::Builtin("@bit_native")]
+            vec![Slot::Ref(Ty::Unknown), Slot::Builtin(Ty::BitNative)]
         );
-        assert_eq!(sig.result, Some(Slot::Ref("unknown")));
+        assert_eq!(sig.result, Some(Slot::Ref(Ty::Unknown)));
         assert_eq!(
             Intrinsic::AddressToPtr.signature().result,
-            Some(Slot::Ref("unknown"))
+            Some(Slot::Ref(Ty::Unknown))
         );
         let sig = Intrinsic::Syscall.signature();
-        assert_eq!(sig.params, vec![Slot::Builtin("@bit_native"); 7]);
-        assert_eq!(sig.result, Some(Slot::Builtin("@bit_native")));
+        assert_eq!(sig.params, vec![Slot::Builtin(Ty::BitNative); 7]);
+        assert_eq!(sig.result, Some(Slot::Builtin(Ty::BitNative)));
         assert_eq!(
             Intrinsic::Memset.signature().params[1],
-            Slot::Builtin("@bit8")
+            Slot::Builtin(Ty::Bit8)
         );
         assert_eq!(Intrinsic::Trap.leaf_builtin(), Some("@lilac_abort"));
         assert_eq!(Intrinsic::Memmove.leaf_builtin(), Some("@memmove"));
@@ -792,11 +797,11 @@ mod tests {
         let sig = Intrinsic::lookup("@i_less_than_32")
             .expect("known")
             .signature();
-        assert_eq!(sig.result, Some(Slot::Builtin("@bit8")));
+        assert_eq!(sig.result, Some(Slot::Builtin(Ty::Bit8)));
         assert_eq!(sig.params.len(), 2);
         let sig = Intrinsic::lookup("@f_negate_64")
             .expect("known")
             .signature();
-        assert_eq!(sig.params, vec![Slot::Builtin("@fbit64")]);
+        assert_eq!(sig.params, vec![Slot::Builtin(Ty::FBit64)]);
     }
 }

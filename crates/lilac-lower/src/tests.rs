@@ -139,7 +139,7 @@ fn literals_lower_to_consts() {
     let (text, _) = lower_src(
         "main: function () nothing {\n    x: @bit8 = 5\n    y: @fbit64 = 3.14\n    z: @bit8 = 0x1\n}\n",
     );
-    assert!(text.contains("#bit8 = const 5"), "{text}");
+    assert!(text.contains("#bit8 = const 0x5"), "{text}");
     assert!(text.contains("#fbit64 = const 3.14"), "{text}");
     assert!(text.contains("#bit8 = const 0x1"), "{text}");
 }

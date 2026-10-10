@@ -11,8 +11,12 @@ use std::hash::{Hash, Hasher};
 
 use lilac_span::{SourceMap, Span};
 
+mod closest;
+pub mod codes;
 mod human;
 
+pub use closest::closest;
+pub use codes::Code;
 pub use human::EmitterHuman;
 
 /// Severity of a [`Diagnostic`].
@@ -121,10 +125,10 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// Starts an error diagnostic.
     #[must_use]
-    pub fn error(code: &'static str, msg: impl Into<String>) -> Self {
+    pub fn error(code: Code, msg: impl Into<String>) -> Self {
         Self {
             level: Level::Error,
-            code,
+            code: code.id(),
             msg: msg.into().into_boxed_str(),
             labels: Vec::new(),
             notes: Vec::new(),
@@ -135,10 +139,10 @@ impl Diagnostic {
 
     /// Starts a warning diagnostic.
     #[must_use]
-    pub fn warning(code: &'static str, msg: impl Into<String>) -> Self {
+    pub fn warning(code: Code, msg: impl Into<String>) -> Self {
         Self {
             level: Level::Warning,
-            code,
+            code: code.id(),
             msg: msg.into().into_boxed_str(),
             labels: Vec::new(),
             notes: Vec::new(),
@@ -279,79 +283,83 @@ pub fn trace_text(
 }
 
 /// Proof that an error was already emitted; forces callers to stop normally.
+///
+/// [`Diags`] makes one: [`Diags::emit`], or [`Diags::already_reported`]
+/// for poison passed along after an error. A diagnostic held to be reported
+/// later has [`ErrorGuaranteed::held`], and the one stop without an error is
+/// named: [`ErrorGuaranteed::unreported`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ErrorGuaranteed(());
 
+/// Why a compile stops something without reporting an error
+/// ([`ErrorGuaranteed::unreported`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unreported {
+    /// `@entry` names something that does not exist outside an executable,
+    /// so the hook is dropped rather than reported.
+    DroppedEntry,
+}
+
 impl ErrorGuaranteed {
-    /// Creates the poison token (call only after emitting a diagnostic).
+    /// The token for `diagnostic`, an error the caller holds and reports
+    /// (or drops on purpose) later.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn held(diagnostic: &Diagnostic) -> Self {
+        debug_assert_eq!(diagnostic.level, Level::Error, "a held warning is no error");
+        Self(())
+    }
+
+    /// Stops for `reason`, which reports nothing on purpose.
+    #[must_use]
+    pub fn unreported(_reason: Unreported) -> Self {
         Self(())
     }
 }
 
-impl Default for ErrorGuaranteed {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Collector: deduplicates, caps output, and hands out [`ErrorGuaranteed`].
-#[derive(Debug)]
+/// Collector: deduplicates and hands out [`ErrorGuaranteed`]. It keeps
+/// every diagnostic; a terminal caps how many it shows ([`Diags::shown`]).
+#[derive(Debug, Default)]
 pub struct Diags {
     diagnostics: Vec<Diagnostic>,
     seen: HashSet<u64>,
-    /// Maximum primary errors rendered; the rest are dropped with a note.
-    pub max_errors: usize,
-    /// Error-level diagnostics currently in `diagnostics`.
-    error_count: usize,
-    /// Error-level diagnostics dropped because the cap was reached.
-    suppressed_errors: usize,
 }
 
 impl Diags {
-    /// Empty collector with the default cap of 10 primary errors.
+    /// Empty collector.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            diagnostics: Vec::new(),
-            seen: HashSet::new(),
-            max_errors: 10,
-            error_count: 0,
-            suppressed_errors: 0,
-        }
+        Self::default()
     }
 
     /// Records a diagnostic (deduped by code + message + primary spans).
-    ///
-    /// Once [`Self::max_errors`] error-level diagnostics are live, further
-    /// errors are dropped and counted in [`Self::suppressed_errors`] instead.
     pub fn emit(&mut self, diagnostic: Diagnostic) -> ErrorGuaranteed {
-        if diagnostic.level == Level::Error && self.error_count >= self.max_errors {
-            self.suppressed_errors += 1;
-            return ErrorGuaranteed::new();
-        }
         if self.seen.insert(dedup_key(&diagnostic)) {
-            if diagnostic.level == Level::Error {
-                self.error_count += 1;
-            }
             self.diagnostics.push(diagnostic);
         }
-        ErrorGuaranteed::new()
+        ErrorGuaranteed(())
+    }
+
+    /// The token for an error already reported, to pass poison along.
+    /// Debug builds check that an error was recorded.
+    #[must_use]
+    pub fn already_reported(&self) -> ErrorGuaranteed {
+        debug_assert!(self.has_errors(), "poison with no error reported");
+        ErrorGuaranteed(())
     }
 
     /// Whether any error (not warning) was recorded.
     #[must_use]
     pub fn has_errors(&self) -> bool {
-        self.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.level == Level::Error)
+        self.error_count() > 0
     }
 
-    /// Error-level diagnostics dropped by the [`Self::max_errors`] cap.
+    /// How many errors (not warnings) were recorded.
     #[must_use]
-    pub fn suppressed_errors(&self) -> usize {
-        self.suppressed_errors
+    pub fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.level == Level::Error)
+            .count()
     }
 
     /// All recorded diagnostics in emission order.
@@ -360,32 +368,22 @@ impl Diags {
         &self.diagnostics
     }
 
-    /// Marks the current end of the diagnostic stream so a later pass can
-    /// capture everything emitted since (generic instantiation capture).
+    /// The diagnostics to show when at most `max_errors` errors are shown:
+    /// all of them in order, less the errors past the first `max_errors`.
+    /// Warnings are never left out.
     #[must_use]
-    pub fn checkpoint(&self) -> usize {
-        self.diagnostics.len()
-    }
-
-    /// Removes and returns every diagnostic emitted after `mark`.
-    ///
-    /// Used by instantiation to capture a specialized body's diagnostics and
-    /// re-attribute them to the call site; a stale `mark` past the end yields
-    /// an empty vector.
-    pub fn take_since(&mut self, mark: usize) -> Vec<Diagnostic> {
-        if mark >= self.diagnostics.len() {
-            return Vec::new();
-        }
-        let taken = self.diagnostics.split_off(mark);
-        // Dropping the dedup hashes lets the same diagnostic be emitted again
-        // after a capture (a failing instance is otherwise swallowed).
-        for diagnostic in &taken {
-            self.seen.remove(&dedup_key(diagnostic));
-            if diagnostic.level == Level::Error {
-                self.error_count = self.error_count.saturating_sub(1);
-            }
-        }
-        taken
+    pub fn shown(&self, max_errors: usize) -> Vec<&Diagnostic> {
+        let mut errors = 0;
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                if diagnostic.level != Level::Error {
+                    return true;
+                }
+                errors += 1;
+                errors <= max_errors
+            })
+            .collect()
     }
 }
 
@@ -400,12 +398,6 @@ fn dedup_key(diagnostic: &Diagnostic) -> u64 {
         }
     }
     hasher.finish()
-}
-
-impl Default for Diags {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Renders a [`Diagnostic`] against a [`SourceMap`].
@@ -562,7 +554,7 @@ mod tests {
     fn sample() -> (SourceMap, Diagnostic) {
         let mut sm = SourceMap::new();
         let file = sm.add_file("main.lilac", "out = T.other()\n");
-        let diagnostic = Diagnostic::error("E042", "unsatisfied requirements").label(
+        let diagnostic = Diagnostic::error(codes::E042, "unsatisfied requirements").label(
             Span::new(7, 8, file),
             true,
             "missing method `other`",
@@ -590,7 +582,7 @@ mod tests {
         );
         let primary = Span::new(6, 15, file);
         let secondary = Span::new(39, 61, file);
-        let diagnostic = Diagnostic::error("E042", "unsatisfied requirements")
+        let diagnostic = Diagnostic::error(codes::E042, "unsatisfied requirements")
             .label(primary, true, "missing method `other` on `@bit32`")
             .label(
                 secondary,
@@ -643,7 +635,7 @@ mod tests {
         let file = sm.add_file("main.lilac", "boom\na()\nboom\nb()\n");
         let mut again = frame("a", Span::new(14, 15, file), Vec::new());
         again.repeat = true;
-        let diagnostic = Diagnostic::error("E031", "no").trace(frame(
+        let diagnostic = Diagnostic::error(codes::E031, "no").trace(frame(
             "boom",
             Span::new(0, 4, file),
             vec![
@@ -680,30 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn take_since_allows_reemission() {
-        let mut diags = Diags::new();
-        let diagnostic = Diagnostic::error("E001", "boom");
-        diags.emit(diagnostic.clone());
-        assert_eq!(diags.take_since(0).len(), 1);
-        diags.emit(diagnostic);
-        assert_eq!(diags.diagnostics().len(), 1);
-    }
-
-    #[test]
-    fn checkpoint_and_take_since_capture_a_tail() {
-        let mut diags = Diags::new();
-        let mark = diags.checkpoint();
-        diags.emit(Diagnostic::error("E001", "first"));
-        diags.emit(Diagnostic::error("E002", "second"));
-        assert_eq!(diags.checkpoint(), 2);
-        let taken = diags.take_since(mark);
-        assert_eq!(taken.len(), 2);
-        assert!(diags.diagnostics().is_empty());
-        assert!(diags.take_since(mark).is_empty());
-        assert_eq!(diags.checkpoint(), 0);
-    }
-
-    #[test]
     fn verbose_trace_full() {
         let mut sm = SourceMap::new();
         let file = sm.add_file("main.lilac", "x\n");
@@ -712,7 +680,7 @@ mod tests {
         for level in (0..7).rev() {
             chain = frame(&format!("frame{level}"), span, vec![chain]);
         }
-        let diagnostic = Diagnostic::error("E042", "requirements")
+        let diagnostic = Diagnostic::error(codes::E042, "requirements")
             .label(span, true, "here")
             .trace(chain);
 
@@ -734,41 +702,20 @@ mod tests {
     }
 
     #[test]
-    fn caps_primary_errors_at_max() {
+    fn shown_caps_errors_but_keeps_everything() {
         let mut diags = Diags::new();
         for index in 0..15 {
-            diags.emit(Diagnostic::error("E001", format!("distinct error {index}")));
+            diags.emit(Diagnostic::error(
+                codes::E001,
+                format!("distinct error {index}"),
+            ));
         }
-        let errors = diags
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| diagnostic.level == Level::Error)
-            .count();
-        assert_eq!(errors, diags.max_errors, "{:?}", diags.diagnostics());
-        assert_eq!(diags.suppressed_errors(), 5);
-        assert!(diags.has_errors());
-
-        // Warnings are never capped.
-        diags.emit(Diagnostic::warning("W001", "counted separately"));
-        assert_eq!(
-            diags
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.level == Level::Warning)
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn take_since_frees_the_error_budget() {
-        let mut diags = Diags::new();
-        diags.max_errors = 1;
-        diags.emit(Diagnostic::error("E001", "captured"));
-        assert_eq!(diags.take_since(0).len(), 1);
-        // The drained error no longer occupies the budget.
-        diags.emit(Diagnostic::error("E002", "after capture"));
-        assert_eq!(diags.suppressed_errors(), 0);
-        assert_eq!(diags.diagnostics().len(), 1);
+        diags.emit(Diagnostic::warning(codes::TEST_WARNING, "never capped"));
+        assert_eq!(diags.diagnostics().len(), 16);
+        assert_eq!(diags.error_count(), 15);
+        let shown = diags.shown(10);
+        assert_eq!(shown.len(), 11, "{shown:?}");
+        assert_eq!(&*shown[9].msg, "distinct error 9");
+        assert_eq!(shown[10].level, Level::Warning);
     }
 }

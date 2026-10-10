@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use lilac_ast::{Expr, FuncDecl, Item, ItemKind, Program, Type as AstType};
-use lilac_error::{Diagnostic, Diags};
-use lilac_module::Project;
+use lilac_error::{codes, Diagnostic, Diags};
+use lilac_module::{FileUnit, Project};
 use lilac_span::{FileId, Span};
 
 /// Identity of one namespace (`NsId(0)` is the root).
@@ -152,6 +152,10 @@ pub struct FileScope {
     pub ns: NsId,
     /// Visible names, already filtered by visibility and reach.
     pub visible: HashMap<String, Lookup>,
+    /// `using A.B as Name` aliases: the namespace and the alias name's span.
+    /// An alias shadows namespaces and names reached from ancestors or other
+    /// `using`s; one that clashes with the file's own namespace is `E054`.
+    pub aliases: HashMap<String, (NsId, Span)>,
 }
 
 /// A resolved compilation unit.
@@ -185,6 +189,38 @@ impl Resolved {
     #[must_use]
     pub fn lookup(&self, file: FileId, name: &str) -> Option<&Lookup> {
         self.files.get(&file)?.visible.get(name)
+    }
+
+    /// The namespace `name` aliases in `file` (`using A.B as name`), if any.
+    #[must_use]
+    pub fn alias(&self, file: FileId, name: &str) -> Option<NsId> {
+        self.files.get(&file)?.aliases.get(name).map(|(ns, _)| *ns)
+    }
+
+    /// The declaration span of the alias `name` in `file`, if any.
+    #[must_use]
+    pub fn alias_span(&self, file: FileId, name: &str) -> Option<Span> {
+        self.files
+            .get(&file)?
+            .aliases
+            .get(name)
+            .map(|(_, span)| *span)
+    }
+
+    /// The direct child namespaces of `ns`, by their last segment.
+    pub fn child_namespaces(&self, ns: NsId) -> impl Iterator<Item = (&str, NsId)> {
+        let parent = self.namespace_path(ns).to_owned();
+        self.namespaces
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, data)| {
+                let name = if parent.is_empty() {
+                    data.path.as_str()
+                } else {
+                    data.path.strip_prefix(parent.as_str())?.strip_prefix('.')?
+                };
+                (!name.is_empty() && !name.contains('.')).then_some((name, ns_id(index)))
+            })
     }
 
     /// The public top-level item a qualified name (`@builtin.Target.os`)
@@ -336,13 +372,18 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
 
     for unit in &project.files {
         let ns = ns_id(unit.ns);
-        let visible = compute_visible(&resolved, ns, &unit.usings, &unit.using_spans, &by_path);
+        let mut visible = compute_visible(&resolved, ns, unit, &by_path);
+        let aliases = collect_aliases(&resolved, ns, unit, &by_path, diags);
+        for name in aliases.keys() {
+            visible.remove(name);
+        }
         resolved.files.insert(
             unit.file,
             FileScope {
                 file: unit.file,
                 ns,
                 visible,
+                aliases,
             },
         );
     }
@@ -355,7 +396,7 @@ fn ns_id(index: usize) -> NsId {
 
 fn duplicate(diags: &mut Diags, name: &str, span: Span, previous: Span) {
     diags.emit(
-        Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+        Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
             .label(span, true, "redefined here")
             .label(previous, false, "first defined here"),
     );
@@ -517,7 +558,7 @@ impl Collector<'_> {
         let (owner_name, owner_span) = (owner.name.clone(), owner.name_span);
         self.diags.emit(
             Diagnostic::error(
-                "E036",
+                codes::E036,
                 format!(
                     "`{}` is an {kind} declared inside `{owner_name}`",
                     item.name
@@ -570,13 +611,13 @@ fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId>
 }
 
 /// Builds a file's visible names: its ancestors' and its own namespace's items
-/// (any visibility; descendant reach), then each `using`d namespace's public
-/// items. Local names shadow imports; two imports of one name are ambiguous.
+/// (any visibility; descendant reach), then each unaliased `using`d
+/// namespace's public items. Local names shadow imports; two imports of one
+/// name are ambiguous.
 fn compute_visible(
     resolved: &Resolved,
     ns: NsId,
-    usings: &[String],
-    using_spans: &[Span],
+    unit: &FileUnit,
     by_path: &HashMap<String, NsId>,
 ) -> HashMap<String, Lookup> {
     let mut visible = HashMap::new();
@@ -598,14 +639,17 @@ fn compute_visible(
 
     let mut imported: HashMap<String, Vec<(DefId, Span)>> = HashMap::new();
     let mut seen = HashSet::new();
-    for (index, using) in usings.iter().enumerate() {
-        let Some(&target) = by_path.get(using.as_str()) else {
+    for using in &unit.usings {
+        if using.alias.is_some() {
+            continue;
+        }
+        let Some(&target) = by_path.get(using.path.as_str()) else {
             continue;
         };
         if !seen.insert(target) {
             continue;
         }
-        let site = using_spans.get(index).copied().unwrap_or_else(Span::dummy);
+        let site = using.span;
         for (name, id) in &resolved.namespaces[target.0 as usize].items {
             if resolved.def(*id).vis == Visibility::Public && !local.contains(name) {
                 imported.entry(name.clone()).or_default().push((*id, site));
@@ -624,11 +668,62 @@ fn compute_visible(
     visible
 }
 
+/// A file's `using … as Name` aliases. An alias named like an item of the
+/// file's own namespace (any of its files, `private` included), or like an
+/// earlier alias in the file, is `E054`; the first binding is kept.
+fn collect_aliases(
+    resolved: &Resolved,
+    ns: NsId,
+    unit: &FileUnit,
+    by_path: &HashMap<String, NsId>,
+    diags: &mut Diags,
+) -> HashMap<String, (NsId, Span)> {
+    let mut aliases: HashMap<String, (NsId, Span)> = HashMap::new();
+    for using in &unit.usings {
+        let Some((name, span)) = &using.alias else {
+            continue;
+        };
+        if let Some(&item) = resolved.namespaces[ns.0 as usize].items.get(name) {
+            diags.emit(
+                Diagnostic::error(
+                    codes::E054,
+                    format!("alias `{name}` collides with a declaration of the same name"),
+                )
+                .label(*span, true, "alias declared here")
+                .label(
+                    resolved.def(item).name_span,
+                    false,
+                    format!("`{name}` declared here"),
+                )
+                .help(
+                    "an alias may shadow a namespace, but not a declaration in \
+                     its own namespace; rename one of them",
+                ),
+            );
+            continue;
+        }
+        if let Some((_, previous)) = aliases.get(name) {
+            diags.emit(
+                Diagnostic::error(codes::E054, format!("alias `{name}` is declared twice"))
+                    .label(*span, true, "aliased again here")
+                    .label(*previous, false, "first aliased here"),
+            );
+            continue;
+        }
+        // A missing target is already `E025` from the loader.
+        let Some(&target) = by_path.get(&using.path) else {
+            continue;
+        };
+        aliases.insert(name.clone(), (target, *span));
+    }
+    aliases
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lilac_lex::Lexer;
-    use lilac_module::{FileUnit, Namespace as LoadedNs};
+    use lilac_module::Namespace as LoadedNs;
     use lilac_parse::Parser;
     use lilac_span::SourceMap;
     use std::path::PathBuf;
@@ -667,8 +762,17 @@ mod tests {
                 file,
                 ns: spec.ns,
                 src: spec.src.to_owned(),
-                usings: spec.usings.iter().map(|u| (*u).to_owned()).collect(),
-                using_spans: spec.usings.iter().map(|_| Span::dummy()).collect(),
+                usings: spec
+                    .usings
+                    .iter()
+                    .map(|u| lilac_module::Using {
+                        path: u.split(" as ").next().unwrap_or(u).to_owned(),
+                        span: Span::dummy(),
+                        alias: u
+                            .split_once(" as ")
+                            .map(|(_, alias)| (alias.to_owned(), Span::dummy())),
+                    })
+                    .collect(),
             });
         }
         let ids = files.iter().map(|f| f.file).collect();
@@ -910,6 +1014,129 @@ shown: function () nothing {}
         assert_eq!(resolved.def(local).ns, NsId(0));
     }
 
+    fn e054(diags: &Diags) -> usize {
+        diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E054")
+            .count()
+    }
+
+    #[test]
+    fn alias_binds_namespace_without_importing() {
+        let (resolved, files, diags) = resolve_files(
+            &["", "a", "a.m"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}\n",
+                    usings: &["a.m as M"],
+                },
+                Spec {
+                    ns: 1,
+                    src: "outer: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "pow: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(resolved.alias(files[0], "M"), Some(NsId(2)));
+        assert!(resolved.lookup(files[0], "pow").is_none());
+        // Aliases are per file.
+        assert_eq!(resolved.alias(files[1], "M"), None);
+    }
+
+    #[test]
+    fn alias_shadows_ancestor_and_imported_names() {
+        let (resolved, files, diags) = resolve_files(
+            &["", "a", "b", "c"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "M: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    src: "user: function () nothing {}\n",
+                    usings: &["c", "b as M"],
+                },
+                Spec {
+                    ns: 2,
+                    src: "f: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 3,
+                    src: "M: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e054(&diags), 0, "{diags:?}");
+        assert_eq!(resolved.alias(files[1], "M"), Some(NsId(2)));
+        assert!(resolved.lookup(files[1], "M").is_none());
+    }
+
+    #[test]
+    fn alias_colliding_with_own_namespace_is_e054() {
+        let (resolved, files, diags) = resolve_files(
+            &["", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}\n",
+                    usings: &["b as M"],
+                },
+                Spec {
+                    ns: 0,
+                    src: "private {\n    M: function () nothing {}\n}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    src: "f: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e054(&diags), 1, "{diags:?}");
+        assert_eq!(resolved.alias(files[0], "M"), None);
+        assert!(resolved.lookup(files[0], "M").is_some());
+    }
+
+    #[test]
+    fn duplicate_alias_is_e054() {
+        let (resolved, files, diags) = resolve_files(
+            &["", "a", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}\n",
+                    usings: &["a as M", "b as M", "a as A"],
+                },
+                Spec {
+                    ns: 1,
+                    src: "f: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "g: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+        );
+        assert_eq!(e054(&diags), 1, "{diags:?}");
+        assert_eq!(resolved.alias(files[0], "M"), Some(NsId(1)));
+        assert_eq!(resolved.alias(files[0], "A"), Some(NsId(1)));
+    }
+
     #[test]
     fn same_namespace_files_merge_and_clash() {
         let (_, _, diags) = resolve_files(
@@ -954,7 +1181,6 @@ shown: function () nothing {}
                 ns: 0,
                 src: src.to_owned(),
                 usings: Vec::new(),
-                using_spans: Vec::new(),
             }],
         };
         let resolved = resolve(&project, &[(file, program)], &mut diags);

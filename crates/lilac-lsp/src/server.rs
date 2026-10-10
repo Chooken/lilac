@@ -14,7 +14,7 @@ use lsp_types::{
     PublishDiagnosticsParams, Url,
 };
 
-use crate::compile::{self, Compiled, Job};
+use crate::compile::{self, Job, Outcome};
 use crate::documents::Documents;
 use crate::index::Retained;
 use crate::roots::{self, canonical_file_uri};
@@ -29,6 +29,8 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// LSP code for a request the server understood but refuses (a rename of a
 /// hook).
 const REQUEST_FAILED: i32 = -32803;
+/// JSON-RPC: the server failed (a request handler panicked).
+const INTERNAL_ERROR: i32 = -32603;
 
 /// A request result as JSON (`null` for `None`).
 macro_rules! value {
@@ -77,7 +79,11 @@ pub struct Server {
     /// Compile jobs for the worker thread.
     jobs: Sender<Job>,
     /// Finished compiles from the worker, by generation.
-    results: Receiver<(u64, Option<Compiled>)>,
+    results: Receiver<(u64, Outcome)>,
+    /// The generation whose compiler panic the user was told about; cleared
+    /// by the next compile that finishes, so a run of failing compiles says
+    /// it once.
+    reported_panic: Option<u64>,
     published: HashSet<Url>,
     shutdown: bool,
     /// Retained project compile (project mode).
@@ -114,6 +120,7 @@ impl Server {
             compiling: false,
             jobs,
             results,
+            reported_panic: None,
             published: HashSet::new(),
             shutdown: false,
             project: None,
@@ -212,22 +219,28 @@ impl Server {
                     request.id,
                     serde_json::Value::Null,
                 )))?;
-        } else if let Some(result) = self.query_response(&request) {
-            let response = match result {
-                Ok(value) => Response::new_ok(request.id, value),
-                Err(message) => Response::new_err(request.id, REQUEST_FAILED, message),
-            };
-            self.connection.sender.send(Message::Response(response))?;
-        } else {
-            let method = request.method;
-            self.connection
-                .sender
-                .send(Message::Response(Response::new_err(
+            return Ok(());
+        }
+        // A handler that panics answers with an internal error, and the
+        // server keeps running.
+        let response = match compile::guarded(|| self.query_response(&request)) {
+            Ok(Some(Ok(value))) => Response::new_ok(request.id, value),
+            Ok(Some(Err(message))) => Response::new_err(request.id, REQUEST_FAILED, message),
+            Ok(None) => {
+                let method = request.method;
+                Response::new_err(
                     request.id,
                     METHOD_NOT_FOUND,
                     format!("method not found: {method}"),
-                )))?;
-        }
+                )
+            }
+            Err(panic) => Response::new_err(
+                request.id,
+                INTERNAL_ERROR,
+                format!("the Lilac language server hit an internal error: {panic}"),
+            ),
+        };
+        self.connection.sender.send(Message::Response(response))?;
         Ok(())
     }
 
@@ -539,12 +552,22 @@ impl Server {
     /// Takes a finished compile: its analysis answers requests from now on
     /// (it is newer than what the server had), and its diagnostics are
     /// published unless an edit arrived meanwhile (the next compile, already
-    /// scheduled, publishes instead). `None` is a compile that panicked.
-    fn finish_compile(&mut self, generation: u64, compiled: Option<Compiled>) {
+    /// scheduled, publishes instead). A compile that panicked changes
+    /// nothing, but the user is told (once until a compile succeeds).
+    fn finish_compile(&mut self, generation: u64, compiled: Outcome) {
         self.compiling = false;
-        let Some(compiled) = compiled else {
-            return;
+        let compiled = match compiled {
+            Ok(compiled) => compiled,
+            Err(panic) => {
+                if self.reported_panic.replace(generation).is_none() {
+                    self.show_error(&format!(
+                        "The Lilac compiler hit an internal error; diagnostics may be stale. {panic}"
+                    ));
+                }
+                return;
+            }
         };
+        self.reported_panic = None;
         self.project = compiled.project;
         self.per_file = compiled.per_file;
         if generation == self.generation {
@@ -578,6 +601,23 @@ impl Server {
         }
     }
 
+    /// Shows `message` to the user as an error (`window/showMessage`).
+    fn show_error(&self, message: &str) {
+        let params = lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::ERROR,
+            message: message.to_owned(),
+        };
+        if let Ok(params) = serde_json::to_value(params) {
+            let _ = self
+                .connection
+                .sender
+                .send(Message::Notification(Notification {
+                    method: "window/showMessage".to_owned(),
+                    params,
+                }));
+        }
+    }
+
     /// Publishes `diagnostics` for `uri`, computed from the open
     /// document's `version` (`None` for a file that is not open).
     fn send_diagnostics(&self, uri: &Url, diagnostics: Vec<LspDiagnostic>, version: Option<i32>) {
@@ -601,6 +641,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::Compiled;
     use lsp_types::{TextDocumentItem, VersionedTextDocumentIdentifier};
 
     fn open(server: &mut Server, uri: &Url, text: &str) {
@@ -676,12 +717,64 @@ mod tests {
             })
             .expect("params"),
         });
-        server.finish_compile(stale.generation, Some(stale));
+        server.finish_compile(stale.generation, Ok(stale));
         assert!(server.retained_for(&uri).is_some());
         assert_eq!(published(&client), Vec::<i32>::new());
 
         let current = job(&server).run();
-        server.finish_compile(current.generation, Some(current));
+        server.finish_compile(current.generation, Ok(current));
         assert_eq!(published(&client), vec![2]);
+    }
+
+    fn shown_errors(client: &Connection) -> Vec<String> {
+        client
+            .receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Notification(notification)
+                    if notification.method == "window/showMessage" =>
+                {
+                    serde_json::from_value::<lsp_types::ShowMessageParams>(notification.params)
+                        .ok()
+                        .map(|params| params.message)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A compile that panicked is shown to the user once, with its message,
+    /// until a compile succeeds again.
+    #[test]
+    fn a_compiler_panic_is_shown_once() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let failed = compile::guarded(|| -> Compiled { panic!("boom") });
+        server.finish_compile(0, failed);
+        server.finish_compile(1, Err("again".to_owned()));
+        let shown = shown_errors(&client);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].contains("internal error") && shown[0].contains("boom"));
+
+        let fine = job(&server).run();
+        server.finish_compile(fine.generation, Ok(fine));
+        server.finish_compile(2, Err("later".to_owned()));
+        let shown = shown_errors(&client);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].contains("later"));
+    }
+
+    #[test]
+    fn guarded_turns_a_panic_into_its_message() {
+        let formatted = 7;
+        assert_eq!(compile::guarded(|| 3), Ok(3));
+        assert_eq!(
+            compile::guarded(|| -> u8 { panic!("static") }),
+            Err("static".to_owned())
+        );
+        assert_eq!(
+            compile::guarded(|| -> u8 { panic!("value {formatted}") }),
+            Err("value 7".to_owned())
+        );
     }
 }

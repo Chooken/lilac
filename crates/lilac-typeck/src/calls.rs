@@ -6,16 +6,17 @@
 //! (variant construction, folded literal, `@compile_error`).
 
 use lilac_ast::{Expr, Type as AstType};
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::intrinsics::{Intrinsic, Slot};
 use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::body::FnCx;
 use crate::expr::{tail_span, Receiver};
 use crate::literals::is_foldable_literal;
+use crate::paths::shadowed_alias_note;
 use crate::{Checker, Hook, Requirement};
 
 /// A checked call.
@@ -64,7 +65,7 @@ impl Checker<'_> {
                     );
                 }
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
-                    let receiver = receiver?;
+                    let receiver = self.callee(fcx, args, receiver)?;
                     return self.static_call(
                         fcx,
                         receiver,
@@ -78,7 +79,8 @@ impl Checker<'_> {
                 }
                 let receiver = self.check_expr(fcx, obj, None);
                 if receiver.ty.is_error() {
-                    return Err(ErrorGuaranteed::new());
+                    // The receiver reported it.
+                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
                 self.method_call(
                     fcx,
@@ -93,16 +95,15 @@ impl Checker<'_> {
             }
             Expr::Tag(name, tag_span) => {
                 let Some(want) = expected else {
-                    return Err(self.diags.emit(
-                        Diagnostic::error("E024", "tag construction needs an expected type").label(
-                            *tag_span,
-                            true,
-                            "annotate the binding",
-                        ),
-                    ));
+                    let error = self.diags.emit(
+                        Diagnostic::error(codes::E024, "tag construction needs an expected type")
+                            .label(*tag_span, true, "annotate the binding"),
+                    );
+                    return Err(self.callee_failed(fcx, args, error));
                 };
                 if want == TypeId::ERROR {
-                    return Err(ErrorGuaranteed::new());
+                    // The expected type reported it.
+                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
                 let tag = tail_span(*tag_span, name);
                 Ok(Called::Value(self.variant_value(
@@ -116,19 +117,21 @@ impl Checker<'_> {
             Expr::TypeApp(ty) => {
                 let resolved = self.resolve_type(ty);
                 if resolved.is_error() {
-                    return Err(ErrorGuaranteed::new());
+                    // `resolve_type` reported it.
+                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
                 self.init_call(fcx, resolved, args, span)
             }
             _ => {
                 let _ = self.check_expr(fcx, callee, None);
-                Err(self.diags.emit(
-                    Diagnostic::error("E022", "this expression is not callable").label(
+                let error = self.diags.emit(
+                    Diagnostic::error(codes::E022, "this expression is not callable").label(
                         span,
                         true,
                         "only functions can be called",
                     ),
-                ))
+                );
+                Err(self.callee_failed(fcx, args, error))
             }
         }
     }
@@ -152,17 +155,19 @@ impl Checker<'_> {
         if let Some(local) = fcx.lookup(name) {
             self.record_local_use(fcx, local, name_span);
             if !generic_args.is_empty() {
-                return Err(self.generic_arity(span, name, 0, generic_args.len()));
+                let error = self.generic_arity(span, name, 0, generic_args.len());
+                return Err(self.callee_failed(fcx, args, error));
             }
             let ty = fcx.ty(local);
             let TypeKind::Func { params, returns } = self.types.kind(ty.id).clone() else {
-                return Err(self.diags.emit(
-                    Diagnostic::error("E022", format!("`{name}` is not callable")).label(
+                let error = self.diags.emit(
+                    Diagnostic::error(codes::E022, format!("`{name}` is not callable")).label(
                         name_span,
                         true,
                         "only functions can be called",
                     ),
-                ));
+                );
+                return Err(self.callee_failed(fcx, args, error));
             };
             let args = self.check_args(fcx, &params, args, span)?;
             return Ok(Called::Call {
@@ -175,75 +180,119 @@ impl Checker<'_> {
             if let Some(intrinsic) = Intrinsic::lookup(name) {
                 self.record_semantic(name_span, SemanticKind::BuiltinFunc);
                 if !generic_args.is_empty() {
-                    return Err(self.generic_arity(span, name, 0, generic_args.len()));
+                    let error = self.generic_arity(span, name, 0, generic_args.len());
+                    return Err(self.callee_failed(fcx, args, error));
                 }
                 return self.check_intrinsic(fcx, intrinsic, name, args, span, expected);
             }
             let overloads = self.overloads(name);
             if overloads.is_empty() {
-                return Err(self.diags.emit(
-                    Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                let error = self.diags.emit(
+                    Diagnostic::error(codes::E021, format!("unresolved name `{name}`")).label(
                         name_span,
                         true,
                         "no hook or intrinsic with this name",
                     ),
-                ));
+                );
+                return Err(self.callee_failed(fcx, args, error));
             }
             return self.hook_call(fcx, name, &overloads, args, span);
         }
         let receiver = Expr::Ident(name.to_owned(), name_span);
         if let Some(receiver) = self.static_receiver(fcx, &receiver) {
-            let ty = match receiver? {
-                Receiver::Type(ty) => ty,
-                Receiver::Bare(def) => {
-                    if generic_args.is_empty() {
-                        self.infer_bare(def, expected, span)?
-                    } else {
-                        let mut resolved = Vec::new();
-                        for arg in generic_args {
-                            let arg = self.resolve_type(arg);
-                            if arg.is_error() {
-                                return Err(ErrorGuaranteed::new());
-                            }
-                            resolved.push(arg);
-                        }
-                        let count = self.res.def(def).generic_params.len();
-                        if resolved.len() != count {
-                            return Err(self.generic_arity(span, name, count, resolved.len()));
-                        }
-                        let ty = self.type_of_def(def, resolved);
-                        self.ensure_type(ty, span)?;
-                        ty
-                    }
-                }
-            };
+            let receiver = self.callee(fcx, args, receiver)?;
+            let ty = self.static_init_type(receiver, name, generic_args, span, expected);
+            let ty = self.callee(fcx, args, ty)?;
             return self.init_call(fcx, ty, args, span);
         }
-        let Some(def) = self.lookup_item(name, name_span)? else {
-            if self.in_entry() {
-                return Err(self.entry_unresolved(name, name_span));
-            }
-            let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                name_span,
-                true,
-                "not a local, item, or intrinsic",
-            );
-            let diagnostic = self.suggest_value(fcx, diagnostic, name, name_span);
-            return Err(self.diags.emit(diagnostic));
+        let found = self.lookup_item(name, name_span);
+        let Some(def) = self.callee(fcx, args, found)? else {
+            let error = if self.in_entry() {
+                self.entry_unresolved(name, name_span)
+            } else {
+                let diagnostic = Diagnostic::error(
+                    codes::E021,
+                    format!("unresolved name `{name}`"),
+                )
+                .label(name_span, true, "not a local, item, or intrinsic");
+                let diagnostic = self.suggest_value(fcx, diagnostic, name, name_span);
+                self.diags.emit(diagnostic)
+            };
+            return Err(self.callee_failed(fcx, args, error));
         };
         self.record_use(crate::paths::path_tail(name_span, name), def);
-        match &self.res.def(def).kind {
-            DefKind::Func(_) => {
-                self.func_call(fcx, def, Vec::new(), generic_args, args, span, None)
-            }
-            _ => Err(self.diags.emit(
-                Diagnostic::error("E022", "this item is not callable").label(
-                    span,
-                    true,
-                    "only functions can be called",
-                ),
-            )),
+        if let DefKind::Func(_) = self.res.def(def).kind {
+            return self.func_call(fcx, def, Vec::new(), generic_args, args, span, None);
         }
+        let error = self.diags.emit(
+            Diagnostic::error(codes::E022, "this item is not callable").label(
+                span,
+                true,
+                "only functions can be called",
+            ),
+        );
+        Err(self.callee_failed(fcx, args, error))
+    }
+
+    /// The type `Name(...)` or `Name[T](...)` constructs, for a type named
+    /// by `receiver`: generic arguments given, else inferred.
+    fn static_init_type(
+        &mut self,
+        receiver: Receiver,
+        name: &str,
+        generic_args: &[AstType],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<TypeRef, ErrorGuaranteed> {
+        let def = match receiver {
+            Receiver::Type(ty) => return Ok(ty),
+            Receiver::Bare(def) if generic_args.is_empty() => {
+                return self.infer_bare(def, expected, span);
+            }
+            Receiver::Bare(def) => def,
+        };
+        let mut resolved = Vec::new();
+        for arg in generic_args {
+            let arg = self.resolve_type(arg);
+            if arg.is_error() {
+                // `resolve_type` reported it.
+                return Err(self.diags.already_reported());
+            }
+            resolved.push(arg);
+        }
+        let count = self.res.def(def).generic_params.len();
+        if resolved.len() != count {
+            return Err(self.generic_arity(span, name, count, resolved.len()));
+        }
+        let ty = self.type_of_def(def, resolved);
+        self.ensure_type(ty, span)?;
+        Ok(ty)
+    }
+
+    /// A call whose callee failed (`error` reports it): still checks each
+    /// argument, against the error type so a tag or literal does not ask
+    /// for one, so errors inside the arguments are reported too.
+    pub(crate) fn callee_failed(
+        &mut self,
+        fcx: &mut FnCx,
+        args: &[Expr],
+        error: ErrorGuaranteed,
+    ) -> ErrorGuaranteed {
+        for arg in args {
+            let _ = self.check_expr(fcx, arg, Some(TypeId::ERROR));
+        }
+        error
+    }
+
+    /// `resolved`, a step of finding the callee, or
+    /// [`Self::callee_failed`] when it failed.
+    pub(crate) fn callee<T>(
+        &mut self,
+        fcx: &mut FnCx,
+        args: &[Expr],
+        resolved: Result<T, ErrorGuaranteed>,
+    ) -> Result<T, ErrorGuaranteed> {
+        resolved.map_err(|error| self.callee_failed(fcx, args, error))
     }
 
     /// Calls function `def` (of a type instantiated at `type_args`, if a
@@ -262,13 +311,15 @@ impl Checker<'_> {
         let own = self.res.def(def).generic_params.len();
         if generic_args.len() != own {
             let name = self.function_name(def);
-            return Err(self.generic_arity(span, &name, own, generic_args.len()));
+            let error = self.generic_arity(span, &name, own, generic_args.len());
+            return Err(self.callee_failed(fcx, args, error));
         }
         let mut key_args = type_args;
         for arg in generic_args {
             let arg = self.resolve_type(arg);
             if arg.is_error() {
-                return Err(ErrorGuaranteed::new());
+                // `resolve_type` reported it.
+                return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
             }
             key_args.push(arg);
         }
@@ -276,10 +327,13 @@ impl Checker<'_> {
             def,
             args: key_args,
         };
-        let sig = self.request(key.clone(), span)?;
+        let sig = self.request(key.clone(), span);
+        let sig = self.callee(fcx, args, sig)?;
         let skip = usize::from(receiver.is_some());
         if receiver.is_some() && sig.params.is_empty() {
-            return Err(ErrorGuaranteed::new());
+            // `method_call` checked the method takes `self`: only an error
+            // type in its signature (reported) gets here.
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
         }
         let mut hir_args: Vec<HirExpr> = receiver.into_iter().collect();
         let fixed = &sig.params[skip..];
@@ -298,7 +352,8 @@ impl Checker<'_> {
             }
         }
         if failed {
-            return Err(ErrorGuaranteed::new());
+            // `check_variadic_arg` reported it.
+            return Err(self.diags.already_reported());
         }
         Ok(Called::Call {
             callee: HirCallee::Func(key),
@@ -330,15 +385,17 @@ impl Checker<'_> {
                 if !is_variant {
                     let name = self.res.def(def).name.clone();
                     let count = self.res.def(def).generic_params.len();
-                    return Err(self.generic_arity(span, &name, count, 0));
+                    let error = self.generic_arity(span, &name, count, 0);
+                    return Err(self.callee_failed(fcx, args, error));
                 }
-                self.infer_bare(def, expected, span)?
+                let ty = self.infer_bare(def, expected, span);
+                self.callee(fcx, args, ty)?
             }
         };
         let owner = self.types.display_ref(ty);
         let Some((def, type_args)) = self.type_parts(ty.id).filter(|_| !ty.is_ref) else {
             let mut diagnostic = Diagnostic::error(
-                "E010",
+                codes::E010,
                 format!("cannot call static member `{field}` on `{owner}`"),
             )
             .label(span, true, "static calls need an object type");
@@ -347,11 +404,12 @@ impl Checker<'_> {
                 diagnostic =
                     diagnostic.note(self.required_method_note(field, None, &probed, expected));
             }
-            return Err(self.missing(diagnostic, true, field, owner, None, &[ty.id]));
+            let error = self.missing(diagnostic, true, field, owner, None, &[ty.id]);
+            return Err(self.callee_failed(fcx, args, error));
         };
         let Some(member) = self.res.member(def, field) else {
             let mut diagnostic = Diagnostic::error(
-                "E021",
+                codes::E021,
                 format!("no member `{field}` on `{owner}`"),
             )
             .label(span, true, "no such member");
@@ -362,13 +420,15 @@ impl Checker<'_> {
                 diagnostic =
                     diagnostic.note(self.required_method_note(field, None, &probed, expected));
             }
-            return Err(self.missing(diagnostic, true, field, owner, Some(def), &[]));
+            let error = self.missing(diagnostic, true, field, owner, Some(def), &[]);
+            return Err(self.callee_failed(fcx, args, error));
         };
         let member_name = tail_span(member_span, field);
         match &self.res.def(member).kind {
             DefKind::Variant(_) => {
                 if !generic_args.is_empty() {
-                    return Err(self.generic_arity(span, field, 0, generic_args.len()));
+                    let error = self.generic_arity(span, field, 0, generic_args.len());
+                    return Err(self.callee_failed(fcx, args, error));
                 }
                 Ok(Called::Value(self.variant_value(
                     ty.id,
@@ -380,18 +440,22 @@ impl Checker<'_> {
             }
             DefKind::Func(_) => {
                 if self.private_denied(member, def, span) {
-                    return Err(ErrorGuaranteed::new());
+                    // `private_denied` reported `E026`.
+                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
                 self.record_use(member_name, member);
                 self.func_call(fcx, member, type_args, generic_args, args, span, None)
             }
-            _ => Err(self.diags.emit(
-                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
-                    span,
-                    true,
-                    "only functions can be called",
-                ),
-            )),
+            _ => {
+                let error = self.diags.emit(
+                    Diagnostic::error(codes::E022, format!("`{field}` is not callable")).label(
+                        span,
+                        true,
+                        "only functions can be called",
+                    ),
+                );
+                Err(self.callee_failed(fcx, args, error))
+            }
         }
     }
 
@@ -410,10 +474,14 @@ impl Checker<'_> {
     ) -> Result<Called, ErrorGuaranteed> {
         let base = receiver.ty.deref();
         let owner = self.types.display(base.id);
+        let shadowed = self.shadowed_alias(fcx, &receiver);
         let Some((def, type_args)) = self.type_parts(base.id) else {
-            let mut diagnostic =
-                Diagnostic::error("E010", format!("cannot call method `{field}` on `{owner}`"))
-                    .label(span, true, "methods need an object");
+            let diagnostic = Diagnostic::error(
+                codes::E010,
+                format!("cannot call method `{field}` on `{owner}`"),
+            )
+            .label(span, true, "methods need an object");
+            let mut diagnostic = shadowed_alias_note(diagnostic, shadowed);
             if self.is_generic_derived(base) {
                 let probed = self.probe_args(fcx, args);
                 diagnostic = diagnostic.note(self.required_method_note(
@@ -423,16 +491,18 @@ impl Checker<'_> {
                     expected,
                 ));
             }
-            return Err(self.missing(diagnostic, true, field, owner, None, &[base.id]));
+            let error = self.missing(diagnostic, true, field, owner, None, &[base.id]);
+            return Err(self.callee_failed(fcx, args, error));
         };
         let Some(member) = self.res.member(def, field) else {
             let mut diagnostic = Diagnostic::error(
-                "E021",
+                codes::E021,
                 format!("no member `{field}` on `{owner}`"),
             )
             .label(member_span, true, "no such member");
             diagnostic =
                 self.suggest_member(diagnostic, def, field, tail_span(member_span, field), true);
+            diagnostic = shadowed_alias_note(diagnostic, shadowed);
             if self.is_generic_derived(base) {
                 let probed = self.probe_args(fcx, args);
                 diagnostic = diagnostic.note(self.required_method_note(
@@ -442,33 +512,36 @@ impl Checker<'_> {
                     expected,
                 ));
             }
-            return Err(self.missing(diagnostic, true, field, owner, Some(def), &[]));
+            let error = self.missing(diagnostic, true, field, owner, Some(def), &[]);
+            return Err(self.callee_failed(fcx, args, error));
         };
         if !matches!(self.res.def(member).kind, DefKind::Func(_)) {
-            return Err(self.diags.emit(
-                Diagnostic::error("E022", format!("`{field}` is not callable")).label(
+            let error = self.diags.emit(
+                Diagnostic::error(codes::E022, format!("`{field}` is not callable")).label(
                     member_span,
                     true,
                     "only functions can be called",
                 ),
-            ));
+            );
+            return Err(self.callee_failed(fcx, args, error));
         }
         if self.private_denied(member, def, member_span) {
-            return Err(ErrorGuaranteed::new());
+            // `private_denied` reported `E026`.
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
         }
         self.record_use(tail_span(member_span, field), member);
-        let template = self.sig_of(member)?;
+        let template = self.sig_of(member);
+        let template = self.callee(fcx, args, template)?;
         let takes_self = template.params.first().is_some_and(|first| {
             first.is_ref && self.type_parts(first.id).is_some_and(|(d, _)| d == def)
         });
         if !takes_self {
-            return Err(self.diags.emit(
-                Diagnostic::error("E022", format!("method `{field}` takes no `self`")).label(
-                    member_span,
-                    true,
-                    "first parameter must be `ref Self`",
-                ),
-            ));
+            let error =
+                self.diags.emit(
+                    Diagnostic::error(codes::E022, format!("method `{field}` takes no `self`"))
+                        .label(member_span, true, "first parameter must be `ref Self`"),
+                );
+            return Err(self.callee_failed(fcx, args, error));
         }
         let receiver = if receiver.ty.is_ref {
             receiver
@@ -521,13 +594,9 @@ impl Checker<'_> {
 
     /// The type an expression would have, without keeping its diagnostics.
     fn probe(&mut self, fcx: &mut FnCx, expr: &Expr) -> Option<TypeRef> {
-        let mark = self.diags.checkpoint();
-        let requirements = self.requirements.len();
-        let dependent = self.dependent.len();
+        let outer = self.diags.hold();
         let ty = self.check_expr(fcx, expr, None).ty;
-        let _ = self.diags.take_since(mark);
-        self.requirements.truncate(requirements);
-        self.dependent.truncate(dependent);
+        let _ = self.diags.release(outer);
         (!ty.is_error()).then_some(ty)
     }
 
@@ -546,27 +615,33 @@ impl Checker<'_> {
             .filter(|hook| hook.sig.returns.first().is_some_and(|ret| ret.id == ty.id))
             .collect();
         if overloads.is_empty() {
-            return Err(self.emit_involving(
-                Diagnostic::error("E022", format!("type `{name}` has no `@init` constructor"))
-                    .label(span, true, "define `@init` or use `= { ... }`"),
+            let error = self.emit_involving(
+                Diagnostic::error(
+                    codes::E022,
+                    format!("type `{name}` has no `@init` constructor"),
+                )
+                .label(span, true, "define `@init` or use `= { ... }`"),
                 &[ty.id],
-            ));
+            );
+            return Err(self.callee_failed(fcx, args, error));
         }
         let Some(hook) = self.select_overload(fcx, &overloads, args) else {
-            return Err(self.diags.emit(
+            let error = self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!(
                         "no overload of `{name}.@init` takes {} arguments",
                         args.len()
                     ),
                 )
                 .label(span, true, "arity mismatch here"),
-            ));
+            );
+            return Err(self.callee_failed(fcx, args, error));
         };
         if let Some(owner) = self.res.def(hook.key.def).parent {
             if self.private_denied(hook.key.def, owner, span) {
-                return Err(ErrorGuaranteed::new());
+                // `private_denied` reported `E026`.
+                return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
             }
         }
         let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
@@ -587,13 +662,14 @@ impl Checker<'_> {
         span: Span,
     ) -> Result<Called, ErrorGuaranteed> {
         let Some(hook) = self.select_overload(fcx, overloads, args) else {
-            return Err(self.diags.emit(
+            let error = self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!("no overload of `{name}` takes {} arguments", args.len()),
                 )
                 .label(span, true, "arity mismatch here"),
-            ));
+            );
+            return Err(self.callee_failed(fcx, args, error));
         };
         let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
         Ok(Called::Call {
@@ -650,7 +726,9 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
-        self.arity(params.len(), args.len(), span)?;
+        if let Err(error) = self.arity(params.len(), args.len(), span) {
+            return Err(self.callee_failed(fcx, args, error));
+        }
         let mut checked = Vec::with_capacity(args.len());
         let mut failed = false;
         for (arg, param) in args.iter().zip(params) {
@@ -669,7 +747,8 @@ impl Checker<'_> {
             checked.push(value);
         }
         if failed {
-            Err(ErrorGuaranteed::new())
+            // Each failed argument reported it.
+            Err(self.diags.already_reported())
         } else {
             Ok(checked)
         }
@@ -683,7 +762,9 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<Vec<HirExpr>, ErrorGuaranteed> {
-        self.arity(params.len(), args.len(), span)?;
+        if let Err(error) = self.arity(params.len(), args.len(), span) {
+            return Err(self.callee_failed(fcx, args, error));
+        }
         let mut checked = Vec::with_capacity(args.len());
         let mut failed = false;
         for (arg, param) in args.iter().zip(params) {
@@ -705,12 +786,13 @@ impl Checker<'_> {
             let value = if param.is_ref {
                 value
             } else {
-                self.auto_deref(value)
+                Self::auto_deref(value)
             };
             checked.push(value);
         }
         if failed {
-            Err(ErrorGuaranteed::new())
+            // Each failed argument reported it.
+            Err(self.diags.already_reported())
         } else {
             Ok(checked)
         }
@@ -725,14 +807,15 @@ impl Checker<'_> {
     ) -> Result<HirExpr, ErrorGuaranteed> {
         if is_foldable_literal(arg) {
             return Err(self.diags.emit(
-                Diagnostic::error("E028", "a variadic argument needs a type")
+                Diagnostic::error(codes::E028, "a variadic argument needs a type")
                     .label(arg.span(), true, "this literal has no type to pass")
                     .help("give it one with `as`, e.g. `0x1b6 as @bit32`"),
             ));
         }
         let value = self.check_expr(fcx, arg, None);
         if value.ty.is_error() {
-            return Err(ErrorGuaranteed::new());
+            // The argument reported it.
+            return Err(self.diags.already_reported());
         }
         let passes = value.ty.is_ref
             || ["@bit32", "@bit64", "@bit_native", "@fbit64"]
@@ -743,7 +826,7 @@ impl Checker<'_> {
         }
         let ty = self.types.display_ref(value.ty);
         Err(self.diags.emit(
-            Diagnostic::error("E028", format!("`{ty}` cannot be a variadic argument"))
+            Diagnostic::error(codes::E028, format!("`{ty}` cannot be a variadic argument"))
                 .label(arg.span(), true, "not passable through `...`")
                 .help("C promotes narrow integers and floats; pass a `@bit32`, `@bit64`, `@bit_native`, `@fbit64` or a `ref`, widening explicitly with `as`"),
         ))
@@ -754,7 +837,7 @@ impl Checker<'_> {
             return Ok(());
         }
         let diagnostic = Diagnostic::error(
-            "E022",
+            codes::E022,
             format!("wrong number of arguments: expected {expected}, found {found}"),
         )
         .label(span, true, "arity mismatch here");
@@ -782,7 +865,7 @@ impl Checker<'_> {
                     HirExprKind::AlignOf(ty)
                 };
                 return Ok(Called::Value(HirExpr {
-                    ty: self.value_of("@bit_native"),
+                    ty: Builtin::BitNative.value(),
                     span,
                     kind,
                 }));
@@ -794,7 +877,7 @@ impl Checker<'_> {
                 let Expr::Str(msg, msg_span) = &args[0] else {
                     return Err(self.diags.emit(
                         Diagnostic::error(
-                            "E010",
+                            codes::E010,
                             "`@compile_error` needs a string literal message",
                         )
                         .label(args[0].span(), true, "message goes here"),
@@ -812,7 +895,8 @@ impl Checker<'_> {
             _ => {}
         }
         let signature = intrinsic.signature();
-        self.intrinsic_arity(name, signature.params.len(), args.len(), span)?;
+        let arity = self.intrinsic_arity(name, signature.params.len(), args.len(), span);
+        self.callee(fcx, args, arity)?;
         let exact = matches!(
             intrinsic,
             Intrinsic::Int(..)
@@ -830,18 +914,22 @@ impl Checker<'_> {
             }
         }
         if failed {
-            return Err(ErrorGuaranteed::new());
+            // `intrinsic_arg` reported it.
+            return Err(self.diags.already_reported());
         }
         let outs = match signature.result {
             None => Vec::new(),
-            Some(Slot::Builtin(ty)) => vec![self.value_of(ty)],
-            Some(Slot::Ref(ty)) => vec![TypeRef::reference(self.builtin(ty))],
+            Some(Slot::Builtin(ty)) => vec![ty.value()],
+            Some(Slot::Ref(ty)) => vec![TypeRef::reference(ty.id())],
             Some(Slot::ExpectedBit | Slot::AnyBit) => match expected {
                 Some(want) if self.is_bit(want) => vec![TypeRef::value(want)],
                 _ => {
                     return Err(self.diags.emit(
-                        Diagnostic::error("E024", format!("`{name}` needs an expected bit type"))
-                            .label(span, true, "annotate the binding"),
+                        Diagnostic::error(
+                            codes::E024,
+                            format!("`{name}` needs an expected bit type"),
+                        )
+                        .label(span, true, "annotate the binding"),
                     ));
                 }
             },
@@ -865,7 +953,7 @@ impl Checker<'_> {
         }
         Err(self.diags.emit(
             Diagnostic::error(
-                "E022",
+                codes::E022,
                 format!("wrong number of arguments to `{name}`: expected {want}, found {found}"),
             )
             .label(span, true, "arity mismatch here"),
@@ -881,8 +969,8 @@ impl Checker<'_> {
         span: Span,
     ) -> Option<HirExpr> {
         match slot {
-            Slot::Builtin(name) => {
-                let id = self.builtin(name);
+            Slot::Builtin(ty) => {
+                let id = ty.id();
                 let value = self.check_expr(fcx, arg, Some(id));
                 if value.ty.is_error() {
                     return None;
@@ -891,10 +979,10 @@ impl Checker<'_> {
                     let value = self.coerce(value, TypeRef::value(id), arg.span());
                     return (!value.ty.is_error()).then_some(value);
                 }
-                let value = self.auto_deref(value);
+                let value = Self::auto_deref(value);
                 if value.ty.id != id {
                     let diagnostic = Diagnostic::error(
-                        "E010",
+                        codes::E010,
                         format!(
                             "mismatched types: expected {}, found {}",
                             self.types.display(id),
@@ -902,13 +990,17 @@ impl Checker<'_> {
                         ),
                     )
                     .label(arg.span(), true, "wrong operand type here");
-                    self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
+                    let requirement = Requirement::Mismatch {
+                        expected_ref: false,
+                    };
+                    self.emit_requirement(diagnostic, requirement, &[value.ty.id]);
                     return None;
                 }
                 Some(value)
             }
-            Slot::Ref(name) => {
-                let id = self.builtin(name);
+            Slot::Ref(ty) => {
+                let id = ty.id();
+                let name = ty.name();
                 let value = self.check_expr(fcx, arg, None);
                 if value.ty.is_error() {
                     return None;
@@ -916,11 +1008,14 @@ impl Checker<'_> {
                 if value.ty.is_ref && value.ty.id == id {
                     return Some(value);
                 }
-                let diagnostic =
-                    Diagnostic::error("E010", format!("mismatched types: expected ref {name}"))
-                        .label(span, false, format!("expected `ref {name}` here"))
-                        .label(arg.span(), true, "needs an explicit `ref`");
-                self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
+                let diagnostic = Diagnostic::error(
+                    codes::E010,
+                    format!("mismatched types: expected ref {name}"),
+                )
+                .label(span, false, format!("expected `ref {name}` here"))
+                .label(arg.span(), true, "needs an explicit `ref`");
+                let requirement = Requirement::Mismatch { expected_ref: true };
+                self.emit_requirement(diagnostic, requirement, &[value.ty.id]);
                 None
             }
             Slot::AnyBit | Slot::ExpectedBit => {
@@ -928,19 +1023,22 @@ impl Checker<'_> {
                 if value.ty.is_error() {
                     return None;
                 }
-                let value = self.auto_deref(value);
+                let value = Self::auto_deref(value);
                 if self.is_bit(value.ty.id) {
                     return Some(value);
                 }
                 let diagnostic = Diagnostic::error(
-                    "E010",
+                    codes::E010,
                     format!(
                         "mismatched types: expected a bit container, found {}",
                         self.types.display(value.ty.id)
                     ),
                 )
                 .label(arg.span(), true, "not a bit container");
-                self.emit_requirement(diagnostic, Requirement::Mismatch, &[value.ty.id]);
+                let requirement = Requirement::Mismatch {
+                    expected_ref: false,
+                };
+                self.emit_requirement(diagnostic, requirement, &[value.ty.id]);
                 None
             }
         }
@@ -972,7 +1070,8 @@ impl Checker<'_> {
         }
         let value = self.check_expr(fcx, arg, None);
         if value.ty.is_error() {
-            return Err(ErrorGuaranteed::new());
+            // The argument reported it.
+            return Err(self.diags.already_reported());
         }
         Ok(value.ty)
     }

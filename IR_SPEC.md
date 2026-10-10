@@ -2,7 +2,7 @@
 
 > Version: `lilac_ir = "0.4"`. Status: normative for the Rust rewrite.
 > `SPEC.md` is normative for language semantics; this file is normative for IR text,
-> verification, and backend contract. Plan-only material lives in `RUST_REWRITE_PLAN.md`.
+> verification, and backend contract. Plan-only material lives in `docs/history/RUST_REWRITE_PLAN.md`.
 
 # Declaration Syntax
 * ! = Constant in data section
@@ -191,11 +191,12 @@ zero %out
   two references are compatible under opaque pointers: `copy %a -> %b` with
   `ref X` -> `ref Y` is a pointer copy. A reference/value mix (`ref X` vs a
   value) and two distinct value types are rejected.
-* `const` defines a typed register from a literal.
+* `const` defines a typed register from a literal: an integer, a float or a
+  data symbol (`LirConst`). The verifier checks it against the register type.
 ```lilac-ir
 copy %a -> %b
 copy &1 -> %b
-&1: #bit32 = const 0x1:#bit32
+&1: #bit32 = const 0x1
 ```
 
 ### field / field stores / deref stores
@@ -432,8 +433,11 @@ Same width rule as integer arithmetic.
 * ```shift.l &a, &b -> &r``` / ```shift.r &a, &b -> &r```
 
 ## Literals (canonical text)
-* Ints: `0x1:#bit32`, `0b101:#bit8`; width suffix is required in canonical text.
-* Floats: `&1: #fbit64 = const 1.5` (source spelling; the register type fixes the width).
+* Ints: `&1: #bit32 = const 0x2a`: lowercase hex, no leading zeros, the
+  register type fixes the width. The value must fit it; a `ref` takes only
+  `0x0`.
+* Floats: `&1: #fbit64 = const 1000.0`: the shortest text that reads back
+  as the same `f64`, not the source spelling.
 * Strings: `!c: str = "..."` in `data`; a string literal is read with
   `&1: #byte_buffer = const !c` (data-backed buffer value).
 

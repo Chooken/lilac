@@ -1,0 +1,5 @@
+Square: object {
+    side: @bit32
+}
+
+area: function (square: Square) n: @bit32 => square.side

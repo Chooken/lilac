@@ -17,8 +17,9 @@ use lilac_hir::intrinsics::{Intrinsic, NumOp};
 use lilac_hir::{
     HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirStmt, HirValueArm, LocalId,
 };
-use lilac_ir::{ArithOp, LirTy};
+use lilac_ir::{ArithOp, LirConst, LirTy};
 use lilac_resolve::DefId;
+use lilac_span::Span;
 use lilac_ty::TypeRef;
 
 use crate::Lower;
@@ -74,6 +75,22 @@ pub(crate) fn arith_op(op: NumOp, float: bool) -> Option<ArithOp> {
         (NumOp::Ge, true) => ArithOp::FGe,
         _ => return None,
     })
+}
+
+/// Number literal text as a constant of `lir`: a float for a float type,
+/// else an integer.
+pub(crate) fn number_const(text: &str, lir: &LirTy, span: Span) -> LirConst {
+    if lir.is_float() {
+        match text.replace('_', "").parse::<f64>() {
+            Ok(value) => LirConst::Float(value),
+            Err(_) => lilac_error::bug!(span, "invalid float literal `{text}`"),
+        }
+    } else {
+        match parse_int(text) {
+            Some(value) => LirConst::Int(value),
+            None => lilac_error::bug!(span, "invalid integer literal `{text}`"),
+        }
+    }
 }
 
 /// Parses integer literal text (`0x`, `0b`, decimal, `_` separators).

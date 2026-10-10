@@ -175,7 +175,7 @@ fn position(uri: &Url, (line, character): (u32, u32)) -> serde_json::Value {
     })
 }
 
-/// A server with `PROGRAM` open (checked clean) as a single file.
+/// A server with `PROGRAM` open (checked with no errors) as a single file.
 fn open_program() -> (Connection, std::thread::JoinHandle<()>, Url) {
     let (client, handle) = start_server();
     initialize(&client, serde_json::json!({ "capabilities": {} }));
@@ -183,7 +183,10 @@ fn open_program() -> (Connection, std::thread::JoinHandle<()>, Url) {
     did_open(&client, &uri, PROGRAM);
     let published = publish_for(&client, &uri);
     assert!(
-        published.diagnostics.is_empty(),
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(lsp_types::DiagnosticSeverity::HINT)),
         "{:?}",
         published.diagnostics
     );

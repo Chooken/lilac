@@ -2,10 +2,10 @@
 //! compile-time folding of all-literal arithmetic (SPEC §2).
 
 use lilac_ast::{BinOp, Expr};
-use lilac_error::Diagnostic;
+use lilac_error::{codes, Diagnostic};
 use lilac_hir::{HirExpr, HirExprKind};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeRef};
 
 use crate::Checker;
 
@@ -157,12 +157,13 @@ impl Checker<'_> {
             return self.type_float(parse_float(bytes), Some(bytes), span, expected);
         }
         let Some(magnitude) = integer_magnitude(bytes) else {
-            self.diags
-                .emit(Diagnostic::error("E060", "invalid integer literal").label(
+            self.diags.emit(
+                Diagnostic::error(codes::E060, "invalid integer literal").label(
                     span,
                     true,
                     "not a valid integer literal",
-                ));
+                ),
+            );
             return HirExpr::poison(span);
         };
         let Some(ty) = self.int_literal_ty(significant_bits(magnitude), span, expected) else {
@@ -186,7 +187,7 @@ impl Checker<'_> {
             if bits > width {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E060",
+                        codes::E060,
                         format!(
                             "value needs {bits} bits but {} holds {width}",
                             self.types.display(ty)
@@ -200,7 +201,7 @@ impl Checker<'_> {
         }
         let Some(width) = smallest_width(bits) else {
             self.diags.emit(
-                Diagnostic::error("E060", "integer literal does not fit in 64 bits").label(
+                Diagnostic::error(codes::E060, "integer literal does not fit in 64 bits").label(
                     span,
                     true,
                     "literal too large",
@@ -208,7 +209,7 @@ impl Checker<'_> {
             );
             return None;
         };
-        Some(self.bit_of_width(width))
+        Some(Self::bit_of_width(width))
     }
 
     /// Folds `-<integer literal>` into a two's-complement constant. `None` when
@@ -226,18 +227,22 @@ impl Checker<'_> {
             return None;
         }
         let Some(magnitude) = integer_magnitude(bytes) else {
-            self.diags
-                .emit(Diagnostic::error("E060", "invalid integer literal").label(
+            self.diags.emit(
+                Diagnostic::error(codes::E060, "invalid integer literal").label(
                     *lit_span,
                     true,
                     "not a valid integer literal",
-                ));
+                ),
+            );
             return Some(HirExpr::poison(span));
         };
         let Some(fit) = signed_smallest_width(magnitude) else {
             self.diags.emit(
-                Diagnostic::error("E060", "negative integer literal does not fit in 64 bits")
-                    .label(*lit_span, true, "literal too large"),
+                Diagnostic::error(
+                    codes::E060,
+                    "negative integer literal does not fit in 64 bits",
+                )
+                .label(*lit_span, true, "literal too large"),
             );
             return Some(HirExpr::poison(span));
         };
@@ -266,7 +271,7 @@ impl Checker<'_> {
             if fit > width {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E060",
+                        codes::E060,
                         format!(
                             "value needs {fit} bits but {} holds {width}",
                             self.types.display(ty)
@@ -278,7 +283,7 @@ impl Checker<'_> {
             }
             (ty, width)
         } else {
-            (self.bit_of_width(fit), fit)
+            (Self::bit_of_width(fit), fit)
         };
         let mask = (1u128 << width) - 1;
         let value = ((1u128 << width) - magnitude) & mask;
@@ -327,14 +332,17 @@ impl Checker<'_> {
                     }
                     Some(_) => {
                         self.diags.emit(
-                            Diagnostic::error("E060", "integer literal does not fit in 64 bits")
-                                .label(*span, true, "literal too large"),
+                            Diagnostic::error(
+                                codes::E060,
+                                "integer literal does not fit in 64 bits",
+                            )
+                            .label(*span, true, "literal too large"),
                         );
                         Folded::Error
                     }
                     None => {
                         self.diags.emit(
-                            Diagnostic::error("E060", "invalid integer literal").label(
+                            Diagnostic::error(codes::E060, "invalid integer literal").label(
                                 *span,
                                 true,
                                 "not a valid integer literal",
@@ -377,11 +385,8 @@ impl Checker<'_> {
                     return Some(Value::Float(value));
                 }
                 self.diags.emit(
-                    Diagnostic::error("E060", "float expression does not fit in @fbit64").label(
-                        span,
-                        true,
-                        "expression out of range",
-                    ),
+                    Diagnostic::error(codes::E060, "float expression does not fit in @fbit64")
+                        .label(span, true, "expression out of range"),
                 );
                 None
             }
@@ -406,8 +411,11 @@ impl Checker<'_> {
                 let (left, right) = (signed(ln, lm), signed(rn, rm));
                 if matches!(op, BinOp::Div | BinOp::Mod) && right == 0 {
                     self.diags.emit(
-                        Diagnostic::error("E060", "division by zero in integer literal expression")
-                            .label(span, true, "divide by zero"),
+                        Diagnostic::error(
+                            codes::E060,
+                            "division by zero in integer literal expression",
+                        )
+                        .label(span, true, "divide by zero"),
                     );
                     return None;
                 }
@@ -433,8 +441,11 @@ impl Checker<'_> {
                     }),
                     _ => {
                         self.diags.emit(
-                            Diagnostic::error("E060", "integer expression does not fit in 64 bits")
-                                .label(span, true, "expression too large"),
+                            Diagnostic::error(
+                                codes::E060,
+                                "integer expression does not fit in 64 bits",
+                            )
+                            .label(span, true, "expression too large"),
                         );
                         None
                     }
@@ -443,7 +454,7 @@ impl Checker<'_> {
             _ => {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E010",
+                        codes::E010,
                         "mismatched types: cannot mix an integer and a float literal",
                     )
                     .label(span, true, "mixed int/float operands"),
@@ -462,8 +473,11 @@ impl Checker<'_> {
             } => {
                 let Some(fit) = signed_smallest_width(magnitude) else {
                     self.diags.emit(
-                        Diagnostic::error("E060", "integer expression does not fit in 64 bits")
-                            .label(span, true, "expression too large"),
+                        Diagnostic::error(
+                            codes::E060,
+                            "integer expression does not fit in 64 bits",
+                        )
+                        .label(span, true, "expression too large"),
                     );
                     return HirExpr::poison(span);
                 };
@@ -503,7 +517,7 @@ impl Checker<'_> {
             if self.is_bit(ty) {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E010",
+                        codes::E010,
                         "mismatched types: expected an integer, found a float",
                     )
                     .label(span, true, format!("float {what} here")),
@@ -512,16 +526,13 @@ impl Checker<'_> {
             }
             if self.is_float(ty) && self.float_width(ty) == 128 {
                 self.diags.emit(
-                    Diagnostic::error("E010", "`@fbit128` literals are not supported yet").label(
-                        span,
-                        true,
-                        "only 16/32/64-bit float literals can be typed",
-                    ),
+                    Diagnostic::error(codes::E010, "`@fbit128` literals are not supported yet")
+                        .label(span, true, "only 16/32/64-bit float literals can be typed"),
                 );
                 return HirExpr::poison(span);
             }
         }
-        let fbit64 = self.builtin("@fbit64");
+        let fbit64 = Builtin::FBit64.id();
         let target = match expected {
             Some(ty) if self.is_float(ty) => ty,
             Some(ty) => self.conversion_source(ty, true).unwrap_or(fbit64),
@@ -536,7 +547,7 @@ impl Checker<'_> {
             };
             self.diags.emit(
                 Diagnostic::error(
-                    "E060",
+                    codes::E060,
                     format!(
                         "float {what} does not fit in {}",
                         self.types.display(target)

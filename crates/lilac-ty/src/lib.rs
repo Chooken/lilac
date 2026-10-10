@@ -116,22 +116,107 @@ pub enum TypeKind {
     Error,
 }
 
-/// Every builtin type's spelling, in `TypeId` order (the first entries of
-/// every type table).
-pub const BUILTIN_TYPES: [&str; 12] = [
-    "@bit8",
-    "@bit16",
-    "@bit32",
-    "@bit64",
-    "@bit_native",
-    "@fbit16",
-    "@fbit32",
-    "@fbit64",
-    "@fbit128",
-    "@byte_buffer",
-    "@format_args",
-    "unknown",
-];
+/// A builtin type. Each is interned first, in this order, in every type
+/// table, so its [`TypeId`] is fixed ([`Builtin::id`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Builtin {
+    /// `@bit8`.
+    Bit8,
+    /// `@bit16`.
+    Bit16,
+    /// `@bit32`.
+    Bit32,
+    /// `@bit64`.
+    Bit64,
+    /// `@bit_native`.
+    BitNative,
+    /// `@fbit16`.
+    FBit16,
+    /// `@fbit32`.
+    FBit32,
+    /// `@fbit64`.
+    FBit64,
+    /// `@fbit128`.
+    FBit128,
+    /// `@byte_buffer`.
+    ByteBuffer,
+    /// `@format_args`.
+    FormatArgs,
+    /// `unknown`.
+    Unknown,
+}
+
+impl Builtin {
+    /// Every builtin, in `TypeId` order.
+    pub const ALL: [Self; 12] = [
+        Self::Bit8,
+        Self::Bit16,
+        Self::Bit32,
+        Self::Bit64,
+        Self::BitNative,
+        Self::FBit16,
+        Self::FBit32,
+        Self::FBit64,
+        Self::FBit128,
+        Self::ByteBuffer,
+        Self::FormatArgs,
+        Self::Unknown,
+    ];
+
+    /// Its spelling (`@bit32`, `unknown`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bit8 => "@bit8",
+            Self::Bit16 => "@bit16",
+            Self::Bit32 => "@bit32",
+            Self::Bit64 => "@bit64",
+            Self::BitNative => "@bit_native",
+            Self::FBit16 => "@fbit16",
+            Self::FBit32 => "@fbit32",
+            Self::FBit64 => "@fbit64",
+            Self::FBit128 => "@fbit128",
+            Self::ByteBuffer => "@byte_buffer",
+            Self::FormatArgs => "@format_args",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The builtin spelled `name`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|builtin| builtin.name() == name)
+    }
+
+    /// Its type in every table.
+    #[must_use]
+    pub fn id(self) -> TypeId {
+        TypeId(self as u32)
+    }
+
+    /// Its type, by value.
+    #[must_use]
+    pub fn value(self) -> TypeRef {
+        TypeRef::value(self.id())
+    }
+
+    fn kind(self) -> TypeKind {
+        match self {
+            Self::Bit8 => TypeKind::Bit8,
+            Self::Bit16 => TypeKind::Bit16,
+            Self::Bit32 => TypeKind::Bit32,
+            Self::Bit64 => TypeKind::Bit64,
+            Self::BitNative => TypeKind::BitNative,
+            Self::FBit16 => TypeKind::FBit16,
+            Self::FBit32 => TypeKind::FBit32,
+            Self::FBit64 => TypeKind::FBit64,
+            Self::FBit128 => TypeKind::FBit128,
+            Self::ByteBuffer => TypeKind::ByteBuffer,
+            Self::FormatArgs => TypeKind::FormatArgs,
+            Self::Unknown => TypeKind::Unknown,
+        }
+    }
+}
 
 /// Function signature.
 #[derive(Clone, Debug, Default)]
@@ -158,27 +243,13 @@ impl Types {
     /// Table with the 12 builtin types pre-interned.
     pub fn new() -> Self {
         let mut table = Self::default();
-        table.kinds.extend([
-            TypeKind::Bit8,
-            TypeKind::Bit16,
-            TypeKind::Bit32,
-            TypeKind::Bit64,
-            TypeKind::BitNative,
-            TypeKind::FBit16,
-            TypeKind::FBit32,
-            TypeKind::FBit64,
-            TypeKind::FBit128,
-            TypeKind::ByteBuffer,
-            TypeKind::FormatArgs,
-            TypeKind::Unknown,
-        ]);
+        table.kinds.extend(Builtin::ALL.map(Builtin::kind));
         table
     }
 
-    /// Looks up a builtin by Lilac spelling (`@bit32`, `@byte_buffer`, `unknown`).
+    /// The builtin type spelled `name` (`@bit32`, `@byte_buffer`, `unknown`).
     pub fn builtin(&self, name: &str) -> Option<TypeId> {
-        let id = BUILTIN_TYPES.iter().position(|builtin| *builtin == name)?;
-        Some(TypeId(u32::try_from(id).ok()?))
+        Builtin::named(name).map(Builtin::id)
     }
 
     /// Interns (or finds) the type for a user `object`.
@@ -475,6 +546,16 @@ mod tests {
         assert_eq!(types.builtin("@bit64"), types.builtin("@bit64"));
         assert_eq!(types.builtin("@nope"), None);
         assert_eq!(types.builtin("bit32"), None);
+    }
+
+    #[test]
+    fn each_builtin_is_its_own_kind() {
+        let types = Types::new();
+        for builtin in Builtin::ALL {
+            assert_eq!(Builtin::named(builtin.name()), Some(builtin));
+            assert_eq!(types.kind(builtin.id()), &builtin.kind());
+            assert_eq!(types.display(builtin.id()), builtin.name());
+        }
     }
 
     #[test]

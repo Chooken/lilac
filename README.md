@@ -100,3 +100,13 @@ functions with `extern` and pass the library with `--link-arg=`.
 `--libc` links through a C compiler (`cc` or `clang` on `PATH`, or
 `--linker=<path>`) with the C library instead. Use it to link static C
 libraries, or code that still uses `Standard.C`.
+
+## Checking a program
+
+`lilac check <file-or-dir>` reports errors without building, and takes the
+same `-q`, `--timings` and `--lib=` flags. Every error has a code; `lilac
+explain <code>` prints its page:
+
+```bash
+lilac explain E042
+```

@@ -15,7 +15,7 @@ use lilac_error::TraceFrame;
 use lilac_span::Span;
 
 use crate::trace::is_hidden;
-use crate::{LirCallee, LirFunc, LirInst, LirModule, LirTy};
+use crate::{LirCallee, LirConst, LirFunc, LirInst, LirModule, LirTy, Symbol};
 
 /// How a caller reaches a callee: a direct `call` or a taken `addr.func`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub enum EdgeKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edge {
     /// Calling function.
-    pub caller: String,
+    pub caller: Symbol,
     /// Span of the `call` / `addr.func`.
     pub span: Span,
     /// Edge kind.
@@ -41,7 +41,7 @@ pub struct Edge {
 /// The functions reachable from the roots.
 #[derive(Clone, Debug, Default)]
 pub struct Reach {
-    reached: HashSet<String>,
+    reached: HashSet<Symbol>,
 }
 
 impl Reach {
@@ -57,7 +57,7 @@ impl Reach {
 /// caller tree.
 #[derive(Clone, Debug, Default)]
 pub struct CallGraph {
-    callers: HashMap<String, Vec<Edge>>,
+    callers: HashMap<Symbol, Vec<Edge>>,
 }
 
 impl CallGraph {
@@ -65,7 +65,7 @@ impl CallGraph {
     /// live callers, before it to see every caller).
     #[must_use]
     pub fn new(module: &LirModule) -> Self {
-        let mut callers: HashMap<String, Vec<Edge>> = HashMap::new();
+        let mut callers: HashMap<Symbol, Vec<Edge>> = HashMap::new();
         for func in &module.funcs {
             for (target, span, kind) in callees(func) {
                 callers.entry(target).or_default().push(Edge {
@@ -118,14 +118,14 @@ impl CallGraph {
         edges
             .into_iter()
             .map(|edge| {
-                let repeat = !expanded.insert(edge.caller.clone());
+                let repeat = !expanded.insert(edge.caller.as_str().to_owned());
                 let callers = if repeat {
                     Vec::new()
                 } else {
-                    self.frames(&edge.caller, expanded, names)
+                    self.frames(edge.caller.as_str(), expanded, names)
                 };
                 TraceFrame {
-                    func: display(&edge.caller, names),
+                    func: display(edge.caller.as_str(), names),
                     span: edge.span,
                     address: edge.kind == EdgeKind::Address,
                     repeat,
@@ -143,10 +143,10 @@ impl CallGraph {
         out: &mut Vec<&'a Edge>,
     ) {
         for edge in self.callers(func) {
-            if !is_hidden(&edge.caller) {
+            if !is_hidden(edge.caller.as_str()) {
                 out.push(edge);
-            } else if spliced.insert(edge.caller.clone()) {
-                self.visible_edges(&edge.caller, spliced, out);
+            } else if spliced.insert(edge.caller.as_str().to_owned()) {
+                self.visible_edges(edge.caller.as_str(), spliced, out);
             }
         }
     }
@@ -169,8 +169,8 @@ pub fn reach<S: BuildHasher>(
         .iter()
         .map(|func| (func.name.as_str(), func))
         .collect();
-    let mut reached: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut reached: HashSet<Symbol> = HashSet::new();
+    let mut queue: VecDeque<Symbol> = VecDeque::new();
     for func in &module.funcs {
         if func.name == "main" && reached.insert(func.name.clone()) {
             queue.push_back(func.name.clone());
@@ -179,8 +179,8 @@ pub fn reach<S: BuildHasher>(
     let mut extra: Vec<&String> = extra_roots.iter().collect();
     extra.sort();
     for root in extra {
-        if reached.insert(root.clone()) {
-            queue.push_back(root.clone());
+        if reached.insert(root.into()) {
+            queue.push_back(root.into());
         }
     }
     if queue.is_empty() {
@@ -207,7 +207,7 @@ pub fn reach<S: BuildHasher>(
 /// (build-system export hints). Reachability follows direct `call` and
 /// `addr.func` targets (an address-taken function survives even when it is
 /// never called directly). Data consts survive only when a surviving
-/// instruction names them: a `Const` literal starting with `'!'`. Layouts
+/// instruction names them (a `const` of [`LirConst::Data`]). Layouts
 /// survive when a surviving function's signature or instruction type names
 /// them, directly or through another surviving layout's fields. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
@@ -218,20 +218,25 @@ pub fn prune_unreachable<S: BuildHasher>(
 ) -> Option<Reach> {
     let reach = reach(module, extra_roots)?;
 
-    module.funcs.retain(|func| reach.contains(&func.name));
+    module
+        .funcs
+        .retain(|func| reach.contains(func.name.as_str()));
 
-    let mut referenced: HashSet<String> = HashSet::new();
+    let mut referenced: HashSet<&Symbol> = HashSet::new();
     for func in &module.funcs {
         for block in &func.blocks {
             for inst in &block.insts {
-                if let LirInst::Const { lit, .. } = inst {
-                    if let Some(sym) = lit.strip_prefix('!') {
-                        referenced.insert(sym.to_owned());
-                    }
+                if let LirInst::Const {
+                    value: LirConst::Data(name),
+                    ..
+                } = inst
+                {
+                    referenced.insert(name);
                 }
             }
         }
     }
+    let referenced: HashSet<Symbol> = referenced.into_iter().cloned().collect();
     module.data.retain(|datum| referenced.contains(&datum.name));
     prune_layouts(module);
     Some(reach)
@@ -296,7 +301,7 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
 
 /// Direct `call` and `addr.func` targets of every instruction in `func`, in
 /// order, with their spans.
-fn callees(func: &LirFunc) -> Vec<(String, Span, EdgeKind)> {
+fn callees(func: &LirFunc) -> Vec<(Symbol, Span, EdgeKind)> {
     let mut targets = Vec::new();
     for block in &func.blocks {
         for inst in &block.insts {
@@ -332,7 +337,7 @@ mod tests {
         let mut insts = Vec::new();
         for callee in calls {
             insts.push(LirInst::Call {
-                func: LirCallee::Func((*callee).to_owned()),
+                func: LirCallee::Func((*callee).into()),
                 ins: Vec::new(),
                 outs: Vec::new(),
                 span: Span::dummy(),
@@ -340,21 +345,21 @@ mod tests {
         }
         for (i, target) in addr.iter().enumerate() {
             insts.push(LirInst::AddrFunc {
-                func: (*target).to_owned(),
-                dst: format!("a{i}"),
+                func: (*target).into(),
+                dst: format!("a{i}").into(),
                 ty: t("ref #bit8"),
                 span: Span::dummy(),
             });
         }
         LirFunc {
-            name: name.to_owned(),
+            name: name.into(),
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
             variadic: false,
             inline: false,
             blocks: vec![LirBlock {
-                label: "entry".to_owned(),
+                label: "entry".into(),
                 insts,
                 term: LirTerm::Return {
                     span: Span::dummy(),
@@ -388,8 +393,8 @@ mod tests {
             if i + 1 == names.len() {
                 if let Some(datum) = data.first() {
                     f.blocks[0].insts.push(LirInst::Const {
-                        dst: "d".to_owned(),
-                        lit: format!("!{datum}"),
+                        dst: "d".into(),
+                        value: LirConst::Data((*datum).into()),
                         ty: t("#byte_buffer"),
                         span: Span::dummy(),
                     });
@@ -399,7 +404,7 @@ mod tests {
         }
         for name in data {
             module.data.push(LirData {
-                name: (*name).to_owned(),
+                name: (*name).into(),
                 bytes: Vec::new(),
                 span: Span::dummy(),
             });
@@ -424,7 +429,7 @@ mod tests {
         let mut module = module_with(&["main", "a", "b"], &[]);
         let alloca = |ty: &str| LirInst::Alloca {
             ty: t(ty),
-            place: "x".to_owned(),
+            place: "x".into(),
             span: Span::dummy(),
         };
         module.funcs[0].blocks[0].insts.push(alloca("#Outer"));

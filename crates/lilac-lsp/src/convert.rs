@@ -247,7 +247,7 @@ fn severity(level: Level) -> DiagnosticSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lilac_error::Diagnostic;
+    use lilac_error::{codes, Diagnostic};
     use lilac_span::{SourceMap, Span};
     use lsp_types::{DiagnosticSeverity, NumberOrString, Position, Range, Url};
 
@@ -290,7 +290,8 @@ mod tests {
     fn diagnostic_maps_code_range_and_source() {
         let mut sources = SourceMap::new();
         let file = sources.add_file("main.lilac", "abc\n");
-        let diag = Diagnostic::error("E001", "boom").label(Span::new(0, 3, file), true, "here");
+        let diag =
+            Diagnostic::error(codes::E001, "boom").label(Span::new(0, 3, file), true, "here");
         let uri = Url::parse("file:///main.lilac").expect("uri");
         let lsp = to_lsp_diagnostic(&diag, &sources, &|id| (id == file).then(|| uri.clone()))
             .expect("mapped");
@@ -317,7 +318,7 @@ mod tests {
             callers,
         };
         let call = Span::new(0, 3, user);
-        let diag = Diagnostic::error("E031", "no")
+        let diag = Diagnostic::error(codes::E031, "no")
             .label(Span::new(0, 4, lib), true, "message here")
             .trace(frame(
                 "boom",
@@ -362,7 +363,7 @@ mod tests {
     fn diagnostic_without_primary_label_does_not_panic() {
         let mut sources = SourceMap::new();
         let _ = sources.add_file("main.lilac", "abc\n");
-        let diag = Diagnostic::error("E000", "no location");
+        let diag = Diagnostic::error(codes::E000, "no location");
         let lsp = to_lsp_diagnostic(&diag, &sources, &|_| None).expect("mapped");
         assert_eq!(
             lsp.range,

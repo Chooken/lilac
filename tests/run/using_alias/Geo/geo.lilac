@@ -1,0 +1,5 @@
+using *.Shapes as Shapes
+
+// `Shapes` is the alias: it shadows the root function `Shapes`, which `Geo`
+// reaches as an ancestor item.
+corner: function () n: @bit32 => Shapes.area(Shapes.Square { side = 0x3 })

@@ -2,7 +2,7 @@
   "name": "lilac",
   "displayName": "Lilac",
   "description": "Syntax highlighting for the Lilac language and Lilac IR",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "lilac-lang",
   "repository": { "type": "git", "url": "https://github.com/Chooken/Lilac.git" },
   "engines": { "vscode": "^1.82.0" },

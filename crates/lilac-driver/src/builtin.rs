@@ -93,7 +93,6 @@ pub fn with_builtin(project: &Project, facts: Facts, sources_map: &mut SourceMap
             ns: project.namespaces.len() - 1,
             src,
             usings: Vec::new(),
-            using_spans: Vec::new(),
         });
     }
     project

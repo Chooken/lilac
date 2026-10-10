@@ -1,7 +1,8 @@
 //! Navigation: references, highlights, rename, type definition and symbols.
 //!
-//! A name is an item ([`DefId`], through the index's `defs` and `uses`) or a
-//! local (its declaration's name span, through the index's `locals`).
+//! A name is an item ([`DefId`], through the index's `defs` and `uses`), a
+//! local (its declaration's name span, through the index's `locals`), or a
+//! `using … as` alias (its declaration's name span, through `aliases`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,8 @@ pub enum Target {
     Item(DefId),
     /// A local or parameter, by its declaration's name span.
     Local(Span),
+    /// A `using … as` alias, by its name's span in the `using`.
+    Alias(Span),
 }
 
 /// The name under `position` in `uri` and what it denotes.
@@ -37,8 +40,8 @@ pub fn target_at(retained: &Retained, uri: &Url, position: Position) -> Option<(
     target_in(retained, file, byte)
 }
 
-/// The name at `byte` of `file`: a local, an item use, else an item's
-/// declared name.
+/// The name at `byte` of `file`: a local, an alias, an item use, else an
+/// item's declared name.
 #[must_use]
 pub fn target_in(retained: &Retained, file: FileId, byte: usize) -> Option<(Span, Target)> {
     let index = &retained.index;
@@ -49,6 +52,13 @@ pub fn target_in(retained: &Retained, file: FileId, byte: usize) -> Option<(Span
         .min_by_key(|site| site.span.hi.0 - site.span.lo.0)
     {
         return Some((site.span, Target::Local(site.decl)));
+    }
+    if let Some(site) = index
+        .aliases
+        .iter()
+        .find(|site| site.span.file == file && contains(site.span, byte))
+    {
+        return Some((site.span, Target::Alias(site.decl)));
     }
     if let Some(site) = smallest_use(retained, file, byte) {
         return Some((site.0, Target::Item(site.1)));
@@ -115,10 +125,16 @@ pub fn reference_spans(retained: &Retained, target: Target) -> Vec<Span> {
             .filter(|site| site.decl == decl)
             .map(|site| site.span)
             .collect(),
+        Target::Alias(decl) => index
+            .aliases
+            .iter()
+            .filter(|site| site.decl == decl)
+            .map(|site| site.span)
+            .collect(),
     };
     let declaration = match target {
         Target::Item(def) => index.defs.get(&def).map(|info| info.name_span),
-        Target::Local(decl) => Some(decl),
+        Target::Local(decl) | Target::Alias(decl) => Some(decl),
     };
     spans.sort_by_key(|span| (Some(*span) != declaration, span.file.0, span.lo.0));
     spans.dedup();
@@ -150,7 +166,7 @@ pub fn references(
 fn is_declared(retained: &Retained, target: Target, spans: &[Span]) -> bool {
     let declaration = match target {
         Target::Item(def) => retained.index.defs.get(&def).map(|info| info.name_span),
-        Target::Local(decl) => Some(decl),
+        Target::Local(decl) | Target::Alias(decl) => Some(decl),
     };
     spans.first().copied() == declaration
 }
@@ -192,11 +208,11 @@ fn location(retained: &Retained, span: Span) -> Option<Location> {
     })
 }
 
-/// Go-to-definition for a local: its declaration.
+/// Go-to-definition for a local or an alias: its declaration.
 #[must_use]
 pub fn local_definition(retained: &Retained, uri: &Url, position: Position) -> Option<Location> {
     match target_at(retained, uri, position)? {
-        (_, Target::Local(decl)) => location(retained, decl),
+        (_, Target::Local(decl) | Target::Alias(decl)) => location(retained, decl),
         (_, Target::Item(_)) => None,
     }
 }
@@ -210,6 +226,9 @@ pub fn type_definition(retained: &Retained, uri: &Url, position: Position) -> Op
     let byte = byte_offset(&source.src, position)?;
     let index = &retained.index;
     let target = target_in(retained, file, byte);
+    if let Some((_, Target::Alias(_))) = target {
+        return None;
+    }
     let named = match target {
         Some((_, Target::Item(def))) => match index.defs.get(&def)?.kind {
             "object" | "enum" => Some(def),

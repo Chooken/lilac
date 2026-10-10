@@ -196,3 +196,36 @@ fn hover_on_a_const_use_shows_its_type() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A file nested past the parser's limit gets its one `E001`, and the
+/// server goes on answering for the rest of it.
+#[test]
+fn hover_survives_deep_nesting() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let n = 1000;
+    let text = format!(
+        "deep: function () nothing {{\n    x: @bit32 = {}0x1{}\n}}\nfoo: function (value: @bit8) result: @bit32 {{\n    result = 0x1\n    return\n}}\nmain: function () nothing {{\n    x: @bit32 = foo(0x1)\n}}\n",
+        "(".repeat(n),
+        ")".repeat(n)
+    );
+    did_open(&client, &uri, &text);
+    let published = publish_for(&client, &uri);
+    let messages: Vec<&str> = published
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("nested too deeply"), "{messages:?}");
+
+    let line = 8; // "    x: @bit32 = foo(0x1)"
+    let character = 17; // inside "foo"
+    let hover = hover_at(&client, &uri, line, character).expect("hover present");
+    assert!(format!("{:?}", hover.contents).contains("foo"));
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

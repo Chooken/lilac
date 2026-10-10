@@ -644,6 +644,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codes;
     use lilac_span::Span;
 
     fn render(src: &str, build: impl FnOnce(FileId) -> Diagnostic) -> String {
@@ -676,7 +677,7 @@ mod tests {
     fn single_digit_gutter() {
         let src = "x = 1\ny = oops\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad").label(span(src, "oops", file), true, "here")
+            Diagnostic::error(codes::E001, "bad").label(span(src, "oops", file), true, "here")
         });
         assert_eq!(
             out,
@@ -695,7 +696,7 @@ mod tests {
         let src = numbered(120);
         let (lo, hi) = find(&src, "line7\n", 0);
         let out = render(&src, |file| {
-            Diagnostic::error("E001", "bad")
+            Diagnostic::error(codes::E001, "bad")
                 .label(Span::new(lo, hi - 1, file), true, "first")
                 .label(span(&src, "line120", file), false, "second")
         });
@@ -718,7 +719,7 @@ mod tests {
     fn one_hidden_line_is_shown_instead_of_elided() {
         let src = numbered(3);
         let out = render(&src, |file| {
-            Diagnostic::error("E001", "bad")
+            Diagnostic::error(codes::E001, "bad")
                 .label(span(&src, "line1", file), true, "")
                 .label(span(&src, "line3", file), false, "")
         });
@@ -731,7 +732,7 @@ mod tests {
         let mut sm = SourceMap::new();
         let a = sm.add_file("a.lilac", "use_it()\n");
         let b = sm.add_file("b.lilac", "fn use_it()\n");
-        let diagnostic = Diagnostic::error("E001", "bad")
+        let diagnostic = Diagnostic::error(codes::E001, "bad")
             .label(Span::new(0, 6, a), true, "called here")
             .label(Span::new(3, 9, b), false, "defined here");
         let out = EmitterHuman::new().render(&diagnostic, &sm);
@@ -756,7 +757,7 @@ mod tests {
     fn labels_on_one_line_hang_right_to_left() {
         let src = "x = foo(a, b)\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad")
+            Diagnostic::error(codes::E001, "bad")
                 .label(span(src, "foo", file), true, "wrong arity")
                 .label(span(src, "a", file), false, "first")
                 .label(span(src, "b", file), false, "second")
@@ -780,7 +781,7 @@ mod tests {
     fn primary_wins_overlapping_underline() {
         let src = "x = foo(a)\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad")
+            Diagnostic::error(codes::E001, "bad")
                 .label(span(src, "foo(a)", file), false, "")
                 .label(span(src, "a", file), true, "")
         });
@@ -792,7 +793,7 @@ mod tests {
         let src = "fn foo() {\n    body\n}\n";
         let (lo, _) = find(src, "{", 0);
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad").label(
+            Diagnostic::error(codes::E001, "bad").label(
                 Span::new(lo, find(src, "}", 0).1, file),
                 true,
                 "this block",
@@ -819,7 +820,7 @@ mod tests {
         let (lo, _) = find(&src, "line1", 0);
         let (_, hi) = find(&src, "line9", 0);
         let out = render(&src, |file| {
-            Diagnostic::error("E001", "bad").label(Span::new(lo, hi, file), true, "all of it")
+            Diagnostic::error(codes::E001, "bad").label(Span::new(lo, hi, file), true, "all of it")
         });
         assert_eq!(
             out,
@@ -842,7 +843,7 @@ mod tests {
     fn tabs_and_wide_chars_keep_carets_aligned() {
         let src = "\t\"é\" oops\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad").label(span(src, "oops", file), true, "")
+            Diagnostic::error(codes::E001, "bad").label(span(src, "oops", file), true, "")
         });
         assert!(out.contains(" --> main.lilac:1:6\n"), "{out}");
         assert!(out.contains("1 |     \"é\" oops\n"), "{out}");
@@ -853,7 +854,7 @@ mod tests {
     fn empty_span_at_eof_draws_one_caret() {
         let src = "x = (";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "unexpected end of file").label(
+            Diagnostic::error(codes::E001, "unexpected end of file").label(
                 Span::new(5, 5, file),
                 true,
                 "",
@@ -866,7 +867,7 @@ mod tests {
     fn span_past_eof_is_clamped() {
         let src = "x\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad").label(Span::new(1, 99, file), true, "")
+            Diagnostic::error(codes::E001, "bad").label(Span::new(1, 99, file), true, "")
         });
         assert!(out.starts_with("error[E001]: bad\n"), "{out}");
     }
@@ -874,7 +875,7 @@ mod tests {
     #[test]
     fn dummy_label_message_becomes_a_note() {
         let sm = SourceMap::new();
-        let diagnostic = Diagnostic::error("E001", "bad")
+        let diagnostic = Diagnostic::error(codes::E001, "bad")
             .label(Span::dummy(), true, "somewhere")
             .help("try again");
         let out = EmitterHuman::new().render(&diagnostic, &sm);
@@ -885,7 +886,7 @@ mod tests {
     fn multi_line_note_aligns_continuations() {
         let src = "x\n";
         let out = render(src, |file| {
-            Diagnostic::error("E001", "bad")
+            Diagnostic::error(codes::E001, "bad")
                 .label(Span::new(0, 1, file), true, "")
                 .note("first\n  second")
         });
@@ -900,7 +901,7 @@ mod tests {
         let src = "x = foo(a, b)\n";
         let mut sm = SourceMap::new();
         let file = sm.add_file("main.lilac", src);
-        let diagnostic = Diagnostic::warning("W001", "odd")
+        let diagnostic = Diagnostic::warning(codes::TEST_WARNING, "odd")
             .label(span(src, "foo", file), true, "here")
             .label(span(src, "b", file), false, "there")
             .note("n");

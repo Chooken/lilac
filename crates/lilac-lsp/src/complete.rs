@@ -120,6 +120,9 @@ impl<'a> Scope<'a> {
             return Some(Named::Value(site.ty));
         }
         let resolved = &self.analysis.resolved;
+        if let Some(ns) = resolved.alias(self.file, name) {
+            return Some(Named::Ns(ns));
+        }
         if let Some(Lookup::One(id)) = resolved.lookup(self.file, name) {
             return Some(self.item(*id));
         }
@@ -294,8 +297,9 @@ impl<'a> Scope<'a> {
             .collect()
     }
 
-    /// The entries for a bare name: locals, the file's visible items, the
-    /// namespaces within reach, keywords and builtin types.
+    /// The entries for a bare name: locals, the file's visible items and
+    /// `using … as` aliases, the namespaces within reach, keywords and
+    /// builtin types.
     fn names(&self) -> Vec<Entry> {
         let types = &self.analysis.types;
         let mut entries: Vec<Entry> = self
@@ -311,6 +315,12 @@ impl<'a> Scope<'a> {
             entries.extend(scope.visible.values().filter_map(|lookup| match lookup {
                 Lookup::One(id) => self.item_entry(*id),
                 Lookup::Ambiguous(_) => None,
+            }));
+            let resolved = &self.analysis.resolved;
+            entries.extend(scope.aliases.iter().map(|(name, (ns, _))| Entry {
+                label: name.clone(),
+                kind: CompletionItemKind::MODULE,
+                detail: Some(format!("namespace {}", resolved.namespace_path(*ns))),
             }));
         }
         let mut ns = Some(self.ns);
@@ -359,8 +369,8 @@ struct Entry {
 }
 
 fn builtin_types() -> impl Iterator<Item = Entry> {
-    lilac_ty::BUILTIN_TYPES.iter().map(|name| Entry {
-        label: (*name).to_owned(),
+    lilac_ty::Builtin::ALL.into_iter().map(|builtin| Entry {
+        label: builtin.name().to_owned(),
         kind: CompletionItemKind::TYPE_PARAMETER,
         detail: Some("builtin type".to_owned()),
     })
@@ -554,7 +564,7 @@ pub fn signature_help(
     let mut label = format!("{}(", info.qualified);
     let mut params = Vec::new();
     for (index, (param, ty)) in decl.params.iter().zip(&sig.params).enumerate() {
-        let is_self = param.name.is_empty() && param.ty.name == "self";
+        let is_self = param.name.is_empty() && param.ty.is_self();
         if index == 0 && is_self && by_value {
             continue;
         }

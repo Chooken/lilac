@@ -26,7 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use lilac_ast::{Item, ItemKind};
-use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed};
 use lilac_lex::Lexer;
 use lilac_parse::Parser;
 use lilac_span::{FileId, SourceMap, Span};
@@ -52,12 +52,22 @@ pub struct FileUnit {
     pub ns: usize,
     /// Raw source text.
     pub src: String,
-    /// Dotted `using` paths from the root, in source order (a relative
-    /// `using *.X` is stored already joined to the file's namespace path).
-    pub usings: Vec<String>,
-    /// Span of each `using` directive, parallel to [`FileUnit::usings`]; the
-    /// `E029` ambiguity diagnostic labels these import sites.
-    pub using_spans: Vec<Span>,
+    /// The file's `using` directives, in source order.
+    pub usings: Vec<Using>,
+}
+
+/// One `using` directive.
+#[derive(Clone, Debug)]
+pub struct Using {
+    /// Dotted path from the root (a relative `using *.X` is stored already
+    /// joined to the file's namespace path).
+    pub path: String,
+    /// The directive's span: the `E029` ambiguity diagnostic labels these
+    /// import sites.
+    pub span: Span,
+    /// `using A.B as Name`: the name and its span. An aliased `using` binds
+    /// only the alias; it imports none of the namespace's names.
+    pub alias: Option<(String, Span)>,
 }
 
 /// One namespace: a folder and the files directly inside it.
@@ -98,7 +108,7 @@ pub fn load(
 ) -> Result<Project, ErrorGuaranteed> {
     let (project, failed) = load_with_status(root, &[], fs, sources, diags);
     if failed {
-        Err(ErrorGuaranteed::new())
+        Err(diags.already_reported())
     } else {
         Ok(project)
     }
@@ -117,7 +127,7 @@ pub fn load_with_status(
 ) -> (Project, bool) {
     let Ok(root_entries) = fs.list_dir(root) else {
         diags.emit(Diagnostic::error(
-            "E025",
+            codes::E025,
             format!("cannot read module folder `{}`", root.display()),
         ));
         return (
@@ -237,7 +247,7 @@ fn load_from(
     if let Some(seed) = seed {
         if !loader.reach(seed, fs) {
             diags.emit(Diagnostic::error(
-                "E025",
+                codes::E025,
                 format!("cannot find module folder `{seed}`"),
             ));
             failed = true;
@@ -262,7 +272,7 @@ fn load_from(
     for (name, dir) in libraries {
         if !loader.reach_tree(name, fs) {
             diags.emit(Diagnostic::error(
-                "E025",
+                codes::E025,
                 format!("cannot read library folder `{}`", dir.display()),
             ));
             failed = true;
@@ -309,17 +319,24 @@ impl Loader<'_> {
             file: file_id,
             ns,
             src,
-            usings: usings.iter().map(|(path, _)| path.clone()).collect(),
-            using_spans: usings.iter().map(|(_, span)| *span).collect(),
+            usings: usings.clone(),
         });
         self.namespaces[ns].files.push(index);
 
         let mut failed = false;
-        for (target_path, span) in usings {
+        for Using {
+            path: target_path,
+            span,
+            ..
+        } in usings
+        {
             if !self.reach(&target_path, fs) {
                 diags.emit(
-                    Diagnostic::error("E025", format!("cannot find module folder `{target_path}`"))
-                        .label(span, true, "imported here"),
+                    Diagnostic::error(
+                        codes::E025,
+                        format!("cannot find module folder `{target_path}`"),
+                    )
+                    .label(span, true, "imported here"),
                 );
                 failed = true;
             }
@@ -374,7 +391,7 @@ impl Loader<'_> {
             for path in file_paths {
                 let Ok(src) = fs.read(&path) else {
                     diags.emit(Diagnostic::error(
-                        "E025",
+                        codes::E025,
                         format!("cannot read module file `{}`", path.display()),
                     ));
                     self.queue.clear();
@@ -463,8 +480,7 @@ pub fn single_file(name: &str, src: &str, sources: &mut SourceMap) -> Project {
             file,
             ns: 0,
             src: src.to_owned(),
-            usings: usings.iter().map(|(path, _)| path.clone()).collect(),
-            using_spans: usings.iter().map(|(_, span)| *span).collect(),
+            usings,
         }],
     }
 }
@@ -521,7 +537,7 @@ fn resolve_dir(root: &Path, libraries: &[(String, PathBuf)], dotted: &str) -> Pa
 
 /// Lexes and parses `src` far enough to collect its `using` paths (relative
 /// ones joined to `ns_path`, the file's own namespace) with their spans.
-fn scan_usings(src: &str, file: FileId, ns_path: &str) -> Vec<(String, Span)> {
+fn scan_usings(src: &str, file: FileId, ns_path: &str) -> Vec<Using> {
     let (tokens, _lex_errors) = Lexer::lex_all(src, file);
     let mut ignore = Diags::new();
     let mut parser = Parser::new(tokens, file);
@@ -537,27 +553,30 @@ fn scan_usings(src: &str, file: FileId, ns_path: &str) -> Vec<(String, Span)> {
     }
     let mut usings = Vec::new();
     for item in &program.items {
-        collect_usings(item, &mut usings);
+        collect_usings(item, ns_path, &mut usings);
     }
     usings
-        .into_iter()
-        .map(|(path, relative, span)| {
-            if relative && !ns_path.is_empty() {
-                (format!("{ns_path}.{path}"), span)
-            } else {
-                (path, span)
-            }
-        })
-        .collect()
 }
 
-/// Collects `using` paths from `item`, descending into `private` blocks.
-fn collect_usings(item: &Item, out: &mut Vec<(String, bool, Span)>) {
+/// Collects `using`s from `item`, descending into `private` blocks.
+fn collect_usings(item: &Item, ns_path: &str, out: &mut Vec<Using>) {
     match &item.kind {
-        ItemKind::Using { path, relative } => out.push((path.clone(), *relative, item.span)),
+        ItemKind::Using {
+            path,
+            relative,
+            alias,
+        } => out.push(Using {
+            path: if *relative && !ns_path.is_empty() {
+                format!("{ns_path}.{path}")
+            } else {
+                path.clone()
+            },
+            span: item.span,
+            alias: alias.clone(),
+        }),
         ItemKind::Private { items } => {
             for inner in items {
-                collect_usings(inner, out);
+                collect_usings(inner, ns_path, out);
             }
         }
         _ => {}
@@ -567,6 +586,14 @@ fn collect_usings(item: &Item, out: &mut Vec<(String, bool, Span)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The paths of `unit`'s `using`s.
+    fn using_paths(unit: &FileUnit) -> Vec<&str> {
+        unit.usings
+            .iter()
+            .map(|using| using.path.as_str())
+            .collect()
+    }
 
     struct MemFs {
         files: HashMap<PathBuf, String>,
@@ -678,7 +705,7 @@ mod tests {
             .iter()
             .find(|file| file.name == "main.lilac")
             .expect("main file");
-        assert_eq!(main.usings, ["util"]);
+        assert_eq!(using_paths(main), ["util"]);
     }
 
     #[test]
@@ -818,7 +845,7 @@ mod tests {
             .iter()
             .find(|file| file.name == "box.lilac")
             .expect("box file");
-        assert_eq!(boxed.usings, ["lib.heap"]);
+        assert_eq!(using_paths(boxed), ["lib.heap"]);
     }
 
     #[test]
@@ -1059,7 +1086,7 @@ mod tests {
             .iter()
             .find(|file| file.name == "main.lilac")
             .expect("main file");
-        assert_eq!(main.usings, ["util"]);
+        assert_eq!(using_paths(main), ["util"]);
     }
 
     #[test]

@@ -7,11 +7,11 @@ function @main
     alloca #fbit64 %big_exp : zeroed
     alloca #fbit64 %frac : zeroed
     alloca #fbit32 %single : zeroed
-    &1: #fbit64 = const 1e3
+    &1: #fbit64 = const 1000.0
     copy &1 -> %int_exp
-    &2: #fbit64 = const 2E10
+    &2: #fbit64 = const 20000000000.0
     copy &2 -> %big_exp
-    &3: #fbit64 = const 1.5e-4
+    &3: #fbit64 = const 0.00015
     copy &3 -> %frac
     &4: #fbit32 = const 3.14
     copy &4 -> %single

@@ -4,11 +4,11 @@
 use std::collections::HashSet;
 
 use lilac_ast::{Expr, StructField, Type as AstType};
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::intrinsics::{Intrinsic, Slot};
 use lilac_hir::{HirCallee, HirExpr, HirExprKind, Layout, SemanticKind};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::body::FnCx;
 use crate::calls::Called;
@@ -18,18 +18,24 @@ use crate::{Checker, Requirement};
 impl Checker<'_> {
     /// Resolves `@array(T, N)` syntax: `T` by value, `N` a literal from 1
     /// to `u32::MAX` (LLVM's array limit).
-    pub(crate) fn resolve_array(&mut self, ty: &AstType, len: &str, len_span: Span) -> TypeRef {
+    pub(crate) fn resolve_array(
+        &mut self,
+        ty: &AstType,
+        element: &AstType,
+        len: &str,
+        len_span: Span,
+    ) -> TypeRef {
         if !ty.name_span.is_dummy() {
             self.record_semantic(ty.name_span, SemanticKind::BuiltinType);
         }
-        let elem = self.resolve_syntax(&ty.generic_args[0]);
+        let elem = self.resolve_syntax(element);
         if elem.is_error() {
             return TypeRef::ERROR;
         }
         if elem.is_ref {
             self.diags.emit(
-                Diagnostic::error("E010", "an array element cannot be a `ref`")
-                    .label(ty.generic_args[0].span, true, "a reference element")
+                Diagnostic::error(codes::E010, "an array element cannot be a `ref`")
+                    .label(element.span, true, "a reference element")
                     .help("wrap the reference in an object"),
             );
             return TypeRef::ERROR;
@@ -39,11 +45,8 @@ impl Checker<'_> {
             .filter(|len| *len > 0);
         let Some(len) = len else {
             self.diags.emit(
-                Diagnostic::error("E010", "an array length must be from 1 to 0xffffffff").label(
-                    len_span,
-                    true,
-                    "not a valid length",
-                ),
+                Diagnostic::error(codes::E010, "an array length must be from 1 to 0xffffffff")
+                    .label(len_span, true, "not a valid length"),
             );
             return TypeRef::ERROR;
         };
@@ -62,7 +65,7 @@ impl Checker<'_> {
     ) -> HirExpr {
         if let Some(field) = fields.first() {
             self.diags.emit(
-                Diagnostic::error("E010", "an array literal takes no fields")
+                Diagnostic::error(codes::E010, "an array literal takes no fields")
                     .label(field.span, true, "not a field of an array")
                     .help("write `@array(T, N) {}` and set elements with `@array_at`"),
             );
@@ -83,30 +86,40 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<Called, ErrorGuaranteed> {
-        self.intrinsic_arity("@array_at", 2, args.len(), span)?;
+        let arity = self.intrinsic_arity("@array_at", 2, args.len(), span);
+        self.callee(fcx, args, arity)?;
         let array = self.check_expr(fcx, &args[0], None);
         if array.ty.is_error() {
-            return Err(ErrorGuaranteed::new());
+            // The array reported it.
+            return Err(self.callee_failed(fcx, &args[1..], self.diags.already_reported()));
         }
         let elem = match self.types.kind(array.ty.id) {
             TypeKind::Array { elem, .. } if array.ty.is_ref => *elem,
             _ => {
                 let found = self.types.display_ref(array.ty);
                 let diagnostic = Diagnostic::error(
-                    "E010",
+                    codes::E010,
                     format!("mismatched types: expected a `ref` array, found `{found}`"),
                 )
                 .label(args[0].span(), true, "pass `ref array`");
                 return Err(self.emit_requirement(
                     diagnostic,
-                    Requirement::Mismatch,
+                    Requirement::Mismatch {
+                        expected_ref: false,
+                    },
                     &[array.ty.id],
                 ));
             }
         };
         let index = self
-            .intrinsic_arg(fcx, &args[1], Slot::Builtin("@bit_native"), false, span)
-            .ok_or_else(ErrorGuaranteed::new)?;
+            .intrinsic_arg(
+                fcx,
+                &args[1],
+                Slot::Builtin(Builtin::BitNative),
+                false,
+                span,
+            )
+            .ok_or_else(|| self.diags.already_reported())?;
         Ok(Called::Call {
             callee: HirCallee::Intrinsic(Intrinsic::ArrayAt),
             args: vec![array, index],
@@ -128,14 +141,14 @@ impl Checker<'_> {
             let found = self.types.display_ref(ty);
             return Err(self.diags.emit(
                 Diagnostic::error(
-                    "E010",
+                    codes::E010,
                     format!("mismatched types: expected an array, found `{found}`"),
                 )
                 .label(args[0].span(), true, "not an array"),
             ));
         };
         Ok(Called::Value(HirExpr {
-            ty: self.value_of("@bit_native"),
+            ty: Builtin::BitNative.value(),
             span,
             kind: HirExprKind::Number(format!("{len:#x}")),
         }))
@@ -159,9 +172,12 @@ impl Checker<'_> {
             if self.has_hooks(elem, &mut HashSet::new()) {
                 let elem = self.types.display(elem);
                 self.diags.emit(
-                    Diagnostic::error("E010", format!("array element `{elem}` has RAII hooks"))
-                        .label(span, true, "arrays hold plain data only")
-                        .note("an array copies and drops its elements as plain bytes"),
+                    Diagnostic::error(
+                        codes::E010,
+                        format!("array element `{elem}` has RAII hooks"),
+                    )
+                    .label(span, true, "arrays hold plain data only")
+                    .note("an array copies and drops its elements as plain bytes"),
                 );
             }
         }

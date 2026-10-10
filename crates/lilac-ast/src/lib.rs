@@ -56,6 +56,9 @@ pub enum ItemKind {
         path: String,
         /// `using *.Path`: resolved against the importing file's namespace.
         relative: bool,
+        /// `using Path as Name`: binds the namespace to `Name` (and its span)
+        /// instead of importing its names.
+        alias: Option<(String, Span)>,
     },
     /// `private { <items> }` visibility wrapper (file or object scope).
     Private {
@@ -134,26 +137,92 @@ pub struct Param {
     pub span: Span,
 }
 
-/// A type reference: `[@]name[args]` or `function` type, with an optional `ref` flag.
+/// A type reference, with an optional `ref` flag.
 #[derive(Clone, Debug)]
 pub struct Type {
-    /// Type name (`@bit32` keeps its `@`; `ref` is in [`Type::is_ref`];
-    /// `"function"` when [`Type::func`] is `Some`).
-    pub name: String,
-    /// Span of the type's identifier token, excluding a leading `ref` and any
-    /// generic arguments.
+    /// What the type is.
+    pub shape: TypeShape,
+    /// Span of the type's name (`function`, `@array`, `self`, or the
+    /// path), excluding a leading `ref` and any generic arguments.
     pub name_span: Span,
     /// `ref T` (a type can never be doubly flagged).
     pub is_ref: bool,
-    /// Generic arguments (`GenObj[T]` instantiation).
-    pub generic_args: Vec<Type>,
-    /// Function type (`function (params) returns`); `None` for named types.
-    pub func: Option<FuncType>,
-    /// `@array(T, N)`: the length literal's text and span (`name` is
-    /// `@array` and `generic_args` holds `T`).
-    pub array_len: Option<(String, Span)>,
     /// Whole-type span.
     pub span: Span,
+}
+
+/// The kinds of type syntax.
+#[derive(Clone, Debug)]
+pub enum TypeShape {
+    /// A named type: `Name`, a path (`A.B.Type`), a builtin (`@bit32`
+    /// keeps its `@`), or `unknown`, with any generic arguments
+    /// (`GenObj[T]`).
+    Named {
+        /// The name or dotted path.
+        name: String,
+        /// Generic arguments.
+        args: Vec<Type>,
+    },
+    /// `function (params) returns`.
+    Function(FuncType),
+    /// `@array(T, N)`.
+    Array {
+        /// The element type.
+        element: Box<Type>,
+        /// The length literal's text.
+        len: String,
+        /// The length literal's span.
+        len_span: Span,
+    },
+    /// `self`: the enclosing type.
+    SelfType,
+    /// A type the parser could not read; it already reported why.
+    Error,
+}
+
+impl Type {
+    /// The name of a named type.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match &self.shape {
+            TypeShape::Named { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The generic arguments of a named type (empty for every other shape).
+    #[must_use]
+    pub fn args(&self) -> &[Type] {
+        match &self.shape {
+            TypeShape::Named { args, .. } => args,
+            _ => &[],
+        }
+    }
+
+    /// What a diagnostic calls the type: a named type's name, else the
+    /// keyword it starts with (`function`, `@array`, `self`).
+    #[must_use]
+    pub fn head(&self) -> &str {
+        match &self.shape {
+            TypeShape::Named { name, .. } => name,
+            TypeShape::Function(_) => "function",
+            TypeShape::Array { .. } => "@array",
+            TypeShape::SelfType => "self",
+            TypeShape::Error => "",
+        }
+    }
+
+    /// Whether this is `self`.
+    #[must_use]
+    pub fn is_self(&self) -> bool {
+        matches!(self.shape, TypeShape::SelfType)
+    }
+
+    /// Whether this is the parser's stand-in for a type it could not read.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        matches!(self.shape, TypeShape::Error)
+    }
 }
 
 /// A `function (params) returns` type in type position.
@@ -182,7 +251,7 @@ pub enum Stmt {
         /// Bound name.
         name: String,
         /// Declared type.
-        ty: Type,
+        ty: Box<Type>,
         /// Initializer.
         value: Expr,
         /// Whole-statement span.
@@ -228,7 +297,7 @@ pub enum Stmt {
         /// Condition (strict non-zero `@bit8` test).
         cond: Expr,
         /// Optional `-> binding: Type` multi-return capture.
-        capture: Option<Param>,
+        capture: Option<Box<Param>>,
         /// Live branch.
         then: Block,
         /// Optional `else` statement (`else { }`, `else if ...`, `else break`).
@@ -382,7 +451,7 @@ pub enum Expr {
     StructLit {
         /// Type before the brace (generic arguments are optional and inferred
         /// from the expected type when omitted).
-        ty: Type,
+        ty: Box<Type>,
         /// Field initializers in order.
         fields: Vec<StructField>,
         /// Whole-literal span.
@@ -403,10 +472,10 @@ pub enum Expr {
         span: Span,
     },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
-    Cast(Box<Expr>, Type),
+    Cast(Box<Expr>, Box<Type>),
     /// `Name[args]` in expression position: the receiver of a static member
     /// (`Box[@bit32].make()`, `Optional[T].Some(x)`).
-    TypeApp(Type),
+    TypeApp(Box<Type>),
     /// An expression that failed to parse; its `span` covers the consumed
     /// tokens. Downstream passes map it to a poison value.
     Error {

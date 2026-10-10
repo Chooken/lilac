@@ -5,6 +5,7 @@
 //! emitted as concrete `HirFunc`s, lowering to `#T` and tripping the verifier
 //! with a false `E070` compiler bug on otherwise-valid, unused generics.
 
+use std::fmt::Write as _;
 use std::process::Command;
 
 fn lilac() -> Command {
@@ -87,4 +88,104 @@ fn fails_fixtures_do_not_panic() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// The terminal shows only the first ten errors, but every error is still
+/// found: a failing generic instance after ten unrelated errors reports its
+/// `E042` (in full in JSON, counted in the human summary).
+#[test]
+fn errors_past_the_shown_ten_are_still_found() {
+    let mut body = String::new();
+    for index in 0..11 {
+        writeln!(body, "    x{index}: @bit32 = missing{index}").expect("writes");
+    }
+    let source = format!(
+        "gen_function[T]: function () out: T {{\n    out = T.other()\n}}\n\nmain: function () nothing {{\n{body}    y: @bit32 = gen_function[@bit32]()\n}}\n"
+    );
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("many_errors.lilac");
+    std::fs::write(&path, source).expect("writes");
+
+    let json = lilac()
+        .args(["check", "--error-format=json"])
+        .arg(&path)
+        .output()
+        .expect("runs lilac");
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    let stderr = String::from_utf8_lossy(&json.stderr);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(all.matches("\"code\":\"E021\"").count(), 11, "{all}");
+    assert_eq!(all.matches("\"code\":\"E042\"").count(), 1, "{all}");
+
+    let human = lilac()
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert_eq!(stderr.matches("error[").count(), 10, "{stderr}");
+    assert!(stderr.contains("12 previous errors"), "{stderr}");
+}
+
+/// A callee that failed, by its body or its name, still has its call
+/// checked: the arity, the result type and every argument.
+#[test]
+fn failed_callees_do_not_hide_their_calls() {
+    let source = "\
+broken: function (a: @bit32) r: @bit32 {
+    r = nope
+}
+
+main: function () nothing {
+    x: @bit32 = undefined_fn(vlaue)
+    y: @bit32 = broken(vlaue2, 0x2)
+    z: @bit64 = broken(0x1)
+}
+";
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("failed_callees.lilac");
+    std::fs::write(&path, source).expect("writes");
+    let output = lilac()
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "unresolved name `nope`",
+        "unresolved name `undefined_fn`",
+        "unresolved name `vlaue`",
+        "wrong number of arguments: expected 1, found 2",
+        "unresolved name `vlaue2`",
+        "no conversion from @bit32 to @bit64",
+    ] {
+        assert!(stderr.contains(expected), "missing `{expected}`:\n{stderr}");
+    }
+    assert!(stderr.contains("6 previous errors"), "{stderr}");
+}
+
+/// Unused names and unreachable statements are editor hints only: the
+/// command line prints nothing for them.
+#[test]
+fn hints_print_nothing_on_the_command_line() {
+    let source = "\
+private {
+    unused_helper: function () nothing {
+    }
+}
+
+main: function () nothing {
+    unused: @bit32 = 0x1
+    return
+    later: @bit32 = 0x4
+}
+";
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hints_only.lilac");
+    std::fs::write(&path, source).expect("writes");
+    let output = lilac()
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("runs lilac");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }

@@ -6,11 +6,8 @@
 //! ordinary expression lexer (brace-depth tracked, so errors point inside the
 //! braces). `[` and `]` are generics-only; there is no indexing syntax.
 
-use lilac_error::Diagnostic;
+use lilac_error::{codes, Diagnostic};
 use lilac_span::{FileId, Span};
-
-/// Lexer diagnostics always carry this stable code.
-pub const LEX_ERROR_CODE: &str = "E000";
 
 /// Every keyword, for editor completion.
 pub const KEYWORDS: [&str; 21] = [
@@ -219,6 +216,21 @@ impl Token {
                 | TokenKind::Eof
         )
     }
+
+    /// What a parse error says it found here: "`function`", "a string",
+    /// "end of file".
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self.kind {
+            TokenKind::StringLit => "a string".to_owned(),
+            TokenKind::CharLit => "a character".to_owned(),
+            TokenKind::FStrStart | TokenKind::FStrMid | TokenKind::FStrEnd => {
+                "an f-string".to_owned()
+            }
+            TokenKind::Eof => "end of file".to_owned(),
+            _ => format!("`{}`", self.text),
+        }
+    }
 }
 
 /// Saturating `usize` -> `u32` for span offsets (files past 4 GiB clamp).
@@ -292,7 +304,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn err(&self, start: usize, end: usize, msg: &str) -> Diagnostic {
-        Diagnostic::error(LEX_ERROR_CODE, msg).label(
+        Diagnostic::error(codes::E000, msg).label(
             Span::new(offset_u32(start), offset_u32(end.max(start)), self.file),
             true,
             String::new(),

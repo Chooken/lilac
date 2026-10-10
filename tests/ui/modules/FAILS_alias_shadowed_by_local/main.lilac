@@ -1,0 +1,6 @@
+using b as B
+
+main: function () nothing {
+    B: @bit32 = 0x1
+    B.f()
+}

@@ -148,7 +148,7 @@ const DUCK_TYPING_SHORT: &str = concat!(
     "             at gen_function[@bit32] (../../tests/ui/FAILS_generic_duck_typing.lilac:2:11)\n",
     "               at main (../../tests/ui/FAILS_generic_duck_typing.lilac:12:24)\n",
     "   = note: based on this usage, the generic body requires a method matching:\n",
-    "               fn other() -> T\n",
+    "               other: function () T\n",
     "\n",
     "error: aborting due to 1 previous error\n",
 );
@@ -193,7 +193,7 @@ const DEEP_CHAIN_VERBOSE: &str = concat!(
     "                       at level0[@bit32] (../../tests/ui/FAILS_generic_deep_chain.lilac:2:11)\n",
     "                         at main (../../tests/ui/FAILS_generic_deep_chain.lilac:26:17)\n",
     "   = note: based on this usage, the generic body requires a method matching:\n",
-    "               fn missing(self: ref T) -> T\n",
+    "               missing: function (self) T\n",
     "\n",
     "error: aborting due to 1 previous error\n",
 );

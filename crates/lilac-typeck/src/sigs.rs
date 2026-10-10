@@ -5,11 +5,11 @@
 //! with identical signatures are `E020`. Hooks of a generic type are added per
 //! instance when the type is instantiated (`types.rs`).
 
-use lilac_error::Diagnostic;
+use lilac_error::{codes, Diagnostic};
 use lilac_hir::{FuncKey, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{FuncSig, TypeId, TypeRef};
+use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 
 use crate::{Checker, Hook};
 
@@ -36,7 +36,7 @@ impl Checker<'_> {
         if matches!(d.kind, DefKind::Hook(_)) && !d.generic_params.is_empty() {
             self.diags.emit(
                 Diagnostic::error(
-                    "E052",
+                    codes::E052,
                     "hook bindings must be concrete; generic hooks are rejected",
                 )
                 .label(d.span, true, "generic parameters here"),
@@ -51,9 +51,7 @@ impl Checker<'_> {
                 if !param.name.is_empty() {
                     c.record_semantic(leading(param.span, &param.name), SemanticKind::Param);
                 }
-                let is_self = param.name.is_empty()
-                    && param.ty.name == "self"
-                    && param.ty.generic_args.is_empty();
+                let is_self = param.name.is_empty() && param.ty.is_self();
                 let ty = match (is_self, parent) {
                     (true, Some(owner)) => {
                         let mut ty = c.template_of(owner);
@@ -112,14 +110,14 @@ impl Checker<'_> {
             let previous = previous.span;
             let diagnostic = if is_platform_hook(&name) {
                 Diagnostic::error(
-                    "E034",
+                    codes::E034,
                     format!("`{name}` is defined more than once in the program"),
                 )
                 .label(span, true, "defined again here")
                 .label(previous, false, "first defined here")
                 .note("a program has one of each platform hook; mount at most one runtime library")
             } else {
-                Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
                     .label(span, true, "redefined here")
                     .label(previous, false, "first defined here")
             };
@@ -142,7 +140,7 @@ impl Checker<'_> {
             .map(|parent| self.type_of_def(parent, key.args.clone()));
         let fail = |c: &mut Self, msg: &str, label: &str| {
             c.diags
-                .emit(Diagnostic::error("E022", msg.to_owned()).label(
+                .emit(Diagnostic::error(codes::E022, msg.to_owned()).label(
                     span,
                     true,
                     label.to_owned(),
@@ -171,10 +169,10 @@ impl Checker<'_> {
                 let decl = def.func().cloned();
                 if let Some(decl) = decl {
                     for param in &decl.params {
-                        if param.ty.name == "self" {
+                        if param.ty.is_self() {
                             self.diags.emit(
                                 Diagnostic::error(
-                                    "E022",
+                                    codes::E022,
                                     "`@init` can't have `self` as a parameter",
                                 )
                                 .label(
@@ -251,16 +249,16 @@ impl Checker<'_> {
         } else {
             let (param, want) = match name {
                 "@entry" => (None, "`@entry: function() nothing`"),
-                "@exit" => (Some("@bit32"), "`@exit: function(code: @bit32) nothing`"),
+                "@exit" => (
+                    Some(Builtin::Bit32),
+                    "`@exit: function(code: @bit32) nothing`",
+                ),
                 _ => (
-                    Some("@byte_buffer"),
+                    Some(Builtin::ByteBuffer),
                     "`@compiler_print: function(text: @byte_buffer) nothing`",
                 ),
             };
-            let expected: Vec<TypeId> = param
-                .and_then(|ty| self.types.builtin(ty))
-                .into_iter()
-                .collect();
+            let expected: Vec<TypeId> = param.map(Builtin::id).into_iter().collect();
             let shaped = sig.returns.is_empty()
                 && sig.params.len() == expected.len()
                 && sig
@@ -277,7 +275,7 @@ impl Checker<'_> {
             )
         };
         self.diags
-            .emit(Diagnostic::error("E022", message).label(span, true, label));
+            .emit(Diagnostic::error(codes::E022, message).label(span, true, label));
         false
     }
 

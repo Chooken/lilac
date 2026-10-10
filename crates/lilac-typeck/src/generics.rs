@@ -8,11 +8,12 @@
 
 use std::collections::HashSet;
 
-use lilac_error::{Diagnostic, TraceFrame};
+use lilac_error::{codes, Diagnostic, TraceFrame};
 use lilac_hir::FuncKey;
 use lilac_span::Span;
 use lilac_ty::{TypeId, TypeRef};
 
+use crate::sink::{has_error, Pending};
 use crate::{Checker, Requirement};
 
 impl Checker<'_> {
@@ -127,33 +128,40 @@ impl Checker<'_> {
         crate::types::elide_chain(&self.frames(key))
     }
 
-    /// Folds the requirement failures captured since `mark` (while checking
-    /// `key`'s body) into one `E042` at the use that first requested `key`,
-    /// held until the worklist drains ([`Self::emit_failures`]). Other
-    /// captured diagnostics are re-emitted unchanged.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn instance_failure(&mut self, key: &FuncKey, mark: usize) {
+    /// Decides what to report of the diagnostics `held` while `key`'s body
+    /// was checked: a failed generic instance folds its requirements into
+    /// `E042` ([`Self::instance_failure`]), a template drops what depends on
+    /// its parameters ([`Self::template_failure`]), and everything else is
+    /// reported as it is.
+    pub(crate) fn settle(&mut self, key: &FuncKey, held: Vec<Pending>) {
         if key.args.iter().any(|arg| self.types.contains_param(arg.id)) {
-            self.template_failure(key, mark);
-            return;
+            self.template_failure(key, held);
+        } else if !key.args.is_empty() && has_error(&held) {
+            self.instance_failure(key, held);
+        } else {
+            self.report(held);
         }
-        self.dependent.retain(|index| *index < mark);
-        let captured = self.diags.take_since(mark);
-        let mut recorded = Vec::new();
-        self.requirements.retain(|(index, requirement)| {
-            if *index >= mark {
-                recorded.push((*index - mark, requirement.clone()));
-                false
-            } else {
-                true
-            }
-        });
+    }
+
+    /// Reports `held` as it is.
+    pub(crate) fn report(&mut self, held: Vec<Pending>) {
+        for pending in held {
+            self.diags.emit(pending.diagnostic);
+        }
+    }
+
+    /// Folds the requirement failures `held` while checking `key`'s body
+    /// into one `E042` at the use that first requested `key`, held until the
+    /// worklist drains ([`Self::emit_failures`]). The other diagnostics are
+    /// reported unchanged.
+    #[allow(clippy::too_many_lines)]
+    fn instance_failure(&mut self, key: &FuncKey, held: Vec<Pending>) {
         let mut requirements = Vec::new();
-        for (position, diagnostic) in captured.into_iter().enumerate() {
-            match recorded.iter().find(|(index, _)| *index == position) {
-                Some((_, requirement)) => requirements.push((diagnostic, requirement.clone())),
+        for pending in held {
+            match pending.requirement {
+                Some(requirement) => requirements.push((pending.diagnostic, requirement)),
                 None => {
-                    self.diags.emit(diagnostic);
+                    self.diags.emit(pending.diagnostic);
                 }
             }
         }
@@ -177,7 +185,7 @@ impl Checker<'_> {
             .collect();
         let pretty = self.instance_display(key);
         let mut diagnostic = Diagnostic::error(
-            "E042",
+            codes::E042,
             format!(
                 "type `{}` does not satisfy `{name}[{params}]` requirements",
                 arg_list.join(", ")
@@ -235,28 +243,17 @@ impl Checker<'_> {
         self.failures.push((key.clone(), diagnostic));
     }
 
-    /// The errors of a template instance (arguments containing parameters):
-    /// those about a parameter's type are dropped and the rest reported as
-    /// they are, never folded into `E042`, since no argument failed, when
-    /// [`Self::reports_template`].
-    fn template_failure(&mut self, key: &FuncKey, mark: usize) {
-        let captured = self.diags.take_since(mark);
-        self.requirements.retain(|(index, _)| *index < mark);
-        let mut dependent = Vec::new();
-        self.dependent.retain(|index| {
-            if *index >= mark {
-                dependent.push(*index - mark);
-                false
-            } else {
-                true
-            }
-        });
+    /// The diagnostics of a template instance (arguments containing
+    /// parameters): those about a parameter's type are dropped and the rest
+    /// reported as they are, never folded into `E042`, since no argument
+    /// failed, when [`Self::reports_template`].
+    fn template_failure(&mut self, key: &FuncKey, held: Vec<Pending>) {
         if !self.reports_template(key) {
             return;
         }
-        for (position, diagnostic) in captured.into_iter().enumerate() {
-            if !dependent.contains(&position) {
-                self.diags.emit(diagnostic);
+        for pending in held {
+            if !pending.dependent {
+                self.diags.emit(pending.diagnostic);
             }
         }
     }
@@ -264,7 +261,7 @@ impl Checker<'_> {
     /// Did-you-mean, conversion, arity and `ref` hints for the requirements.
     fn requirement_helps(&self, requirements: &[(Diagnostic, Requirement)]) -> Vec<String> {
         let mut helps = Vec::new();
-        for (diagnostic, requirement) in requirements {
+        for (_, requirement) in requirements {
             match requirement {
                 Requirement::Missing {
                     name,
@@ -273,7 +270,7 @@ impl Checker<'_> {
                     ..
                 } => {
                     let members = self.res.def(*def).members.keys().map(String::as_str);
-                    if let Some(best) = crate::suggest::closest(name, members) {
+                    if let Some(best) = lilac_error::closest(name, members) {
                         helps.push(format!("`{owner}` has `{best}`, did you mean `{best}`?"));
                     }
                 }
@@ -281,17 +278,18 @@ impl Checker<'_> {
                     let exists = self
                         .conversion_pairs()
                         .iter()
-                        .any(|(source, _)| self.types.display(*source) == *from);
+                        .any(|(source, _)| source == from);
                     if exists {
                         helps.push(format!(
-                            "a `@conversion` from `{from}` exists; check its target"
+                            "a `@conversion` from `{}` exists; check its target",
+                            self.types.display(*from)
                         ));
                     }
                 }
                 Requirement::Arity { expected, found } => helps.push(format!(
                     "the call takes {expected} arguments, but {found} were supplied"
                 )),
-                Requirement::Mismatch if diagnostic.msg.contains("expected ref ") => {
+                Requirement::Mismatch { expected_ref: true } => {
                     helps.push("try passing a reference: `ref <value>`".to_owned());
                 }
                 _ => {}
@@ -323,7 +321,9 @@ impl Checker<'_> {
         self.types.display_ref(ty)
     }
 
-    /// The note describing the method a generic body requires.
+    /// The note describing the method a generic body requires, as a Lilac
+    /// declaration: `name: function (self, a: @bit32) T`. Parameters past
+    /// `self` are named `a`, `b`, ... since only their types are known.
     pub(crate) fn required_method_note(
         &self,
         name: &str,
@@ -332,18 +332,19 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> String {
         let mut params = Vec::new();
-        if let Some(ty) = receiver {
-            params.push(format!("self: ref {}", self.display_in_body(ty.deref())));
+        if receiver.is_some() {
+            params.push("self".to_owned());
         }
-        for arg in args {
-            params.push(arg.map_or_else(|| "?".to_owned(), |ty| self.display_in_body(ty)));
+        for (index, arg) in args.iter().enumerate() {
+            let ty = arg.map_or_else(|| "?".to_owned(), |ty| self.display_in_body(ty));
+            params.push(format!("{}: {ty}", param_name(index)));
         }
         let ret = match expected {
             Some(id) if id != TypeId::ERROR => self.display_in_body(TypeRef::value(id)),
             _ => "?".to_owned(),
         };
         format!(
-            "based on this usage, the generic body requires a method matching:\n    fn {name}({}) -> {ret}",
+            "based on this usage, the generic body requires a method matching:\n    {name}: function ({}) {ret}",
             params.join(", ")
         )
     }
@@ -357,6 +358,15 @@ impl Checker<'_> {
         format!(
             "based on this usage, the generic body requires a field matching:\n    {name}: {ty}"
         )
+    }
+}
+
+/// The name the required-method note gives argument `index`: `a` ... `z`,
+/// then `a26`, ...
+fn param_name(index: usize) -> String {
+    match u8::try_from(index) {
+        Ok(letter) if letter < 26 => char::from(b'a' + letter).to_string(),
+        _ => format!("a{index}"),
     }
 }
 

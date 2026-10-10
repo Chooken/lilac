@@ -324,7 +324,7 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 > **Being phased out.** Programs no longer link a C library by default; the
 > library's own OS bindings (`Standard.Os`) replace it piece by piece, and code that
 > still uses `Standard.C` builds with `lilac build --libc`. See
-> `docs/build-command-plan.md`.
+> `docs/history/build-command-plan.md`.
 
 The single non-portable namespace. Everything here is either a raw `extern`
 declaration or a thin wrapper over one. Above this line the library is

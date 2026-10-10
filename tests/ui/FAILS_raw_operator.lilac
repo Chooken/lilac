@@ -1,0 +1,7 @@
+// Raw bit types have no operators; the help names Standard and the intrinsic.
+main: function () nothing {
+    a: @bit32 = 0x1
+    b: @bit32 = a + a
+    c: @fbit16 = 1.0
+    d: @fbit16 = c * c
+}

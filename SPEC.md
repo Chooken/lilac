@@ -2,7 +2,7 @@
 
 > Version: 0.7-draft (ownership and drop order, `@bit8` conditions, library mounting, `=>` as always-inline functions). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
-> `RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
+> `docs/history/RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
 > Keyword spelling is `object` and `function` everywhere; all `@` hooks,
 > intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than_8`,
 > `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
@@ -640,6 +640,19 @@ reach below).
 using Standard
 ```
 
+**`using … as`.** `using A.B as Name` (or `using *.A.B as Name`) loads `A.B`
+like any `using` but imports none of its names: it binds the namespace to
+`Name` in the file that contains the directive, so `Name.pow()` is
+`A.B.pow()` and `x: Name.Type` is `x: A.B.Type`. The alias may shadow a
+namespace and a name reached from an ancestor or imported by another
+`using`, but not a declaration: an alias named like an item of the file's
+own namespace (any of its files), or like another alias in the file, is
+`E054`. A local or parameter shadows an alias in its block.
+
+```lilac
+using Standard.Io as Io
+```
+
 **Ancestor/descendant reach.** The folder tree orders namespaces into ancestor
 chains and descendant sets; only namespaces in the compilation unit participate
 and the root is always in it. Loading a namespace also loads its ancestors
@@ -666,7 +679,9 @@ access (such as a `@init` constructor call) from outside the object.
 **Collisions.** A same-named declaration in one namespace is `E020`, first
 binding wins. A local (or ancestor-reached) name shadows an imported one. If two
 `using`d namespaces export the same name, referencing it is `E029`; an
-unreferenced collision is not an error.
+unreferenced collision is not an error. A `using … as` alias named like a
+declaration of the file's own namespace, or like another alias, is `E054`.
+
 
 **Paths.** A dotted path names an item through its namespace, in type
 positions (`x: A.B.Type`, `A.Box[@bit8]`, with generic arguments on the
@@ -676,9 +691,10 @@ first segment is looked up innermost first:
 
 1. a local or parameter (the chain is then a field access);
 2. a generic parameter or builtin type;
-3. a name the file sees (its namespace, its ancestors, its `using`s;
+3. a `using … as` alias of the file;
+4. a name the file sees (its namespace, its ancestors, its `using`s;
    `E029` when ambiguous);
-4. a namespace: a child of the file's namespace, else of its nearest
+5. a namespace: a child of the file's namespace, else of its nearest
    ancestor that has one. The root is every namespace's ancestor, so a
    top-level namespace (`Standard.Io`) can be named anywhere unless a closer
    one of that name shadows it, and a library names its own subfolders

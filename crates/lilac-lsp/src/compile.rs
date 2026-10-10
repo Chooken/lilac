@@ -17,6 +17,7 @@ use lsp_types::{Diagnostic as LspDiagnostic, Url};
 use crate::convert::{to_lsp_diagnostic, trace_diagnostics};
 use crate::documents::Documents;
 use crate::fs::OverlayFs;
+use crate::hints;
 use crate::index::{LirStages, Retained};
 use crate::roots::canonical_file_uri;
 
@@ -49,23 +50,28 @@ pub struct Compiled {
     pub diagnostics: HashMap<Url, (Vec<LspDiagnostic>, Option<i32>)>,
 }
 
+/// A compile's outcome: the result, or the message of the compiler panic
+/// that ended it (also printed to stderr).
+pub type Outcome = Result<Compiled, String>;
+
 /// Starts the compile thread: it runs each job it receives and sends back
-/// the result, or `None` when the compiler panicked (the panic is printed
-/// to stderr and the server keeps its previous analysis).
+/// its [`Outcome`] (the server keeps its previous analysis when the
+/// compiler panicked).
 ///
 /// # Panics
 ///
 /// When the operating system cannot start a thread.
 #[must_use]
-pub fn spawn_worker() -> (Sender<Job>, Receiver<(u64, Option<Compiled>)>) {
+pub fn spawn_worker() -> (Sender<Job>, Receiver<(u64, Outcome)>) {
     let (jobs, job_receiver) = crossbeam_channel::unbounded::<Job>();
     let (result_sender, results) = crossbeam_channel::unbounded();
     std::thread::Builder::new()
         .name("lilac-compile".to_owned())
+        .stack_size(lilac_driver::COMPILE_STACK_BYTES)
         .spawn(move || {
             for job in job_receiver {
                 let generation = job.generation;
-                let compiled = panic::catch_unwind(AssertUnwindSafe(|| job.run())).ok();
+                let compiled = guarded(|| job.run());
                 if result_sender.send((generation, compiled)).is_err() {
                     break;
                 }
@@ -73,6 +79,21 @@ pub fn spawn_worker() -> (Sender<Job>, Receiver<(u64, Option<Compiled>)>) {
         })
         .expect("spawning the compile thread");
     (jobs, results)
+}
+
+/// Runs `f`, turning a panic into its message.
+///
+/// # Errors
+///
+/// The panic message when `f` panicked.
+pub fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(f)).map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_owned())
+    })
 }
 
 impl Job {
@@ -231,14 +252,11 @@ impl Job {
     }
 }
 
-/// A compiler session for editor use: the CLI's `max_errors` cap (10) is for
-/// terminals, but an editor wants the full diagnostic list, so lift it here.
-/// The session also analyzes tolerantly so hover/definition keep working while
-/// the buffer has syntax or type errors.
+/// A compiler session for editor use. It analyzes tolerantly so
+/// hover/definition keep working while the buffer has syntax or type errors.
 fn new_session(libraries: &[(String, PathBuf)]) -> Session {
     let mut session = Session::new();
     session.libraries = libraries.to_vec();
-    session.diags.max_errors = usize::MAX;
     session.retain_partial_analysis = true;
     session
 }
@@ -329,12 +347,40 @@ fn retain(
             }
         }
     }
+    let fresh: HashSet<Url> = file_uris
+        .values()
+        .filter(|uri| !covered.contains(*uri))
+        .cloned()
+        .collect();
     covered.extend(file_uris.values().cloned());
     let uri_files = file_uris
         .iter()
         .map(|(id, uri)| (uri.clone(), *id))
         .collect();
-    Retained::build_with_stages(session, file_uris, uri_files, stages)
+    let retained = Retained::build_with_stages(session, file_uris, uri_files, stages);
+    publish_hints(&retained, &fresh, by_uri);
+    retained
+}
+
+/// Adds `retained`'s faded hints ([`hints`]) to `by_uri`, for the files in
+/// `fresh` (those this compile publishes).
+fn publish_hints(
+    retained: &Retained,
+    fresh: &HashSet<Url>,
+    by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
+) {
+    for hint in hints::hints(retained) {
+        let Some(uri) = retained.file_uris.get(&hint.span.file) else {
+            continue;
+        };
+        if let Some(lsp) = fresh
+            .contains(uri)
+            .then(|| hints::to_lsp_hint(retained, &hint))
+            .flatten()
+        {
+            by_uri.entry(uri.clone()).or_default().push(lsp);
+        }
+    }
 }
 
 /// Like [`retain`] for a single-file compile of the document at `uri`.
@@ -357,7 +403,9 @@ fn retain_single(
     }
     let file_uris = HashMap::from([(FileId(0), uri.clone())]);
     let uri_files = HashMap::from([(uri.clone(), FileId(0))]);
-    Retained::build_with_stages(session, file_uris, uri_files, stages)
+    let retained = Retained::build_with_stages(session, file_uris, uri_files, stages);
+    publish_hints(&retained, &HashSet::from([uri.clone()]), by_uri);
+    retained
 }
 
 /// The file of a diagnostic's primary label (else its first label).

@@ -20,7 +20,7 @@ function @main
     alloca #bit_native %address : zeroed
     alloca ref #unknown %again : zeroed
     zero %tmp.1
-    &1: #bit64 = const 0x0706050403020100
+    &1: #bit64 = const 0x706050403020100
     copy &1 -> %tmp.1.low  // idx 0
     &2: #bit64 = const 0x0
     copy &2 -> %tmp.1.high  // idx 1

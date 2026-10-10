@@ -8,7 +8,7 @@
 //! guards is skipped: that condition may be constant (`@size_of(T)`, a
 //! target flag), and lowering would then drop the arm for some arguments.
 
-use lilac_error::Diagnostic;
+use lilac_error::{codes, Diagnostic};
 use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirStmt};
 use lilac_span::Span;
@@ -29,7 +29,7 @@ impl Checker<'_> {
         for (span, index, len) in bad {
             self.diags.emit(
                 Diagnostic::error(
-                    "E037",
+                    codes::E037,
                     format!("index {index} is out of bounds for an array of length {len}"),
                 )
                 .label(span, true, format!("the last index is {}", len - 1)),

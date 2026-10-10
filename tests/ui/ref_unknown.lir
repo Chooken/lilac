@@ -46,7 +46,7 @@ function @main
     copy %tmp.3 -> %s
     &2: ref #unknown = field %s .Data  // idx 0
     copy &2 -> %tmp.4
-    &3: #bit8 = const 0x2A
+    &3: #bit8 = const 0x2a
     copy &3 -> %tmp.5
     call @.root.put (in %tmp.4, %tmp.5) (out)
     &4: ref #unknown = field %s .Data  // idx 0

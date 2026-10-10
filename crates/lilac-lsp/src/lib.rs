@@ -35,6 +35,7 @@ pub mod convert;
 pub mod documents;
 pub mod fs;
 pub mod handlers;
+pub mod hints;
 pub mod index;
 pub mod lir;
 pub mod navigate;

@@ -58,7 +58,7 @@ fn check_broken_item_recovers_without_extra_errors() {
         "stderr was:\n{stderr}"
     );
     assert!(
-        stderr.contains("recovers_parse.lilac:4:1"),
+        stderr.contains("recovers_parse.lilac:3:15"),
         "stderr was:\n{stderr}"
     );
     assert_eq!(
@@ -151,4 +151,66 @@ fn emit_ir_prints_version_header() {
         "stdout was:\n{stdout}"
     );
     assert!(stdout.contains("target = "), "stdout was:\n{stdout}");
+}
+
+/// Writes `main` with `body` as its one statement and checks it.
+fn check_main(name: &str, body: &str) -> std::process::Output {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.lilac"));
+    std::fs::write(&path, format!("main: function () {{\n    {body}\n}}\n")).expect("writes");
+    lilac()
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("runs lilac")
+}
+
+/// Nesting past the parser's limit is one `E001`, never a stack overflow.
+#[test]
+fn deep_nesting_is_e001_not_a_crash() {
+    let n = 1000;
+    let parens = format!("x: @bit32 = {}0x1{}", "(".repeat(n), ")".repeat(n));
+    let ifs = format!("{}{}", "if 0x1 {\n".repeat(n), "}\n".repeat(n));
+    let chain = format!("x: @bit8 = 0x1{}", " and 0x1".repeat(n * 10));
+    for (name, body) in [
+        ("deep_parens", parens),
+        ("deep_ifs", ifs),
+        ("deep_chain", chain),
+    ] {
+        let output = check_main(name, &body);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{name}: {stderr}");
+        assert_eq!(
+            stderr.matches("error[E001]: nested too deeply").count(),
+            1,
+            "{name}: {stderr}"
+        );
+    }
+}
+
+/// The deepest program the parser accepts checks cleanly in a debug build:
+/// every pass fits in the compile thread's stack.
+#[test]
+fn deepest_accepted_nesting_checks() {
+    // The function's block, the statement and its expression are three of
+    // the 256 levels; each `if` is two (the statement and its block).
+    let n = 253;
+    let parens = format!("x: @bit32 = {}0x1{}", "(".repeat(n), ")".repeat(n));
+    let calls = format!(
+        "x: @bit32 = {}0x1{}",
+        "@i_add_32(0x1, ".repeat(n),
+        ")".repeat(n)
+    );
+    let ifs = format!("{}{}", "if 0x1 {\n".repeat(127), "}\n".repeat(127));
+    for (name, body) in [
+        ("max_parens", parens),
+        ("max_calls", calls),
+        ("max_ifs", ifs),
+    ] {
+        let output = check_main(name, &body);
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

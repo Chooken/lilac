@@ -21,6 +21,7 @@ mod indices;
 mod literals;
 mod paths;
 mod sigs;
+mod sink;
 mod suggest;
 mod types;
 
@@ -29,11 +30,12 @@ mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
+use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed, Unreported};
 use lilac_hir::{FuncKey, HirFunc, HirProgram};
 use lilac_resolve::{DefId, DefKind, Resolved};
 use lilac_span::{FileId, Span};
-use lilac_ty::{FuncSig, TypeId, TypeKind, TypeRef, Types};
+use lilac_ty::{Builtin, FuncSig, TypeId, TypeKind, TypeRef, Types};
+use sink::{Pending, Sink};
 
 /// The result of checking a unit.
 #[derive(Clone, Debug, Default)]
@@ -67,7 +69,7 @@ pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Opti
     let mut checker = Checker {
         res,
         types,
-        diags,
+        diags: Sink::new(diags),
         native_bits: options.native_bits,
         require_entry: options.require_entry,
         entry_unresolved: false,
@@ -82,8 +84,6 @@ pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Opti
         const_types: HashMap::new(),
         out: HirProgram::default(),
         env: Env::default(),
-        requirements: Vec::new(),
-        dependent: Vec::new(),
         instantiated: HashSet::new(),
         reported: HashSet::new(),
         origins: HashMap::new(),
@@ -117,8 +117,12 @@ pub(crate) enum State {
     Queued,
     /// Body checked successfully.
     Done,
-    /// Body or signature failed; later uses stay silent.
-    Failed,
+    /// Body has an error. Callers are still checked against the signature,
+    /// so their own errors are reported too.
+    BodyFailed,
+    /// The instance cannot be called at all (a signature type failed, the
+    /// `E051` depth cap, or a dropped `@entry`); later uses stay silent.
+    Unusable,
 }
 
 /// One function instance.
@@ -177,8 +181,8 @@ pub(crate) enum Requirement {
     },
     /// A one-step conversion was missing.
     Conversion {
-        /// Display of the source type.
-        from: String,
+        /// The source type.
+        from: TypeId,
     },
     /// Wrong argument count.
     Arity {
@@ -188,13 +192,16 @@ pub(crate) enum Requirement {
         found: usize,
     },
     /// Any other type mismatch.
-    Mismatch,
+    Mismatch {
+        /// Whether a `ref` was expected (the help suggests passing one).
+        expected_ref: bool,
+    },
 }
 
 pub(crate) struct Checker<'a> {
     pub res: &'a Resolved,
     pub types: &'a mut Types,
-    pub diags: &'a mut Diags,
+    pub diags: Sink<'a>,
     pub native_bits: u32,
     /// Declared signatures by definition (templates for generic ones).
     pub sigs: HashMap<DefId, FuncSig>,
@@ -219,10 +226,6 @@ pub(crate) struct Checker<'a> {
     pub out: HirProgram,
     /// Current environment.
     pub env: Env,
-    /// Requirement failures by diagnostic index.
-    pub requirements: Vec<(usize, Requirement)>,
-    /// Diagnostics (by index) about a type containing a generic parameter.
-    pub dependent: Vec<usize>,
     /// Generic functions with a concrete instance, whose errors that
     /// instance reports (so a template check of them stays silent).
     pub instantiated: HashSet<DefId>,
@@ -285,13 +288,6 @@ impl Checker<'_> {
     /// other error is reported ([`Self::template_failure`]). The output is
     /// kept apart from the lowered program.
     fn check_templates(&mut self) -> Vec<HirFunc> {
-        // A fresh, uncapped sink: instance failure detection reads the
-        // diagnostics back, and indices recorded so far refer to the old one.
-        let mut scratch = Diags::new();
-        scratch.max_errors = usize::MAX;
-        std::mem::swap(self.diags, &mut scratch);
-        let requirements = std::mem::take(&mut self.requirements);
-        let dependent = std::mem::take(&mut self.dependent);
         let funcs = self.out.funcs.len();
         let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
         self.instantiated = self.instances.keys().map(|key| key.def).collect();
@@ -309,12 +305,6 @@ impl Checker<'_> {
             self.drain_queue();
         }
         self.out.layouts.retain(|ty, _| layouts.contains(ty));
-        std::mem::swap(self.diags, &mut scratch);
-        self.requirements = requirements;
-        self.dependent = dependent;
-        for diagnostic in scratch.take_since(0) {
-            self.diags.emit(diagnostic);
-        }
         let templates = self.out.funcs.split_off(funcs);
         for func in &templates {
             if self.reports_template(&func.key) {
@@ -388,7 +378,8 @@ impl Checker<'_> {
 
     /// Requests instance `key` (from the instance being checked, at
     /// `use_span`): computes its concrete signature and queues its body.
-    /// `Err` (silent) when the definition or a previous request failed.
+    /// `Err` when the signature failed, now (reported) or before (silent: it
+    /// was reported then); a body that failed still gives its signature.
     pub(crate) fn request(
         &mut self,
         key: FuncKey,
@@ -401,7 +392,8 @@ impl Checker<'_> {
         }
         if let Some(instance) = self.instances.get(&key) {
             return match instance.state {
-                State::Failed => Err(ErrorGuaranteed::new()),
+                // Reported when it became unusable.
+                State::Unusable => Err(self.diags.already_reported()),
                 _ => Ok(instance.sig.clone()),
             };
         }
@@ -431,12 +423,12 @@ impl Checker<'_> {
             state: State::Queued,
         };
         if depth > MAX_DEPTH {
-            instance.state = State::Failed;
+            instance.state = State::Unusable;
             self.instances.insert(key.clone(), instance);
             let chain = self.chain_text(&key);
             return Err(self.diags.emit(
                 Diagnostic::error(
-                    "E051",
+                    codes::E051,
                     "generic instantiation is too deep (possible infinite recursion)",
                 )
                 .label(use_span, true, "instantiated here")
@@ -445,10 +437,10 @@ impl Checker<'_> {
         }
         // Every type the signature mentions must exist before the body runs.
         for ty in sig.params.iter().chain(sig.returns.iter()) {
-            if self.ensure_type(*ty, use_span).is_err() {
-                instance.state = State::Failed;
+            if let Err(error) = self.ensure_type(*ty, use_span) {
+                instance.state = State::Unusable;
                 self.instances.insert(key, instance);
-                return Err(ErrorGuaranteed::new());
+                return Err(error);
             }
         }
         self.instances.insert(key.clone(), instance);
@@ -462,14 +454,16 @@ impl Checker<'_> {
             return Ok(sig.clone());
         }
         if self.failed_sigs.contains(&def) {
-            return Err(ErrorGuaranteed::new());
+            // Reported when it first failed.
+            return Err(self.diags.already_reported());
         }
         if let Some(sig) = self.collect_sig(def) {
             self.sigs.insert(def, sig.clone());
             Ok(sig)
         } else {
+            // `collect_sig` reported each unresolved type.
             self.failed_sigs.insert(def);
-            Err(ErrorGuaranteed::new())
+            Err(self.diags.already_reported())
         }
     }
 
@@ -491,11 +485,11 @@ impl Checker<'_> {
     pub(crate) fn entry_unresolved(&mut self, name: &str, span: Span) -> ErrorGuaranteed {
         if !self.require_entry {
             self.entry_unresolved = true;
-            return ErrorGuaranteed::new();
+            return ErrorGuaranteed::unreported(Unreported::DroppedEntry);
         }
         self.diags.emit(
             Diagnostic::error(
-                "E032",
+                codes::E032,
                 format!("the program has no `{name}`, which `@entry` calls"),
             )
             .label(span, true, format!("`@entry` calls `{name}` here"))
@@ -515,30 +509,32 @@ impl Checker<'_> {
         requirement: Requirement,
         involved: &[TypeId],
     ) -> ErrorGuaranteed {
-        let index = self.diags.checkpoint();
-        let guaranteed = self.emit_involving(diagnostic, involved);
-        if self.diags.checkpoint() > index {
-            self.requirements.push((index, requirement));
-        }
-        guaranteed
+        let dependent = self.involves_param(involved);
+        self.diags.push(Pending {
+            diagnostic,
+            requirement: Some(requirement),
+            dependent,
+        })
     }
 
-    /// Emits a diagnostic about `involved` types, recording it as
-    /// [`Self::dependent`] when one contains a generic parameter (so a
-    /// template check, which cannot know the parameter, drops it).
+    /// Emits a diagnostic about `involved` types, marked dependent when one
+    /// contains a generic parameter (so a template check, which cannot know
+    /// the parameter, drops it).
     pub(crate) fn emit_involving(
         &mut self,
         diagnostic: Diagnostic,
         involved: &[TypeId],
     ) -> ErrorGuaranteed {
-        let index = self.diags.checkpoint();
-        let guaranteed = self.diags.emit(diagnostic);
-        if self.diags.checkpoint() > index
-            && involved.iter().any(|ty| self.types.contains_param(*ty))
-        {
-            self.dependent.push(index);
-        }
-        guaranteed
+        let dependent = self.involves_param(involved);
+        self.diags.push(Pending {
+            diagnostic,
+            requirement: None,
+            dependent,
+        })
+    }
+
+    fn involves_param(&self, involved: &[TypeId]) -> bool {
+        involved.iter().any(|ty| self.types.contains_param(*ty))
     }
 
     /// `E010` with both sides labelled.
@@ -552,18 +548,34 @@ impl Checker<'_> {
         let exp = self.types.display_ref(expected);
         let got = self.types.display_ref(found);
         let diagnostic = Diagnostic::error(
-            "E010",
+            codes::E010,
             format!("mismatched types: expected {exp}, found {got}"),
         )
         .label(expected_span, false, format!("expected `{exp}` here"))
         .label(found_span, true, format!("found `{got}` here"));
-        self.emit_requirement(diagnostic, Requirement::Mismatch, &[expected.id, found.id])
+        self.emit_requirement(
+            diagnostic,
+            Requirement::Mismatch {
+                expected_ref: expected.is_ref,
+            },
+            &[expected.id, found.id],
+        )
     }
 
     /// Records an item use for the editor.
     pub(crate) fn record_use(&mut self, span: Span, def: DefId) {
         if def != DefId::ERROR && !span.is_dummy() {
             self.out.uses.push(lilac_hir::NameSite { span, def });
+        }
+    }
+
+    /// Records a use of a `using … as` alias for the editor: the path head at
+    /// `span`, declared at `decl`.
+    pub(crate) fn record_alias_use(&mut self, span: Span, decl: Span) {
+        if !span.is_dummy() && !decl.is_dummy() {
+            self.out
+                .alias_uses
+                .push(lilac_hir::AliasSite { span, decl });
         }
     }
 
@@ -591,25 +603,12 @@ impl Checker<'_> {
                 decl,
                 ty: fcx.ty(local),
                 scope: fcx.scope_of(local),
+                kind: fcx.kind_of(local),
             });
         }
     }
 
     // ---- small type helpers --------------------------------------------
-
-    pub(crate) fn builtin(&self, name: &str) -> TypeId {
-        match self.types.builtin(name) {
-            Some(id) => id,
-            None => lilac_error::bug!(Span::dummy(), "missing builtin `{name}`"),
-        }
-    }
-
-    pub(crate) fn value_of(&self, name: &str) -> TypeRef {
-        TypeRef {
-            id: self.builtin(name),
-            is_ref: false,
-        }
-    }
 
     pub(crate) fn is_bit(&self, id: TypeId) -> bool {
         matches!(
@@ -650,13 +649,14 @@ impl Checker<'_> {
         }
     }
 
-    pub(crate) fn bit_of_width(&self, width: u32) -> TypeId {
-        self.builtin(match width {
-            8 => "@bit8",
-            16 => "@bit16",
-            32 => "@bit32",
-            _ => "@bit64",
-        })
+    pub(crate) fn bit_of_width(width: u32) -> TypeId {
+        match width {
+            8 => Builtin::Bit8,
+            16 => Builtin::Bit16,
+            32 => Builtin::Bit32,
+            _ => Builtin::Bit64,
+        }
+        .id()
     }
 
     /// Every concrete `@conversion` as `(from, to)`.

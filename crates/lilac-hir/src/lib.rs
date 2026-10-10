@@ -81,6 +81,13 @@ pub struct HirProgram {
     /// Every named local's declaration and uses, each linked to its
     /// declaration (editor references and rename).
     pub locals: Vec<LocalSite>,
+    /// Every path head that names a `using … as` alias, linked to the
+    /// alias's declaration (editor definition, references and rename).
+    pub alias_uses: Vec<AliasSite>,
+    /// Statements no path reaches: the rest of a block after a `return`,
+    /// `break`, `continue`, `@panic` or `@trap`, one span per block (an
+    /// editor hint; they are still checked and lowered).
+    pub unreachable: Vec<Span>,
 }
 
 /// A concrete type's layout.
@@ -149,6 +156,29 @@ pub struct LocalSite {
     /// Where the name is in scope: its block (the function for a
     /// parameter); the name is visible from `decl` to the scope's end.
     pub scope: Span,
+    /// What declares it.
+    pub kind: LocalKind,
+}
+
+/// What declares a local name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LocalKind {
+    /// A `let`, a capture or a binding in a body.
+    Local,
+    /// A parameter of a function with a body.
+    Param,
+    /// A named result, or a parameter of a function without a body
+    /// (`extern`): a name that is part of the signature only.
+    Signature,
+}
+
+/// One use of a `using … as` alias: the head of a path.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct AliasSite {
+    /// The name token.
+    pub span: Span,
+    /// The alias's name token in its `using` directive.
+    pub decl: Span,
 }
 
 /// One resolved item use.

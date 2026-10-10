@@ -99,6 +99,14 @@
   symbol that differ only in pointee merge. `lib/Standard`
   is only usable mounted (`--lib=Standard=lib/Standard`); the run test
   `tests/run/stdlib` exercises all of it.
+- `using A.B as Name` (`ItemKind::Using::alias`, `lilac_module::Using::alias`)
+  loads `A.B` but imports none of its names: the resolver binds `Name` in
+  the file's `FileScope::aliases` (`Resolved::alias`), and `lookup_head`
+  tries it before the visible names, so it shadows ancestor-reached and
+  imported names and namespaces. An alias named like an item of the file's
+  own namespace, or a second alias of one name, is `E054`
+  (`collect_aliases`). Locals shadow aliases; a failed member access on such
+  a local says so (`Checker::shadowed_alias`).
 - Visibility reach is ancestor-public + descendant-private (Rust's rule). A
   top-level `private { … }` excludes an item from `using` (importers see it as
   unresolved, not `E026`); an object-member `private { … }` gates external access
@@ -234,9 +242,12 @@
   re-reads the root and libraries) and takes `lilac.libraries` from
   `workspace/didChangeConfiguration` without a restart.
 - Navigation (`navigate.rs`): a name is an item (`DefId`: the index's
-  `defs` and `uses`) or a local, keyed by its declaration's name span
+  `defs` and `uses`), a local, keyed by its declaration's name span
   (`HirProgram::locals`, a `LocalSite` per declaration and use, recorded by
-  typeck's `record_local`/`record_local_use`). References, highlights,
+  typeck's `record_local`/`record_local_use`), or a `using … as` alias,
+  keyed by its name's span in the `using` (`HirProgram::alias_uses`, an
+  `AliasSite` per path head, recorded in `lookup_item`; the index adds
+  each declaration as a site). References, highlights,
   definition, type definition, rename (`prepareRename` refuses hooks and any
   edit in the builtins or in a library other than the requesting file's),
   document and workspace symbols are all built from those. A `.Variant` tag
@@ -252,6 +263,20 @@
   to its members; `@` lists `Intrinsic::names()` and the builtin types.
   A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
   `textDocument/codeAction` turns them into quick fixes without a compile.
+- Faded hints (`hints.rs`) are editor-only: computed from the retained
+  analysis and published with a file's diagnostics as `Hint` +
+  `Unnecessary`; the compiler reports none, and the CLI prints nothing.
+  They cover unused locals and parameters (a `LocalSite` declaration with
+  no other site; `LocalSite::kind` leaves out `LocalKind::Signature` names,
+  `self` and `_`-prefixed names), unused `using … as` aliases, unused
+  top-level `private` items (no `NameSite`), and unreachable statements
+  (`HirProgram::unreachable`: the rest of a block after `return`, `break`,
+  `continue`, `@panic` or `@trap`, recorded by typeck's `check_stmts`). A
+  scope with an error gets none. Discarded results are never flagged.
+- Resilience: a compile that panics keeps the previous analysis and shows
+  one `window/showMessage` error until a compile succeeds
+  (`Server::reported_panic`); a request handler that panics is answered
+  with `InternalError` (`compile::guarded`), and the server keeps running.
 - The driver's `Session::project_files()` (fed by
   `lilac_module::load_with_status`) is the `FileId -> PathBuf` map the server
   uses to attach diagnostics to document URIs.
@@ -283,6 +308,39 @@ Its types and constants are checked on first use (not eagerly like user
 items), so a program that never names `@builtin` lowers byte-identically.
 `lilac-target` owns the variant names (`Arch::builtin_name`,
 `Os::builtin_name`) and `Target::page_size`.
+
+Every pass recurses over the tree, so depth is bounded once, in the
+parser: past `lilac_parse::MAX_NESTING` (256) levels is `E001`, reported
+once per item, and the construct is skipped (`Parser::nested`). Each link of
+a chain built left to right (an operator of `a + b + c`, an `as`, a `.b` or
+call of `a.b().c`, a prefix `-`/`ref`) is a level too (`Parser::link`). Every
+compile runs on a thread with `lilac_driver::COMPILE_STACK_BYTES` (the CLI's
+`main`, the LSP server and its worker), which covers that depth in a debug
+build (`deepest_accepted_nesting_checks`). A new recursive syntax form must
+count its levels the same way.
+
+Where things live:
+
+- `lilac-parse`: `lib.rs` holds the `Parser` and its recovery; `items.rs`,
+  `types.rs`, `stmt.rs` and `expr.rs` parse each kind of syntax.
+- `lilac-lower`: `lib.rs` drives lowering and holds `FnState` (one
+  function's emission state); `symbols.rs` (names, mangling, externs),
+  `ownership.rs` (copies, moves, drops, glue), `control.rs` (`if`,
+  `match`, loops, `and`/`or`), `expr.rs` (values by expression kind),
+  `calls.rs` and `intrinsics.rs`.
+- `lilac-ir`: `lib.rs` holds the LIR types, `print.rs` the printer,
+  `verify.rs` the verifier and the post-DCE `check_live_*` checks.
+- LIR names are typed (`names.rs`): `Reg` (`&`), `PlaceName` (`%`),
+  `Label` (`$`) and `Symbol` (`@`, data `!`); each displays with its sigil.
+  A `const` holds a `LirConst` (`Int(u64)`, `Float(f64)`, `Data(Symbol)`)
+  built once in lowering (`number_const`); the verifier checks it fits its
+  type (`check_const`) and the backend never parses text.
+- AST type syntax is a `lilac_ast::TypeShape` (`Named`, `Function`,
+  `Array`, `SelfType`, `Error`): a type the parser could not read is
+  `Error`, never a name. Builtin types are `lilac_ty::Builtin`, whose
+  `id()` is its fixed `TypeId` in every table; look one up by spelling
+  (`Types::builtin`) only for source names. Intrinsic slots carry a
+  `Builtin`.
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`
@@ -321,6 +379,23 @@ bug fix that changes generated code.
   `lilac_lower::check_constant_indices` before DCE, traced through the full
   call graph, so it fires in functions nothing calls. Arms a constant
   condition rules out are never lowered, so they are not checked.
+- Typeck emits through `Checker::diags`, a `Sink` (`sink.rs`): while an
+  instance body is checked it holds each diagnostic as a `Pending` (with
+  its `Requirement` and whether it is `dependent` on a parameter), and
+  `check_instance` hands them to `settle` when the body is done, which
+  reports them, folds a failed generic instance's requirements into `E042`
+  (`instance_failure`), or filters a template's (`template_failure`). A
+  body failed when what it held has an error. `Diags` keeps every
+  diagnostic; only the terminal shows the first `SHOWN_ERRORS` (10), and
+  the summary counts the rest (`Session::hidden_errors`).
+- One error must not hide another. An instance whose body failed is
+  `State::BodyFailed`, and its callers are still checked against its
+  declared signature; only `State::Unusable` (a signature type that failed,
+  the `E051` depth cap, a dropped `@entry`) makes `request` fail. When a
+  callee cannot be found or used, `Checker::callee_failed` (or `callee`,
+  for a `Result`) still checks every argument against the error type, so
+  errors inside them are reported. A silent `Err(ErrorGuaranteed::new())`
+  carries a comment naming the diagnostic that covers it.
 - `E042` traces every site that requested the failing instance
   (`Checker::origins`, recorded on every `request`, cached or not), through
   generic requesters down to plain functions (`Checker::instance_trace`).
@@ -330,7 +405,7 @@ bug fix that changes generated code.
 - Every compile checks each uninstantiated generic as a template
   (`Checker::check_templates`: its own parameters as abstract `T`s, never
   lowered). Diagnostics emitted through `emit_requirement`/`emit_involving`
-  with a type that `contains_param` are recorded in `Checker::dependent`;
+  with a type that `contains_param` are held as `dependent`;
   `template_failure` drops those and reports the rest plainly (never
   `E042`), but only for the template instance of a generic with no concrete
   instance (`reports_template`), so nothing is reported twice. A new error
@@ -352,11 +427,37 @@ bug fix that changes generated code.
 
 ## Diagnostics
 
+- Codes live in one registry, `lilac_error::codes`: each `Code` is listed
+  once with its page `docs/errors/<code>.md` (`include_str!`), and
+  `Diagnostic::error` takes a `Code`, so a new code needs its page to
+  compile (a unit test checks each page starts with `# <code>: `).
+- `ErrorGuaranteed` is earned: only `Diags::emit` makes one, or
+  `Diags::already_reported` (debug-asserts an error was recorded) for
+  poison passed along. Typeck uses `Sink::already_reported`, which also
+  accepts an error it holds (`ErrorGuaranteed::held`). The one stop with
+  no error is named: `ErrorGuaranteed::unreported(Unreported::DroppedEntry)`.
 - A did-you-mean is a fix, not prose: `Diagnostic::suggest(span, name)`
   adds the `help: did you mean ...?` line and the `Suggestion` the editor
   applies (and the JSON emitter's `suggestions`). `span` must cover just
   the misspelled name. Typeck's `suggest.rs` has the candidate lists
-  (`value_names`, `type_names`, `member_names`) and `closest`.
+  (`value_names`, `type_names`, `member_names`); the matcher is
+  `lilac_error::closest`, which the CLI also uses for misspelled commands,
+  flags and `lilac explain` codes. A dotted
+  path is walked to its first segment that names nothing
+  (`suggest_path`), and that segment alone is matched against what the
+  previous namespace holds, or at the head against the file's aliases,
+  the namespaces within reach and its visible types (`head_names`); so a
+  path's span must start at its head.
+- Parse errors say what they found: `Parser::expected` writes "expected
+  {what}, found {token}" (`Token::describe`: "`function`", "a string",
+  "end of file"). A delimiter the file ends inside is `Parser::unclosed`:
+  the error is at the opening `{`/`(`, with the end of file as a
+  secondary label.
+- The CLI never dumps the usage on a usage error: it prints the problem,
+  a did-you-mean when one is close, and "run `lilac help` for all
+  options". `lilac explain <code>` prints the code's page
+  (`codes::lookup`). `--timings` and `-q` are common flags
+  (`Common::progress`), so `check` and `emit-*` take them too.
 
 ## Gates
 

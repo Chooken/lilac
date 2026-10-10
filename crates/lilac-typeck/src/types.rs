@@ -5,12 +5,12 @@
 //! also when its member hooks are instantiated and registered, so operators,
 //! conversions and RAII hooks of `Box[@bit32]` exist as soon as the type does.
 
-use lilac_ast::Type as AstType;
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_ast::{Type as AstType, TypeShape};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::{FuncKey, Layout, SemanticKind, TypeHooks};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::paths::path_tail;
 use crate::{Checker, TypeState, MAX_DEPTH};
@@ -38,63 +38,70 @@ impl Checker<'_> {
 
     /// Resolves type syntax to a template (parameters stay `Param`).
     pub(crate) fn resolve_syntax(&mut self, ty: &AstType) -> TypeRef {
-        // An empty name is the parser's poison sentinel (already reported).
-        if ty.name.is_empty() {
-            return TypeRef::ERROR;
+        match &ty.shape {
+            // The parser already reported it.
+            TypeShape::Error => TypeRef::ERROR,
+            TypeShape::Function(func) => {
+                let params = func
+                    .params
+                    .iter()
+                    .map(|slot| self.resolve_syntax(&slot.ty))
+                    .collect();
+                let returns = func
+                    .returns
+                    .iter()
+                    .map(|slot| self.resolve_syntax(&slot.ty))
+                    .collect();
+                let id = self.types.intern_func(params, returns);
+                TypeRef {
+                    id,
+                    is_ref: ty.is_ref,
+                }
+            }
+            TypeShape::Array {
+                element,
+                len,
+                len_span,
+            } => self.resolve_array(ty, element, len, *len_span),
+            // Outside a method's receiver, `self` names no type.
+            TypeShape::SelfType => self.resolve_named(ty, "self", &[]),
+            TypeShape::Named { name, args } => self.resolve_named(ty, name, args),
         }
-        if let Some(func) = &ty.func {
-            let params = func
-                .params
-                .iter()
-                .map(|slot| self.resolve_syntax(&slot.ty))
-                .collect();
-            let returns = func
-                .returns
-                .iter()
-                .map(|slot| self.resolve_syntax(&slot.ty))
-                .collect();
-            let id = self.types.intern_func(params, returns);
-            return TypeRef {
-                id,
-                is_ref: ty.is_ref,
-            };
-        }
-        if let Some((len, len_span)) = &ty.array_len {
-            return self.resolve_array(ty, len, *len_span);
-        }
-        let name_span = path_tail(ty.name_span, &ty.name);
+    }
+
+    /// Resolves a named type: a generic parameter, a builtin, or an
+    /// object/enum with its arguments.
+    fn resolve_named(&mut self, ty: &AstType, name: &str, args: &[AstType]) -> TypeRef {
+        let name_span = path_tail(ty.name_span, name);
         if !ty.name_span.is_dummy() {
-            let kind = if self.types.builtin(&ty.name).is_some() {
+            let kind = if self.types.builtin(name).is_some() {
                 SemanticKind::BuiltinType
             } else {
                 SemanticKind::UserType
             };
             self.record_semantic(name_span, kind);
         }
-        if let Some(index) = self.env.params.iter().position(|name| *name == ty.name) {
-            if !ty.generic_args.is_empty() {
-                self.arity_error(ty, None, ty.generic_args.len());
+        if let Some(index) = self.env.params.iter().position(|param| param == name) {
+            if !args.is_empty() {
+                self.arity_error(ty, name, None, args.len());
                 return TypeRef::ERROR;
             }
             let index = u32::try_from(index).unwrap_or(u32::MAX);
-            let id = self.types.intern_param(index, &ty.name);
+            let id = self.types.intern_param(index, name);
             return TypeRef {
                 id,
                 is_ref: ty.is_ref,
             };
         }
-        if let Some(id) = self.types.builtin(&ty.name) {
-            if !ty.generic_args.is_empty() {
-                self.arity_error(ty, None, ty.generic_args.len());
+        if let Some(id) = self.types.builtin(name) {
+            if !args.is_empty() {
+                self.arity_error(ty, name, None, args.len());
                 return TypeRef::ERROR;
             }
-            if ty.name == "unknown" && !ty.is_ref {
+            if name == "unknown" && !ty.is_ref {
                 self.diags.emit(
-                    Diagnostic::error("E023", "`unknown` can only live behind a reference").label(
-                        ty.span,
-                        true,
-                        "write `ref unknown`",
-                    ),
+                    Diagnostic::error(codes::E023, "`unknown` can only live behind a reference")
+                        .label(ty.span, true, "write `ref unknown`"),
                 );
                 return TypeRef::ERROR;
             }
@@ -103,37 +110,37 @@ impl Checker<'_> {
                 is_ref: ty.is_ref,
             };
         }
-        let Ok(found) = self.lookup_item(&ty.name, ty.span) else {
+        let Ok(found) = self.lookup_item(name, ty.name_span) else {
             return TypeRef::ERROR;
         };
         let Some(def) = found.filter(|def| self.res.def(*def).is_type()) else {
-            let diagnostic = Diagnostic::error("E023", format!("unknown type `{}`", ty.name))
+            let diagnostic = Diagnostic::error(codes::E023, format!("unknown type `{name}`"))
                 .label(ty.span, true, "no such type in scope");
-            let diagnostic = self.suggest_type(diagnostic, &ty.name, name_span);
+            let diagnostic = self.suggest_type(diagnostic, name, ty.name_span);
             self.diags.emit(diagnostic);
             return TypeRef::ERROR;
         };
         self.record_use(name_span, def);
         let declared = self.res.def(def).generic_params.len();
-        if ty.generic_args.len() != declared {
-            self.arity_error(ty, Some(def), ty.generic_args.len());
+        if args.len() != declared {
+            self.arity_error(ty, name, Some(def), args.len());
             return TypeRef::ERROR;
         }
-        let mut args = Vec::with_capacity(declared);
-        for arg in &ty.generic_args {
+        let mut resolved_args = Vec::with_capacity(declared);
+        for arg in args {
             let arg = self.resolve_syntax(arg);
             if arg.is_error() {
                 return TypeRef::ERROR;
             }
-            args.push(arg);
+            resolved_args.push(arg);
         }
-        let mut resolved = self.type_of_def(def, args);
+        let mut resolved = self.type_of_def(def, resolved_args);
         resolved.is_ref = ty.is_ref;
         resolved
     }
 
     /// `E044` for a type applied to the wrong number of arguments.
-    fn arity_error(&mut self, ty: &AstType, def: Option<DefId>, found: usize) {
+    fn arity_error(&mut self, ty: &AstType, name: &str, def: Option<DefId>, found: usize) {
         let declared = def.map_or_else(Vec::new, |def| self.res.def(def).generic_params.clone());
         let noun = if declared.len() == 1 {
             "argument"
@@ -141,8 +148,8 @@ impl Checker<'_> {
             "arguments"
         };
         let mut diagnostic = Diagnostic::error(
-            "E044",
-            format!("wrong number of generic arguments for `{}`", ty.name),
+            codes::E044,
+            format!("wrong number of generic arguments for `{name}`"),
         )
         .label(
             ty.span,
@@ -157,7 +164,7 @@ impl Checker<'_> {
                     format!("declared with `[{}]`", declared.join(", ")),
                 );
             }
-            _ => diagnostic = diagnostic.note(format!("`{}` is not generic", ty.name)),
+            _ => diagnostic = diagnostic.note(format!("`{name}` is not generic")),
         }
         self.diags.emit(diagnostic);
     }
@@ -218,12 +225,13 @@ impl Checker<'_> {
         }
         match self.type_states.get(&ty.id) {
             Some(TypeState::Done) => return Ok(()),
-            Some(TypeState::Failed) => return Err(ErrorGuaranteed::new()),
+            // Reported when its layout first failed.
+            Some(TypeState::Failed) => return Err(self.diags.already_reported()),
             Some(TypeState::Active) if ty.is_ref => return Ok(()),
             Some(TypeState::Active) => {
                 let name = self.types.display(ty.id);
                 return Err(self.diags.emit(
-                    Diagnostic::error("E053", format!("`{name}` contains itself by value"))
+                    Diagnostic::error(codes::E053, format!("`{name}` contains itself by value"))
                         .label(
                             span,
                             true,
@@ -244,7 +252,7 @@ impl Checker<'_> {
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(self.diags.emit(
                 Diagnostic::error(
-                    "E051",
+                    codes::E051,
                     "generic instantiation is too deep (possible infinite recursion)",
                 )
                 .label(span, true, "instantiated here")
@@ -260,8 +268,9 @@ impl Checker<'_> {
         let layout = self.with_env(env, |c| c.compute_layout(def));
         self.type_stack.pop();
         let Ok(layout) = layout else {
+            // `compute_layout` reported it.
             self.type_states.insert(ty.id, TypeState::Failed);
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         };
         self.out.layouts.insert(ty.id, layout);
         self.type_states.insert(ty.id, TypeState::Done);
@@ -291,9 +300,10 @@ impl Checker<'_> {
                 };
                 variants.push((name, payload));
             }
-            let tag = self.tag_type(variants.len());
+            let tag = Self::tag_type(variants.len());
+            // `resolve_type` reported each failed payload.
             return if failed {
-                Err(ErrorGuaranteed::new())
+                Err(self.diags.already_reported())
             } else {
                 Ok(Layout::Enum { variants, tag })
             };
@@ -310,20 +320,22 @@ impl Checker<'_> {
             failed |= resolved.is_error();
             fields.push((name, resolved));
         }
+        // `resolve_type` reported each failed field.
         if failed {
-            Err(ErrorGuaranteed::new())
+            Err(self.diags.already_reported())
         } else {
             Ok(Layout::Object { fields })
         }
     }
 
     /// The smallest bit container holding `count` variant tags.
-    pub(crate) fn tag_type(&self, count: usize) -> TypeId {
-        self.builtin(match count {
-            0..=256 => "@bit8",
-            257..=65_536 => "@bit16",
-            _ => "@bit32",
-        })
+    pub(crate) fn tag_type(count: usize) -> TypeId {
+        match count {
+            0..=256 => Builtin::Bit8,
+            257..=65_536 => Builtin::Bit16,
+            _ => Builtin::Bit32,
+        }
+        .id()
     }
 
     /// Instantiates and registers every member hook of `def[args]`.

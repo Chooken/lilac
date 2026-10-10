@@ -12,7 +12,10 @@ use std::collections::HashMap;
 
 use lilac_span::{SourceMap, Span};
 
-use crate::{LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy};
+use crate::{
+    LirCallee, LirConst, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, Reg,
+    Symbol,
+};
 
 /// The frame record place and the place holding the head slot's address.
 const FRAME: &str = ".lilac.frame";
@@ -56,13 +59,13 @@ pub fn instrument<S: std::hash::BuildHasher>(
 ) {
     let mut sites = Sites::new(&module.data);
     for func in &mut module.funcs {
-        if func.is_extern || is_hidden(&func.name) || func.blocks.is_empty() {
+        if func.is_extern || is_hidden(func.name.as_str()) || func.blocks.is_empty() {
             continue;
         }
         let name = names
-            .get(&func.name)
+            .get(func.name.as_str())
             .cloned()
-            .unwrap_or_else(|| func.name.clone());
+            .unwrap_or_else(|| func.name.as_str().to_owned());
         instrument_func(func, &name, sources, &mut sites);
     }
     module.data.extend(sites.added);
@@ -71,7 +74,7 @@ pub fn instrument<S: std::hash::BuildHasher>(
 /// Site data constants: existing ones are reused by content, new ones are
 /// named `.lilac.site.N`.
 struct Sites {
-    by_bytes: HashMap<Vec<u8>, String>,
+    by_bytes: HashMap<Vec<u8>, Symbol>,
     added: Vec<LirData>,
 }
 
@@ -87,12 +90,12 @@ impl Sites {
         }
     }
 
-    fn intern(&mut self, text: String) -> String {
+    fn intern(&mut self, text: String) -> Symbol {
         let bytes = text.into_bytes();
         if let Some(name) = self.by_bytes.get(&bytes) {
             return name.clone();
         }
-        let name = format!(".lilac.site.{}", self.added.len());
+        let name = Symbol::new(format!(".lilac.site.{}", self.added.len()));
         self.by_bytes.insert(bytes.clone(), name.clone());
         self.added.push(LirData {
             name: name.clone(),
@@ -105,47 +108,47 @@ impl Sites {
 
 /// Allocates the frame and links it: `frame.prev ← *head`, `*head ← addr
 /// frame`, through the registers `top` and `me`.
-fn prologue(top: String, me: String, span: Span) -> [LirInst; 7] {
+fn prologue(top: Reg, me: Reg, span: Span) -> [LirInst; 7] {
     let frame_ref = LirTy::trace_frame().to_ref();
     [
         LirInst::Alloca {
             ty: LirTy::trace_frame(),
-            place: FRAME.to_owned(),
+            place: FRAME.into(),
             span,
         },
         LirInst::Alloca {
             ty: frame_ref.clone().to_ref(),
-            place: HEAD.to_owned(),
+            place: HEAD.into(),
             span,
         },
         LirInst::Call {
             func: LirCallee::Builtin("@trace_head".to_owned()),
             ins: Vec::new(),
-            outs: vec![HEAD.to_owned()],
+            outs: vec![HEAD.into()],
             span,
         },
         LirInst::Load {
-            src: HEAD.to_owned(),
+            src: HEAD.into(),
             dst: top.clone(),
             ty: frame_ref.clone(),
             span,
         },
         LirInst::StoreField {
             value: LirOperand::Reg(top),
-            obj: FRAME.to_owned(),
+            obj: FRAME.into(),
             name: "prev".to_owned(),
             idx: 0,
             span,
         },
         LirInst::Addr {
-            place: FRAME.to_owned(),
+            place: FRAME.into(),
             dst: me.clone(),
             ty: frame_ref,
             span,
         },
         LirInst::Store {
             src: LirOperand::Reg(me),
-            dst: HEAD.to_owned(),
+            dst: HEAD.into(),
             span,
         },
     ]
@@ -156,7 +159,7 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
     let mut regs = 0_u32;
     let mut reg = || {
         regs += 1;
-        format!(".lilac.t{regs}")
+        Reg::new(format!(".lilac.t{regs}"))
     };
     for (index, block) in func.blocks.iter_mut().enumerate() {
         let span = block.span;
@@ -181,13 +184,13 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
                     let site = reg();
                     insts.push(LirInst::Const {
                         dst: site.clone(),
-                        lit: format!("!{data}"),
+                        value: LirConst::Data(data),
                         ty: LirTy::byte_buffer(),
                         span: *call_span,
                     });
                     insts.push(LirInst::StoreField {
                         value: LirOperand::Reg(site),
-                        obj: FRAME.to_owned(),
+                        obj: FRAME.into(),
                         name: "site".to_owned(),
                         idx: 1,
                         span: *call_span,
@@ -200,7 +203,7 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
             let prev = reg();
             insts.extend([
                 LirInst::Field {
-                    obj: FRAME.to_owned(),
+                    obj: FRAME.into(),
                     name: "prev".to_owned(),
                     idx: 0,
                     dst: prev.clone(),
@@ -209,7 +212,7 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
                 },
                 LirInst::Store {
                     src: LirOperand::Reg(prev),
-                    dst: HEAD.to_owned(),
+                    dst: HEAD.into(),
                     span,
                 },
             ]);
@@ -230,7 +233,7 @@ mod tests {
 
     fn call(func: &str, span: Span) -> LirInst {
         LirInst::Call {
-            func: LirCallee::Func(func.to_owned()),
+            func: LirCallee::Func(func.into()),
             ins: Vec::new(),
             outs: Vec::new(),
             span,
@@ -239,7 +242,7 @@ mod tests {
 
     fn block(label: &str, insts: Vec<LirInst>, term: LirTerm) -> LirBlock {
         LirBlock {
-            label: label.to_owned(),
+            label: label.into(),
             insts,
             term,
             span: Span::dummy(),
@@ -254,7 +257,7 @@ mod tests {
 
     fn func(name: &str, blocks: Vec<LirBlock>) -> LirFunc {
         LirFunc {
-            name: name.to_owned(),
+            name: name.into(),
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
@@ -271,7 +274,7 @@ mod tests {
         let at = Span::new(6, 9, file);
         let mut module = LirModule::new("x86_64-unknown-none");
         module.funcs.push(LirFunc {
-            ins: vec![("p".to_owned(), LirTy::Bit(8))],
+            ins: vec![("p".into(), LirTy::Bit(8))],
             ..func(
                 "f",
                 vec![
@@ -280,21 +283,21 @@ mod tests {
                         vec![
                             LirInst::Alloca {
                                 ty: LirTy::Bit(32),
-                                place: "x".to_owned(),
+                                place: "x".into(),
                                 span: Span::dummy(),
                             },
                             call("g", at),
                             LirInst::CopyReg {
-                                src: LirOperand::Place("p".to_owned()),
-                                dst: "c".to_owned(),
+                                src: LirOperand::Place("p".into()),
+                                dst: "c".into(),
                                 ty: LirTy::Bit(8),
                                 span: Span::dummy(),
                             },
                         ],
                         LirTerm::BranchIf {
-                            cond: "c".to_owned(),
-                            then: "a".to_owned(),
-                            els: Some("b".to_owned()),
+                            cond: "c".into(),
+                            then: "a".into(),
+                            els: Some("b".into()),
                             span: Span::dummy(),
                         },
                     ),
@@ -361,12 +364,12 @@ mod tests {
         ));
         assert!(matches!(
             &entry[call_at - 2],
-            LirInst::Const { lit, .. } if lit == "!.lilac.site.0"
+            LirInst::Const { value: crate::LirConst::Data(name), .. } if *name == ".lilac.site.0"
         ));
         let site: Vec<&LirData> = module
             .data
             .iter()
-            .filter(|datum| datum.name.starts_with(".lilac.site."))
+            .filter(|datum| datum.name.as_str().starts_with(".lilac.site."))
             .collect();
         // Both calls at the same span share one constant.
         assert_eq!(site.len(), 1);

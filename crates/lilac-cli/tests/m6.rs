@@ -178,6 +178,75 @@ fn ambiguous_import_labels_both_using_sites() {
     );
 }
 
+/// An alias named like an item of its file's namespace (a sibling file's
+/// included), or like an earlier alias, is `E054` at the alias.
+#[test]
+fn alias_collisions_are_e054() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("FAILS_alias_collision"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("error[E054]").count(),
+        2,
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--> main.lilac:1:12") && stderr.contains("helpers.lilac:1:1"),
+        "E054 must label the alias and the sibling file's item:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--> main.lilac:3:12") && stderr.contains("first aliased here"),
+        "E054 must label both aliases:\n{stderr}"
+    );
+}
+
+/// A local shadows an alias; a failed member access on it says so.
+#[test]
+fn local_shadowing_alias_is_noted() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("FAILS_alias_shadowed_by_local"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E010]"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("alias `B` declared here")
+            && stderr.contains("the local `B` shadows the alias `B`"),
+        "the error must point at the shadowed alias:\n{stderr}"
+    );
+}
+
+/// A misspelled path segment (a type, a function, a namespace, or an
+/// alias at the head) gets a did-you-mean whose fix covers just that
+/// segment.
+#[test]
+fn misspelled_path_segments_suggest_the_closest_name() {
+    let output = lilac()
+        .args(["check", "--error-format=json"])
+        .arg(modules("FAILS_path_did_you_mean"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for (line, col, end_col, replacement) in [
+        (5, 15, 20, "Square"),
+        (6, 24, 28, "area"),
+        (7, 21, 27, "shapes"),
+        (8, 17, 23, "Shapes"),
+    ] {
+        let fix = format!(
+            r#""line":{line},"col":{col},"end_line":{line},"end_col":{end_col},"replacement":"{replacement}""#
+        );
+        assert!(stderr.contains(&fix), "missing {fix} in:\n{stderr}");
+    }
+}
+
 /// Runs `emit-ir` over a project directory and returns its IR text.
 fn emit_ir(name: &str) -> String {
     let output = lilac()

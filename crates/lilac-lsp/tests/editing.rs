@@ -5,8 +5,8 @@ use std::time::Duration;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, ResponseError};
 use lsp_types::{
     CodeActionOrCommand, CompletionItem, CompletionResponse, CompletionTextEdit,
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, PublishDiagnosticsParams,
-    SignatureHelp, TextDocumentContentChangeEvent, TextDocumentItem, Url,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
+    PublishDiagnosticsParams, SignatureHelp, TextDocumentContentChangeEvent, TextDocumentItem, Url,
     VersionedTextDocumentIdentifier,
 };
 
@@ -208,7 +208,10 @@ fn open_program() -> (Connection, std::thread::JoinHandle<()>, Url) {
     did_open(&client, &uri, PROGRAM);
     let published = publish_for(&client, &uri);
     assert!(
-        published.diagnostics.is_empty(),
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::HINT)),
         "{:?}",
         published.diagnostics
     );
@@ -372,7 +375,10 @@ fn library_namespaces_complete() {
     did_open(&client, &uri, text);
     let published = publish_for(&client, &uri);
     assert!(
-        published.diagnostics.is_empty(),
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::HINT)),
         "{:?}",
         published.diagnostics
     );
@@ -388,6 +394,113 @@ fn library_namespaces_complete() {
         panic!("completions");
     };
     assert_eq!(labels(&items), vec!["helper"]);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn aliases_navigate_complete_and_rename() {
+    let dir = std::env::temp_dir().join(format!("lilac-lsp-alias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("lib");
+    let app = dir.join("app");
+    std::fs::create_dir_all(&lib).expect("mkdir");
+    std::fs::create_dir_all(&app).expect("mkdir");
+    std::fs::write(
+        lib.join("lib.lilac"),
+        "helper: function () nothing {\n}\nThing: object {\n    v: @bit8\n}\n",
+    )
+    .expect("write");
+    let main = app.join("main.lilac");
+    let text = "using Lib as L\nmain: function () nothing {\n    t: L.Thing = L.Thing { v = 0x1 }\n    L.helper()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        serde_json::json!({
+            "capabilities": {},
+            "rootUri": Url::from_directory_path(&app).expect("root").as_str(),
+            "initializationOptions": { "libraries": { "Lib": lib.to_string_lossy() } },
+        }),
+    );
+    let uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+    // The alias in `L.helper()`, and its declaration in the `using`.
+    let call = position(&uri, after(text, "\n    "));
+    let declared = serde_json::json!({
+        "start": { "line": 0, "character": 13 },
+        "end": { "line": 0, "character": 14 },
+    });
+
+    let result = request(
+        &client,
+        "textDocument/completion",
+        position(&uri, after(text, "L.")),
+    )
+    .expect("completion");
+    let Some(CompletionResponse::Array(items)) = serde_json::from_value(result).expect("items")
+    else {
+        panic!("completions");
+    };
+    let mut names = labels(&items);
+    names.sort_unstable();
+    assert_eq!(names, vec!["Thing", "helper"]);
+
+    let hover = request(&client, "textDocument/hover", call.clone()).expect("hover");
+    assert!(hover.to_string().contains("namespace Lib"), "{hover}");
+
+    let definition = request(&client, "textDocument/definition", call.clone()).expect("definition");
+    assert!(
+        definition["uri"]
+            .as_str()
+            .is_some_and(|target| target.ends_with("/app/main.lilac")),
+        "{definition}"
+    );
+    assert_eq!(definition["range"], declared, "{definition}");
+
+    let mut params = call.clone();
+    params["context"] = serde_json::json!({ "includeDeclaration": true });
+    let references = request(&client, "textDocument/references", params).expect("references");
+    let references = references.as_array().expect("locations");
+    // The declaration, the annotation, the struct literal and the call.
+    assert_eq!(references.len(), 4, "{references:?}");
+    assert_eq!(references[0]["range"], declared);
+
+    let mut params = call;
+    params["newName"] = serde_json::json!("Library");
+    let edit = request(&client, "textDocument/rename", params).expect("rename");
+    let changes = edit["changes"].as_object().expect("changes");
+    assert_eq!(changes.len(), 1, "{edit}");
+    let edits = changes
+        .values()
+        .next()
+        .and_then(serde_json::Value::as_array)
+        .expect("edits in main.lilac");
+    let mut starts: Vec<(u64, u64)> = edits
+        .iter()
+        .map(|edit| {
+            assert_eq!(edit["newText"], "Library");
+            let start = &edit["range"]["start"];
+            (
+                start["line"].as_u64().expect("line"),
+                start["character"].as_u64().expect("character"),
+            )
+        })
+        .collect();
+    starts.sort_unstable();
+    assert_eq!(starts, vec![(0, 13), (2, 7), (2, 17), (3, 4)]);
 
     shutdown(&client);
     handle.join().expect("server thread");

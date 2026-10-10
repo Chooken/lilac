@@ -13,7 +13,7 @@ use lsp_types::{
 
 use crate::convert::{byte_offset, line_len_utf16, span_range};
 use crate::index::{AnalysisIndex, DefInfo, Retained};
-use crate::navigate::smallest_use;
+use crate::navigate::{smallest_use, target_in, Target};
 use crate::roots::canonical_file_uri;
 
 /// Legend token-type indices, in the order advertised by `initialize`.
@@ -41,6 +41,7 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
         Some((span_range(sources, span)?, item_hover(retained, def)?))
     };
     let (range, value) = intrinsic_hover(retained, file, byte)
+        .or_else(|| alias_hover(retained, file, byte))
         .or_else(item)
         .or_else(|| expr_hover(retained, file, byte))?;
 
@@ -171,6 +172,24 @@ fn expr_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, 
     ))
 }
 
+/// Renders a hover for a `using … as` alias (a use or its declaration): the
+/// namespace it names.
+fn alias_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
+    let (span, Target::Alias(decl)) = target_in(retained, file, byte)? else {
+        return None;
+    };
+    let resolved = &retained.session.analysis()?.resolved;
+    let (ns, _) = resolved
+        .files
+        .get(&decl.file)?
+        .aliases
+        .values()
+        .find(|(_, declared)| *declared == decl)?;
+    let range = span_range(&retained.session.source_map, span)?;
+    let path = resolved.namespace_path(*ns);
+    Some((range, format!("```lilac\nnamespace {path}\n```")))
+}
+
 /// Renders a hover for an intrinsic's name: its signature.
 fn intrinsic_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
     let site = retained.index.semantics.iter().find(|site| {
@@ -204,19 +223,22 @@ pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
         return format!("{name}{special}");
     }
     let sig = intrinsic.signature();
-    let params = sig.params.iter().map(slot).collect::<Vec<_>>().join(", ");
-    let result = sig
-        .result
-        .as_ref()
-        .map_or_else(|| "nothing".to_owned(), slot);
+    let params = sig
+        .params
+        .iter()
+        .copied()
+        .map(slot)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let result = sig.result.map_or_else(|| "nothing".to_owned(), slot);
     format!("{name}({params}) {result}")
 }
 
 /// One intrinsic slot as source spells it.
-fn slot(slot: &Slot) -> String {
+fn slot(slot: Slot) -> String {
     match slot {
-        Slot::Builtin(name) => (*name).to_owned(),
-        Slot::Ref(name) => format!("ref {name}"),
+        Slot::Builtin(ty) => ty.name().to_owned(),
+        Slot::Ref(ty) => format!("ref {}", ty.name()),
         Slot::AnyBit => "@bitN".to_owned(),
         Slot::ExpectedBit => "@bitN (the expected type)".to_owned(),
     }

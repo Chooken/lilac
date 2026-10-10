@@ -6,16 +6,70 @@ mod progress;
 mod std_fs;
 
 use lilac_codegen::Backend as _;
-use lilac_driver::{ErrorFormat, OptimizeMode, Session, Target};
+use lilac_driver::{ErrorFormat, OptimizeMode, Progress, Session, Target};
 use lilac_error::ErrorGuaranteed;
 use lilac_ir::LirModule;
+use progress::{Reporter, Verbosity};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std_fs::StdFs;
 
+/// The commands, for did-you-mean.
+const COMMANDS: [&str; 6] = ["check", "emit-ir", "emit-llvm", "build", "explain", "help"];
+
+/// Every flag any command takes (without its `=value`), for did-you-mean.
+const FLAGS: [&str; 21] = [
+    "--error-format",
+    "--color",
+    "--target",
+    "--verbose",
+    "--mode",
+    "--release",
+    "--stack-traces",
+    "--dump-lir",
+    "--export",
+    "--lib",
+    "--timings",
+    "-q",
+    "--quiet",
+    "--check",
+    "-o",
+    "--build-dir",
+    "--libc",
+    "--linker",
+    "--link-arg",
+    "-h",
+    "--help",
+];
+
+/// The line a usage error ends with instead of the whole usage text.
+const HELP_HINT: &str = "run `lilac help` for all options";
+
+/// "did you mean `x`?" for a misspelled `word`, else nothing.
+fn did_you_mean(word: &str, candidates: &[&str]) -> String {
+    lilac_error::closest(word, candidates.iter().copied())
+        .map(|best| format!("\nhelp: did you mean `{best}`?"))
+        .unwrap_or_default()
+}
+
+/// An unknown flag, with the closest known one (keeping its `=value`).
+fn unknown_flag(arg: &str) -> String {
+    let (name, value) = arg
+        .split_once('=')
+        .map_or((arg, None), |(n, v)| (n, Some(v)));
+    let help = lilac_error::closest(name, FLAGS.iter().copied())
+        .map(|best| match value {
+            Some(value) => format!("\nhelp: did you mean `{best}={value}`?"),
+            None => format!("\nhelp: did you mean `{best}`?"),
+        })
+        .unwrap_or_default();
+    format!("unknown flag: {arg}{help}\n{HELP_HINT}")
+}
+
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--cache-dir=<path>] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]...
-  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]"
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]
+  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
+  lilac explain <code>"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -29,6 +83,18 @@ fn opt_level(mode: OptimizeMode) -> lilac_codegen::OptLevel {
 }
 
 fn main() -> ExitCode {
+    std::thread::Builder::new()
+        .name("lilac".to_owned())
+        .stack_size(lilac_driver::COMPILE_STACK_BYTES)
+        .spawn(run)
+        .expect("spawning the compiler thread")
+        .join()
+        // The panic message is already printed.
+        .unwrap_or(ExitCode::from(101))
+}
+
+/// The command line, run on a thread with [`lilac_driver::COMPILE_STACK_BYTES`].
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("{}", usage());
@@ -39,12 +105,14 @@ fn main() -> ExitCode {
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
+        "explain" => cmd_explain(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
         }
         other => {
-            eprintln!("unknown command: {other}\n{}", usage());
+            let help = did_you_mean(other, &COMMANDS);
+            eprintln!("unknown command: {other}{help}\n{HELP_HINT}");
             ExitCode::from(2)
         }
     }
@@ -59,7 +127,49 @@ struct Common {
     /// `--stack-traces=on|off`, when given. `session.stack_traces` takes it,
     /// else stays off; `lilac build` defaults it from the mode instead.
     stack_traces: Option<bool>,
+    /// `-q`/`--quiet` (nothing but diagnostics, winning over `--timings`)
+    /// or `--timings` (each stage with its duration), when given.
+    progress: Option<Verbosity>,
     session: Session,
+}
+
+impl Common {
+    /// How much progress the command prints: nothing under `-q` or JSON
+    /// diagnostics, else stage timings under `--timings`. `normal` is the
+    /// command's own default (`build` prints a line per step, the others
+    /// nothing).
+    fn verbosity(&self, normal: Option<Verbosity>) -> Option<Verbosity> {
+        if self.session.opts.error_format == ErrorFormat::Json {
+            Some(Verbosity::Quiet)
+        } else {
+            self.progress.or(normal)
+        }
+    }
+
+    /// Whether `-q` was given.
+    fn quiet(&self) -> bool {
+        self.progress == Some(Verbosity::Quiet)
+    }
+}
+
+/// Hooks a `--timings` reporter into `session` for `check` and `emit-*`.
+/// Returns it so the caller can close the last stage.
+fn stage_timings(verbosity: Option<Verbosity>, session: &mut Session) -> Option<Reporter> {
+    if verbosity != Some(Verbosity::Timings) {
+        return None;
+    }
+    let reporter = Reporter::new(Verbosity::Timings, session.opts.color);
+    let hook = reporter.clone();
+    session.progress = Some(Progress::new(move |stage, event| hook.stage(stage, event)));
+    Some(reporter)
+}
+
+/// Prints the diagnostics and, unless `-q`, the summary line.
+fn print_diagnostics(session: &Session, quiet: bool) {
+    eprint!("{}", session.render_diagnostics());
+    if !quiet {
+        eprint!("{}", session.render_summary());
+    }
 }
 
 /// `--color=auto|always|never`: whether diagnostics and progress are coloured.
@@ -81,6 +191,7 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
     let mut target_set = false;
     let mut dump_lir: Option<PathBuf> = None;
     let mut stack_traces: Option<bool> = None;
+    let mut progress: Option<Verbosity> = None;
     let mut session = Session::new();
     session.opts.color = progress::auto_color();
     let mut index = 0;
@@ -108,8 +219,8 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                     return Err(ExitCode::from(2));
                 }
             }
-        } else if *arg == "--verbose" {
-            session.opts.verbose = true;
+        } else if parse_progress_flag(arg, &mut progress) {
+            // `--timings` or `-q`.
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
         } else if let Some(mode) = arg.strip_prefix("--mode=") {
@@ -122,14 +233,18 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             // Consumed by the session-wide parser above: `--release`.
         } else if let Some(value) = arg.strip_prefix("--stack-traces=") {
             stack_traces = Some(parse_on_off("--stack-traces", value)?);
-        } else if parse_path_flag(arg, &mut session, &mut dump_lir)? {
-            // `--cache-dir=` or `--dump-lir=`.
+        } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
+            if dir.is_empty() {
+                eprintln!("--dump-lir= needs a path\n{HELP_HINT}");
+                return Err(ExitCode::from(2));
+            }
+            dump_lir = Some(PathBuf::from(dir));
         } else if let Some(mount) = arg.strip_prefix("--lib=") {
             let Some((name, dir)) = mount
                 .split_once('=')
                 .filter(|(n, d)| !n.is_empty() && !d.is_empty())
             else {
-                eprintln!("--lib= needs `Name=dir`\n{}", usage());
+                eprintln!("--lib= needs `Name=dir`\n{HELP_HINT}");
                 return Err(ExitCode::from(2));
             };
             if name.starts_with('@') {
@@ -141,23 +256,23 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 .push((name.to_owned(), PathBuf::from(dir)));
         } else if let Some(name) = arg.strip_prefix("--export=") {
             if name.is_empty() {
-                eprintln!("--export= needs a name\n{}", usage());
+                eprintln!("--export= needs a name\n{HELP_HINT}");
                 return Err(ExitCode::from(2));
             }
             session.exports.insert(name.to_owned());
         } else if arg.starts_with('-') {
-            eprintln!("unknown flag: {arg}\n{}", usage());
+            eprintln!("{}", unknown_flag(arg));
             return Err(ExitCode::from(2));
         } else if file.is_none() {
             file = Some(arg.clone());
         } else {
-            eprintln!("expected one file\n{}", usage());
+            eprintln!("expected one file\n{HELP_HINT}");
             return Err(ExitCode::from(2));
         }
         index += 1;
     }
     let Some(file) = file else {
-        eprintln!("missing <file>\n{}", usage());
+        eprintln!("missing <file>\n{HELP_HINT}");
         return Err(ExitCode::from(2));
     };
     session.stack_traces = stack_traces.unwrap_or(false);
@@ -167,35 +282,9 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
         target_set,
         dump_lir,
         stack_traces,
+        progress,
         session,
     })
-}
-
-/// Parses `--cache-dir=<path>` (into `session`) and `--dump-lir=<dir>` (into
-/// `dump_lir`), returning `true` when `arg` was one of them.
-///
-/// Kept out of [`parse_common`] to stay under the pedantic line budget.
-fn parse_path_flag(
-    arg: &str,
-    session: &mut Session,
-    dump_lir: &mut Option<PathBuf>,
-) -> Result<bool, ExitCode> {
-    if let Some(dir) = arg.strip_prefix("--cache-dir=") {
-        if dir.is_empty() {
-            eprintln!("--cache-dir= needs a path\n{}", usage());
-            return Err(ExitCode::from(2));
-        }
-        session.cache_dir = Some(PathBuf::from(dir));
-    } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
-        if dir.is_empty() {
-            eprintln!("--dump-lir= needs a path\n{}", usage());
-            return Err(ExitCode::from(2));
-        }
-        *dump_lir = Some(PathBuf::from(dir));
-    } else {
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 /// `on`/`off` for a switch flag.
@@ -210,16 +299,31 @@ fn parse_on_off(flag: &str, value: &str) -> Result<bool, ExitCode> {
     }
 }
 
-/// Parses the session-wide scalar flag `--release`, returning `true` when `arg`
-/// was it.
+/// Parses the session-wide scalar flags `--release` and `--verbose`, returning
+/// `true` when `arg` was one.
 ///
 /// Kept out of [`parse_common`] to stay under the pedantic line budget.
 fn parse_session_flag(arg: &str, session: &mut Session) -> bool {
-    if arg == "--release" {
-        session.optimize = OptimizeMode::Release;
-        return true;
+    match arg {
+        "--release" => session.optimize = OptimizeMode::Release,
+        "--verbose" => session.opts.verbose = true,
+        _ => return false,
     }
-    false
+    true
+}
+
+/// Parses `--timings` and `-q`/`--quiet` into `progress` (quiet wins),
+/// returning `true` when `arg` was one.
+fn parse_progress_flag(arg: &str, progress: &mut Option<Verbosity>) -> bool {
+    match arg {
+        "--timings" if *progress != Some(Verbosity::Quiet) => {
+            *progress = Some(Verbosity::Timings);
+        }
+        "--timings" => {}
+        "-q" | "--quiet" => *progress = Some(Verbosity::Quiet),
+        _ => return false,
+    }
+    true
 }
 
 /// Runs the pipeline, optionally writing one `.lir` file per pass boundary into
@@ -335,23 +439,46 @@ fn compile_project_with_dumps(
     (result, io_error)
 }
 
+/// `lilac explain E010`: prints the code's page from `docs/errors/`.
+fn cmd_explain(args: &[String]) -> ExitCode {
+    let [id] = args else {
+        eprintln!("`lilac explain` takes one error code, like `E010`\n{HELP_HINT}");
+        return ExitCode::from(2);
+    };
+    let Some(code) = lilac_error::codes::lookup(id) else {
+        let ids: Vec<&str> = lilac_error::codes::ALL
+            .iter()
+            .map(|code| code.id())
+            .collect();
+        let help = did_you_mean(&id.to_ascii_uppercase(), &ids);
+        eprintln!("unknown error code: {id}{help}");
+        return ExitCode::from(2);
+    };
+    print!("{}", code.doc());
+    ExitCode::SUCCESS
+}
+
 fn cmd_check(args: &[String]) -> ExitCode {
-    let common = match parse_common(args, false) {
+    let mut common = match parse_common(args, false) {
         Ok(common) => common,
         Err(code) => return code,
     };
+    let quiet = common.quiet();
+    let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
     let (result, dump_err) =
         match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
             Ok(pair) => pair,
             Err(code) => return code,
         };
+    if let Some(reporter) = &timings {
+        reporter.end();
+    }
     let code = match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     };
-    eprint!("{}", session.render_diagnostics());
-    eprint!("{}", session.render_summary());
+    print_diagnostics(&session, quiet);
     if let Some(err) = &dump_err {
         eprintln!("{err}");
         return ExitCode::from(1);
@@ -360,18 +487,22 @@ fn cmd_check(args: &[String]) -> ExitCode {
 }
 
 fn cmd_emit_ir(args: &[String]) -> ExitCode {
-    let common = match parse_common(args, true) {
+    let mut common = match parse_common(args, true) {
         Ok(common) => common,
         Err(code) => return code,
     };
+    let quiet = common.quiet();
+    let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
     let (result, dump_err) =
         match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
             Ok(pair) => pair,
             Err(code) => return code,
         };
-    eprint!("{}", session.render_diagnostics());
-    eprint!("{}", session.render_summary());
+    if let Some(reporter) = &timings {
+        reporter.end();
+    }
+    print_diagnostics(&session, quiet);
     let Ok(module) = result else {
         return ExitCode::from(1);
     };
@@ -410,10 +541,12 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
 }
 
 fn cmd_emit_llvm(args: &[String]) -> ExitCode {
-    let common = match parse_common(args, true) {
+    let mut common = match parse_common(args, true) {
         Ok(common) => common,
         Err(code) => return code,
     };
+    let quiet = common.quiet();
+    let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
     // Unlike `check`/`emit-ir`, `emit-llvm` defaults to the real host so the IR
     // data layout matches the machine it will run on. An explicit `--target=`
@@ -430,8 +563,10 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
             Ok(pair) => pair,
             Err(code) => return code,
         };
-    eprint!("{}", session.render_diagnostics());
-    eprint!("{}", session.render_summary());
+    if let Some(reporter) = &timings {
+        reporter.end();
+    }
+    print_diagnostics(&session, quiet);
     let Ok(module) = result else {
         return ExitCode::from(1);
     };
@@ -512,17 +647,9 @@ mod tests {
     }
 
     #[test]
-    fn release_is_release_and_cache_dir_parses() {
-        let common = parse_common(
-            &args(&["f.lilac", "--release", "--cache-dir=out/cache"]),
-            false,
-        )
-        .expect("valid args");
+    fn release_is_release() {
+        let common = parse_common(&args(&["f.lilac", "--release"]), false).expect("valid args");
         assert_eq!(common.session.optimize, OptimizeMode::Release);
-        assert_eq!(
-            common.session.cache_dir,
-            Some(std::path::PathBuf::from("out/cache"))
-        );
     }
 
     /// Outside `lilac build`, stack traces are off unless asked for.
@@ -545,8 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_cache_dir_is_rejected() {
-        assert!(parse_common(&args(&["f.lilac", "--cache-dir="]), false).is_err());
+    fn empty_dump_lir_is_rejected() {
+        assert!(parse_common(&args(&["f.lilac", "--dump-lir="]), false).is_err());
     }
 
     #[test]

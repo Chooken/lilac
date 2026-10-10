@@ -5,7 +5,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use lilac_error::{Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed, Level};
+use lilac_error::{
+    codes, Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed, Level,
+};
 use lilac_ir::LirModule;
 use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
@@ -14,6 +16,19 @@ pub mod builtin;
 
 pub use lilac_ir::Entry;
 pub use lilac_target::{Arch, LinkFlavor, LinkInfo, Os, Target};
+
+/// The stack a compile needs: run [`Session`]s on a thread this big.
+///
+/// Every pass recurses over the syntax tree, and the parser bounds its
+/// nesting (`lilac_parse::MAX_NESTING`), so this covers the deepest program
+/// it accepts, in a debug build. It is reserved address space, not memory
+/// used up front. The main thread's stack (1 MiB on Windows) is too small.
+pub const COMPILE_STACK_BYTES: usize = 64 << 20;
+
+/// How many errors a terminal shows ([`Session::render_diagnostics`]); the
+/// summary counts the rest. The session keeps them all, and JSON output
+/// carries them all.
+pub const SHOWN_ERRORS: usize = 10;
 
 /// `--error-format=` selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -169,8 +184,6 @@ pub struct Session {
     pub opts: Opts,
     /// Optimization level (read by the LLVM backend).
     pub optimize: OptimizeMode,
-    /// Cache directory (reserved for the post-v1 content cache).
-    pub cache_dir: Option<PathBuf>,
     /// Extra reachability roots (`--export=<name>`): functions to keep alive
     /// even when nothing calls them, so a library can expose entry points.
     /// Names are qualified source names (`api`, `A.B.api`), mapped to
@@ -214,7 +227,6 @@ impl Default for Session {
             target: Target::default(),
             opts: Opts::default(),
             optimize: OptimizeMode::default(),
-            cache_dir: None,
             exports: HashSet::new(),
             project_files: Vec::new(),
             libraries: Vec::new(),
@@ -334,7 +346,7 @@ impl Session {
             },
         );
         if failed {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.run(project, on_stage)
     }
@@ -364,7 +376,7 @@ impl Session {
             .map(|file| (file.file, file.path.clone()))
             .collect();
         if failed {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.run(&project, on_stage)
     }
@@ -412,13 +424,13 @@ impl Session {
         self.report(Stage::Parse, StageEvent::Begin);
         let (programs, failed) = lilac_module::parse_all(project, &mut self.diags, strict);
         if failed && strict {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.report(Stage::Parse, DONE);
         self.report(Stage::Resolve, StageEvent::Begin);
         let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
         if self.diags.has_errors() && strict {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.report(Stage::Resolve, DONE);
         self.report(Stage::Check, StageEvent::Begin);
@@ -438,14 +450,14 @@ impl Session {
             hir,
         });
         if self.diags.has_errors() {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         lilac_lower::check_extern_signatures(&checked.hir, &resolved, &types, &mut self.diags);
         if self.require_entry {
             self.check_platform_hooks(&resolved);
         }
         if self.diags.has_errors() {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.report(
             Stage::Check,
@@ -501,7 +513,7 @@ impl Session {
         }
         lilac_ir::verify(&lir, &mut self.diags)?;
         if self.diags.has_errors() {
-            return Err(ErrorGuaranteed::new());
+            return Err(self.diags.already_reported());
         }
         self.report(Stage::Verify, DONE);
         on_stage("final", &lir);
@@ -515,24 +527,34 @@ impl Session {
         }
     }
 
-    /// Renders all recorded diagnostics to one string (human ones separated
-    /// by blank lines).
+    /// Renders the recorded diagnostics to one string: for a terminal the
+    /// first [`SHOWN_ERRORS`] errors, separated by blank lines; as JSON,
+    /// every one.
     #[must_use]
     pub fn render_diagnostics(&self) -> String {
-        let human = self.human_emitter();
-        let rendered = self
-            .diags
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| match self.opts.error_format {
-                ErrorFormat::Human => human.render(diagnostic, &self.source_map),
-                ErrorFormat::Json => EmitterJson.render(diagnostic, &self.source_map),
-            })
-            .collect::<Vec<_>>();
         match self.opts.error_format {
-            ErrorFormat::Human => rendered.join("\n"),
-            ErrorFormat::Json => rendered.concat(),
+            ErrorFormat::Human => {
+                let human = self.human_emitter();
+                self.diags
+                    .shown(SHOWN_ERRORS)
+                    .into_iter()
+                    .map(|diagnostic| human.render(diagnostic, &self.source_map))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            ErrorFormat::Json => self
+                .diags
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| EmitterJson.render(diagnostic, &self.source_map))
+                .collect(),
         }
+    }
+
+    /// How many errors [`Self::render_diagnostics`] leaves out.
+    #[must_use]
+    pub fn hidden_errors(&self) -> usize {
+        self.diags.error_count().saturating_sub(SHOWN_ERRORS)
     }
 
     /// The human closing line (`error: aborting due to …`), preceded by a
@@ -542,19 +564,15 @@ impl Session {
         if self.opts.error_format == ErrorFormat::Json {
             return String::new();
         }
-        let count = |level| {
-            self.diags
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.level == level)
-                .count()
-        };
-        let suppressed = self.diags.suppressed_errors();
-        let summary = self.human_emitter().summary(
-            count(Level::Error) + suppressed,
-            suppressed,
-            count(Level::Warning),
-        );
+        let warnings = self
+            .diags
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.level == Level::Warning)
+            .count();
+        let summary =
+            self.human_emitter()
+                .summary(self.diags.error_count(), self.hidden_errors(), warnings);
         if summary.is_empty() {
             summary
         } else {
@@ -576,7 +594,7 @@ impl Session {
             if !defined {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E033",
+                        codes::E033,
                         format!("the program defines no `{hook}`; an executable needs one"),
                     )
                     .note("a runtime library supplies `@entry`, `@exit` and `@compiler_print`")
@@ -1196,10 +1214,10 @@ main: function () nothing {}
             .iter()
             .flat_map(|block| &block.insts)
             .find_map(|inst| match inst {
-                lilac_ir::LirInst::Const { dst, lit, ty, .. }
-                    if dst == "stride" && *ty == lilac_ir::LirTy::BitNative =>
+                lilac_ir::LirInst::Const { dst, value, ty, .. }
+                    if *dst == "stride" && *ty == lilac_ir::LirTy::BitNative =>
                 {
-                    Some(lit.clone())
+                    Some(value.to_string())
                 }
                 _ => None,
             })

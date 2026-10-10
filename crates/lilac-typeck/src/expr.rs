@@ -8,18 +8,18 @@
 use std::collections::HashSet;
 
 use lilac_ast::{
-    BinOp, Expr, FStrPart, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType,
+    BinOp, Expr, FStrPart, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType, TypeShape,
 };
-use lilac_error::{Diagnostic, ErrorGuaranteed};
-use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, HirValueArm, SemanticKind};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
+use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, HirValueArm, Intrinsic, SemanticKind};
 use lilac_resolve::{DefId, DefKind, Visibility};
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::body::{local_expr, FnCx};
 use crate::calls::Called;
 use crate::literals::is_foldable_literal;
-use crate::paths::path_tail;
+use crate::paths::{path_tail, shadowed_alias_note};
 use crate::sigs::BINARY_HOOKS;
 use crate::{Checker, Env, Requirement};
 
@@ -54,8 +54,11 @@ impl Checker<'_> {
                 let Some(want) = expected.filter(|id| *id != TypeId::ERROR) else {
                     if expected.is_none() {
                         self.diags.emit(
-                            Diagnostic::error("E024", "tag literal needs an expected enum type")
-                                .label(*span, true, "annotate the binding"),
+                            Diagnostic::error(
+                                codes::E024,
+                                "tag literal needs an expected enum type",
+                            )
+                            .label(*span, true, "annotate the binding"),
                         );
                     }
                     return HirExpr::poison(*span);
@@ -64,12 +67,12 @@ impl Checker<'_> {
             }
             Expr::Number(bytes, span) => self.check_number(bytes, *span, expected),
             Expr::Str(bytes, span) => HirExpr {
-                ty: self.value_of("@byte_buffer"),
+                ty: Builtin::ByteBuffer.value(),
                 span: *span,
                 kind: HirExprKind::Str(bytes.clone()),
             },
             Expr::Char(scalar, span) => HirExpr {
-                ty: self.value_of("@bit32"),
+                ty: Builtin::Bit32.value(),
                 span: *span,
                 kind: HirExprKind::Number(format!("0x{:X}", u32::from(*scalar))),
             },
@@ -91,7 +94,7 @@ impl Checker<'_> {
                     if outs.len() != 1 {
                         self.diags.emit(
                             Diagnostic::error(
-                                "E022",
+                                codes::E022,
                                 "call in value position must return exactly one value",
                             )
                             .label(
@@ -132,8 +135,11 @@ impl Checker<'_> {
             Expr::FString { parts, span } => self.check_fstring(fcx, parts, *span),
             Expr::TypeApp(ty) => {
                 self.diags.emit(
-                    Diagnostic::error("E021", format!("cannot use type `{}` as a value", ty.name))
-                        .label(ty.span, true, "a type, not a value"),
+                    Diagnostic::error(
+                        codes::E021,
+                        format!("cannot use type `{}` as a value", ty.head()),
+                    )
+                    .label(ty.span, true, "a type, not a value"),
                 );
                 HirExpr::poison(ty.span)
             }
@@ -159,7 +165,7 @@ impl Checker<'_> {
             self.mismatch(want, expr.ty, want_span, span);
             return HirExpr::poison(span);
         }
-        let expr = self.auto_deref(expr);
+        let expr = Self::auto_deref(expr);
         if expr.ty.id == want.id {
             return expr;
         }
@@ -168,13 +174,16 @@ impl Checker<'_> {
         }
         let from = self.types.display(expr.ty.id);
         let target = self.types.display(want.id);
-        let diagnostic =
-            Diagnostic::error("E043", format!("no conversion from {from} to {target}"))
-                .label(want_span, false, format!("expected `{target}` here"))
-                .label(expr.span, true, "conversion attempted here");
+        let source = expr.ty.id;
+        let diagnostic = Diagnostic::error(
+            codes::E043,
+            format!("no conversion from {from} to {target}"),
+        )
+        .label(want_span, false, format!("expected `{target}` here"))
+        .label(expr.span, true, "conversion attempted here");
         self.emit_requirement(
             diagnostic,
-            Requirement::Conversion { from },
+            Requirement::Conversion { from: source },
             &[expr.ty.id, want.id],
         );
         HirExpr::poison(expr.span)
@@ -200,8 +209,8 @@ impl Checker<'_> {
     }
 
     /// `*expr` when `expr` is a reference (never through `ref unknown`).
-    pub(crate) fn auto_deref(&self, expr: HirExpr) -> HirExpr {
-        if !expr.ty.is_ref || self.types.builtin("unknown") == Some(expr.ty.id) {
+    pub(crate) fn auto_deref(expr: HirExpr) -> HirExpr {
+        if !expr.ty.is_ref || expr.ty.id == Builtin::Unknown.id() {
             return expr;
         }
         HirExpr {
@@ -220,11 +229,8 @@ impl Checker<'_> {
         }
         if self.env.params.iter().any(|param| param == name) {
             self.diags.emit(
-                Diagnostic::error("E021", format!("cannot use type `{name}` as a value")).label(
-                    span,
-                    true,
-                    "name a variable instead",
-                ),
+                Diagnostic::error(codes::E021, format!("cannot use type `{name}` as a value"))
+                    .label(span, true, "name a variable instead"),
             );
             return HirExpr::poison(span);
         }
@@ -232,11 +238,8 @@ impl Checker<'_> {
             return HirExpr::poison(span);
         };
         let Some(def) = found else {
-            let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
-                span,
-                true,
-                "not a local or item",
-            );
+            let diagnostic = Diagnostic::error(codes::E021, format!("unresolved name `{name}`"))
+                .label(span, true, "not a local or item");
             let diagnostic = self.suggest_value(fcx, diagnostic, name, span);
             self.diags.emit(diagnostic);
             return HirExpr::poison(span);
@@ -246,7 +249,7 @@ impl Checker<'_> {
             DefKind::Func(decl) if decl.variadic => {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E028",
+                        codes::E028,
                         format!("cannot use variadic extern `{name}` as a value"),
                     )
                     .label(span, true, "function types have no `...`")
@@ -282,21 +285,24 @@ impl Checker<'_> {
             }
             DefKind::Object | DefKind::Enum => {
                 self.diags.emit(
-                    Diagnostic::error("E021", format!("cannot use type `{name}` as a value"))
+                    Diagnostic::error(codes::E021, format!("cannot use type `{name}` as a value"))
                         .label(span, true, "name a variable instead"),
                 );
                 HirExpr::poison(span)
             }
             DefKind::Hook(_) => {
                 self.diags.emit(
-                    Diagnostic::error("E021", format!("cannot use function `{name}` as a value"))
-                        .label(span, true, "hooks are not values"),
+                    Diagnostic::error(
+                        codes::E021,
+                        format!("cannot use function `{name}` as a value"),
+                    )
+                    .label(span, true, "hooks are not values"),
                 );
                 HirExpr::poison(span)
             }
             DefKind::Field(_) | DefKind::Variant(_) => {
                 self.diags.emit(
-                    Diagnostic::error("E021", format!("unresolved name `{name}`")).label(
+                    Diagnostic::error(codes::E021, format!("unresolved name `{name}`")).label(
                         span,
                         true,
                         "not a local or item",
@@ -322,7 +328,7 @@ impl Checker<'_> {
         };
         self.diags.emit(
             Diagnostic::error(
-                "E044",
+                codes::E044,
                 format!("wrong number of generic arguments for `{what}`"),
             )
             .label(
@@ -344,7 +350,8 @@ impl Checker<'_> {
             Expr::TypeApp(ty) => {
                 let resolved = self.resolve_type(ty);
                 Some(if resolved.is_error() {
-                    Err(ErrorGuaranteed::new())
+                    // `resolve_type` reported it.
+                    Err(self.diags.already_reported())
                 } else {
                     Ok(Receiver::Type(resolved))
                 })
@@ -400,8 +407,11 @@ impl Checker<'_> {
                     self.record_local_use(fcx, local, *span);
                     return Ok(local_expr(local, fcx.ty(local), *span));
                 }
-                let diagnostic = Diagnostic::error("E021", format!("unresolved name `{name}`"))
-                    .label(*span, true, "not a local or item");
+                let diagnostic = Diagnostic::error(
+                    codes::E021,
+                    format!("unresolved name `{name}`"),
+                )
+                .label(*span, true, "not a local or item");
                 let diagnostic = self.suggest_value(fcx, diagnostic, name, *span);
                 Err(self.diags.emit(diagnostic))
             }
@@ -410,10 +420,11 @@ impl Checker<'_> {
                 if base.ty.is_error() {
                     return Ok(HirExpr::poison(*span));
                 }
-                Ok(self.field_access(base, field, *span, None, false))
+                let shadowed = self.shadowed_alias(fcx, &base);
+                Ok(self.field_access(base, field, *span, None, false, shadowed))
             }
             _ => Err(self.diags.emit(
-                Diagnostic::error("E010", "cannot assign to this expression").label(
+                Diagnostic::error(codes::E010, "cannot assign to this expression").label(
                     expr.span(),
                     true,
                     "only variables and fields are assignable",
@@ -423,6 +434,7 @@ impl Checker<'_> {
     }
 
     /// `base.field` on an object (through a reference if needed).
+    /// `shadowed` is the alias a local `base` hides ([`Self::shadowed_alias`]).
     pub(crate) fn field_access(
         &mut self,
         base: HirExpr,
@@ -430,8 +442,9 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
         annotate: bool,
+        shadowed: Option<(String, Span)>,
     ) -> HirExpr {
-        let base = self.auto_deref(base);
+        let base = Self::auto_deref(base);
         let ty = base.ty.id;
         if let Some(fields) = self.fields_of(ty) {
             if let Some(index) = fields.iter().position(|(name, _)| name == field) {
@@ -454,11 +467,15 @@ impl Checker<'_> {
             }
         }
         let owner = self.types.display(ty);
-        let mut diagnostic = Diagnostic::error("E021", format!("no field `{field}` on `{owner}`"))
-            .label(span, true, "no such member");
+        let mut diagnostic = Diagnostic::error(
+            codes::E021,
+            format!("no field `{field}` on `{owner}`"),
+        )
+        .label(span, true, "no such member");
         if let Some((def, _)) = self.type_parts(ty) {
             diagnostic = self.suggest_member(diagnostic, def, field, tail_span(span, field), false);
         }
+        diagnostic = shadowed_alias_note(diagnostic, shadowed);
         if annotate && self.is_generic_derived(base.ty) {
             diagnostic = diagnostic.note(self.required_field_note(field, expected));
         }
@@ -485,7 +502,7 @@ impl Checker<'_> {
         }
         let decl = def.span;
         self.diags.emit(
-            Diagnostic::error("E026", format!("`{}` is a private member", def.name))
+            Diagnostic::error(codes::E026, format!("`{}` is a private member", def.name))
                 .label(access, true, "accessed from outside its object")
                 .label(decl, false, "declared private here"),
         );
@@ -518,7 +535,8 @@ impl Checker<'_> {
         if base.ty.is_error() {
             return base;
         }
-        self.field_access(base, field, span, expected, true)
+        let shadowed = self.shadowed_alias(fcx, &base);
+        self.field_access(base, field, span, expected, true, shadowed)
     }
 
     /// The instance of generic `def` the expected type names (`E044` if none).
@@ -559,41 +577,40 @@ impl Checker<'_> {
                 self.record_use(tag_span, variant);
             }
         }
-        let value =
-            match (payload_ty, payload) {
-                (None, None | Some((_, []))) => None,
-                (None, Some(_)) => {
-                    self.diags.emit(
-                        Diagnostic::error("E022", format!("variant `.{name}` takes no payload"))
-                            .label(span, true, "arity mismatch here"),
-                    );
-                    return HirExpr::poison(span);
-                }
-                (Some(_), None) => {
+        let value = match (payload_ty, payload) {
+            (None, None | Some((_, []))) => None,
+            (None, Some(_)) => {
+                self.diags.emit(
+                    Diagnostic::error(codes::E022, format!("variant `.{name}` takes no payload"))
+                        .label(span, true, "arity mismatch here"),
+                );
+                return HirExpr::poison(span);
+            }
+            (Some(_), None) => {
+                self.diags.emit(
+                    Diagnostic::error(
+                        codes::E022,
+                        format!("variant `.{name}` needs a payload; write `.{name}(...)`"),
+                    )
+                    .label(span, true, "payload missing here"),
+                );
+                return HirExpr::poison(span);
+            }
+            (Some(want), Some((fcx, args))) => {
+                let [arg] = args else {
                     self.diags.emit(
                         Diagnostic::error(
-                            "E022",
-                            format!("variant `.{name}` needs a payload; write `.{name}(...)`"),
+                            codes::E022,
+                            format!("variant `.{name}` needs exactly one payload value"),
                         )
-                        .label(span, true, "payload missing here"),
+                        .label(span, true, "arity mismatch here"),
                     );
                     return HirExpr::poison(span);
-                }
-                (Some(want), Some((fcx, args))) => {
-                    let [arg] = args else {
-                        self.diags.emit(
-                            Diagnostic::error(
-                                "E022",
-                                format!("variant `.{name}` needs exactly one payload value"),
-                            )
-                            .label(span, true, "arity mismatch here"),
-                        );
-                        return HirExpr::poison(span);
-                    };
-                    let value = self.check_expr(fcx, arg, Some(want.id));
-                    Some(Box::new(self.coerce(value, want, arg.span())))
-                }
-            };
+                };
+                let value = self.check_expr(fcx, arg, Some(want.id));
+                Some(Box::new(self.coerce(value, want, arg.span())))
+            }
+        };
         HirExpr {
             ty: TypeRef::value(ty),
             span,
@@ -615,7 +632,7 @@ impl Checker<'_> {
         }
         if place.ty.is_ref {
             self.diags.emit(
-                Diagnostic::error("E010", "cannot take `ref` of a reference").label(
+                Diagnostic::error(codes::E010, "cannot take `ref` of a reference").label(
                     span,
                     true,
                     "double references are invalid unless wrapped inside an object",
@@ -639,7 +656,7 @@ impl Checker<'_> {
         match value {
             Expr::Ident(..) | Expr::Member { .. } => self.check_place(fcx, value),
             _ => Err(self.diags.emit(
-                Diagnostic::error("E010", "cannot take `ref` of this expression").label(
+                Diagnostic::error(codes::E010, "cannot take `ref` of this expression").label(
                     value.span(),
                     true,
                     "only variables and fields have addresses",
@@ -662,7 +679,7 @@ impl Checker<'_> {
             if value.ty.is_error() {
                 return value;
             }
-            let unknown = self.builtin("unknown");
+            let unknown = Builtin::Unknown.id();
             if value.ty.is_ref
                 && (value.ty.id == unknown || target.id == unknown || value.ty.id == target.id)
             {
@@ -703,7 +720,7 @@ impl Checker<'_> {
                 let lhs = self.check_cond(fcx, lhs, what);
                 let rhs = self.check_cond(fcx, rhs, what);
                 return HirExpr {
-                    ty: self.value_of("@bit8"),
+                    ty: Builtin::Bit8.value(),
                     span,
                     kind: HirExprKind::Logic {
                         and: op == BinOp::And,
@@ -717,7 +734,7 @@ impl Checker<'_> {
                 if left.ty.is_error() || right.ty.is_error() {
                     return HirExpr::poison(span);
                 }
-                let (left, right) = (self.auto_deref(left), self.auto_deref(right));
+                let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
                 if left.ty.id != right.ty.id {
                     let (l, r) = (
                         self.types.display(left.ty.id),
@@ -725,7 +742,7 @@ impl Checker<'_> {
                     );
                     self.diags.emit(
                         Diagnostic::error(
-                            "E010",
+                            codes::E010,
                             format!(
                                 "mismatched types: `==` needs identical types, found {l} and {r}"
                             ),
@@ -740,7 +757,7 @@ impl Checker<'_> {
                     return HirExpr::poison(span);
                 }
                 return HirExpr {
-                    ty: self.value_of("@bit8"),
+                    ty: Builtin::Bit8.value(),
                     span,
                     kind: HirExprKind::Eq(Box::new(left), Box::new(right)),
                 };
@@ -754,7 +771,7 @@ impl Checker<'_> {
         if left.ty.is_error() || right.ty.is_error() {
             return HirExpr::poison(span);
         }
-        let (left, right) = (self.auto_deref(left), self.auto_deref(right));
+        let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
         let hook = hook_name(op);
         let found = self.overloads(hook).into_iter().find(|candidate| {
             let sig = &candidate.sig;
@@ -764,8 +781,8 @@ impl Checker<'_> {
                 && sig.params[1] == right.ty
         });
         let Some(found) = found else {
-            let diagnostic = Diagnostic::error(
-                "E043",
+            let mut diagnostic = Diagnostic::error(
+                codes::E043,
                 format!(
                     "no {hook} for ({}, {})",
                     self.types.display(left.ty.id),
@@ -773,9 +790,16 @@ impl Checker<'_> {
                 ),
             )
             .label(span, true, "no exact operator overload");
+            if left.ty == right.ty && !left.ty.is_ref {
+                if let Some(help) = raw_operator_help(hook, left.ty.id) {
+                    diagnostic = diagnostic.help(help);
+                }
+            }
             self.emit_requirement(
                 diagnostic,
-                Requirement::Mismatch,
+                Requirement::Mismatch {
+                    expected_ref: false,
+                },
                 &[left.ty.id, right.ty.id],
             );
             return HirExpr::poison(span);
@@ -854,7 +878,7 @@ impl Checker<'_> {
         {
             self.diags.emit(
                 Diagnostic::error(
-                    "E010",
+                    codes::E010,
                     format!(
                         "mismatched types: `if` branches produce {} and {}",
                         self.types.display(then.ty.id),
@@ -894,29 +918,28 @@ impl Checker<'_> {
         for arm in arms {
             fcx.open(arm.span);
             let (pattern, capture) = self.check_pattern(fcx, arm, scrutinee.ty.id);
-            let value =
-                match &arm.body {
-                    MatchArmBody::Inline(stmt) => {
-                        if let Stmt::ExprStmt(value) = stmt.as_ref() {
-                            self.check_expr(fcx, value, expected.or(first.map(|t| t.id)))
-                        } else {
-                            self.diags.emit(
-                                Diagnostic::error("E010", "match arm does not produce a value")
-                                    .label(arm.span, true, "no value here"),
-                            );
-                            failed = true;
-                            HirExpr::poison(arm.span)
-                        }
-                    }
-                    MatchArmBody::Block(_) => {
+            let value = match &arm.body {
+                MatchArmBody::Inline(stmt) => {
+                    if let Stmt::ExprStmt(value) = stmt.as_ref() {
+                        self.check_expr(fcx, value, expected.or(first.map(|t| t.id)))
+                    } else {
                         self.diags.emit(
-                            Diagnostic::error("E010", "match arm block cannot produce a value")
+                            Diagnostic::error(codes::E010, "match arm does not produce a value")
                                 .label(arm.span, true, "no value here"),
                         );
                         failed = true;
                         HirExpr::poison(arm.span)
                     }
-                };
+                }
+                MatchArmBody::Block(_) => {
+                    self.diags.emit(
+                        Diagnostic::error(codes::E010, "match arm block cannot produce a value")
+                            .label(arm.span, true, "no value here"),
+                    );
+                    failed = true;
+                    HirExpr::poison(arm.span)
+                }
+            };
             fcx.close();
             if first.is_none() && !value.ty.is_error() {
                 first = Some(value.ty.deref());
@@ -938,7 +961,7 @@ impl Checker<'_> {
                 .any(|ty| !ty.is_error() && ty.id != result.id);
             if disagree {
                 self.diags.emit(
-                    Diagnostic::error("E010", "match arms produce different types").label(
+                    Diagnostic::error(codes::E010, "match arms produce different types").label(
                         span,
                         true,
                         "arms disagree here",
@@ -979,8 +1002,16 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> HirExpr {
-        let object = if ty.generic_args.is_empty() && !self.env.params.contains(&ty.name) {
-            let Ok(found) = self.lookup_item(&ty.name, ty.span) else {
+        let plain = match &ty.shape {
+            TypeShape::Named { name, args }
+                if args.is_empty() && !self.env.params.contains(name) =>
+            {
+                Some(name.as_str())
+            }
+            _ => None,
+        };
+        let object = if let Some(name) = plain {
+            let Ok(found) = self.lookup_item(name, ty.name_span) else {
                 return HirExpr::poison(span);
             };
             match found {
@@ -1000,15 +1031,14 @@ impl Checker<'_> {
                         let Some(id) = inferred else {
                             self.diags.emit(
                                 Diagnostic::error(
-                                    "E023",
-                                    format!("cannot infer generic arguments for `{}`", ty.name),
+                                    codes::E023,
+                                    format!("cannot infer generic arguments for `{name}`"),
                                 )
                                 .label(
                                     span,
                                     true,
                                     format!(
-                                        "write `{}[...] {{ ... }}` or annotate the binding",
-                                        ty.name
+                                        "write `{name}[...] {{ ... }}` or annotate the binding"
                                     ),
                                 ),
                             );
@@ -1019,11 +1049,11 @@ impl Checker<'_> {
                 }
                 _ => {
                     let diagnostic = Diagnostic::error(
-                        "E023",
-                        format!("unknown type `{}`", ty.name),
+                        codes::E023,
+                        format!("unknown type `{name}`"),
                     )
                     .label(ty.span, true, "no such type in scope");
-                    let diagnostic = self.suggest_type(diagnostic, &ty.name, ty.name_span);
+                    let diagnostic = self.suggest_type(diagnostic, name, ty.name_span);
                     self.diags.emit(diagnostic);
                     return HirExpr::poison(span);
                 }
@@ -1041,7 +1071,7 @@ impl Checker<'_> {
         let display = self.types.display(object.id);
         let Some(layout) = self.fields_of(object.id) else {
             self.diags.emit(
-                Diagnostic::error("E010", format!("`{display}` is not an object")).label(
+                Diagnostic::error(codes::E010, format!("`{display}` is not an object")).label(
                     span,
                     true,
                     "only objects construct with `{ ... }`",
@@ -1057,7 +1087,7 @@ impl Checker<'_> {
             if !seen.insert(field.name.clone()) {
                 self.diags.emit(
                     Diagnostic::error(
-                        "E020",
+                        codes::E020,
                         format!("duplicate field `{}` in struct literal", field.name),
                     )
                     .label(field.span, true, "redefined here"),
@@ -1071,11 +1101,14 @@ impl Checker<'_> {
                     .is_some();
                 let (code, msg) = if is_member {
                     (
-                        "E022",
+                        codes::E022,
                         format!("`{}` is not a field of `{display}`", field.name),
                     )
                 } else {
-                    ("E021", format!("no field `{}` on `{display}`", field.name))
+                    (
+                        codes::E021,
+                        format!("no field `{}` on `{display}`", field.name),
+                    )
                 };
                 let mut diagnostic = Diagnostic::error(code, msg).label(
                     field.span,
@@ -1121,7 +1154,7 @@ impl Checker<'_> {
         if let Some(first) = missing.first() {
             self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!("struct literal missing field `{first}` of `{display}`"),
                 )
                 .label(span, true, "add the missing field"),
@@ -1147,7 +1180,7 @@ impl Checker<'_> {
     fn check_fstring(&mut self, fcx: &mut FnCx, parts: &[FStrPart], span: Span) -> HirExpr {
         if parts.len() > 16 {
             self.diags.emit(
-                Diagnostic::error("E061", "too many format pieces (max 16)").label(
+                Diagnostic::error(codes::E061, "too many format pieces (max 16)").label(
                     span,
                     true,
                     "too many pieces here",
@@ -1155,7 +1188,7 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         }
-        let buffer = self.value_of("@byte_buffer");
+        let buffer = Builtin::ByteBuffer.value();
         let pieces = parts
             .iter()
             .map(|part| match part {
@@ -1171,7 +1204,7 @@ impl Checker<'_> {
             })
             .collect();
         HirExpr {
-            ty: self.value_of("@format_args"),
+            ty: Builtin::FormatArgs.value(),
             span,
             kind: HirExprKind::FormatArgs(pieces),
         }
@@ -1262,7 +1295,7 @@ impl Checker<'_> {
                 .get(&def)
                 .map_or(Span::dummy(), |value| value.span);
             self.diags
-                .emit(Diagnostic::error("E022", "cyclic constant").label(
+                .emit(Diagnostic::error(codes::E022, "cyclic constant").label(
                     span,
                     true,
                     "constants cannot refer to themselves",
@@ -1301,6 +1334,36 @@ fn hook_name(op: BinOp) -> &'static str {
         _ => 8,
     };
     BINARY_HOOKS[index]
+}
+
+/// The help for an operator on two raw numbers of one builtin type, which
+/// have no operator hooks: the `Standard` type that has them, and the
+/// intrinsic that does the operation (`@i_add_32`).
+fn raw_operator_help(hook: &str, ty: TypeId) -> Option<String> {
+    let builtin = Builtin::ALL
+        .into_iter()
+        .find(|builtin| builtin.id() == ty)?;
+    let (family, width, standard) = match builtin {
+        Builtin::Bit8 => ("i", "8", Some("Int8")),
+        Builtin::Bit16 => ("i", "16", Some("Int16")),
+        Builtin::Bit32 => ("i", "32", Some("Int32")),
+        Builtin::Bit64 => ("i", "64", Some("Int64")),
+        Builtin::BitNative => ("i", "native", Some("Int")),
+        Builtin::FBit16 => ("f", "16", None),
+        Builtin::FBit32 => ("f", "32", Some("Float32")),
+        Builtin::FBit64 => ("f", "64", Some("Float64")),
+        Builtin::FBit128 => ("f", "128", None),
+        _ => return None,
+    };
+    let intrinsic = format!("@{family}_{}_{width}", hook.strip_prefix('@')?);
+    Intrinsic::lookup(&intrinsic)?;
+    let name = builtin.name();
+    Some(match standard {
+        Some(standard) => format!(
+            "`{name}` has no operators; use `Standard`'s `{standard}`, or call `{intrinsic}`"
+        ),
+        None => format!("`{name}` has no operators; call `{intrinsic}`"),
+    })
 }
 
 /// The name token of a struct-literal field (fields begin at their name).

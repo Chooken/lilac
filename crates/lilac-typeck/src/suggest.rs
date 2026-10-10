@@ -2,43 +2,13 @@
 //! fix ([`Diagnostic::suggest`]).
 
 use lilac_error::Diagnostic;
-use lilac_resolve::{DefKind, Lookup};
+use lilac_resolve::{DefKind, Lookup, NsId, Segment, Visibility};
 use lilac_span::Span;
 
 use crate::body::FnCx;
+use crate::paths::Head;
 use crate::Checker;
-
-/// The candidate closest to `name` by edit distance, if one is close
-/// enough: one edit for names of up to three characters, else two.
-pub(crate) fn closest<'a>(
-    name: &str,
-    candidates: impl IntoIterator<Item = &'a str>,
-) -> Option<String> {
-    let limit = if name.chars().count() <= 3 { 1 } else { 2 };
-    candidates
-        .into_iter()
-        .filter(|candidate| *candidate != name)
-        .map(|candidate| (levenshtein(name, candidate), candidate))
-        .filter(|(distance, _)| *distance <= limit)
-        .min()
-        .map(|(_, candidate)| candidate.to_owned())
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
-}
+use lilac_error::closest;
 
 /// Adds a fix replacing `span` with the candidate closest to `name`, if any.
 pub(crate) fn suggest<'a>(
@@ -73,11 +43,7 @@ impl Checker<'_> {
     pub(crate) fn type_names(&self) -> Vec<String> {
         let mut names = self.visible_names(|kind| matches!(kind, DefKind::Object | DefKind::Enum));
         names.extend(self.env.params.iter().cloned());
-        names.extend(
-            lilac_ty::BUILTIN_TYPES
-                .iter()
-                .map(|name| (*name).to_owned()),
-        );
+        names.extend(lilac_ty::Builtin::ALL.map(|builtin| builtin.name().to_owned()));
         names
     }
 
@@ -97,7 +63,8 @@ impl Checker<'_> {
             .collect()
     }
 
-    /// Adds a fix for a misspelled value name (an undotted one).
+    /// Adds a fix for a misspelled value name, or for the misspelled
+    /// segment of a path (`span` starts at its head).
     pub(crate) fn suggest_value(
         &self,
         fcx: &FnCx,
@@ -106,14 +73,18 @@ impl Checker<'_> {
         span: Span,
     ) -> Diagnostic {
         if name.contains('.') {
-            return diagnostic;
+            return self.suggest_path(diagnostic, name, span, |kind| {
+                matches!(kind, DefKind::Func(_) | DefKind::Const { .. })
+            });
         }
-        let names = self.value_names(fcx);
+        // A misspelled bare name may be a path's head (`Mth.pow()`).
+        let mut names = self.value_names(fcx);
+        names.extend(self.head_names(|_| false));
         suggest(diagnostic, name, span, names.iter().map(String::as_str))
     }
 
-    /// Adds a fix for a misspelled type name (an undotted one); `span` is
-    /// the name's token.
+    /// Adds a fix for a misspelled type name, or for the misspelled segment
+    /// of a type path; `span` is the whole name (`A.B.Type`).
     pub(crate) fn suggest_type(
         &self,
         diagnostic: Diagnostic,
@@ -121,10 +92,113 @@ impl Checker<'_> {
         span: Span,
     ) -> Diagnostic {
         if name.contains('.') {
-            return diagnostic;
+            return self.suggest_path(diagnostic, name, span, |kind| {
+                matches!(kind, DefKind::Object | DefKind::Enum)
+            });
         }
         let names = self.type_names();
         suggest(diagnostic, name, span, names.iter().map(String::as_str))
+    }
+
+    /// Adds a fix for the first segment of the path `name` that names
+    /// nothing, from what the previous segment's namespace holds: its
+    /// child namespaces and items (those `wanted` accepts for the last
+    /// segment, types before it). A head is matched against the file's
+    /// aliases, the namespaces within reach and the visible types. `span`
+    /// starts at the head; a path that reaches an item before failing is a
+    /// member access and gets no fix here.
+    fn suggest_path(
+        &self,
+        diagnostic: Diagnostic,
+        name: &str,
+        span: Span,
+        wanted: impl Fn(&DefKind) -> bool,
+    ) -> Diagnostic {
+        let segments: Vec<&str> = name.split('.').collect();
+        let mut offset = 0u32;
+        let mut current: Option<NsId> = None;
+        for (index, segment) in segments.iter().enumerate() {
+            let last = index + 1 == segments.len();
+            let found = match current {
+                None => match self.lookup_head(segment) {
+                    Head::One(found) => Some(found),
+                    Head::Ambiguous(_) => return diagnostic,
+                    Head::Missing => None,
+                },
+                Some(ns) => self.res.ns_member(ns, segment, self.file_ns()),
+            };
+            match found {
+                Some(Segment::Ns(ns)) if !last => current = Some(ns),
+                Some(_) => return diagnostic,
+                None => {
+                    let accepts = |kind: &DefKind| {
+                        if last {
+                            wanted(kind)
+                        } else {
+                            matches!(kind, DefKind::Object | DefKind::Enum)
+                        }
+                    };
+                    let names = match current {
+                        None => self.head_names(accepts),
+                        Some(ns) => self.namespace_names(ns, accepts),
+                    };
+                    let len = u32::try_from(segment.len()).unwrap_or(u32::MAX);
+                    let lo = span.lo.0.saturating_add(offset);
+                    let at = Span::new(lo, lo.saturating_add(len), span.file);
+                    return suggest(diagnostic, segment, at, names.iter().map(String::as_str));
+                }
+            }
+            offset = offset
+                .saturating_add(u32::try_from(segment.len()).unwrap_or(u32::MAX))
+                .saturating_add(1);
+        }
+        diagnostic
+    }
+
+    /// The names a path can start with here: the file's aliases, the
+    /// namespaces within reach, and its visible items `wanted` accepts.
+    fn head_names(&self, wanted: impl Fn(&DefKind) -> bool) -> Vec<String> {
+        let mut names = self.visible_names(wanted);
+        if let Some(scope) = self.res.files.get(&self.file()) {
+            names.extend(scope.aliases.keys().cloned());
+        }
+        let mut ns = Some(self.file_ns());
+        while let Some(current) = ns {
+            names.extend(
+                self.res
+                    .child_namespaces(current)
+                    .map(|(name, _)| name.to_owned()),
+            );
+            ns = self
+                .res
+                .namespaces
+                .get(current.0 as usize)
+                .and_then(|data| data.parent);
+        }
+        names
+    }
+
+    /// What a path can step to inside `ns`: its child namespaces and the
+    /// items `wanted` accepts (a `private` one only within reach).
+    fn namespace_names(&self, ns: NsId, wanted: impl Fn(&DefKind) -> bool) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .res
+            .child_namespaces(ns)
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        let reaches = self.res.reaches(self.file_ns(), ns);
+        if let Some(data) = self.res.namespaces.get(ns.0 as usize) {
+            names.extend(
+                data.items
+                    .iter()
+                    .filter(|(_, id)| {
+                        let def = self.res.def(**id);
+                        (def.vis == Visibility::Public || reaches) && wanted(&def.kind)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+        names
     }
 
     /// Adds a fix for a misspelled member of `owner` at `span`: a method or
@@ -158,21 +232,5 @@ impl Checker<'_> {
             .filter(|(_, id)| wanted(&self.res.def(**id).kind))
             .map(|(name, _)| name.clone())
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::closest;
-
-    #[test]
-    fn closest_scales_with_the_name() {
-        assert_eq!(
-            closest("lenght", ["length", "left"]),
-            Some("length".to_owned())
-        );
-        assert_eq!(closest("ab", ["xy"]), None);
-        assert_eq!(closest("ab", ["ac", "xy"]), Some("ac".to_owned()));
-        assert_eq!(closest("same", ["same"]), None);
     }
 }

@@ -10,16 +10,17 @@ use std::collections::{HashMap, HashSet};
 use lilac_ast::{
     Block, Expr, FuncBody, FuncDecl, MatchArm, MatchArmBody, MatchPattern, Param, Stmt,
 };
-use lilac_error::Diagnostic;
+use lilac_error::{codes, Diagnostic};
 use lilac_hir::{
     FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirPattern,
-    HirStmt, LocalId, SemanticKind,
+    HirStmt, LocalId, LocalKind, SemanticKind,
 };
 use lilac_span::Span;
-use lilac_ty::{FuncSig, TypeId, TypeRef};
+use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 
 use crate::calls::Called;
 use crate::sigs::leading;
+use crate::sink::has_error;
 use crate::{Checker, State};
 
 /// Per-function checking state.
@@ -34,6 +35,9 @@ pub(crate) struct FnCx {
     pub local_scopes: Vec<Span>,
     /// Parameter locals (colored as parameters).
     pub params: HashSet<LocalId>,
+    /// Named results, and parameters of a function without a body: names
+    /// only its signature has ([`LocalKind::Signature`]).
+    pub signature_only: HashSet<LocalId>,
     /// `loop` nesting depth.
     pub loops: u32,
 }
@@ -47,6 +51,7 @@ impl FnCx {
             scope_spans: vec![span],
             local_scopes: Vec::new(),
             params: HashSet::new(),
+            signature_only: HashSet::new(),
             loops: 0,
         }
     }
@@ -96,6 +101,17 @@ impl FnCx {
             .unwrap_or_else(Span::dummy)
     }
 
+    /// What declares `id`.
+    pub(crate) fn kind_of(&self, id: LocalId) -> LocalKind {
+        if self.signature_only.contains(&id) {
+            LocalKind::Signature
+        } else if self.params.contains(&id) {
+            LocalKind::Param
+        } else {
+            LocalKind::Local
+        }
+    }
+
     /// The name token of `id`'s declaration (slots begin at their name).
     pub(crate) fn decl_span(&self, id: LocalId) -> Span {
         let local = &self.locals[id.0 as usize];
@@ -128,33 +144,35 @@ impl Checker<'_> {
         };
         let span = def.span;
         let env = self.env_of(key.def, key.args.clone(), Some(key.clone()));
-        let mark = self.diags.checkpoint();
+        let outer = self.diags.hold();
         self.entry_unresolved = false;
         let func = self.with_env(env, |c| c.check_func(key, &decl, &sig, span));
+        let held = self.diags.release(outer);
         if std::mem::take(&mut self.entry_unresolved) {
             // An `@entry` naming a missing root item, outside an executable:
             // nothing enters the program, so the hook is left out.
             if let Some(instance) = self.instances.get_mut(key) {
-                instance.state = State::Failed;
+                instance.state = State::Unusable;
             }
+            self.report(held);
             return;
         }
-        let failed = self.diags.diagnostics()[mark.min(self.diags.checkpoint())..]
-            .iter()
-            .any(|d| d.level == lilac_error::Level::Error);
+        let failed = has_error(&held);
         if let Some(instance) = self.instances.get_mut(key) {
-            instance.state = if failed { State::Failed } else { State::Done };
+            instance.state = if failed {
+                State::BodyFailed
+            } else {
+                State::Done
+            };
         }
-        if failed && !key.args.is_empty() {
-            self.instance_failure(key, mark);
-        }
+        self.settle(key, held);
         self.out.funcs.push(func);
     }
 
     fn check_func(&mut self, key: &FuncKey, decl: &FuncDecl, sig: &FuncSig, span: Span) -> HirFunc {
         let mut fcx = FnCx::new(span);
         let slot = |c: &mut Self, fcx: &mut FnCx, param: &Param, ty: TypeRef, is_param: bool| {
-            let name = if param.name.is_empty() && param.ty.name == "self" {
+            let name = if param.name.is_empty() && param.ty.is_self() {
                 "self".to_owned()
             } else {
                 param.name.clone()
@@ -162,16 +180,19 @@ impl Checker<'_> {
             let id = fcx.hidden(ty, param.span);
             fcx.locals[id.0 as usize].name.clone_from(&name);
             if !name.is_empty() {
-                let decl = fcx.decl_span(id);
-                c.record_local(fcx, id, decl);
-                if fcx.scopes[0].insert(name.clone(), id).is_some() {
-                    c.diags.emit(
-                        Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
-                            .label(param.span, true, "redefined here"),
-                    );
-                }
                 if is_param {
                     fcx.params.insert(id);
+                }
+                if !is_param || decl.body.is_none() {
+                    fcx.signature_only.insert(id);
+                }
+                let decl_span = fcx.decl_span(id);
+                c.record_local(fcx, id, decl_span);
+                if fcx.scopes[0].insert(name.clone(), id).is_some() {
+                    c.diags.emit(
+                        Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
+                            .label(param.span, true, "redefined here"),
+                    );
                 }
             }
             id
@@ -192,9 +213,7 @@ impl Checker<'_> {
             None => None,
             Some(FuncBody::Block(block)) => {
                 let mut stmts = Vec::new();
-                for stmt in &block.stmts {
-                    self.check_stmt(&mut fcx, stmt, &mut stmts);
-                }
+                self.check_stmts(&mut fcx, &block.stmts, &mut stmts);
                 Some(HirBlock {
                     stmts,
                     span: block.span,
@@ -218,8 +237,11 @@ impl Checker<'_> {
         let span = expr.span();
         let [out] = returns else {
             self.diags.emit(
-                Diagnostic::error("E022", "inline `=>` bodies need exactly one return type")
-                    .label(span, true, "here"),
+                Diagnostic::error(
+                    codes::E022,
+                    "inline `=>` bodies need exactly one return type",
+                )
+                .label(span, true, "here"),
             );
             return HirBlock {
                 stmts: Vec::new(),
@@ -242,13 +264,30 @@ impl Checker<'_> {
     pub(crate) fn check_block(&mut self, fcx: &mut FnCx, block: &Block) -> HirBlock {
         fcx.open(block.span);
         let mut stmts = Vec::new();
-        for stmt in &block.stmts {
-            self.check_stmt(fcx, stmt, &mut stmts);
-        }
+        self.check_stmts(fcx, &block.stmts, &mut stmts);
         fcx.close();
         HirBlock {
             stmts,
             span: block.span,
+        }
+    }
+
+    /// Checks a block's statements in order. The rest of the block after a
+    /// statement that never finishes is still checked, and recorded as
+    /// unreachable (`HirProgram::unreachable`).
+    fn check_stmts(&mut self, fcx: &mut FnCx, stmts: &[Stmt], out: &mut Vec<HirStmt>) {
+        let mut reached = true;
+        for (index, stmt) in stmts.iter().enumerate() {
+            self.check_stmt(fcx, stmt, out);
+            if reached && never_finishes(stmt) {
+                reached = false;
+                if let (Some(first), Some(last)) = (stmts.get(index + 1), stmts.last()) {
+                    let (first, last) = (first.span(), last.span());
+                    self.out
+                        .unreachable
+                        .push(Span::new(first.lo.0, last.hi.0, first.file));
+                }
+            }
         }
     }
 
@@ -297,7 +336,7 @@ impl Checker<'_> {
         if let Some(previous) = previous {
             let previous = fcx.locals[previous.0 as usize].span;
             self.diags.emit(
-                Diagnostic::error("E020", format!("duplicate definition of `{name}`"))
+                Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
                     .label(span, true, "redefined in the same block")
                     .label(previous, false, "first defined here")
                     .help("use a nested block to shadow it, or pick another name"),
@@ -339,23 +378,25 @@ impl Checker<'_> {
             Stmt::Return { span } => out.push(HirStmt::Return(*span)),
             Stmt::Break { span } => {
                 if fcx.loops == 0 {
-                    self.diags
-                        .emit(Diagnostic::error("E022", "break outside `loop`").label(
+                    self.diags.emit(
+                        Diagnostic::error(codes::E022, "break outside `loop`").label(
                             *span,
                             true,
                             "break needs an enclosing loop",
-                        ));
+                        ),
+                    );
                 }
                 out.push(HirStmt::Break(*span));
             }
             Stmt::Continue { span } => {
                 if fcx.loops == 0 {
-                    self.diags
-                        .emit(Diagnostic::error("E022", "continue outside `loop`").label(
+                    self.diags.emit(
+                        Diagnostic::error(codes::E022, "continue outside `loop`").label(
                             *span,
                             true,
                             "continue needs an enclosing loop",
-                        ));
+                        ),
+                    );
                 }
                 out.push(HirStmt::Continue(*span));
             }
@@ -488,7 +529,7 @@ impl Checker<'_> {
                 if !outs.is_empty() {
                     self.diags.emit(
                         Diagnostic::error(
-                            "E022",
+                            codes::E022,
                             format!(
                                 "call returns {} value{}, but the statement drops them",
                                 outs.len(),
@@ -510,11 +551,8 @@ impl Checker<'_> {
                     HirExprKind::CompileError { .. } | HirExprKind::Poison
                 ) {
                     self.diags.emit(
-                        Diagnostic::error("E022", "this value is computed and then dropped").label(
-                            *span,
-                            true,
-                            "assign or drop explicitly",
-                        ),
+                        Diagnostic::error(codes::E022, "this value is computed and then dropped")
+                            .label(*span, true, "assign or drop explicitly"),
                     );
                 }
                 out.push(HirStmt::Expr(hir));
@@ -542,7 +580,7 @@ impl Checker<'_> {
         else {
             self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!(
                         "multi-`let` needs a function call with {} returns",
                         bindings.len()
@@ -560,7 +598,7 @@ impl Checker<'_> {
         if outs.len() != bindings.len() {
             self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!(
                         "wrong number of values: expected {}, call returns {}",
                         bindings.len(),
@@ -628,7 +666,7 @@ impl Checker<'_> {
         } = cond
         else {
             self.diags.emit(
-                Diagnostic::error("E022", "`if` capture needs a call condition").label(
+                Diagnostic::error(codes::E022, "`if` capture needs a call condition").label(
                     span,
                     true,
                     "write `if f() -> name: Type`",
@@ -640,7 +678,7 @@ impl Checker<'_> {
             self.check_call(fcx, callee, generic_args, args, *call_span, None)
         else {
             self.diags.emit(
-                Diagnostic::error("E022", "cannot capture from this call").label(
+                Diagnostic::error(codes::E022, "cannot capture from this call").label(
                     *call_span,
                     true,
                     "capture needs a multi-return call",
@@ -650,7 +688,7 @@ impl Checker<'_> {
         };
         if outs.is_empty() {
             self.diags.emit(
-                Diagnostic::error("E022", "cannot capture from a call with no returns").label(
+                Diagnostic::error(codes::E022, "cannot capture from a call with no returns").label(
                     *call_span,
                     true,
                     "nothing to capture",
@@ -670,7 +708,7 @@ impl Checker<'_> {
         let Some(position) = slot_names.iter().position(|name| *name == capture.name) else {
             self.diags.emit(
                 Diagnostic::error(
-                    "E022",
+                    codes::E022,
                     format!("no out-slot named `{}` to capture", capture.name),
                 )
                 .label(capture.span, true, "unknown slot"),
@@ -706,7 +744,7 @@ impl Checker<'_> {
 
     /// Checks a condition: exactly `@bit8`, or one `@conversion` to it.
     pub(crate) fn check_cond(&mut self, fcx: &mut FnCx, cond: &Expr, what: &str) -> HirExpr {
-        let bit8 = self.builtin("@bit8");
+        let bit8 = Builtin::Bit8.id();
         let expected = matches!(cond, Expr::Number(..)).then_some(bit8);
         let hir = self.check_expr(fcx, cond, expected);
         self.cond_of(hir, what)
@@ -717,8 +755,8 @@ impl Checker<'_> {
         if hir.ty.is_error() {
             return hir;
         }
-        let hir = self.auto_deref(hir);
-        let bit8 = self.builtin("@bit8");
+        let hir = Self::auto_deref(hir);
+        let bit8 = Builtin::Bit8.id();
         if hir.ty.id == bit8 {
             return hir;
         }
@@ -728,7 +766,7 @@ impl Checker<'_> {
         let found = self.types.display(hir.ty.id);
         self.emit_involving(
             Diagnostic::error(
-                "E010",
+                codes::E010,
                 format!("`{what}` condition must be `@bit8`, found {found}"),
             )
             .label(hir.span, true, "not `@bit8`")
@@ -742,10 +780,10 @@ impl Checker<'_> {
 
     /// A `match` scrutinee: references are matched through.
     pub(crate) fn check_scrutinee(&mut self, fcx: &mut FnCx, scrutinee: &Expr) -> HirExpr {
-        let bit8 = self.builtin("@bit8");
+        let bit8 = Builtin::Bit8.id();
         let expected = matches!(scrutinee, Expr::Number(..)).then_some(bit8);
         let hir = self.check_expr(fcx, scrutinee, expected);
-        self.auto_deref(hir)
+        Self::auto_deref(hir)
     }
 
     /// Checks one arm pattern and declares its capture in the current scope.
@@ -763,7 +801,7 @@ impl Checker<'_> {
                     if !named.is_error() && scrutinee != TypeId::ERROR && named.id != scrutinee {
                         self.diags.emit(
                             Diagnostic::error(
-                                "E010",
+                                codes::E010,
                                 format!(
                                     "pattern names `{}`, but the match inspects `{}`",
                                     self.types.display(named.id),
@@ -787,7 +825,7 @@ impl Checker<'_> {
                         if !payload.is_error() && !declared.is_error() && payload != declared {
                             self.diags.emit(
                                 Diagnostic::error(
-                                    "E010",
+                                    codes::E010,
                                     format!(
                                         "mismatched types: capture holds {}, declared {}",
                                         self.types.display_ref(payload),
@@ -805,7 +843,7 @@ impl Checker<'_> {
                     None => {
                         self.diags.emit(
                             Diagnostic::error(
-                                "E022",
+                                codes::E022,
                                 format!("variant `.{name}` carries no payload to capture"),
                             )
                             .label(
@@ -823,7 +861,7 @@ impl Checker<'_> {
                 if scrutinee != TypeId::ERROR && !self.is_bit(scrutinee) {
                     self.diags.emit(
                         Diagnostic::error(
-                            "E010",
+                            codes::E010,
                             format!(
                                 "byte patterns need a bit container scrutinee, found {}",
                                 self.types.display(scrutinee)
@@ -834,7 +872,7 @@ impl Checker<'_> {
                 }
                 if arm.capture.is_some() {
                     self.diags.emit(
-                        Diagnostic::error("E022", "byte patterns capture nothing").label(
+                        Diagnostic::error(codes::E022, "byte patterns capture nothing").label(
                             arm.span,
                             true,
                             "captures need `.Tag` patterns",
@@ -854,11 +892,12 @@ impl Checker<'_> {
         span: Span,
     ) -> Result<(u32, Option<TypeRef>), lilac_error::ErrorGuaranteed> {
         if ty == TypeId::ERROR {
-            return Err(lilac_error::ErrorGuaranteed::new());
+            // Whatever made the type an error reported it.
+            return Err(self.diags.already_reported());
         }
         let Some(variants) = self.variants_of(ty) else {
             return Err(self.diags.emit(
-                Diagnostic::error("E010", format!("tag `.{name}` needs an enum type")).label(
+                Diagnostic::error(codes::E010, format!("tag `.{name}` needs an enum type")).label(
                     span,
                     true,
                     "expected a tag here",
@@ -868,7 +907,7 @@ impl Checker<'_> {
         let Some(index) = variants.iter().position(|(variant, _)| variant == name) else {
             let owner = self.types.display(ty);
             let mut diagnostic = Diagnostic::error(
-                "E021",
+                codes::E021,
                 format!("no variant `{name}` on `{owner}`"),
             )
             .label(span, true, "no such variant");
@@ -887,5 +926,17 @@ fn empty_block(span: Span) -> HirBlock {
     HirBlock {
         stmts: Vec::new(),
         span,
+    }
+}
+
+/// Whether `stmt` never lets the block go on: `return`, `break`,
+/// `continue`, or a call of `@panic` or `@trap`.
+fn never_finishes(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        Stmt::ExprStmt(Expr::Call { callee, .. }) => {
+            matches!(&**callee, Expr::Ident(name, _) if name == "@panic" || name == "@trap")
+        }
+        _ => false,
     }
 }

@@ -1,0 +1,9 @@
+// Each misspelled path segment gets a fix covering just that segment.
+using geo.shapes as Shapes
+
+main: function () nothing {
+    a: Shapes.Squar = Shapes.Square { side = 0x1 }
+    b: @bit32 = Shapes.aera(Shapes.Square { side = 0x1 })
+    c: @bit32 = geo.shapez.area(Shapes.Square { side = 0x1 })
+    d: @bit32 = Shapez.area(Shapes.Square { side = 0x1 })
+}

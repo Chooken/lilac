@@ -12,6 +12,5 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
-large_enum_variant = "allow"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"

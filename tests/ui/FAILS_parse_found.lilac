@@ -1,0 +1,3 @@
+// A parse error names the token it found.
+main function () nothing {
+}

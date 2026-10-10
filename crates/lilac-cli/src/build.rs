@@ -14,7 +14,6 @@ use std::process::ExitCode;
 
 use lilac_codegen::Backend as _;
 use lilac_driver::{Entry, ErrorFormat, LinkInfo, OptimizeMode, Progress, Session};
-use lilac_error::Level;
 
 use crate::link;
 use crate::progress::{Reporter, Verbosity};
@@ -32,10 +31,6 @@ pub struct BuildFlags {
     pub linker: Option<PathBuf>,
     /// `--link-arg=<arg>`: extra linker arguments, in order.
     pub link_args: Vec<String>,
-    /// `--timings`.
-    pub timings: bool,
-    /// `-q`/`--quiet`.
-    pub quiet: bool,
 }
 
 /// Splits the build-only flags off `args`, returning them with the rest
@@ -65,10 +60,6 @@ pub fn parse_build_flags(args: &[String]) -> Result<(BuildFlags, Vec<String>), S
             flags.linker = Some(PathBuf::from(nonempty(path, "--linker=")?));
         } else if let Some(value) = arg.strip_prefix("--link-arg=") {
             flags.link_args.push(nonempty(value, "--link-arg=")?);
-        } else if arg == "--timings" {
-            flags.timings = true;
-        } else if arg == "-q" || arg == "--quiet" {
-            flags.quiet = true;
         } else {
             rest.push(arg.clone());
         }
@@ -131,22 +122,11 @@ fn program_name(input: &Path, is_dir: bool) -> String {
     named.unwrap_or_else(|| "main".to_owned())
 }
 
-/// Counts the session's errors, including suppressed ones.
-fn error_count(session: &Session) -> usize {
-    session
-        .diags
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.level == Level::Error)
-        .count()
-        + session.diags.suppressed_errors()
-}
-
 pub fn cmd_build(args: &[String]) -> ExitCode {
     let (flags, rest) = match parse_build_flags(args) {
         Ok(parsed) => parsed,
         Err(message) => {
-            eprintln!("{message}\n{}", crate::usage());
+            eprintln!("{message}\n{}", crate::HELP_HINT);
             return ExitCode::from(2);
         }
     };
@@ -154,6 +134,9 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         Ok(common) => common,
         Err(code) => return code,
     };
+    let verbosity = common
+        .verbosity(Some(Verbosity::Normal))
+        .unwrap_or(Verbosity::Normal);
     let mut session = common.session;
     session.stack_traces = common
         .stack_traces
@@ -165,13 +148,6 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     let Some(info) = session.target.link_info() else {
         eprintln!("error: `lilac build` cannot link executables for `{triple}`");
         return ExitCode::from(2);
-    };
-    let verbosity = if flags.quiet || session.opts.error_format == ErrorFormat::Json {
-        Verbosity::Quiet
-    } else if flags.timings {
-        Verbosity::Timings
-    } else {
-        Verbosity::Normal
     };
     let reporter = Reporter::new(verbosity, session.opts.color);
 
@@ -203,9 +179,9 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     eprint!("{}", session.render_diagnostics());
     let Ok(module) = result else {
         if session.opts.error_format == ErrorFormat::Human {
-            let errors = error_count(&session);
+            let errors = session.diags.error_count();
             let noun = if errors == 1 { "error" } else { "errors" };
-            let hidden = match session.diags.suppressed_errors() {
+            let hidden = match session.hidden_errors() {
                 0 => String::new(),
                 n => format!("; {n} not shown"),
             };
@@ -356,10 +332,10 @@ mod tests {
             "src",
         ]))
         .expect("valid");
-        assert!(flags.libc && flags.quiet);
+        assert!(flags.libc);
         assert_eq!(flags.output, Some(PathBuf::from("out/x.exe")));
         assert_eq!(flags.link_args, ["a.lib", "b.lib"]);
-        assert_eq!(rest, ["--release", "src"]);
+        assert_eq!(rest, ["--release", "-q", "src"]);
     }
 
     #[test]

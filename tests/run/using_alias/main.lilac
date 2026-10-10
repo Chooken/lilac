@@ -1,0 +1,41 @@
+// expect-stdout: aliases
+// `using … as` binds a namespace to a name and imports none of its names.
+// `Geo` here is the alias, shadowing the top-level namespace `Geo`, which
+// is still reachable through `Outer`. A local shadows an alias.
+
+using Geo.Shapes as Geo
+using Geo as Outer
+using Standard.Io as Io
+using Standard.Process as Process
+
+Shapes: function () n: @bit32 => 0x0
+
+check: function (actual: @bit32, want: @bit32, code: @bit32) nothing {
+    if @i_less_than_u_32(actual, want) {
+        Process.exit(code)
+    }
+    if @i_greater_than_u_32(actual, want) {
+        Process.exit(code)
+    }
+}
+
+main: function () nothing {
+    sq: Geo.Square = Geo.Square { side = 0x4 }
+    check(Geo.area(sq), 0x10, 0x1)
+    check(Geo.Square.perimeter(ref sq), 0x10, 0x2)
+    check(Geo.UNIT, 0x1, 0x3)
+    p: Geo.Pair[@bit32] = Geo.Pair[@bit32] { a = 0x2, b = 0x3 }
+    check(p.b, 0x3, 0x4)
+    s: Geo.Shape = Geo.Shape.Circle(0x6)
+    match s {
+        Geo.Shape.Circle -> r: @bit32 => check(r, 0x6, 0x5)
+        .Dot => Process.exit(0x6)
+    }
+    check(Outer.corner(), 0x9, 0x7)
+    check(Shapes(), 0x0, 0x8)
+    {
+        Io: @bit32 = 0x9
+        check(Io, 0x9, 0x9)
+    }
+    Io.print_line("aliases")
+}

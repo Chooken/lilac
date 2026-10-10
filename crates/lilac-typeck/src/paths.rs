@@ -1,7 +1,7 @@
 //! Names and qualified paths: `name`, `A.B.item`, `A.B.Type`.
 //!
-//! A path's first segment is a name the file sees, else a namespace by
-//! reach ([`Resolved::namespace_named`]). Each later segment steps into a
+//! A path's first segment is a `using … as` alias, a name the file sees,
+//! else a namespace by reach ([`Resolved::namespace_named`]). Each later segment steps into a
 //! namespace: an item, else a child namespace. A path ends at an item;
 //! `Type.member` past it is a static member access. Locals and generic
 //! parameters come before all of this; the callers check them.
@@ -9,12 +9,14 @@
 //! [`Resolved::namespace_named`]: lilac_resolve::Resolved::namespace_named
 
 use lilac_ast::Expr;
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
+use lilac_hir::{HirExpr, HirExprKind};
 use lilac_resolve::{DefId, Lookup, NsId, Segment};
 use lilac_span::Span;
 
 use crate::body::FnCx;
 use crate::expr::tail_span;
+use crate::sigs::leading;
 use crate::Checker;
 
 /// What a path's first segment names.
@@ -25,6 +27,22 @@ pub(crate) enum Head {
     Ambiguous(Vec<Span>),
     /// Nothing.
     Missing,
+}
+
+/// Explains a failed member access on a local that shadows an alias (see
+/// [`Checker::shadowed_alias`]).
+pub(crate) fn shadowed_alias_note(
+    diagnostic: Diagnostic,
+    shadowed: Option<(String, Span)>,
+) -> Diagnostic {
+    let Some((name, span)) = shadowed else {
+        return diagnostic;
+    };
+    diagnostic
+        .label(span, false, format!("alias `{name}` declared here"))
+        .note(format!(
+            "the local `{name}` shadows the alias `{name}`; rename the local to reach the namespace"
+        ))
 }
 
 /// The span of a path's last segment (the whole span for a bare name).
@@ -46,6 +64,12 @@ impl Checker<'_> {
 
     /// What `name` names as the first segment of a path.
     pub(crate) fn lookup_head(&self, name: &str) -> Head {
+        // An alias shadows ancestor-reached and imported names and
+        // namespaces; one named like an item of the file's own namespace is
+        // `E054` in the resolver, so it never shadows those.
+        if let Some(ns) = self.res.alias(self.file(), name) {
+            return Head::One(Segment::Ns(ns));
+        }
         match self.res.lookup(self.file(), name) {
             Some(Lookup::One(id)) => return Head::One(Segment::Def(*id)),
             Some(Lookup::Ambiguous(sites)) => return Head::Ambiguous(sites.clone()),
@@ -62,6 +86,19 @@ impl Checker<'_> {
         }
     }
 
+    /// The `using … as` alias a local receiver hides: its name and the
+    /// alias's span, when `receiver` is a local named like an alias of this
+    /// file. Locals shadow aliases, so `Math.pow()` with a local `Math` is a
+    /// method call; a failed one says why ([`shadowed_alias_note`]).
+    pub(crate) fn shadowed_alias(&self, fcx: &FnCx, receiver: &HirExpr) -> Option<(String, Span)> {
+        let HirExprKind::Local(id) = receiver.kind else {
+            return None;
+        };
+        let name = &fcx.locals.get(id.0 as usize)?.name;
+        let (_, span) = self.res.files.get(&self.file())?.aliases.get(name)?;
+        Some((name.clone(), *span))
+    }
+
     /// Resolves an item name or a dotted path in the current environment.
     /// `Ok(None)`: no definition (or a namespace); `Err`: ambiguous (`E029`,
     /// already reported).
@@ -72,11 +109,17 @@ impl Checker<'_> {
     ) -> Result<Option<DefId>, ErrorGuaranteed> {
         let mut parts = name.split('.');
         let head = parts.next().unwrap_or(name);
+        if let Some(decl) = self.res.alias_span(self.file(), head) {
+            self.record_alias_use(leading(span, head), decl);
+        }
         let mut segment = match self.lookup_head(head) {
             Head::One(segment) => segment,
             Head::Ambiguous(sites) => {
-                let mut diagnostic = Diagnostic::error("E029", format!("`{head}` is ambiguous"))
-                    .label(span, true, "ambiguous reference here");
+                let mut diagnostic = Diagnostic::error(
+                    codes::E029,
+                    format!("`{head}` is ambiguous"),
+                )
+                .label(span, true, "ambiguous reference here");
                 for site in sites {
                     diagnostic = diagnostic.label(site, false, "imported here");
                 }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
-use lilac_hir::{LocalSite, NameSite, SemanticSite};
+use lilac_hir::{AliasSite, LocalSite, NameSite, SemanticSite};
 use lilac_ir::LirModule;
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::{FileId, Span};
@@ -42,6 +42,10 @@ pub struct AnalysisIndex {
     /// Local and parameter names, each linked to its declaration; deduped
     /// and sorted by `(file, lo)`.
     pub locals: Vec<LocalSite>,
+    /// `using … as` alias names, each linked to its declaration: every
+    /// declaration (as its own site) and every path head naming one;
+    /// deduped and sorted by `(file, lo)`.
+    pub aliases: Vec<AliasSite>,
 }
 
 /// The IR modules captured at each pipeline boundary during a compile.
@@ -133,6 +137,17 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
     locals.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
     locals.dedup();
 
+    let mut aliases = analysis.hir.alias_uses.clone();
+    aliases.extend(resolved.files.values().flat_map(|scope| {
+        scope.aliases.values().map(|(_, decl)| AliasSite {
+            span: *decl,
+            decl: *decl,
+        })
+    }));
+    aliases.retain(|site| !site.span.is_dummy());
+    aliases.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
+    aliases.dedup();
+
     let mut exprs = Vec::new();
     let mut record = |expr: &lilac_hir::HirExpr| exprs.push((expr.span, expr.ty));
     for func in &analysis.hir.funcs {
@@ -150,6 +165,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
         exprs,
         semantics: analysis.semantics.clone(),
         locals,
+        aliases,
     }
 }
 

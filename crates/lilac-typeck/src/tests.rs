@@ -1083,7 +1083,7 @@ fn generic_missing_member_shows_required_signature() {
     let (line, _) = sm.line_col(primary.span).expect("primary span has a file");
     assert_eq!(line, 2, "primary must be the body use: {rendered}");
     assert!(
-        rendered.contains("fn other() -> T"),
+        rendered.contains("other: function () T"),
         "missing inferred signature: {rendered}"
     );
     assert!(
@@ -1104,7 +1104,7 @@ fn generic_missing_member_shows_required_signature() {
 
 #[test]
 fn value_receiver_shows_required_signature() {
-    // A value receiver of generic-param type renders `self: T`; the argument
+    // A value receiver of generic-param type renders `self`; the argument
     // is probe-checked (a decimal literal is `@bit8`) and the return
     // comes from the generic parameter.
     let src = "gen[T]: function (value: T) out: T {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[@bit32](0x1)\n}\n";
@@ -1112,7 +1112,7 @@ fn value_receiver_shows_required_signature() {
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
     assert!(
-        rendered.contains("fn other(self: ref T, @bit8) -> T"),
+        rendered.contains("other: function (self, a: @bit8) T"),
         "missing value-receiver signature: {rendered}"
     );
 }
@@ -1126,7 +1126,7 @@ fn generic_param_form_in_required_signature() {
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
     assert!(
-        rendered.contains("fn other(self: ref T, U) -> @bit8"),
+        rendered.contains("other: function (self, a: U) @bit8"),
         "missing generic-param signature: {rendered}"
     );
 }
@@ -1140,7 +1140,7 @@ fn concrete_return_stays_concrete_in_required_signature() {
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
     assert!(
-        rendered.contains("fn other(self: ref T, @bit8) -> Widget"),
+        rendered.contains("other: function (self, a: @bit8) Widget"),
         "concrete return not rendered concretely: {rendered}"
     );
 }
