@@ -160,8 +160,10 @@ pub struct Analysis {
 
 /// Dedups semantic-token sites by `(span, kind)` and sorts them by
 /// `(file, lo)`.
-fn merge_semantics(sites: &[lilac_hir::SemanticSite]) -> Vec<lilac_hir::SemanticSite> {
-    let mut sites = sites.to_vec();
+fn merge_semantics(
+    sites: impl Iterator<Item = lilac_hir::SemanticSite>,
+) -> Vec<lilac_hir::SemanticSite> {
+    let mut sites: Vec<_> = sites.collect();
     sites.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
     sites.dedup_by(|a, b| a.span == b.span && a.kind == b.kind);
     sites
@@ -427,7 +429,7 @@ impl Session {
         if failed && strict {
             return Err(self.diags.already_reported());
         }
-        conditional::select(
+        let condition_semantics = conditional::select(
             &mut project,
             &mut programs,
             &mut self.diags,
@@ -451,13 +453,27 @@ impl Session {
         let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
-        self.analysis = Some(Analysis {
-            resolved: resolved.clone(),
-            types: types.clone(),
-            sigs: checked.sigs.clone(),
-            semantics: merge_semantics(&checked.hir.semantics),
-            hir,
-        });
+        self.analysis =
+            Some(Analysis {
+                resolved: resolved.clone(),
+                types: types.clone(),
+                sigs: checked.sigs.clone(),
+                semantics: merge_semantics(
+                    checked
+                        .hir
+                        .semantics
+                        .iter()
+                        .chain(&condition_semantics)
+                        .copied()
+                        .chain(resolved.namespace_sites.iter().map(|&span| {
+                            lilac_hir::SemanticSite {
+                                span,
+                                kind: lilac_hir::SemanticKind::Namespace,
+                            }
+                        })),
+                ),
+                hir,
+            });
         if self.diags.has_errors() {
             return Err(self.diags.already_reported());
         }

@@ -245,12 +245,14 @@ impl Parser {
         let first = self.expect(diags, TokenKind::Ident, "folder name after `using`")?;
         let mut path = first.text;
         let mut end = first.span;
+        let mut segments = vec![first.span];
         while self.peek().kind == TokenKind::Dot {
             self.bump();
             let segment = self.expect(diags, TokenKind::Ident, "folder name after `.`")?;
             path.push('.');
             path.push_str(&segment.text);
             end = segment.span;
+            segments.push(segment.span);
         }
         let alias = if self.peek().kind == TokenKind::KwAs {
             self.bump();
@@ -267,6 +269,7 @@ impl Parser {
                 path,
                 relative,
                 alias,
+                segments,
             },
         })
     }

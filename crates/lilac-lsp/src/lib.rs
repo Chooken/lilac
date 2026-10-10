@@ -14,7 +14,7 @@ use lsp_types::{
 
 /// Legend token types, in the index order shared by the encoder
 /// (`handlers::semantic_tokens`) and the `VSCode` `semanticTokenScopes`.
-pub(crate) const TOKEN_TYPES: [SemanticTokenType; 7] = [
+pub(crate) const TOKEN_TYPES: [SemanticTokenType; 8] = [
     SemanticTokenType::FUNCTION,
     SemanticTokenType::TYPE,
     SemanticTokenType::ENUM,
@@ -22,6 +22,7 @@ pub(crate) const TOKEN_TYPES: [SemanticTokenType; 7] = [
     SemanticTokenType::ENUM_MEMBER,
     SemanticTokenType::VARIABLE,
     SemanticTokenType::PARAMETER,
+    SemanticTokenType::NAMESPACE,
 ];
 
 /// Legend token modifiers (index 0 is `defaultLibrary`).

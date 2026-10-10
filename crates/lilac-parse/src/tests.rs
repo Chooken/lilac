@@ -628,7 +628,9 @@ fn relative_using_parses() {
     assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
     assert!(matches!(
         &program.items[0].kind,
-        ItemKind::Using { path, relative: true, alias: None } if path == "Heap.Pool"
+        ItemKind::Using { path, relative: true, alias: None, segments }
+            if path == "Heap.Pool"
+                && segments.iter().map(|s| (s.lo.0, s.hi.0)).eq([(8, 12), (13, 17)])
     ));
 }
 
@@ -638,12 +640,12 @@ fn using_alias_parses() {
     assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
     assert!(matches!(
         &program.items[0].kind,
-        ItemKind::Using { path, relative: false, alias: Some((alias, _)) }
+        ItemKind::Using { path, relative: false, alias: Some((alias, _)), .. }
             if path == "Standard.Math" && alias == "Math"
     ));
     assert!(matches!(
         &program.items[1].kind,
-        ItemKind::Using { path, relative: true, alias: Some((alias, _)) }
+        ItemKind::Using { path, relative: true, alias: Some((alias, _)), .. }
             if path == "Heap" && alias == "H"
     ));
 }

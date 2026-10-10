@@ -165,6 +165,9 @@ pub enum SemanticKind {
     BuiltinType,
     /// A compiler intrinsic call name (`@i_add_8`, `@load_u8`, ...).
     BuiltinFunc,
+    /// A namespace in a path or a `using` (`Os` in `Os.write`), or a
+    /// `using … as` alias.
+    Namespace,
 }
 
 /// One semantic-token site.

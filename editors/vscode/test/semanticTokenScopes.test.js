@@ -12,6 +12,7 @@ const LEGEND_TOKEN_TYPES = [
   "enumMember",
   "variable",
   "parameter",
+  "namespace",
 ];
 
 const EXPECTED_SCOPES = {
@@ -22,6 +23,8 @@ const EXPECTED_SCOPES = {
   enumMember: ["variable.other.enummember"],
   variable: ["variable.other"],
   parameter: ["variable.parameter"],
+  // Under `entity.name.type`, so themes color a namespace like a type.
+  namespace: ["entity.name.type.namespace"],
 };
 
 const pkg = JSON.parse(

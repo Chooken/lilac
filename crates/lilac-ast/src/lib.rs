@@ -59,6 +59,8 @@ pub enum ItemKind {
         /// `using Path as Name`: binds the namespace to `Name` (and its span)
         /// instead of importing its names.
         alias: Option<(String, Span)>,
+        /// The span of each written segment of `path`, in order.
+        segments: Vec<Span>,
     },
     /// `private { <items> }` visibility wrapper (file or object scope).
     Private {

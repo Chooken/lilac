@@ -178,6 +178,10 @@ pub struct Resolved {
     pub hooks: Vec<DefId>,
     /// Namespaces by dotted path.
     pub ns_by_path: HashMap<String, NsId>,
+    /// Every name a `using` writes that is a namespace: each segment of
+    /// its path that names a loaded one, and each alias name. The editor
+    /// colors these.
+    pub namespace_sites: Vec<Span>,
 }
 
 impl Resolved {
@@ -381,6 +385,8 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
         let ns = ns_id(unit.ns);
         let mut visible = compute_visible(&resolved, ns, unit, &by_path);
         let aliases = collect_aliases(&resolved, ns, unit, &by_path, diags);
+        let sites = using_namespace_sites(unit, &by_path, &aliases);
+        resolved.namespace_sites.extend(sites);
         for name in aliases.keys() {
             visible.remove(name);
         }
@@ -683,6 +689,32 @@ fn compute_visible(
     visible
 }
 
+/// The namespace names `unit`'s `using`s write (see
+/// [`Resolved::namespace_sites`]). A written segment is the tail of the
+/// joined path, so segment `i` of `n` ends the path's first
+/// `path_len - n + i + 1` segments.
+fn using_namespace_sites(
+    unit: &FileUnit,
+    by_path: &HashMap<String, NsId>,
+    aliases: &HashMap<String, (NsId, Span)>,
+) -> Vec<Span> {
+    let mut sites = Vec::new();
+    for using in &unit.usings {
+        let parts: Vec<&str> = using.path.split('.').collect();
+        let Some(skipped) = parts.len().checked_sub(using.segments.len()) else {
+            continue;
+        };
+        for (index, span) in using.segments.iter().enumerate() {
+            let prefix = parts[..=skipped + index].join(".");
+            if by_path.contains_key(&prefix) {
+                sites.push(*span);
+            }
+        }
+    }
+    sites.extend(aliases.values().map(|(_, span)| *span));
+    sites
+}
+
 /// A file's `using … as Name` aliases. An alias named like an item of the
 /// file's own namespace (any of its files, `private` included), or like an
 /// earlier alias in the file, is `E054`; the first binding is kept.
@@ -786,6 +818,7 @@ mod tests {
                         alias: u
                             .split_once(" as ")
                             .map(|(_, alias)| (alias.to_owned(), Span::dummy())),
+                        segments: Vec::new(),
                     })
                     .collect(),
             });

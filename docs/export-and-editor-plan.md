@@ -1,6 +1,6 @@
 # Export, Linux Leaves and Editor Plan
 
-> Status: Phase 0 done (`70e6f5e`). Source: the review of the OS layer and
+> Status: Phases 0 and 1 done. Source: the review of the OS layer and
 > the editor on 2026-10-10.
 > Goal: Lilac can define C-callable functions, the Linux-only intrinsics say
 > so in their names, namespaces color like types, and completion after `.`
@@ -49,7 +49,14 @@ Order: 1 → 2 → 3 → 4. Phase 1 is small and independent; 2 must precede 3
 
 ---
 
-## Phase 1: Namespaces color like types
+## Phase 1: Namespaces color like types (done)
+
+As built, 1.2 places segments by offset only when a path's span is
+exactly its text (`paths::segment_spans`); a path written with space
+between segments is left uncolored, never colored wrong. Typeck flattens
+member chains into dotted names in many places, so carrying parser spans
+through all of them was not worth it. Top-level conditions are colored
+too (the driver keeps the selector checks' sites).
 
 - **1.1 `SemanticKind::Namespace`.** Add the variant in
   `crates/lilac-hir/src/lib.rs` (`SemanticKind`).

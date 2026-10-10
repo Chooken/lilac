@@ -316,6 +316,17 @@
   to its members; `@` lists `Intrinsic::names()` and the builtin types.
   A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
   `textDocument/codeAction` turns them into quick fixes without a compile.
+- Semantic tokens (`handlers::semantic_tokens`) merge item declarations
+  and uses with `Analysis::semantics`: typeck's `SemanticSite`s, the
+  driver's top-level-condition checks (`conditional::select` returns
+  them) and the resolver's `Resolved::namespace_sites` (each `using`
+  segment naming a loaded namespace, and each alias name, from the
+  parser's `ItemKind::Using::segments`). A path segment that walks a
+  namespace (`Checker::lookup_item`) is a `Namespace` site, placed by
+  `paths::segment_spans` only when the path's span is exactly its text
+  (no space or comment between segments); otherwise it is left uncolored.
+  VS Code maps `namespace` under `entity.name.type`, so it colors like a
+  type.
 - Faded hints (`hints.rs`) are editor-only: computed from the retained
   analysis and published with a file's diagnostics as `Hint` +
   `Unnecessary`; the compiler reports none, and the CLI prints nothing.

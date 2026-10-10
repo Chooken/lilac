@@ -10,7 +10,7 @@
 
 use lilac_ast::Expr;
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
-use lilac_hir::{HirExpr, HirExprKind};
+use lilac_hir::{HirExpr, HirExprKind, SemanticKind};
 use lilac_resolve::{DefId, Lookup, NsId, Segment};
 use lilac_span::Span;
 
@@ -51,6 +51,24 @@ pub(crate) fn path_tail(span: Span, name: &str) -> Span {
         Some((_, tail)) => tail_span(span, tail),
         None => span,
     }
+}
+
+/// The span of each segment of the path `name` spelled at `span`, or `None`
+/// when the span is longer than the name: the path was written with space
+/// or a comment between its segments, so offsets would not find them.
+/// Equal lengths mean the segments and dots fill the span exactly.
+pub(crate) fn segment_spans(span: Span, name: &str) -> Option<Vec<Span>> {
+    if span.is_dummy() || span.hi.0.checked_sub(span.lo.0)? as usize != name.len() {
+        return None;
+    }
+    let mut lo = span.lo.0;
+    let mut spans = Vec::new();
+    for segment in name.split('.') {
+        let hi = lo + u32::try_from(segment.len()).ok()?;
+        spans.push(Span::new(lo, hi, span.file));
+        lo = hi + 1;
+    }
+    Some(spans)
 }
 
 impl Checker<'_> {
@@ -112,6 +130,14 @@ impl Checker<'_> {
         if let Some(decl) = self.res.alias_span(self.file(), head) {
             self.record_alias_use(leading(span, head), decl);
         }
+        // Each segment that names a namespace colors as one.
+        let spans = segment_spans(span, name).unwrap_or_default();
+        let mut spans = spans.into_iter();
+        let mut record = |checker: &mut Self, segment: &Segment| {
+            if let (Some(span), Segment::Ns(_)) = (spans.next(), segment) {
+                checker.record_semantic(span, SemanticKind::Namespace);
+            }
+        };
         let mut segment = match self.lookup_head(head) {
             Head::One(segment) => segment,
             Head::Ambiguous(sites) => {
@@ -127,6 +153,7 @@ impl Checker<'_> {
             }
             Head::Missing => return Ok(None),
         };
+        record(self, &segment);
         for part in parts {
             // An item ends the path.
             let Segment::Ns(ns) = segment else {
@@ -136,6 +163,7 @@ impl Checker<'_> {
                 Some(next) => segment = next,
                 None => return Ok(None),
             }
+            record(self, &segment);
         }
         match segment {
             Segment::Def(def) => Ok(Some(def)),

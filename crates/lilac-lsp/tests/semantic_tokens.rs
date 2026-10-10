@@ -209,7 +209,8 @@ fn initialize_advertises_the_semantic_tokens_legend() {
             "property",
             "enumMember",
             "variable",
-            "parameter"
+            "parameter",
+            "namespace"
         ]
     );
     let modifiers: Vec<&str> = provider["legend"]["tokenModifiers"]
@@ -442,6 +443,98 @@ fn clean_file_with_nothing_to_color_is_empty() {
 
     let tokens = semantic_tokens_at(&client, &uri);
     assert!(tokens.data.is_empty(), "{:?}", tokens.data);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+const NAMESPACE: u32 = 7;
+
+/// Initializes the server on the project folder `root`.
+fn initialize_at(client: &Connection, root: &Url) {
+    let id = RequestId::from(1);
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "initialize".to_owned(),
+            params: serde_json::json!({ "capabilities": {}, "rootUri": root.as_str() }),
+        }))
+        .expect("initialize");
+    read_response(client, &id);
+    client
+        .sender
+        .send(Message::Notification(Notification {
+            method: "initialized".to_owned(),
+            params: serde_json::Value::Null,
+        }))
+        .expect("initialized");
+}
+
+#[test]
+fn namespaces_color_in_usings_paths_and_conditions() {
+    let dir = std::env::temp_dir().join("lilac-lsp-tokens-namespace");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Geo").join("Shapes")).expect("mkdir");
+    std::fs::write(dir.join("Geo").join("geo.lilac"), "unit: @bit32 => 0x1\n").expect("write");
+    std::fs::write(
+        dir.join("Geo").join("Shapes").join("shapes.lilac"),
+        "Point: object {\n    x: @bit32\n}\narea: function () r: @bit32 {\n    r = 0x1\n}\n",
+    )
+    .expect("write");
+    let text = "using Geo.Shapes as S\n\
+                if @builtin.Target.os == @builtin.Os.Windows {\n    flag: @bit32 => 0x1\n} else {\n    flag: @bit32 => 0x2\n}\n\
+                main: function () nothing {\n    p: S.Point = S.Point { x = Geo.Shapes.area() }\n    \
+                q: @bit32 = Geo . Shapes.area()\n}\n";
+    let main = dir.join("main.lilac");
+    std::fs::write(&main, text).expect("write");
+    let root = Url::from_directory_path(&dir).expect("root");
+    let uri = Url::from_file_path(&main).expect("uri");
+
+    let (client, handle) = start_server();
+    initialize_at(&client, &root);
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(lsp_types::DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+    let decoded = decode(&semantic_tokens_at(&client, &uri));
+    let kind = |key: &str, offset: usize| {
+        let token = token_after(&decoded, text, key, offset);
+        (token.token_type, token.length)
+    };
+
+    // The `using` path's segments and its alias.
+    assert_eq!(kind("using Geo", 6), (NAMESPACE, 3));
+    assert_eq!(kind("Geo.Shapes as", 4), (NAMESPACE, 6));
+    assert_eq!(kind("as S", 3), (NAMESPACE, 1));
+    // A top-level condition: two namespaces, then a constant.
+    assert_eq!(kind("@builtin.Target.os", 0), (NAMESPACE, 8));
+    assert_eq!(kind("@builtin.Target.os", 9), (NAMESPACE, 6));
+    // A type path and a struct-literal head: the alias, then the type.
+    assert_eq!(kind("p: S.Point", 3), (NAMESPACE, 1));
+    assert_eq!(kind("p: S.Point", 5), (TYPE, 5));
+    assert_eq!(kind("= S.Point {", 2), (NAMESPACE, 1));
+    assert_eq!(kind("= S.Point {", 4), (TYPE, 5));
+    // A call path.
+    assert_eq!(kind("x = Geo.Shapes", 4), (NAMESPACE, 3));
+    assert_eq!(kind("x = Geo.Shapes", 8), (NAMESPACE, 6));
+    assert_eq!(kind("x = Geo.Shapes.area", 15), (FUNCTION, 4));
+    // A path spelled with spaces: its segments cannot be placed, so they
+    // stay uncolored rather than colored wrong; the function still is.
+    let (line, character) = position(text, text.find("Geo . Shapes").expect("spaced"));
+    assert!(
+        decoded
+            .iter()
+            .all(|token| !(token.line == line && token.character == character)),
+        "{decoded:?}"
+    );
+    assert_eq!(kind("Geo . Shapes.area", 13), (FUNCTION, 4));
 
     shutdown(&client);
     handle.join().expect("server thread");

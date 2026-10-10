@@ -1046,8 +1046,9 @@ impl Checker<'_> {
             };
             match found {
                 Some(def) if self.res.def(def).is_type() => {
-                    self.record_use(ty.name_span, def);
-                    self.record_semantic(ty.name_span, SemanticKind::UserType);
+                    let tail = path_tail(ty.name_span, name);
+                    self.record_use(tail, def);
+                    self.record_semantic(tail, SemanticKind::UserType);
                     if self.res.def(def).generic_params.is_empty() {
                         let object = self.type_of_def(def, Vec::new());
                         if self.ensure_type(object, span).is_err() {

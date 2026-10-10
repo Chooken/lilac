@@ -56,7 +56,8 @@
           "property": ["variable.other.property"],
           "enumMember": ["variable.other.enummember"],
           "variable": ["variable.other"],
-          "parameter": ["variable.parameter"]
+          "parameter": ["variable.parameter"],
+          "namespace": ["entity.name.type.namespace"]
         }
       }
     ],

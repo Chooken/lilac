@@ -72,6 +72,9 @@ pub struct Using {
     /// `using A.B as Name`: the name and its span. An aliased `using` binds
     /// only the alias; it imports none of the namespace's names.
     pub alias: Option<(String, Span)>,
+    /// The span of each segment the directive writes: the tail of `path`
+    /// (a relative `using` writes no namespace path before it).
+    pub segments: Vec<Span>,
 }
 
 /// One namespace: a folder and the files directly inside it.
@@ -628,6 +631,7 @@ fn collect_usings(item: &Item, ns_path: &str, all_arms: bool, out: &mut Vec<Usin
             path,
             relative,
             alias,
+            segments,
         } => out.push(Using {
             path: if *relative && !ns_path.is_empty() {
                 format!("{ns_path}.{path}")
@@ -636,6 +640,7 @@ fn collect_usings(item: &Item, ns_path: &str, all_arms: bool, out: &mut Vec<Usin
             },
             span: item.span,
             alias: alias.clone(),
+            segments: segments.clone(),
         }),
         ItemKind::Private { items } => {
             for inner in items {

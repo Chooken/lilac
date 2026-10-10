@@ -24,6 +24,7 @@ const TOKEN_PROPERTY: u32 = 3;
 const TOKEN_ENUM_MEMBER: u32 = 4;
 const TOKEN_VARIABLE: u32 = 5;
 const TOKEN_PARAMETER: u32 = 6;
+const TOKEN_NAMESPACE: u32 = 7;
 
 /// Legend modifier index 0 (`defaultLibrary`) as a bitset.
 const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 0;
@@ -391,6 +392,7 @@ fn semantic_type(kind: SemanticKind) -> (u32, u32) {
         SemanticKind::Variant => (TOKEN_ENUM_MEMBER, 0),
         SemanticKind::BuiltinType => (TOKEN_TYPE, MODIFIER_DEFAULT_LIBRARY),
         SemanticKind::BuiltinFunc => (TOKEN_FUNCTION, MODIFIER_DEFAULT_LIBRARY),
+        SemanticKind::Namespace => (TOKEN_NAMESPACE, 0),
     }
 }
 
