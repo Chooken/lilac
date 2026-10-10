@@ -1,0 +1,71 @@
+// expect-exit: 0
+// A top-level `if` or `match` over items keeps only the arm its constant
+// condition selects: per-target functions, a per-OS `using … as`, arms
+// inside `private`, nested conditionals, and a condition naming an item
+// that another conditional declares.
+
+using Standard
+using Standard.Process
+
+LEVEL: @bit32 => 0x2
+
+if @builtin.Target.pointer_size == 0x8 {
+    width: function () n: @bit32 => 0x40
+} else {
+    width: function () n: @bit32 => 0x20
+}
+
+match @builtin.Target.os {
+    .Windows {
+        using Plat.Win as Host
+    }
+} else {
+    using Plat.Unix as Host
+}
+
+// `wide` is declared by the conditional below, decided first.
+if wide() {
+    picked: function () n: @bit32 => 0x7
+    if LEVEL == 0x2 {
+        nested: function () n: @bit32 => 0x1
+    } else {
+        nested: function () n: @bit32 => 0x2
+    }
+} else {
+    picked: function () n: @bit32 => 0x9
+}
+
+if true {
+    wide: function () n: @bit8 => @i_greater_than_u_32(width(), 0x10)
+}
+
+private {
+    if false {
+        hidden: function () n: @bit32 => 0x1
+    } else if LEVEL == 0x2 {
+        hidden: function () n: @bit32 => 0x3
+    }
+}
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+main: function () nothing {
+    if @builtin.Target.pointer_size == 0x8 {
+        check(width() == 0x40, 0x1)
+    } else {
+        check(width() == 0x20, 0x1)
+    }
+    match @builtin.Target.os {
+        .Windows => check(Host.family() == 0x1, 0x2)
+    } else {
+        check(Host.family() == 0x2, 0x2)
+    }
+    check(picked() == 0x7, 0x3)
+    check(nested() == 0x1, 0x4)
+    check(hidden() == 0x3, 0x5)
+}

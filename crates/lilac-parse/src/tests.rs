@@ -1452,3 +1452,27 @@ fn operators_bind_by_precedence() {
         assert_eq!(grouping(value), want, "{src}");
     }
 }
+
+#[test]
+fn conditional_items_parse_if_chains_and_matches() {
+    let (file, diags, _) = parse(
+        "if a { x: @bit8 => 0x1 } else if b { y: @bit8 => 0x2 } else { z: @bit8 => 0x3 }\n\
+         match s { .A { using Q as P } .B => using R as P } else { w: @bit8 => 0x4 }\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Conditional(chain) = &file.items[0].kind else {
+        panic!("expected a conditional, got {:?}", file.items[0].kind);
+    };
+    assert!(chain.scrutinee.is_none());
+    assert_eq!(chain.arms.len(), 2);
+    assert_eq!(chain.els.as_ref().map(Vec::len), Some(1));
+    let ItemKind::Conditional(by_tag) = &file.items[1].kind else {
+        panic!("expected a conditional, got {:?}", file.items[1].kind);
+    };
+    assert!(by_tag.scrutinee.is_some());
+    assert_eq!(by_tag.arms.len(), 2);
+    assert!(matches!(
+        by_tag.arms[1].items[0].kind,
+        ItemKind::Using { .. }
+    ));
+}

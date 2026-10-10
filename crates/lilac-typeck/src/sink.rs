@@ -55,6 +55,11 @@ impl<'a> Sink<'a> {
         }
     }
 
+    /// How many errors were reported (held ones not included).
+    pub(crate) fn error_count(&self) -> usize {
+        self.diags.error_count()
+    }
+
     /// The token for poison passed along after an error, reported or held.
     /// Debug builds check there is one.
     pub(crate) fn already_reported(&self) -> ErrorGuaranteed {

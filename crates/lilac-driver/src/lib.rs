@@ -13,6 +13,7 @@ use lilac_module::Fs;
 use lilac_span::{FileId, SourceMap};
 
 pub mod builtin;
+mod conditional;
 
 pub use lilac_ir::Entry;
 pub use lilac_target::{Arch, LinkFlavor, LinkInfo, Os, Target};
@@ -420,12 +421,20 @@ impl Session {
             entry: self.entry,
             mode: self.optimize,
         };
-        let project = &builtin::with_builtin(project, facts, &mut self.source_map);
+        let mut project = builtin::with_builtin(project, facts, &mut self.source_map);
         self.report(Stage::Parse, StageEvent::Begin);
-        let (programs, failed) = lilac_module::parse_all(project, &mut self.diags, strict);
+        let (mut programs, failed) = lilac_module::parse_all(&project, &mut self.diags, strict);
         if failed && strict {
             return Err(self.diags.already_reported());
         }
+        conditional::select(
+            &mut project,
+            &mut programs,
+            &mut self.diags,
+            &self.source_map,
+            self.target,
+        );
+        let project = &project;
         self.report(Stage::Parse, DONE);
         self.report(Stage::Resolve, StageEvent::Begin);
         let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);

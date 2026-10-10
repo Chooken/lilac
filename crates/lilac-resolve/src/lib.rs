@@ -496,7 +496,11 @@ impl Collector<'_> {
                 ty: ty.clone(),
                 value: value.clone().map(Arc::new),
             },
-            ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
+            // A conditional defines nothing until the driver splices its arm in.
+            ItemKind::Using { .. }
+            | ItemKind::Private { .. }
+            | ItemKind::Conditional(_)
+            | ItemKind::Error => return None,
         };
         let mut def = self.new_def(&item.name, kind, item.span, vis);
         def.parent = parent;

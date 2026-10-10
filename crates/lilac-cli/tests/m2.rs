@@ -454,3 +454,26 @@ fn constants_are_not_assignable() {
         "stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn top_level_condition_must_be_constant() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_conditional_not_constant.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("error[E039]").count(),
+        1,
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("FAILS_conditional_not_constant.lilac:6:4"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("error[E021]: unresolved name `missing`"),
+        "stderr:\n{stderr}"
+    );
+}

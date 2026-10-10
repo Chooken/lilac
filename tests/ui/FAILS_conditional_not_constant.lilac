@@ -1,0 +1,15 @@
+// A top-level condition must be constant (`E039`): a global can change at
+// run time, and a name no conditional ever declares is reported as itself.
+
+flag: @bit8 = 0x1
+
+if flag {
+    pick: function () n: @bit32 => 0x1
+}
+
+if missing() {
+    other: function () n: @bit32 => 0x2
+}
+
+main: function () nothing {
+}

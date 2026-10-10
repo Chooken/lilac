@@ -785,6 +785,38 @@ names a file sees. Dead-code elimination keeps unused library code out of
 the output, so mounting a library a program does not use changes nothing it
 emits. A missing library folder is `E025`.
 
+### Conditional items
+
+At the top level (and inside a top-level `private { }`), an `if` chain or a
+`match` can hold items instead of statements. Only the arm its condition
+selects exists: its items are declared in place of the conditional, as if
+written there, and the other arms are never checked or compiled.
+
+```lilac
+if @builtin.Target.pointer_size == 0x8 {
+    Word: object { value: @bit64 }
+} else {
+    Word: object { value: @bit32 }
+}
+
+match @builtin.Target.os {
+    .Windows {
+        using Standard.Os.Windows as Platform
+    }
+    .Linux => using Standard.Os.Linux as Platform
+} else {
+    using Standard.Os.MacOs as Platform
+}
+```
+
+A `match` arm is `{ items }` or `=> item`; a `match` with no matching arm
+and no `else` declares nothing. The condition (or scrutinee) must be a
+constant expression (see Constant conditions), else `E039`. It is checked in
+its file's scope and may name items other conditionals declare: those are
+decided first, and an arm can hold further conditionals. A `using` inside an
+arm takes effect only in the selected arm, but every arm's `using`s are
+loaded, so each must name a folder that exists.
+
 ### Enums
 
 Enums are the single tagged-data type: a closed set of named variants,

@@ -115,59 +115,7 @@ pub fn lower(
     triple: &str,
     ptr_bytes: u64,
 ) -> Lowered {
-    let mut lower = Lower {
-        hir,
-        res,
-        types,
-        sources,
-        names: HashMap::new(),
-        bad_indices: Vec::new(),
-        bad_globals: Vec::new(),
-        ptr_bytes,
-        module: LirModule::new(triple),
-        symbols: HashMap::new(),
-        externs: HashSet::new(),
-        drop_glue: HashMap::new(),
-        copy_glue: HashMap::new(),
-        needs_drop: HashMap::new(),
-        needs_copy: HashMap::new(),
-        funcs: hir
-            .funcs
-            .iter()
-            .map(|func| (func.key.clone(), func))
-            .collect(),
-    };
-    for func in &hir.funcs {
-        let symbol = lower.symbol_of(func);
-        if func.body.is_none() {
-            lower.externs.insert(func.key.clone());
-        } else {
-            let name = lower.display_of(func);
-            lower.names.insert(symbol.clone(), name);
-        }
-        lower.symbols.insert(func.key.clone(), symbol.into());
-    }
-    let mut layouts: Vec<(&TypeId, &Layout)> = hir.layouts.iter().collect();
-    layouts.sort_by_key(|(id, _)| id.0);
-    for (id, layout) in layouts {
-        let name = lower.type_name(*id);
-        let fields = match layout {
-            Layout::Object { fields } => fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), lower.lir_ty(*ty)))
-                .collect(),
-            Layout::Enum { variants, tag } => {
-                let mut fields = vec![("tag".to_owned(), lower.lir_ty(TypeRef::value(*tag)))];
-                for (name, payload) in variants {
-                    if let Some(payload) = payload {
-                        fields.push((name.clone(), lower.lir_ty(*payload)));
-                    }
-                }
-                fields
-            }
-        };
-        lower.module.layouts.insert(name, fields);
-    }
+    let mut lower = Lower::new(hir, res, types, sources, triple, ptr_bytes);
     lower.lower_globals();
     let mut externs = HashSet::new();
     for func in &hir.funcs {
@@ -184,6 +132,97 @@ pub fn lower(
         names: lower.names,
         bad_indices: lower.bad_indices,
         bad_globals: lower.bad_globals,
+    }
+}
+
+/// The value of each selector `lilac_typeck::check_selectors` checked
+/// (the index of a top-level conditional's selected arm), or `None` when
+/// it failed to check or is not constant (`E039`).
+#[must_use]
+pub fn evaluate_selectors(
+    hir: &HirProgram,
+    res: &Resolved,
+    types: &Types,
+    sources: &SourceMap,
+    triple: &str,
+    ptr_bytes: u64,
+    selectors: &[Option<lilac_hir::HirExpr>],
+) -> Vec<Option<u64>> {
+    let mut lower = Lower::new(hir, res, types, sources, triple, ptr_bytes);
+    selectors
+        .iter()
+        .map(|selector| match lower.constant(selector.as_ref()?)? {
+            constant::Value::Int(bits, _) => Some(bits),
+            _ => None,
+        })
+        .collect()
+}
+
+impl<'a> Lower<'a> {
+    /// A lowering of `hir` with every function's symbol and every layout
+    /// registered.
+    fn new(
+        hir: &'a HirProgram,
+        res: &'a Resolved,
+        types: &'a Types,
+        sources: &'a SourceMap,
+        triple: &str,
+        ptr_bytes: u64,
+    ) -> Self {
+        let mut lower = Lower {
+            hir,
+            res,
+            types,
+            sources,
+            names: HashMap::new(),
+            bad_indices: Vec::new(),
+            bad_globals: Vec::new(),
+            ptr_bytes,
+            module: LirModule::new(triple),
+            symbols: HashMap::new(),
+            externs: HashSet::new(),
+            drop_glue: HashMap::new(),
+            copy_glue: HashMap::new(),
+            needs_drop: HashMap::new(),
+            needs_copy: HashMap::new(),
+            funcs: hir
+                .funcs
+                .iter()
+                .map(|func| (func.key.clone(), func))
+                .collect(),
+        };
+        for func in &hir.funcs {
+            let symbol = lower.symbol_of(func);
+            if func.body.is_none() {
+                lower.externs.insert(func.key.clone());
+            } else {
+                let name = lower.display_of(func);
+                lower.names.insert(symbol.clone(), name);
+            }
+            lower.symbols.insert(func.key.clone(), symbol.into());
+        }
+        let mut layouts: Vec<(&TypeId, &Layout)> = hir.layouts.iter().collect();
+        layouts.sort_by_key(|(id, _)| id.0);
+        for (id, layout) in layouts {
+            let name = lower.type_name(*id);
+            let fields = match layout {
+                Layout::Object { fields } => fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), lower.lir_ty(*ty)))
+                    .collect(),
+                Layout::Enum { variants, tag } => {
+                    let mut fields = vec![("tag".to_owned(), lower.lir_ty(TypeRef::value(*tag)))];
+                    for (name, payload) in variants {
+                        if let Some(payload) = payload {
+                            fields.push((name.clone(), lower.lir_ty(*payload)));
+                        }
+                    }
+                    fields
+                }
+            };
+            lower.module.layouts.insert(name, fields);
+        }
+        lower
     }
 }
 

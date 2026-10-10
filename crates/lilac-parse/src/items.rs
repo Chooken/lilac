@@ -1,7 +1,10 @@
 //! Items: functions, objects, enums, constants, `using` and `private`
 //! blocks, and function signatures.
 
-use lilac_ast::{EnumVariant, Expr, FuncBody, FuncDecl, Item, ItemKind, Param, Type, TypeShape};
+use lilac_ast::{
+    ArmTest, Conditional, EnumVariant, Expr, FuncBody, FuncDecl, Item, ItemArm, ItemKind, Param,
+    Type, TypeShape,
+};
 use lilac_error::ErrorGuaranteed;
 use lilac_lex::{Token, TokenKind};
 use lilac_span::Span;
@@ -19,6 +22,16 @@ impl Parser {
         }
         if self.peek().kind == TokenKind::KwPrivate {
             return self.parse_private_block(diags, in_object);
+        }
+        if matches!(self.peek().kind, TokenKind::KwIf | TokenKind::KwMatch) {
+            if in_object {
+                return Err(Self::err(
+                    diags,
+                    self.peek().span,
+                    "a conditional `if`/`match` over items is top-level only",
+                ));
+            }
+            return self.parse_conditional_item(diags);
         }
         let (name, name_span) = self.parse_item_name(diags)?;
         let generic_params = self.parse_generic_params(diags)?;
@@ -264,11 +277,27 @@ impl Parser {
         in_object: bool,
     ) -> Result<Item, ErrorGuaranteed> {
         let keyword = self.bump();
-        let open = self.expect(diags, TokenKind::LBrace, "`{` to open `private` body")?;
+        let items = self.parse_item_block(diags, in_object, "`private` block")?;
+        Ok(Item {
+            span: join_spans(keyword.span, self.prev_span()),
+            name: String::new(),
+            kind: ItemKind::Private { items },
+        })
+    }
+
+    /// `{ items }`, recovering past broken items; `what` names the block
+    /// for errors.
+    fn parse_item_block(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        in_object: bool,
+        what: &str,
+    ) -> Result<Vec<Item>, ErrorGuaranteed> {
+        let open = self.expect(diags, TokenKind::LBrace, &format!("`{{` to open {what}"))?;
         let mut items = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
-                return Err(Self::unclosed(diags, &open, "`private` block", self.peek()));
+                return Err(Self::unclosed(diags, &open, what, self.peek()));
             }
             let before = self.pos;
             if let Ok(item) = self.parse_item(diags, in_object) {
@@ -282,11 +311,121 @@ impl Parser {
                 items.push(self.error_item(before));
             }
         }
-        let close = self.bump();
-        Ok(Item {
-            span: join_spans(keyword.span, close.span),
-            name: String::new(),
-            kind: ItemKind::Private { items },
+        self.bump();
+        Ok(items)
+    }
+
+    /// A top-level `if` chain or `match` over items, one nesting level.
+    fn parse_conditional_item(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Item, ErrorGuaranteed> {
+        let start = self.peek().span;
+        self.nested(
+            diags,
+            Self::skip_stmt,
+            |span| Item {
+                name: String::new(),
+                kind: ItemKind::Error,
+                span,
+            },
+            |p, diags| {
+                let conditional = if p.peek().kind == TokenKind::KwIf {
+                    p.parse_item_if(diags)?
+                } else {
+                    p.parse_item_match(diags)?
+                };
+                Ok(Item {
+                    name: String::new(),
+                    kind: ItemKind::Conditional(conditional),
+                    span: join_spans(start, p.prev_span()),
+                })
+            },
+        )
+    }
+
+    /// `if a { items } else if b { items } else { items }`.
+    fn parse_item_if(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Conditional, ErrorGuaranteed> {
+        let mut arms = Vec::new();
+        let mut els = None;
+        loop {
+            let keyword = self.bump();
+            let cond = self.with_struct_lit(false, |p| p.parse_expr(diags))?;
+            let items = self.parse_item_block(diags, false, "`if` items")?;
+            arms.push(ItemArm {
+                test: ArmTest::If(cond),
+                items,
+                span: join_spans(keyword.span, self.prev_span()),
+            });
+            if self.peek().kind != TokenKind::KwElse {
+                break;
+            }
+            self.bump();
+            if self.peek().kind != TokenKind::KwIf {
+                els = Some(self.parse_item_block(diags, false, "`else` items")?);
+                break;
+            }
+        }
+        Ok(Conditional {
+            scrutinee: None,
+            arms,
+            els,
+        })
+    }
+
+    /// `match s { .A { items } .B => item } else { items }`.
+    fn parse_item_match(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Conditional, ErrorGuaranteed> {
+        self.bump();
+        let scrutinee = self.with_struct_lit(false, |p| p.parse_expr(diags))?;
+        let open = self.expect(diags, TokenKind::LBrace, "`{` to open match arms")?;
+        let mut arms = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                return Err(Self::unclosed(diags, &open, "match", self.peek()));
+            }
+            let (pattern, start) = self.parse_match_pattern(diags)?;
+            let pattern_span = join_spans(start, self.prev_span());
+            let items = match self.peek().kind {
+                TokenKind::FatArrow if self.peek_at(1).kind == TokenKind::LBrace => {
+                    self.bump();
+                    self.parse_item_block(diags, false, "match arm items")?
+                }
+                TokenKind::FatArrow => {
+                    self.bump();
+                    vec![self.parse_item(diags, false)?]
+                }
+                TokenKind::LBrace => self.parse_item_block(diags, false, "match arm items")?,
+                _ => {
+                    return Err(Self::expected(
+                        diags,
+                        self.peek(),
+                        "`=>` or `{` for match arm items",
+                    ))
+                }
+            };
+            arms.push(ItemArm {
+                test: ArmTest::Pattern(pattern, pattern_span),
+                items,
+                span: join_spans(start, self.prev_span()),
+            });
+        }
+        self.bump();
+        let els = if self.peek().kind == TokenKind::KwElse {
+            self.bump();
+            Some(self.parse_item_block(diags, false, "`else` items")?)
+        } else {
+            None
+        };
+        Ok(Conditional {
+            scrutinee: Some(scrutinee),
+            arms,
+            els,
         })
     }
 

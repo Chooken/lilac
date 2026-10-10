@@ -602,13 +602,27 @@ fn scan_usings(src: &str, file: FileId, ns_path: &str) -> Vec<Using> {
     }
     let mut usings = Vec::new();
     for item in &program.items {
-        collect_usings(item, ns_path, &mut usings);
+        collect_usings(item, ns_path, true, &mut usings);
     }
     usings
 }
 
-/// Collects `using`s from `item`, descending into `private` blocks.
-fn collect_usings(item: &Item, ns_path: &str, out: &mut Vec<Using>) {
+/// The `using`s of `program`'s live items (its file in namespace
+/// `ns_path`): conditional items are skipped, since the driver decides them
+/// and splices the selected arm in before resolving.
+#[must_use]
+pub fn usings_of(program: &lilac_ast::Program, ns_path: &str) -> Vec<Using> {
+    let mut usings = Vec::new();
+    for item in &program.items {
+        collect_usings(item, ns_path, false, &mut usings);
+    }
+    usings
+}
+
+/// Collects `using`s from `item`, descending into `private` blocks, and into
+/// every arm of a conditional when `all_arms` is set (the loader loads what
+/// any arm may name).
+fn collect_usings(item: &Item, ns_path: &str, all_arms: bool, out: &mut Vec<Using>) {
     match &item.kind {
         ItemKind::Using {
             path,
@@ -625,7 +639,13 @@ fn collect_usings(item: &Item, ns_path: &str, out: &mut Vec<Using>) {
         }),
         ItemKind::Private { items } => {
             for inner in items {
-                collect_usings(inner, ns_path, out);
+                collect_usings(inner, ns_path, all_arms, out);
+            }
+        }
+        ItemKind::Conditional(conditional) if all_arms => {
+            let arms = conditional.arms.iter().map(|arm| &arm.items);
+            for inner in arms.chain(conditional.els.iter()).flatten() {
+                collect_usings(inner, ns_path, all_arms, out);
             }
         }
         _ => {}

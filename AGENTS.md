@@ -117,6 +117,18 @@
   own namespace, or a second alias of one name, is `E054`
   (`collect_aliases`). Locals shadow aliases; a failed member access on such
   a local says so (`Checker::shadowed_alias`).
+- Conditional items (`ItemKind::Conditional`: a top-level `if` chain or
+  `match` over items) are decided in the driver before resolution
+  (`lilac-driver/src/conditional.rs`), in rounds: resolve with scratch
+  diagnostics (the resolver skips conditionals), build each outermost
+  one's selector (an `if`/`match` value of the arm index), check just the
+  selectors (`lilac_typeck::check_selectors`: hook bodies are parked and
+  queued only when a checked body calls them), fold them
+  (`lilac_lower::evaluate_selectors`), splice the arm in. A selector that
+  fails to check waits while others progress, then reports its in-condition
+  errors (or `E039`); one that checks but is not constant is `E039`. The
+  loader loads every arm's `using`s; `lilac_module::usings_of` resets a
+  file's `using`s to its live items.
 - Visibility reach is ancestor-public + descendant-private (Rust's rule). A
   top-level `private { … }` excludes an item from `using` (importers see it as
   unresolved, not `E026`); an object-member `private { … }` gates external access

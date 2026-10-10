@@ -204,7 +204,50 @@ impl Parser {
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<MatchArm, ErrorGuaranteed> {
-        let (pattern, start) = match self.peek().kind {
+        let (pattern, start) = self.parse_match_pattern(diags)?;
+        let capture = if self.peek().kind == TokenKind::Arrow {
+            self.bump();
+            Some(self.parse_param(diags)?)
+        } else {
+            None
+        };
+        let (body, end) = if self.peek().kind == TokenKind::FatArrow {
+            self.bump();
+            if self.peek().kind == TokenKind::LBrace {
+                let block = self.parse_block(diags)?;
+                let end = block.span;
+                (MatchArmBody::Block(block), end)
+            } else {
+                let stmt = self.parse_stmt(diags)?;
+                let end = stmt.span();
+                (MatchArmBody::Inline(Box::new(stmt)), end)
+            }
+        } else if self.peek().kind == TokenKind::LBrace {
+            let block = self.parse_block(diags)?;
+            let end = block.span;
+            (MatchArmBody::Block(block), end)
+        } else {
+            return Err(Self::expected(
+                diags,
+                self.peek(),
+                "`=>` or `{` for match arm body",
+            ));
+        };
+        Ok(MatchArm {
+            pattern,
+            capture,
+            body,
+            span: join_spans(start, end),
+        })
+    }
+
+    /// A match arm's pattern (`.Tag`, `Enum.Tag` or a literal) and the span
+    /// it starts at.
+    pub(crate) fn parse_match_pattern(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<(MatchPattern, Span), ErrorGuaranteed> {
+        Ok(match self.peek().kind {
             TokenKind::Dot => {
                 let dot = self.bump();
                 let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
@@ -254,40 +297,6 @@ impl Parser {
                     "`.Tag`, `Enum.Tag`, or a literal pattern for match arm",
                 ));
             }
-        };
-        let capture = if self.peek().kind == TokenKind::Arrow {
-            self.bump();
-            Some(self.parse_param(diags)?)
-        } else {
-            None
-        };
-        let (body, end) = if self.peek().kind == TokenKind::FatArrow {
-            self.bump();
-            if self.peek().kind == TokenKind::LBrace {
-                let block = self.parse_block(diags)?;
-                let end = block.span;
-                (MatchArmBody::Block(block), end)
-            } else {
-                let stmt = self.parse_stmt(diags)?;
-                let end = stmt.span();
-                (MatchArmBody::Inline(Box::new(stmt)), end)
-            }
-        } else if self.peek().kind == TokenKind::LBrace {
-            let block = self.parse_block(diags)?;
-            let end = block.span;
-            (MatchArmBody::Block(block), end)
-        } else {
-            return Err(Self::expected(
-                diags,
-                self.peek(),
-                "`=>` or `{` for match arm body",
-            ));
-        };
-        Ok(MatchArm {
-            pattern,
-            capture,
-            body,
-            span: join_spans(start, end),
         })
     }
 

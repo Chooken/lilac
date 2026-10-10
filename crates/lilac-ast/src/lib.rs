@@ -85,9 +85,59 @@ pub enum ItemKind {
         /// Initializer (`None` starts zeroed).
         value: Option<Expr>,
     },
+    /// A top-level `if` or `match` over items. Only the arm its constant
+    /// condition selects exists: the driver splices it in place before the
+    /// program is resolved.
+    Conditional(Conditional),
     /// An item that failed to parse; its `span` covers the consumed tokens.
     /// Carries no name and defines nothing downstream.
     Error,
+}
+
+/// `if a { items } else if b { items } else { items }` or
+/// `match s { .A { items } .B => item } else { items }` at the top level.
+#[derive(Clone, Debug)]
+pub struct Conditional {
+    /// The `match` scrutinee (`None` for an `if` chain).
+    pub scrutinee: Option<Expr>,
+    /// The arms, in order: the first whose test holds is selected.
+    pub arms: Vec<ItemArm>,
+    /// The items of the trailing `else`, if any.
+    pub els: Option<Vec<Item>>,
+}
+
+/// One arm of a [`Conditional`].
+#[derive(Clone, Debug)]
+pub struct ItemArm {
+    /// Its condition (`if` chain) or pattern (`match`).
+    pub test: ArmTest,
+    /// The items it declares.
+    pub items: Vec<Item>,
+    /// Whole-arm span.
+    pub span: Span,
+}
+
+/// The test of an [`ItemArm`].
+#[derive(Clone, Debug)]
+pub enum ArmTest {
+    /// `if cond` / `else if cond`.
+    If(Expr),
+    /// A `match` pattern, with its span.
+    Pattern(MatchPattern, Span),
+}
+
+impl Conditional {
+    /// The spans of what decides the arm: the conditions, or the scrutinee
+    /// and the patterns.
+    #[must_use]
+    pub fn test_spans(&self) -> Vec<Span> {
+        let mut spans: Vec<Span> = self.scrutinee.iter().map(Expr::span).collect();
+        spans.extend(self.arms.iter().map(|arm| match &arm.test {
+            ArmTest::If(cond) => cond.span(),
+            ArmTest::Pattern(_, span) => *span,
+        }));
+        spans
+    }
 }
 
 /// One enum variant: `One` or `Some: @bit32` (payload).

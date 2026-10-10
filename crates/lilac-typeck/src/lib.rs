@@ -30,8 +30,9 @@ mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use lilac_ast::Expr;
 use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed, Unreported};
-use lilac_hir::{FuncKey, HirFunc, HirProgram};
+use lilac_hir::{FuncKey, HirExpr, HirFunc, HirProgram};
 use lilac_resolve::{DefId, DefKind, Resolved};
 use lilac_span::{FileId, Span};
 use lilac_ty::{Builtin, FuncSig, TypeId, TypeKind, TypeRef, Types};
@@ -66,29 +67,7 @@ pub struct Options {
 /// Checks every definition in `res`, generic functions nothing instantiates
 /// included (as templates).
 pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Options) -> Checked {
-    let mut checker = Checker {
-        res,
-        types,
-        diags: Sink::new(diags),
-        native_bits: options.native_bits,
-        require_entry: options.require_entry,
-        entry_unresolved: false,
-        sigs: HashMap::new(),
-        failed_sigs: HashSet::new(),
-        hooks: HashMap::new(),
-        instances: HashMap::new(),
-        queue: VecDeque::new(),
-        type_states: HashMap::new(),
-        type_stack: Vec::new(),
-        arrays: Vec::new(),
-        const_types: HashMap::new(),
-        out: HirProgram::default(),
-        env: Env::default(),
-        instantiated: HashSet::new(),
-        reported: HashSet::new(),
-        origins: HashMap::new(),
-        failures: Vec::new(),
-    };
+    let mut checker = Checker::new(res, types, diags, options);
     checker.run();
     let templates = checker.check_templates();
     let sigs = checker.sigs.clone();
@@ -96,6 +75,94 @@ pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Opti
         hir: std::mem::take(&mut checker.out),
         sigs,
         templates,
+    }
+}
+
+/// What [`check_selectors`] produced.
+#[derive(Clone, Debug, Default)]
+pub struct Selectors {
+    /// What evaluating the selectors needs: constants, the bodies of the
+    /// `=>` functions they call, and layouts.
+    pub hir: HirProgram,
+    /// Each selector checked, or `None` when checking it reported an error.
+    pub values: Vec<Option<HirExpr>>,
+}
+
+/// Checks the selector of each top-level conditional: an expression in
+/// its file's scope whose `@bit32` value is the index of the selected arm.
+/// Only what the selectors reach is checked (plus the hooks and
+/// constants), so code naming items of undecided conditionals stays out
+/// of it.
+pub fn check_selectors(
+    res: &Resolved,
+    types: &mut Types,
+    diags: &mut Diags,
+    options: Options,
+    selectors: &[(FileId, Expr)],
+) -> Selectors {
+    let mut checker = Checker::new(res, types, diags, options);
+    checker.collect_hooks();
+    // Only what a selector reaches is checked. The hook bodies queued so far
+    // (`@entry` reaches the whole program) are parked, and a hook is queued
+    // when something checked calls it (hook calls are not requests).
+    let mut parked: HashSet<FuncKey> = std::mem::take(&mut checker.queue).into_iter().collect();
+    checker.check_consts();
+    checker.drain_queue();
+    // What checked code calls, waiting to be unparked; bodies before
+    // `scanned` were walked for it.
+    let mut called = Vec::new();
+    for value in checker.out.consts.values() {
+        value.walk(&mut |expr| callee_of(expr, &mut called));
+    }
+    let mut scanned = 0;
+    let ty = TypeRef::value(Builtin::Bit32.id());
+    let mut values = Vec::with_capacity(selectors.len());
+    for (file, expr) in selectors {
+        let before = checker.diags.error_count();
+        let env = Env {
+            file: Some(*file),
+            ..Env::default()
+        };
+        let hir = checker.with_env(env, |c| {
+            let mut fcx = body::FnCx::new(Span::dummy());
+            let hir = c.check_expr(&mut fcx, expr, Some(ty.id));
+            c.coerce(hir, ty, expr.span())
+        });
+        hir.walk(&mut |expr| callee_of(expr, &mut called));
+        loop {
+            for func in &checker.out.funcs[scanned..] {
+                if let Some(body) = &func.body {
+                    body.walk_exprs(&mut |expr| callee_of(expr, &mut called));
+                }
+            }
+            scanned = checker.out.funcs.len();
+            for key in called.drain(..) {
+                if parked.remove(&key) {
+                    checker.queue.push_back(key);
+                }
+            }
+            if checker.queue.is_empty() {
+                break;
+            }
+            checker.drain_queue();
+        }
+        values.push((checker.diags.error_count() == before).then_some(hir));
+    }
+    Selectors {
+        hir: std::mem::take(&mut checker.out),
+        values,
+    }
+}
+
+/// Records the function `expr` calls or names, if any.
+fn callee_of(expr: &HirExpr, out: &mut Vec<FuncKey>) {
+    match &expr.kind {
+        lilac_hir::HirExprKind::Call {
+            callee: lilac_hir::HirCallee::Func(key),
+            ..
+        }
+        | lilac_hir::HirExprKind::FuncRef(key) => out.push(key.clone()),
+        _ => {}
     }
 }
 
@@ -249,6 +316,39 @@ pub(crate) struct Checker<'a> {
 pub(crate) const MAX_DEPTH: usize = 16;
 #[cfg(test)]
 pub(crate) const MAX_DEPTH: usize = 4;
+
+impl<'a> Checker<'a> {
+    fn new(
+        res: &'a Resolved,
+        types: &'a mut Types,
+        diags: &'a mut Diags,
+        options: Options,
+    ) -> Self {
+        Self {
+            res,
+            types,
+            diags: Sink::new(diags),
+            native_bits: options.native_bits,
+            require_entry: options.require_entry,
+            entry_unresolved: false,
+            sigs: HashMap::new(),
+            failed_sigs: HashSet::new(),
+            hooks: HashMap::new(),
+            instances: HashMap::new(),
+            queue: VecDeque::new(),
+            type_states: HashMap::new(),
+            type_stack: Vec::new(),
+            arrays: Vec::new(),
+            const_types: HashMap::new(),
+            out: HirProgram::default(),
+            env: Env::default(),
+            instantiated: HashSet::new(),
+            reported: HashSet::new(),
+            origins: HashMap::new(),
+            failures: Vec::new(),
+        }
+    }
+}
 
 impl Checker<'_> {
     fn run(&mut self) {
