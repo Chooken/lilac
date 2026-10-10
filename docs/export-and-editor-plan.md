@@ -1,6 +1,6 @@
 # Export, Linux Leaves and Editor Plan
 
-> Status: Phases 0, 1 and 2 done. Source: the review of the OS layer and
+> Status: Phases 0 to 3 done. Source: the review of the OS layer and
 > the editor on 2026-10-10.
 > Goal: Lilac can define C-callable functions, the Linux-only intrinsics say
 > so in their names, namespaces color like types, and completion after `.`
@@ -113,7 +113,17 @@ A mechanical rename; no behavior changes.
 
 ---
 
-## Phase 3: `export`, C-ABI definitions
+## Phase 3: `export`, C-ABI definitions (done)
+
+As built: the export's body keeps its ordinary symbol (`.root.compare`),
+not `.lilac.export.<symbol>`, since `.lilac.` frames are hidden from stack
+traces; the C entry is `LirFunc::export`. Exports are DCE roots once the
+module has a root (`main` or the entry stub); a library checked alone is
+not pruned, as before. A non-variadic `extern` named as a value is a C
+function too (it was a place-ABI value, which miscompiled a call through
+it). `@linux_thread_clone` takes the entry and its argument and puts both
+on the child's stack. Every program that mounts `Standard` keeps its
+`thread_start` export (`lilac_thread_start`) and `null`.
 
 - **3.1 Syntax.** Make `export` a keyword (`crates/lilac-lex`). Parse
   `name: export function (…) outs { body }` and

@@ -140,7 +140,6 @@ impl Lower<'_> {
             | Intrinsic::Memmove
             | Intrinsic::Memset
             | Intrinsic::LinuxSyscall
-            | Intrinsic::ThreadEntry
             | Intrinsic::LinuxThreadClone
             | Intrinsic::Trap => {
                 let Some(name) = intrinsic.leaf_builtin() else {

@@ -1,11 +1,6 @@
-//! Threads: the entry every new thread runs, Linux's raw `clone`, and the
-//! thread-local storage a native program sets up for itself.
-//!
-//! `.lilac.thread_entry(ptr start) -> ptr` is a C-ABI function an OS thread
-//! starts in (`CreateThread`, `pthread_create`, or the child of `clone`).
-//! `start` points at a `{function, argument}` pair; it calls `function`
-//! with the place ABI, passing `argument`, and returns null. `@thread_entry`
-//! is its address.
+//! Threads: Linux's raw `clone`, and the thread-local storage a native
+//! program sets up for itself. A thread starts in a C function the program
+//! passes (an `export`), as with `CreateThread` and `pthread_create`.
 //!
 //! `@linux_thread_clone` (Linux x86-64 and aarch64) makes a thread with the
 //! `clone` system call. The child needs its own thread-local block, which
@@ -31,8 +26,7 @@ use lilac_error::bug;
 use lilac_span::Span;
 use lilac_target::Arch;
 
-use crate::lower::{checked, Lower};
-use crate::runtime::{byte_ptr, entry, param};
+use crate::lower::Lower;
 
 /// Bytes of the static area the main thread's TLS block is built in.
 const MAIN_TLS_BYTES: u64 = 4096;
@@ -71,57 +65,12 @@ pub(crate) fn append_assembly(module: &Module<'_>, name: &str, assembly: &str) {
     append_ir(module, name, &text);
 }
 
-/// `.lilac.thread_entry(ptr start) -> ptr`: calls `start`'s function with its
-/// argument, then returns null.
-pub(crate) fn thread_entry(lower: &Lower<'_, '_>) {
-    if lower.module().get_function(".lilac.thread_entry").is_some() {
-        return;
-    }
-    let ptr = lower.ptr_type();
-    let function = lower.runtime_fn(".lilac.thread_entry", ptr.fn_type(&[ptr.into()], false));
-    let builder = entry(lower, function);
-    let start = param(function, 0, "thread_entry").into_pointer_value();
-    let callee = checked(builder.build_load(ptr, start, "function"), "load function");
-    let word = lower
-        .native_int()
-        .const_int(u64::from(lower.native_int().get_bit_width() / 8), false);
-    let at = byte_ptr(lower, &builder, start, word);
-    let argument = checked(builder.build_load(ptr, at, "argument"), "load argument");
-    let slot = checked(builder.build_alloca(ptr, "slot"), "argument slot");
-    checked(builder.build_store(slot, argument), "store argument");
-    let fn_type = lower.context().void_type().fn_type(&[ptr.into()], false);
-    checked(
-        builder.build_indirect_call(fn_type, callee.into_pointer_value(), &[slot.into()], ""),
-        "call thread function",
-    );
-    checked(
-        builder.build_return(Some(&ptr.const_null())),
-        "return thread entry",
-    );
-}
-
-/// `@thread_entry() -> ref unknown`: the address of `.lilac.thread_entry`.
-pub(crate) fn thread_entry_address(lower: &Lower<'_, '_>) {
-    thread_entry(lower);
-    let Some(target) = lower.module().get_function(".lilac.thread_entry") else {
-        bug!(Span::dummy(), "`.lilac.thread_entry` was not defined");
-    };
-    let ptr = lower.ptr_type();
-    let function = lower.runtime_fn(".lilac.thread_entry.address", ptr.fn_type(&[], false));
-    let builder = entry(lower, function);
-    checked(
-        builder.build_return(Some(&target.as_global_value().as_pointer_value())),
-        "return thread entry address",
-    );
-}
-
 /// `@linux_thread_clone(flags, stack, parent_tid, child_tid, tls_area, tls_size,
-/// start) -> iNative`: lays out the child's TLS block in `tls_area`, then
-/// `clone`s a thread on `stack` (its top) that runs `.lilac.thread_entry(start)`
-/// and exits. Returns the child's id, a negated errno, or `-ENOMEM` when the
+/// entry, argument) -> iNative`: lays out the child's TLS block in
+/// `tls_area`, then `clone`s a thread on `stack` (its top) that calls the C
+/// function `entry(argument)` and exits. Returns the child's id, a negated errno, or `-ENOMEM` when the
 /// area is too small.
 pub(crate) fn thread_clone(lower: &Lower<'_, '_>) {
-    thread_entry(lower);
     tls_init(lower.module(), lower.arch());
     append_ir(lower.module(), ".lilac.linux_thread_clone", THREAD_CLONE);
     let assembly = match lower.arch() {
@@ -336,9 +285,9 @@ copy:
 /// `.lilac.linux_thread_clone`: the TLS block, then the assembly `clone`.
 const THREAD_CLONE: &str = r"
 declare ptr @.lilac.tls_init(ptr, i64)
-declare i64 @.lilac.clone_raw(i64, ptr, ptr, ptr, ptr, ptr)
+declare i64 @.lilac.clone_raw(i64, ptr, ptr, ptr, ptr)
 
-define i64 @.lilac.linux_thread_clone(i64 %flags, ptr %stack, ptr %parent, ptr %child, ptr %area, i64 %size, ptr %start) {
+define i64 @.lilac.linux_thread_clone(i64 %flags, ptr %stack, ptr %parent, ptr %child, ptr %area, i64 %size, ptr %routine, ptr %argument) {
 entry:
   %tp = call ptr @.lilac.tls_init(ptr %area, i64 %size)
   %small = icmp eq ptr %tp, null
@@ -346,23 +295,28 @@ entry:
 fail:
   ret i64 -12
 clone:
-  %id = call i64 @.lilac.clone_raw(i64 %flags, ptr %stack, ptr %parent, ptr %child, ptr %tp, ptr %start)
+  %top = ptrtoint ptr %stack to i64
+  %aligned = and i64 %top, -16
+  %low = sub i64 %aligned, 16
+  %sp = inttoptr i64 %low to ptr
+  store ptr %argument, ptr %sp, align 8
+  %routine.at = getelementptr i8, ptr %sp, i64 8
+  store ptr %routine, ptr %routine.at, align 8
+  %id = call i64 @.lilac.clone_raw(i64 %flags, ptr %sp, ptr %parent, ptr %child, ptr %tp)
   ret i64 %id
 }
 ";
 
-/// `.lilac.clone_raw(flags, stack, parent_tid, child_tid, tp, start)` on
-/// x86-64: `start` goes on the child's stack, `clone` (56) takes `child_tid`
-/// in `r10` and the thread pointer in `r8`. The child clears the frame
-/// pointer, runs `.lilac.thread_entry(start)` and exits the thread (60).
+/// `.lilac.clone_raw(flags, stack, parent_tid, child_tid, tp)` on x86-64:
+/// `stack` is 16-byte aligned and holds the argument, then the entry.
+/// `clone` (56) takes `child_tid` in `r10` and the thread pointer in `r8`.
+/// The child clears the frame pointer, calls `entry(argument)` and exits
+/// the thread (60).
 const CLONE_X86_64: &str = r#"
 .text
 .type ".lilac.clone_raw",@function
 .p2align 4
 ".lilac.clone_raw":
-    andq $-16, %rsi
-    subq $16, %rsi
-    movq %r9, (%rsi)
     movq %rcx, %r10
     movl $56, %eax
     syscall
@@ -370,7 +324,7 @@ const CLONE_X86_64: &str = r#"
     jnz 1f
     xorl %ebp, %ebp
     movq (%rsp), %rdi
-    callq ".lilac.thread_entry"
+    callq *8(%rsp)
     movl $60, %eax
     xorl %edi, %edi
     syscall
@@ -381,16 +335,13 @@ const CLONE_X86_64: &str = r#"
 
 /// `.lilac.clone_raw` on aarch64: `clone` (220) takes the thread pointer in
 /// `x3` and `child_tid` in `x4`. The child clears the frame and link
-/// registers, runs `.lilac.thread_entry(start)` and exits the thread (93).
+/// registers, calls `entry(argument)` and exits the thread (93).
 const CLONE_AARCH64: &str = r#"
 .text
 .type ".lilac.clone_raw",%function
 .p2align 2
 ".lilac.clone_raw":
 
-    and x1, x1, #-16
-    sub x1, x1, #16
-    str x5, [x1]
     mov x6, x3
     mov x3, x4
     mov x4, x6
@@ -400,7 +351,8 @@ const CLONE_AARCH64: &str = r#"
     mov x29, #0
     mov x30, #0
     ldr x0, [sp]
-    bl ".lilac.thread_entry"
+    ldr x9, [sp, #8]
+    blr x9
     mov x0, #0
     mov x8, #93
     svc #0

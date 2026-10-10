@@ -346,7 +346,9 @@ exists, else a compile error):
   thread, `join(thread) Optional[Error]` waits for it and frees it,
   `yield_thread()`. Windows uses `CreateThread`, macOS `pthread_create`,
   and native Linux its own `clone` thread (`@linux_thread_clone`) on a 1 MiB
-  mapping holding its stack and thread-local block; under `--libc`, Linux
+  mapping holding its stack and thread-local block. Each starts in the
+  `export` `thread_start` (C symbol `lilac_thread_start`), which every
+  program mounting `Standard` keeps; under `--libc`, Linux
   uses `pthread_create`, and a native program that links a shared C
   library should too. The stack-trace head is per thread.
 * **Errors:** `Error`, the common cases by name (`NotFound`,

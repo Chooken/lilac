@@ -32,13 +32,15 @@
   `@linux_syscall` or `@linux_thread_clone` off Linux x86-64/aarch64
   (`Target::has_syscall`) is `E035`, checked after DCE like `E031`
   (`lilac_ir::check_live_syscalls`).
-- Threads (`lilac-codegen-llvm/src/threads.rs`): `@thread_entry` is the
-  address of `.lilac.thread_entry`, a C-ABI `ptr (ptr start)` that calls
-  `start`'s `{function, argument}` with the place ABI; `CreateThread` and
-  `pthread_create` start there. `@linux_thread_clone` is Linux's own thread:
+- Threads (`lilac-codegen-llvm/src/threads.rs`): a thread starts in a C
+  function, `Standard.Os`'s `thread_start` (an `export`, symbol
+  `lilac_thread_start`), which runs the start block's `entry(argument)`;
+  `CreateThread`, `pthread_create` and `@linux_thread_clone` get its
+  address. `@linux_thread_clone` is Linux's own thread:
   `.lilac.tls_init` lays out the child's TLS block from `PT_TLS` (through
-  `__ehdr_start`; variant II on x86-64, I on aarch64), then assembly
-  `clone`s. That code is LLVM IR text linked into the module
+  `__ehdr_start`; variant II on x86-64, I on aarch64), puts the argument
+  and entry on the child's stack, then assembly `clone`s and the child
+  calls the entry. That code is LLVM IR text linked into the module
   (`append_ir`/`append_assembly`: linking appends module assembly, where
   `set_inline_assembly` would replace it). The trace head is
   `thread_local` on Windows, Linux (local-exec) and macOS, so a native
@@ -130,7 +132,7 @@
   root skips `build`, a folder with its own `lilac.json` and a library's
   mount name; a root with no `*.lilac` file (a folder of projects) loads
   only what `using`s reach. `using` is visibility only. DCE prunes unused functions, data and type layouts
-  (`prune_layouts`), so an unused library emits nothing. Extern `ref` slots
+  (`prune_layouts`), so an unused library emits only its `export`s. Extern `ref` slots
   lower as `ref #unknown` (casts at each call), so declarations of one C
   symbol that differ only in pointee merge. `lib/Standard`
   is only usable mounted (`--lib=Standard=lib/Standard`); the run test

@@ -45,9 +45,10 @@ fn an_error_in_an_unused_library_namespace_is_reported() {
     assert!(stderr.contains("Lib/Unused/bad.lilac"), "{stderr}");
 }
 
-/// Mounting `Standard` adds nothing to a program that does not use it.
+/// Mounting `Standard` adds only its exports (the thread start, and what
+/// it calls) to a program that does not use it: every `export` is kept.
 #[test]
-fn an_unused_library_adds_nothing_to_the_ir() {
+fn an_unused_library_adds_only_its_exports_to_the_ir() {
     let dir = scratch("unused_library_ir");
     let main = dir.join("main.lilac");
     write(&main, "main: function () nothing {\n}\n");
@@ -63,10 +64,22 @@ fn an_unused_library_adds_nothing_to_the_ir() {
         );
         out.stdout
     };
+    let functions = |ir: Vec<u8>| -> Vec<String> {
+        String::from_utf8_lossy(&ir)
+            .lines()
+            .filter(|line| line.contains("function @") || line.starts_with("extern "))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(functions(emit(None)), ["function @main"]);
     let mounted = emit(Some(format!("--lib=Standard={}", standard_dir().display())));
     assert_eq!(
-        String::from_utf8_lossy(&emit(None)),
-        String::from_utf8_lossy(&mounted)
+        functions(mounted),
+        [
+            "function @main",
+            "inline function @Standard.Os.null",
+            "function @Standard.Os.thread_start",
+        ]
     );
 }
 

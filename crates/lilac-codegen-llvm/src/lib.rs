@@ -1839,15 +1839,8 @@ mod tests {
             &[],
             &["head"],
         );
-        alloca(&mut insts, "entry", "ref #unknown");
-        call(
-            &mut insts,
-            LirCallee::Builtin("@thread_entry".to_owned()),
-            &[],
-            &["entry"],
-        );
         if clone {
-            let args = ["f", "s", "p", "c", "a", "n", "st"];
+            let args = ["f", "s", "p", "c", "a", "n", "e", "st"];
             for (place, ty) in args.iter().zip([
                 "#bit_native",
                 "ref #unknown",
@@ -1855,6 +1848,7 @@ mod tests {
                 "ref #unknown",
                 "ref #unknown",
                 "#bit_native",
+                "ref #unknown",
                 "ref #unknown",
             ]) {
                 alloca(&mut insts, place, ty);
@@ -1871,7 +1865,7 @@ mod tests {
     }
 
     /// Linux threads: `.lilac.linux_thread_clone` lays out the TLS block and runs
-    /// the assembly `clone`, whose child calls `.lilac.thread_entry`; the
+    /// the assembly `clone`, whose child calls the entry it is given; the
     /// trace head is a local-exec thread-local, so `.lilac.native_main`
     /// first sets up the main thread's block. The entry assembly survives
     /// the clone assembly being appended.
@@ -1884,7 +1878,6 @@ mod tests {
             let text = native_text(triple, thread_insts(true));
             for want in [
                 "@.lilac.trace_head.slot = internal thread_local(localexec) global ptr null",
-                "define ptr @.lilac.thread_entry(ptr",
                 "define i64 @.lilac.linux_thread_clone(i64",
                 "define ptr @.lilac.tls_init(ptr",
                 "\\22.lilac.clone_raw\\22:",
@@ -1903,7 +1896,6 @@ mod tests {
         let text = native_text("x86_64-pc-windows-msvc", thread_insts(false));
         for want in [
             "@.lilac.trace_head.slot = internal thread_local global ptr null",
-            "define ptr @.lilac.thread_entry(ptr",
             "@_tls_used = constant",
             "@_tls_index = global i32 0",
             "__chkstk:",

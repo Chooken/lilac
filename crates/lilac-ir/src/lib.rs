@@ -815,7 +815,6 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
         ),
         "@lilac_abort" => (vec![], vec![]),
         "@linux_syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
-        "@thread_entry" => (vec![], vec![LirTy::opaque_ref()]),
         "@linux_thread_clone" => (
             vec![
                 LirTy::BitNative,
@@ -824,6 +823,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
                 LirTy::opaque_ref(),
                 LirTy::opaque_ref(),
                 LirTy::BitNative,
+                LirTy::opaque_ref(),
                 LirTy::opaque_ref(),
             ],
             vec![LirTy::BitNative],

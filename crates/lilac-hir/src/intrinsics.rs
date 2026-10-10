@@ -350,15 +350,9 @@ pub enum Intrinsic {
     /// `@linux_syscall(number, a0, a1, a2, a3, a4, a5)`: the Linux system-call
     /// instruction (`E035` on other targets).
     LinuxSyscall,
-    /// `@thread_entry()`: the address of the backend's C-ABI thread start
-    /// routine, `ptr (ptr start)`, which calls `start`'s Lilac
-    /// `function (ref unknown) nothing` with its argument (a
-    /// `{ function, argument }` pair). Hand it to `CreateThread`,
-    /// `pthread_create` or `@linux_thread_clone`.
-    ThreadEntry,
     /// `@linux_thread_clone(flags, stack, parent_tid, child_tid, tls_area,
-    /// tls_size, start)`: Linux `clone` of a thread that runs
-    /// `@thread_entry`'s routine on `start` on `stack`, then exits. With
+    /// tls_size, entry, argument)`: Linux `clone` of a thread that calls the
+    /// C function `entry(argument)` on `stack`, then exits. With
     /// `CLONE_SETTLS`, its thread-local storage is built in the zeroed
     /// `tls_area` (`E035` off Linux x86-64/aarch64).
     LinuxThreadClone,
@@ -419,7 +413,7 @@ pub struct Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 28] = [
+    const PLAIN: [(&'static str, Self); 27] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -434,7 +428,6 @@ impl Intrinsic {
         ("@ptr_to_address", Self::PtrToAddress),
         ("@address_to_ptr", Self::AddressToPtr),
         ("@linux_syscall", Self::LinuxSyscall),
-        ("@thread_entry", Self::ThreadEntry),
         ("@linux_thread_clone", Self::LinuxThreadClone),
         ("@trap", Self::Trap),
         ("@byte_buffer_ptr", Self::ByteBufferPtr),
@@ -650,9 +643,7 @@ impl Intrinsic {
             ),
             Self::PtrToAddress => sig(vec![Ref(Ty::Unknown)], Some(Builtin(Ty::BitNative))),
             Self::AddressToPtr => sig(vec![Builtin(Ty::BitNative)], Some(Ref(Ty::Unknown))),
-            Self::LinuxSyscall | Self::ThreadEntry | Self::LinuxThreadClone => {
-                self.system_signature()
-            }
+            Self::LinuxSyscall | Self::LinuxThreadClone => self.system_signature(),
             Self::ByteBufferPtr => sig(vec![Builtin(Ty::ByteBuffer)], Some(Ref(Ty::Bit8))),
             Self::ByteBufferLen => sig(vec![Builtin(Ty::ByteBuffer)], Some(Builtin(Ty::BitNative))),
             Self::ByteBufferFrom => sig(
@@ -678,9 +669,10 @@ impl Intrinsic {
         let opaque = Slot::Ref(Ty::Unknown);
         let (params, result) = match self {
             Self::LinuxSyscall => (vec![native; 7], native),
-            Self::ThreadEntry => (Vec::new(), opaque),
             _ => (
-                vec![native, opaque, opaque, opaque, opaque, native, opaque],
+                vec![
+                    native, opaque, opaque, opaque, opaque, native, opaque, opaque,
+                ],
                 native,
             ),
         };
@@ -699,7 +691,6 @@ impl Intrinsic {
             Self::Memmove => "@memmove",
             Self::Memset => "@memset",
             Self::LinuxSyscall => "@linux_syscall",
-            Self::ThreadEntry => "@thread_entry",
             Self::LinuxThreadClone => "@linux_thread_clone",
             Self::Trap => "@lilac_abort",
 

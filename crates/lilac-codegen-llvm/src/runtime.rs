@@ -52,9 +52,6 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@trace_head") {
         trace_head(lower);
     }
-    if used.contains("@thread_entry") {
-        crate::threads::thread_entry_address(lower);
-    }
     if used.contains("@linux_thread_clone") {
         crate::threads::thread_clone(lower);
     }
