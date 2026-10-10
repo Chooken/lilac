@@ -540,3 +540,35 @@ fn file_watchers_are_registered() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A folder nothing `using`s is still part of the project, so its files
+/// resolve root-relative `using`s instead of compiling as their own folder.
+#[test]
+fn an_unused_folder_compiles_in_its_project() {
+    let dir = temp_project("unused-folder");
+    std::fs::write(dir.join("main.lilac"), "main: function () nothing {\n}\n").expect("write");
+    std::fs::create_dir_all(dir.join("Util")).expect("mkdir");
+    std::fs::write(
+        dir.join("Util").join("util.lilac"),
+        "helper: function () nothing {\n}\n",
+    )
+    .expect("write");
+    std::fs::create_dir_all(dir.join("Geo")).expect("mkdir");
+    let geo = dir.join("Geo").join("geo.lilac");
+    let text = "using Util\n\narea: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&geo, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        Some(&Url::from_directory_path(&dir).expect("root")),
+    );
+    let uri = Url::from_file_path(&geo).expect("uri");
+    did_open(&client, &uri, text);
+    let params = publish_for(&client, &uri);
+    assert!(params.diagnostics.is_empty(), "{:?}", params.diagnostics);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}

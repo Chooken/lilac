@@ -9,10 +9,14 @@
 //! visited once, so cycles terminate. A `using` inside a `private { ... }`
 //! block is honored (it still loads the folder).
 //!
-//! Mounted libraries load whole: after the fixpoint, every folder below each
-//! library whose name is an identifier is reached too, so a library is
-//! checked even where nothing `using`s it. In the project's own folder,
-//! `using` still decides what loads.
+//! Projects and mounted libraries load whole: after the fixpoint, every
+//! folder below the root and each library whose name is an identifier is
+//! reached too, so code is checked (and an editor sees it in the project)
+//! even where nothing `using`s it. `using` itself is visibility only. Below
+//! the root, `build` (the build folder), a folder holding its own
+//! `lilac.json` (another project) and a library's mount name are skipped,
+//! and a root with no `*.lilac` file of its own (a repository holding
+//! several projects) loads only what its `using`s reach.
 //!
 //! `E025` is the module-load error: a `using` whose target is missing or is not
 //! a directory, an unreadable root or library folder, or an unreadable file. Each is
@@ -144,6 +148,7 @@ pub fn load_with_status(
         root_entries,
         None,
         None,
+        true,
         libraries,
         fs,
         sources,
@@ -178,6 +183,7 @@ pub fn load_file(
         Vec::new(),
         Some(file),
         None,
+        false,
         libraries,
         fs,
         sources,
@@ -208,6 +214,7 @@ pub fn load_namespace(
         Vec::new(),
         None,
         Some(namespace),
+        false,
         libraries,
         fs,
         sources,
@@ -217,19 +224,22 @@ pub fn load_namespace(
 
 /// The `using` fixpoint, starting from the root namespace's `root_entries`
 /// (or the already-read `root_file`) and, when given, the namespace `seed`.
-/// Reaching a namespace also reaches its ancestors, so ancestor reach never
-/// depends on what else was imported.
+/// With `whole_root`, every project folder is reached too (see the module
+/// docs). Reaching a namespace also reaches its ancestors, so ancestor reach
+/// never depends on what else was imported.
 #[allow(clippy::too_many_arguments)]
 fn load_from(
     root: &Path,
     root_entries: Vec<PathBuf>,
     root_file: Option<RootFile<'_>>,
     seed: Option<&str>,
+    whole_root: bool,
     libraries: &[(String, PathBuf)],
     fs: &mut dyn Fs,
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> (Project, bool) {
+    let whole_root = whole_root && root_entries.iter().any(|entry| is_lilac_file(entry));
     let mut loader = Loader {
         root,
         libraries,
@@ -269,6 +279,9 @@ fn load_from(
     }
 
     failed |= loader.drain(&mut files, fs, sources, diags);
+    if whole_root {
+        loader.reach_children("", fs);
+    }
     for (name, dir) in libraries {
         if !loader.reach_tree(name, fs) {
             diags.emit(Diagnostic::error(
@@ -411,7 +424,17 @@ impl Loader<'_> {
         if !self.reach(path, fs) {
             return false;
         }
+        self.reach_children(path, fs);
+        true
+    }
+
+    /// Reaches every identifier-named folder below the (reached) namespace
+    /// at `path`, `""` being the project root. In the project's own tree,
+    /// `build`, a folder with its own `lilac.json` and a library's mount
+    /// name are skipped.
+    fn reach_children(&mut self, path: &str, fs: &mut dyn Fs) {
         let ns = self.ns_by_path[path];
+        let in_project = path.is_empty() || !self.is_library(path);
         let mut children: Vec<String> = self.listings[ns]
             .iter()
             .filter(|entry| !is_lilac_file(entry))
@@ -420,10 +443,36 @@ impl Loader<'_> {
             .collect();
         children.sort();
         for child in children {
+            let child_path = if path.is_empty() {
+                child.clone()
+            } else {
+                format!("{path}.{child}")
+            };
+            if in_project && path.is_empty() && (child == "build" || self.is_library(&child)) {
+                continue;
+            }
+            if in_project && self.is_other_project(&child_path, fs) {
+                continue;
+            }
             // A non-folder entry (a stray file) simply fails to list.
-            let _ = self.reach_tree(&format!("{path}.{child}"), fs);
+            let _ = self.reach_tree(&child_path, fs);
         }
-        true
+    }
+
+    /// Whether dotted `path` starts at a mounted library.
+    fn is_library(&self, path: &str) -> bool {
+        let first = path.split('.').next().unwrap_or_default();
+        self.libraries.iter().any(|(name, _)| name == first)
+    }
+
+    /// Whether the folder at dotted `path` holds its own `lilac.json`.
+    fn is_other_project(&self, path: &str, fs: &mut dyn Fs) -> bool {
+        let dir = resolve_dir(self.root, self.libraries, path);
+        fs.list_dir(&dir).is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.file_name() == Some(OsStr::new("lilac.json")))
+        })
     }
 
     fn project(self, files: Vec<FileUnit>) -> Project {
@@ -1023,6 +1072,102 @@ mod tests {
             .collect();
         assert_eq!(paths, ["", "Std", "Std.Io", "Std.Io.Raw"]);
         assert_eq!(project.files.len(), 3);
+    }
+
+    /// A project loads whole too, except its build folder, a nested project
+    /// and a folder named like a library.
+    #[test]
+    fn a_project_loads_every_folder() {
+        let root = PathBuf::from("proj");
+        let lib = PathBuf::from("libs").join("std");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "main.lilac",
+            "main: function () nothing {}
+",
+        );
+        fs.add(
+            &root,
+            "Geo/geo.lilac",
+            "area: function () nothing {}
+",
+        );
+        fs.add(
+            &root,
+            "Geo/Shapes/shapes.lilac",
+            "s: function () nothing {}
+",
+        );
+        fs.add(
+            &root,
+            "build/debug/stray.lilac",
+            "b: function () nothing {}
+",
+        );
+        fs.add(
+            &root,
+            "Other/lilac.json",
+            "{}
+",
+        );
+        fs.add(
+            &root,
+            "Other/main.lilac",
+            "o: function () nothing {}
+",
+        );
+        fs.add(
+            &root,
+            "Std/shadow.lilac",
+            "x: function () nothing {}
+",
+        );
+        fs.add(
+            &lib,
+            "io.lilac",
+            "print: function () nothing {}
+",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Geo", "Geo.Shapes", "Std"]);
+        let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["main.lilac", "geo.lilac", "shapes.lilac", "io.lilac"]
+        );
+    }
+
+    /// A root with no source of its own (a folder of projects) loads only
+    /// what its `using`s reach.
+    #[test]
+    fn a_root_without_source_loads_no_folders() {
+        let root = PathBuf::from("repo");
+        let mut fs = MemFs::new();
+        fs.add(
+            &root,
+            "app/main.lilac",
+            "main: function () nothing {}
+",
+        );
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        assert_eq!(project.namespaces.len(), 1);
+        assert!(project.files.is_empty());
     }
 
     #[test]

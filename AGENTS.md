@@ -88,12 +88,14 @@
   `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
   `Session.libraries` carries them into `lilac_module::load_with_status`.
   `using *.A` is relative to the importing file's namespace.
-- Mounted libraries load whole: after the `using` fixpoint the loader
-  reaches every identifier-named folder under each library
-  (`Loader::reach_tree`; a missing library folder is `E025`), and typeck
-  already checks every non-generic item, so unused library code is checked.
-  `using` is visibility only (in the project's own tree it still decides
-  what loads). DCE prunes unused functions, data and type layouts
+- Projects and mounted libraries load whole: after the `using` fixpoint
+  the loader reaches every identifier-named folder under the root and each
+  library (`Loader::reach_children`; a missing library folder is `E025`),
+  and typeck already checks every non-generic item, so unused code is
+  checked and the editor compiles every project file in its project. The
+  root skips `build`, a folder with its own `lilac.json` and a library's
+  mount name; a root with no `*.lilac` file (a folder of projects) loads
+  only what `using`s reach. `using` is visibility only. DCE prunes unused functions, data and type layouts
   (`prune_layouts`), so an unused library emits nothing. Extern `ref` slots
   lower as `ref #unknown` (casts at each call), so declarations of one C
   symbol that differ only in pointee merge. `lib/Standard`

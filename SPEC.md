@@ -633,10 +633,13 @@ Namespaces mirror folders; no declaration introduces one. Every `*.lilac` file
 directly in a folder belongs to that folder's namespace, and the files in one
 folder **merge**: they see each other's declarations with no import (a same-named
 declaration across them is `E020`). Subfolders are separate namespaces, named by
-their dotted path from the root (`<root>/A/B` is `A.B`). In the project's
-own tree a subfolder is loaded only when a file in an already-loaded namespace
-`using`s it, directly or transitively. A mounted library (below) is loaded
-whole.
+their dotted path from the root (`<root>/A/B` is `A.B`). A project is
+loaded and checked whole, like a mounted library (below): every folder under
+the root whose name is an identifier is a namespace whether or not anything
+`using`s it, so `using` only decides visibility. Skipped are `build` (the
+build folder), a folder holding its own `lilac.json` (another project) and a
+folder named like a mounted library. A root with no `*.lilac` file of its own
+(a folder of projects) loads only what `using`s reach.
 
 **`using`.** `using A.B` resolves root-relative to `<root>/A/B` and makes that
 namespace's public (non-`private`) names visible, unqualified, **in the file that
