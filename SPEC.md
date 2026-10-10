@@ -243,7 +243,7 @@ An expression is constant when it is one of:
 | a `@builtin` constant (`@builtin.Target.os`) | the target or build fact it states |
 | an object or enum-variant literal | if every field / the payload is constant |
 | `value.field` | the field of a constant object |
-| `a == b` | bit equality of two constant integers |
+| `a == b` | bit equality of two constant values of one type (integers, objects, enum variants with their payloads) |
 | `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
 | `a and b`, `a or b` | short-circuit over a constant `a` (`b` only when it decides) |
 | a value `match` | the arm a constant scrutinee selects (a variant pattern binds its capture), else the `else` value |
@@ -1013,10 +1013,11 @@ Resolution order (normative):
    `@add(typeof(a), typeof(b))` overload; no operand conversion is attempted, so
    a miss is `E043` naming the exact pair. A direct `@hook(a)` call likewise
    requires an exact overload: a non-`ref` argument whose type is not the
-   parameter type is `E010`. Numeric literals still take the parameter/operand
-   type (literal typing, not conversion). Typed contexts (let/assign/return,
-   f-string holes) and ordinary function-call arguments still convert as in
-   step 2.
+   parameter type is `E010`. Numeric literals and tags (`.None`, `.Some(x)`)
+   still take the parameter/operand type (literal typing, not conversion), so
+   `os == .Windows` types the tag from `os`. Typed contexts
+   (let/assign/return, f-string holes) and ordinary function-call arguments
+   still convert as in step 2.
 
 `==` never converts: equality is always direct bit-equality.
 

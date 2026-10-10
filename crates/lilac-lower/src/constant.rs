@@ -280,12 +280,11 @@ impl<'a> Lower<'a> {
                 }
                 _ => None,
             },
+            // Bit equality, as lowered: both sides have one type, so equal
+            // values (an integer, the fields of an object, an enum's tag
+            // and payload) are equal bits.
             HirExprKind::Eq(lhs, rhs) => {
-                let (Value::Int(left, _), Value::Int(right, _)) =
-                    (self.eval(eval, lhs)?, self.eval(eval, rhs)?)
-                else {
-                    return None;
-                };
+                let (left, right) = (self.eval(eval, lhs)?, self.eval(eval, rhs)?);
                 Some(Value::Int(u64::from(left == right), 8))
             }
             HirExprKind::If { cond, then, els } => {

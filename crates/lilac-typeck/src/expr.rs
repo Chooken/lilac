@@ -852,7 +852,7 @@ impl Checker<'_> {
         lhs: &Expr,
         rhs: &Expr,
     ) -> (HirExpr, HirExpr) {
-        let (left_lit, right_lit) = (is_foldable_literal(lhs), is_foldable_literal(rhs));
+        let (left_lit, right_lit) = (needs_context(lhs), needs_context(rhs));
         if left_lit && right_lit {
             let left = self.check_expr(fcx, lhs, None);
             let right = self.check_expr(fcx, rhs, None);
@@ -1428,6 +1428,17 @@ fn raw_operator_help(hook: &str, ty: TypeId) -> Option<String> {
         ),
         None => format!("`{name}` has no operators; call `{intrinsic}`"),
     })
+}
+
+/// Whether `expr` takes its type from the other side of a binary operator:
+/// a number literal (or arithmetic over them) or a tag (`.None`,
+/// `.Some(x)`).
+fn needs_context(expr: &Expr) -> bool {
+    match expr {
+        Expr::Tag(..) => true,
+        Expr::Call { callee, .. } => matches!(**callee, Expr::Tag(..)),
+        _ => is_foldable_literal(expr),
+    }
 }
 
 /// The name token of a struct-literal field (fields begin at their name).
