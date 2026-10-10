@@ -63,7 +63,7 @@ pub(crate) struct Lower<'ctx, 'a> {
 
 impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Creates a lowering context over `module` for `triple`, which picks
-    /// `iNative` and the `@syscall` instruction.
+    /// `iNative` and the `@linux_syscall` instruction.
     pub(crate) fn new(
         context: &'ctx Context,
         module: Module<'ctx>,
@@ -1531,7 +1531,7 @@ pub(crate) fn symbol(name: &str) -> &str {
 
 /// The LLVM symbol a `@`-prefixed leaf LIR builtin emits under. `@memcpy`
 /// becomes `.lilac.memcpy` so its in-module definition cannot collide with the
-/// host C library's `memcpy`; `@ptr_add`/`@lilac_abort`/`@syscall` map to
+/// host C library's `memcpy`; `@ptr_add`/`@lilac_abort`/`@linux_syscall` map to
 /// their `.lilac.` leaves (`syscall` is also a C library function).
 fn builtin_symbol(name: &str) -> &str {
     match name {
@@ -1540,10 +1540,10 @@ fn builtin_symbol(name: &str) -> &str {
         "@memset" => ".lilac.memset",
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
-        "@syscall" => ".lilac.syscall",
+        "@linux_syscall" => ".lilac.linux_syscall",
         "@trace_head" => ".lilac.trace_head",
         "@thread_entry" => ".lilac.thread_entry.address",
-        "@thread_clone" => ".lilac.thread_clone",
+        "@linux_thread_clone" => ".lilac.linux_thread_clone",
         other => other.strip_prefix('@').unwrap_or(other),
     }
 }

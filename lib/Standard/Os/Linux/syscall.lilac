@@ -1,4 +1,4 @@
-// Linux system calls, made directly with `@syscall`: no C library, also
+// Linux system calls, made directly with `@linux_syscall`: no C library, also
 // under `--libc`. Names, argument orders and constants are the kernel's,
 // so the man pages document them. Only calls both x86-64 and 64-bit Arm
 // have are here: `openat`, not `open`; `pipe2`, not `pipe`.

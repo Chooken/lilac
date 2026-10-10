@@ -7,7 +7,7 @@
 //! with the place ABI, passing `argument`, and returns null. `@thread_entry`
 //! is its address.
 //!
-//! `@thread_clone` (Linux x86-64 and aarch64) makes a thread with the
+//! `@linux_thread_clone` (Linux x86-64 and aarch64) makes a thread with the
 //! `clone` system call. The child needs its own thread-local block, which
 //! `.lilac.tls_init` lays out in a caller-given zeroed area from the
 //! executable's `PT_TLS` program header (found through `__ehdr_start`): x86-64
@@ -115,7 +115,7 @@ pub(crate) fn thread_entry_address(lower: &Lower<'_, '_>) {
     );
 }
 
-/// `@thread_clone(flags, stack, parent_tid, child_tid, tls_area, tls_size,
+/// `@linux_thread_clone(flags, stack, parent_tid, child_tid, tls_area, tls_size,
 /// start) -> iNative`: lays out the child's TLS block in `tls_area`, then
 /// `clone`s a thread on `stack` (its top) that runs `.lilac.thread_entry(start)`
 /// and exits. Returns the child's id, a negated errno, or `-ENOMEM` when the
@@ -123,13 +123,13 @@ pub(crate) fn thread_entry_address(lower: &Lower<'_, '_>) {
 pub(crate) fn thread_clone(lower: &Lower<'_, '_>) {
     thread_entry(lower);
     tls_init(lower.module(), lower.arch());
-    append_ir(lower.module(), ".lilac.thread_clone", THREAD_CLONE);
+    append_ir(lower.module(), ".lilac.linux_thread_clone", THREAD_CLONE);
     let assembly = match lower.arch() {
         Some(Arch::X86_64) => CLONE_X86_64,
         Some(Arch::Aarch64) => CLONE_AARCH64,
         other => bug!(
             Span::dummy(),
-            "`@thread_clone` has no `clone` for {other:?}"
+            "`@linux_thread_clone` has no `clone` for {other:?}"
         ),
     };
     append_assembly(lower.module(), ".lilac.clone_raw", assembly);
@@ -333,12 +333,12 @@ copy:
 }
 ";
 
-/// `.lilac.thread_clone`: the TLS block, then the assembly `clone`.
+/// `.lilac.linux_thread_clone`: the TLS block, then the assembly `clone`.
 const THREAD_CLONE: &str = r"
 declare ptr @.lilac.tls_init(ptr, i64)
 declare i64 @.lilac.clone_raw(i64, ptr, ptr, ptr, ptr, ptr)
 
-define i64 @.lilac.thread_clone(i64 %flags, ptr %stack, ptr %parent, ptr %child, ptr %area, i64 %size, ptr %start) {
+define i64 @.lilac.linux_thread_clone(i64 %flags, ptr %stack, ptr %parent, ptr %child, ptr %area, i64 %size, ptr %start) {
 entry:
   %tp = call ptr @.lilac.tls_init(ptr %area, i64 %size)
   %small = icmp eq ptr %tp, null

@@ -829,12 +829,12 @@ main: function () nothing {
         assert!(names.contains(&"main"), "{names:?}");
     }
 
-    /// A live `@syscall` off Linux x86-64/aarch64 is `E035`, with the call
+    /// A live `@linux_syscall` off Linux x86-64/aarch64 is `E035`, with the call
     /// chain; an unreachable one, or one on Linux, is fine.
     #[test]
     fn syscall_needs_linux() {
         let src = "call: function () r: @bit_native {
-    r = @syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+    r = @linux_syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
 }
 main: function () nothing {
     r: @bit_native = call()
@@ -845,7 +845,9 @@ main: function () nothing {
         assert!(session.compile_lir("s.lilac", src).is_err());
         let text = session.render_diagnostics();
         assert!(
-            text.contains("error[E035]: `@syscall` is not available on `x86_64-pc-windows-msvc`"),
+            text.contains(
+                "error[E035]: `@linux_syscall` is not available on `x86_64-pc-windows-msvc`"
+            ),
             "{text}"
         );
         assert!(text.contains("at main (s.lilac:5:22)"), "{text}");
@@ -861,7 +863,7 @@ main: function () nothing {
         }
 
         let dead = "call: function () r: @bit_native {
-    r = @syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+    r = @linux_syscall(0x27, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
 }
 main: function () nothing {}
 ";

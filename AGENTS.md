@@ -22,20 +22,20 @@
   once as ordinary LIR in `lilac-ir::runtime` and shared by all backends. It
   makes no OS call: the compiler has no OS layer. Backends hand-write only
   the leaf intrinsics (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`,
-  `@lilac_abort`, `@syscall`: the Linux system-call instruction, and the
+  `@lilac_abort`, `@linux_syscall`: the Linux system-call instruction, and the
   thread leaves below).
 - Instruction builtins (`Intrinsic::leaf_builtin`): `@memcpy`/`@memmove`/
-  `@memset`/`@syscall` call their leaf, `@trap` calls `@lilac_abort` then
+  `@memset`/`@linux_syscall` call their leaf, `@trap` calls `@lilac_abort` then
   ends the block `unreachable`, and the pointer builtins (`@ptr_add`,
   `@ptr_to_address`, `@address_to_ptr`) lower inline to `bitcast`s (and an
   `i.add`). `@align_of` is a constant like `@size_of`. A reachable user
-  `@syscall` or `@thread_clone` off Linux x86-64/aarch64
+  `@linux_syscall` or `@linux_thread_clone` off Linux x86-64/aarch64
   (`Target::has_syscall`) is `E035`, checked after DCE like `E031`
   (`lilac_ir::check_live_syscalls`).
 - Threads (`lilac-codegen-llvm/src/threads.rs`): `@thread_entry` is the
   address of `.lilac.thread_entry`, a C-ABI `ptr (ptr start)` that calls
   `start`'s `{function, argument}` with the place ABI; `CreateThread` and
-  `pthread_create` start there. `@thread_clone` is Linux's own thread:
+  `pthread_create` start there. `@linux_thread_clone` is Linux's own thread:
   `.lilac.tls_init` lays out the child's TLS block from `PT_TLS` (through
   `__ehdr_start`; variant II on x86-64, I on aarch64), then assembly
   `clone`s. That code is LLVM IR text linked into the module
@@ -81,7 +81,7 @@
   place ABI (`LirFunc::uses_c_abi`). `lib/Standard/Runtime` defines the hooks
   over `Standard.Os`.
 - `Standard.Os` is two levels. The raw namespaces `Os.Windows` (kernel32
-  `extern`s), `Os.Linux` (`@syscall` wrappers, the calls x86-64 and Arm
+  `extern`s), `Os.Linux` (`@linux_syscall` wrappers, the calls x86-64 and Arm
   share) and `Os.MacOs` (libSystem `extern`s) mirror the platform exactly:
   its names, argument orders, constant values and failure convention
   (`GetLastError`, raw `-errno` with `is_error`/`errno_of`, `errno()`).

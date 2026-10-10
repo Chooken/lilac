@@ -1,6 +1,6 @@
 # Export, Linux Leaves and Editor Plan
 
-> Status: Phases 0 and 1 done. Source: the review of the OS layer and
+> Status: Phases 0, 1 and 2 done. Source: the review of the OS layer and
 > the editor on 2026-10-10.
 > Goal: Lilac can define C-callable functions, the Linux-only intrinsics say
 > so in their names, namespaces color like types, and completion after `.`
@@ -90,7 +90,7 @@ too (the driver keeps the selector checks' sites).
 
 ---
 
-## Phase 2: `linux_` prefix on the Linux-only intrinsics
+## Phase 2: `linux_` prefix on the Linux-only intrinsics (done)
 
 A mechanical rename; no behavior changes.
 

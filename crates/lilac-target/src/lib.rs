@@ -402,7 +402,7 @@ impl Target {
         }
     }
 
-    /// Whether `@syscall` has an instruction here: Linux on x86-64 or
+    /// Whether `@linux_syscall` has an instruction here: Linux on x86-64 or
     /// aarch64 (`E035` elsewhere).
     #[must_use]
     pub fn has_syscall(&self) -> bool {

@@ -320,7 +320,7 @@ namespace; unused declarations cost nothing (DCE).
 | Namespace | Interface | Failure |
 |---|---|---|
 | `Os.Windows` | kernel32 (`CreateFileW`, `VirtualAlloc`, `SRWLOCK`s, ...), `ProcessPrng`; `windows.h` constants (`STD_OUTPUT_HANDLE`, `MEM_COMMIT`, `ERROR_*`) and structs (`SYSTEM_INFO`, `WIN32_FIND_DATAW`) | `BOOL`/`HANDLE`, then `GetLastError()` |
-| `Os.Linux` | system calls through `@syscall`, the ones x86-64 and 64-bit Arm share (`openat`, `mmap`, `clone`, `futex`, `getrandom`, ...); kernel constants, per architecture where they differ (`O_DIRECTORY`) | the raw `-errno`: `is_error(r)`, `errno_of(r)` |
+| `Os.Linux` | system calls through `@linux_syscall`, the ones x86-64 and 64-bit Arm share (`openat`, `mmap`, `clone`, `futex`, `getrandom`, ...); kernel constants, per architecture where they differ (`O_DIRECTORY`) | the raw `-errno`: `is_error(r)`, `errno_of(r)` |
 | `Os.MacOs` | libSystem (`open`, `mmap`, `clock_gettime_nsec_np`, `getentropy`, `pthread_*`, `os_unfair_lock_*`, ...); Darwin constant values | `-1`/null, then `errno()` |
 
 Every `Os.Windows` function is in `toolchain/windows/*.def` and every
@@ -345,7 +345,7 @@ exists, else a compile error):
   `entry(argument)` (a `function (argument: ref unknown) nothing`) on a new
   thread, `join(thread) Optional[Error]` waits for it and frees it,
   `yield_thread()`. Windows uses `CreateThread`, macOS `pthread_create`,
-  and native Linux its own `clone` thread (`@thread_clone`) on a 1 MiB
+  and native Linux its own `clone` thread (`@linux_thread_clone`) on a 1 MiB
   mapping holding its stack and thread-local block; under `--libc`, Linux
   uses `pthread_create`, and a native program that links a shared C
   library should too. The stack-trace head is per thread.

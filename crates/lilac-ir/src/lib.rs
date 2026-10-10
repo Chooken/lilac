@@ -791,9 +791,9 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
             vec![LirTy::byte_ref()],
         ),
         "@lilac_abort" => (vec![], vec![]),
-        "@syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
+        "@linux_syscall" => (vec![LirTy::BitNative; 7], vec![LirTy::BitNative]),
         "@thread_entry" => (vec![], vec![LirTy::opaque_ref()]),
-        "@thread_clone" => (
+        "@linux_thread_clone" => (
             vec![
                 LirTy::BitNative,
                 LirTy::opaque_ref(),

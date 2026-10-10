@@ -1,14 +1,14 @@
 // Virtual memory (`mmap(2)`, ...). `mmap` and `mremap` return the address,
 // or `-errno` (`is_error`).
 
-mmap: function (addr: ref unknown, length: @bit_native, prot: @bit32, flags: @bit32, fd: @bit32, offset: @bit_native) @bit_native => @syscall(call_number(9, 222), @ptr_to_address(addr), length, @extend_zero(prot), @extend_zero(flags), @extend_sign(fd), offset)
+mmap: function (addr: ref unknown, length: @bit_native, prot: @bit32, flags: @bit32, fd: @bit32, offset: @bit_native) @bit_native => @linux_syscall(call_number(9, 222), @ptr_to_address(addr), length, @extend_zero(prot), @extend_zero(flags), @extend_sign(fd), offset)
 
-munmap: function (addr: ref unknown, length: @bit_native) @bit_native => @syscall(call_number(11, 215), @ptr_to_address(addr), length, 0x0, 0x0, 0x0, 0x0)
+munmap: function (addr: ref unknown, length: @bit_native) @bit_native => @linux_syscall(call_number(11, 215), @ptr_to_address(addr), length, 0x0, 0x0, 0x0, 0x0)
 
-mprotect: function (addr: ref unknown, length: @bit_native, prot: @bit32) @bit_native => @syscall(call_number(10, 226), @ptr_to_address(addr), length, @extend_zero(prot), 0x0, 0x0, 0x0)
+mprotect: function (addr: ref unknown, length: @bit_native, prot: @bit32) @bit_native => @linux_syscall(call_number(10, 226), @ptr_to_address(addr), length, @extend_zero(prot), 0x0, 0x0, 0x0)
 
-madvise: function (addr: ref unknown, length: @bit_native, advice: @bit32) @bit_native => @syscall(call_number(28, 233), @ptr_to_address(addr), length, @extend_zero(advice), 0x0, 0x0, 0x0)
+madvise: function (addr: ref unknown, length: @bit_native, advice: @bit32) @bit_native => @linux_syscall(call_number(28, 233), @ptr_to_address(addr), length, @extend_zero(advice), 0x0, 0x0, 0x0)
 
-mremap: function (old_address: ref unknown, old_size: @bit_native, new_size: @bit_native, flags: @bit32, new_address: ref unknown) @bit_native => @syscall(call_number(25, 216), @ptr_to_address(old_address), old_size, new_size, @extend_zero(flags), @ptr_to_address(new_address), 0x0)
+mremap: function (old_address: ref unknown, old_size: @bit_native, new_size: @bit_native, flags: @bit32, new_address: ref unknown) @bit_native => @linux_syscall(call_number(25, 216), @ptr_to_address(old_address), old_size, new_size, @extend_zero(flags), @ptr_to_address(new_address), 0x0)
 
-msync: function (addr: ref unknown, length: @bit_native, flags: @bit32) @bit_native => @syscall(call_number(26, 227), @ptr_to_address(addr), length, @extend_zero(flags), 0x0, 0x0, 0x0)
+msync: function (addr: ref unknown, length: @bit_native, flags: @bit32) @bit_native => @linux_syscall(call_number(26, 227), @ptr_to_address(addr), length, @extend_zero(flags), 0x0, 0x0, 0x0)

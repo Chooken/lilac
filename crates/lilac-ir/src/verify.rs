@@ -1,5 +1,5 @@
 //! Checking a module: the verifier, and the checks of what stays live
-//! after dead-code elimination (`@compile_error`, `@syscall`).
+//! after dead-code elimination (`@compile_error`, `@linux_syscall`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,7 +53,7 @@ pub fn check_live_compile_errors<S: std::hash::BuildHasher>(
     }
 }
 
-/// `E035` for each `@syscall` or `@thread_clone` a reachable user function
+/// `E035` for each `@linux_syscall` or `@linux_thread_clone` a reachable user function
 /// makes when the target has no system-call instruction (`has_syscall` is
 /// false). The
 /// runtime's own `.lilac.*` calls are the compiler's business, not the user's.
@@ -86,7 +86,7 @@ pub fn check_live_syscalls<S: std::hash::BuildHasher>(
             else {
                 continue;
             };
-            if name != "@syscall" && name != "@thread_clone" {
+            if name != "@linux_syscall" && name != "@linux_thread_clone" {
                 continue;
             }
             failed = true;

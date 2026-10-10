@@ -11,10 +11,10 @@
         .Windows => ExitProcess(code)
         .Linux => match @builtin.Target.arch {
             .X86_64 => {
-                result: @bit_native = @syscall(0xe7, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+                result: @bit_native = @linux_syscall(0xe7, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
             }
             .Aarch64 => {
-                result: @bit_native = @syscall(0x5e, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+                result: @bit_native = @linux_syscall(0x5e, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
             }
         } else {
             exit(code)

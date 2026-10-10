@@ -366,9 +366,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@ptr_add`** | `(ptr, offset)` | The `ref unknown` that is `offset` bytes (`@bit_native`) past `ptr` (`ref unknown`). |
 | **`@ptr_to_address`** | `(ptr)` | The address of `ptr` (`ref unknown`) as a `@bit_native`. |
 | **`@address_to_ptr`** | `(address)` | The `ref unknown` at `address` (`@bit_native`); `@address_to_ptr(0x0)` is null. |
-| **`@syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
-| **`@thread_entry`** | `()` | The address (`ref unknown`) of the compiler's thread entry: a C-ABI function `(start: ref unknown) ref unknown` for `CreateThread`, `pthread_create` or `@thread_clone`. `start` points at two words, a `function (argument: ref unknown) nothing` and its `argument`; the entry calls it and returns null. |
-| **`@thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, start)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child runs the thread entry on `start`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@syscall` (`E035`). |
+| **`@linux_syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
+| **`@thread_entry`** | `()` | The address (`ref unknown`) of the compiler's thread entry: a C-ABI function `(start: ref unknown) ref unknown` for `CreateThread`, `pthread_create` or `@linux_thread_clone`. `start` points at two words, a `function (argument: ref unknown) nothing` and its `argument`; the entry calls it and returns null. |
+| **`@linux_thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, start)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child runs the thread entry on `start`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@linux_syscall` (`E035`). |
 | **`@trap()`** | `()` |
  Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
 | **`@atomic_load_W`** | `(ref @bitW): @bitW` | Atomic load. |
@@ -402,7 +402,7 @@ constants. Pointer math goes through `ref unknown`: cast a typed reference
 to it (`ref value as ref unknown`), move it with `@ptr_add`, and cast it back
 (`as ref T`), which auto-dereferences like any reference.
 The compiler has no operating-system intrinsics. OS access is library code:
-`extern`s and `@syscall`s chosen by `@builtin.Target` (`Standard.Os` uses
+`extern`s and `@linux_syscall`s chosen by `@builtin.Target` (`Standard.Os` uses
 `kernel32` on Windows, system calls on Linux, and the C library on macOS,
 where Apple supports no other), so programs do not depend on a separate C
 library. What the compiler itself needs from the platform, it asks for

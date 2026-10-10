@@ -1,3 +1,3 @@
 // Random bytes (`getrandom(2)`): at most 33554431 bytes per call.
 
-getrandom: function (buf: ref unknown, buflen: @bit_native, flags: @bit32) @bit_native => @syscall(call_number(318, 278), @ptr_to_address(buf), buflen, @extend_zero(flags), 0x0, 0x0, 0x0)
+getrandom: function (buf: ref unknown, buflen: @bit_native, flags: @bit32) @bit_native => @linux_syscall(call_number(318, 278), @ptr_to_address(buf), buflen, @extend_zero(flags), 0x0, 0x0, 0x0)

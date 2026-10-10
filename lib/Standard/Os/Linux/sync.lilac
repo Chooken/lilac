@@ -1,3 +1,3 @@
 // Waiting on memory (`futex(2)`): the primitive under every lock.
 
-futex: function (uaddr: ref unknown, futex_op: @bit32, val: @bit32, timeout: ref unknown, uaddr2: ref unknown, val3: @bit32) @bit_native => @syscall(call_number(202, 98), @ptr_to_address(uaddr), @extend_zero(futex_op), @extend_zero(val), @ptr_to_address(timeout), @ptr_to_address(uaddr2), @extend_zero(val3))
+futex: function (uaddr: ref unknown, futex_op: @bit32, val: @bit32, timeout: ref unknown, uaddr2: ref unknown, val3: @bit32) @bit_native => @linux_syscall(call_number(202, 98), @ptr_to_address(uaddr), @extend_zero(futex_op), @extend_zero(val), @ptr_to_address(timeout), @ptr_to_address(uaddr2), @extend_zero(val3))

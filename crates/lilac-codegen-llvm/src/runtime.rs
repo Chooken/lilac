@@ -5,7 +5,7 @@
 //! normal pointer-ABI function path), so the backend defines only the
 //! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`),
 //! `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
-//! `@lilac_abort` (`llvm.trap` + `unreachable`), `@syscall` (the Linux
+//! `@lilac_abort` (`llvm.trap` + `unreachable`), `@linux_syscall` (the Linux
 //! system-call instruction, as inline assembly), and `@trace_head` (the
 //! address of the shadow-stack head global). Each uses the value ABI from
 //! `lilac_ir::builtin_sig`.
@@ -46,7 +46,7 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@lilac_abort") {
         abort(lower);
     }
-    if used.contains("@syscall") {
+    if used.contains("@linux_syscall") {
         syscall(lower);
     }
     if used.contains("@trace_head") {
@@ -55,7 +55,7 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@thread_entry") {
         crate::threads::thread_entry_address(lower);
     }
-    if used.contains("@thread_clone") {
+    if used.contains("@linux_thread_clone") {
         crate::threads::thread_clone(lower);
     }
 }
@@ -210,7 +210,7 @@ fn abort(lower: &Lower<'_, '_>) {
     checked(builder.build_unreachable(), "abort unreachable");
 }
 
-/// `@syscall(n, a0..a5) -> iNative`: the Linux system-call instruction, with
+/// `@linux_syscall(n, a0..a5) -> iNative`: the Linux system-call instruction, with
 /// the number and six arguments in the kernel's registers and the result
 /// (or `-errno`) in the first. Only 64-bit x86 and Arm have one.
 fn syscall(lower: &Lower<'_, '_>) {
@@ -223,12 +223,15 @@ fn syscall(lower: &Lower<'_, '_>) {
             "svc #0",
             "={x0},{x8},{x0},{x1},{x2},{x3},{x4},{x5},~{memory}",
         ),
-        other => bug!(Span::dummy(), "`@syscall` has no instruction for {other:?}"),
+        other => bug!(
+            Span::dummy(),
+            "`@linux_syscall` has no instruction for {other:?}"
+        ),
     };
     let native = lower.native_int();
     let params = [BasicMetadataTypeEnum::from(native); 7];
     let fn_type = native.fn_type(&params, false);
-    let function = lower.runtime_fn(".lilac.syscall", fn_type);
+    let function = lower.runtime_fn(".lilac.linux_syscall", fn_type);
     let builder = entry(lower, function);
     let instruction = lower.context().create_inline_asm(
         fn_type,
@@ -247,7 +250,7 @@ fn syscall(lower: &Lower<'_, '_>) {
         "syscall",
     );
     let ValueKind::Basic(result) = call.try_as_basic_value() else {
-        bug!(Span::dummy(), "`@syscall` returned void");
+        bug!(Span::dummy(), "`@linux_syscall` returned void");
     };
     checked(builder.build_return(Some(&result)), "return syscall");
 }

@@ -1745,7 +1745,7 @@ mod tests {
         assert!(linux.contains("define ptr @memcpy("), "{linux}");
     }
 
-    /// `@syscall` reaches the kernel through `.lilac.syscall`, the
+    /// `@linux_syscall` reaches the kernel through `.lilac.linux_syscall`, the
     /// architecture's system-call instruction, and the process is entered
     /// through the assembly `.lilac.native_entry`, which calls
     /// `.lilac.native_main` with the arguments from the stack.
@@ -1770,7 +1770,7 @@ mod tests {
             }
             call(
                 &mut insts,
-                LirCallee::Builtin("@syscall".to_owned()),
+                LirCallee::Builtin("@linux_syscall".to_owned()),
                 &args,
                 &["r"],
             );
@@ -1787,7 +1787,7 @@ mod tests {
                 )
                 .expect("builds");
             let text = built.print_to_string().to_string();
-            assert!(text.contains("define i64 @.lilac.syscall("), "{text}");
+            assert!(text.contains("define i64 @.lilac.linux_syscall("), "{text}");
             assert!(text.contains(instruction), "{triple}: {text}");
             assert!(text.contains(entry), "{triple}: {text}");
             assert!(
@@ -1847,7 +1847,7 @@ mod tests {
             alloca(&mut insts, "id", "#bit_native");
             call(
                 &mut insts,
-                LirCallee::Builtin("@thread_clone".to_owned()),
+                LirCallee::Builtin("@linux_thread_clone".to_owned()),
                 &args,
                 &["id"],
             );
@@ -1855,7 +1855,7 @@ mod tests {
         insts
     }
 
-    /// Linux threads: `.lilac.thread_clone` lays out the TLS block and runs
+    /// Linux threads: `.lilac.linux_thread_clone` lays out the TLS block and runs
     /// the assembly `clone`, whose child calls `.lilac.thread_entry`; the
     /// trace head is a local-exec thread-local, so `.lilac.native_main`
     /// first sets up the main thread's block. The entry assembly survives
@@ -1870,7 +1870,7 @@ mod tests {
             for want in [
                 "@.lilac.trace_head.slot = internal thread_local(localexec) global ptr null",
                 "define ptr @.lilac.thread_entry(ptr",
-                "define i64 @.lilac.thread_clone(i64",
+                "define i64 @.lilac.linux_thread_clone(i64",
                 "define ptr @.lilac.tls_init(ptr",
                 "\\22.lilac.clone_raw\\22:",
                 "call void @.lilac.main_tls()",
