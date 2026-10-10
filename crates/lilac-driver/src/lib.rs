@@ -187,11 +187,6 @@ pub struct Session {
     pub opts: Opts,
     /// Optimization level (read by the LLVM backend).
     pub optimize: OptimizeMode,
-    /// Extra reachability roots (`--export=<name>`): functions to keep alive
-    /// even when nothing calls them, so a library can expose entry points.
-    /// Names are qualified source names (`api`, `A.B.api`), mapped to
-    /// symbols by `lilac_lower::export_symbol`.
-    pub exports: HashSet<String>,
     /// Loaded project files: identity to path (empty outside project compiles).
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Mounted libraries (`--lib Name=dir`): `using Name.X` loads `dir/X`.
@@ -230,7 +225,6 @@ impl Default for Session {
             target: Target::default(),
             opts: Opts::default(),
             optimize: OptimizeMode::default(),
-            exports: HashSet::new(),
             project_files: Vec::new(),
             libraries: Vec::new(),
             analysis: None,
@@ -511,13 +505,19 @@ impl Session {
         on_stage("runtime", &lir);
         self.report(Stage::Runtime, DONE);
         self.report(Stage::Prune, StageEvent::Begin);
-        let mut roots: HashSet<String> = self
-            .exports
-            .iter()
-            .map(|name| lilac_lower::export_symbol(name))
-            .collect();
+        let mut roots: HashSet<String> = HashSet::new();
         if self.require_entry {
             roots.insert(".lilac.start".to_owned());
+        }
+        // Every `export` is kept, but only once something roots the module:
+        // with no entry (a library checked alone) nothing is pruned.
+        if self.require_entry || lir.funcs.iter().any(|func| func.name == "main") {
+            roots.extend(
+                lir.funcs
+                    .iter()
+                    .filter(|func| func.export.is_some())
+                    .map(|func| func.name.as_str().to_owned()),
+            );
         }
         lilac_ir::prune_unreachable(&mut lir, &roots);
         self.report(
@@ -1371,15 +1371,14 @@ main: function () nothing {}
         );
     }
 
-    /// An `--export`ed function roots the module: a `@compile_error` in a
-    /// function nothing calls still reports `E031`.
+    /// An `export` roots the module: a `@compile_error` in one nothing
+    /// calls still reports `E031`.
     #[test]
     fn exported_compile_error_is_e031() {
         let mut session = Session::new();
-        session.exports.insert("api".to_owned());
         let result = session.compile_lir(
             "api.lilac",
-            "api: function () nothing {\n    @compile_error(\"api\")\n}\n\nmain: function () nothing {\n}\n",
+            "api: export function () nothing {\n    @compile_error(\"api\")\n}\n\nmain: function () nothing {\n}\n",
         );
         assert!(result.is_err());
         let rendered = session.render_diagnostics();
@@ -1388,21 +1387,21 @@ main: function () nothing {}
         assert!(!rendered.contains("at main"), "{rendered}");
     }
 
-    /// An `--export` root prunes unexported functions even with no `main`, so a
-    /// library keeps exactly its exported entry points.
+    /// An `export` survives pruning beside `main`, under its own symbol; a
+    /// function nothing reaches does not.
     #[test]
-    fn export_roots_without_main_prune_others() {
+    fn exports_are_roots() {
         let mut session = Session::new();
-        session.exports.insert("api".to_owned());
         let module = session
             .compile_lir(
                 "lib.lilac",
-                "api: function () nothing {\n}\n\ndead: function () nothing {\n}\n",
+                "api: export \"lib_api\" function (x: @bit32) y: @bit32 {\n    y = x\n}\n\ndead: function () nothing {\n}\n\nmain: function () nothing {\n}\n",
             )
             .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
-        let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
-        assert!(names.contains(&".root.api"), "{names:?}");
-        assert!(!names.contains(&".root.dead"), "{names:?}");
+        let api = module.funcs.iter().find(|func| func.name == ".root.api");
+        let export = api.and_then(|func| func.export.as_ref());
+        assert_eq!(export.map(|export| export.symbol.as_str()), Some("lib_api"));
+        assert!(module.funcs.iter().all(|func| func.name != ".root.dead"));
     }
 
     /// The platform hooks a program can define itself.

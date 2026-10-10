@@ -1,0 +1,10 @@
+// expect-error: E055
+// expect-stderr: error[E055]: two functions take the C symbol `shared`
+// An `export` defines its symbol, so an `extern` of the same one clashes.
+
+shared: extern function (value: @bit32) nothing
+
+provide: export "shared" function (value: @bit32) nothing {
+}
+
+main: function () nothing {}

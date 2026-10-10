@@ -18,7 +18,7 @@ use std_fs::StdFs;
 const COMMANDS: [&str; 6] = ["check", "emit-ir", "emit-llvm", "build", "explain", "help"];
 
 /// Every flag any command takes (without its `=value`), for did-you-mean.
-const FLAGS: [&str; 21] = [
+const FLAGS: [&str; 20] = [
     "--error-format",
     "--color",
     "--target",
@@ -27,7 +27,6 @@ const FLAGS: [&str; 21] = [
     "--release",
     "--stack-traces",
     "--dump-lir",
-    "--export",
     "--lib",
     "--timings",
     "-q",
@@ -67,7 +66,7 @@ fn unknown_flag(arg: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--export=<name>]... [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]
+    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]
   lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
   lilac explain <code>"
 }
@@ -254,12 +253,6 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             session
                 .libraries
                 .push((name.to_owned(), PathBuf::from(dir)));
-        } else if let Some(name) = arg.strip_prefix("--export=") {
-            if name.is_empty() {
-                eprintln!("--export= needs a name\n{HELP_HINT}");
-                return Err(ExitCode::from(2));
-            }
-            session.exports.insert(name.to_owned());
         } else if arg.starts_with('-') {
             eprintln!("{}", unknown_flag(arg));
             return Err(ExitCode::from(2));

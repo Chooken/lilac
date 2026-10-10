@@ -1,0 +1,5 @@
+api: export function () nothing {
+}
+
+main: function () nothing {
+}

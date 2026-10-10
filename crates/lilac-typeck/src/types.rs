@@ -52,7 +52,7 @@ impl Checker<'_> {
                     .iter()
                     .map(|slot| self.resolve_syntax(&slot.ty))
                     .collect();
-                let id = self.types.intern_func(params, returns);
+                let id = self.types.intern_func_abi(params, returns, func.is_export);
                 TypeRef {
                     id,
                     is_ref: ty.is_ref,
@@ -209,7 +209,9 @@ impl Checker<'_> {
     /// growing is `E051`.
     pub(crate) fn ensure_type(&mut self, ty: TypeRef, span: Span) -> Result<(), ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
-            TypeKind::Func { params, returns } => {
+            TypeKind::Func {
+                params, returns, ..
+            } => {
                 for slot in params.iter().chain(returns.iter()) {
                     self.ensure_type(*slot, span)?;
                 }

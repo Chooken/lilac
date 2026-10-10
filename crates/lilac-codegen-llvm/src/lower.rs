@@ -28,8 +28,9 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst, LirFunc,
-    LirInst, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
+    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst,
+    LirExport, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp,
+    Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Target};
@@ -133,6 +134,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
         for func in &self.lir.funcs {
             self.lower_func(func);
+            if let Some(export) = &func.export {
+                self.emit_export(func, export);
+            }
         }
         self.emit_entry_wrapper(entry);
         Ok(())
@@ -395,6 +399,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             let attribute = self.context.create_enum_attribute(kind, 0);
             function.add_attribute(AttributeLoc::Function, attribute);
         }
+        if let Some(export) = &func.export {
+            let fn_type = self.export_fn_type(export);
+            self.module
+                .add_function(export.symbol.as_str(), fn_type, None);
+        }
         Ok(())
     }
 
@@ -439,6 +448,83 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             Some(return_ty) => return_ty.fn_type(&params, func.variadic),
             None => self.context.void_type().fn_type(&params, func.variadic),
         })
+    }
+
+    /// The C signature of an `export`'s entry.
+    fn export_fn_type(&self, export: &LirExport) -> FunctionType<'ctx> {
+        let c_type = |ty: &LirTy| {
+            self.extern_c_type(ty).unwrap_or_else(|| {
+                bug!(
+                    Span::dummy(),
+                    "export `{}` has the non-C type `{ty}`",
+                    export.symbol
+                )
+            })
+        };
+        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            export.ins.iter().map(|ty| c_type(ty).into()).collect();
+        match export.outs.first() {
+            Some(out) => c_type(out).fn_type(&params, false),
+            None => self.context.void_type().fn_type(&params, false),
+        }
+    }
+
+    /// The C entry of an `export`: `symbol` with its C signature stores
+    /// each argument in a stack slot, calls the function with the place
+    /// ABI (each slot's address, then a slot per out), and returns the out.
+    /// A `ref` slot holds the pointer, as the place ABI passes a `ref`.
+    fn emit_export(&self, func: &LirFunc, export: &LirExport) {
+        let c_type = |ty: &LirTy| {
+            self.extern_c_type(ty).unwrap_or_else(|| {
+                bug!(
+                    Span::dummy(),
+                    "export `{}` has the non-C type `{ty}`",
+                    export.symbol
+                )
+            })
+        };
+        let symbol = export.symbol.as_str();
+        let Some(entry) = self.module.get_function(symbol) else {
+            bug!(Span::dummy(), "export `{symbol}` was not declared");
+        };
+        let Some(body) = self.module.get_function(self::symbol(func.name.as_str())) else {
+            bug!(Span::dummy(), "export of undeclared `{}`", func.name);
+        };
+        let builder = self.context.create_builder();
+        builder.position_at_end(self.context.append_basic_block(entry, "entry"));
+        let mut slots: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (index, ty) in export.ins.iter().enumerate() {
+            let slot = checked(builder.build_alloca(c_type(ty), "arg"), "export argument");
+            let Some(value) = entry.get_nth_param(u32::try_from(index).unwrap_or(u32::MAX)) else {
+                bug!(Span::dummy(), "export `{symbol}` lost a parameter");
+            };
+            checked(builder.build_store(slot, value), "export argument store");
+            slots.push(slot.into());
+        }
+        let outs: Vec<_> = export
+            .outs
+            .iter()
+            .map(|ty| {
+                (
+                    c_type(ty),
+                    checked(builder.build_alloca(c_type(ty), "out"), "export out"),
+                )
+            })
+            .collect();
+        slots.extend(
+            outs.iter()
+                .map(|(_, slot)| BasicMetadataValueEnum::from(*slot)),
+        );
+        checked(builder.build_call(body, &slots, ""), "export call");
+        match outs.first() {
+            Some((ty, slot)) => {
+                let value = checked(builder.build_load(*ty, *slot, "result"), "export result");
+                checked(builder.build_return(Some(&value)), "export return");
+            }
+            None => {
+                checked(builder.build_return(None), "export return");
+            }
+        }
     }
 
     /// Maps a LIR type to its platform C ABI type, or `None` when it is not one
@@ -835,7 +921,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         ty: &LirTy,
         builder: &Builder<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let Some(function) = self.module.get_function(symbol(name.as_str())) else {
+        // An export's address is its C entry's.
+        let export = self
+            .lir
+            .funcs
+            .iter()
+            .find(|func| func.name == *name)
+            .and_then(|func| func.export.as_ref());
+        let target = export.map_or_else(|| symbol(name.as_str()), |export| export.symbol.as_str());
+        let Some(function) = self.module.get_function(target) else {
             bug!(Span::dummy(), "address of unknown function `{name}`");
         };
         let ptr = function.as_global_value().as_pointer_value();
@@ -864,6 +958,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         match callee {
             LirCallee::Func(name) => self.lower_direct_call(name, ins, outs, builder, state),
             LirCallee::Reg(reg) => self.lower_indirect_call(reg, ins, outs, builder, state),
+            LirCallee::CReg(reg) => self.lower_c_indirect_call(reg, ins, outs, builder, state),
             LirCallee::Builtin(name) => self.lower_builtin_call(name, ins, outs, builder, state),
         }
     }
@@ -1016,6 +1111,62 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             builder.build_indirect_call(fn_type, ptr, &args, ""),
             "indirect call",
         );
+    }
+
+    /// An indirect C call: each `in` place is loaded and passed by value
+    /// at its own (C) type, and the result is stored into the `out` place.
+    fn lower_c_indirect_call(
+        &self,
+        reg: &Reg,
+        ins: &[PlaceName],
+        outs: &[PlaceName],
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        let Some(value) = state.regs.get(reg).copied() else {
+            bug!(Span::dummy(), "call through undefined register `{reg}`");
+        };
+        let ptr = match value {
+            BasicValueEnum::PointerValue(ptr) => ptr,
+            BasicValueEnum::IntValue(int) => checked(
+                builder.build_int_to_ptr(int, self.ptr_type(), ""),
+                "inttoptr",
+            ),
+            other => bug!(
+                Span::dummy(),
+                "indirect callee `{reg}` is a `{}`, not a pointer or integer",
+                other.get_type().print_to_string()
+            ),
+        };
+        let place_type = |place: &PlaceName| {
+            let Some(ty) = state.place_types.get(place) else {
+                bug!(Span::dummy(), "C call with the undeclared place `{place}`");
+            };
+            self.lir_type(ty)
+        };
+        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            ins.iter().map(|place| place_type(place).into()).collect();
+        let fn_type = match outs.first() {
+            Some(out) => place_type(out).fn_type(&params, false),
+            None => self.context.void_type().fn_type(&params, false),
+        };
+        let args: Vec<BasicMetadataValueEnum<'ctx>> = ins
+            .iter()
+            .map(|place| self.load_place(place, builder, state).into())
+            .collect();
+        let result = checked(
+            builder.build_indirect_call(fn_type, ptr, &args, ""),
+            "C indirect call",
+        );
+        if let Some(out) = outs.first() {
+            let ValueKind::Basic(value) = result.try_as_basic_value() else {
+                bug!(Span::dummy(), "C call through `{reg}` returned void");
+            };
+            checked(
+                builder.build_store(place_ptr(out, state), value),
+                "C call result store",
+            );
+        }
     }
 
     /// A builtin call uses the value ABI: each input place is loaded, the

@@ -155,6 +155,7 @@ pub(crate) fn print_operand(operand: &LirOperand) -> String {
 pub(crate) fn print_callee(callee: &LirCallee) -> String {
     match callee {
         LirCallee::Reg(reg) => reg.to_string(),
+        LirCallee::CReg(reg) => format!("c {reg}"),
         LirCallee::Func(func) => func.to_string(),
         LirCallee::Builtin(name) => name.clone(),
     }
@@ -428,6 +429,19 @@ pub(crate) fn print_func(func: &LirFunc) -> Vec<(String, Option<Span>)> {
         format!("function {}", func.name)
     };
     let mut lines = vec![(header, None)];
+    if let Some(export) = &func.export {
+        let ins: Vec<String> = export.ins.iter().map(ToString::to_string).collect();
+        let outs: Vec<String> = export.outs.iter().map(ToString::to_string).collect();
+        lines.push((
+            format!(
+                "  export {} ({}) ({})",
+                export.symbol,
+                ins.join(", "),
+                outs.join(", ")
+            ),
+            None,
+        ));
+    }
     for (place, ty) in &func.ins {
         lines.push((format!("  in {ty} {place}"), None));
     }

@@ -259,7 +259,10 @@ impl Checker<'_> {
                 );
                 HirExpr::poison(span)
             }
-            DefKind::Func(_) => {
+            DefKind::Func(decl) => {
+                // An `export` or `extern` is a C function: its value is the
+                // C symbol's address.
+                let c_abi = decl.is_export || decl.is_extern;
                 let generic = self.res.def(def).generic_params.len();
                 if generic > 0 {
                     self.generic_arity(span, name, generic, 0);
@@ -269,7 +272,7 @@ impl Checker<'_> {
                 let Ok(sig) = self.request(key.clone(), span) else {
                     return HirExpr::poison(span);
                 };
-                let id = self.types.intern_func(sig.params, sig.returns);
+                let id = self.types.intern_func_abi(sig.params, sig.returns, c_abi);
                 HirExpr {
                     ty: TypeRef::value(id),
                     span,
@@ -696,6 +699,11 @@ impl Checker<'_> {
 
     /// `operand as T`: one conversion (or a literal pinned to `T`); the
     /// `ref unknown` <-> `ref T` pointer cast is a pure retype.
+    /// Whether `id` is an `export function` type: a C function's address.
+    pub(crate) fn is_c_function(&self, id: TypeId) -> bool {
+        matches!(self.types.kind(id), TypeKind::Func { c_abi: true, .. })
+    }
+
     fn check_cast(&mut self, fcx: &mut FnCx, operand: &Expr, target_ty: &AstType) -> HirExpr {
         let target = self.resolve_type(target_ty);
         let span = operand.span();
@@ -709,7 +717,9 @@ impl Checker<'_> {
                 return value;
             }
             let unknown = Builtin::Unknown.id();
-            if value.ty.is_ref
+            // A C function's address converts to `ref unknown`.
+            let c_function = !value.ty.is_ref && self.is_c_function(value.ty.id);
+            if (value.ty.is_ref || c_function && target.id == unknown)
                 && (value.ty.id == unknown || target.id == unknown || value.ty.id == target.id)
             {
                 return HirExpr {
@@ -724,6 +734,15 @@ impl Checker<'_> {
         let value = self.check_expr(fcx, operand, Some(target.id));
         if value.ty.is_error() {
             return value;
+        }
+        // `ref unknown` converts to a C function type.
+        if value.ty.is_ref && value.ty.id == Builtin::Unknown.id() && self.is_c_function(target.id)
+        {
+            return HirExpr {
+                ty: target,
+                span,
+                kind: HirExprKind::Retype(Box::new(value)),
+            };
         }
         if value.ty.is_ref {
             self.mismatch(target, value.ty, target_ty.span, span);

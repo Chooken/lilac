@@ -1,0 +1,7 @@
+// expect-error: E028
+// expect-stderr: error[E028]: `export function (@bit32) -> @bit32, @bit32` returns 2 values; C returns at most one
+// An `export function` type is a C function's: it returns at most one value.
+
+main: function () nothing {
+    f: export function (x: @bit32) a: @bit32, b: @bit32 = @address_to_ptr(0x0) as export function (x: @bit32) a: @bit32, b: @bit32
+}

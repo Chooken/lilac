@@ -98,6 +98,9 @@ pub struct LirFunc {
     /// Whether this is an `extern` declaration with no body (see
     /// [`Self::uses_c_abi`]).
     pub is_extern: bool,
+    /// The C symbol an `export` defines, calling this function: a C-ABI
+    /// entry the backend writes around it (see [`LirExport`]).
+    pub export: Option<LirExport>,
     /// Whether an `extern` takes C varargs after its `ins` (`...`); a call
     /// may then pass extra `ins` of a [`is_variadic_arg_type`] type.
     pub variadic: bool,
@@ -116,6 +119,21 @@ impl LirFunc {
     pub fn uses_c_abi(&self) -> bool {
         self.is_extern && !self.name.as_str().starts_with(".lilac.")
     }
+}
+
+/// The C entry of an `export`: the backend defines `symbol` with the C
+/// signature `ins` -> `outs` (at most one), which stores each argument in
+/// a stack slot, calls the function with the place ABI, and returns its
+/// out place. Every type is an [`is_c_abi_type`]; a wrapper object's slot
+/// has its field's type, which has the object's layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LirExport {
+    /// The unmangled C symbol.
+    pub symbol: Symbol,
+    /// The C parameter types, one per `in`.
+    pub ins: Vec<LirTy>,
+    /// The C result type, one per `out` (none or one).
+    pub outs: Vec<LirTy>,
 }
 
 /// One labeled block: straight-line instructions plus one terminator.
@@ -145,6 +163,11 @@ pub enum LirOperand {
 pub enum LirCallee {
     /// Indirect call through a register holding a function address.
     Reg(Reg),
+    /// Indirect call through a register holding a C function's address
+    /// (`export function` values), with the C ABI: each `in` place's type
+    /// is its C parameter type, and the `out` place (at most one) holds
+    /// the result. Prints `c &reg`.
+    CReg(Reg),
     /// Direct call by function name.
     Func(Symbol),
     /// Direct call to a compiler builtin leaf (name keeps its `@` sigil,

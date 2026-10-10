@@ -363,6 +363,7 @@ mod tests {
             ins: Vec::new(),
             outs: Vec::new(),
             is_extern: false,
+            export: None,
             variadic: false,
             inline: false,
             blocks: vec![LirBlock {

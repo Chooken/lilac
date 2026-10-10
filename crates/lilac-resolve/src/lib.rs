@@ -380,6 +380,7 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
         };
         collector.top_level(&program.items, Visibility::Public);
     }
+    check_exports(&resolved, diags);
 
     for unit in &project.files {
         let ns = ns_id(unit.ns);
@@ -401,6 +402,72 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
         );
     }
     resolved
+}
+
+/// `E055`: an `export` is a top-level, non-generic function whose C
+/// symbol no other `export` or `extern` takes, and never `main`.
+fn check_exports(resolved: &Resolved, diags: &mut Diags) {
+    // C symbol -> (whether an export takes it, the first declaration).
+    let mut symbols: HashMap<&str, (bool, Span)> = HashMap::new();
+    for def in &resolved.defs {
+        let (DefKind::Func(decl) | DefKind::Hook(decl)) = &def.kind else {
+            continue;
+        };
+        if !decl.is_export && !decl.is_extern {
+            continue;
+        }
+        let symbol = decl.link_name.as_deref().unwrap_or(&def.name);
+        let name_span = def.name_span;
+        if decl.is_export {
+            let wrong = if def.parent.is_some() || matches!(def.kind, DefKind::Hook(_)) {
+                Some((
+                    "an `export` must be a top-level function",
+                    "not a top-level function",
+                ))
+            } else if !def.generic_params.is_empty() {
+                Some((
+                    "an `export` cannot be generic",
+                    "C has one symbol per function",
+                ))
+            } else if symbol == "main" {
+                Some((
+                    "an `export` cannot be named `main`",
+                    "`main` is the program's entry point",
+                ))
+            } else {
+                None
+            };
+            if let Some((message, label)) = wrong {
+                diags.emit(
+                    Diagnostic::error(codes::E055, message)
+                        .label(name_span, true, label)
+                        .help(
+                            "export a top-level function that calls this one, under another name",
+                        ),
+                );
+                continue;
+            }
+        }
+        match symbols.get(symbol) {
+            Some((first_export, first)) if decl.is_export || *first_export => {
+                diags.emit(
+                    Diagnostic::error(
+                        codes::E055,
+                        format!("two functions take the C symbol `{symbol}`"),
+                    )
+                    .label(name_span, true, "declared here")
+                    .label(*first, false, "first declared here")
+                    .help(
+                        "an `export` defines its symbol: no other `export` or `extern` may name it",
+                    ),
+                );
+            }
+            Some(_) => {}
+            None => {
+                symbols.insert(symbol, (decl.is_export, name_span));
+            }
+        }
+    }
 }
 
 fn ns_id(index: usize) -> NsId {

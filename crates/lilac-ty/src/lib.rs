@@ -111,6 +111,8 @@ pub enum TypeKind {
         params: Vec<TypeRef>,
         /// Return-slot types in order.
         returns: Vec<TypeRef>,
+        /// `export function (…)`: a C function, called with the C ABI.
+        c_abi: bool,
     },
     /// Poison for error recovery; never a real type.
     Error,
@@ -233,7 +235,7 @@ pub struct Types {
     kinds: Vec<TypeKind>,
     objects: HashMap<DefId, TypeId>,
     object_names: HashMap<DefId, String>,
-    funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>), TypeId>,
+    funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>, bool), TypeId>,
     params: HashMap<(u32, String), TypeId>,
     instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
     arrays: HashMap<(TypeId, u64), TypeId>,
@@ -338,7 +340,11 @@ impl Types {
                     is_ref: ty.is_ref,
                 }
             }
-            TypeKind::Func { params, returns } => {
+            TypeKind::Func {
+                params,
+                returns,
+                c_abi,
+            } => {
                 let params = params
                     .iter()
                     .map(|param| self.substitute(*param, args))
@@ -347,7 +353,7 @@ impl Types {
                     .iter()
                     .map(|ret| self.substitute(*ret, args))
                     .collect();
-                let id = self.intern_func(params, returns);
+                let id = self.intern_func_abi(params, returns, c_abi);
                 TypeRef {
                     id,
                     is_ref: ty.is_ref,
@@ -363,7 +369,9 @@ impl Types {
             TypeKind::Param { .. } => true,
             TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
             TypeKind::Array { elem, .. } => self.contains_param(*elem),
-            TypeKind::Func { params, returns } => params
+            TypeKind::Func {
+                params, returns, ..
+            } => params
                 .iter()
                 .chain(returns.iter())
                 .any(|slot| self.contains_param(slot.id)),
@@ -401,8 +409,13 @@ impl Types {
                 out
             }
             TypeKind::Array { elem, len } => format!("array.{len}.{}", self.mangle(*elem)),
-            TypeKind::Func { params, returns } => {
-                let mut out = format!("function.{}", params.len());
+            TypeKind::Func {
+                params,
+                returns,
+                c_abi,
+            } => {
+                let abi = if *c_abi { "export." } else { "" };
+                let mut out = format!("{abi}function.{}", params.len());
                 for param in params {
                     out.push('.');
                     out.push_str(&self.mangle_ref(*param));
@@ -436,7 +449,18 @@ impl Types {
 
     /// Interns (or finds) a `function (params) returns` type.
     pub fn intern_func(&mut self, params: Vec<TypeRef>, returns: Vec<TypeRef>) -> TypeId {
-        let key = (params, returns);
+        self.intern_func_abi(params, returns, false)
+    }
+
+    /// Interns (or finds) a function type, an `export function` one (C
+    /// ABI) when `c_abi`.
+    pub fn intern_func_abi(
+        &mut self,
+        params: Vec<TypeRef>,
+        returns: Vec<TypeRef>,
+        c_abi: bool,
+    ) -> TypeId {
+        let key = (params, returns, c_abi);
         if let Some(&id) = self.funcs.get(&key) {
             return id;
         }
@@ -444,6 +468,7 @@ impl Types {
         self.kinds.push(TypeKind::Func {
             params: key.0.clone(),
             returns: key.1.clone(),
+            c_abi,
         });
         self.funcs.insert(key, id);
         id
@@ -485,7 +510,12 @@ impl Types {
                 format!("{}[{}]", self.object_name(*base), args.join(", "))
             }
             TypeKind::Array { elem, len } => format!("@array({}, {len})", self.display(*elem)),
-            TypeKind::Func { params, returns } => {
+            TypeKind::Func {
+                params,
+                returns,
+                c_abi,
+            } => {
+                let abi = if *c_abi { "export " } else { "" };
                 let ps: Vec<String> = params.iter().map(|p| self.display_ref(*p)).collect();
                 let rs: Vec<String> = returns.iter().map(|r| self.display_ref(*r)).collect();
                 let rs = if rs.is_empty() {
@@ -493,7 +523,7 @@ impl Types {
                 } else {
                     rs.join(", ")
                 };
-                format!("function ({}) -> {rs}", ps.join(", "))
+                format!("{abi}function ({}) -> {rs}", ps.join(", "))
             }
             TypeKind::Error => "<error>".to_owned(),
         }

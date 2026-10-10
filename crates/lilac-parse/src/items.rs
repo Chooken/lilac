@@ -41,7 +41,9 @@ impl Parser {
             TokenKind::KwFunction => {
                 ItemKind::Func(self.parse_func_rest(diags, false, generic_params)?)
             }
-            TokenKind::KwExtern => {
+            TokenKind::KwExtern | TokenKind::KwExport => {
+                let is_export = kind_token.kind == TokenKind::KwExport;
+                let keyword = if is_export { "export" } else { "extern" };
                 let link_name = if self.peek().kind == TokenKind::StringLit {
                     let token = self.bump();
                     match String::from_utf8(token.bytes) {
@@ -50,15 +52,19 @@ impl Parser {
                             return Err(Self::err(
                                 diags,
                                 token.span,
-                                "an `extern` link name must be non-empty UTF-8 with no NUL",
+                                &format!(
+                                    "an `{keyword}` link name must be non-empty UTF-8 with no NUL"
+                                ),
                             ))
                         }
                     }
                 } else {
                     None
                 };
-                self.expect(diags, TokenKind::KwFunction, "`function` after `extern`")?;
-                let mut decl = self.parse_func_rest(diags, true, generic_params)?;
+                let after = format!("`function` after `{keyword}`");
+                self.expect(diags, TokenKind::KwFunction, &after)?;
+                let mut decl = self.parse_func_rest(diags, !is_export, generic_params)?;
+                decl.is_export = is_export;
                 decl.link_name = link_name;
                 ItemKind::Func(decl)
             }
@@ -521,6 +527,7 @@ impl Parser {
                             returns: func.returns,
                             body,
                             is_extern: false,
+                            is_export: false,
                             link_name: None,
                             variadic: false,
                         }),
@@ -593,6 +600,7 @@ impl Parser {
             returns,
             body,
             is_extern,
+            is_export: false,
             link_name: None,
             variadic,
         })

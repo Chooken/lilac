@@ -422,6 +422,7 @@ fn lir_func(
             .map(|(place, ty)| ((*place).into(), ty.clone()))
             .collect(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks,
@@ -431,6 +432,7 @@ fn lir_func(
 fn extern_func(name: &str, ins: &[(&str, LirTy)], outs: &[(&str, LirTy)]) -> LirFunc {
     LirFunc {
         is_extern: true,
+        export: None,
         variadic: false,
         ..lir_func(name, ins, outs, Vec::new())
     }
@@ -702,6 +704,7 @@ mod tests {
         module.funcs.extend(hook_externs());
         module.funcs.push(LirFunc {
             is_extern: true,
+            export: None,
             ..super::lir_func(".lilac.entry", &super::entry_params(), &[], Vec::new())
         });
         module.funcs.push(entry_point());

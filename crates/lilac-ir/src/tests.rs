@@ -21,6 +21,7 @@ pub(crate) fn canonical_module() -> LirModule {
             ins: vec![("in".into(), t("#bit32"))],
             outs: vec![("out".into(), t("#bit32"))],
             is_extern: false,
+            export: None,
             variadic: false,
             inline: false,
             blocks: vec![LirBlock {
@@ -136,6 +137,7 @@ fn verify_rejects_copy_place_type_mismatch() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -404,6 +406,7 @@ fn trivial_func(name: &str) -> LirFunc {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -444,6 +447,7 @@ fn verify_accepts_ref_to_ref_copy() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -757,6 +761,7 @@ fn printer_emits_bodyless_extern() {
             ins: vec![("s".into(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
+            export: None,
             variadic: false,
             inline: false,
             blocks: Vec::new(),
@@ -794,6 +799,7 @@ fn extern_module() -> LirModule {
             ins: vec![("s".into(), t("#byte_buffer"))],
             outs: Vec::new(),
             is_extern: true,
+            export: None,
             variadic: false,
             inline: false,
             blocks: Vec::new(),
@@ -864,6 +870,7 @@ fn builtin_call_prints_and_verifies() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -931,6 +938,7 @@ fn data_symbol_const_verifies() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -957,6 +965,7 @@ fn unknown_data_symbol_rejected() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -995,6 +1004,7 @@ fn field_on_byte_buffer_uses_builtin_layout() {
         ins: vec![("buffer".into(), t("#byte_buffer"))],
         outs: vec![("out".into(), t("ref #bit8"))],
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -1078,6 +1088,7 @@ fn spanned_lines_carry_their_own_distinct_spans() {
         ins: Vec::new(),
         outs: Vec::new(),
         is_extern: false,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![LirBlock {
@@ -1164,6 +1175,7 @@ fn spanned_extern_only_module_is_consistent() {
         ins: vec![("s".into(), t("#bit8"))],
         outs: vec![],
         is_extern: true,
+        export: None,
         variadic: false,
         inline: false,
         blocks: vec![],

@@ -1,0 +1,9 @@
+// expect-error: E055
+// expect-stderr: error[E055]: an `export` cannot be generic
+// C has one symbol per function, so an `export` takes no type parameters.
+
+identity[T]: export function (value: T) result: T {
+    result = value
+}
+
+main: function () nothing {}

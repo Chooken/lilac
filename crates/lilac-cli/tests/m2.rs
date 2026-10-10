@@ -391,11 +391,11 @@ fn unexported_function_is_pruned() {
     assert!(!text.contains("function @.root.api"), "{text}");
 }
 
-/// `--export=api` roots `api`, so it survives reachability pruning.
+/// An `export` is a root: `api` survives pruning though nothing calls it.
 #[test]
-fn export_flag_roots_named_function() {
+fn export_roots_function() {
     let output = lilac()
-        .args(["emit-ir", "--export=api", &ui("export_entry.lilac")])
+        .args(["emit-ir", &ui("export_root.lilac")])
         .output()
         .expect("runs lilac");
     assert!(
@@ -405,21 +405,7 @@ fn export_flag_roots_named_function() {
     );
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
     assert!(text.contains("function @.root.api"), "{text}");
-}
-
-/// `--export=` with no name is a usage error (exit 2).
-#[test]
-fn empty_export_is_rejected() {
-    let output = lilac()
-        .args(["check", "--export=", &ui("export_entry.lilac")])
-        .output()
-        .expect("runs lilac");
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--export= needs a name"),
-        "stderr:\n{stderr}"
-    );
+    assert!(text.contains("  export @api () ()"), "{text}");
 }
 
 #[test]

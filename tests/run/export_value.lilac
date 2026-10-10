@@ -1,0 +1,36 @@
+// expect-exit: 0
+// An `export`'s value is a C function: Lilac calls it through a local with
+// the C ABI (a wrapper object passes and returns its field), and converts it
+// to `ref unknown` and back.
+
+using Standard.Process
+
+Wrapped: object {
+    value: @bit32
+}
+
+scale: export "lilac_scale" function (x: Wrapped, by: @bit32) result: Wrapped {
+    result = Wrapped { value = @i_mul_32(x.value, by) }
+}
+
+main: function () nothing {
+    f: export function (x: Wrapped, by: @bit32) result: Wrapped = scale
+    r: Wrapped = f(Wrapped { value = 0x6 }, 0x7)
+    if r.value == 0x2a {
+    } else {
+        exit(0x1)
+    }
+    address: ref unknown = f as ref unknown
+    g: export function (x: Wrapped, by: @bit32) result: Wrapped = address as export function (x: Wrapped, by: @bit32) result: Wrapped
+    s: Wrapped = g(r, 0x2)
+    if s.value == 0x54 {
+    } else {
+        exit(0x2)
+    }
+    // A direct call uses the Lilac ABI.
+    t: Wrapped = scale(s, 0x0)
+    if t.value == 0x0 {
+    } else {
+        exit(0x3)
+    }
+}

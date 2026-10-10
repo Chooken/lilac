@@ -168,8 +168,11 @@ pub struct FuncDecl {
     pub body: Option<FuncBody>,
     /// Whether this is an `extern` (foreign, C ABI) declaration.
     pub is_extern: bool,
-    /// An `extern`'s link name (`extern "write" function …`); `None` links
-    /// under the declared name.
+    /// Whether this is an `export`: a definition C can call, by its link
+    /// name, with the C ABI.
+    pub is_export: bool,
+    /// An `extern` or `export`'s link name (`extern "write" function …`);
+    /// `None` links under the declared name.
     pub link_name: Option<String>,
     /// Whether an `extern` ends its parameters with `...` (C varargs).
     pub variadic: bool,
@@ -290,6 +293,9 @@ pub struct FuncType {
     pub params: Vec<Param>,
     /// Return slots.
     pub returns: Vec<Param>,
+    /// `export function (…)`: a C function's address, called with the C
+    /// ABI.
+    pub is_export: bool,
 }
 
 /// A `{ ... }` statement sequence.

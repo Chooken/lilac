@@ -176,8 +176,7 @@
   `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it
   can never take a C symbol; root `main` stays `main`, and root types and
   their methods stay unprefixed (`Object.Method` already has a `.`).
-  `--export=<name>` takes the source name (`lilac_lower::export_symbol`).
-  `extern` symbols stay unmangled, and a file argument on the CLI
+  `extern` and `export` symbols stay unmangled, and a file argument on the CLI
   is single-file mode (its parent is not a project root).
 
 ## Extern C ABI (M6b)
@@ -199,6 +198,23 @@
   ordinary diagnostic rather than a backend failure. `lilac_ir::is_c_abi_type` is the single accept-set shared by that
   frontend check and `lilac-codegen-llvm`'s signature lowering, so they cannot
   drift.
+- `export` (`FuncDecl::is_export`) is `extern` with a body: C calls it by
+  its unmangled symbol. The resolver checks it (`E055`, `check_exports`:
+  top-level, not generic, not `main`, no other `export` or `extern` of the
+  symbol); `check_extern_signatures` checks its slots (`E028`). It lowers
+  as an ordinary place-ABI function with `LirFunc::export` (a
+  `LirExport`: the symbol and the C slot types), and the backend emits the
+  C entry (`Lower::emit_export`: arguments into stack slots, a place-ABI
+  call, the out returned). Direct Lilac calls skip it. The driver roots
+  every export in DCE once the module has a root (`main` or the entry
+  stub); `--export` is gone.
+- C function values: `export function (…)` (`FuncType::is_export`,
+  `TypeKind::Func::c_abi`). An `export` or non-variadic `extern` named as a
+  value has that type, and `addr.func` of an export is its C entry. A call
+  through one is `LirCallee::CReg` (`call c &r`), lowered by
+  `emit_c_call` like an extern call (wrapper objects pass their field).
+  It converts to and from `ref unknown` with `as` (`check_cast`), and
+  `check_c_function_types` makes a non-C slot or `>1` out `E028`.
 
 ## Build and link
 

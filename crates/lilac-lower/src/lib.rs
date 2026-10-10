@@ -27,15 +27,16 @@ mod intrinsics;
 mod ownership;
 mod symbols;
 
-pub use symbols::{check_extern_signatures, export_symbol};
+pub use symbols::check_extern_signatures;
+use symbols::extern_symbol;
 
 use std::collections::{HashMap, HashSet};
 
 use lilac_error::{codes, Diagnostic, Diags};
 use lilac_hir::{FuncKey, HirFunc, HirProgram, HirStmt, Layout, LocalId};
 use lilac_ir::{
-    ConvertOp, Label, LirBlock, LirConst, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy,
-    PlaceName, Reg, Symbol,
+    ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirModule, LirOperand,
+    LirTerm, LirTy, PlaceName, Reg, Symbol,
 };
 use lilac_resolve::Resolved;
 use lilac_span::{BytePos, SourceMap, Span};
@@ -480,6 +481,7 @@ impl FnState {
             ins: self.ins,
             outs: self.outs,
             is_extern: false,
+            export: None,
             variadic: false,
             inline,
             blocks: self.blocks,
@@ -625,6 +627,7 @@ impl Lower<'_> {
                 ins: state.ins,
                 outs: state.outs,
                 is_extern: true,
+                export: None,
                 variadic: self
                     .res
                     .def(func.key.def)
@@ -654,7 +657,27 @@ impl Lower<'_> {
         if state.open {
             self.drop_scope(&mut state, 0, end);
         }
-        state.finish(symbol, func.inline, end)
+        let mut lowered = state.finish(symbol, func.inline, end);
+        lowered.export = self.export_of(func);
+        lowered
+    }
+
+    /// The C entry of an `export`: its symbol and each slot's C type.
+    fn export_of(&self, func: &HirFunc) -> Option<LirExport> {
+        let decl = self.res.def(func.key.def).func()?;
+        if !decl.is_export {
+            return None;
+        }
+        let abi = |ids: &[LocalId]| -> Vec<LirTy> {
+            ids.iter()
+                .map(|id| self.abi_ty(func.local(*id).ty).0)
+                .collect()
+        };
+        Some(LirExport {
+            symbol: Symbol::new(extern_symbol(self.res, func.key.def)),
+            ins: abi(&func.params),
+            outs: abi(&func.returns),
+        })
     }
 
     /// Declares a local's place (zeroed alloca) and returns it.

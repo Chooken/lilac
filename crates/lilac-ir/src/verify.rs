@@ -8,9 +8,9 @@ use lilac_span::Span;
 
 use crate::print::print_op;
 use crate::{
-    builtin_layout, builtin_sig, fields_of, is_variadic_arg_type, trace, ArithOp, AtomicOrdering,
-    CallGraph, LirBlock, LirCallee, LirConst, LirFunc, LirInst, LirModule, LirOperand, LirTerm,
-    LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
+    builtin_layout, builtin_sig, fields_of, is_c_abi_type, is_variadic_arg_type, trace, ArithOp,
+    AtomicOrdering, CallGraph, LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst,
+    LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
 };
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
@@ -173,6 +173,20 @@ impl Verifier<'_> {
             }
             self.verify_func(func);
         }
+        // An export's C symbol is a function too.
+        for export in self
+            .module
+            .funcs
+            .iter()
+            .filter_map(|func| func.export.as_ref())
+        {
+            if !seen.insert(export.symbol.as_str()) {
+                self.error(
+                    format!("duplicate function `{}`", export.symbol),
+                    Span::dummy(),
+                );
+            }
+        }
     }
 
     /// Whether a type is known: a scalar, a pointer to a known type or to
@@ -190,6 +204,9 @@ impl Verifier<'_> {
     }
 
     fn verify_func<'a>(&mut self, func: &'a LirFunc) {
+        if let Some(export) = &func.export {
+            self.verify_export(func, export);
+        }
         if func.variadic && !func.is_extern {
             self.error(
                 format!("only an extern may be variadic, but `{}` is", func.name),
@@ -234,6 +251,31 @@ impl Verifier<'_> {
 
     /// Validates the signature places shared by functions and externs: no
     /// duplicate place names and every `in`/`out` type known.
+    /// An export's C signature: one C type per place, at most one out.
+    fn verify_export(&mut self, func: &LirFunc, export: &LirExport) {
+        if func.is_extern
+            || export.ins.len() != func.ins.len()
+            || export.outs.len() != func.outs.len()
+            || export.outs.len() > 1
+        {
+            self.error(
+                format!(
+                    "export `{}` of `{}` does not match its function",
+                    export.symbol, func.name
+                ),
+                Span::dummy(),
+            );
+        }
+        for ty in export.ins.iter().chain(&export.outs) {
+            if !is_c_abi_type(ty) {
+                self.error(
+                    format!("export `{}` has the non-C type `{ty}`", export.symbol),
+                    Span::dummy(),
+                );
+            }
+        }
+    }
+
     fn verify_signature<'a>(&mut self, func: &'a LirFunc, places: &mut Places<'a>) {
         for (place, ty) in func.ins.iter().chain(func.outs.iter()) {
             if places.insert(place.as_str(), ty).is_some() {
@@ -785,6 +827,39 @@ impl Verifier<'_> {
         self.define_reg(regs, dst, ty, false, *span, func);
     }
 
+    /// An indirect C call: a defined register, C-typed places, at most one
+    /// out.
+    fn check_c_call(
+        &mut self,
+        reg: &Reg,
+        ins: &[PlaceName],
+        outs: &[PlaceName],
+        places: &Places,
+        span: Span,
+        regs: &Regs,
+    ) {
+        if !regs.contains_key(reg.as_str()) {
+            self.error(format!("call through undefined register `{reg}`"), span);
+        }
+        if outs.len() > 1 {
+            self.error(
+                format!("C call through `{reg}` has {} outs", outs.len()),
+                span,
+            );
+        }
+        for place in ins.iter().chain(outs) {
+            if places
+                .get(place.as_str())
+                .is_some_and(|ty| !is_c_abi_type(ty))
+            {
+                self.error(
+                    format!("C call through `{reg}` passes the non-C place `{place}`"),
+                    span,
+                );
+            }
+        }
+    }
+
     /// Checks a call target: register definedness for indirect calls,
     /// name and arity for direct calls, signature for builtin calls.
     fn check_call_target(
@@ -802,6 +877,7 @@ impl Verifier<'_> {
                     self.error(format!("call through undefined register `{reg}`"), span);
                 }
             }
+            LirCallee::CReg(reg) => self.check_c_call(reg, ins, outs, places, span, regs),
             LirCallee::Func(target) => {
                 let Some(found) = self.module.funcs.iter().find(|func| func.name == *target) else {
                     self.error(format!("call to unknown function `{target}`"), span);

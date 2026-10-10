@@ -54,6 +54,15 @@ impl Parser {
         if first.kind == TokenKind::KwFunction {
             return self.parse_func_type(diags, start, start, false);
         }
+        if first.kind == TokenKind::KwExport {
+            // `export function (…)`: a C function's address.
+            let keyword = self.expect(diags, TokenKind::KwFunction, "`function` after `export`")?;
+            let mut ty = self.parse_func_type(diags, start, keyword.span, false)?;
+            if let TypeShape::Function(func) = &mut ty.shape {
+                func.is_export = true;
+            }
+            return Ok(ty);
+        }
         let (is_ref, name_token) = match first.kind {
             TokenKind::KwRef => {
                 if self.peek().kind == TokenKind::KwRef {
@@ -206,7 +215,11 @@ impl Parser {
             .last()
             .map_or_else(|| self.prev_span(), |param| param.span);
         Ok(Type {
-            shape: TypeShape::Function(FuncType { params, returns }),
+            shape: TypeShape::Function(FuncType {
+                params,
+                returns,
+                is_export: false,
+            }),
             name_span,
             is_ref,
             span: join_spans(start, end),
@@ -286,6 +299,7 @@ pub(crate) fn starts_type(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::KwFunction
+            | TokenKind::KwExport
             | TokenKind::KwRef
             | TokenKind::At
             | TokenKind::Ident

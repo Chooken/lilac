@@ -219,8 +219,8 @@ therefore the caller's explicit choice of sink, never hidden sugar behavior.
 Two rules decide whether a `@compile_error(msg)` is an error:
 
 1. **Reachability.** A `@compile_error` is `E031` exactly when the function
-   containing it is reachable from the program's roots (`main`, `--export`
-   names) after generic instantiation. One in an uncalled function or an
+   containing it is reachable from the program's roots (`main` and every
+   `export`) after generic instantiation. One in an uncalled function or an
    unused hook is silently dropped. The `E031` diagnostic notes one shortest
    call chain from a root, innermost first, in stack-trace form
    (`at Holder[@bit32].make (main.lilac:5:9)`); compiler glue frames are
@@ -1190,18 +1190,55 @@ to check against, so each must carry its own:
   (widen them with `as`).
 
 A variadic `extern` cannot be used as a function value (`E028`): function
-types have no `...`. The backend declares it with a C variadic prototype,
+types have no `...`. A non-variadic one named as a value is a C function
+(see `export`). The backend declares it with a C variadic prototype,
 so each target's varargs convention applies (on Apple arm64, varargs go on the
 stack, which a fixed prototype gets wrong).
 
-### export (reserved)
+### export (C-callable definitions)
 
-The dual direction — foreign code calling into Lilac (thread entry points,
-callbacks) — needs exported symbols. The `export` keyword is reserved for this
-and unspecified in v1. Until it lands, `--export=<name>` on the CLI (repeatable)
-seeds the reachability roots alongside `main`, so a named function is kept alive
-even when nothing calls it; it does not change the ABI or emit a C-callable
-symbol.
+`export` is the other direction: a function with a body that C calls, by
+an unmangled symbol, with the platform C ABI. Like `extern`, a string after
+it names the symbol; otherwise it is the declared name.
+
+```lilac
+compare: export function (a: ref @bit32, b: ref @bit32) order: @bit32 {
+    order = 0x0
+}
+
+lilac_scale: export "scale" function (x: @bit32) y: @bit32 => @i_mul_32(x, 0x2)
+```
+
+Rules (`E055` unless noted):
+
+- An `export` is a top-level function: not a method, a hook or generic.
+- Its symbol is not `main`, and no other `export` or `extern` names it (an
+  `export` defines the symbol; a second definition or a declaration of it
+  would clash).
+- Its parameters and result follow the `extern` rules: C types, at most one
+  result (`E028`).
+- Every `export` is kept: it is a reachability root beside `main`, in the
+  project and in mounted libraries alike, so an unused one still emits.
+
+Lilac calls an `export` by name like any function (the Lilac ABI, no C
+conversion). Named as a value, it is a C function: its type is
+`export function (params) outs`, and its value is the C symbol's address.
+
+**C function values.** `export function (params) outs` is the type of a C
+function's address. It is a C type, so it passes to and from `extern`s
+(`qsort`'s comparator, a thread start routine), and calling a value of it
+uses the C ABI. Its slots follow the `extern` rules (`E028`). An `export`
+or a non-variadic `extern` named as a value has this type. It converts to
+and from `ref unknown` with `as`; a Lilac `function` value never converts
+to it, since the two ABIs differ.
+
+```lilac
+qsort: extern function (base: ref unknown, count: @bit_native, size: @bit_native, compare: export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
+
+sort: function (values: ref unknown, count: @bit_native) nothing {
+    qsort(values, count, 0x4, compare)
+}
+```
 
 ### Async lives in the standard library
 

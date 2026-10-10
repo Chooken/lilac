@@ -21,7 +21,8 @@ pub(crate) fn extern_symbol(res: &Resolved, def: lilac_resolve::DefId) -> String
         .unwrap_or_else(|| def.name.clone())
 }
 
-/// Diagnoses `extern` signatures the C ABI cannot carry (`E028`): parameters
+/// Diagnoses `extern` and `export` signatures the C ABI cannot carry
+/// (`E028`): parameters
 /// and returns must be bit integers, floats, `ref T`, or an object wrapping
 /// exactly one such field; at most one return; never linked as `main`. Two
 /// externs with one link name must declare the same C signature.
@@ -46,9 +47,19 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         funcs: HashMap::new(),
     };
     check_link_names(&lower, diags);
-    for func in hir.funcs.iter().filter(|func| func.body.is_none()) {
+    check_c_function_types(&lower, diags);
+    for func in &hir.funcs {
+        let is_export = res
+            .def(func.key.def)
+            .func()
+            .is_some_and(|decl| decl.is_export);
+        if func.body.is_some() && !is_export {
+            continue;
+        }
+        let kind = if is_export { "export" } else { "extern" };
         let name = &extern_symbol(res, func.key.def);
-        if name == "main" {
+        // An export named `main` is `E055`.
+        if name == "main" && !is_export {
             diags.emit(
                 Diagnostic::error(
                     codes::E028,
@@ -74,9 +85,9 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
             if !lilac_ir::is_c_abi_type(&ty) {
                 let place = place(*id, "arg");
                 diags.emit(
-                    Diagnostic::error(codes::E028, format!("`extern` parameter `{place}` has unsupported C type `{ty}`"))
+                    Diagnostic::error(codes::E028, format!("`{kind}` parameter `{place}` has unsupported C type `{ty}`"))
                         .label(local.span, true, "not a C ABI type")
-                        .help("`extern` parameters must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+                        .help(format!("`{kind}` parameters must be a bit integer, a float, `ref T`, or an object wrapping one of those")),
                 );
             }
         }
@@ -86,12 +97,12 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
                 Diagnostic::error(
                     codes::E028,
                     format!(
-                        "`extern` function `{name}` declares {} out places; at most one is allowed",
+                        "`{kind}` function `{name}` declares {} out places; at most one is allowed",
                         func.returns.len()
                     ),
                 )
                 .label(slot, true, "extra out place")
-                .help("an `extern` may return at most one C value"),
+                .help(format!("an `{kind}` may return at most one C value")),
             );
         } else if let Some(id) = func.returns.first() {
             let local = func.local(*id);
@@ -99,11 +110,49 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
             if !lilac_ir::is_c_abi_type(&ty) {
                 let place = place(*id, "out");
                 diags.emit(
-                    Diagnostic::error(codes::E028, format!("`extern` return `{place}` has unsupported C type `{ty}`"))
+                    Diagnostic::error(codes::E028, format!("`{kind}` return `{place}` has unsupported C type `{ty}`"))
                         .label(local.span, true, "not a C ABI type")
-                        .help("`extern` returns must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+                        .help(format!("`{kind}` returns must be a bit integer, a float, `ref T`, or an object wrapping one of those")),
                 );
             }
+        }
+    }
+}
+
+/// `E028` for an `export function` type C cannot carry: each slot must be
+/// a C type, with at most one result. Reported once per type, at the
+/// first local of it.
+fn check_c_function_types(lower: &Lower<'_>, diags: &mut Diags) {
+    let mut seen: HashSet<TypeId> = HashSet::new();
+    for func in &lower.hir.funcs {
+        for local in &func.locals {
+            let TypeKind::Func {
+                params,
+                returns,
+                c_abi: true,
+            } = lower.types.kind(local.ty.id)
+            else {
+                continue;
+            };
+            if !seen.insert(local.ty.id) {
+                continue;
+            }
+            let name = lower.types.display(local.ty.id);
+            let bad = params
+                .iter()
+                .chain(returns)
+                .map(|slot| lower.abi_ty(*slot).0)
+                .find(|ty| !lilac_ir::is_c_abi_type(ty));
+            let problem = match (bad, returns.len()) {
+                (Some(ty), _) => format!("has the non-C slot type `{ty}`"),
+                (None, 0 | 1) => continue,
+                (None, count) => format!("returns {count} values; C returns at most one"),
+            };
+            diags.emit(
+                Diagnostic::error(codes::E028, format!("`{name}` {problem}"))
+                    .label(local.span, true, "a C function type")
+                    .help("C function slots must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+            );
         }
     }
 }
@@ -152,20 +201,6 @@ pub(crate) fn check_link_names(lower: &Lower<'_>, diags: &mut Diags) {
                 linked.insert(name, (sig, text, func.span));
             }
         }
-    }
-}
-
-/// The symbol of the non-generic free function with qualified source name
-/// `name` (`api` is `.root.api`, `A.B.api` stays): how `--export` names
-/// a root.
-#[must_use]
-pub fn export_symbol(name: &str) -> String {
-    match name.rsplit_once('.') {
-        Some(_) => name.to_owned(),
-        None => match namespace_prefix("", name).as_str() {
-            "" => name.to_owned(),
-            prefix => format!("{prefix}.{name}"),
-        },
     }
 }
 

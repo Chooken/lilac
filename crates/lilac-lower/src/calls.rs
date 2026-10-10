@@ -1,9 +1,9 @@
 //! Calls: Lilac calls and `extern` calls through the C ABI.
 
-use lilac_hir::{FuncKey, HirCallee, HirExpr, HirFunc, Layout};
-use lilac_ir::{LirCallee, LirInst, LirOperand, LirTy, PlaceName};
+use lilac_hir::{FuncKey, HirCallee, HirExpr, HirFunc, Layout, LocalId};
+use lilac_ir::{LirCallee, LirInst, LirOperand, LirTy, PlaceName, Reg};
 use lilac_span::Span;
-use lilac_ty::TypeRef;
+use lilac_ty::{TypeKind, TypeRef};
 
 use crate::symbols::c_ty;
 use crate::{FnState, Lower};
@@ -50,22 +50,31 @@ impl Lower<'_> {
                 return;
             }
         }
+        if let HirCallee::Local(id) = callee {
+            if let TypeKind::Func {
+                returns,
+                c_abi: true,
+                ..
+            } = self.types.kind(func.local(*id).ty.id)
+            {
+                let returns = returns.clone();
+                let reg = callee_reg(state, *id, span);
+                self.emit_c_call(
+                    state,
+                    func,
+                    LirCallee::CReg(reg),
+                    args,
+                    outs,
+                    &returns,
+                    span,
+                );
+                return;
+            }
+        }
         let ins: Vec<PlaceName> = args.iter().map(|arg| self.arg(state, func, arg)).collect();
         let target = match callee {
             HirCallee::Func(key) => LirCallee::Func(self.symbol(key)),
-            HirCallee::Local(id) => {
-                let Some(place) = state.places.get(id).cloned() else {
-                    lilac_error::bug!(span, "call through an undeclared local");
-                };
-                let reg = state.reg();
-                state.emit(LirInst::CopyReg {
-                    src: LirOperand::Place(place),
-                    dst: reg.clone(),
-                    ty: LirTy::opaque_ref(),
-                    span,
-                });
-                LirCallee::Reg(reg)
-            }
+            HirCallee::Local(id) => LirCallee::Reg(callee_reg(state, *id, span)),
             HirCallee::Intrinsic(_) => {
                 lilac_error::bug!(span, "intrinsic in the general call path")
             }
@@ -78,7 +87,7 @@ impl Lower<'_> {
         });
     }
 
-    /// A C ABI call: wrapper objects pass (and return) their single field.
+    /// A call to an `extern`, with the C ABI ([`Self::emit_c_call`]).
     pub(crate) fn emit_extern_call(
         &mut self,
         state: &mut FnState,
@@ -86,6 +95,37 @@ impl Lower<'_> {
         key: &FuncKey,
         args: &[HirExpr],
         outs: &[PlaceName],
+        span: Span,
+    ) {
+        let symbol = self.symbol(key);
+        let returns: Vec<TypeRef> = self
+            .hir
+            .funcs
+            .iter()
+            .find(|candidate| candidate.key == *key)
+            .map(|callee| {
+                callee
+                    .returns
+                    .iter()
+                    .map(|id| callee.local(*id).ty)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let target = LirCallee::Func(symbol);
+        self.emit_c_call(state, func, target, args, outs, &returns, span);
+    }
+
+    /// A C ABI call to `target` returning `returns`: wrapper objects pass
+    /// (and return) their single field.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_c_call(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        target: LirCallee,
+        args: &[HirExpr],
+        outs: &[PlaceName],
+        returns: &[TypeRef],
         span: Span,
     ) {
         let mut ins = Vec::with_capacity(args.len());
@@ -123,23 +163,9 @@ impl Lower<'_> {
             });
             ins.push(inner);
         }
-        let symbol = self.symbol(key);
-        let returns: Vec<TypeRef> = self
-            .hir
-            .funcs
-            .iter()
-            .find(|candidate| candidate.key == *key)
-            .map(|callee| {
-                callee
-                    .returns
-                    .iter()
-                    .map(|id| callee.local(*id).ty)
-                    .collect()
-            })
-            .unwrap_or_default();
         let mut call_outs = Vec::with_capacity(outs.len());
         let mut rewrap = Vec::new();
-        for (out, ty) in outs.iter().zip(&returns) {
+        for (out, ty) in outs.iter().zip(returns) {
             let (slot, wrapped) = self.abi_slot(*ty);
             let abi = c_ty(slot.clone());
             if wrapped || abi != slot {
@@ -151,7 +177,7 @@ impl Lower<'_> {
             }
         }
         state.emit(LirInst::Call {
-            func: LirCallee::Func(symbol),
+            func: target,
             ins,
             outs: call_outs,
             span,
@@ -181,4 +207,19 @@ impl Lower<'_> {
             }
         }
     }
+}
+
+/// The function address a local holds, in a register.
+fn callee_reg(state: &mut FnState, id: LocalId, span: Span) -> Reg {
+    let Some(place) = state.places.get(&id).cloned() else {
+        lilac_error::bug!(span, "call through an undeclared local");
+    };
+    let reg = state.reg();
+    state.emit(LirInst::CopyReg {
+        src: LirOperand::Place(place),
+        dst: reg.clone(),
+        ty: LirTy::opaque_ref(),
+        span,
+    });
+    reg
 }

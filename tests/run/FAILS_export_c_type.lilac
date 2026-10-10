@@ -1,0 +1,13 @@
+// expect-error: E028
+// expect-stderr: error[E028]: `export` parameter `pair` has unsupported C type `#Pair`
+// An `export` takes C types: an object of two fields is not one.
+
+Pair: object {
+    a: @bit32
+    b: @bit32
+}
+
+take: export function (pair: Pair) nothing {
+}
+
+main: function () nothing {}

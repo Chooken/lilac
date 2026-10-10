@@ -159,7 +159,10 @@ impl Checker<'_> {
                 return Err(self.callee_failed(fcx, args, error));
             }
             let ty = fcx.ty(local);
-            let TypeKind::Func { params, returns } = self.types.kind(ty.id).clone() else {
+            let TypeKind::Func {
+                params, returns, ..
+            } = self.types.kind(ty.id).clone()
+            else {
                 let error = self.diags.emit(
                     Diagnostic::error(codes::E022, format!("`{name}` is not callable")).label(
                         name_span,

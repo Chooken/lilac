@@ -109,6 +109,23 @@ extern @ext_name
     out #type %out_1
 ```
 
+An `export` is an ordinary function with an `export` line naming the C
+symbol it defines and that symbol's C signature (one C type per `in`, at
+most one result). The backend emits that symbol as a C function which
+stores each argument in a stack slot, calls the function with the slots,
+and returns its out place. `addr.func` of the function is the C symbol's
+address.
+```lilac-ir
+function @.root.compare
+  export @compare (ref #unknown, ref #unknown) (#bit32)
+  in ref #bit32 %a
+  in ref #bit32 %b
+  out #bit32 %order
+{
+  ...
+}
+```
+
 Labels can be defined inside function blocks:
 ```lilac-ir
 {
@@ -274,6 +291,14 @@ as produced by `tests/ui/arrays.lir`.
 * `in` then `out` operands in signature order; arity and types are verified
 ```lilac-ir
 call &f (in %a) (out %b)
+```
+
+`call c &f` calls a C function's address (an `export function` value) with
+the platform C ABI: each `in` place's type is its C parameter type, and the
+`out` place (at most one) receives the C result. Every place must be a C
+type.
+```lilac-ir
+call c &f (in %a) (out %b)
 ```
 
 ### builtin calls

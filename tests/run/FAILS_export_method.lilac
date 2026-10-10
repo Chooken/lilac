@@ -1,0 +1,12 @@
+// expect-error: E055
+// expect-stderr: error[E055]: an `export` must be a top-level function
+// An `export` is a top-level function: a method has no C symbol.
+
+Counter: object {
+    count: @bit32
+
+    bump: export function (self) nothing {
+    }
+}
+
+main: function () nothing {}

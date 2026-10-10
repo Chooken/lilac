@@ -21,6 +21,12 @@ write: extern function
 //     ^^^^^^ storage.type.lilac
 //            ^^^^^^^^ storage.type.lilac
 
+compare: export function
+// <------- entity.name.function.lilac
+//     ^ keyword.operator.lilac
+//       ^^^^^^ storage.type.lilac
+//              ^^^^^^^^ storage.type.lilac
+
 // SYNTAX TEST "source.lilac" "keywords"
 
 if x
