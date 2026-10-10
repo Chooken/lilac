@@ -15,10 +15,12 @@ using Standard.Os as Os
 }
 
 @exit: function (code: @bit32) nothing {
-    Os.exit_process(code)
+    Os.exit(code)
 }
 
 // Panic messages and stack traces go to standard error.
 @compiler_print: function (text: @byte_buffer) nothing {
-    Os.write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    data: ref @bit8 = @byte_buffer_ptr(text)
+    error: Optional[Os.Error] = Os.write_all(Os.standard_error(), data as ref unknown, @byte_buffer_len(text))
+
 }

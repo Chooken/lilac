@@ -1,0 +1,179 @@
+// Memory: the heap (`allocate`) and whole pages (`map_pages`). Under
+// `--libc` the heap is C's (`calloc`/`free`), so C and Lilac share one;
+// pages always come from the OS.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+using Standard.Os.MacOs as MacOs
+using Standard.C as C
+
+// `size` zeroed bytes, 16-byte aligned, or null when out of memory. Free
+// them with `deallocate`.
+allocate: function (size: @bit_native) memory: ref unknown {
+    match @builtin.Target.os {
+        .Windows => {
+            if @builtin.Target.libc {
+                memory = C.calloc(0x1, size)
+            } else {
+                memory = Windows.HeapAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, size)
+            }
+        }
+        .Linux => {
+            if @builtin.Target.libc {
+                memory = C.calloc(0x1, size)
+            } else {
+                // One mapping per allocation, its length in a header in
+                // front.
+                total: @bit_native = @i_add_native(size, alloc_header)
+                mapped: ref unknown = map_pages(total)
+                if @ptr_to_address(mapped) == 0x0 {
+                    memory = mapped
+                } else {
+                    header: ref AllocHeader = mapped as ref AllocHeader
+                    header.length = total
+                    memory = @ptr_add(mapped, alloc_header)
+                }
+            }
+        }
+        .MacOs => {
+            memory = MacOs.calloc(0x1, size)
+        }
+    } else {
+        needs_libc()
+        memory = C.calloc(0x1, size)
+    }
+}
+
+// Frees memory from `allocate` (null is ignored).
+deallocate: function (memory: ref unknown) nothing {
+    if @ptr_to_address(memory) == 0x0 {
+        return
+    }
+    match @builtin.Target.os {
+        .Windows => {
+            if @builtin.Target.libc {
+                C.free(memory)
+            } else {
+                ok: @bit32 = Windows.HeapFree(Windows.GetProcessHeap(), 0x0, memory)
+            }
+        }
+        .Linux => {
+            if @builtin.Target.libc {
+                C.free(memory)
+            } else {
+                mapped: ref unknown = header_of(memory)
+                header: ref AllocHeader = mapped as ref AllocHeader
+                unmap_pages(mapped, header.length)
+            }
+        }
+        .MacOs => MacOs.free(memory)
+    } else {
+        needs_libc()
+        C.free(memory)
+    }
+}
+
+// `memory` (from `allocate`, or null) resized to `size` bytes, keeping
+// its contents up to the smaller size, or null when out of memory (then
+// `memory` is untouched). New bytes are zeroed except under the C heap.
+reallocate: function (memory: ref unknown, size: @bit_native) moved: ref unknown {
+    if @ptr_to_address(memory) == 0x0 {
+        moved = allocate(size)
+        return
+    }
+    match @builtin.Target.os {
+        .Windows => {
+            if @builtin.Target.libc {
+                moved = C.realloc(memory, size)
+            } else {
+                moved = Windows.HeapReAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, memory, size)
+            }
+        }
+        .Linux => {
+            if @builtin.Target.libc {
+                moved = C.realloc(memory, size)
+            } else {
+                // `mremap` moves the mapping, zero-filling any growth.
+                mapped: ref unknown = header_of(memory)
+                header: ref AllocHeader = mapped as ref AllocHeader
+                total: @bit_native = @i_add_native(size, alloc_header)
+                result: @bit_native = Linux.mremap(mapped, header.length, total, Linux.MREMAP_MAYMOVE, @address_to_ptr(0x0))
+                if Linux.is_error(result) {
+                    moved = @address_to_ptr(0x0)
+                } else {
+                    remapped: ref unknown = @address_to_ptr(result)
+                    new_header: ref AllocHeader = remapped as ref AllocHeader
+                    new_header.length = total
+                    moved = @ptr_add(remapped, alloc_header)
+                }
+            }
+        }
+        .MacOs => {
+            moved = MacOs.realloc(memory, size)
+        }
+    } else {
+        needs_libc()
+        moved = C.realloc(memory, size)
+    }
+}
+
+// `size` bytes of fresh zeroed pages (`size` is rounded up to whole pages),
+// or null when out of memory. Release them with `unmap_pages`.
+map_pages: function (size: @bit_native) memory: ref unknown {
+    match @builtin.Target.os {
+        .Windows => {
+            memory = Windows.VirtualAlloc(@address_to_ptr(0x0), size, @bit_or_32(Windows.MEM_COMMIT, Windows.MEM_RESERVE), Windows.PAGE_READWRITE)
+        }
+        .Linux => {
+            result: @bit_native = Linux.mmap(@address_to_ptr(0x0), size, @bit_or_32(Linux.PROT_READ, Linux.PROT_WRITE), @bit_or_32(Linux.MAP_PRIVATE, Linux.MAP_ANONYMOUS), 0xFFFFFFFF, 0x0)
+            if Linux.is_error(result) {
+                result = 0x0
+            }
+            memory = @address_to_ptr(result)
+        }
+        .MacOs => {
+            memory = MacOs.mmap(@address_to_ptr(0x0), size, @bit_or_32(MacOs.PROT_READ, MacOs.PROT_WRITE), @bit_or_32(MacOs.MAP_PRIVATE, MacOs.MAP_ANON), 0xFFFFFFFF, 0x0)
+            if @ptr_to_address(memory) == MacOs.MAP_FAILED {
+                memory = @address_to_ptr(0x0)
+            }
+        }
+    } else {
+        // No virtual memory: plain zeroed memory from the C library.
+        needs_libc()
+        memory = C.calloc(0x1, size)
+    }
+}
+
+// Releases `size` bytes of pages from `map_pages`.
+unmap_pages: function (memory: ref unknown, size: @bit_native) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            ok: @bit32 = Windows.VirtualFree(memory, 0x0, Windows.MEM_RELEASE)
+        }
+        .Linux => {
+            result: @bit_native = Linux.munmap(memory, size)
+        }
+        .MacOs => {
+            result: @bit32 = MacOs.munmap(memory, size)
+        }
+    } else {
+        needs_libc()
+        C.free(memory)
+    }
+}
+
+// The size of a page of `map_pages` memory on this target.
+page_size: function () @bit_native => @builtin.Target.page_size
+
+private {
+    // The bytes in front of each native Linux allocation, holding the
+    // mapping's length (16 keeps the allocation 16-byte aligned).
+    AllocHeader: object {
+        length: @bit_native
+    }
+
+    alloc_header: @bit_native => 0x10
+
+    // The mapping an allocation lives in.
+    header_of: function (memory: ref unknown) ref unknown =>@address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
+}

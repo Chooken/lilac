@@ -1,0 +1,120 @@
+// Clocks and sleeping, in nanoseconds.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+using Standard.Os.MacOs as MacOs
+
+// A clock that only moves forward, from an arbitrary start: for measuring
+// time between two readings.
+monotonic_nanos: function () nanos: @bit64 {
+    match @builtin.Target.os {
+        .Windows => {
+            counter: @bit64 = 0x0
+            frequency: @bit64 = 0x1
+            ok: @bit32 = Windows.QueryPerformanceCounter(ref counter)
+            ok = Windows.QueryPerformanceFrequency(ref frequency)
+            // Whole seconds and the rest apart, so nothing overflows.
+            seconds: @bit64 = @i_div_u_64(counter, frequency)
+            rest: @bit64 = @i_mod_u_64(counter, frequency)
+            nanos = @i_add_64(@i_mul_64(seconds, nanos_per_second), @i_div_u_64(@i_mul_64(rest, nanos_per_second), frequency))
+        }
+        .Linux => {
+            nanos = linux_clock(Linux.CLOCK_MONOTONIC)
+        }
+        .MacOs => {
+            nanos = MacOs.clock_gettime_nsec_np(MacOs.CLOCK_UPTIME_RAW)
+        }
+    } else {
+        unsupported()
+    }
+}
+
+// The time of day: nanoseconds since 1970-01-01 00:00 UTC.
+wall_clock_nanos: function () nanos: @bit64 {
+    match @builtin.Target.os {
+        .Windows => {
+            // 100-nanosecond ticks since 1601.
+            time: Windows.FILETIME { dwLowDateTime = 0x0, dwHighDateTime = 0x0 }
+            Windows.GetSystemTimePreciseAsFileTime(ref time)
+            ticks: @bit64 = @bit_or_64(@bit_shift_left_64(@extend_zero(time.dwHighDateTime), 0x20), @extend_zero(time.dwLowDateTime))
+            nanos = @i_mul_64(@i_sub_64(ticks, windows_epoch), 0x64)
+        }
+        .Linux => {
+            nanos = linux_clock(Linux.CLOCK_REALTIME)
+        }
+        .MacOs => {
+            nanos = MacOs.clock_gettime_nsec_np(MacOs.CLOCK_REALTIME)
+        }
+    } else {
+        unsupported()
+    }
+}
+
+// Pauses the calling thread for at least `nanos`.
+sleep: function (nanos: @bit64) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            // Whole milliseconds, rounded up, in slices `Sleep` accepts.
+            millis: @bit64 = @i_div_u_64(@i_add_64(nanos, 0xF423F), 0xF4240)
+            loop {
+                if millis == 0x0 {
+                    break
+                }
+                slice: @bit64 = millis
+                if @i_greater_than_u_64(slice, 0xFFFFFFFE) {
+                    slice = 0xFFFFFFFE
+                }
+                Windows.Sleep(@truncate(slice))
+                millis = @i_sub_64(millis, slice)
+            }
+        }
+        .Linux => {
+            // Until an absolute deadline, so an interrupted sleep resumes.
+            deadline: @bit64 = @i_add_64(linux_clock(Linux.CLOCK_MONOTONIC), nanos)
+            until: Linux.Timespec {
+                tv_sec = @i_div_u_64(deadline, nanos_per_second)
+                tv_nsec = @i_mod_u_64(deadline, nanos_per_second)
+            }
+            loop {
+                result: @bit_native = Linux.clock_nanosleep(Linux.CLOCK_MONOTONIC, Linux.TIMER_ABSTIME, ref until, @address_to_ptr(0x0))
+                if Linux.is_error(result) {
+                    if Linux.errno_of(result) == Linux.EINTR {
+                        continue
+                    }
+                }
+                break
+            }
+        }
+        .MacOs => {
+            request: MacOs.Timespec {
+                tv_sec = @i_div_u_64(nanos, nanos_per_second)
+                tv_nsec = @i_mod_u_64(nanos, nanos_per_second)
+            }
+            remaining: MacOs.Timespec { tv_sec = 0x0, tv_nsec = 0x0 }
+            loop {
+                if MacOs.nanosleep(ref request, ref remaining as ref unknown) == 0xFFFFFFFF {
+                    if MacOs.errno() == MacOs.EINTR {
+                        request = remaining
+                        continue
+                    }
+                }
+                break
+            }
+        }
+    } else {
+        unsupported()
+    }
+}
+
+private {
+    nanos_per_second: @bit64 => 0x3B9ACA00
+
+    // 1970-01-01 in Windows ticks.
+    windows_epoch: @bit64 => 0x19DB1DED53E8000
+
+    linux_clock: function (clock: @bit32) nanos: @bit64 {
+        time: Linux.Timespec { tv_sec = 0x0, tv_nsec = 0x0 }
+        result: @bit_native = Linux.clock_gettime(clock, ref time)
+        nanos = @i_add_64(@i_mul_64(time.tv_sec, nanos_per_second), time.tv_nsec)
+    }
+}

@@ -1,0 +1,25 @@
+// Clocks, sleeping, locks and random bytes.
+
+QueryPerformanceCounter: extern function (lpPerformanceCount: ref @bit64) ok: @bit32
+QueryPerformanceFrequency: extern function (lpFrequency: ref @bit64) ok: @bit32
+GetSystemTimePreciseAsFileTime: extern function (lpSystemTimeAsFileTime: ref FILETIME) nothing
+GetTickCount64: extern function () milliseconds: @bit64
+Sleep: extern function (dwMilliseconds: @bit32) nothing
+
+// Slim reader/writer locks and condition variables: an `SRWLOCK` and a
+// `CONDITION_VARIABLE` are one zero-initialized pointer each.
+InitializeSRWLock: extern function (SRWLock: ref unknown) nothing
+AcquireSRWLockExclusive: extern function (SRWLock: ref unknown) nothing
+TryAcquireSRWLockExclusive: extern function (SRWLock: ref unknown) acquired: @bit8
+ReleaseSRWLockExclusive: extern function (SRWLock: ref unknown) nothing
+AcquireSRWLockShared: extern function (SRWLock: ref unknown) nothing
+TryAcquireSRWLockShared: extern function (SRWLock: ref unknown) acquired: @bit8
+ReleaseSRWLockShared: extern function (SRWLock: ref unknown) nothing
+InitializeConditionVariable: extern function (ConditionVariable: ref unknown) nothing
+SleepConditionVariableSRW: extern function (ConditionVariable: ref unknown, SRWLock: ref unknown, dwMilliseconds: @bit32, Flags: @bit32) ok: @bit32
+WakeConditionVariable: extern function (ConditionVariable: ref unknown) nothing
+WakeAllConditionVariable: extern function (ConditionVariable: ref unknown) nothing
+
+// Random bytes from the system generator (`bcryptprimitives.dll`, Windows
+// 10 and later); it cannot fail.
+ProcessPrng: extern function (pbData: ref unknown, cbData: @bit_native) ok: @bit32

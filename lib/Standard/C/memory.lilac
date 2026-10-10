@@ -2,7 +2,6 @@
 malloc: extern function(size: @bit_native) out: ref unknown
 calloc: extern function(nmemb: @bit_native, size: @bit_native) out: ref unknown
 realloc: extern function(ptr: ref unknown, size: @bit_native) out: ref unknown
-reallocarray: extern function(ptr: ref unknown, nmemb: @bit_native, size: @bit_native) out: ref unknown
 free: extern function(ptr: ref unknown) nothing
 aligned_alloc: extern function(alignment: @bit_native, size: @bit_native) out: ref unknown
 
@@ -11,6 +10,3 @@ memmove: extern function(dest: ref unknown, src: ref unknown, n: @bit_native) ou
 memset: extern function(s: ref unknown, c: Int32, n: @bit_native) out: ref unknown
 memcmp: extern function(s1: ref unknown, s2: ref unknown, n: @bit_native) out: Int32
 memchr: extern function(s: ref unknown, c: Int32, n: @bit_native) out: ref unknown
-
-mmap: extern function (address: ref unknown, len: @bit_native, prot: Int32, flags: @bit32, fd: Int32, offset: Int64) memory: ref unknown
-munmap: extern function (address: ref unknown, len: @bit_native) result: Int32

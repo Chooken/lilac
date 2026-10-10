@@ -4,5 +4,6 @@ using Standard.Os as Os
 
 // Ends the process with `code`. Does not return.
 exit: function (code: @bit32) nothing {
-    Os.exit_process(code)
+    Os.exit(code)
+
 }

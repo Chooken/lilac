@@ -1,0 +1,56 @@
+// Processes, threads, the environment and errors.
+
+ExitProcess: extern function (uExitCode: @bit32) nothing
+GetLastError: extern function () error: @bit32
+SetLastError: extern function (dwErrCode: @bit32) nothing
+GetCommandLineW: extern function () commandLine: ref @bit16
+GetEnvironmentVariableW: extern function (lpName: ref @bit16, lpBuffer: ref @bit16, nSize: @bit32) length: @bit32
+SetEnvironmentVariableW: extern function (lpName: ref @bit16, lpValue: ref @bit16) ok: @bit32
+GetEnvironmentStringsW: extern function () environment: ref @bit16
+FreeEnvironmentStringsW: extern function (penv: ref @bit16) ok: @bit32
+GetModuleFileNameW: extern function (hModule: ref unknown, lpFilename: ref @bit16, nSize: @bit32) length: @bit32
+
+GetCurrentProcess: extern function () process: ref unknown
+GetCurrentProcessId: extern function () id: @bit32
+GetCurrentThread: extern function () thread: ref unknown
+GetCurrentThreadId: extern function () id: @bit32
+CreateProcessW: extern function (lpApplicationName: ref @bit16, lpCommandLine: ref @bit16, lpProcessAttributes: ref unknown, lpThreadAttributes: ref unknown, bInheritHandles: @bit32, dwCreationFlags: @bit32, lpEnvironment: ref unknown, lpCurrentDirectory: ref @bit16, lpStartupInfo: ref STARTUPINFOW, lpProcessInformation: ref PROCESS_INFORMATION) ok: @bit32
+TerminateProcess: extern function (hProcess: ref unknown, uExitCode: @bit32) ok: @bit32
+GetExitCodeProcess: extern function (hProcess: ref unknown, lpExitCode: ref @bit32) ok: @bit32
+
+// `lpStartAddress` is a C-ABI `DWORD (*)(void *)`.
+CreateThread: extern function (lpThreadAttributes: ref unknown, dwStackSize: @bit_native, lpStartAddress: ref unknown, lpParameter: ref unknown, dwCreationFlags: @bit32, lpThreadId: ref @bit32) thread: ref unknown
+ExitThread: extern function (dwExitCode: @bit32) nothing
+GetExitCodeThread: extern function (hThread: ref unknown, lpExitCode: ref @bit32) ok: @bit32
+SwitchToThread: extern function () switched: @bit32
+
+WaitForSingleObject: extern function (hHandle: ref unknown, dwMilliseconds: @bit32) result: @bit32
+WaitForMultipleObjects: extern function (nCount: @bit32, lpHandles: ref unknown, bWaitAll: @bit32, dwMilliseconds: @bit32) result: @bit32
+
+STARTUPINFOW: object {
+    cb: @bit32
+    lpReserved: ref @bit16
+    lpDesktop: ref @bit16
+    lpTitle: ref @bit16
+    dwX: @bit32
+    dwY: @bit32
+    dwXSize: @bit32
+    dwYSize: @bit32
+    dwXCountChars: @bit32
+    dwYCountChars: @bit32
+    dwFillAttribute: @bit32
+    dwFlags: @bit32
+    wShowWindow: @bit16
+    cbReserved2: @bit16
+    lpReserved2: ref @bit8
+    hStdInput: ref unknown
+    hStdOutput: ref unknown
+    hStdError: ref unknown
+}
+
+PROCESS_INFORMATION: object {
+    hProcess: ref unknown
+    hThread: ref unknown
+    dwProcessId: @bit32
+    dwThreadId: @bit32
+}

@@ -1,0 +1,50 @@
+// The outcome of an operation that can fail: `Ok` with its value, or
+// `Error` with why. A zeroed `Result` is `Ok` with a zero value.
+Result[T, E]: enum {
+    Ok: T
+    Error: E
+
+    is_ok: function(self) ok: Bool {
+        match self {
+            .Ok => {
+                ok = true
+            }
+        } else {
+            ok = false
+        }
+    }
+
+    // `ok` and the value; on an error `value` stays zeroed.
+    unwrap: function(self) ok: Bool, value: T {
+        match self {
+            .Ok -> ok_value: T {
+                ok = true
+                value = ok_value
+            }
+        } else {
+            ok = false
+        }
+    }
+
+    unwrap_or: function(self, default: T) value: T {
+        match self {
+            .Ok -> ok_value: T {
+                value = ok_value
+            }
+        } else {
+            value = default
+        }
+    }
+
+    // `failed` and the error; on success `error` stays zeroed.
+    error: function(self) failed: Bool, error: E {
+        match self {
+            .Error -> why: E {
+                failed = true
+                error = why
+            }
+        } else {
+            failed = false
+        }
+    }
+}

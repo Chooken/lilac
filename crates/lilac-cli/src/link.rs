@@ -261,9 +261,9 @@ mod tests {
             Path::new("o.exe"),
             &["extra.lib".to_owned()],
         );
-        let kernel32 = Path::new("sys")
-            .join("x86_64-pc-windows-msvc")
-            .join("kernel32.lib");
+        let stubs = Path::new("sys").join("x86_64-pc-windows-msvc");
+        let kernel32 = stubs.join("kernel32.lib");
+        let bcrypt = stubs.join("bcryptprimitives.lib");
         assert_eq!(
             strings(&args),
             [
@@ -271,6 +271,7 @@ mod tests {
                 "link",
                 "o.obj",
                 &kernel32.display().to_string(),
+                &bcrypt.display().to_string(),
                 "/entry:.lilac.native_entry",
                 "/subsystem:console",
                 "/nodefaultlib",

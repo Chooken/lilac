@@ -1,10 +1,81 @@
 LIBRARY kernel32.dll
 EXPORTS
+    AcquireSRWLockExclusive
+    AcquireSRWLockShared
+    CloseHandle
+    CopyFileW
+    CreateDirectoryW
+    CreateFileW
+    CreatePipe
+    CreateProcessW
+    CreateThread
+    DeleteFileW
+    DuplicateHandle
     ExitProcess
+    ExitThread
+    FindClose
+    FindFirstFileW
+    FindNextFileW
+    FlushFileBuffers
+    FreeEnvironmentStringsW
+    GetCommandLineW
+    GetConsoleMode
+    GetConsoleOutputCP
+    GetCurrentDirectoryW
+    GetCurrentProcess
+    GetCurrentProcessId
+    GetCurrentThread
+    GetCurrentThreadId
+    GetEnvironmentStringsW
+    GetEnvironmentVariableW
+    GetExitCodeProcess
+    GetExitCodeThread
+    GetFileAttributesW
+    GetFileSizeEx
+    GetFileType
+    GetFullPathNameW
+    GetLastError
+    GetModuleFileNameW
     GetProcessHeap
     GetStdHandle
+    GetSystemInfo
+    GetSystemTimePreciseAsFileTime
+    GetTickCount64
     HeapAlloc
     HeapFree
+    HeapReAlloc
+    HeapSize
+    InitializeConditionVariable
+    InitializeSRWLock
+    MoveFileExW
+    MultiByteToWideChar
+    QueryPerformanceCounter
+    QueryPerformanceFrequency
+    ReadConsoleW
+    ReadFile
+    ReleaseSRWLockExclusive
+    ReleaseSRWLockShared
+    RemoveDirectoryW
+    SetConsoleMode
+    SetConsoleOutputCP
+    SetCurrentDirectoryW
+    SetEndOfFile
+    SetEnvironmentVariableW
+    SetFilePointerEx
+    SetLastError
+    Sleep
+    SleepConditionVariableSRW
+    SwitchToThread
+    TerminateProcess
+    TryAcquireSRWLockExclusive
+    TryAcquireSRWLockShared
     VirtualAlloc
     VirtualFree
+    VirtualProtect
+    WaitForMultipleObjects
+    WaitForSingleObject
+    WakeAllConditionVariable
+    WakeConditionVariable
+    WideCharToMultiByte
+    WriteConsoleW
     WriteFile

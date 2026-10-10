@@ -1,0 +1,37 @@
+// The macOS system interface: `libSystem`, Apple's only stable one (it has
+// no stable system calls). Names and argument orders are the C library's,
+// so the man pages document them, and the constants are Darwin's values,
+// which often differ from Linux's (`O_CREAT` is `0x200`, `MAP_ANON`
+// `0x1000`). C `int` is `@bit32`; `size_t`, `ssize_t`, `off_t` and `long`
+// are `@bit_native`; `void *` is `ref unknown`; a path is a NUL-terminated
+// byte string. A failed call returns `-1` (or null) and sets `errno()`.
+//
+// Every function here is listed in `toolchain/*-apple-darwin/libSystem.tbd`,
+// the stub a native build links.
+
+// Files and descriptors. `open` and `fcntl` are variadic in C: pass
+// `open`'s mode (`@bit32`) only with `O_CREAT`.
+
+open: extern function (path: ref @bit8, oflag: @bit32, ...) fd: @bit32
+close: extern function (fildes: @bit32) result: @bit32
+read: extern function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native
+write: extern function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native
+pread: extern function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native, offset: @bit_native) result: @bit_native
+pwrite: extern function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native, offset: @bit_native) result: @bit_native
+lseek: extern function (fildes: @bit32, offset: @bit_native, whence: @bit32) result: @bit_native
+fsync: extern function (fildes: @bit32) result: @bit32
+ftruncate: extern function (fildes: @bit32, length: @bit_native) result: @bit32
+fcntl: extern function (fildes: @bit32, cmd: @bit32, ...) result: @bit32
+dup: extern function (fildes: @bit32) result: @bit32
+dup2: extern function (fildes: @bit32, fildes2: @bit32) result: @bit32
+// `fildes` is two `@bit32`s: the read end, then the write end.
+pipe: extern function (fildes: ref unknown) result: @bit32
+isatty: extern function (fildes: @bit32) result: @bit32
+
+unlink: extern function (path: ref @bit8) result: @bit32
+mkdir: extern function (path: ref @bit8, mode: @bit16) result: @bit32
+rmdir: extern function (path: ref @bit8) result: @bit32
+rename: extern function (old: ref @bit8, new: ref @bit8) result: @bit32
+access: extern function (path: ref @bit8, mode: @bit32) result: @bit32
+getcwd: extern function (buf: ref @bit8, size: @bit_native) result: ref @bit8
+chdir: extern function (path: ref @bit8) result: @bit32

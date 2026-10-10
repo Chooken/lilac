@@ -1,0 +1,14 @@
+// Clocks and sleeping (`clock_gettime(2)`, ...).
+
+// `struct timespec` (64-bit `time_t`).
+Timespec: object {
+    tv_sec: @bit64
+    tv_nsec: @bit64
+}
+
+clock_gettime: function (clockid: @bit32, tp: ref Timespec) @bit_native => @syscall(call_number(228, 113), @extend_sign(clockid), @ptr_to_address(tp as ref unknown), 0x0, 0x0, 0x0, 0x0)
+
+clock_getres: function (clockid: @bit32, res: ref Timespec) @bit_native => @syscall(call_number(229, 114), @extend_sign(clockid), @ptr_to_address(res as ref unknown), 0x0, 0x0, 0x0, 0x0)
+
+// `remain` may be null.
+clock_nanosleep: function (clockid: @bit32, flags: @bit32, request: ref Timespec, remain: ref unknown) @bit_native => @syscall(call_number(230, 115), @extend_sign(clockid), @extend_zero(flags), @ptr_to_address(request as ref unknown), @ptr_to_address(remain), 0x0, 0x0)

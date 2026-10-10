@@ -31,7 +31,9 @@
 //!
 //! `lilac` runs in `tests/run` and is given the program's bare name, so
 //! source locations (in diagnostics and stack traces) read the same on every
-//! machine.
+//! machine. The program runs in a scratch folder, where any files it
+//! creates land.
+
 //!
 //! A program is a single `*.lilac` file or a folder project, whose header is
 //! read from its `main.lilac`.
@@ -185,7 +187,12 @@ fn run_one(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let run = Command::new(&exe).output().expect("runs executable");
+    // In the scratch folder, so a program's files land there.
+    let run = Command::new(&exe)
+        .current_dir(scratch)
+        .output()
+        .expect("runs executable");
+
     let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
     let want = if expect.stdout.is_empty() {
         String::new()

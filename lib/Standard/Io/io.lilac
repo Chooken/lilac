@@ -1,10 +1,10 @@
-// Writing bytes to the standard output and error streams, through the OS
+// Writing text to the standard output and error streams, through the OS
 // (`Standard.Os`).
 
-using Standard.Os
+using Standard.Os as Os
 
 print: function (text: @byte_buffer) nothing {
-    write_stream(0x1, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    write_text(Os.standard_output(), text)
 }
 
 print_line: function (text: @byte_buffer) nothing {
@@ -14,7 +14,8 @@ print_line: function (text: @byte_buffer) nothing {
 
 print_byte: function (byte: @bit8) nothing {
     b: @bit8 = byte
-    write_stream(0x1, ref b, 0x1)
+    p: ref @bit8 = ref b
+    error: Optional[Os.Error] = Os.write_all(Os.standard_output(), p as ref unknown, 0x1)
 }
 
 // Writes the code point `c` (a character literal such as 'H') as UTF-8.
@@ -37,6 +38,12 @@ print_char: function (c: @bit32) nothing {
 }
 
 private {
+    // Writes all of `text`; a failure is dropped, as C's `printf` does.
+    write_text: function (handle: Os.Handle, text: @byte_buffer) nothing {
+        data: ref @bit8 = @byte_buffer_ptr(text)
+        error: Optional[Os.Error] = Os.write_all(handle, data as ref unknown, @byte_buffer_len(text))
+    }
+
     // One UTF-8 continuation byte: six bits of `c / scale`.
     print_continuation: function (c: @bit32, scale: @bit32) nothing {
         print_byte(@truncate(@i_add_32(0x80, @i_mod_u_32(@i_div_u_32(c, scale), 0x40))))
@@ -44,7 +51,8 @@ private {
 }
 
 print_error: function (text: @byte_buffer) nothing {
-    write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    write_text(Os.standard_error(), text)
+
 }
 
 print_error_line: function (text: @byte_buffer) nothing {

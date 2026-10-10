@@ -1,168 +1,428 @@
-// The operating-system calls Standard is built on, picked per target at
-// compile time from `@builtin.Target`: `kernel32` on Windows, system calls
-// on Linux, and the C library on macOS, on Linux under `--libc`, and on a
-// bare target that links one. Only the live arm of each `match` is
-// compiled, so a program only links what its target uses.
-
-// Writes `len` bytes at `data` to standard stream `fd` (1 = stdout,
-// 2 = stderr).
+// The operating system, portably: Standard's one switch over the target.
+// Each function picks its platform at compile time from `@builtin.Target`:
+// `Windows` (kernel32), `Linux` (system calls, also under `--libc`) and
+// `MacOs` (libSystem), the raw namespaces beside this one. Only the live
+// arm is compiled, so a program links only what its target uses. With
+// `--libc`, the C library also owns the heap (`allocate`) and the process
+// exit (so C `stdio` flushes); a bare target (`.None`) has only that.
+//
+// This file: handles, reading and writing, and files.
 
 using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
-using Standard.C as C
+using Standard.Os.MacOs as MacOs
 
-write_stream: function (fd: @bit32, buffer: ref @bit8, length: @bit_native) nothing {
-    if @builtin.Target.libc {
-        written: @bit_native = C.write(fd, buffer, length)
-    } else match @builtin.Target.os {
+// An open file, pipe or console: a Windows `HANDLE`, else a file
+// descriptor.
+Handle: object {
+    value: @bit_native
+}
+
+// How `open` opens a file.
+OpenMode: enum {
+    // Read an existing file.
+    Read
+    // Write a file, created if missing and emptied if not.
+    Write
+    // Write at the end of a file, created if missing.
+    Append
+    // Read and write an existing file.
+    ReadWrite
+}
+
+// Where a `seek` offset counts from.
+SeekFrom: enum {
+    Start
+    Current
+    End
+}
+
+standard_input: function () handle: Handle {
+    handle = standard_stream(Windows.STD_INPUT_HANDLE, 0x0)
+}
+
+standard_output: function () handle: Handle {
+    handle = standard_stream(Windows.STD_OUTPUT_HANDLE, 0x1)
+}
+
+standard_error: function () handle: Handle {
+    handle = standard_stream(Windows.STD_ERROR_HANDLE, 0x2)
+}
+
+// Writes up to `length` bytes at `buffer`: how many were written, which
+// may be fewer.
+write: function (handle: Handle, buffer: ref unknown, length: @bit_native) result: Result[@bit_native, Error] {
+    match @builtin.Target.os {
         .Windows => {
-            // I don't like this what if your not writing to std?
-            handle: ref unknown = Windows.GetStdHandle(Windows.GetStd(fd))
             written: @bit32 = 0x0
-            ok: @bit32 = Windows.WriteFile(handle, buffer, @truncate(length), ref written, @address_to_ptr(0x0))
+            ok: @bit32 = Windows.WriteFile(handle_ptr(handle), buffer, windows_count(length), ref written, null())
+            result = windows_count_result(ok, written)
         }
         .Linux => {
-            written: @bit_native = Linux.write(fd, buffer, length)
+            result = linux_result(Linux.write(fd(handle), buffer, length))
         }
         .MacOs => {
-            written: @bit_native = C.write(fd, buffer, length)
+            result = posix_result(MacOs.write(fd(handle), buffer, length))
         }
-        .None => {
-            needs_libc()
-            written: @bit_native = C.write(fd, buffer, length)
+    } else {
+        needs_libc()
+        result = posix_result(bare_write(fd(handle), buffer, length))
+    }
+}
+
+// Writes all `length` bytes at `buffer`, or stops at the first error.
+write_all: function (handle: Handle, buffer: ref unknown, length: @bit_native) error: Optional[Error] {
+    // A zeroed `Optional` is `Some`.
+    error = .None
+    done: @bit_native = 0x0
+    loop {
+        if @i_less_than_u_native(done, length) {
+        } else break
+        match write(handle, @ptr_add(buffer, done), @i_sub_native(length, done)) {
+            .Ok -> written: @bit_native {
+                done = @i_add_native(done, written)
+            }
+            .Error -> why: Error {
+                error = .Some(why)
+                break
+            }
         }
     }
 }
 
-// Ends the process with `code`. Does not return.
-exit_process: function (code: @bit32) nothing {
-    if @builtin.Target.libc {
-        C.exit(code)
-    } else match @builtin.Target.os {
-        .Windows => Windows.ExitProcess(code)
-        .Linux => Linux.exit_group(code)
-        .MacOs => C.exit(code)
-        .None => {
-            needs_libc()
-            C.exit(code)
-        }
-    }
-}
-
-// `size` zeroed bytes, or null when out of memory. Free them with
-// `deallocate`.
-allocate: function (size: @bit_native) memory: ref unknown {
-    if @builtin.Target.libc {
-        memory = C.calloc(0x1, size)
-    } else match @builtin.Target.os {
+// Reads up to `length` bytes into `buffer`: how many were read, 0 at the
+// end of the file.
+read: function (handle: Handle, buffer: ref unknown, length: @bit_native) result: Result[@bit_native, Error] {
+    match @builtin.Target.os {
         .Windows => {
-            memory = Windows.HeapAlloc(Windows.GetProcessHeap(), heap_zero_memory, size)
+            got: @bit32 = 0x0
+            ok: @bit32 = Windows.ReadFile(handle_ptr(handle), buffer, windows_count(length), ref got, null())
+            if ok == Windows.FALSE {
+                // A closed pipe is the end of the stream.
+                code: @bit32 = Windows.GetLastError()
+                if code == Windows.ERROR_BROKEN_PIPE {
+                    result = .Ok(0x0)
+                } else {
+                    result = .Error(error_of_windows(code))
+                }
+            } else {
+                result = .Ok(@extend_zero(got))
+            }
         }
         .Linux => {
-            // One mapping per allocation, its length in a header in front.
-            total: @bit_native = @i_add_native(size, alloc_header)
-            mapped: ref unknown = map_pages(total)
-            if @i_greater_than_u_native(@ptr_to_address(mapped), 0x0) {
-                header: ref AllocHeader = mapped as ref AllocHeader
-                header.length = total
-                memory = @ptr_add(mapped, alloc_header)
+            result = linux_result(Linux.read(fd(handle), buffer, length))
+        }
+        .MacOs => {
+            result = posix_result(MacOs.read(fd(handle), buffer, length))
+        }
+    } else {
+        unsupported()
+    }
+}
+
+// Opens the file at `path` (UTF-8).
+open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error] {
+    match @builtin.Target.os {
+        .Windows => {
+            access: @bit32 = Windows.GENERIC_READ
+            disposition: @bit32 = Windows.OPEN_EXISTING
+            match mode {
+                .Write => {
+                    access = Windows.GENERIC_WRITE
+                    disposition = Windows.CREATE_ALWAYS
+                }
+                .Append => {
+                    access = Windows.FILE_APPEND_DATA
+                    disposition = Windows.OPEN_ALWAYS
+                }
+                .ReadWrite => {
+                    access = @bit_or_32(Windows.GENERIC_READ, Windows.GENERIC_WRITE)
+                }
+            }
+            share: @bit32 = @bit_or_32(@bit_or_32(Windows.FILE_SHARE_READ, Windows.FILE_SHARE_WRITE), Windows.FILE_SHARE_DELETE)
+            wide: ref @bit16 = wide_path(path)
+            if @ptr_to_address(wide as ref unknown) == 0x0 {
+                result = .Error(.OutOfMemory)
+                return
+            }
+            opened: ref unknown = Windows.CreateFileW(wide, access, share, null(), disposition, Windows.FILE_ATTRIBUTE_NORMAL, null())
+            code: @bit32 = Windows.GetLastError()
+            deallocate(wide as ref unknown)
+            if @ptr_to_address(opened) == Windows.INVALID_HANDLE_VALUE {
+                result = .Error(error_of_windows(code))
             } else {
-                memory = mapped
+                result = .Ok(Handle { value = @ptr_to_address(opened) })
+            }
+        }
+        .Linux => {
+            c: ref @bit8 = c_path(path)
+            if @ptr_to_address(c as ref unknown) == 0x0 {
+                result = .Error(.OutOfMemory)
+                return
+            }
+            flags: @bit32 = @bit_or_32(posix_open_flags(mode, Linux.O_RDONLY, Linux.O_WRONLY, Linux.O_RDWR, Linux.O_CREAT, Linux.O_TRUNC, Linux.O_APPEND), Linux.O_CLOEXEC)
+            opened: @bit_native = Linux.openat(Linux.AT_FDCWD, c, flags, 0x1B6)
+            deallocate(c as ref unknown)
+            match linux_result(opened) {
+                .Ok -> descriptor: @bit_native {
+                    result = .Ok(Handle { value = descriptor })
+                }
+                .Error -> why: Error {
+                    result = .Error(why)
+                }
             }
         }
         .MacOs => {
-            memory = C.calloc(0x1, size)
+            c: ref @bit8 = c_path(path)
+            if @ptr_to_address(c as ref unknown) == 0x0 {
+                result = .Error(.OutOfMemory)
+                return
+            }
+            flags: @bit32 = @bit_or_32(posix_open_flags(mode, MacOs.O_RDONLY, MacOs.O_WRONLY, MacOs.O_RDWR, MacOs.O_CREAT, MacOs.O_TRUNC, MacOs.O_APPEND), MacOs.O_CLOEXEC)
+            mode_bits: @bit32 = 0x1B6
+            opened: @bit32 = MacOs.open(c, flags, mode_bits)
+            code: @bit32 = MacOs.errno()
+            deallocate(c as ref unknown)
+            if opened == 0xFFFFFFFF {
+                result = .Error(error_of_errno(code))
+            } else {
+                result = .Ok(Handle { value = @extend_zero(opened) })
+            }
         }
-        .None => {
-            needs_libc()
-            memory = C.calloc(0x1, size)
-        }
+    } else {
+        unsupported()
     }
 }
 
-// Frees memory from `allocate`.
-deallocate: function (memory: ref unknown) nothing {
-    if @builtin.Target.libc {
-        C.free(memory)
-    } else match @builtin.Target.os {
-        .Windows => {
-            ok: @bit32 = Windows.HeapFree(Windows.GetProcessHeap(), 0x0, memory)
-        }
-        .Linux => {
-            mapped: ref unknown = @address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
-            header: ref AllocHeader = mapped as ref AllocHeader
-            unmap_pages(mapped, header.length)
-        }
-        .MacOs => C.free(memory)
-        .None => {
-            needs_libc()
-            C.free(memory)
-        }
-    }
-}
+// Closes `handle`.
+close: function (handle: Handle) error: Optional[Error] {
+    error = .None
+    match @builtin.Target.os {
 
-// `size` bytes of fresh zeroed pages (`size` is rounded up to whole pages),
-// or null when out of memory. Release them with `unmap_pages`.
-map_pages: function (size: @bit_native) memory: ref unknown {
-    if @builtin.Target.libc {
-        memory = c_map(size, 0x1002)
-    } else match @builtin.Target.os {
         .Windows => {
-            memory = Windows.VirtualAlloc(@address_to_ptr(0x0), size, mem_commit_reserve, page_read_write)
+            if Windows.CloseHandle(handle_ptr(handle)) == Windows.FALSE {
+                error = .Some(error_of_windows(Windows.GetLastError()))
+            }
         }
         .Linux => {
-            memory = Linux.mmap(size)
+            result: @bit_native = Linux.close(fd(handle))
+            if Linux.is_error(result) {
+                error = .Some(error_of_errno(Linux.errno_of(result)))
+            }
         }
         .MacOs => {
-            memory = c_map(size, 0x1002)
+            if MacOs.close(fd(handle)) == 0xFFFFFFFF {
+                error = .Some(error_of_errno(MacOs.errno()))
+            }
         }
-        .None => {
-            // No virtual memory: plain zeroed memory from the C library.
-            needs_libc()
-            memory = C.calloc(0x1, size)
-        }
+    } else {
+        unsupported()
     }
 }
 
-// Releases `size` bytes of pages from `map_pages`.
-unmap_pages: function (memory: ref unknown, size: @bit_native) nothing {
-    if @builtin.Target.libc {
-        memory = c_map(size, 0x1002)
-    } else match @builtin.Target.os {
+// Moves `handle`'s position to `offset` bytes from `from`: the new
+// position from the start.
+seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@bit64, Error] {
+    match @builtin.Target.os {
         .Windows => {
-            ok: @bit32 = Windows.VirtualFree(memory, 0x0, mem_release)
+            method: @bit32 = Windows.FILE_BEGIN
+            match from {
+                .Current => {
+                    method = Windows.FILE_CURRENT
+                }
+                .End => {
+                    method = Windows.FILE_END
+                }
+            }
+            position: @bit64 = 0x0
+            if Windows.SetFilePointerEx(handle_ptr(handle), offset, ref position, method) == Windows.FALSE {
+                result = .Error(error_of_windows(Windows.GetLastError()))
+            } else {
+                result = .Ok(position)
+            }
         }
         .Linux => {
-            result: @bit_native = Linux.unmap(memory, size)
+            moved: @bit_native = Linux.lseek(fd(handle), native_of(offset), whence(from))
+            if Linux.is_error(moved) {
+                result = .Error(error_of_errno(Linux.errno_of(moved)))
+            } else {
+                result = .Ok(bit64_of(moved))
+            }
         }
         .MacOs => {
-            result: @bit32 = C.munmap(memory, size)
+            moved: @bit_native = MacOs.lseek(fd(handle), native_of(offset), whence(from))
+            if moved == @i_negate_native(0x1) {
+                result = .Error(error_of_errno(MacOs.errno()))
+            } else {
+                result = .Ok(bit64_of(moved))
+            }
         }
-        .None => {
-            needs_libc()
-            C.free(memory)
+    } else {
+        unsupported()
+    }
+}
+
+// The size in bytes of the file open as `handle`.
+size: function (handle: Handle) result: Result[@bit64, Error] {
+    match @builtin.Target.os {
+        .Windows => {
+            bytes: @bit64 = 0x0
+            if Windows.GetFileSizeEx(handle_ptr(handle), ref bytes) == Windows.FALSE {
+                result = .Error(error_of_windows(Windows.GetLastError()))
+            } else {
+                result = .Ok(bytes)
+            }
         }
+        .Linux => {
+            // `statx` is 256 bytes, 8-aligned.
+            storage: @array(@bit64, 32) = @array(@bit64, 32) {}
+            storage_ref: ref @array(@bit64, 32) = ref storage
+            info: ref Linux.Statx = storage_ref as ref unknown as ref Linux.Statx
+            empty: @bit8 = 0x0
+            status: @bit_native = Linux.statx(fd(handle), ref empty, Linux.AT_EMPTY_PATH, Linux.STATX_SIZE, info)
+
+            if Linux.is_error(status) {
+                result = .Error(error_of_errno(Linux.errno_of(status)))
+            } else {
+                result = .Ok(info.stx_size)
+            }
+        }
+        .MacOs => {
+            // The end's offset, then back to where the handle was.
+            here: Result[@bit64, Error] = seek(handle, 0x0, .Current)
+            result = seek(handle, 0x0, .End)
+            match here {
+                .Ok -> position: @bit64 {
+                    restored: Result[@bit64, Error] = seek(handle, position, .Start)
+                }
+                .Error -> why: Error {
+                    result = .Error(why)
+                }
+            }
+        }
+    } else {
+        unsupported()
     }
 }
 
 private {
-    // The bytes in front of each Linux allocation, holding the mapping's
-    // length for `munmap` (16 keeps the allocation 16-byte aligned).
-    AllocHeader: object {
-        length: @bit_native
+    // A null pointer.
+    null: function () ref unknown => @address_to_ptr(0x0)
+
+    handle_ptr: function (handle: Handle) ref unknown => @address_to_ptr(handle.value)
+
+    fd: function (handle: Handle) @bit32 => @truncate(handle.value)
+
+    standard_stream: function (windows_id: @bit32, descriptor: @bit_native) handle: Handle {
+        match @builtin.Target.os {
+            .Windows => {
+                handle.value = @ptr_to_address(Windows.GetStdHandle(windows_id))
+            }
+        } else {
+            handle.value = descriptor
+        }
     }
 
-    alloc_header: @bit_native => 0x10
+    // A Windows I/O count: at most 1 GiB per call.
+    windows_count: function (length: @bit_native) count: @bit32 {
+        if @i_greater_than_u_native(length, 0x40000000) {
+            count = 0x40000000
+        } else {
+            count = @truncate(length)
+        }
+    }
 
-    // `GetStdHandle` takes `-10 - fd`: stdout (1) is `-11`, stderr `-12`.
-    std_handle_base: @bit32 => 0xfffffff6
+    windows_count_result: function (ok: @bit32, count: @bit32) result: Result[@bit_native, Error] {
+        if ok == Windows.FALSE {
+            result = .Error(error_of_windows(Windows.GetLastError()))
+        } else {
+            result = .Ok(@extend_zero(count))
+        }
+    }
 
-    heap_zero_memory: @bit32 => 0x8
-    mem_commit_reserve: @bit32 => 0x3000
-    mem_release: @bit32 => 0x8000
-    page_read_write: @bit32 => 0x4
+    // A Linux system call's result: the value, or the error its
+    // `-errno` names.
+    linux_result: function (raw: @bit_native) result: Result[@bit_native, Error] {
+        if Linux.is_error(raw) {
+            result = .Error(error_of_errno(Linux.errno_of(raw)))
+        } else {
+            result = .Ok(raw)
+        }
+    }
 
-    
+    // A C call's `ssize_t` result: the value, or `errno` when `-1`.
+    posix_result: function (raw: @bit_native) result: Result[@bit_native, Error] {
+        if raw == @i_negate_native(0x1) {
+            result = .Error(error_of_errno(posix_errno()))
+        } else {
+            result = .Ok(raw)
+        }
+    }
+
+    // `open` flags for `mode`, from the platform's values.
+    posix_open_flags: function (mode: OpenMode, read_only: @bit32, write_only: @bit32, read_write: @bit32, create: @bit32, truncate: @bit32, append: @bit32) flags: @bit32 {
+        match mode {
+            .Read => {
+                flags = read_only
+            }
+            .Write => {
+                flags = @bit_or_32(@bit_or_32(write_only, create), truncate)
+            }
+            .Append => {
+                flags = @bit_or_32(@bit_or_32(write_only, create), append)
+            }
+            .ReadWrite => {
+                flags = read_write
+            }
+        }
+    }
+
+    // `lseek`'s whence (`SEEK_*` is 0, 1, 2 on Linux and macOS).
+    whence: function (from: SeekFrom) value: @bit32 {
+        match from {
+            .Current => {
+                value = 0x1
+            }
+            .End => {
+                value = 0x2
+            }
+        } else {
+            value = 0x0
+        }
+    }
+
+    // `@bit64` and `@bit_native` are the same width on every target with
+    // files, so these convert without changing a bit.
+    native_of: function (value: @bit64) @bit_native => @truncate(value)
+
+    bit64_of: function (native: @bit_native) @bit64 => @extend_zero(native)
+
+    // `path` as a NUL-terminated byte string from `allocate`, or null.
+    c_path: function (path: @byte_buffer) c: ref @bit8 {
+        length: @bit_native = @byte_buffer_len(path)
+        memory: ref unknown = allocate(@i_add_native(length, 0x1))
+        c = memory as ref @bit8
+        if @ptr_to_address(memory) == 0x0 {
+            return
+        }
+        @memcpy(c, @byte_buffer_ptr(path), length)
+    }
+
+    // `path` as NUL-terminated UTF-16 from `allocate`, or null.
+    wide_path: function (path: @byte_buffer) wide: ref @bit16 {
+        length: @bit_native = @byte_buffer_len(path)
+        memory: ref unknown = allocate(@i_mul_native(@i_add_native(length, 0x1), 0x2))
+        wide = memory as ref @bit16
+        if @ptr_to_address(memory) == 0x0 {
+            return
+        }
+        if @i_greater_than_u_native(length, 0x0) {
+            count: @bit32 = Windows.MultiByteToWideChar(Windows.CP_UTF8, 0x0, @byte_buffer_ptr(path), @truncate(length), wide, @truncate(length))
+        }
+    }
+
+    // A bare target's C library still has POSIX `write` in practice.
+    bare_write: extern "write" function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native
 
     // A bare target has no OS of its own: Standard needs a C library there.
     needs_libc: function () nothing {
@@ -172,13 +432,7 @@ private {
         }
     }
 
-    // `mmap` of fresh read-write pages with the target's `flags`
-    // (`MAP_PRIVATE | MAP_ANONYMOUS`), or null.
-    c_map: function (size: @bit_native, flags: @bit32) memory: ref unknown {
-        memory = C.mmap(@address_to_ptr(0x0), size, 0x3, flags, 0xffffffff, 0x0)
-        // `MAP_FAILED` is `-1`.
-        if @i_greater_than_u_native(@ptr_to_address(memory), @i_sub_native(0x0, 0x1000)) {
-            memory = @address_to_ptr(0x0)
-        }
+    unsupported: function () nothing {
+        @compile_error("Standard.Os has no file, clock or random support on a target with no OS")
     }
 }

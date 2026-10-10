@@ -363,7 +363,7 @@ impl Target {
                 exe_suffix: ".exe",
                 obj_suffix: ".obj",
                 entry_symbol: ".lilac.native_entry",
-                system_libs: &["kernel32.lib"],
+                system_libs: &["kernel32.lib", "bcryptprimitives.lib"],
                 dynamic_linker: None,
             },
             Os::Linux => LinkInfo {
@@ -657,7 +657,11 @@ mod tests {
         let windows = info("x86_64-pc-windows-msvc").expect("windows links");
         assert_eq!(windows.flavor, LinkFlavor::Coff);
         assert_eq!((windows.exe_suffix, windows.obj_suffix), (".exe", ".obj"));
-        assert_eq!(windows.system_libs, ["kernel32.lib"]);
+        assert_eq!(
+            windows.system_libs,
+            ["kernel32.lib", "bcryptprimitives.lib"]
+        );
+
         let linux = info("x86_64-unknown-linux-gnu").expect("linux links");
         assert_eq!(linux.flavor, LinkFlavor::Elf);
         assert_eq!((linux.exe_suffix, linux.obj_suffix), ("", ".o"));

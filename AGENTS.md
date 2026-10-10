@@ -64,8 +64,18 @@
   missing `@exit`/`@compiler_print` outside an executable is declared by
   `lilac_ir::hook_externs`: a `.lilac.`-named `extern`, which keeps the
   place ABI (`LirFunc::uses_c_abi`). `lib/Standard/Runtime` defines the hooks
-  over `Standard.Os` (per-OS `extern`s and `@syscall`s picked by
-  `@builtin.Target`).
+  over `Standard.Os`.
+- `Standard.Os` is two levels. The raw namespaces `Os.Windows` (kernel32
+  `extern`s), `Os.Linux` (`@syscall` wrappers, the calls x86-64 and Arm
+  share) and `Os.MacOs` (libSystem `extern`s) mirror the platform exactly:
+  its names, argument orders, constant values and failure convention
+  (`GetLastError`, raw `-errno` with `is_error`/`errno_of`, `errno()`).
+  `Os` itself is the portable surface (`Handle`, `read`/`write`, `open`,
+  `allocate`, `map_pages`, clocks, `fill_random`, `exit`, `Error`), each
+  function one `match @builtin.Target.os` over them; `--libc` only moves
+  the heap and the exit to C. The rest of `Standard` uses only `Os`, and
+  `Standard.C` is ISO C only. Every `Os.Windows`/`Os.MacOs` function must
+  be in the `toolchain/` stubs (`tests/toolchain.rs` checks).
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR
@@ -189,8 +199,9 @@
   facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
 - **Native mode is the default** (`Entry::Native`, on Windows, Linux and
   macOS). It links with the sysroot's `lld` and `toolchain/` stubs
-  (`kernel32.lib`, a hand-written `libSystem.tbd`, listing what
-  `Standard.Os` calls), no C library: the sysroot is `LILAC_SYSROOT`, else
+  (`kernel32.lib` and `bcryptprimitives.lib`, a hand-written
+  `libSystem.tbd`, listing what `Standard.Os.Windows`/`Os.MacOs` declare),
+  no C library: the sysroot is `LILAC_SYSROOT`, else
   `<exe dir>/../lib/lilac` (`scripts/package.sh` builds that layout). The
   program is entered at `.lilac.native_entry` (`LinkInfo::entry_symbol`),
   the backend's wrapper of the stub `.lilac.start(count, arguments,
@@ -211,7 +222,7 @@
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
   else `cc`/`clang` on `PATH`) with a C `main(argc, argv, envp)`
   (`Entry::CMain`) that calls `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
-  uses the C library (and Windows exits through C `exit`). It is the
+  takes its heap and exit from the C library. It is the
   permanent opt-in for static C libraries, and how code using `Standard.C`
   builds while that is phased out. Shared C libraries work in native mode
   (an `extern` plus `--link-arg=`); free their memory with their own free

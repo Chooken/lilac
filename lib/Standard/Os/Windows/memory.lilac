@@ -1,0 +1,27 @@
+// Heaps and virtual memory.
+
+GetProcessHeap: extern function () heap: ref unknown
+HeapAlloc: extern function (hHeap: ref unknown, dwFlags: @bit32, dwBytes: @bit_native) memory: ref unknown
+HeapReAlloc: extern function (hHeap: ref unknown, dwFlags: @bit32, lpMem: ref unknown, dwBytes: @bit_native) memory: ref unknown
+HeapFree: extern function (hHeap: ref unknown, dwFlags: @bit32, lpMem: ref unknown) ok: @bit32
+HeapSize: extern function (hHeap: ref unknown, dwFlags: @bit32, lpMem: ref unknown) size: @bit_native
+
+VirtualAlloc: extern function (lpAddress: ref unknown, dwSize: @bit_native, flAllocationType: @bit32, flProtect: @bit32) memory: ref unknown
+VirtualFree: extern function (lpAddress: ref unknown, dwSize: @bit_native, dwFreeType: @bit32) ok: @bit32
+VirtualProtect: extern function (lpAddress: ref unknown, dwSize: @bit_native, flNewProtect: @bit32, lpflOldProtect: ref @bit32) ok: @bit32
+
+GetSystemInfo: extern function (lpSystemInfo: ref SYSTEM_INFO) nothing
+
+SYSTEM_INFO: object {
+    wProcessorArchitecture: @bit16
+    wReserved: @bit16
+    dwPageSize: @bit32
+    lpMinimumApplicationAddress: ref unknown
+    lpMaximumApplicationAddress: ref unknown
+    dwActiveProcessorMask: @bit_native
+    dwNumberOfProcessors: @bit32
+    dwProcessorType: @bit32
+    dwAllocationGranularity: @bit32
+    wProcessorLevel: @bit16
+    wProcessorRevision: @bit16
+}

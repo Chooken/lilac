@@ -1,0 +1,33 @@
+// Processes, threads, the environment and errors.
+
+// Runs `atexit` handlers and flushes C `stdio`, then ends the process.
+exit: extern function (status: @bit32) nothing
+// Ends the process at once.
+_exit: extern function (status: @bit32) nothing
+abort: extern function () nothing
+getpid: extern function () pid: @bit32
+kill: extern function (pid: @bit32, sig: @bit32) result: @bit32
+getenv: extern function (name: ref @bit8) value: ref @bit8
+sysconf: extern function (name: @bit32) value: @bit_native
+
+// The calling thread's `errno`: `__error()` is where C's `errno` lives.
+__error: extern function () errno: ref @bit32
+errno: function () @bit32 => __error()
+
+// The process arguments, as `main` received them.
+_NSGetArgc: extern function () argc: ref @bit32
+_NSGetArgv: extern function () argv: ref unknown
+_NSGetEnviron: extern function () environ: ref unknown
+
+// Threads. A `pthread_t` is a pointer-sized `@bit_native`; `start_routine`
+// is a C-ABI `void *(*)(void *)`.
+pthread_create: extern function (thread: ref @bit_native, attr: ref unknown, start_routine: ref unknown, arg: ref unknown) result: @bit32
+pthread_join: extern function (thread: @bit_native, value_ptr: ref unknown) result: @bit32
+pthread_detach: extern function (thread: @bit_native) result: @bit32
+pthread_self: extern function () thread: @bit_native
+sched_yield: extern function () result: @bit32
+
+// `os_unfair_lock`: one zero-initialized `@bit32`.
+os_unfair_lock_lock: extern function (lock: ref unknown) nothing
+os_unfair_lock_trylock: extern function (lock: ref unknown) acquired: @bit8
+os_unfair_lock_unlock: extern function (lock: ref unknown) nothing

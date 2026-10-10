@@ -1,0 +1,137 @@
+// Darwin's constants, by their C header names. Many differ from Linux's.
+
+// Standard descriptors.
+STDIN_FILENO: @bit32 => 0x0
+STDOUT_FILENO: @bit32 => 0x1
+STDERR_FILENO: @bit32 => 0x2
+
+// `open` flags.
+O_RDONLY: @bit32 => 0x0
+O_WRONLY: @bit32 => 0x1
+O_RDWR: @bit32 => 0x2
+O_NONBLOCK: @bit32 => 0x4
+O_APPEND: @bit32 => 0x8
+O_NOFOLLOW: @bit32 => 0x100
+O_CREAT: @bit32 => 0x200
+O_TRUNC: @bit32 => 0x400
+O_EXCL: @bit32 => 0x800
+O_DIRECTORY: @bit32 => 0x100000
+O_CLOEXEC: @bit32 => 0x1000000
+
+// `access` modes.
+F_OK: @bit32 => 0x0
+X_OK: @bit32 => 0x1
+W_OK: @bit32 => 0x2
+R_OK: @bit32 => 0x4
+
+// `lseek` whence.
+SEEK_SET: @bit32 => 0x0
+SEEK_CUR: @bit32 => 0x1
+SEEK_END: @bit32 => 0x2
+
+// `fcntl` commands.
+F_GETFD: @bit32 => 0x1
+F_SETFD: @bit32 => 0x2
+F_GETFL: @bit32 => 0x3
+F_SETFL: @bit32 => 0x4
+FD_CLOEXEC: @bit32 => 0x1
+
+// `mmap` protections and flags.
+PROT_NONE: @bit32 => 0x0
+PROT_READ: @bit32 => 0x1
+PROT_WRITE: @bit32 => 0x2
+PROT_EXEC: @bit32 => 0x4
+MAP_SHARED: @bit32 => 0x1
+MAP_PRIVATE: @bit32 => 0x2
+MAP_FIXED: @bit32 => 0x10
+MAP_ANON: @bit32 => 0x1000
+MAP_ANONYMOUS: @bit32 => 0x1000
+// `mmap`'s failure value, as an address.
+MAP_FAILED: @bit_native => @i_negate_native(0x1)
+
+// `madvise` advice.
+MADV_NORMAL: @bit32 => 0x0
+MADV_RANDOM: @bit32 => 0x1
+MADV_SEQUENTIAL: @bit32 => 0x2
+MADV_WILLNEED: @bit32 => 0x3
+MADV_DONTNEED: @bit32 => 0x4
+MADV_FREE: @bit32 => 0x5
+
+// Clocks.
+CLOCK_REALTIME: @bit32 => 0x0
+CLOCK_MONOTONIC_RAW: @bit32 => 0x4
+CLOCK_MONOTONIC_RAW_APPROX: @bit32 => 0x5
+CLOCK_MONOTONIC: @bit32 => 0x6
+CLOCK_UPTIME_RAW: @bit32 => 0x8
+CLOCK_UPTIME_RAW_APPROX: @bit32 => 0x9
+CLOCK_PROCESS_CPUTIME_ID: @bit32 => 0xC
+CLOCK_THREAD_CPUTIME_ID: @bit32 => 0x10
+
+// `sysconf` names.
+_SC_PAGESIZE: @bit32 => 0x1D
+_SC_NPROCESSORS_ONLN: @bit32 => 0x3A
+
+// Signals.
+SIGHUP: @bit32 => 0x1
+SIGINT: @bit32 => 0x2
+SIGQUIT: @bit32 => 0x3
+SIGILL: @bit32 => 0x4
+SIGTRAP: @bit32 => 0x5
+SIGABRT: @bit32 => 0x6
+SIGFPE: @bit32 => 0x8
+SIGKILL: @bit32 => 0x9
+SIGBUS: @bit32 => 0xA
+SIGSEGV: @bit32 => 0xB
+SIGPIPE: @bit32 => 0xD
+SIGALRM: @bit32 => 0xE
+SIGTERM: @bit32 => 0xF
+SIGCHLD: @bit32 => 0x14
+SIGUSR1: @bit32 => 0x1E
+SIGUSR2: @bit32 => 0x1F
+
+// `errno` values.
+EPERM: @bit32 => 0x1
+ENOENT: @bit32 => 0x2
+ESRCH: @bit32 => 0x3
+EINTR: @bit32 => 0x4
+EIO: @bit32 => 0x5
+ENXIO: @bit32 => 0x6
+E2BIG: @bit32 => 0x7
+ENOEXEC: @bit32 => 0x8
+EBADF: @bit32 => 0x9
+ECHILD: @bit32 => 0xA
+EDEADLK: @bit32 => 0xB
+ENOMEM: @bit32 => 0xC
+EACCES: @bit32 => 0xD
+EFAULT: @bit32 => 0xE
+EBUSY: @bit32 => 0x10
+EEXIST: @bit32 => 0x11
+EXDEV: @bit32 => 0x12
+ENODEV: @bit32 => 0x13
+ENOTDIR: @bit32 => 0x14
+EISDIR: @bit32 => 0x15
+EINVAL: @bit32 => 0x16
+ENFILE: @bit32 => 0x17
+EMFILE: @bit32 => 0x18
+ENOTTY: @bit32 => 0x19
+EFBIG: @bit32 => 0x1B
+ENOSPC: @bit32 => 0x1C
+ESPIPE: @bit32 => 0x1D
+EROFS: @bit32 => 0x1E
+EMLINK: @bit32 => 0x1F
+EPIPE: @bit32 => 0x20
+EDOM: @bit32 => 0x21
+ERANGE: @bit32 => 0x22
+EAGAIN: @bit32 => 0x23
+EWOULDBLOCK: @bit32 => 0x23
+ENOTSUP: @bit32 => 0x2D
+EADDRINUSE: @bit32 => 0x30
+ECONNRESET: @bit32 => 0x36
+ETIMEDOUT: @bit32 => 0x3C
+ECONNREFUSED: @bit32 => 0x3D
+ELOOP: @bit32 => 0x3E
+ENAMETOOLONG: @bit32 => 0x3F
+ENOTEMPTY: @bit32 => 0x42
+ENOLCK: @bit32 => 0x4D
+ENOSYS: @bit32 => 0x4E
+EOPNOTSUPP: @bit32 => 0x66

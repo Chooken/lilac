@@ -9,7 +9,6 @@ fflush: extern function(stream: FILE) result: CInt
 setvbuf: extern function(stream: FILE, buf: ref Int8, mode: CInt, size: @bit_native) result: CInt
 
 
-write: extern function (fd: @bit32, data: ref @bit8, len: @bit_native) written: @bit_native
 fread: extern function(ptr: ref unknown, size: @bit_native, nmemb: @bit_native, stream: FILE) result: @bit_native
 fwrite: extern function(ptr: ref unknown, size: @bit_native, nmemb: @bit_native, stream: FILE) result: @bit_native
 fgets: extern function(s: ref Int8, size: CInt, stream: FILE) result: ref Int8

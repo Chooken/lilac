@@ -1,0 +1,74 @@
+// The Win32 API (kernel32 and bcryptprimitives), by its own names, so the
+// Microsoft documentation describes every declaration. Types follow
+// `windows.h`: `HANDLE` and other pointers are `ref unknown` (or `ref` of
+// the pointee), `BOOL`, `DWORD`, `UINT` and `int` are `@bit32`, `SIZE_T`
+// and `ULONG_PTR` are `@bit_native`, `LARGE_INTEGER` is `@bit64`, and a
+// string is UTF-16 (`ref @bit16`, NUL-terminated). A failed call's reason
+// is `GetLastError()` (the `ERROR_*` constants).
+//
+// Every function here is listed in `toolchain/windows/*.def`, which builds
+// the import libraries a native build links.
+
+// Files, pipes and consoles.
+
+GetStdHandle: extern function (nStdHandle: @bit32) handle: ref unknown
+CreateFileW: extern function (lpFileName: ref @bit16, dwDesiredAccess: @bit32, dwShareMode: @bit32, lpSecurityAttributes: ref unknown, dwCreationDisposition: @bit32, dwFlagsAndAttributes: @bit32, hTemplateFile: ref unknown) handle: ref unknown
+ReadFile: extern function (hFile: ref unknown, lpBuffer: ref unknown, nNumberOfBytesToRead: @bit32, lpNumberOfBytesRead: ref @bit32, lpOverlapped: ref unknown) ok: @bit32
+WriteFile: extern function (hFile: ref unknown, lpBuffer: ref unknown, nNumberOfBytesToWrite: @bit32, lpNumberOfBytesWritten: ref @bit32, lpOverlapped: ref unknown) ok: @bit32
+CloseHandle: extern function (hObject: ref unknown) ok: @bit32
+FlushFileBuffers: extern function (hFile: ref unknown) ok: @bit32
+SetFilePointerEx: extern function (hFile: ref unknown, liDistanceToMove: @bit64, lpNewFilePointer: ref @bit64, dwMoveMethod: @bit32) ok: @bit32
+GetFileSizeEx: extern function (hFile: ref unknown, lpFileSize: ref @bit64) ok: @bit32
+SetEndOfFile: extern function (hFile: ref unknown) ok: @bit32
+GetFileType: extern function (hFile: ref unknown) kind: @bit32
+CreatePipe: extern function (hReadPipe: ref unknown, hWritePipe: ref unknown, lpPipeAttributes: ref unknown, nSize: @bit32) ok: @bit32
+DuplicateHandle: extern function (hSourceProcessHandle: ref unknown, hSourceHandle: ref unknown, hTargetProcessHandle: ref unknown, lpTargetHandle: ref unknown, dwDesiredAccess: @bit32, bInheritHandle: @bit32, dwOptions: @bit32) ok: @bit32
+
+DeleteFileW: extern function (lpFileName: ref @bit16) ok: @bit32
+MoveFileExW: extern function (lpExistingFileName: ref @bit16, lpNewFileName: ref @bit16, dwFlags: @bit32) ok: @bit32
+CopyFileW: extern function (lpExistingFileName: ref @bit16, lpNewFileName: ref @bit16, bFailIfExists: @bit32) ok: @bit32
+CreateDirectoryW: extern function (lpPathName: ref @bit16, lpSecurityAttributes: ref unknown) ok: @bit32
+RemoveDirectoryW: extern function (lpPathName: ref @bit16) ok: @bit32
+GetFileAttributesW: extern function (lpFileName: ref @bit16) attributes: @bit32
+GetFullPathNameW: extern function (lpFileName: ref @bit16, nBufferLength: @bit32, lpBuffer: ref @bit16, lpFilePart: ref unknown) length: @bit32
+GetCurrentDirectoryW: extern function (nBufferLength: @bit32, lpBuffer: ref @bit16) length: @bit32
+SetCurrentDirectoryW: extern function (lpPathName: ref @bit16) ok: @bit32
+FindFirstFileW: extern function (lpFileName: ref @bit16, lpFindFileData: ref WIN32_FIND_DATAW) handle: ref unknown
+FindNextFileW: extern function (hFindFile: ref unknown, lpFindFileData: ref WIN32_FIND_DATAW) ok: @bit32
+FindClose: extern function (hFindFile: ref unknown) ok: @bit32
+
+GetConsoleMode: extern function (hConsoleHandle: ref unknown, lpMode: ref @bit32) ok: @bit32
+SetConsoleMode: extern function (hConsoleHandle: ref unknown, dwMode: @bit32) ok: @bit32
+WriteConsoleW: extern function (hConsoleOutput: ref unknown, lpBuffer: ref unknown, nNumberOfCharsToWrite: @bit32, lpNumberOfCharsWritten: ref @bit32, lpReserved: ref unknown) ok: @bit32
+ReadConsoleW: extern function (hConsoleInput: ref unknown, lpBuffer: ref unknown, nNumberOfCharsToRead: @bit32, lpNumberOfCharsRead: ref @bit32, pInputControl: ref unknown) ok: @bit32
+GetConsoleOutputCP: extern function () codePage: @bit32
+SetConsoleOutputCP: extern function (wCodePageID: @bit32) ok: @bit32
+
+// UTF-8 <-> UTF-16 (`CodePage` `CP_UTF8`). A count of `-1` means
+// NUL-terminated.
+MultiByteToWideChar: extern function (CodePage: @bit32, dwFlags: @bit32, lpMultiByteStr: ref @bit8, cbMultiByte: @bit32, lpWideCharStr: ref @bit16, cchWideChar: @bit32) length: @bit32
+WideCharToMultiByte: extern function (CodePage: @bit32, dwFlags: @bit32, lpWideCharStr: ref @bit16, cchWideChar: @bit32, lpMultiByteStr: ref @bit8, cbMultiByte: @bit32, lpDefaultChar: ref unknown, lpUsedDefaultChar: ref unknown) length: @bit32
+
+FILETIME: object {
+    dwLowDateTime: @bit32
+    dwHighDateTime: @bit32
+}
+
+WIN32_FIND_DATAW: object {
+    dwFileAttributes: @bit32
+    ftCreationTime: FILETIME
+    ftLastAccessTime: FILETIME
+    ftLastWriteTime: FILETIME
+    nFileSizeHigh: @bit32
+    nFileSizeLow: @bit32
+    dwReserved0: @bit32
+    dwReserved1: @bit32
+    cFileName: @array(@bit16, 260)
+    cAlternateFileName: @array(@bit16, 14)
+}
+
+SECURITY_ATTRIBUTES: object {
+    nLength: @bit32
+    lpSecurityDescriptor: ref unknown
+    bInheritHandle: @bit32
+}

@@ -1,0 +1,124 @@
+// Why an OS call failed, portably: the common cases by name, the rest as
+// the platform's own code (`errno`, or `GetLastError` on Windows).
+
+using Standard.Os.Windows as Windows
+using Standard.Os.MacOs as MacOs
+
+// `errno` values are the target's: Darwin's differ from Linux's.
+match @builtin.Target.os {
+    .MacOs => using Standard.Os.MacOs as Posix
+} else {
+    using Standard.Os.Linux as Posix
+}
+
+Error: enum {
+    // A code with no name here.
+    Other: @bit32
+    NotFound
+    PermissionDenied
+    AlreadyExists
+    Interrupted
+    InvalidInput
+    OutOfMemory
+    WouldBlock
+    BrokenPipe
+    IsDirectory
+    NotDirectory
+    DirectoryNotEmpty
+    NoSpace
+    TimedOut
+    Unsupported
+    BadHandle
+}
+
+// The error an `errno` value names.
+error_of_errno: function (code: @bit32) error: Error {
+    if code == Posix.ENOENT {
+        error = .NotFound
+    } else if code == Posix.EACCES {
+        error = .PermissionDenied
+    } else if code == Posix.EPERM {
+        error = .PermissionDenied
+    } else if code == Posix.EEXIST {
+        error = .AlreadyExists
+    } else if code == Posix.EINTR {
+        error = .Interrupted
+    } else if code == Posix.EINVAL {
+        error = .InvalidInput
+    } else if code == Posix.ENOMEM {
+        error = .OutOfMemory
+    } else if code == Posix.EAGAIN {
+        error = .WouldBlock
+    } else if code == Posix.EPIPE {
+        error = .BrokenPipe
+    } else if code == Posix.EISDIR {
+        error = .IsDirectory
+    } else if code == Posix.ENOTDIR {
+        error = .NotDirectory
+    } else if code == Posix.ENOTEMPTY {
+        error = .DirectoryNotEmpty
+    } else if code == Posix.ENOSPC {
+        error = .NoSpace
+    } else if code == Posix.ETIMEDOUT {
+        error = .TimedOut
+    } else if code == Posix.ENOSYS {
+        error = .Unsupported
+    } else if code == Posix.EBADF {
+        error = .BadHandle
+    } else {
+        error = .Other(code)
+    }
+}
+
+// The error a Windows `GetLastError` code names.
+error_of_windows: function (code: @bit32) error: Error {
+    if code == Windows.ERROR_FILE_NOT_FOUND {
+        error = .NotFound
+    } else if code == Windows.ERROR_PATH_NOT_FOUND {
+        error = .NotFound
+    } else if code == Windows.ERROR_ACCESS_DENIED {
+        error = .PermissionDenied
+    } else if code == Windows.ERROR_FILE_EXISTS {
+        error = .AlreadyExists
+    } else if code == Windows.ERROR_ALREADY_EXISTS {
+        error = .AlreadyExists
+    } else if code == Windows.ERROR_INVALID_PARAMETER {
+        error = .InvalidInput
+    } else if code == Windows.ERROR_INVALID_NAME {
+        error = .InvalidInput
+    } else if code == Windows.ERROR_NOT_ENOUGH_MEMORY {
+        error = .OutOfMemory
+    } else if code == Windows.ERROR_OUTOFMEMORY {
+        error = .OutOfMemory
+    } else if code == Windows.ERROR_BROKEN_PIPE {
+        error = .BrokenPipe
+    } else if code == Windows.ERROR_NO_DATA {
+        error = .BrokenPipe
+    } else if code == Windows.ERROR_DIRECTORY {
+        error = .NotDirectory
+    } else if code == Windows.ERROR_DIR_NOT_EMPTY {
+        error = .DirectoryNotEmpty
+    } else if code == Windows.ERROR_TIMEOUT {
+        error = .TimedOut
+    } else if code == Windows.ERROR_NOT_SUPPORTED {
+        error = .Unsupported
+    } else if code == Windows.ERROR_INVALID_HANDLE {
+        error = .BadHandle
+    } else {
+        error = .Other(code)
+    }
+}
+
+private {
+    // The calling thread's `errno` after a failed C call. Linux system
+    // calls return theirs instead (`Linux.errno_of`).
+    posix_errno: function () code: @bit32 {
+        match @builtin.Target.os {
+            .MacOs => {
+                code = MacOs.errno()
+            }
+        } else {
+            code = 0x0
+        }
+    }
+}

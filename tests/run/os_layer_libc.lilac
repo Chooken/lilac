@@ -1,0 +1,121 @@
+// libc
+// expect-stdout: written
+// expect-exit: 0
+// `os_layer.lilac` under `--libc`: the heap is C's, exit is C's, and on
+// Windows random bytes come from the C runtime's `rand_s`.
+
+using Standard
+using Standard.Process
+using Standard.Os as Os
+
+check: function (ok: Bool, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+// The value of an `Ok`, else exits with `code`.
+value_of: function (result: Result[@bit_native, Os.Error], code: @bit32) value: @bit_native {
+    ok: Bool, got: @bit_native = result.unwrap()
+    check(ok, code)
+    value = got
+}
+
+value_of_64: function (result: Result[@bit64, Os.Error], code: @bit32) value: @bit64 {
+    ok: Bool, got: @bit64 = result.unwrap()
+    check(ok, code)
+    value = got
+}
+
+handle_of: function (result: Result[Os.Handle, Os.Error], code: @bit32) handle: Os.Handle {
+    ok: Bool, got: Os.Handle = result.unwrap()
+    check(ok, code)
+    handle = got
+}
+
+text_ptr: function (text: @byte_buffer) ref unknown => @byte_buffer_ptr(text) as ref unknown
+
+// Exits with `code` when `error` holds one.
+check_none: function (error: Optional[Os.Error], code: @bit32) nothing {
+    match error {
+        .Some => exit(code)
+    }
+}
+
+nonzero: function (value: @bit64) Bool => @i_greater_than_u_64(value, 0x0)
+
+streams: function () nothing {
+    text: @byte_buffer = "written\n"
+    written: @bit_native = value_of(Os.write(Os.standard_output(), text_ptr(text), @byte_buffer_len(text)), 0x1)
+    check(written == 0x8, 0x2)
+}
+
+files: function () nothing {
+    name: @byte_buffer = "os_layer.tmp"
+    file: Os.Handle = handle_of(Os.open(name, .Write), 0x10)
+    content: @byte_buffer = "abcdef"
+    check(value_of(Os.write(file, text_ptr(content), 0x6), 0x11) == 0x6, 0x12)
+    check_none(Os.close(file), 0x13)
+
+    file = handle_of(Os.open(name, .Read), 0x14)
+    check(value_of_64(Os.size(file), 0x15) == 0x6, 0x16)
+    check(value_of_64(Os.seek(file, 0x2, .Start), 0x17) == 0x2, 0x18)
+    buffer: @array(@bit8, 8) = @array(@bit8, 8) {}
+    into: ref @array(@bit8, 8) = ref buffer
+    check(value_of(Os.read(file, into as ref unknown, 0x8), 0x19) == 0x4, 0x1A)
+    check(@array_at(into, 0x0) == 0x63, 0x1B)
+    check(@array_at(into, 0x3) == 0x66, 0x1C)
+    check(value_of(Os.read(file, into as ref unknown, 0x8), 0x1D) == 0x0, 0x1E)
+    check_none(Os.close(file), 0x1F)
+
+    missing: Result[Os.Handle, Os.Error] = Os.open("os_layer.missing", .Read)
+    failed: Bool, why: Os.Error = missing.error()
+
+    check(failed, 0x20)
+    match why {
+        .NotFound => {
+        }
+    } else {
+        exit(0x21)
+    }
+}
+
+clocks: function () nothing {
+    start: @bit64 = Os.monotonic_nanos()
+    Os.sleep(0x1E8480)
+    elapsed: @bit64 = @i_sub_64(Os.monotonic_nanos(), start)
+    // At least the 2 ms slept.
+    check(@i_greater_than_or_equal_u_64(elapsed, 0x1E8480), 0x30)
+    // After 2020.
+    check(@i_greater_than_u_64(Os.wall_clock_nanos(), 0x16345785D8A00000), 0x31)
+}
+
+random: function () nothing {
+    bytes: @array(@bit64, 4) = @array(@bit64, 4) {}
+    into: ref @array(@bit64, 4) = ref bytes
+    Os.fill_random(into as ref unknown, 0x20)
+    any: @bit64 = @bit_or_64(@bit_or_64(@array_at(into, 0x0), @array_at(into, 0x1)), @bit_or_64(@array_at(into, 0x2), @array_at(into, 0x3)))
+    check(nonzero(any), 0x40)
+}
+
+heap: function () nothing {
+    memory: ref unknown = Os.allocate(0x10)
+    check(nonzero(@extend_zero(@ptr_to_address(memory))), 0x50)
+    bytes: ref @bit8 = memory as ref @bit8
+    @store_u8(bytes, 0xF, 0x2A)
+    grown: ref unknown = Os.reallocate(memory, 0x10000)
+    check(nonzero(@extend_zero(@ptr_to_address(grown))), 0x51)
+
+    check(@load_u8(grown as ref @bit8, 0xF) == 0x2A, 0x52)
+    @store_u8(grown as ref @bit8, 0xFFFF, 0x1)
+    Os.deallocate(grown)
+}
+
+main: function () nothing {
+    streams()
+    files()
+    clocks()
+    random()
+    heap()
+}

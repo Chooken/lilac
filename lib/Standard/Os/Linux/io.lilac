@@ -1,0 +1,89 @@
+// Files and descriptors (`read(2)`, `openat(2)`, ...). A path is a
+// NUL-terminated byte string.
+
+read: function (fd: @bit32, buf: ref unknown, count: @bit_native) @bit_native => @syscall(call_number(0, 63), @extend_sign(fd), @ptr_to_address(buf), count, 0x0, 0x0, 0x0)
+
+write: function (fd: @bit32, buf: ref unknown, count: @bit_native) @bit_native => @syscall(call_number(1, 64), @extend_sign(fd), @ptr_to_address(buf), count, 0x0, 0x0, 0x0)
+
+pread64: function (fd: @bit32, buf: ref unknown, count: @bit_native, offset: @bit_native) @bit_native => @syscall(call_number(17, 67), @extend_sign(fd), @ptr_to_address(buf), count, offset, 0x0, 0x0)
+
+pwrite64: function (fd: @bit32, buf: ref unknown, count: @bit_native, offset: @bit_native) @bit_native => @syscall(call_number(18, 68), @extend_sign(fd), @ptr_to_address(buf), count, offset, 0x0, 0x0)
+
+openat: function (dirfd: @bit32, pathname: ref @bit8, flags: @bit32, mode: @bit32) @bit_native => @syscall(call_number(257, 56), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @extend_zero(flags), @extend_zero(mode), 0x0, 0x0)
+
+close: function (fd: @bit32) @bit_native => @syscall(call_number(3, 57), @extend_sign(fd), 0x0, 0x0, 0x0, 0x0, 0x0)
+
+lseek: function (fd: @bit32, offset: @bit_native, whence: @bit32) @bit_native => @syscall(call_number(8, 62), @extend_sign(fd), offset, @extend_zero(whence), 0x0, 0x0, 0x0)
+
+fsync: function (fd: @bit32) @bit_native => @syscall(call_number(74, 82), @extend_sign(fd), 0x0, 0x0, 0x0, 0x0, 0x0)
+
+fdatasync: function (fd: @bit32) @bit_native => @syscall(call_number(75, 83), @extend_sign(fd), 0x0, 0x0, 0x0, 0x0, 0x0)
+
+ftruncate: function (fd: @bit32, length: @bit_native) @bit_native => @syscall(call_number(77, 46), @extend_sign(fd), length, 0x0, 0x0, 0x0, 0x0)
+
+ioctl: function (fd: @bit32, request: @bit_native, argument: @bit_native) @bit_native => @syscall(call_number(16, 29), @extend_sign(fd), request, argument, 0x0, 0x0, 0x0)
+
+fcntl: function (fd: @bit32, cmd: @bit32, argument: @bit_native) @bit_native => @syscall(call_number(72, 25), @extend_sign(fd), @extend_zero(cmd), argument, 0x0, 0x0, 0x0)
+
+dup: function (oldfd: @bit32) @bit_native => @syscall(call_number(32, 23), @extend_sign(oldfd), 0x0, 0x0, 0x0, 0x0, 0x0)
+
+dup3: function (oldfd: @bit32, newfd: @bit32, flags: @bit32) @bit_native => @syscall(call_number(292, 24), @extend_sign(oldfd), @extend_sign(newfd), @extend_zero(flags), 0x0, 0x0, 0x0)
+
+// `pipefd` is two `@bit32`s: the read end, then the write end.
+pipe2: function (pipefd: ref unknown, flags: @bit32) @bit_native => @syscall(call_number(293, 59), @ptr_to_address(pipefd), @extend_zero(flags), 0x0, 0x0, 0x0, 0x0)
+
+// `struct stat` differs between x86-64 and 64-bit Arm; `statx` does not.
+fstat: function (fd: @bit32, statbuf: ref unknown) @bit_native => @syscall(call_number(5, 80), @extend_sign(fd), @ptr_to_address(statbuf), 0x0, 0x0, 0x0, 0x0)
+
+statx: function (dirfd: @bit32, pathname: ref @bit8, flags: @bit32, mask: @bit32, statxbuf: ref Statx) @bit_native => @syscall(call_number(332, 291), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @extend_zero(flags), @extend_zero(mask), @ptr_to_address(statxbuf as ref unknown), 0x0)
+
+getdents64: function (fd: @bit32, dirp: ref unknown, count: @bit_native) @bit_native => @syscall(call_number(217, 61), @extend_sign(fd), @ptr_to_address(dirp), count, 0x0, 0x0, 0x0)
+
+mkdirat: function (dirfd: @bit32, pathname: ref @bit8, mode: @bit32) @bit_native => @syscall(call_number(258, 34), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @extend_zero(mode), 0x0, 0x0, 0x0)
+
+unlinkat: function (dirfd: @bit32, pathname: ref @bit8, flags: @bit32) @bit_native => @syscall(call_number(263, 35), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @extend_zero(flags), 0x0, 0x0, 0x0)
+
+renameat2: function (olddirfd: @bit32, oldpath: ref @bit8, newdirfd: @bit32, newpath: ref @bit8, flags: @bit32) @bit_native => @syscall(call_number(316, 276), @extend_sign(olddirfd), @ptr_to_address(oldpath as ref unknown), @extend_sign(newdirfd), @ptr_to_address(newpath as ref unknown), @extend_zero(flags), 0x0)
+
+readlinkat: function (dirfd: @bit32, pathname: ref @bit8, buf: ref unknown, bufsiz: @bit_native) @bit_native => @syscall(call_number(267, 78), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @ptr_to_address(buf), bufsiz, 0x0, 0x0)
+
+faccessat: function (dirfd: @bit32, pathname: ref @bit8, mode: @bit32) @bit_native => @syscall(call_number(269, 48), @extend_sign(dirfd), @ptr_to_address(pathname as ref unknown), @extend_zero(mode), 0x0, 0x0, 0x0)
+
+getcwd: function (buf: ref unknown, size: @bit_native) @bit_native => @syscall(call_number(79, 17), @ptr_to_address(buf), size, 0x0, 0x0, 0x0, 0x0)
+
+chdir: function (path: ref @bit8) @bit_native => @syscall(call_number(80, 49), @ptr_to_address(path as ref unknown), 0x0, 0x0, 0x0, 0x0, 0x0)
+
+// `struct statx_timestamp`.
+StatxTimestamp: object {
+    tv_sec: @bit64
+    tv_nsec: @bit32
+    reserved: @bit32
+}
+
+// `struct statx`: the same on every architecture (256 bytes).
+Statx: object {
+    stx_mask: @bit32
+    stx_blksize: @bit32
+    stx_attributes: @bit64
+    stx_nlink: @bit32
+    stx_uid: @bit32
+    stx_gid: @bit32
+    stx_mode: @bit16
+    spare0: @bit16
+    stx_ino: @bit64
+    stx_size: @bit64
+    stx_blocks: @bit64
+    stx_attributes_mask: @bit64
+    stx_atime: StatxTimestamp
+    stx_btime: StatxTimestamp
+    stx_ctime: StatxTimestamp
+    stx_mtime: StatxTimestamp
+    stx_rdev_major: @bit32
+    stx_rdev_minor: @bit32
+    stx_dev_major: @bit32
+    stx_dev_minor: @bit32
+    stx_mnt_id: @bit64
+    stx_dio_mem_align: @bit32
+    stx_dio_offset_align: @bit32
+    spare3: @array(@bit64, 12)
+}

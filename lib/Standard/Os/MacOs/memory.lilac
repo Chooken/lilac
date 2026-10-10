@@ -1,0 +1,12 @@
+// The C heap and virtual memory. `mmap` returns `MAP_FAILED` (`-1`) on
+// failure.
+
+malloc: extern function (size: @bit_native) memory: ref unknown
+calloc: extern function (count: @bit_native, size: @bit_native) memory: ref unknown
+realloc: extern function (ptr: ref unknown, size: @bit_native) memory: ref unknown
+free: extern function (ptr: ref unknown) nothing
+
+mmap: extern function (addr: ref unknown, len: @bit_native, prot: @bit32, flags: @bit32, fd: @bit32, offset: @bit_native) memory: ref unknown
+munmap: extern function (addr: ref unknown, len: @bit_native) result: @bit32
+mprotect: extern function (addr: ref unknown, len: @bit_native, prot: @bit32) result: @bit32
+madvise: extern function (addr: ref unknown, len: @bit_native, advice: @bit32) result: @bit32

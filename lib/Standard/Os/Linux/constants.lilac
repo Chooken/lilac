@@ -1,0 +1,232 @@
+// The kernel's constants, by the names in its headers. Where x86-64 and
+// 64-bit Arm differ, the value follows the target.
+
+// Standard descriptors.
+STDIN_FILENO: @bit32 => 0x0
+STDOUT_FILENO: @bit32 => 0x1
+STDERR_FILENO: @bit32 => 0x2
+
+// `openat` flags.
+O_RDONLY: @bit32 => 0x0
+O_WRONLY: @bit32 => 0x1
+O_RDWR: @bit32 => 0x2
+O_CREAT: @bit32 => 0x40
+O_EXCL: @bit32 => 0x80
+O_NOCTTY: @bit32 => 0x100
+O_TRUNC: @bit32 => 0x200
+O_APPEND: @bit32 => 0x400
+O_NONBLOCK: @bit32 => 0x800
+O_DSYNC: @bit32 => 0x1000
+O_SYNC: @bit32 => 0x101000
+O_CLOEXEC: @bit32 => 0x80000
+O_PATH: @bit32 => 0x200000
+
+match @builtin.Target.arch {
+    .Aarch64 {
+        O_DIRECTORY: @bit32 => 0x4000
+        O_NOFOLLOW: @bit32 => 0x8000
+        O_DIRECT: @bit32 => 0x10000
+    }
+} else {
+    O_DIRECTORY: @bit32 => 0x10000
+    O_NOFOLLOW: @bit32 => 0x20000
+    O_DIRECT: @bit32 => 0x4000
+}
+
+// `*at` directory and flags.
+AT_FDCWD: @bit32 => @extend_sign(@i_negate_8(0x64))
+AT_SYMLINK_NOFOLLOW: @bit32 => 0x100
+AT_REMOVEDIR: @bit32 => 0x200
+AT_EMPTY_PATH: @bit32 => 0x1000
+
+// `renameat2` flags.
+RENAME_NOREPLACE: @bit32 => 0x1
+RENAME_EXCHANGE: @bit32 => 0x2
+
+// `faccessat` modes.
+F_OK: @bit32 => 0x0
+X_OK: @bit32 => 0x1
+W_OK: @bit32 => 0x2
+R_OK: @bit32 => 0x4
+
+// File mode bits.
+S_IFMT: @bit32 => 0xF000
+S_IFDIR: @bit32 => 0x4000
+S_IFREG: @bit32 => 0x8000
+S_IFLNK: @bit32 => 0xA000
+S_IRWXU: @bit32 => 0x1C0
+S_IRUSR: @bit32 => 0x100
+S_IWUSR: @bit32 => 0x80
+S_IXUSR: @bit32 => 0x40
+S_IRGRP: @bit32 => 0x20
+S_IWGRP: @bit32 => 0x10
+S_IXGRP: @bit32 => 0x8
+S_IROTH: @bit32 => 0x4
+S_IWOTH: @bit32 => 0x2
+S_IXOTH: @bit32 => 0x1
+
+// `statx` masks.
+STATX_TYPE: @bit32 => 0x1
+STATX_MODE: @bit32 => 0x2
+STATX_SIZE: @bit32 => 0x200
+STATX_BASIC_STATS: @bit32 => 0x7FF
+
+// `lseek` whence.
+SEEK_SET: @bit32 => 0x0
+SEEK_CUR: @bit32 => 0x1
+SEEK_END: @bit32 => 0x2
+
+// `fcntl` commands.
+F_DUPFD: @bit32 => 0x0
+F_GETFD: @bit32 => 0x1
+F_SETFD: @bit32 => 0x2
+F_GETFL: @bit32 => 0x3
+F_SETFL: @bit32 => 0x4
+F_DUPFD_CLOEXEC: @bit32 => 0x406
+FD_CLOEXEC: @bit32 => 0x1
+
+// `mmap` protections and flags.
+PROT_NONE: @bit32 => 0x0
+PROT_READ: @bit32 => 0x1
+PROT_WRITE: @bit32 => 0x2
+PROT_EXEC: @bit32 => 0x4
+MAP_SHARED: @bit32 => 0x1
+MAP_PRIVATE: @bit32 => 0x2
+MAP_FIXED: @bit32 => 0x10
+MAP_ANONYMOUS: @bit32 => 0x20
+MAP_GROWSDOWN: @bit32 => 0x100
+MAP_NORESERVE: @bit32 => 0x4000
+MAP_POPULATE: @bit32 => 0x8000
+MAP_STACK: @bit32 => 0x20000
+MAP_FIXED_NOREPLACE: @bit32 => 0x100000
+
+// `mremap` flags.
+MREMAP_MAYMOVE: @bit32 => 0x1
+MREMAP_FIXED: @bit32 => 0x2
+
+// `madvise` advice.
+MADV_NORMAL: @bit32 => 0x0
+MADV_RANDOM: @bit32 => 0x1
+MADV_SEQUENTIAL: @bit32 => 0x2
+MADV_WILLNEED: @bit32 => 0x3
+MADV_DONTNEED: @bit32 => 0x4
+MADV_FREE: @bit32 => 0x8
+
+// `msync` flags.
+MS_ASYNC: @bit32 => 0x1
+MS_INVALIDATE: @bit32 => 0x2
+MS_SYNC: @bit32 => 0x4
+
+// Clocks and `clock_nanosleep` flags.
+CLOCK_REALTIME: @bit32 => 0x0
+CLOCK_MONOTONIC: @bit32 => 0x1
+CLOCK_PROCESS_CPUTIME_ID: @bit32 => 0x2
+CLOCK_THREAD_CPUTIME_ID: @bit32 => 0x3
+CLOCK_MONOTONIC_RAW: @bit32 => 0x4
+CLOCK_BOOTTIME: @bit32 => 0x7
+TIMER_ABSTIME: @bit32 => 0x1
+
+// `getrandom` flags.
+GRND_NONBLOCK: @bit32 => 0x1
+GRND_RANDOM: @bit32 => 0x2
+
+// `futex` operations.
+FUTEX_WAIT: @bit32 => 0x0
+FUTEX_WAKE: @bit32 => 0x1
+FUTEX_PRIVATE_FLAG: @bit32 => 0x80
+FUTEX_WAIT_PRIVATE: @bit32 => 0x80
+FUTEX_WAKE_PRIVATE: @bit32 => 0x81
+
+// `clone` flags.
+CSIGNAL: @bit_native => 0xFF
+CLONE_VM: @bit_native => 0x100
+CLONE_FS: @bit_native => 0x200
+CLONE_FILES: @bit_native => 0x400
+CLONE_SIGHAND: @bit_native => 0x800
+CLONE_VFORK: @bit_native => 0x4000
+CLONE_PARENT: @bit_native => 0x8000
+CLONE_THREAD: @bit_native => 0x10000
+CLONE_SYSVSEM: @bit_native => 0x40000
+CLONE_SETTLS: @bit_native => 0x80000
+CLONE_PARENT_SETTID: @bit_native => 0x100000
+CLONE_CHILD_CLEARTID: @bit_native => 0x200000
+CLONE_CHILD_SETTID: @bit_native => 0x1000000
+
+// `wait4` options.
+WNOHANG: @bit32 => 0x1
+WUNTRACED: @bit32 => 0x2
+
+// `arch_prctl` codes (x86-64).
+ARCH_SET_FS: @bit32 => 0x1002
+ARCH_GET_FS: @bit32 => 0x1003
+
+// `rt_sigprocmask` how.
+SIG_BLOCK: @bit32 => 0x0
+SIG_UNBLOCK: @bit32 => 0x1
+SIG_SETMASK: @bit32 => 0x2
+
+// Signals.
+SIGHUP: @bit32 => 0x1
+SIGINT: @bit32 => 0x2
+SIGQUIT: @bit32 => 0x3
+SIGILL: @bit32 => 0x4
+SIGTRAP: @bit32 => 0x5
+SIGABRT: @bit32 => 0x6
+SIGBUS: @bit32 => 0x7
+SIGFPE: @bit32 => 0x8
+SIGKILL: @bit32 => 0x9
+SIGUSR1: @bit32 => 0xA
+SIGSEGV: @bit32 => 0xB
+SIGUSR2: @bit32 => 0xC
+SIGPIPE: @bit32 => 0xD
+SIGALRM: @bit32 => 0xE
+SIGTERM: @bit32 => 0xF
+SIGCHLD: @bit32 => 0x11
+SIGCONT: @bit32 => 0x12
+SIGSTOP: @bit32 => 0x13
+
+// `errno` values (`errno_of`).
+EPERM: @bit32 => 0x1
+ENOENT: @bit32 => 0x2
+ESRCH: @bit32 => 0x3
+EINTR: @bit32 => 0x4
+EIO: @bit32 => 0x5
+ENXIO: @bit32 => 0x6
+E2BIG: @bit32 => 0x7
+ENOEXEC: @bit32 => 0x8
+EBADF: @bit32 => 0x9
+ECHILD: @bit32 => 0xA
+EAGAIN: @bit32 => 0xB
+EWOULDBLOCK: @bit32 => 0xB
+ENOMEM: @bit32 => 0xC
+EACCES: @bit32 => 0xD
+EFAULT: @bit32 => 0xE
+EBUSY: @bit32 => 0x10
+EEXIST: @bit32 => 0x11
+EXDEV: @bit32 => 0x12
+ENODEV: @bit32 => 0x13
+ENOTDIR: @bit32 => 0x14
+EISDIR: @bit32 => 0x15
+EINVAL: @bit32 => 0x16
+ENFILE: @bit32 => 0x17
+EMFILE: @bit32 => 0x18
+ENOTTY: @bit32 => 0x19
+EFBIG: @bit32 => 0x1B
+ENOSPC: @bit32 => 0x1C
+ESPIPE: @bit32 => 0x1D
+EROFS: @bit32 => 0x1E
+EMLINK: @bit32 => 0x1F
+EPIPE: @bit32 => 0x20
+EDOM: @bit32 => 0x21
+ERANGE: @bit32 => 0x22
+EDEADLK: @bit32 => 0x23
+ENAMETOOLONG: @bit32 => 0x24
+ENOLCK: @bit32 => 0x25
+ENOSYS: @bit32 => 0x26
+ENOTEMPTY: @bit32 => 0x27
+ELOOP: @bit32 => 0x28
+EOPNOTSUPP: @bit32 => 0x5F
+EADDRINUSE: @bit32 => 0x62
+ECONNRESET: @bit32 => 0x68
+ETIMEDOUT: @bit32 => 0x6E
+ECONNREFUSED: @bit32 => 0x6F

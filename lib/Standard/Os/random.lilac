@@ -1,0 +1,67 @@
+// Random bytes from the OS's secure generator.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+using Standard.Os.MacOs as MacOs
+
+// Fills `length` bytes at `buffer` with secure random bytes.
+fill_random: function (buffer: ref unknown, length: @bit_native) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            if @builtin.Target.libc {
+                // The C runtime links no `bcryptprimitives`: use its own
+                // generator, four bytes at a time.
+                done: @bit_native = 0x0
+                loop {
+                    if @i_less_than_u_native(done, length) {
+                    } else break
+                    value: @bit32 = 0x0
+                    failed: @bit32 = rand_s(ref value)
+                    count: @bit_native = @i_sub_native(length, done)
+                    if @i_greater_than_u_native(count, 0x4) {
+                        count = 0x4
+                    }
+                    source: ref @bit32 = ref value
+                    @memcpy(@ptr_add(buffer, done) as ref @bit8, source as ref unknown as ref @bit8, count)
+                    done = @i_add_native(done, count)
+                }
+            } else {
+                ok: @bit32 = Windows.ProcessPrng(buffer, length)
+            }
+        }
+        .Linux => {
+            done: @bit_native = 0x0
+            loop {
+                if @i_less_than_u_native(done, length) {
+                } else break
+                result: @bit_native = Linux.getrandom(@ptr_add(buffer, done), @i_sub_native(length, done), 0x0)
+                if Linux.is_error(result) {
+                    // Only an interrupted call can fail here: try again.
+                    continue
+                }
+                done = @i_add_native(done, result)
+            }
+        }
+        .MacOs => {
+            // `getentropy` fills at most 256 bytes per call.
+            done: @bit_native = 0x0
+            loop {
+                if @i_less_than_u_native(done, length) {
+                } else break
+                count: @bit_native = @i_sub_native(length, done)
+                if @i_greater_than_u_native(count, 0x100) {
+                    count = 0x100
+                }
+                result: @bit32 = MacOs.getentropy(@ptr_add(buffer, done), count)
+                done = @i_add_native(done, count)
+            }
+        }
+    } else {
+        unsupported()
+    }
+}
+
+private {
+    // The Universal C Runtime's secure generator.
+    rand_s: extern function (randomValue: ref @bit32) result: @bit32
+}

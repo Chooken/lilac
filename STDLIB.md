@@ -74,9 +74,12 @@ Standard/                 root prelude: scalars, operators, Option/Result, panic
 ├── Text/                 strings, unicode, parse/format
 ├── Collections/          containers, iterators, algorithms
 ├── Io/                   files, paths, streams, console
-├── Os/                   OS calls (kernel32 / Linux system calls / libc), picked by @builtin.Target
+├── Os/                   the portable OS layer, picked by @builtin.Target
+│   ├── Windows/          raw Win32 (kernel32, bcryptprimitives)
+│   ├── Linux/            raw Linux system calls
+│   └── MacOs/            raw libSystem
 ├── Runtime/              the platform hooks: @entry (calls main), @exit, @compiler_print
-├── C/                    libc externs, C types, pointer/atomic primitives (--libc)
+├── C/                    ISO C externs and C types (--libc)
 ├── Threading/            threads, mutex, rwlock, channel (over C)
 ├── Math/                 numeric math + random
 ├── Diagnostics/          error types, formatting, color, tracing
@@ -93,9 +96,11 @@ Standard  ←  C  ←  Io / Threading / Math
 Standard  ←  Diagnostics  ←  Testing / Compiler
 ```
 
-`Standard.Os` and `Standard.C` are the non-portable namespaces; everything
-above them is portable Lilac. `Standard.Os` picks each OS call per target at
-compile time, so code using it is portable too.
+`Standard.Os.Windows`, `Standard.Os.Linux`, `Standard.Os.MacOs` and
+`Standard.C` are the non-portable namespaces; everything above them is
+portable Lilac. `Standard.Os` picks each OS call per target at compile
+time, so code using it is portable too, and the rest of the library sits
+only on `Standard.Os`, never on a raw namespace.
 
 A typical program imports the prelude plus the domains it uses:
 
@@ -172,10 +177,15 @@ unsigned variants; float variants. Unsigned comparisons bind
 | Type | Definition | Key methods |
 |---|---|---|
 | `Option[T]` | `enum { Some: T; None }` | `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`, `and_then`, `or`, `or_else`, `take`, `replace`, `iter` |
-| `Result[T, E]` | `enum { Ok: T; Err: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
+| `Result[T, E]` | `enum { Ok: T; Error: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
 | `Ordering` | `enum { Less; Equal; Greater }` | `then`, `reverse`, `is_less`… |
 | `Never` | `enum {}` (empty) | uninhabited; result of `panic`/`abort` |
 | `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
+
+> **Today:** `Optional[T]` (`Some`, `None`; `unwrap`, `unwrap_or`,
+> `unwrap_or_default`) and a first `Result[T, E]` (`Ok`, `Error`; `is_ok`,
+> `unwrap`, `unwrap_or`, `error`). Both start zeroed as their first variant:
+> a zeroed `Optional` is `Some`, so set `.None` explicitly.
 
 **Functions:**
 
@@ -293,12 +303,51 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 
 > **Today:** `print`, `print_line`, `print_char` (a code point, as UTF-8),
 > `print_byte`, `print_error` and `print_error_line`, over
-> `Standard.Os.write_stream`. `Standard.Process.exit` and
-> `Standard.Heap.Allocator` likewise sit on `Standard.Os` (`exit_process`,
-> `allocate`/`deallocate`), not on `Standard.C`. `Standard.Os` also has
-> `map_pages`/`unmap_pages`, and `Standard.Runtime` defines the platform
-> hooks (SPEC §8) over it. The
-> inventory below is the target design.
+> `Standard.Os.write_all`. `Standard.Process.exit` and
+> `Standard.Heap.Allocator` likewise sit on `Standard.Os` (`exit`,
+> `allocate`/`deallocate`), and `Standard.Runtime` defines the platform
+> hooks (SPEC §8) over it. The inventory below is the target design.
+
+### 3.5a `Standard.Os` (the OS layer)
+
+Two levels. The raw namespaces expose each platform's own interface,
+faithfully: the platform's names, argument orders, constant values and
+error convention, so its documentation (MSDN, the man pages) describes
+them and C examples port one for one. Each is split into files by area
+(`io`, `memory`, `process`, `time`, `constants`, ...) that merge into one
+namespace; unused declarations cost nothing (DCE).
+
+| Namespace | Interface | Failure |
+|---|---|---|
+| `Os.Windows` | kernel32 (`CreateFileW`, `VirtualAlloc`, `SRWLOCK`s, ...), `ProcessPrng`; `windows.h` constants (`STD_OUTPUT_HANDLE`, `MEM_COMMIT`, `ERROR_*`) and structs (`SYSTEM_INFO`, `WIN32_FIND_DATAW`) | `BOOL`/`HANDLE`, then `GetLastError()` |
+| `Os.Linux` | system calls through `@syscall`, the ones x86-64 and 64-bit Arm share (`openat`, `mmap`, `clone`, `futex`, `getrandom`, ...); kernel constants, per architecture where they differ (`O_DIRECTORY`) | the raw `-errno`: `is_error(r)`, `errno_of(r)` |
+| `Os.MacOs` | libSystem (`open`, `mmap`, `clock_gettime_nsec_np`, `getentropy`, `pthread_*`, `os_unfair_lock_*`, ...); Darwin constant values | `-1`/null, then `errno()` |
+
+Every `Os.Windows` function is in `toolchain/windows/*.def` and every
+`Os.MacOs` one in both `libSystem.tbd` stubs; `tests/toolchain.rs` checks.
+
+The portable surface, each function one `match @builtin.Target.os` over
+the raw namespaces (a bare target, `.None`, gets the C library where one
+exists, else a compile error):
+
+* **Handles:** `Handle` (a `HANDLE` or a descriptor), `standard_input()`,
+  `standard_output()`, `standard_error()`; `read`, `write` (both
+  `Result[@bit_native, Error]`), `write_all` (`Optional[Error]`),
+  `open(path, OpenMode) Result[Handle, Error]`, `close`,
+  `seek(handle, offset, SeekFrom) Result[@bit64, Error]`, `size`.
+* **Memory:** `allocate` (zeroed), `deallocate`, `reallocate`; `map_pages`,
+  `unmap_pages` (always the OS), `page_size()`.
+* **Process:** `exit(code)`; `argument_count`, `argument_vector`,
+  `environment_vector` (stored by `@entry`).
+* **Time:** `monotonic_nanos()`, `wall_clock_nanos()`, `sleep(nanos)`.
+* **Random:** `fill_random(buffer, length)`.
+* **Errors:** `Error`, the common cases by name (`NotFound`,
+  `PermissionDenied`, ...) plus `Other: @bit32`, from `error_of_errno` and
+  `error_of_windows`.
+
+Under `--libc`, the C library owns the heap (`allocate` is `calloc`, so C
+and Lilac share one) and the exit (C `exit`, so `stdio` flushes); Linux
+still makes system calls for everything else.
 
 | Type | Purpose | Key methods |
 |---|---|---|
@@ -324,7 +373,10 @@ String`, `@conversion(from: String) to: @format_args` (via builder).
 > **Being phased out.** Programs no longer link a C library by default; the
 > library's own OS bindings (`Standard.Os`) replace it piece by piece, and code that
 > still uses `Standard.C` builds with `lilac build --libc`. See
-> `docs/history/build-command-plan.md`.
+> `docs/history/build-command-plan.md`. It holds ISO C only: POSIX and
+> platform calls (`write`, `mmap`, ...) are in the `Standard.Os` raw
+> namespaces, whose constants differ per OS.
+
 
 The single non-portable namespace. Everything here is either a raw `extern`
 declaration or a thin wrapper over one. Above this line the library is
