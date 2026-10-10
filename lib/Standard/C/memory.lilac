@@ -11,3 +11,6 @@ memmove: extern function(dest: ref unknown, src: ref unknown, n: @bit_native) ou
 memset: extern function(s: ref unknown, c: Int32, n: @bit_native) out: ref unknown
 memcmp: extern function(s1: ref unknown, s2: ref unknown, n: @bit_native) out: Int32
 memchr: extern function(s: ref unknown, c: Int32, n: @bit_native) out: ref unknown
+
+mmap: extern function (address: ref unknown, len: @bit_native, prot: Int32, flags: @bit32, fd: Int32, offset: Int64) memory: ref unknown
+munmap: extern function (address: ref unknown, len: @bit_native) result: Int32

@@ -3,7 +3,7 @@
 // `@compiler_print` and then calls `@exit(101)`. Mounting Standard supplies
 // all three.
 
-using Standard.Os
+using Standard.Os as Os
 
 // Runs the program: its root-namespace `main`.
 @entry: function () nothing {
@@ -11,10 +11,10 @@ using Standard.Os
 }
 
 @exit: function (code: @bit32) nothing {
-    exit_process(code)
+    Os.exit_process(code)
 }
 
 // Panic messages and stack traces go to standard error.
 @compiler_print: function (text: @byte_buffer) nothing {
-    write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    Os.write_stream(0x2, @byte_buffer_ptr(text), @byte_buffer_len(text))
 }
