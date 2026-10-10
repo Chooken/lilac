@@ -225,7 +225,8 @@ copy &2 -> ref %tmp.3
 as produced by `tests/ui/object_instance_function.lir`.
 
 ### conversions / field.addr
-* `trunc` narrows and `extend.zero` widens bit containers; `field.addr`
+* `trunc` narrows, and `extend.zero` and `extend.sign` widen, bit
+  containers; `field.addr`
   computes a field address like `field` but yields a register holding it.
 ```lilac-ir
 &2: #bit8 = trunc &1
@@ -397,6 +398,12 @@ and `@align_of` never reach LIR: lowering computes them from the layouts as
 * To: variable or register
 ```lilac-ir
 extend.zero #, &, #, [%, &]
+```
+
+### extend.sign 
+As `extend.zero`, filling the new high bits with the sign bit.
+```lilac-ir
+extend.sign #, &, #, [%, &]
 ```
 
 ### truncate 

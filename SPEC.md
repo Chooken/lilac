@@ -247,7 +247,7 @@ An expression is constant when it is one of:
 | `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
 | `a and b`, `a or b` | short-circuit over a constant `a` (`b` only when it decides) |
 | a value `match` | the arm a constant scrutinee selects (a variant pattern binds its capture), else the `else` value |
-| an integer intrinsic | `@i_*` arithmetic and comparisons, `@truncate`, `@extend_zero`, over constant arguments |
+| an integer intrinsic | `@i_*` arithmetic and comparisons, `@truncate`, `@extend_zero`, `@extend_sign`, over constant arguments |
 | a call to a `=>` function | with constant arguments: its body, with the parameters bound |
 
 and nothing else. In particular:
@@ -356,7 +356,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@align_of`** | `(T)` or `(value)` | The alignment in bytes of a type, or of a value's type, as a `@bit_native` constant (the same target C layout as `@size_of`). |
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). |
-| **`@load_u8`** | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
+| **`@extend_sign`** | `(value)` | Sign-extends a bit container (copies its top bit into the new bits); target width as `@extend_zero`. |
+| **`@load_u8`**
+ | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
 | **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
 | **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bit_native`) from `ref @bit8` to `ref @bit8`. |
 | **`@memmove`** | `(dst, src, len)` | `@memcpy` for ranges that may overlap. |

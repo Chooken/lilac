@@ -738,15 +738,19 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &mut FnState<'ctx>,
     ) {
         let value = match op {
-            ConvertOp::Trunc | ConvertOp::ExtendZero => {
+            ConvertOp::Trunc | ConvertOp::ExtendZero | ConvertOp::ExtendSign => {
                 let source = reg_int(src, state);
                 let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
                     bug!(Span::dummy(), "`convert` to non-integer type `{ty}`");
                 };
-                if matches!(op, ConvertOp::Trunc) {
-                    checked(builder.build_int_truncate(source, result_ty, ""), "trunc").into()
-                } else {
-                    checked(builder.build_int_z_extend(source, result_ty, ""), "zext").into()
+                match op {
+                    ConvertOp::Trunc => {
+                        checked(builder.build_int_truncate(source, result_ty, ""), "trunc").into()
+                    }
+                    ConvertOp::ExtendSign => {
+                        checked(builder.build_int_s_extend(source, result_ty, ""), "sext").into()
+                    }
+                    _ => checked(builder.build_int_z_extend(source, result_ty, ""), "zext").into(),
                 }
             }
             ConvertOp::Bitcast => {

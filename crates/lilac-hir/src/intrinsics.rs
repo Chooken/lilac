@@ -325,6 +325,8 @@ pub enum Intrinsic {
     Truncate,
     /// `@extend_zero` (width from the expected type).
     ExtendZero,
+    /// `@extend_sign` (width from the expected type).
+    ExtendSign,
     /// `@size_of(Type)` / `@size_of(value)`.
     SizeOf,
     /// `@load_u8(ptr, offset)`.
@@ -405,9 +407,10 @@ pub struct Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 25] = [
+    const PLAIN: [(&'static str, Self); 26] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
+        ("@extend_sign", Self::ExtendSign),
         ("@size_of", Self::SizeOf),
         ("@load_u8", Self::LoadU8),
         ("@store_u8", Self::StoreU8),
@@ -593,7 +596,9 @@ impl Intrinsic {
                 vec![Builtin(width.bits().unwrap_or(Ty::Bit64))],
                 Some(Builtin(width.builtin())),
             ),
-            Self::Truncate | Self::ExtendZero => sig(vec![AnyBit], Some(ExpectedBit)),
+            Self::Truncate | Self::ExtendZero | Self::ExtendSign => {
+                sig(vec![AnyBit], Some(ExpectedBit))
+            }
             Self::SizeOf | Self::AlignOf | Self::ArrayLen => {
                 sig(Vec::new(), Some(Builtin(Ty::BitNative)))
             }

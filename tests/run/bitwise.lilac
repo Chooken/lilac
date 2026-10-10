@@ -1,6 +1,7 @@
 // expect-exit: 0
 // The bitwise intrinsics at run time and folded in a constant condition:
-// `and`/`or`/`xor`/`not`, and shifts taking the amount modulo the width.
+// `and`/`or`/`xor`/`not`, shifts taking the amount modulo the width, and
+// `@extend_sign`.
 
 using Standard.Process
 
@@ -12,6 +13,7 @@ check: function (actual: @bit32, want: @bit32, code: @bit32) nothing {
 }
 
 flags: @bit32 => @bit_or_32(0x40, 0x200)
+at_cwd: @bit32 => @extend_sign(@i_negate_8(0x64))
 
 main: function () nothing {
     a: @bit32 = 0xF0F0
@@ -33,4 +35,15 @@ main: function () nothing {
         @compile_error("the constant `or` lost a bit")
     }
     check(flags, 0x240, 0xA)
+    // Sign extension, at run time and folded.
+    negative: @bit8 = 0xFE
+    check(@extend_sign(negative), 0xFFFFFFFE, 0xB)
+    positive: @bit8 = 0x7F
+    check(@extend_sign(positive), 0x7F, 0xC)
+    wide: @bit64 = @extend_sign(minus)
+    if wide == 0xFFFFFFFF80000000 {
+    } else {
+        exit(0xD)
+    }
+    check(at_cwd, 0xFFFFFF9C, 0xE)
 }

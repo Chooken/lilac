@@ -411,6 +411,15 @@ impl<'a> Lower<'a> {
             (Intrinsic::Truncate | Intrinsic::ExtendZero, [(bits, _)]) => {
                 Some(Value::Int(bits & mask_of(width), width))
             }
+            (Intrinsic::ExtendSign, [(bits, from)]) => {
+                let sign = 1u64 << (from - 1);
+                let extended = if bits & sign == 0 {
+                    *bits
+                } else {
+                    bits | !mask_of(*from)
+                };
+                Some(Value::Int(extended & mask_of(width), width))
+            }
             _ => None,
         }
     }

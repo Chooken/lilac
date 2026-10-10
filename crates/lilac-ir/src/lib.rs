@@ -386,7 +386,7 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `&d: #t = trunc|extend.zero &s` (width conversion).
+    /// `&d: #t = trunc|extend.zero|extend.sign &s` (width conversion).
     Convert {
         /// Conversion operator.
         op: ConvertOp,
@@ -691,6 +691,8 @@ pub enum ConvertOp {
     Trunc,
     /// `extend.zero` (zero-extension).
     ExtendZero,
+    /// `extend.sign` (sign-extension).
+    ExtendSign,
     /// `bitcast` (same-width reinterpret: `@bit32` <-> `@fbit32`, or a
     /// reference <-> `#bit_native` address).
     Bitcast,

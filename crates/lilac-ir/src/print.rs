@@ -269,6 +269,7 @@ pub(crate) fn print_inst(inst: &LirInst) -> String {
             let op = match op {
                 ConvertOp::Trunc => "trunc",
                 ConvertOp::ExtendZero => "extend.zero",
+                ConvertOp::ExtendSign => "extend.sign",
                 ConvertOp::Bitcast => "bitcast",
             };
             format!("{dst}: {ty} = {op} {src}")

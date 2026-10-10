@@ -96,10 +96,12 @@ impl Lower<'_> {
             Intrinsic::FbitToBits(_)
             | Intrinsic::BitsToFbit(_)
             | Intrinsic::Truncate
-            | Intrinsic::ExtendZero => {
+            | Intrinsic::ExtendZero
+            | Intrinsic::ExtendSign => {
                 let op = match intrinsic {
                     Intrinsic::Truncate => ConvertOp::Trunc,
                     Intrinsic::ExtendZero => ConvertOp::ExtendZero,
+                    Intrinsic::ExtendSign => ConvertOp::ExtendSign,
                     _ => ConvertOp::Bitcast,
                 };
                 let src = self.value_reg(state, func, &args[0]);
