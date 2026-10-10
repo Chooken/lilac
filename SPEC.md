@@ -335,6 +335,11 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@i_greater_than_or_equal_W`** | `(@bitW, @bitW): @bit8` | Signed integer greater-or-equal. Returns `@bit8`. |
 | **`@i_less_than_or_equal_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer less-or-equal. Returns `@bit8`. |
 | **`@i_greater_than_or_equal_u_W`** | `(@bitW, @bitW): @bit8` | Unsigned integer greater-or-equal. Returns `@bit8`. |
+| **`@bit_and_W`**, **`@bit_or_W`**, **`@bit_xor_W`** | `(@bitW, @bitW): @bitW` | Bitwise and, or, exclusive or. |
+| **`@bit_not_W`** | `(@bitW): @bitW` | Bitwise complement. |
+| **`@bit_shift_left_W`** | `(@bitW, amount: @bitW): @bitW` | Shifts left by `amount` modulo the width (so a shift is never undefined). |
+| **`@bit_shift_right_W`** | `(@bitW, amount: @bitW): @bitW` | Arithmetic shift right (copies the sign bit), by `amount` modulo the width. |
+| **`@bit_shift_right_u_W`** | `(@bitW, amount: @bitW): @bitW` | Logical shift right (shifts in zeros), by `amount` modulo the width. |
 | **`@f_add_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point addition using IEEE-754 bit interpretation. |
 | **`@f_sub_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point subtraction. |
 | **`@f_mul_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point multiplication. |
@@ -584,6 +589,27 @@ Redeclaring a name in the same block is `E020`; a nested block may shadow
 an outer local (or a global) until it ends.
 
 The base language enforces no concept of mutability. Read-only variables and immutability guards are implemented in user-land using the `@on_override` compiler hook.
+
+### Global variables
+
+A top-level `name: Type = value` declares a **global**: one mutable,
+statically allocated value for the whole program, read and assigned like a
+local (`count = @i_add_32(count, 0x1)`, `origin.x = 0x9`, `ref count`).
+`name: Type` with no initializer is a zeroed global. A top-level
+`name: Type => value` is an inline constant instead (§7), with no storage.
+
+The initializer is evaluated at compile time and must be a constant
+expression (the forms in §2's constant-condition table, plus object
+literals and enum variants of constants); anything else is `E038`. No code
+runs before `@entry`, so a global needing a computed value is declared
+zeroed and assigned at run time. A global is never dropped: its `@on_drop`
+hook, if any, does not run at exit.
+
+```lilac
+count: @bit32 = 0x2A
+origin: Point = Point { x = 0x3, y = 0x4 }
+scratch: @array(@bit8, 64)   // zeroed
+```
 
 ### References & Auto-Dereferencing
 

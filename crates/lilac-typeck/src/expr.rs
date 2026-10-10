@@ -285,6 +285,18 @@ impl Checker<'_> {
                     kind: HirExprKind::Const(def),
                 }
             }
+            DefKind::Global { .. } => {
+                let ty = self.const_type(def);
+                if ty.is_error() {
+                    // The type's own error was reported at the declaration.
+                    return HirExpr::poison(span);
+                }
+                HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Global(def),
+                }
+            }
             DefKind::Object | DefKind::Enum => {
                 self.diags.emit(
                     Diagnostic::error(codes::E021, format!("cannot use type `{name}` as a value"))
@@ -409,15 +421,14 @@ impl Checker<'_> {
                     self.record_local_use(fcx, local, *span);
                     return Ok(local_expr(local, fcx.ty(local), *span));
                 }
-                let diagnostic = Diagnostic::error(
-                    codes::E021,
-                    format!("unresolved name `{name}`"),
-                )
-                .label(*span, true, "not a local or item");
-                let diagnostic = self.suggest_value(fcx, diagnostic, name, *span);
-                Err(self.diags.emit(diagnostic))
+                let item = self.check_ident(fcx, name, *span);
+                self.item_place(item, name)
             }
             Expr::Member { obj, field, span } => {
+                if let Some((path, span)) = self.qualified_name(fcx, expr) {
+                    let item = self.check_ident(fcx, &path, span);
+                    return self.item_place(item, &path);
+                }
                 let base = self.check_place(fcx, obj)?;
                 if base.ty.is_error() {
                     return Ok(HirExpr::poison(*span));
@@ -430,6 +441,22 @@ impl Checker<'_> {
                     expr.span(),
                     true,
                     "only variables and fields are assignable",
+                ),
+            )),
+        }
+    }
+
+    /// An item named as an assignable place: only a global is one.
+    fn item_place(&mut self, item: HirExpr, name: &str) -> Result<HirExpr, ErrorGuaranteed> {
+        match item.kind {
+            HirExprKind::Global(_) => Ok(item),
+            // `check_ident` reported why the name is no value.
+            HirExprKind::Poison => Err(self.diags.already_reported()),
+            _ => Err(self.diags.emit(
+                Diagnostic::error(codes::E010, format!("cannot assign to `{name}`")).label(
+                    item.span,
+                    true,
+                    "only variables, globals and fields are assignable",
                 ),
             )),
         }
@@ -1215,12 +1242,13 @@ impl Checker<'_> {
 
     // ---- module constants ---------------------------------------------------
 
-    /// The declared type of a constant.
+    /// The declared type of a constant or global.
     pub(crate) fn const_type(&mut self, def: DefId) -> TypeRef {
         if let Some(ty) = self.const_types.get(&def) {
             return *ty;
         }
-        let DefKind::Const { ty, .. } = &self.res.def(def).kind else {
+        let (DefKind::Const { ty, .. } | DefKind::Global { ty, .. }) = &self.res.def(def).kind
+        else {
             return TypeRef::ERROR;
         };
         let ty = ty.clone();
@@ -1250,6 +1278,39 @@ impl Checker<'_> {
         for def in consts {
             self.const_cycle(def, &mut Vec::new(), &mut done);
         }
+        for def in self.res.ids() {
+            if matches!(self.res.def(def).kind, DefKind::Global { .. }) {
+                self.check_global(def);
+            }
+        }
+    }
+
+    /// Checks one global's type and initializer into the output. Lowering
+    /// requires the initializer to be constant.
+    fn check_global(&mut self, def: DefId) {
+        let DefKind::Global { value, .. } = &self.res.def(def).kind else {
+            return;
+        };
+        let value = value.clone();
+        let ty = self.const_type(def);
+        if ty.is_error() {
+            return;
+        }
+        let span = self.res.def(def).span;
+        let env = Env {
+            file: Some(self.res.def(def).file),
+            ..Env::default()
+        };
+        let value = value.map(|value| {
+            self.with_env(env, |c| {
+                let mut fcx = FnCx::new(Span::dummy());
+                let hir = c.check_expr(&mut fcx, &value, Some(ty.id));
+                c.coerce(hir, ty, value.span())
+            })
+        });
+        self.out
+            .globals
+            .insert(def, lilac_hir::HirGlobal { ty, value, span });
     }
 
     /// Checks one constant's initializer into the output.

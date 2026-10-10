@@ -205,6 +205,7 @@ impl<'a> Scope<'a> {
             DefKind::Object => CompletionItemKind::STRUCT,
             DefKind::Enum => CompletionItemKind::ENUM,
             DefKind::Const { .. } => CompletionItemKind::CONSTANT,
+            DefKind::Global { .. } => CompletionItemKind::VARIABLE,
             DefKind::Field(_) => CompletionItemKind::FIELD,
             DefKind::Variant(_) => CompletionItemKind::ENUM_MEMBER,
         };

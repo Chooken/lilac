@@ -119,6 +119,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     pub(crate) fn run(&mut self, entry: Entry) -> Result<(), Diagnostic> {
         self.define_layouts();
         self.define_data();
+        self.define_globals();
         self.emit_runtime();
         for func in &self.lir.funcs {
             self.declare_func(func)?;
@@ -272,6 +273,39 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             global.set_constant(true);
             global.set_unnamed_addr(true);
             global.set_initializer(&init);
+        }
+    }
+
+    /// Defines each global variable: internal, aligned to its type, and
+    /// zeroed or holding its initial bytes (which LIR gives in the target's
+    /// layout, so the global is a byte array under an opaque pointer).
+    fn define_globals(&self) {
+        let ptr_bytes = u64::from(self.native.get_bit_width() / 8);
+        for global in &self.lir.globals {
+            let (_, align) = lilac_ir::size_align(&self.lir.layouts, &global.ty, ptr_bytes);
+            let value = match &global.init {
+                None => {
+                    let ty = self.lir_type(&global.ty);
+                    let value = self.module.add_global(ty, None, global.name.as_str());
+                    value.set_initializer(&ty.const_zero());
+                    value
+                }
+                Some(bytes) => {
+                    let i8_ty = self.context.i8_type();
+                    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+                    let values: Vec<_> = bytes
+                        .iter()
+                        .map(|byte| i8_ty.const_int(u64::from(*byte), false))
+                        .collect();
+                    let value =
+                        self.module
+                            .add_global(i8_ty.array_type(len), None, global.name.as_str());
+                    value.set_initializer(&i8_ty.const_array(&values));
+                    value
+                }
+            };
+            value.set_linkage(Linkage::Internal);
+            value.set_alignment(u32::try_from(align).unwrap_or(1));
         }
     }
 
@@ -460,6 +494,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 let value = self.addr_func_value(func, ty, builder);
                 state.regs.insert(dst.clone(), value);
             }
+            LirInst::AddrGlobal { global, dst, .. } => {
+                state.regs.insert(dst.clone(), self.global_addr(global));
+            }
             LirInst::Field {
                 obj, idx, dst, ty, ..
             } => {
@@ -520,6 +557,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             | LirInst::CmpXchg { .. }
             | LirInst::Fence { .. } => self.lower_atomic(inst, builder, state),
         }
+    }
+
+    /// The address of global `global` (`addr.global`).
+    fn global_addr(&self, global: &Symbol) -> BasicValueEnum<'ctx> {
+        let Some(value) = self.module.get_global(global.as_str()) else {
+            bug!(Span::dummy(), "address of undeclared global `!{global}`");
+        };
+        value.as_pointer_value().into()
     }
 
     /// Lowers `zero %place`: a `memset` of the place's size.
@@ -1193,6 +1238,12 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 };
                 checked(value, "integer arith").into()
             }
+            ArithOp::And
+            | ArithOp::Or
+            | ArithOp::Xor
+            | ArithOp::Shl
+            | ArithOp::Shr
+            | ArithOp::ShrU => bitwise(op, lhs, rhs, builder, state),
             ArithOp::Eq => {
                 // `==` is strict bit-equality (SPEC §8) even for floats, so a
                 // float operand is reinterpreted to the same-width integer and
@@ -1529,6 +1580,35 @@ fn reg_int<'ctx>(name: &Reg, state: &FnState<'ctx>) -> IntValue<'ctx> {
         ),
         None => bug!(Span::dummy(), "use of undefined register `{name}`"),
     }
+}
+
+/// A bitwise op or shift. LIR shifts by the amount modulo the width;
+/// LLVM's shift is poison past it, so the amount is masked first.
+fn bitwise<'ctx>(
+    op: &ArithOp,
+    lhs: &Reg,
+    rhs: &Reg,
+    builder: &Builder<'ctx>,
+    state: &FnState<'ctx>,
+) -> BasicValueEnum<'ctx> {
+    let left = reg_int(lhs, state);
+    let right = reg_int(rhs, state);
+    let value = match op {
+        ArithOp::And => builder.build_and(left, right, ""),
+        ArithOp::Or => builder.build_or(left, right, ""),
+        ArithOp::Xor => builder.build_xor(left, right, ""),
+        _ => {
+            let width = u64::from(left.get_type().get_bit_width());
+            let mask = left.get_type().const_int(width - 1, false);
+            let amount = checked(builder.build_and(right, mask, ""), "shift mask");
+            match op {
+                ArithOp::Shl => builder.build_left_shift(left, amount, ""),
+                ArithOp::Shr => builder.build_right_shift(left, amount, true, ""),
+                _ => builder.build_right_shift(left, amount, false, ""),
+            }
+        }
+    };
+    checked(value, "bitwise").into()
 }
 
 /// Reads a register as a float value.

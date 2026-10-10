@@ -1,4 +1,4 @@
-UNIT: @bit32 = 0x1
+UNIT: @bit32 => 0x1
 
 Square: object {
     side: @bit32

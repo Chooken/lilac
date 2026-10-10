@@ -32,9 +32,12 @@ impl Checker<'_> {
             .iter()
             .flat_map(|scope| scope.keys().cloned())
             .collect();
-        names.extend(
-            self.visible_names(|kind| matches!(kind, DefKind::Func(_) | DefKind::Const { .. })),
-        );
+        names.extend(self.visible_names(|kind| {
+            matches!(
+                kind,
+                DefKind::Func(_) | DefKind::Const { .. } | DefKind::Global { .. }
+            )
+        }));
         names
     }
 
@@ -74,7 +77,10 @@ impl Checker<'_> {
     ) -> Diagnostic {
         if name.contains('.') {
             return self.suggest_path(diagnostic, name, span, |kind| {
-                matches!(kind, DefKind::Func(_) | DefKind::Const { .. })
+                matches!(
+                    kind,
+                    DefKind::Func(_) | DefKind::Const { .. } | DefKind::Global { .. }
+                )
             });
         }
         // A misspelled bare name may be a path's head (`Mth.pow()`).

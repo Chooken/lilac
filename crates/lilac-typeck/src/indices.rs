@@ -133,6 +133,7 @@ impl Checker<'_> {
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)
+            | HirExprKind::Global(_)
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::CompileError { .. }
@@ -164,6 +165,8 @@ impl Checker<'_> {
 /// Whether `cond` might be a constant condition: it reads no local.
 fn may_be_constant(cond: &HirExpr) -> bool {
     let mut reads_local = false;
-    cond.walk(&mut |expr| reads_local |= matches!(expr.kind, HirExprKind::Local(_)));
+    cond.walk(&mut |expr| {
+        reads_local |= matches!(expr.kind, HirExprKind::Local(_) | HirExprKind::Global(_));
+    });
     !reads_local
 }

@@ -809,6 +809,12 @@ mod tests {
             (ArithOp::IDivU, "idu"),
             (ArithOp::IMod, "ir"),
             (ArithOp::IModU, "iru"),
+            (ArithOp::And, "band"),
+            (ArithOp::Or, "bor"),
+            (ArithOp::Xor, "bxor"),
+            (ArithOp::Shl, "shl"),
+            (ArithOp::Shr, "shr"),
+            (ArithOp::ShrU, "shru"),
         ] {
             arith(&mut insts, op, "cr", "cr", dst, "#bit32");
         }

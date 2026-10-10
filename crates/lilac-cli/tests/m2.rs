@@ -421,3 +421,36 @@ fn empty_export_is_rejected() {
         "stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn global_initializer_must_be_constant() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_global_initializer.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("error[E038]").count(),
+        1,
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("FAILS_global_initializer.lilac:7:19"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn constants_are_not_assignable() {
+    let output = lilac()
+        .args(["check", &ui("FAILS_assign_constant.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(!output.status.success(), "should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[E010]: cannot assign to `LIMIT`"),
+        "stderr:\n{stderr}"
+    );
+}

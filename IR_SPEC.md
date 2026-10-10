@@ -28,6 +28,15 @@ data {
 }
 ```
 
+Globals are mutable static storage, one declaration each, either zeroed or
+holding their initial bytes (little-endian, in the type's C layout).
+The symbol is the global's qualified name (a root global's under `.root.`);
+globals no `addr.global` names are removed by DCE.
+```lilac-ir
+global !.root.count: #bit32 = bytes "*\x00\x00\x00"
+global !.root.pointer: ref #bit32 = zeroed
+```
+
 String const bytes are raw bytes: printable ASCII and newlines print as is, `"` and `\` are escaped with a backslash, and any other byte prints as `\xHH` (one byte, as in source).
 
 Types are defined as like (members carry their field names in layout order;
@@ -174,9 +183,11 @@ literal's temporary before its fields are written):
 zero %out
 ```
 
-### addr / addr.func / load
+### addr / addr.func / addr.global / load
 * `&r: ref #t = addr %var` takes a place address; `addr.func @f` takes a
   function address with pointee signature checked by the verifier;
+  `&r: ref #t = addr.global !g` takes a global's address (`#t` is the
+  global's type; a `ref` global's address is `ref #unknown`);
   `&r: #t = load %p` reads the value that the pointer in `ref` place `%p`
   points to. `load` always follows the pointer, even when `#t` is itself a
   `ref` (reading an `Optional[ref T]` payload through the slot's address).
@@ -429,8 +440,9 @@ All operands share one `#bit8/16/32/64/Native` width, carried on the result reg.
 Same width rule as integer arithmetic.
 
 ## Bitwise Operations
-* ```and &a, &b -> &r``` / ```or``` / ```xor``` / ```not &a -> &r```
-* ```shift.l &a, &b -> &r``` / ```shift.r &a, &b -> &r```
+* ```and &a, &b -> &r``` / ```or``` / ```xor``` (`not` is `xor` with all ones)
+* ```shift.l &a, &b -> &r``` / ```shift.r``` (arithmetic) / ```shift.r.u```
+  (logical): the amount `&b` (same width as `&a`) is taken modulo the width.
 
 ## Literals (canonical text)
 * Ints: `&1: #bit32 = const 0x2a`: lowercase hex, no leading zeros, the

@@ -509,7 +509,7 @@ fn document_symbols_nest_members() {
         vec![
             ("Point", SymbolKind::STRUCT),
             ("Shape", SymbolKind::ENUM),
-            ("limit", SymbolKind::CONSTANT),
+            ("limit", SymbolKind::VARIABLE),
             ("add", SymbolKind::FUNCTION),
             ("main", SymbolKind::FUNCTION),
         ]
@@ -574,12 +574,12 @@ fn hover_text(client: &Connection, uri: &Url, at: (u32, u32)) -> String {
 }
 
 #[test]
-fn hovers_show_fields_variants_constants_and_intrinsics() {
+fn hovers_show_fields_variants_globals_and_intrinsics() {
     let (client, handle, uri) = open_program();
     for (from, expected) in [
         (at(PROGRAM, "point.x", 0, 6), "field Point.x: @bit8"),
         (at(PROGRAM, ".Line(", 0, 2), "variant Shape.Line: @bit8"),
-        (at(PROGRAM, "limit)", 0, 1), "const limit: @bit8 = 0x10"),
+        (at(PROGRAM, "limit)", 0, 1), "global limit: @bit8 = 0x10"),
         (
             at(PROGRAM, "@i_add_8", 1, 2),
             "@i_add_8(@bit8, @bit8) @bit8",

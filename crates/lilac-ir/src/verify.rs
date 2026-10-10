@@ -304,6 +304,15 @@ impl Verifier<'_> {
                 self.check_addr_func(target, ty, *span);
                 self.define_reg(regs, dst, ty, false, *span, func);
             }
+            LirInst::AddrGlobal {
+                global,
+                dst,
+                ty,
+                span,
+            } => {
+                self.check_addr_global(global, ty, *span);
+                self.define_reg(regs, dst, ty, false, *span, func);
+            }
             LirInst::Call {
                 func: callee,
                 ins,
@@ -718,6 +727,31 @@ impl Verifier<'_> {
     fn check_addr_func(&mut self, target: &Symbol, ty: &LirTy, span: Span) {
         if !self.module.funcs.iter().any(|item| item.name == *target) {
             self.error(format!("address of unknown function `{target}`"), span);
+        }
+        self.check_type(ty, span);
+    }
+
+    /// Checks `addr.global`: the global is declared and the result is a
+    /// reference to its type (opaque for a `ref` global).
+    fn check_addr_global(&mut self, global: &Symbol, ty: &LirTy, span: Span) {
+        let Some(declared) = self.module.globals.iter().find(|item| item.name == *global) else {
+            self.error(
+                format!("address of unknown global `!{}`", global.as_str()),
+                span,
+            );
+            return;
+        };
+        let fits = *ty == declared.ty.clone().to_ref()
+            || (matches!(declared.ty, LirTy::Ref(_)) && *ty == LirTy::opaque_ref());
+        if !fits {
+            self.error(
+                format!(
+                    "`addr.global !{}` needs `ref {}`, found `{ty}`",
+                    global.as_str(),
+                    declared.ty
+                ),
+                span,
+            );
         }
         self.check_type(ty, span);
     }

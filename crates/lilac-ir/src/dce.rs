@@ -226,25 +226,31 @@ pub fn prune_unreachable<S: BuildHasher>(
     for func in &module.funcs {
         for block in &func.blocks {
             for inst in &block.insts {
-                if let LirInst::Const {
-                    value: LirConst::Data(name),
-                    ..
-                } = inst
-                {
-                    referenced.insert(name);
+                match inst {
+                    LirInst::Const {
+                        value: LirConst::Data(name),
+                        ..
+                    }
+                    | LirInst::AddrGlobal { global: name, .. } => {
+                        referenced.insert(name);
+                    }
+                    _ => {}
                 }
             }
         }
     }
     let referenced: HashSet<Symbol> = referenced.into_iter().cloned().collect();
     module.data.retain(|datum| referenced.contains(&datum.name));
+    module
+        .globals
+        .retain(|global| referenced.contains(&global.name));
     prune_layouts(module);
     Some(reach)
 }
 
 /// Keeps only the layouts the surviving functions use.
 fn prune_layouts(module: &mut LirModule) {
-    let mut pending: Vec<&LirTy> = Vec::new();
+    let mut pending: Vec<&LirTy> = module.globals.iter().map(|global| &global.ty).collect();
     for func in &module.funcs {
         pending.extend(func.ins.iter().map(|(_, ty)| ty));
         pending.extend(func.outs.iter().map(|(_, ty)| ty));
@@ -278,6 +284,7 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::Load { ty, .. }
         | LirInst::Addr { ty, .. }
         | LirInst::AddrFunc { ty, .. }
+        | LirInst::AddrGlobal { ty, .. }
         | LirInst::Field { ty, .. }
         | LirInst::Convert { ty, .. }
         | LirInst::FieldAddr { ty, .. }

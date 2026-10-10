@@ -113,6 +113,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
             DefKind::Object => "object",
             DefKind::Enum => "enum",
             DefKind::Const { .. } => "const",
+            DefKind::Global { .. } => "global",
             DefKind::Field(_) => "field",
             DefKind::Variant(_) => "variant",
         };
@@ -218,7 +219,7 @@ mod tests {
             .index
             .defs
             .values()
-            .any(|d| d.name == "pi" && d.kind == "const"));
+            .any(|d| d.name == "pi" && d.kind == "global"));
         assert!(retained
             .index
             .defs

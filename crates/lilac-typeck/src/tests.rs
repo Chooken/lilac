@@ -1843,7 +1843,7 @@ fn instantiated_generic_keeps_reporting_through_its_instance() {
 #[test]
 fn unused_generic_constant_index_out_of_bounds_is_e037() {
     let diags = check_src(
-        "LIMIT: @bit_native = 0x9\n\
+        "LIMIT: @bit_native => 0x9\n\
          bad[T]: function (x: T) nothing {\n    a: @array(T, 4) = @array(T, 4) {}\n    \
          b: ref T = @array_at(ref a, 0x4)\n    c: ref T = @array_at(ref a, LIMIT)\n    \
          d: ref T = @array_at(ref a, 0x3)\n}\n\

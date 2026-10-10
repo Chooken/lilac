@@ -128,6 +128,20 @@ pub enum NumOp {
     LeU,
     /// `greater_than_or_equal_u`.
     GeU,
+    /// `and` (integers only).
+    And,
+    /// `or` (integers only).
+    Or,
+    /// `xor` (integers only).
+    Xor,
+    /// `not` (unary, integers only).
+    Not,
+    /// `shift_left` (integers only; the amount is taken modulo the width).
+    Shl,
+    /// `shift_right` (arithmetic: copies the sign bit).
+    Shr,
+    /// `shift_right_u` (logical: shifts in zeros).
+    ShrU,
 }
 
 impl NumOp {
@@ -152,6 +166,27 @@ impl NumOp {
             _ => return None,
         };
         Some(op)
+    }
+
+    /// A bitwise op (`@bit_<op>_W`): integers only, no sign of their own.
+    fn parse_bitwise(name: &str) -> Option<Self> {
+        let op = match name {
+            "and" => Self::And,
+            "or" => Self::Or,
+            "xor" => Self::Xor,
+            "not" => Self::Not,
+            "shift_left" => Self::Shl,
+            "shift_right" => Self::Shr,
+            "shift_right_u" => Self::ShrU,
+            _ => return None,
+        };
+        Some(op)
+    }
+
+    /// Whether it takes one operand (`negate`, `not`).
+    #[must_use]
+    pub fn is_unary(self) -> bool {
+        matches!(self, Self::Negate | Self::Not)
     }
 
     /// Whether the result is a `@bit8` truth value.
@@ -405,6 +440,13 @@ impl Intrinsic {
             let (op, width) = rest.rsplit_once('_')?;
             return Some(Self::Int(NumOp::parse(op, false)?, IntWidth::parse(width)?));
         }
+        if let Some(rest) = name.strip_prefix("@bit_") {
+            let (op, width) = rest.rsplit_once('_')?;
+            return Some(Self::Int(
+                NumOp::parse_bitwise(op)?,
+                IntWidth::parse(width)?,
+            ));
+        }
         if let Some(rest) = name.strip_prefix("@f_") {
             let (op, width) = rest.rsplit_once('_')?;
             return Some(Self::Float(
@@ -461,6 +503,15 @@ impl Intrinsic {
             "less_than_or_equal_u",
             "greater_than_or_equal_u",
         ];
+        const BIT_OPS: [&str; 7] = [
+            "and",
+            "or",
+            "xor",
+            "not",
+            "shift_left",
+            "shift_right",
+            "shift_right_u",
+        ];
         const ORDERINGS: [&str; 5] = ["", "_relaxed", "_acquire", "_release", "_acq_rel"];
         let mut names: Vec<String> = Self::PLAIN
             .iter()
@@ -469,6 +520,9 @@ impl Intrinsic {
         for op in NUM_OPS {
             names.extend(INT_WIDTHS.iter().map(|width| format!("@i_{op}_{width}")));
             names.extend(FLOAT_WIDTHS.iter().map(|width| format!("@f_{op}_{width}")));
+        }
+        for op in BIT_OPS {
+            names.extend(INT_WIDTHS.iter().map(|width| format!("@bit_{op}_{width}")));
         }
         for (op, _) in AtomicOp::NAMES {
             for ordering in ORDERINGS {
@@ -510,7 +564,7 @@ impl Intrinsic {
                 } else {
                     ty
                 };
-                let params = if op == NumOp::Negate {
+                let params = if op.is_unary() {
                     vec![ty]
                 } else {
                     vec![ty, ty]
@@ -651,6 +705,18 @@ mod tests {
             Some(Intrinsic::Float(NumOp::Ge, FloatWidth::W32))
         );
         assert_eq!(Intrinsic::lookup("@f_div_u_32"), None);
+        assert_eq!(
+            Intrinsic::lookup("@bit_shift_right_u_64"),
+            Some(Intrinsic::Int(NumOp::ShrU, IntWidth::W64))
+        );
+        assert_eq!(
+            Intrinsic::lookup("@bit_not_native"),
+            Some(Intrinsic::Int(NumOp::Not, IntWidth::Native))
+        );
+        assert_eq!(Intrinsic::lookup("@i_and_32"), None);
+        assert_eq!(Intrinsic::lookup("@bit_add_32"), None);
+        assert_eq!(Intrinsic::lookup("@bit_native"), None);
+        assert_eq!(Intrinsic::lookup("@f_xor_32"), None);
         assert_eq!(Intrinsic::lookup("@i_add_128"), None);
         assert_eq!(Intrinsic::lookup("@fbit_to_bits_128"), None);
         assert_eq!(Intrinsic::lookup("@i_add"), None);

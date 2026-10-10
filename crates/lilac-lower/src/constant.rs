@@ -64,6 +64,12 @@ pub(crate) fn arith_op(op: NumOp, float: bool) -> Option<ArithOp> {
         (NumOp::GtU, false) => ArithOp::IGtU,
         (NumOp::LeU, false) => ArithOp::ILeU,
         (NumOp::GeU, false) => ArithOp::IGeU,
+        (NumOp::And, false) => ArithOp::And,
+        (NumOp::Or, false) => ArithOp::Or,
+        (NumOp::Xor, false) => ArithOp::Xor,
+        (NumOp::Shl, false) => ArithOp::Shl,
+        (NumOp::Shr, false) => ArithOp::Shr,
+        (NumOp::ShrU, false) => ArithOp::ShrU,
         (NumOp::Add, true) => ArithOp::FAdd,
         (NumOp::Sub, true) => ArithOp::FSub,
         (NumOp::Mul, true) => ArithOp::FMul,
@@ -161,6 +167,12 @@ pub(crate) fn eval_arith(op: &ArithOp, left: u64, right: u64, width: u32) -> Opt
         ArithOp::IGtU => flag(left > right),
         ArithOp::ILeU => flag(left <= right),
         ArithOp::IGeU => flag(left >= right),
+        ArithOp::And => int(left & right),
+        ArithOp::Or => int(left | right),
+        ArithOp::Xor => int(left ^ right),
+        ArithOp::Shl => int(left << (right % u64::from(width))),
+        ArithOp::Shr => int((signed(left) >> (right % u64::from(width))).cast_unsigned()),
+        ArithOp::ShrU => int(left >> (right % u64::from(width))),
         _ => None,
     }
 }
@@ -316,6 +328,7 @@ impl<'a> Lower<'a> {
                 self.expand(eval, key.def, frame, body)
             }
             HirExprKind::Call { .. }
+            | HirExprKind::Global(_)
             | HirExprKind::Deref(_)
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
@@ -388,6 +401,9 @@ impl<'a> Lower<'a> {
         match (intrinsic, ints.as_slice()) {
             (Intrinsic::Int(NumOp::Negate, _), [(bits, _)]) => {
                 eval_arith(&ArithOp::ISub, 0, *bits, width)
+            }
+            (Intrinsic::Int(NumOp::Not, _), [(bits, _)]) => {
+                eval_arith(&ArithOp::Xor, *bits, u64::MAX, width)
             }
             (Intrinsic::Int(op, _), [(left, operand_width), (right, _)]) => {
                 eval_arith(&arith_op(op, false)?, *left, *right, *operand_width)

@@ -70,6 +70,8 @@ pub struct HirProgram {
     pub funcs: Vec<HirFunc>,
     /// Checked module constants (lowering inlines them at each use).
     pub consts: HashMap<DefId, HirExpr>,
+    /// Checked global variables.
+    pub globals: HashMap<DefId, HirGlobal>,
     /// Layout of every concrete object/enum type that occurs in the program.
     pub layouts: HashMap<TypeId, Layout>,
     /// RAII hooks per concrete type.
@@ -124,6 +126,17 @@ pub enum Layout {
         /// The tag's bit container: the smallest `@bitN` holding the count.
         tag: TypeId,
     },
+}
+
+/// One checked global variable.
+#[derive(Clone, Debug)]
+pub struct HirGlobal {
+    /// Declared type.
+    pub ty: TypeRef,
+    /// Initializer (`None` starts zeroed); lowering requires it constant.
+    pub value: Option<HirExpr>,
+    /// Declaration span.
+    pub span: Span,
 }
 
 /// The RAII hooks bound to one concrete type.
@@ -446,6 +459,8 @@ pub enum HirExprKind {
     FormatArgs(Vec<HirExpr>),
     /// A module constant (inlined by lowering).
     Const(DefId),
+    /// A global variable (place).
+    Global(DefId),
     /// `@size_of(T)`.
     SizeOf(TypeRef),
     /// `@align_of(T)`.
@@ -477,7 +492,10 @@ impl HirExpr {
     pub fn is_place(&self) -> bool {
         matches!(
             self.kind,
-            HirExprKind::Local(_) | HirExprKind::Field { .. } | HirExprKind::Deref(_)
+            HirExprKind::Local(_)
+                | HirExprKind::Field { .. }
+                | HirExprKind::Deref(_)
+                | HirExprKind::Global(_)
         )
     }
 
@@ -529,6 +547,7 @@ impl HirExpr {
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)
+            | HirExprKind::Global(_)
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::CompileError { .. }

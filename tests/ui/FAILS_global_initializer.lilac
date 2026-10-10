@@ -1,0 +1,11 @@
+// A global's initializer must be a constant expression (`E038`).
+
+seed: function () value: @bit32 {
+    value = 0x7
+}
+
+counter: @bit32 = seed()
+
+main: function () nothing {
+    counter = 0x1
+}

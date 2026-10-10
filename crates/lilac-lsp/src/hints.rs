@@ -95,26 +95,7 @@ pub fn hints(retained: &Retained) -> Vec<Hint> {
         }
     }
 
-    // Top-level `private` items nothing names.
-    let used_defs: HashSet<_> = index.uses.iter().map(|site| site.def).collect();
-    for id in analysis.resolved.ids() {
-        let def = analysis.resolved.def(id);
-        let item = matches!(
-            def.kind,
-            DefKind::Func(_) | DefKind::Object | DefKind::Enum | DefKind::Const { .. }
-        );
-        if item
-            && def.parent.is_none()
-            && def.vis == Visibility::Private
-            && !def.name_span.is_dummy()
-            && !used_defs.contains(&id)
-        {
-            hints.push(Hint {
-                span: def.name_span,
-                message: format!("`{}` is never used", def.name),
-            });
-        }
-    }
+    unused_private_items(retained, &mut hints);
 
     // The rest of a block after `return`, `break`, `continue`, `@panic` or
     // `@trap`.
@@ -143,6 +124,36 @@ pub fn hints(retained: &Retained) -> Vec<Hint> {
 
     hints.sort_by_key(|hint| (hint.span.file.0, hint.span.lo.0, hint.span.hi.0));
     hints
+}
+
+/// Top-level `private` items nothing names.
+fn unused_private_items(retained: &Retained, hints: &mut Vec<Hint>) {
+    let Some(analysis) = retained.session.analysis() else {
+        return;
+    };
+    let used: HashSet<_> = retained.index.uses.iter().map(|site| site.def).collect();
+    for id in analysis.resolved.ids() {
+        let def = analysis.resolved.def(id);
+        let item = matches!(
+            def.kind,
+            DefKind::Func(_)
+                | DefKind::Object
+                | DefKind::Enum
+                | DefKind::Const { .. }
+                | DefKind::Global { .. }
+        );
+        if item
+            && def.parent.is_none()
+            && def.vis == Visibility::Private
+            && !def.name_span.is_dummy()
+            && !used.contains(&id)
+        {
+            hints.push(Hint {
+                span: def.name_span,
+                message: format!("`{}` is never used", def.name),
+            });
+        }
+    }
 }
 
 /// `hint` as a faded LSP diagnostic, or `None` when its file is unknown.

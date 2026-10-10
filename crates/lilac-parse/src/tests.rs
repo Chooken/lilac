@@ -234,10 +234,13 @@ fn tag_literal_parses() {
 }
 
 #[test]
-fn bare_top_level_decl_still_errors() {
-    let (_, diags, _) = parse("x: @bit8\n");
-    assert!(diags.has_errors());
-    assert!(diags.diagnostics().iter().any(|d| d.code == "E001"));
+fn bare_top_level_decl_is_a_zeroed_global() {
+    let (file, diags, _) = parse("x: @bit8\n");
+    assert!(!diags.has_errors(), "{diags:?}");
+    assert!(matches!(
+        file.items[0].kind,
+        ItemKind::Global { value: None, .. }
+    ));
 }
 
 #[test]

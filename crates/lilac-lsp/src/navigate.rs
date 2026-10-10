@@ -450,6 +450,7 @@ fn symbol_kind(info: &DefInfo) -> SymbolKind {
         "object" => SymbolKind::STRUCT,
         "enum" => SymbolKind::ENUM,
         "const" => SymbolKind::CONSTANT,
+        "global" => SymbolKind::VARIABLE,
         "field" => SymbolKind::FIELD,
         _ => SymbolKind::ENUM_MEMBER,
     }

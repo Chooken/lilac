@@ -376,7 +376,7 @@ fn colored(sources: &lilac_span::SourceMap, span: Span, kind: &str) -> Option<(R
         "object" => TOKEN_TYPE,
         "enum" => TOKEN_ENUM,
         "field" => TOKEN_PROPERTY,
-        "const" => TOKEN_VARIABLE,
+        "const" | "global" => TOKEN_VARIABLE,
         _ => return None,
     };
     span_range(sources, span).map(|range| (range, token_type))

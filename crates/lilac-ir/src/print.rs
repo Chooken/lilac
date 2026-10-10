@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use lilac_span::Span;
 
 use crate::{
-    ArithOp, ConvertOp, LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm,
-    LirTy, SpannedText,
+    ArithOp, ConvertOp, LirCallee, LirData, LirFunc, LirGlobal, LirInst, LirModule, LirOperand,
+    LirTerm, LirTy, SpannedText,
 };
 
 impl LirModule {
@@ -32,6 +32,9 @@ impl LirModule {
         let mut lines = self.header_lines();
         for data in &self.data {
             lines.extend(print_data(data));
+        }
+        for global in &self.globals {
+            lines.push(print_global(global));
         }
         let mut names: Vec<&str> = self.layouts.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -118,6 +121,18 @@ pub(crate) fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
     )]
 }
 
+/// `global !name: #t = zeroed`, or `= bytes "…"` with its initial bytes.
+pub(crate) fn print_global(global: &LirGlobal) -> (String, Option<Span>) {
+    let init = match &global.init {
+        None => "zeroed".to_owned(),
+        Some(bytes) => format!("bytes \"{}\"", escape_data(bytes)),
+    };
+    (
+        format!("global !{}: {} = {init}", global.name.as_str(), global.ty),
+        Some(global.span),
+    )
+}
+
 /// Prints one type section (`type #Name` with `name: #ty` members in
 /// layout order; the section order itself is sorted in `to_text`). Type
 /// sections are compiler-generated, so every line carries no span.
@@ -154,6 +169,12 @@ pub(crate) fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::IDivU => "i.div.u",
         ArithOp::IMod => "i.mod",
         ArithOp::IModU => "i.mod.u",
+        ArithOp::And => "and",
+        ArithOp::Or => "or",
+        ArithOp::Xor => "xor",
+        ArithOp::Shl => "shift.l",
+        ArithOp::Shr => "shift.r",
+        ArithOp::ShrU => "shift.r.u",
         ArithOp::FAdd => "f.add",
         ArithOp::FSub => "f.sub",
         ArithOp::FMul => "f.mul",
@@ -190,6 +211,11 @@ pub(crate) fn print_inst(inst: &LirInst) -> String {
         }
         LirInst::AddrFunc { func, dst, ty, .. } => {
             format!("{dst}: {ty} = addr.func {func}")
+        }
+        LirInst::AddrGlobal {
+            global, dst, ty, ..
+        } => {
+            format!("{dst}: {ty} = addr.global !{}", global.as_str())
         }
         LirInst::Call {
             func, ins, outs, ..
@@ -361,6 +387,7 @@ pub(crate) fn inst_span(inst: &LirInst) -> Span {
         | LirInst::Load { span, .. }
         | LirInst::Addr { span, .. }
         | LirInst::AddrFunc { span, .. }
+        | LirInst::AddrGlobal { span, .. }
         | LirInst::Call { span, .. }
         | LirInst::Field { span, .. }
         | LirInst::StoreField { span, .. }

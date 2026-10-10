@@ -58,12 +58,19 @@ pub enum DefKind {
     Field(AstType),
     /// `Variant` / `Variant: Type` inside an enum.
     Variant(Option<AstType>),
-    /// `name: Type = expr` / `name: Type => expr` module constant.
+    /// `name: Type => expr` inline constant.
     Const {
         /// Declared type.
         ty: AstType,
         /// Initializer (inlined at every use).
         value: Arc<Expr>,
+    },
+    /// `name: Type = expr` / `name: Type` global variable.
+    Global {
+        /// Declared type.
+        ty: AstType,
+        /// Constant initializer (`None` starts zeroed).
+        value: Option<Arc<Expr>>,
     },
 }
 
@@ -481,9 +488,13 @@ impl Collector<'_> {
             ItemKind::Object { .. } => DefKind::Object,
             ItemKind::Enum { .. } => DefKind::Enum,
             ItemKind::Field { ty } => DefKind::Field(ty.clone()),
-            ItemKind::Const { ty, value, .. } => DefKind::Const {
+            ItemKind::Const { ty, value } => DefKind::Const {
                 ty: ty.clone(),
                 value: Arc::new(value.clone()),
+            },
+            ItemKind::Global { ty, value } => DefKind::Global {
+                ty: ty.clone(),
+                value: value.clone().map(Arc::new),
             },
             ItemKind::Using { .. } | ItemKind::Private { .. } | ItemKind::Error => return None,
         };

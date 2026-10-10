@@ -40,6 +40,8 @@ pub struct LirModule {
     pub target: String,
     /// Typed constants (`!c0: str`, `!c1: numlit`).
     pub data: Vec<LirData>,
+    /// Global variables (`global !name: #t = …`).
+    pub globals: Vec<LirGlobal>,
     /// Functions in source order.
     pub funcs: Vec<LirFunc>,
     /// Layout name (without `#`) → `(field, type)` in order.
@@ -67,6 +69,20 @@ pub struct LirData {
     /// Raw bytes (`!c0: str = "hi"`; any byte, not necessarily UTF-8).
     pub bytes: Vec<u8>,
     /// Definition span.
+    pub span: Span,
+}
+
+/// One global variable: mutable static storage of one type.
+#[derive(Clone, Debug)]
+pub struct LirGlobal {
+    /// Global name (prints as `!name`).
+    pub name: Symbol,
+    /// Stored type.
+    pub ty: LirTy,
+    /// The initial bytes in the target's layout (little-endian), exactly
+    /// the type's size; `None` starts zeroed.
+    pub init: Option<Vec<u8>>,
+    /// Declaration span.
     pub span: Span,
 }
 
@@ -154,6 +170,18 @@ pub enum ArithOp {
     IMod,
     /// `i.mod.u` (unsigned remainder).
     IModU,
+    /// `and` (bitwise).
+    And,
+    /// `or`.
+    Or,
+    /// `xor`.
+    Xor,
+    /// `shift.l`: shifts left by the right operand modulo the width.
+    Shl,
+    /// `shift.r`: arithmetic right shift (the amount modulo the width).
+    Shr,
+    /// `shift.r.u`: logical right shift (the amount modulo the width).
+    ShrU,
     /// `f.add` (bitwise-float add).
     FAdd,
     /// `f.sub`.
@@ -295,6 +323,17 @@ pub enum LirInst {
         /// Destination register.
         dst: Reg,
         /// Pointer type.
+        ty: LirTy,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: ref #t = addr.global !g` (a global variable's address).
+    AddrGlobal {
+        /// Global name.
+        global: Symbol,
+        /// Destination register.
+        dst: Reg,
+        /// Pointer type (`ref #t`, or `ref #unknown` for a `ref` global).
         ty: LirTy,
         /// Instruction span.
         span: Span,
@@ -711,6 +750,7 @@ impl LirModule {
             version: LILAC_IR_VERSION.to_owned(),
             target: target.to_owned(),
             data: Vec::new(),
+            globals: Vec::new(),
             funcs: Vec::new(),
             layouts: HashMap::new(),
         }

@@ -492,10 +492,9 @@ adds `using Standard.Memory` for the allocator convention and
 Recorded, not solved here. Each is either a small compiler addition or a
 stdlib workaround via `extern`.
 
-1. **No bitwise/shift intrinsics.** `SPEC.md` §3 lists arithmetic,
-   comparison, and float intrinsics but **no** `and`/`or`/`xor`/`not`/shift/
-   rotate/popcount/clz/ctz. `Standard`'s bit operators, `Math`, and hashing
-   all need these — either new intrinsics or `C`-level externs/inline asm.
+1. **No rotate/popcount/clz/ctz intrinsics.** `and`/`or`/`xor`/`not` and
+   the shifts exist (`@bit_and_W` … `@bit_shift_right_u_W`); the rest of the bit
+   toolkit does not yet, and there are no bitwise operators (`&`, `|`, `<<`).
 2. **No host `run`.** The CLI has no one-shot host-native run. Stdlib tests
    must go `emit-llvm` → `clang` link → execute.
 3. **No const generics.** `Array[T, N]` needs const-generic parameters

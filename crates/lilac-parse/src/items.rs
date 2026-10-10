@@ -115,11 +115,19 @@ impl Parser {
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
             if !in_object {
-                return Err(Self::expected(
-                    diags,
-                    self.peek(),
-                    "`=` or `=>` after constant type",
-                ));
+                // `name: Type` at the top level: a zeroed global.
+                if !generic_params.is_empty() {
+                    return Err(Self::err(
+                        diags,
+                        name_span,
+                        "only `object`, `function`, and `enum` declarations take generic parameters",
+                    ));
+                }
+                return Ok(Item {
+                    span: join_spans(name_span, ty.span),
+                    name,
+                    kind: ItemKind::Global { ty, value: None },
+                });
             }
             if !generic_params.is_empty() {
                 return Err(Self::err(
@@ -152,15 +160,16 @@ impl Parser {
                 "only `object`, `function`, and `enum` declarations take generic parameters",
             ));
         }
-        Ok(Item {
-            span: join_spans(name_span, value.span()),
-            name,
-            kind: ItemKind::Const {
+        let span = join_spans(name_span, value.span());
+        let kind = if is_inline {
+            ItemKind::Const { ty, value }
+        } else {
+            ItemKind::Global {
                 ty,
-                value,
-                is_inline,
-            },
-        })
+                value: Some(value),
+            }
+        };
+        Ok(Item { span, name, kind })
     }
 
     pub(crate) fn parse_item_name(

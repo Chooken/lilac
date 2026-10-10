@@ -22,6 +22,7 @@ mod calls;
 mod constant;
 mod control;
 mod expr;
+mod globals;
 mod intrinsics;
 mod ownership;
 mod symbols;
@@ -50,6 +51,9 @@ pub struct Lowered {
     /// Constant `@array_at` indexes past the array's end, in lowering order
     /// ([`check_constant_indices`] reports them).
     pub bad_indices: Vec<BadIndex>,
+    /// Global initializers that are not constant expressions
+    /// ([`check_global_initializers`] reports them).
+    pub bad_globals: Vec<Span>,
 }
 
 /// A constant `@array_at` index that is out of bounds: `E037`.
@@ -89,6 +93,17 @@ pub fn check_constant_indices(lowered: &Lowered, diags: &mut Diags) {
     }
 }
 
+/// Reports every [`Lowered::bad_globals`] entry as `E038`.
+pub fn check_global_initializers(lowered: &Lowered, diags: &mut Diags) {
+    for span in &lowered.bad_globals {
+        diags.emit(
+            Diagnostic::error(codes::E038, "a global's initializer must be constant")
+                .label(*span, true, "not a constant expression")
+                .help("assign it at run time instead, or leave the global zeroed: `name: Type`"),
+        );
+    }
+}
+
 /// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
 /// size (for `@size_of`); `sources` locates `@panic` sites.
 #[must_use]
@@ -107,6 +122,7 @@ pub fn lower(
         sources,
         names: HashMap::new(),
         bad_indices: Vec::new(),
+        bad_globals: Vec::new(),
         ptr_bytes,
         module: LirModule::new(triple),
         symbols: HashMap::new(),
@@ -152,6 +168,7 @@ pub fn lower(
         };
         lower.module.layouts.insert(name, fields);
     }
+    lower.lower_globals();
     let mut externs = HashSet::new();
     for func in &hir.funcs {
         let lowered = lower.lower_func(func);
@@ -166,6 +183,7 @@ pub fn lower(
         module: lower.module,
         names: lower.names,
         bad_indices: lower.bad_indices,
+        bad_globals: lower.bad_globals,
     }
 }
 
@@ -179,6 +197,8 @@ struct Lower<'a> {
     names: HashMap<String, String>,
     /// Constant out-of-bounds `@array_at` indexes (`E037`).
     bad_indices: Vec<BadIndex>,
+    /// Global initializers that are not constant (`E038`).
+    bad_globals: Vec<Span>,
     ptr_bytes: u64,
     module: LirModule,
     /// LIR symbol of every function instance.

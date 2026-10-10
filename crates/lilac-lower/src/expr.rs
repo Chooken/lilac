@@ -31,6 +31,7 @@ impl Lower<'_> {
                 let pointer = self.value(state, func, inner);
                 Place::Indirect(self.fresh_place(state, pointer, inner.ty, expr.span))
             }
+            HirExprKind::Global(def) => self.global_place(state, *def, expr.ty, expr.span),
             HirExprKind::Field { base, index } => {
                 let base_place = if base.is_place() {
                     self.place_of(state, func, base)
@@ -203,7 +204,7 @@ impl Lower<'_> {
             HirExprKind::Field { base, index } if base.is_place() => {
                 self.field_value(state, func, base, *index, lir, span)
             }
-            HirExprKind::Field { .. } | HirExprKind::Deref(_) => {
+            HirExprKind::Field { .. } | HirExprKind::Deref(_) | HirExprKind::Global(_) => {
                 let place = self.place_of(state, func, expr);
                 state.read_place(&place, &lir, span)
             }

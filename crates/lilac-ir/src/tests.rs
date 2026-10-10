@@ -43,6 +43,7 @@ pub(crate) fn canonical_module() -> LirModule {
             }],
         }],
         layouts: HashMap::new(),
+        globals: Vec::new(),
     }
 }
 
@@ -761,6 +762,7 @@ fn printer_emits_bodyless_extern() {
             blocks: Vec::new(),
         }],
         layouts: HashMap::new(),
+        globals: Vec::new(),
     };
     let text = module.to_text();
     assert!(
@@ -797,6 +799,7 @@ fn extern_module() -> LirModule {
             blocks: Vec::new(),
         }],
         layouts: HashMap::new(),
+        globals: Vec::new(),
     }
 }
 

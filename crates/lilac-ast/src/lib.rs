@@ -70,14 +70,20 @@ pub enum ItemKind {
         /// Declared type.
         ty: Type,
     },
-    /// `name: Type = expr` / `name: Type => expr` module-level constant.
+    /// `name: Type => expr`: an inline constant (folds through substitution).
     Const {
         /// Declared type.
         ty: Type,
         /// Initializer.
         value: Expr,
-        /// `true` for `=>` (inline; folds through substitution).
-        is_inline: bool,
+    },
+    /// `name: Type = expr` (or `name: Type`, zeroed): a global variable,
+    /// initialized with a constant expression.
+    Global {
+        /// Declared type.
+        ty: Type,
+        /// Initializer (`None` starts zeroed).
+        value: Option<Expr>,
     },
     /// An item that failed to parse; its `span` covers the consumed tokens.
     /// Carries no name and defines nothing downstream.

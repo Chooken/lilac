@@ -42,6 +42,14 @@
   `@array_at` lowers to an unsigned bounds check that panics, then the
   `elem.addr` instruction (LLVM: `ptrtoint`/`inttoptr` arithmetic, since a
   dynamic GEP is `unsafe` in inkwell); `@array_len` folds in typeck.
+- Globals: a top-level `name: T = constant` (or `name: T`, zeroed) is a
+  `DefKind::Global` (`=>` stays a `Const`), checked into
+  `HirProgram::globals` and named by `HirExprKind::Global`, a place (an
+  assignment target too: `Checker::item_place`). `lilac-lower/src/globals.rs`
+  folds each initializer with the constant evaluator and encodes it to
+  bytes in the C layout (a non-constant one is `E038`,
+  `check_global_initializers`); a use is `addr.global` into an indirect
+  place. `LirModule::globals` are pruned by DCE like data, never dropped.
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
   `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
   `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes

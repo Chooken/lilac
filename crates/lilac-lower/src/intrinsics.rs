@@ -51,6 +51,31 @@ impl Lower<'_> {
                 });
                 LirOperand::Reg(reg)
             }
+            Intrinsic::Int(NumOp::Not, _) => {
+                // `not x` is `x xor <all ones>`.
+                let operand = self.value_reg(state, func, &args[0]);
+                let ones = state.reg();
+                let width = match lir {
+                    LirTy::Bit(bits) => u32::from(bits),
+                    _ => u32::try_from(self.ptr_bytes * 8).unwrap_or(64),
+                };
+                state.emit(LirInst::Const {
+                    dst: ones.clone(),
+                    value: LirConst::Int(constant::mask_of(width)),
+                    ty: lir.clone(),
+                    span,
+                });
+                let reg = state.reg();
+                state.emit(LirInst::Arith {
+                    op: ArithOp::Xor,
+                    lhs: operand,
+                    rhs: ones,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
             Intrinsic::Int(op, _) | Intrinsic::Float(op, _) => {
                 let float = matches!(intrinsic, Intrinsic::Float(..));
                 let Some(op) = constant::arith_op(op, float) else {
