@@ -9,7 +9,7 @@ use lilac_error::{codes, Diagnostic};
 use lilac_hir::{FuncKey, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
+use lilac_ty::{Builtin, FuncSig, TypeRef};
 
 use crate::{Checker, Hook};
 
@@ -247,25 +247,33 @@ impl Checker<'_> {
                 "platform hooks belong to the program, not a type".to_owned(),
             )
         } else {
-            let (param, want) = match name {
-                "@entry" => (None, "`@entry: function() nothing`"),
+            // Each parameter: its builtin type, and whether it is a `ref`.
+            let (expected, want): (&[(Builtin, bool)], _) = match name {
+                "@entry" => (
+                    &[
+                        (Builtin::BitNative, false),
+                        (Builtin::Unknown, true),
+                        (Builtin::Unknown, true),
+                    ],
+                    "`@entry: function(count: @bit_native, arguments: ref unknown, \
+                     environment: ref unknown) nothing`",
+                ),
                 "@exit" => (
-                    Some(Builtin::Bit32),
+                    &[(Builtin::Bit32, false)],
                     "`@exit: function(code: @bit32) nothing`",
                 ),
                 _ => (
-                    Some(Builtin::ByteBuffer),
+                    &[(Builtin::ByteBuffer, false)],
                     "`@compiler_print: function(text: @byte_buffer) nothing`",
                 ),
             };
-            let expected: Vec<TypeId> = param.map(Builtin::id).into_iter().collect();
             let shaped = sig.returns.is_empty()
                 && sig.params.len() == expected.len()
                 && sig
                     .params
                     .iter()
-                    .zip(&expected)
-                    .all(|(param, ty)| !param.is_ref && param.id == *ty);
+                    .zip(expected)
+                    .all(|(param, (ty, is_ref))| param.is_ref == *is_ref && param.id == ty.id());
             if shaped {
                 return true;
             }

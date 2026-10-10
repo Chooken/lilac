@@ -192,21 +192,25 @@
   (`kernel32.lib`, a hand-written `libSystem.tbd`, listing what
   `Standard.Os` calls), no C library: the sysroot is `LILAC_SYSROOT`, else
   `<exe dir>/../lib/lilac` (`scripts/package.sh` builds that layout). The
-  program is entered at `.lilac.start` (`lilac_ir::entry_point`, added and
-  rooted only under `require_entry`), and
-  the backend defines `memcpy`/`memmove`/`memset` (marked `no-builtins`),
-  plus `_fltused` and `__chkstk` on Windows (`lilac-codegen-llvm`'s
-  `native.rs`; on x86-64 Linux it also gives `.lilac.start` the
-  `stackrealign` attribute, since the kernel enters it unaligned for a
-  call). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
+  program is entered at `.lilac.native_entry` (`LinkInfo::entry_symbol`),
+  the backend's wrapper of the stub `.lilac.start(count, arguments,
+  environment)` (`lilac_ir::entry_point`, added and rooted only under
+  `require_entry`; `Lower::emit_entry_wrapper`): the C `main` shape on
+  macOS (`LC_MAIN`), no arguments on Windows (zero and nulls), and on
+  Linux an assembly entry reading `argc`/`argv`/`envp` off the stack that
+  calls the C-ABI `.lilac.native_main`. Standard's `@entry` stores them in
+  `Standard.Os` (`argument_count`, `argument_vector`,
+  `environment_vector`); `main` takes nothing. The backend also defines
+  `memcpy`/`memmove`/`memset` (marked `no-builtins`), plus `_fltused` and
+  `__chkstk` on Windows (`lilac-codegen-llvm`'s `native.rs`). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
   when a `--link-arg` names a shared library (`.so`, `-l`). macOS links
   `libSystem` (Apple's only stable system interface; lld ad-hoc signs arm64
   executables) and takes `memcpy`/`memset`/`bzero` from it, so the backend
   defines none of the C-runtime replacements there; a `libSystem` function
   the stub does not list needs adding to `toolchain/*-apple-darwin/`.
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
-  else `cc`/`clang` on `PATH`) with a C `main` (`Entry::CMain`) that calls
-  `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
+  else `cc`/`clang` on `PATH`) with a C `main(argc, argv, envp)`
+  (`Entry::CMain`) that calls `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
   uses the C library (and Windows exits through C `exit`). It is the
   permanent opt-in for static C libraries, and how code using `Standard.C`
   builds while that is phased out. Shared C libraries work in native mode

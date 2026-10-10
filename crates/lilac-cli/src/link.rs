@@ -271,7 +271,7 @@ mod tests {
                 "link",
                 "o.obj",
                 &kernel32.display().to_string(),
-                "/entry:.lilac.start",
+                "/entry:.lilac.native_entry",
                 "/subsystem:console",
                 "/nodefaultlib",
                 "/out:o.exe",
@@ -299,7 +299,7 @@ mod tests {
                 "o.o",
                 "-static",
                 "-e",
-                ".lilac.start",
+                ".lilac.native_entry",
                 "-o",
                 "o"
             ]
@@ -366,7 +366,7 @@ mod tests {
                 "11.0",
                 "11.0",
                 "-e",
-                "_.lilac.start",
+                "_.lilac.native_entry",
                 "-o",
                 "o",
             ]

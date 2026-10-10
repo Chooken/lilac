@@ -5,8 +5,12 @@
 
 using Standard.Os as Os
 
-// Runs the program: its root-namespace `main`.
-@entry: function () nothing {
+// Records the process arguments in `Standard.Os`, then runs the program:
+// its root-namespace `main`.
+@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
+    Os.argument_count = count
+    Os.argument_vector = arguments
+    Os.environment_vector = environment
     main()
 }
 

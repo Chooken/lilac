@@ -1,0 +1,8 @@
+// The process's arguments and environment as the OS passed them: C's
+// `argc`, `argv` and `envp`, stored by `@entry` (`Standard.Runtime`) before
+// `main` runs. Native Windows passes none (count 0, null vectors); its
+// command line comes from `GetCommandLineW`.
+
+argument_count: @bit_native
+argument_vector: ref unknown
+environment_vector: ref unknown

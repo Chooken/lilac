@@ -1654,7 +1654,11 @@ mod tests {
         call(&mut entry, LirCallee::Func("main".into()), &[], &[]);
         module.funcs.push(func(
             ".lilac.entry",
-            &[],
+            &[
+                ("count", "#bit_native"),
+                ("arguments", "ref #unknown"),
+                ("environment", "ref #unknown"),
+            ],
             &[],
             vec![ret_block("entry", entry)],
         ));
@@ -1741,20 +1745,21 @@ mod tests {
     }
 
     /// `@syscall` reaches the kernel through `.lilac.syscall`, the
-    /// architecture's system-call instruction, and x86-64 realigns the stack
-    /// `.lilac.start` is entered with.
+    /// architecture's system-call instruction, and the process is entered
+    /// through the assembly `.lilac.native_entry`, which calls
+    /// `.lilac.native_main` with the arguments from the stack.
     #[test]
     fn linux_system_calls_and_entry() {
-        for (triple, instruction, realigns) in [
+        for (triple, instruction, entry) in [
             (
                 "x86_64-unknown-linux-gnu",
                 "asm sideeffect \"syscall\"",
-                true,
+                "leaq 16(%rsp,%rdi,8), %rdx",
             ),
             (
                 "aarch64-unknown-linux-gnu",
                 "asm sideeffect \"svc #0\"",
-                false,
+                "add x2, x1, x0, lsl #3",
             ),
         ] {
             let mut insts = Vec::new();
@@ -1783,7 +1788,11 @@ mod tests {
             let text = built.print_to_string().to_string();
             assert!(text.contains("define i64 @.lilac.syscall("), "{text}");
             assert!(text.contains(instruction), "{triple}: {text}");
-            assert_eq!(text.contains("\"stackrealign\""), realigns, "{triple}");
+            assert!(text.contains(entry), "{triple}: {text}");
+            assert!(
+                text.contains("define void @.lilac.native_main(i64"),
+                "{triple}: {text}"
+            );
         }
     }
 
@@ -1806,7 +1815,11 @@ mod tests {
             .expect("builds");
         let text = built.print_to_string().to_string();
         assert!(text.contains("define void @.lilac.start("), "{text}");
-        for symbol in ["@memcpy(", "@memmove(", "@memset(", "\"stackrealign\""] {
+        assert!(
+            text.contains("define i32 @.lilac.native_entry(i32"),
+            "{text}"
+        );
+        for symbol in ["@memcpy(", "@memmove(", "@memset("] {
             assert!(!text.contains(symbol), "{symbol}: {text}");
         }
     }
@@ -1858,13 +1871,14 @@ mod tests {
     }
 
     /// A LIR `main` is emitted as `.lilac.main`, and an executable gains an
-    /// `i32 @main()` wrapper that calls the entry stub, which never returns.
+    /// `i32 @main(argc, argv, envp)` wrapper that calls the entry stub, which
+    /// never returns.
     #[test]
     fn emits_main_entry_wrapper() {
         let text = emit(&executable_module("x86_64-pc-windows-msvc", Vec::new()));
         assert!(text.contains("define void @.lilac.main()"), "{text}");
-        assert!(text.contains("define i32 @main()"), "{text}");
-        assert!(text.contains("call void @.lilac.start()"), "{text}");
+        assert!(text.contains("define i32 @main(i32"), "{text}");
+        assert!(text.contains("call void @.lilac.start(ptr"), "{text}");
         assert!(text.contains("call void @.lilac.main()"), "{text}");
     }
 

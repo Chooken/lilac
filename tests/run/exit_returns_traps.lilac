@@ -3,7 +3,7 @@
 // The program supplies its own platform hooks, and its `@exit` returns: the
 // entry stub traps after `@exit(0)` rather than running on.
 
-@entry: function () nothing {
+@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     main()
 }
 

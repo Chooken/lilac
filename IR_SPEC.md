@@ -146,8 +146,11 @@ name; no instruction carries a generic parameter type.
 
 Every compiler-generated function or runtime symbol lives in the `.lilac.`
 namespace: the LIR runtime (`.lilac.byte_buffer_from`, `.lilac.load_u8`,
-`.lilac.format_args_push`, …), the entry stub `.lilac.start` (calls
-`.lilac.entry`, then `.lilac.exit` with 0, then `@lilac_abort`), the
+`.lilac.format_args_push`, …), the entry stub
+`.lilac.start(#bit_native %count, ref #unknown %arguments, ref #unknown
+%environment)` (calls `.lilac.entry` with them, then `.lilac.exit` with 0,
+then `@lilac_abort`; the backend's entry wrapper, `main` or
+`.lilac.native_entry`, calls it), the
 platform hooks (`.lilac.entry`, `.lilac.exit`, `.lilac.compiler_print`: the
 program's `@entry`, `@exit` and `@compiler_print`), the renamed Lilac
 `main` in LLVM (`.lilac.main`), and the backend's three leaf intrinsics

@@ -32,7 +32,7 @@ use lilac_ir::{
     LirInst, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
-use lilac_target::{is_64_bit_triple, Arch, Target};
+use lilac_target::{is_64_bit_triple, Arch, Os, Target};
 
 /// Turns a fallible inkwell builder call into an ICE.
 pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
@@ -57,6 +57,7 @@ pub(crate) struct Lower<'ctx, 'a> {
     lir: &'a LirModule,
     native: IntType<'ctx>,
     arch: Option<Arch>,
+    os: Option<Os>,
     named: HashMap<String, StructType<'ctx>>,
 }
 
@@ -80,6 +81,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             lir,
             native,
             arch: Target::parse(triple).ok().map(|target| target.arch),
+            os: Target::parse(triple).ok().map(|target| target.os),
             named: HashMap::new(),
         }
     }
@@ -127,29 +129,75 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         for func in &self.lir.funcs {
             self.lower_func(func);
         }
-        if entry == Entry::CMain {
-            self.emit_entry_wrapper();
-        }
+        self.emit_entry_wrapper(entry);
         Ok(())
     }
 
-    /// Appends the C entry point when the LIR has the entry stub
-    /// `.lilac.start` (an executable): `i32 @main()` calls it. The stub ends
-    /// the process through `@exit` and never returns, so the wrapper ends
-    /// `unreachable`. A module without the stub gets no wrapper.
-    fn emit_entry_wrapper(&self) {
+    /// Appends the process entry when the LIR has the entry stub
+    /// `.lilac.start` (an executable), passing it the argument count, the
+    /// argument vector and the environment vector:
+    ///
+    /// - a C entry: `i32 main(i32 argc, ptr argv, ptr envp)`;
+    /// - native macOS: `.lilac.native_entry`, the same C `main` shape
+    ///   (`LC_MAIN`);
+    /// - native Windows: `void .lilac.native_entry()`, passing zero and
+    ///   nulls (the command line is read through `kernel32`);
+    /// - native Linux: `void .lilac.native_main(iN count, ptr, ptr)`, which
+    ///   the assembly entry `.lilac.native_entry` calls with what the kernel
+    ///   left on the stack ([`crate::native`]).
+    ///
+    /// The stub ends the process through `@exit` and never returns, so the
+    /// wrapper ends `unreachable`. A module without the stub gets none.
+    fn emit_entry_wrapper(&self, entry: Entry) {
         let Some(start) = self.module.get_function(".lilac.start") else {
             return;
         };
         let i32_ty = self.context.i32_type();
-        let main = self
-            .module
-            .add_function("main", i32_ty.fn_type(&[], false), None);
+        let ptr = self.ptr_type();
+        let c_main = i32_ty.fn_type(&[i32_ty.into(), ptr.into(), ptr.into()], false);
+        let (name, ty) = match entry {
+            Entry::CMain => ("main", c_main),
+            Entry::Native if self.os == Some(Os::Macos) => (".lilac.native_entry", c_main),
+            Entry::Native if self.os == Some(Os::Windows) => (
+                ".lilac.native_entry",
+                self.context.void_type().fn_type(&[], false),
+            ),
+            Entry::Native => (
+                ".lilac.native_main",
+                self.context
+                    .void_type()
+                    .fn_type(&[self.native.into(), ptr.into(), ptr.into()], false),
+            ),
+        };
+        let wrapper = self.module.add_function(name, ty, None);
         let builder = self.context.create_builder();
-        let entry = self.context.append_basic_block(main, "entry");
-        builder.position_at_end(entry);
-        checked(builder.build_call(start, &[], ""), "main wrapper call");
-        checked(builder.build_unreachable(), "main wrapper end");
+        let block = self.context.append_basic_block(wrapper, "entry");
+        builder.position_at_end(block);
+        let (count, arguments, environment) = match wrapper.get_params().as_slice() {
+            [count, arguments, environment] => (
+                count.into_int_value(),
+                arguments.into_pointer_value(),
+                environment.into_pointer_value(),
+            ),
+            _ => (self.native.const_zero(), ptr.const_null(), ptr.const_null()),
+        };
+        let count = if count.get_type() == self.native {
+            count
+        } else {
+            checked(
+                builder.build_int_z_extend(count, self.native, "count"),
+                "entry count",
+            )
+        };
+        let mut slots = Vec::new();
+        for value in [count.into(), arguments.into(), environment.into()] {
+            let value: BasicValueEnum = value;
+            let slot = checked(builder.build_alloca(value.get_type(), ""), "entry slot");
+            checked(builder.build_store(slot, value), "entry store");
+            slots.push(slot.into());
+        }
+        checked(builder.build_call(start, &slots, ""), "entry call");
+        checked(builder.build_unreachable(), "entry end");
     }
 
     /// The leaf builtins this module references, so the runtime emits only the

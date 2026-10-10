@@ -1,0 +1,35 @@
+// expect-exit: 0
+// `@entry` receives the process's argument count and argument and
+// environment vectors, which Standard stores in `Standard.Os`. Native
+// Windows passes none; every other entry passes at least the program name.
+
+using Standard
+using Standard.Process
+using Standard.Os as Os
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+main: function () nothing {
+    count: @bit_native = Os.argument_count
+    vector: @bit_native = @ptr_to_address(Os.argument_vector)
+    environment: @bit_native = @ptr_to_address(Os.environment_vector)
+    if @builtin.Target.libc {
+        check(@i_greater_than_or_equal_u_native(count, 0x1), 0x1)
+        check(@i_greater_than_u_native(vector, 0x0), 0x2)
+        check(@i_greater_than_u_native(environment, 0x0), 0x3)
+    } else match @builtin.Target.os {
+        .Windows => {
+            check(count == 0x0, 0x4)
+            check(vector == 0x0, 0x5)
+        }
+    } else {
+        check(@i_greater_than_or_equal_u_native(count, 0x1), 0x6)
+        check(@i_greater_than_u_native(vector, 0x0), 0x7)
+        check(@i_greater_than_u_native(environment, 0x0), 0x8)
+    }
+}

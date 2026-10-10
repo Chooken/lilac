@@ -59,23 +59,45 @@ pub fn build_runtime(ptr_size: u32) -> Vec<LirFunc> {
     ]
 }
 
-/// The process entry stub `.lilac.start`: calls the program's `@entry`
-/// hook (`.lilac.entry`), then `@exit(0)` (`.lilac.exit`), then traps, so
-/// an `@exit` that returns stops rather than running on. It makes no OS
-/// call itself; the OS passes it nothing the program needs. It is the
-/// native entry symbol, and the C `main` calls it under a C entry.
+/// The process entry stub `.lilac.start(count, arguments, environment)`:
+/// calls the program's `@entry` hook (`.lilac.entry`) with the process's
+/// argument count, argument vector and environment vector (C's `argc`,
+/// `argv` and `envp`; zero and null where the OS passes none), then
+/// `@exit(0)` (`.lilac.exit`), then traps, so an `@exit` that returns stops
+/// rather than running on. It makes no OS call itself. The backend's entry
+/// wrapper (the C `main`, or the native entry) calls it.
 #[must_use]
 pub fn entry_point() -> LirFunc {
-    let mut insts = vec![call(ENTRY_HOOK, &[], &[])];
+    let mut insts = vec![call(ENTRY_HOOK, &ENTRY_PARAMS.map(|(name, _)| name), &[])];
     insts.extend(const_place("code", 0, LirTy::Bit(32)));
     insts.push(call(EXIT_HOOK, &["code"], &[]));
     insts.push(call_builtin("@lilac_abort", &[], &[]));
     lir_func(
         ".lilac.start",
-        &[],
+        &entry_params(),
         &[],
         vec![block("entry", insts, unreachable())],
     )
+}
+
+/// The parameters of `.lilac.start` and `@entry`, as `(name, is a ref)`:
+/// the count is a `#bit_native`, the vectors `ref #unknown`.
+const ENTRY_PARAMS: [(&str, bool); 3] =
+    [("count", false), ("arguments", true), ("environment", true)];
+
+/// [`ENTRY_PARAMS`] typed.
+fn entry_params() -> Vec<(&'static str, LirTy)> {
+    ENTRY_PARAMS
+        .iter()
+        .map(|(name, is_ref)| {
+            let ty = if *is_ref {
+                LirTy::opaque_ref()
+            } else {
+                LirTy::BitNative
+            };
+            (*name, ty)
+        })
+        .collect()
 }
 
 /// The platform hooks' fixed symbols (`lilac_hir::PLATFORM_HOOKS`).
@@ -680,7 +702,7 @@ mod tests {
         module.funcs.extend(hook_externs());
         module.funcs.push(LirFunc {
             is_extern: true,
-            ..super::lir_func(".lilac.entry", &[], &[], Vec::new())
+            ..super::lir_func(".lilac.entry", &super::entry_params(), &[], Vec::new())
         });
         module.funcs.push(entry_point());
         let (handler, data) = super::panic_runtime();

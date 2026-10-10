@@ -1388,7 +1388,7 @@ main: function () nothing {}
     }
 
     /// The platform hooks a program can define itself.
-    const HOOKS: &str = "@entry: function () nothing {
+    const HOOKS: &str = "@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     main()
 }
 

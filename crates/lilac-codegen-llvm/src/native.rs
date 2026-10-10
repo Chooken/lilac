@@ -7,8 +7,9 @@
 //! runtime linked, the object defines all of them itself, as Rust's
 //! `compiler-builtins` does.
 //!
-//! On x86-64 Linux, `.lilac.start` also realigns its stack, which the kernel
-//! leaves 8 bytes off from a normal call.
+//! On Linux it also defines the process entry `.lilac.native_entry` in
+//! assembly: only assembly can read the arguments the kernel leaves on the
+//! stack.
 //!
 //! macOS needs none of this: its system interface is `libSystem`, which a
 //! native program links anyway, and which already defines the memory
@@ -72,6 +73,44 @@ __chkstk:
     ret
 ";
 
+/// The Linux x86-64 process entry: the kernel leaves `argc`, then the
+/// `argv` pointers and a null, then the `envp` pointers on the stack, with
+/// no return address. It passes them to `.lilac.native_main` (the C-ABI
+/// wrapper of `.lilac.start`) after aligning the stack for a call, and
+/// clears the frame pointer so a stack walk ends here.
+const ENTRY_X86_64: &str = r#"
+.text
+.globl ".lilac.native_entry"
+.type ".lilac.native_entry",@function
+.p2align 4
+".lilac.native_entry":
+    xorl %ebp, %ebp
+    movq (%rsp), %rdi
+    leaq 8(%rsp), %rsi
+    leaq 16(%rsp,%rdi,8), %rdx
+    andq $-16, %rsp
+    callq ".lilac.native_main"
+    ud2
+"#;
+
+/// The Linux 64-bit Arm process entry, as [`ENTRY_X86_64`] (the stack
+/// pointer is already aligned).
+const ENTRY_AARCH64: &str = r#"
+.text
+.globl ".lilac.native_entry"
+.type ".lilac.native_entry",%function
+.p2align 2
+".lilac.native_entry":
+    mov x29, #0
+    mov x30, #0
+    ldr x0, [sp]
+    add x1, sp, #8
+    add x2, x1, x0, lsl #3
+    add x2, x2, #8
+    bl ".lilac.native_main"
+    brk #0
+"#;
+
 /// Defines the native support symbols in `module` for `triple`.
 pub(crate) fn define<'ctx>(
     context: &'ctx Context,
@@ -100,14 +139,13 @@ pub(crate) fn define<'ctx>(
             module.set_inline_assembly(CHKSTK_AARCH64);
         }
     }
-    // Linux enters a process with the stack 16-byte aligned and no return
-    // address, so on x86-64 it is 8 bytes off from what a called function
-    // assumes: `.lilac.start` realigns its frame (64-bit Arm's stack pointer
-    // is always aligned).
-    if triple.contains("linux") && triple.starts_with("x86_64") {
-        if let Some(start) = module.get_function(".lilac.start") {
-            let realign = context.create_string_attribute("stackrealign", "");
-            start.add_attribute(AttributeLoc::Function, realign);
+    // Linux enters a process with its arguments on the stack, which only
+    // assembly can read: the entry passes them to `.lilac.native_main`.
+    if triple.contains("linux") && module.get_function(".lilac.native_main").is_some() {
+        if triple.starts_with("x86_64") {
+            module.set_inline_assembly(ENTRY_X86_64);
+        } else if triple.starts_with("aarch64") {
+            module.set_inline_assembly(ENTRY_AARCH64);
         }
     }
 }

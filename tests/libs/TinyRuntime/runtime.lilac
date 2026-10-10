@@ -2,7 +2,7 @@
 // without Standard. `@entry` runs the program's `start` rather than `main`,
 // and panics print nothing.
 
-@entry: function () nothing {
+@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     start()
 }
 

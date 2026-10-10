@@ -1100,12 +1100,13 @@ defines them:
 
 | Hook | Signature | Called |
 | --- | --- | --- |
-| **`@entry`** | `function () nothing` | By the process entry stub. It runs the program. |
+| **`@entry`** | `function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing` | By the process entry stub, with the process's argument count and argument and environment vectors (C's `argc`, `argv` and `envp`; zero and null on native Windows, whose command line comes from `GetCommandLineW`). It runs the program. |
 | **`@exit`** | `function (code: @bit32) nothing` | After `@entry` returns (code 0), and by the panic handler (code 101). It must end the process. |
 | **`@compiler_print`** | `function (text: @byte_buffer) nothing` | By the panic handler, for the message and each stack-trace line. |
 
-- **The entry stub** (`.lilac.start` natively, called from the C `main`
-  under `--libc`) makes no OS call: it calls `@entry`, then `@exit(0x0)`,
+- **The entry stub** (`.lilac.start`, called from the C `main` under
+  `--libc` and from the native entry otherwise) makes no OS call: it calls
+  `@entry` with the arguments, then `@exit(0x0)`,
   then traps. The panic handler writes through `@compiler_print`, calls
   `@exit(0x65)`, then traps. So an `@exit` that returns stops at a trap
   rather than running on.

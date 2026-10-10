@@ -362,7 +362,7 @@ impl Target {
                 flavor: LinkFlavor::Coff,
                 exe_suffix: ".exe",
                 obj_suffix: ".obj",
-                entry_symbol: ".lilac.start",
+                entry_symbol: ".lilac.native_entry",
                 system_libs: &["kernel32.lib"],
                 dynamic_linker: None,
             },
@@ -370,7 +370,7 @@ impl Target {
                 flavor: LinkFlavor::Elf,
                 exe_suffix: "",
                 obj_suffix: ".o",
-                entry_symbol: ".lilac.start",
+                entry_symbol: ".lilac.native_entry",
                 system_libs: &[],
                 dynamic_linker: Some(if self.arch == Arch::X86_64 {
                     "/lib64/ld-linux-x86-64.so.2"
@@ -382,7 +382,7 @@ impl Target {
                 flavor: LinkFlavor::MachO,
                 exe_suffix: "",
                 obj_suffix: ".o",
-                entry_symbol: ".lilac.start",
+                entry_symbol: ".lilac.native_entry",
                 system_libs: &["libSystem.tbd"],
                 dynamic_linker: None,
             },
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(macos.flavor, LinkFlavor::MachO);
         assert_eq!(macos.system_libs, ["libSystem.tbd"]);
         for info in [windows, linux, macos] {
-            assert_eq!(info.entry_symbol, ".lilac.start");
+            assert_eq!(info.entry_symbol, ".lilac.native_entry");
         }
         for unsupported in [
             "x86_64-unknown-none",
