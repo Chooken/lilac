@@ -1,0 +1,48 @@
+// expect-stdout: ab|c|def|g|hi
+// Outs nothing binds are dropped at the end of their statement (newest
+// first): a call statement drops them all, a call used as a value is its
+// first out, and a multi-`let` binds the outs left to right.
+
+using Standard.Io
+
+Noisy: object {
+    c: @bit32
+
+    // Skips the zeroed out slot a callee drops when it first assigns it.
+    @on_drop: function (self) nothing {
+        if self.c == 0x0 {
+            return
+        }
+        print_char(self.c)
+    }
+}
+
+two: function (x: @bit32, y: @bit32) first: Noisy, second: Noisy {
+    first = Noisy { c = x }
+    second = Noisy { c = y }
+}
+
+three: function () first: Noisy, second: Noisy, third: Noisy {
+    first = Noisy { c = 'i' }
+    second = Noisy { c = 'h' }
+    third = Noisy { c = 'g' }
+}
+
+take: function (v: Noisy) nothing {
+}
+
+main: function () nothing {
+    two('b', 'a')
+    print_char('|')
+    {
+        kept: Noisy = two('d', 'c')
+        print_char('|')
+    }
+    take(two('e', 'f'))
+    print_char('|')
+    {
+        a: Noisy, b: Noisy = three()
+        print_char('|')
+    }
+    print_char(0xA)
+}

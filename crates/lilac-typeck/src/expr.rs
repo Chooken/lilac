@@ -90,25 +90,26 @@ impl Checker<'_> {
                 args,
                 span,
             } => match self.check_call(fcx, callee, generic_args, args, *span, expected) {
+                // A call used as a value is its first out; the rest drop.
                 Ok(Called::Call { callee, args, outs }) => {
-                    if outs.len() != 1 {
+                    let Some((&first, rest)) = outs.split_first() else {
                         self.diags.emit(
-                            Diagnostic::error(
-                                codes::E022,
-                                "call in value position must return exactly one value",
-                            )
-                            .label(
+                            Diagnostic::error(codes::E022, "this call returns no value").label(
                                 *span,
                                 true,
-                                "one value expected here",
+                                "a value is expected here",
                             ),
                         );
                         return HirExpr::poison(*span);
-                    }
+                    };
                     HirExpr {
-                        ty: outs[0],
+                        ty: first,
                         span: *span,
-                        kind: HirExprKind::Call { callee, args },
+                        kind: HirExprKind::Call {
+                            callee,
+                            args,
+                            rest: rest.to_vec(),
+                        },
                     }
                 }
                 Ok(Called::Value(value)) => value,
@@ -204,6 +205,7 @@ impl Checker<'_> {
             kind: HirExprKind::Call {
                 callee: HirCallee::Func(hook.key),
                 args: vec![expr],
+                rest: Vec::new(),
             },
         })
     }
@@ -810,6 +812,7 @@ impl Checker<'_> {
             kind: HirExprKind::Call {
                 callee: HirCallee::Func(found.key),
                 args: vec![left, right],
+                rest: Vec::new(),
             },
         }
     }

@@ -3,7 +3,7 @@ Object1: object {
 }
 
 main: function () nothing {
-    result: Object1 = get()
+    result: Object1, second: @bit32, third: @bit32 = get()
 }
 
 get: function () result: Object1, result_2: @bit32 {

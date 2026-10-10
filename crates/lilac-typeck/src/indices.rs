@@ -98,7 +98,7 @@ impl Checker<'_> {
                 self.expr_indices(lhs, guarded, bad);
                 self.expr_indices(rhs, guarded || may_be_constant(lhs), bad);
             }
-            HirExprKind::Call { callee, args } => {
+            HirExprKind::Call { callee, args, .. } => {
                 if let (HirCallee::Intrinsic(Intrinsic::ArrayAt), [array, index]) =
                     (callee, args.as_slice())
                 {

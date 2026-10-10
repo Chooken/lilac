@@ -511,7 +511,9 @@ impl Checker<'_> {
         });
     }
 
-    /// An expression statement: a call's results may not be dropped silently.
+    /// An expression statement. A call's outs are dropped at its end, and a
+    /// value with no effect is recorded for the editor
+    /// (`HirProgram::no_effect`).
     fn check_expr_stmt(&mut self, fcx: &mut FnCx, expr: &Expr, out: &mut Vec<HirStmt>) {
         let Expr::Call {
             callee,
@@ -521,43 +523,34 @@ impl Checker<'_> {
         } = expr
         else {
             let hir = self.check_expr(fcx, expr, None);
+            self.note_no_effect(&hir);
             out.push(HirStmt::Expr(hir));
             return;
         };
         match self.check_call(fcx, callee, generic_args, args, *span, None) {
             Ok(Called::Call { callee, args, outs }) => {
-                if !outs.is_empty() {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            codes::E022,
-                            format!(
-                                "call returns {} value{}, but the statement drops them",
-                                outs.len(),
-                                if outs.len() == 1 { "" } else { "s" },
-                            ),
-                        )
-                        .label(*span, true, "assign or drop explicitly"),
-                    );
-                }
+                let (ty, rest) = match outs.split_first() {
+                    Some((&first, rest)) => (first, rest.to_vec()),
+                    None => (TypeRef::ERROR, Vec::new()),
+                };
                 out.push(HirStmt::Expr(HirExpr {
-                    ty: outs.first().copied().unwrap_or(TypeRef::ERROR),
+                    ty,
                     span: *span,
-                    kind: HirExprKind::Call { callee, args },
+                    kind: HirExprKind::Call { callee, args, rest },
                 }));
             }
             Ok(Called::Value(hir)) => {
-                if !matches!(
-                    hir.kind,
-                    HirExprKind::CompileError { .. } | HirExprKind::Poison
-                ) {
-                    self.diags.emit(
-                        Diagnostic::error(codes::E022, "this value is computed and then dropped")
-                            .label(*span, true, "assign or drop explicitly"),
-                    );
-                }
+                self.note_no_effect(&hir);
                 out.push(HirStmt::Expr(hir));
             }
             Err(_) => {}
+        }
+    }
+
+    /// Records an expression statement whose value has no effect.
+    fn note_no_effect(&mut self, hir: &HirExpr) {
+        if hir.has_no_effect() && !hir.ty.is_error() {
+            self.out.no_effect.push(hir.span);
         }
     }
 
@@ -595,24 +588,30 @@ impl Checker<'_> {
         else {
             return;
         };
-        if outs.len() != bindings.len() {
+        // The bindings take the outs left to right; outs past them drop.
+        if let Some(extra) = bindings.get(outs.len()) {
             self.diags.emit(
                 Diagnostic::error(
                     codes::E022,
                     format!(
-                        "wrong number of values: expected {}, call returns {}",
+                        "{} values are bound, but the call returns {}",
                         bindings.len(),
                         outs.len()
                     ),
                 )
-                .label(*call_span, true, "arity mismatch here"),
+                .label(extra.span, true, "no value for this binding")
+                .label(*call_span, false, "this call"),
             );
             return;
         }
         let call = HirExpr {
             ty: outs[0],
             span: *call_span,
-            kind: HirExprKind::Call { callee, args },
+            kind: HirExprKind::Call {
+                callee,
+                args,
+                rest: outs[1..].to_vec(),
+            },
         };
         let exact = outs
             .iter()
@@ -627,7 +626,10 @@ impl Checker<'_> {
             out.push(HirStmt::MultiLet { locals, call });
             return;
         }
-        let hidden: Vec<LocalId> = outs.iter().map(|ty| fcx.hidden(*ty, *call_span)).collect();
+        let hidden: Vec<LocalId> = outs[..bindings.len()]
+            .iter()
+            .map(|ty| fcx.hidden(*ty, *call_span))
+            .collect();
         out.push(HirStmt::MultiLet {
             locals: hidden.clone(),
             call,
@@ -722,7 +724,11 @@ impl Checker<'_> {
             call: HirExpr {
                 ty: outs[0],
                 span: *call_span,
-                kind: HirExprKind::Call { callee, args },
+                kind: HirExprKind::Call {
+                    callee,
+                    args,
+                    rest: Vec::new(),
+                },
             },
         }];
         let test = local_expr(hidden[0], outs[0], *call_span);

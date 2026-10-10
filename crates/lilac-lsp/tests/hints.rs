@@ -126,6 +126,7 @@ main: function () nothing {
     unused: @bit32 = 0x1
     used: @bit32 = 0x2
     used = used_helper(used, 0x3)
+    used == 0x2
     return
     later: @bit32 = 0x4
     @trap()
@@ -142,14 +143,15 @@ fn unused_names_and_unreachable_statements_are_faded() {
             (1, "`unused_helper` is never used".to_owned()),
             (3, "parameter `unused_param` is never used".to_owned()),
             (15, "local `unused` is never used".to_owned()),
-            (19, "unreachable code".to_owned()),
+            (18, "this value is never used".to_owned()),
+            (20, "unreachable code".to_owned()),
         ],
         "{:?}",
         published.diagnostics
     );
     assert_eq!(
         published.diagnostics.len(),
-        4,
+        5,
         "{:?}",
         published.diagnostics
     );

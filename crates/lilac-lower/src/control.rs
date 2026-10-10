@@ -49,9 +49,19 @@ impl Lower<'_> {
                 if let HirExprKind::Call {
                     callee: callee @ (HirCallee::Func(_) | HirCallee::Local(_)),
                     args,
+                    rest,
                 } = &call.kind
                 {
-                    self.emit_call(state, func, callee, args, &places, call.span);
+                    // `rest` holds every out after the first; the locals
+                    // bind a prefix, and the outs past them drop.
+                    let unbound = &rest[places.len().saturating_sub(1).min(rest.len())..];
+                    let extra: Vec<PlaceName> = unbound
+                        .iter()
+                        .map(|ty| self.tmp(state, *ty, call.span))
+                        .collect();
+                    let outs: Vec<PlaceName> = places.iter().chain(&extra).cloned().collect();
+                    self.emit_call(state, func, callee, args, &outs, call.span);
+                    self.own_rest(state, &extra, unbound);
                 } else {
                     let operand = self.read(state, func, call);
                     state.emit(LirInst::CopyPlace {
@@ -66,7 +76,7 @@ impl Lower<'_> {
             }
             HirStmt::Assign { place, value } => self.lower_assign(state, func, place, value),
             HirStmt::Expr(expr) => match &expr.kind {
-                HirExprKind::Call { callee, args } if expr.ty.is_error() => {
+                HirExprKind::Call { callee, args, .. } if expr.ty.is_error() => {
                     if let HirCallee::Intrinsic(intrinsic) = callee {
                         let _ =
                             self.lower_intrinsic(state, func, *intrinsic, args, expr.ty, expr.span);

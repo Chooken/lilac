@@ -300,10 +300,12 @@ impl<'a> Lower<'a> {
             HirExprKind::Call {
                 callee: HirCallee::Intrinsic(intrinsic),
                 args,
+                ..
             } => self.eval_intrinsic(eval, *intrinsic, args, expr.ty),
             HirExprKind::Call {
                 callee: HirCallee::Func(key),
                 args,
+                ..
             } => {
                 let callee: &'a HirFunc = self.funcs.get(key).copied()?;
                 let body = inline_body(callee)?;

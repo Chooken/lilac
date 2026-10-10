@@ -88,6 +88,25 @@ pub struct HirProgram {
     /// `break`, `continue`, `@panic` or `@trap`, one span per block (an
     /// editor hint; they are still checked and lowered).
     pub unreachable: Vec<Span>,
+    /// Expression statements whose value has no effect (no call anywhere
+    /// in them, like `5 + 5`): an editor hint; they are still lowered.
+    pub no_effect: Vec<Span>,
+}
+
+impl HirExpr {
+    /// Whether evaluating this has no effect: it calls nothing (operator
+    /// hooks and intrinsics are calls too) and is not a `@compile_error`.
+    #[must_use]
+    pub fn has_no_effect(&self) -> bool {
+        let mut effect = false;
+        self.walk(&mut |e| {
+            effect |= matches!(
+                e.kind,
+                HirExprKind::Call { .. } | HirExprKind::CompileError { .. } | HirExprKind::Poison
+            );
+        });
+        !effect
+    }
 }
 
 /// A concrete type's layout.
@@ -253,7 +272,8 @@ pub enum HirStmt {
     },
     /// `a: T, b: U = f()`: the call writes its outs straight into the locals.
     MultiLet {
-        /// One local per out slot, in order.
+        /// One local per bound out slot, in order (a prefix of the outs; the
+        /// call's other outs are dropped at the end of the statement).
         locals: Vec<LocalId>,
         /// The call (an [`HirExprKind::Call`]).
         call: HirExpr,
@@ -377,12 +397,15 @@ pub enum HirExprKind {
         /// Payload value.
         payload: Option<Box<HirExpr>>,
     },
-    /// A call returning at most one value (its type is that value's type).
+    /// A call: its type is its first out's type (the error type for none).
     Call {
         /// Target.
         callee: HirCallee,
         /// Arguments (already converted to parameter types).
         args: Vec<HirExpr>,
+        /// The types of the outs after the first. Nothing binds them, so
+        /// they are dropped at the end of the statement.
+        rest: Vec<TypeRef>,
     },
     /// A function used as a value.
     FuncRef(FuncKey),

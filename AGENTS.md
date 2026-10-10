@@ -271,8 +271,11 @@
   `self` and `_`-prefixed names), unused `using … as` aliases, unused
   top-level `private` items (no `NameSite`), and unreachable statements
   (`HirProgram::unreachable`: the rest of a block after `return`, `break`,
-  `continue`, `@panic` or `@trap`, recorded by typeck's `check_stmts`). A
-  scope with an error gets none. Discarded results are never flagged.
+  `continue`, `@panic` or `@trap`, recorded by typeck's `check_stmts`),
+  and statements whose value has no effect (`HirProgram::no_effect`, from
+  `HirExpr::has_no_effect`: nothing in them is a call, so `5 + 5` but not
+  `a + b`, which calls an operator hook). A scope with an error gets none.
+  Discarded call results are never flagged, and nothing here is an error.
 - Resilience: a compile that panics keeps the previous analysis and shows
   one `window/showMessage` error until a compile succeeds
   (`Server::reported_panic`); a request handler that panics is answered

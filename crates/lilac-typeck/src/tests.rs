@@ -718,12 +718,54 @@ fn multilet_arity_mismatch_is_e022() {
     );
 }
 
+const TWO_OUTS: &str = "get: function () a: @bit32, b: @bit8 {\n    a = 0x1\n    b = 0x2\n}\n";
+
 #[test]
-fn single_let_against_multi_return_is_e022() {
-    let diags = check_src(
-        "Object1: object {\n    value: @bit8\n}\nmain: function () nothing {\n    result: Object1 = get()\n}\nget: function () result: Object1, result_2: @bit32 {\n    result = Object1 {\n        value = 0x0\n    }\n    result_2 = 0x0\n}\n",
-    );
+fn unbound_outs_are_dropped() {
+    // A call statement, a call as a value and a short multi-`let`.
+    let diags = check_src(&format!(
+        "{TWO_OUTS}three: function () a: @bit32, b: @bit8, c: @bit8 {{\n    a = 0x1\n    b = 0x2\n    c = 0x3\n}}\nmain: function () nothing {{\n    get()\n    first: @bit32 = get()\n    x: @bit32 = @i_add_32(get(), 0x1)\n    p: @bit32, q: @bit8 = three()\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn more_bindings_than_outs_is_e022() {
+    let diags = check_src(&format!(
+        "{TWO_OUTS}main: function () nothing {{\n    p: @bit32, q: @bit8, r: @bit8 = get()\n}}\n"
+    ));
     assert!(has_code(&diags, "E022"), "{diags:?}");
+    let msgs = messages(&diags);
+    assert!(
+        msgs.iter()
+            .any(|m| m == "3 values are bound, but the call returns 2"),
+        "{msgs:?}"
+    );
+}
+
+#[test]
+fn values_with_no_effect_are_recorded_not_errors() {
+    let src = "E: enum {\n    A\n}\nmain: function () nothing {\n    x: @bit32 = 0x1\n    0x5 + 0x5\n    x\n    @size_of(@bit32)\n    E.A\n    @trap()\n}\n";
+    let (diags, hir, _) = check(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let texts: Vec<&str> = hir
+        .no_effect
+        .iter()
+        .map(|span| &src[span.lo.0 as usize..span.hi.0 as usize])
+        .collect();
+    assert_eq!(texts, ["0x5 + 0x5", "x", "@size_of(@bit32)", "E.A"]);
+}
+
+#[test]
+fn value_from_nothing_is_e022() {
+    let diags = check_src(
+        "none: function () nothing {\n}\nmain: function () nothing {\n    x: @bit32 = none()\n}\n",
+    );
+    let msgs = messages(&diags);
+    assert!(
+        msgs.iter().any(|m| m == "this call returns no value"),
+        "{msgs:?}"
+    );
 }
 
 #[test]

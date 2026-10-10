@@ -422,6 +422,19 @@ multi_func: function () result_1: @bit8, result_2: @bit16 {
 val1: @bit8, val2: @bit16 = multi_func()
 ```
 
+A caller need not bind every result. The bindings take the results left to
+right, and the results past them are dropped at the end of the statement
+(`@on_drop` runs, so nothing leaks). A call used as a value is its first
+result, and a call statement drops all of them:
+
+```lilac
+val1: @bit8 = multi_func()   // result_2 is dropped
+multi_func()                 // both are dropped
+```
+
+Binding more values than the call returns, or using a call that returns
+`nothing` as a value, is `E022`.
+
 ### Control Flow
 
 A condition (`if`, value `if`, `and`/`or` operands) is a `@bit8` tested for

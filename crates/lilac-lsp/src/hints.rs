@@ -1,8 +1,8 @@
-//! Faded hints: unused names and unreachable statements. They are computed
-//! here from a retained analysis and published beside the compiler's
-//! diagnostics as `Hint` + `Unnecessary`; the compiler never reports them,
-//! so the command line prints nothing for them. Discarded results are never
-//! flagged.
+//! Faded hints: unused names, unreachable statements and statements whose
+//! value has no effect. They are computed here from a retained analysis and
+//! published beside the compiler's diagnostics as `Hint` + `Unnecessary`;
+//! the compiler never reports them, so the command line prints nothing for
+//! them. Discarded call results are never flagged.
 
 use std::collections::{HashMap, HashSet};
 
@@ -118,11 +118,25 @@ pub fn hints(retained: &Retained) -> Vec<Hint> {
 
     // The rest of a block after `return`, `break`, `continue`, `@panic` or
     // `@trap`.
-    for span in unreachable {
+    for &span in &unreachable {
         if !has_error(span) {
             hints.push(Hint {
                 span,
                 message: "unreachable code".to_owned(),
+            });
+        }
+    }
+
+    // Statements whose value has no effect (`5 + 5`). Every instance of a
+    // generic records its body, so a span can repeat.
+    let mut no_effect = analysis.hir.no_effect.clone();
+    no_effect.sort_by_key(|span| (span.file.0, span.lo.0, span.hi.0));
+    no_effect.dedup();
+    for span in no_effect {
+        if !has_error(span) && !unreachable.iter().any(|outer| contains(*outer, span)) {
+            hints.push(Hint {
+                span,
+                message: "this value is never used".to_owned(),
             });
         }
     }

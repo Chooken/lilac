@@ -216,7 +216,9 @@ impl Lower<'_> {
             HirExprKind::Variant { index, payload } => {
                 self.variant_value(state, func, expr, *index, payload.as_deref())
             }
-            HirExprKind::Call { callee, args } => self.call_value(state, func, expr, callee, args),
+            HirExprKind::Call { callee, args, rest } => {
+                self.call_value(state, func, expr, callee, args, rest)
+            }
             HirExprKind::FuncRef(key) => {
                 let reg = state.reg();
                 state.emit(LirInst::AddrFunc {
@@ -332,6 +334,7 @@ impl Lower<'_> {
         expr: &HirExpr,
         callee: &HirCallee,
         args: &[HirExpr],
+        rest: &[TypeRef],
     ) -> LirOperand {
         let span = expr.span;
         if let HirCallee::Intrinsic(intrinsic) = callee {
@@ -342,9 +345,20 @@ impl Lower<'_> {
             return LirOperand::Reg(Reg::default());
         }
         let out = self.tmp(state, expr.ty, span);
-        self.emit_call(state, func, callee, args, std::slice::from_ref(&out), span);
+        let mut outs = vec![out.clone()];
+        outs.extend(rest.iter().map(|ty| self.tmp(state, *ty, span)));
+        self.emit_call(state, func, callee, args, &outs, span);
         self.own_temp(state, &out, expr.ty);
+        self.own_rest(state, &outs[1..], rest);
         LirOperand::Place(out)
+    }
+
+    /// Registers the outs nothing binds as temps, dropped at the end of the
+    /// statement.
+    pub(crate) fn own_rest(&mut self, state: &mut FnState, places: &[PlaceName], tys: &[TypeRef]) {
+        for (place, ty) in places.iter().zip(tys) {
+            self.own_temp(state, place, *ty);
+        }
     }
 
     /// An object literal: a zeroed temporary with each field stored.
