@@ -18,18 +18,6 @@ Box[T]: object {
         }
     }
 
-    // Hands the allocation to a new box; this one is left empty.
-    move: function(self) to: Box[T] {
-        to = Box[T] {
-            value = self.value
-        }
-        self.value = .None
-    }
-
-    @on_copy: function(self) copy: Box[T] {
-        @compile_error("You cannot copy a Box[T]. If you want to move it use variable.move()!")
-    }
-
     @on_drop: function(self) nothing {
         if self.value.get() -> value: ref T {
             Allocator.destroy[T](value)

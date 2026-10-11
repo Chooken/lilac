@@ -1937,3 +1937,128 @@ fn unused_generic_index_under_a_possibly_constant_condition_is_skipped() {
     );
     assert!(!diags.has_errors(), "{:?}", messages(&diags));
 }
+
+/// A type whose own `@on_drop` makes it move.
+const HANDLE: &str =
+    "Handle: object {\n    id: @bit32\n\n    @on_drop: function (self) nothing {\n    }\n}\n\
+                      take: function (handle: Handle) nothing {\n}\n";
+
+/// The function with a local named `local`.
+fn body_of<'a>(hir: &'a HirProgram, local: &str) -> &'a lilac_hir::HirFunc {
+    hir.funcs
+        .iter()
+        .find(|func| func.locals.iter().any(|slot| slot.name == local))
+        .expect("function")
+}
+
+#[test]
+fn reading_a_moving_type_wraps_a_move_and_drops_the_rest() {
+    let (diags, hir, _) = check(&format!(
+        "{HANDLE}main: function () nothing {{\n    a: Handle = Handle {{ id = 0x1 }}\n    \
+         b: Handle = a\n    n: @bit32 = 0x2\n    m: @bit32 = n\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "b");
+    let stmts = &main.body.as_ref().expect("body").stmts;
+    // `b = a` moves; `m = n` copies.
+    assert!(
+        matches!(&stmts[1], HirStmt::Let { value, .. } if matches!(value.kind, HirExprKind::Move(_)))
+    );
+    assert!(
+        matches!(&stmts[3], HirStmt::Let { value, .. } if matches!(value.kind, HirExprKind::Local(_)))
+    );
+    // Only `b` is full at the end: one drop, no flag.
+    let Some(HirStmt::Drop { drops, .. }) = stmts.last() else {
+        panic!("no drop at the end: {stmts:?}");
+    };
+    assert_eq!(drops.len(), 1);
+    assert_eq!(drops[0].flag, None);
+    assert_eq!(main.local(drops[0].path.local).name, "b");
+}
+
+#[test]
+fn a_move_on_one_branch_gets_a_drop_flag() {
+    let (diags, hir, _) = check(&format!(
+        "{HANDLE}main: function () nothing {{\n    a: Handle = Handle {{ id = 0x1 }}\n    \
+         if 0x1 {{\n        take(a)\n    }}\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "a");
+    assert_eq!(main.flags.len(), 1);
+    let flag = main.flags[0].1;
+    let Some(HirStmt::Drop { drops, .. }) = main.body.as_ref().expect("body").stmts.last() else {
+        panic!("no drop at the end");
+    };
+    assert_eq!(drops[0].flag, Some(flag));
+}
+
+#[test]
+fn an_out_is_empty_until_its_first_assignment() {
+    let (diags, hir, _) = check(&format!(
+        "{HANDLE}make: function () made: Handle {{\n    made = Handle {{ id = 0x1 }}\n    \
+         made = Handle {{ id = 0x2 }}\n}}\nmain: function () nothing {{\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let make = body_of(&hir, "made");
+    let stmts = &make.body.as_ref().expect("body").stmts;
+    assert!(
+        matches!(&stmts[0], HirStmt::Assign { old: lilac_hir::HirOld::Empty(drops), .. } if drops.is_empty())
+    );
+    assert!(matches!(
+        &stmts[1],
+        HirStmt::Assign {
+            old: lilac_hir::HirOld::Full,
+            ..
+        }
+    ));
+    // The out is never dropped on return.
+    assert!(!stmts
+        .iter()
+        .any(|stmt| matches!(stmt, HirStmt::Drop { .. })));
+}
+
+#[test]
+fn ownership_errors_have_their_codes() {
+    for (body, code) in [
+        (
+            "    a: Handle = Handle { id = 0x1 }\n    take(a)\n    take(a)\n",
+            "E063",
+        ),
+        (
+            "    a: Handle = Handle { id = 0x1 }\n    r: ref Handle = ref a\n    take(r)\n",
+            "E064",
+        ),
+        (
+            "    a: @bit32 = 0x1\n    b: @bit32 = move a\n    c: @bit32 = a\n",
+            "E063",
+        ),
+        ("    b: @bit32 = move 0x1\n", "E064"),
+    ] {
+        let diags = check_src(&format!("{HANDLE}main: function () nothing {{\n{body}}}\n"));
+        assert!(has_code(&diags, code), "{body}: {:?}", messages(&diags));
+    }
+    let diags = check_src(
+        "half: function (n: @bit8) h: @bit8 {\n    if n {\n        return\n    }\n    h = n\n}\n",
+    );
+    assert!(has_code(&diags, "E065"), "{:?}", messages(&diags));
+}
+
+#[test]
+fn a_generic_that_moves_its_argument_twice_fails_as_e042() {
+    // The template copies `T`; the `Handle` instance cannot.
+    let diags = check_src(&format!(
+        "{HANDLE}twice[T]: function (x: T) nothing {{\n    a: T = x\n    b: T = x\n}}\n\
+         copies: function () nothing {{\n    twice[@bit32](0x1)\n}}\n\
+         main: function () nothing {{\n    twice[Handle](Handle {{ id = 0x1 }})\n}}\n"
+    ));
+    assert_eq!(
+        diags
+            .diagnostics()
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
+        ["E042"],
+        "{:?}",
+        messages(&diags)
+    );
+}

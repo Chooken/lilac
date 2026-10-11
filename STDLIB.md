@@ -21,7 +21,7 @@ These were decided before the layout and shape every namespace below.
 | Abstraction model | Structural duck-typed conventions (fixed method shapes). **No language traits/interfaces.** |
 | Container semantics | Value semantics: assignment/passing deep-copies via `@on_copy`, scope exit frees via `@on_drop`. |
 | Allocator model | Process-wide malloc/free default, plus an optional `Allocator` argument on allocating constructors. |
-| Ownership | `Unique[T]` (`@on_override`/`@on_copy` + explicit `move()`), `Rc[T]` (non-atomic), `Arc[T]` (atomic), `Weak[T]`. |
+| Ownership | `Unique[T]` (moves by its `@on_drop`), `Rc[T]` (non-atomic), `Arc[T]` (atomic), `Weak[T]`. |
 
 ### 0.1 How namespaces work (drives the root-vs-subfolder split)
 
@@ -53,7 +53,8 @@ namespace you import it from. Therefore the root namespace is a real prelude
 * **Programmer errors** `panic` (index out of bounds).
 * `Result`/`Option` are plain `enum`s, driven by `match` (statements-only in
   v1) and helper methods. Their `get` (and `Result.error`) are functions
-  that can fail (`SPEC.md` §4), so the caller handles the empty side with a
+  that can fail (`SPEC.md` §4) and take `self` by value (the payload moves
+  out), so the caller handles the empty side with a
   capture `if`, a guard or a `loop if`; there is no panicking `unwrap`.
 
 ### 0.4 The `==` hazard (why a conventions layer exists)
@@ -187,7 +188,8 @@ unsigned variants; float variants. Unsigned comparisons bind
 > **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
 > `unwrap_or`, `unwrap_or_default`) and a first `Result[T, E]` (`Ok`,
 > `Error`; `is_ok`, `get: value: T else error: E`, `error: error: E else
-> nothing`, `unwrap_or`). Both start zeroed as their first variant:
+> nothing`, `unwrap_or`). `get`, `error` and the `unwrap_or`s take `self`
+> by value, so they move the optional or result. Both start zeroed as their first variant:
 > a zeroed `Optional` is `Some`, so set `.None` explicitly.
 
 **Functions:**
@@ -223,7 +225,7 @@ unsigned variants; float variants. Unsigned comparisons bind
 
 | Type | Semantics | Key methods |
 |---|---|---|
-| `Unique[T]` | owned heap box; single logical owner | `new(value)`, `get() ref T`, `get_mut() ref T`, `move() T` (explicit transfer, leaves a moved-from state), `replace(value)`, `into_inner() T`, `is_valid()` |
+| `Unique[T]` | owned heap box; single logical owner | `new(value)`, `get() ref T`, `get_mut() ref T`, `replace(value)`, `into_inner() T`, `is_valid()` |
 | `Rc[T]` | non-atomic reference count | `new(value)`, `strong_count`, `weak_count`, `downgrade() Weak[T]`, `get() ref T` |
 | `Arc[T]` | atomic reference count | same surface as `Rc[T]`; thread-safe |
 | `Weak[T]` | non-owning handle for cycles | `upgrade() Option[Rc[T] / Arc[T]]`, `strong_count` |
@@ -573,9 +575,10 @@ stdlib workaround via `extern`.
    (`List[@bit32](...)` or a builder).
 6. **`==` cannot be overridden.** Content equality and map/set keys must route
    through `equals`/`compare`/`hash` conventions (§0.4), never `==`.
-7. **No move/non-copyable types.** `Unique[T]` copy is defined by `@on_copy`
-   and an explicit `move()`; true compile-time move-safety would be a language
-   feature.
+7. ~~**No move/non-copyable types.**~~ Resolved: a type with its own
+   `@on_drop` and no `@on_copy` moves, the compiler tracks moved-out places
+   (`SPEC.md` §1), and `move a` moves a copyable value. `Box` and `Unique[T]`
+   need no `move()`.
 8. **Non-transitive `using`, no re-export.** There is no umbrella import; each
    domain is imported explicitly, and cross-domain needs are explicit imports.
 9. **libm dependency.** `sqrt`/`pow`/trig come from libm (`link = ["m"]`) via

@@ -44,14 +44,15 @@ impl Checker<'_> {
                     self.expr_indices(value, guarded, bad);
                 }
                 HirStmt::MultiLet { call, .. } => self.expr_indices(call, guarded, bad),
-                HirStmt::Assign { place, value } => {
+                HirStmt::Assign { place, value, .. } => {
                     self.expr_indices(place, guarded, bad);
                     self.expr_indices(value, guarded, bad);
                 }
                 HirStmt::Return(_)
                 | HirStmt::Fail(_)
                 | HirStmt::Break(_)
-                | HirStmt::Continue(_) => {}
+                | HirStmt::Continue(_)
+                | HirStmt::Drop { .. } => {}
                 HirStmt::If { cond, then, els } => {
                     self.expr_indices(cond, guarded, bad);
                     let arms = guarded || may_be_constant(cond);
@@ -116,6 +117,7 @@ impl Checker<'_> {
             HirExprKind::Field { base, .. }
             | HirExprKind::Deref(base)
             | HirExprKind::RefOf(base)
+            | HirExprKind::Move(base)
             | HirExprKind::Retype(base) => self.expr_indices(base, guarded, bad),
             HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
                 for value in values {

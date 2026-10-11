@@ -22,6 +22,8 @@ value_of: function (result: Result[@bit_native, Os.Error], code: @bit32) value: 
         value = got
     } else {
         exit(code)
+        // `exit` does not return.
+        @trap()
     }
 }
 
@@ -30,6 +32,8 @@ value_of_64: function (result: Result[@bit64, Os.Error], code: @bit32) value: @b
         value = got
     } else {
         exit(code)
+        // `exit` does not return.
+        @trap()
     }
 }
 
@@ -38,6 +42,8 @@ handle_of: function (result: Result[Os.Handle, Os.Error], code: @bit32) handle: 
         handle = got
     } else {
         exit(code)
+        // `exit` does not return.
+        @trap()
     }
 }
 

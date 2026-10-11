@@ -25,7 +25,7 @@ monotonic_nanos: function () nanos: @bit64 {
             nanos = MacOs.clock_gettime_nsec_np(MacOs.CLOCK_UPTIME_RAW)
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -46,7 +46,7 @@ wall_clock_nanos: function () nanos: @bit64 {
             nanos = MacOs.clock_gettime_nsec_np(MacOs.CLOCK_REALTIME)
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -102,7 +102,7 @@ sleep: function (nanos: @bit64) nothing {
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 

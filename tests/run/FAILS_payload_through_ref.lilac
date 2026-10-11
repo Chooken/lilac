@@ -1,0 +1,28 @@
+// expect-error: E064
+// expect-stderr: error[E064]: cannot move a payload out of a reference
+// Matching through a `ref` cannot move a payload that cannot be copied
+// out: the reference does not own it.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+Slot: enum {
+    Full: Handle
+    Empty
+}
+
+peek: function (slot: ref Slot) nothing {
+    match slot {
+        .Full -> handle: Handle {
+        }
+    }
+}
+
+main: function () nothing {
+    slot: Slot = .Full(Handle { id = 0x1 })
+    peek(ref slot)
+}

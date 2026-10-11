@@ -1437,6 +1437,8 @@ fn grouping(expr: &Expr) -> String {
         }
         Expr::Cast(value, ty) => format!("({} as {})", grouping(value), ty.head()),
         Expr::RefOf { value, .. } => format!("(ref {})", grouping(value)),
+        Expr::Move { value, .. } => format!("(move {})", grouping(value)),
+        Expr::Member { obj, field, .. } => format!("{}.{field}", grouping(obj)),
         Expr::Call { callee, args, .. } => {
             let args: Vec<String> = args.iter().map(grouping).collect();
             format!("{}({})", grouping(callee), args.join(", "))
@@ -1459,6 +1461,8 @@ fn operators_bind_by_precedence() {
         ("-a as T", "(@negate(a) as T)"),
         ("- ref -a", "@negate((ref @negate(a)))"),
         ("(a or b) and c", "((a Or b) And c)"),
+        ("move a.b", "(move a.b)"),
+        ("ref move a", "(ref (move a))"),
     ] {
         let (program, diags, _) = parse(&in_main(&format!("x: T = {src}")));
         assert!(!diags.has_errors(), "{src}: {:?}", diags.diagnostics());

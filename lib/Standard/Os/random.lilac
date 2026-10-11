@@ -57,7 +57,7 @@ fill_random: function (buffer: ref unknown, length: @bit_native) nothing {
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 

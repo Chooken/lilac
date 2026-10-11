@@ -3,8 +3,8 @@
 
 use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{
-    HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirPattern, HirStmt,
-    HirValueArm, Layout, LocalId,
+    HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirOld, HirPath,
+    HirPattern, HirStmt, HirValueArm, Layout, LocalId,
 };
 use lilac_ir::{ArithOp, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy, PlaceName, Reg};
 use lilac_span::Span;
@@ -36,10 +36,12 @@ impl Lower<'_> {
                 let operand = self.read(state, func, value);
                 state.emit(LirInst::CopyPlace {
                     src: operand,
-                    dst: place.clone(),
+                    dst: place,
                     span: value.span,
                 });
-                self.own(state, &place, func.local(*local).ty);
+                if !func.flags.is_empty() {
+                    Self::mark(state, func, &HirPath::local(*local), true, value.span);
+                }
             }
             HirStmt::MultiLet { locals, call } => {
                 let places: Vec<PlaceName> = locals
@@ -70,11 +72,14 @@ impl Lower<'_> {
                         span: call.span,
                     });
                 }
-                for (place, id) in places.iter().zip(locals) {
-                    self.own(state, place, func.local(*id).ty);
+                for id in locals {
+                    Self::mark(state, func, &HirPath::local(*id), true, call.span);
                 }
             }
-            HirStmt::Assign { place, value } => self.lower_assign(state, func, place, value),
+            HirStmt::Assign { place, value, old } => {
+                self.lower_assign(state, func, place, value, old);
+            }
+            HirStmt::Drop { drops, span } => self.lower_drops(state, func, drops, *span),
             HirStmt::Expr(expr) => match &expr.kind {
                 HirExprKind::Call { callee, args, .. } if expr.ty.is_error() => {
                     if let HirCallee::Intrinsic(intrinsic) = callee {
@@ -181,12 +186,16 @@ impl Lower<'_> {
         state.at(join);
     }
 
+    /// `place = value`: the value is evaluated, the old value handled as
+    /// `old` says, then the new one moves in (and the place's drop flags
+    /// are set).
     pub(crate) fn lower_assign(
         &mut self,
         state: &mut FnState,
         func: &HirFunc,
         place: &HirExpr,
         value: &HirExpr,
+        old: &HirOld,
     ) {
         let ty = place.ty;
         let operand = self.read(state, func, value);
@@ -195,32 +204,80 @@ impl Lower<'_> {
             .hir
             .hooks
             .get(&ty.id)
-            .and_then(|hooks| hooks.override_.clone());
+            .and_then(|hooks| hooks.override_.clone())
+            .filter(|_| !ty.is_ref);
         let drops = self.needs_drop(ty);
-        if override_.is_none() && !drops {
-            state.write(&target, operand, value.span);
-            return;
+        match old {
+            HirOld::Full | HirOld::Maybe(_) if override_.is_none() && !drops => {
+                state.write(&target, operand, value.span);
+            }
+            HirOld::Empty(old) if old.is_empty() => state.write(&target, operand, value.span),
+            HirOld::Empty(old) => {
+                // The drops may branch, so the value waits in a place.
+                let new = self.fresh_place(state, operand, ty, value.span);
+                self.lower_drops(state, func, old, place.span);
+                state.write(&target, LirOperand::Place(new), value.span);
+            }
+            HirOld::Full => {
+                let new = self.fresh_place(state, operand, ty, value.span);
+                self.replace(state, &target, ty, &new, place.span, value.span);
+            }
+            HirOld::Maybe(flag) => {
+                let new = self.fresh_place(state, operand, ty, value.span);
+                let Some(flag) = state.places.get(flag).cloned() else {
+                    lilac_error::bug!(place.span, "an undeclared drop flag");
+                };
+                let flag = state.read_place(&Place::Direct(flag), &LirTy::Bit(8), place.span);
+                let cond = state.reg_of(flag, &LirTy::Bit(8), place.span);
+                let (full, empty, join) = (state.label(), state.label(), state.label());
+                state.end(LirTerm::BranchIf {
+                    cond,
+                    then: full.clone(),
+                    els: Some(empty.clone()),
+                    span: place.span,
+                });
+                state.at(full);
+                self.replace(state, &target, ty, &new, place.span, value.span);
+                state.branch(&join, place.span);
+                state.at(empty);
+                state.write(&target, LirOperand::Place(new), value.span);
+                state.branch(&join, place.span);
+                state.at(join);
+            }
         }
-        let new = self.fresh_place(state, operand, ty, value.span);
-        // Assigning an out slot initializes the result, so `@on_override` is
-        // skipped (a guard type could otherwise never be returned); the old
-        // value is still dropped.
-        let is_out = matches!(place.kind, HirExprKind::Local(id) if func.returns.contains(&id));
-        if let Some(hook) = override_.filter(|_| !ty.is_ref && !is_out) {
-            let old_ref = self.ref_place(state, &target, ty, place.span);
-            let new_ref = self.ref_place(state, &Place::Direct(new.clone()), ty, place.span);
+        Self::mark_expr(state, func, place, true);
+    }
+
+    /// Replaces the full value at `target` with the one at `new`:
+    /// `@on_override(ref old, ref new)`, the old value's drop, the write.
+    fn replace(
+        &mut self,
+        state: &mut FnState,
+        target: &Place,
+        ty: TypeRef,
+        new: &PlaceName,
+        span: Span,
+        write_span: Span,
+    ) {
+        let override_ = self
+            .hir
+            .hooks
+            .get(&ty.id)
+            .and_then(|hooks| hooks.override_.clone())
+            .filter(|_| !ty.is_ref);
+        if let Some(hook) = override_ {
+            let old_ref = self.ref_place(state, target, ty, span);
+            let new_ref = self.ref_place(state, &Place::Direct(new.clone()), ty, span);
             let symbol = self.symbol(&hook);
             state.emit(LirInst::Call {
                 func: LirCallee::Func(symbol),
                 ins: vec![old_ref, new_ref],
                 outs: Vec::new(),
-                span: place.span,
+                span,
             });
         }
-        if drops {
-            self.drop_place(state, &target, ty, place.span);
-        }
-        state.write(&target, LirOperand::Place(new), value.span);
+        self.drop_place(state, target, ty, span);
+        state.write(target, LirOperand::Place(new.clone()), write_span);
     }
 
     pub(crate) fn lower_match(
@@ -239,22 +296,23 @@ impl Lower<'_> {
                 self.lower_block(state, func, els);
                 return;
             };
-            state.scopes.push(Scope::default());
-            if let Some(capture) = arm.capture {
-                let (subject, _) = self.subject(state, func, scrutinee);
-                self.bind_capture(state, func, &subject, scrutinee.ty, &arm.pattern, capture);
-            }
-            for stmt in &arm.body.stmts {
-                self.lower_stmt(state, func, stmt);
-            }
-            if state.open {
-                let index = state.scopes.len() - 1;
-                self.drop_scope(state, index, end_of(arm.body.span));
-            }
-            state.scopes.pop();
+            let subject = match arm.capture {
+                Some(_) => {
+                    let (subject, _) = self.subject(state, func, scrutinee);
+                    let owned = self.detach(state, scrutinee, &subject, std::iter::once(arm.moves));
+                    Some((subject, owned))
+                }
+                None => None,
+            };
+            let (subject, owned) = match subject {
+                Some((subject, owned)) => (Some(subject), owned),
+                None => (None, None),
+            };
+            self.lower_arm(state, func, scrutinee, subject.as_ref(), arm, owned);
             return;
         }
         let (subject, is_enum) = self.subject(state, func, scrutinee);
+        let owned = self.detach(state, scrutinee, &subject, arms.iter().map(|arm| arm.moves));
         let join = state.label();
         let els_label = state.label();
         let mut next = state.label();
@@ -282,18 +340,7 @@ impl Lower<'_> {
                 span: arm.body.span,
             });
             state.at(body);
-            state.scopes.push(Scope::default());
-            if let Some(capture) = arm.capture {
-                self.bind_capture(state, func, &subject, scrutinee.ty, &arm.pattern, capture);
-            }
-            for stmt in &arm.body.stmts {
-                self.lower_stmt(state, func, stmt);
-            }
-            if state.open {
-                let index = state.scopes.len() - 1;
-                self.drop_scope(state, index, end_of(arm.body.span));
-            }
-            state.scopes.pop();
+            self.lower_arm(state, func, scrutinee, Some(&subject), arm, owned.clone());
             state.branch(&join, arm.body.span);
         }
         if arms.is_empty() {
@@ -301,9 +348,75 @@ impl Lower<'_> {
             state.branch(&els_label, els.span);
         }
         state.at(els_label);
+        state.scopes.push(Scope {
+            temps: owned.into_iter().collect(),
+        });
         self.lower_block(state, func, els);
+        if state.open {
+            let index = state.scopes.len() - 1;
+            self.drop_scope(state, index, end_of(els.span));
+        }
+        state.scopes.pop();
         state.branch(&join, els.span);
         state.at(join);
+    }
+
+    /// One statement `match` arm, its capture bound from `subject`. `owned`
+    /// is the matched temporary when this arm drops it (another arm moves
+    /// its payload out, so the statement does not).
+    fn lower_arm(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        scrutinee: &HirExpr,
+        subject: Option<&Place>,
+        arm: &HirArm,
+        owned: Option<(PlaceName, TypeRef)>,
+    ) {
+        let owned = owned.filter(|_| !arm.moves);
+        state.scopes.push(Scope {
+            temps: owned.into_iter().collect(),
+        });
+        if let (Some(capture), Some(subject)) = (arm.capture, subject) {
+            self.bind_capture(
+                state,
+                func,
+                scrutinee,
+                subject,
+                &arm.pattern,
+                arm.moves,
+                capture,
+            );
+        }
+        for stmt in &arm.body.stmts {
+            self.lower_stmt(state, func, stmt);
+        }
+        if state.open {
+            let index = state.scopes.len() - 1;
+            self.drop_scope(state, index, end_of(arm.body.span));
+        }
+        state.scopes.pop();
+    }
+
+    /// When an arm moves the payload out of a matched temporary, the
+    /// statement no longer drops it: the arms that do not move drop it
+    /// instead. Returns it then (when it needs a drop).
+    pub(crate) fn detach(
+        &mut self,
+        state: &mut FnState,
+        scrutinee: &HirExpr,
+        subject: &Place,
+        mut moves: impl Iterator<Item = bool>,
+    ) -> Option<(PlaceName, TypeRef)> {
+        if scrutinee.is_place() || !moves.any(|moves| moves) {
+            return None;
+        }
+        let Place::Direct(name) = subject else {
+            return None;
+        };
+        Self::take_temp(state, name);
+        self.needs_drop(scrutinee.ty)
+            .then(|| (name.clone(), scrutinee.ty))
     }
 
     /// The place a `match` inspects (fresh values spill into a temp).
@@ -378,14 +491,17 @@ impl Lower<'_> {
         test
     }
 
-    /// Initializes a capture local with a copy of the matched payload.
+    /// Initializes a capture local from the matched payload: moved out
+    /// (`moves`, which empties the scrutinee) or copied.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind_capture(
         &mut self,
         state: &mut FnState,
         func: &HirFunc,
+        scrutinee: &HirExpr,
         subject: &Place,
-        ty: TypeRef,
         pattern: &HirPattern,
+        moves: bool,
         capture: LocalId,
     ) {
         let HirPattern::Variant(index) = pattern else {
@@ -397,15 +513,25 @@ impl Lower<'_> {
             span,
             ..
         } = *func.local(capture);
-        let (field, name) = self.payload_field(ty.id, *index);
+        let (field, name) = self.payload_field(scrutinee.ty.id, *index);
         let payload = self.field_place(state, subject, field, &name, capture_ty, span);
-        let value = self.copy_out(state, &payload, capture_ty, span);
+        let value = if moves {
+            let lir = self.lir_ty(capture_ty);
+            state.read_place(&payload, &lir, span)
+        } else {
+            self.copy_out(state, &payload, capture_ty, span)
+        };
         state.emit(LirInst::CopyPlace {
             src: value,
-            dst: place.clone(),
+            dst: place,
             span,
         });
-        self.own(state, &place, capture_ty);
+        if moves {
+            Self::mark_expr(state, func, scrutinee, false);
+        }
+        if !func.flags.is_empty() {
+            Self::mark(state, func, &HirPath::local(capture), true, span);
+        }
     }
 
     /// Whether lowering `expr` creates blocks.
@@ -468,27 +594,24 @@ impl Lower<'_> {
             // A constant scrutinee lowers only the chosen arm.
             match choice.map(|index| &arms[index]) {
                 Some(arm) => {
-                    state.scopes.push(Scope::default());
-                    if let Some(capture) = arm.capture {
-                        let (subject, _) = self.subject(state, func, scrutinee);
-                        self.bind_capture(
-                            state,
-                            func,
-                            &subject,
-                            scrutinee.ty,
-                            &arm.pattern,
-                            capture,
-                        );
-                    }
-                    let operand = self.read(state, func, &arm.value);
-                    state.emit(LirInst::CopyPlace {
-                        src: operand,
-                        dst: result.clone(),
-                        span,
-                    });
-                    let scope = state.scopes.len() - 1;
-                    self.drop_scope(state, scope, arm.value.span);
-                    state.scopes.pop();
+                    let subject = match arm.capture {
+                        Some(_) => {
+                            let (subject, _) = self.subject(state, func, scrutinee);
+                            let owned =
+                                self.detach(state, scrutinee, &subject, std::iter::once(arm.moves));
+                            (Some(subject), owned)
+                        }
+                        None => (None, None),
+                    };
+                    self.value_arm(
+                        state,
+                        func,
+                        scrutinee,
+                        subject.0.as_ref(),
+                        arm,
+                        subject.1,
+                        &result,
+                    );
                 }
                 None => self.region(state, func, els, &result),
             }
@@ -496,6 +619,7 @@ impl Lower<'_> {
             return LirOperand::Place(result);
         }
         let (subject, is_enum) = self.subject(state, func, scrutinee);
+        let owned = self.detach(state, scrutinee, &subject, arms.iter().map(|arm| arm.moves));
         let join = state.label();
         let els_label = state.label();
         let mut next = state.label();
@@ -517,19 +641,15 @@ impl Lower<'_> {
                 span,
             });
             state.at(body);
-            state.scopes.push(Scope::default());
-            if let Some(capture) = arm.capture {
-                self.bind_capture(state, func, &subject, scrutinee.ty, &arm.pattern, capture);
-            }
-            let operand = self.read(state, func, &arm.value);
-            state.emit(LirInst::CopyPlace {
-                src: operand,
-                dst: result.clone(),
-                span,
-            });
-            let scope = state.scopes.len() - 1;
-            self.drop_scope(state, scope, arm.value.span);
-            state.scopes.pop();
+            self.value_arm(
+                state,
+                func,
+                scrutinee,
+                Some(&subject),
+                arm,
+                owned.clone(),
+                &result,
+            );
             state.branch(&join, span);
         }
         if arms.is_empty() {
@@ -537,11 +657,58 @@ impl Lower<'_> {
             state.branch(&els_label, span);
         }
         state.at(els_label);
+        state.scopes.push(Scope {
+            temps: owned.into_iter().collect(),
+        });
         self.region(state, func, els, &result);
+        let scope = state.scopes.len() - 1;
+        self.drop_scope(state, scope, els.span);
+        state.scopes.pop();
         state.branch(&join, span);
         state.at(join);
         self.own_temp(state, &result, expr.ty);
         LirOperand::Place(result)
+    }
+
+    /// One value `match` arm: its capture bound from `subject`, its value
+    /// moved into `result`, then what the arm still owns dropped. `owned`
+    /// is as for [`Self::lower_arm`].
+    #[allow(clippy::too_many_arguments)]
+    fn value_arm(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        scrutinee: &HirExpr,
+        subject: Option<&Place>,
+        arm: &HirValueArm,
+        owned: Option<(PlaceName, TypeRef)>,
+        result: &PlaceName,
+    ) {
+        let owned = owned.filter(|_| !arm.moves);
+        state.scopes.push(Scope {
+            temps: owned.into_iter().collect(),
+        });
+        if let (Some(capture), Some(subject)) = (arm.capture, subject) {
+            self.bind_capture(
+                state,
+                func,
+                scrutinee,
+                subject,
+                &arm.pattern,
+                arm.moves,
+                capture,
+            );
+        }
+        let operand = self.read(state, func, &arm.value);
+        state.emit(LirInst::CopyPlace {
+            src: operand,
+            dst: result.clone(),
+            span: arm.value.span,
+        });
+        self.lower_drops(state, func, &arm.drops, arm.value.span);
+        let scope = state.scopes.len() - 1;
+        self.drop_scope(state, scope, arm.value.span);
+        state.scopes.pop();
     }
 
     /// The value of an `if` expression: each branch writes the result; a

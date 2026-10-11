@@ -1,4 +1,3 @@
-// pending: ownership plan phase 3 (a type with `@on_drop` and no `@on_copy` moves)
 // expect-stdout: |a
 // Reading a place whose type has its own `@on_drop` but no `@on_copy`
 // moves it: the handle has one owner, so it drops once.

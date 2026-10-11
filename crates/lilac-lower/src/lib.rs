@@ -1,22 +1,24 @@
 //! HIR -> LIR lowering: places, ownership, and control flow.
 //!
-//! Ownership is decided here, uniformly:
+//! Ownership is decided by typeck's ownership pass, and lowering follows it:
 //!
-//! - Reading a *place* (local, field, dereference) into a new owner copies it:
-//!   the type's `@on_copy` hook, or copy glue when only its fields have hooks,
-//!   or a plain bit copy. Every other expression is a fresh value and moves.
-//! - Every `let` local is dropped when its block exits (reverse declaration
-//!   order); `return` and `break` drop the scopes they leave. By-value
-//!   parameters belong to the callee and are dropped on exit; return slots
-//!   move to the caller. A fresh value nobody takes is dropped at the end of
-//!   its statement.
+//! - A [`lilac_hir::HirExprKind::Move`] reads its place bit for bit. Reading
+//!   any other *place* (local, field, dereference) into a new owner copies
+//!   it: the type's `@on_copy` hook, or copy glue when only its fields have
+//!   hooks, or a plain bit copy. Every other expression is a fresh value
+//!   and moves.
+//! - Locals drop where a [`HirStmt::Drop`] says; a fresh value nobody takes
+//!   is dropped at the end of its statement (or by the early exit leaving
+//!   it). A drop flag ([`HirFunc::flags`]) is set when its place is
+//!   initialized and cleared when it is moved out.
 //! - Dropping runs the type's `@on_drop`, then drops every field (drop glue).
-//! - Assignment evaluates the new value, runs `@on_override(ref old, ref new)`,
-//!   drops the old value, then moves the new one in.
+//! - Assignment evaluates the new value, handles the old one as its
+//!   [`lilac_hir::HirOld`] says (`@on_override(ref old, ref new)`, then a
+//!   drop, for a full place), then moves the new one in.
 //!
 //! Arguments always reach the callee in a fresh place (the callee owns and may
-//! modify its parameters), and every function zeroes its return slots on
-//! entry, so a slot starts zeroed on each call.
+//! modify its parameters). Every function zeroes its return slots on entry:
+//! storage is zero-filled, but an out is empty until it is set.
 
 mod calls;
 mod constant;
@@ -33,7 +35,7 @@ use symbols::extern_symbol;
 use std::collections::{HashMap, HashSet};
 
 use lilac_error::{codes, Diagnostic, Diags};
-use lilac_hir::{FuncKey, HirFunc, HirProgram, HirStmt, Layout, LocalId};
+use lilac_hir::{FuncKey, HirFunc, HirPath, HirProgram, HirStmt, Layout, LocalId};
 use lilac_ir::{
     ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirModule, LirOperand,
     LirTerm, LirTy, PlaceName, Reg, Symbol,
@@ -270,11 +272,9 @@ impl Place {
     }
 }
 
-/// Owned places of one block (or expression region).
+/// Temporaries of one block (or expression region).
 #[derive(Default)]
 struct Scope {
-    /// `let` locals and by-value parameters needing a drop, in order.
-    locals: Vec<(PlaceName, TypeRef)>,
     /// Fresh values nobody took yet (dropped at the end of their statement).
     temps: Vec<(PlaceName, TypeRef)>,
 }
@@ -504,7 +504,7 @@ fn end_of(span: Span) -> Span {
 fn stmt_span(stmt: &HirStmt) -> Span {
     match stmt {
         HirStmt::MultiLet { call, .. } => call.span,
-        HirStmt::Assign { place, value } if place.span.file == value.span.file => Span {
+        HirStmt::Assign { place, value, .. } if place.span.file == value.span.file => Span {
             lo: place.span.lo.min(value.span.lo),
             hi: place.span.hi.max(value.span.hi),
             file: place.span.file,
@@ -514,7 +514,8 @@ fn stmt_span(stmt: &HirStmt) -> Span {
         HirStmt::Return(span)
         | HirStmt::Fail(span)
         | HirStmt::Break(span)
-        | HirStmt::Continue(span) => *span,
+        | HirStmt::Continue(span)
+        | HirStmt::Drop { span, .. } => *span,
         HirStmt::If { cond, .. } => cond.span,
         HirStmt::Loop(block) | HirStmt::Block(block) => block.span,
         HirStmt::Match { scrutinee, .. } => scrutinee.span,
@@ -646,12 +647,15 @@ impl Lower<'_> {
                 span: func.span,
             });
         }
+        for (_, flag) in &func.flags {
+            let place = self.declare(&mut state, func, *flag);
+            state.emit(LirInst::Zero {
+                place,
+                span: func.span,
+            });
+        }
         for id in &func.params {
-            let ty = func.local(*id).ty;
-            if self.needs_drop(ty) {
-                let place = state.places[id].clone();
-                state.scopes[0].locals.push((place, ty));
-            }
+            Self::mark(&mut state, func, &HirPath::local(*id), true, func.span);
         }
         for stmt in &body.stmts {
             self.lower_stmt(&mut state, func, stmt);

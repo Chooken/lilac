@@ -116,7 +116,7 @@ read: function (handle: Handle, buffer: ref unknown, length: @bit_native) result
             result = posix_result(MacOs.read(fd(handle), buffer, length))
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -190,7 +190,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -216,7 +216,7 @@ close: function (handle: Handle) error: Optional[Error] {
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -258,7 +258,7 @@ seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -301,7 +301,7 @@ size: function (handle: Handle) result: Result[@bit64, Error] {
             }
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -316,10 +316,14 @@ private {
     standard_stream: function (windows_id: @bit32, descriptor: @bit_native) handle: Handle {
         match @builtin.Target.os {
             .Windows => {
-                handle.value = @ptr_to_address(Windows.GetStdHandle(windows_id))
+                handle = Handle {
+                    value = @ptr_to_address(Windows.GetStdHandle(windows_id))
+                }
             }
         } else {
-            handle.value = descriptor
+            handle = Handle {
+                value = descriptor
+            }
         }
     }
 
@@ -430,9 +434,5 @@ private {
         } else {
             @compile_error("Standard.Os needs a C library on a target with no OS; build with `--libc`")
         }
-    }
-
-    unsupported: function () nothing {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }

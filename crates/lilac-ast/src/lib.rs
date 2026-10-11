@@ -201,6 +201,21 @@ pub struct Param {
     pub span: Span,
 }
 
+impl Param {
+    /// Whether this is the bare `self` receiver (`ref Self`).
+    #[must_use]
+    pub fn is_ref_self(&self) -> bool {
+        self.name.is_empty() && self.ty.is_self()
+    }
+
+    /// Whether this is a receiver: the bare `self`, or `self: T`, which
+    /// takes the receiver by value.
+    #[must_use]
+    pub fn is_receiver(&self) -> bool {
+        self.is_ref_self() || self.name == "self"
+    }
+}
+
 /// A type reference, with an optional `ref` flag.
 #[derive(Clone, Debug)]
 pub struct Type {
@@ -571,6 +586,13 @@ pub enum Expr {
         /// Whole-expression span (`ref` through value).
         span: Span,
     },
+    /// `move place` (moves the place out, whatever its type).
+    Move {
+        /// Place expression.
+        value: Box<Expr>,
+        /// Whole-expression span (`move` through value).
+        span: Span,
+    },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
     Cast(Box<Expr>, Box<Type>),
     /// `Name[args]` in expression position: the receiver of a static member
@@ -667,6 +689,7 @@ impl Expr {
             | Self::MatchValue { span, .. }
             | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
+            | Self::Move { span, .. }
             | Self::FString { span, .. }
             | Self::Error { span } => *span,
             Self::TypeApp(ty) => ty.span,

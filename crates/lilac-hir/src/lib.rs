@@ -8,9 +8,12 @@
 //! block exits (lowering emits the drops).
 //!
 //! Places are [`HirExprKind::Local`], [`HirExprKind::Field`] and
-//! [`HirExprKind::Deref`]. Lowering copies a place (running copy hooks) when
-//! its value moves into a new owner; every other expression is a fresh value
-//! that moves.
+//! [`HirExprKind::Deref`]. Ownership is decided in typeck: a read that
+//! moves a place is wrapped in [`HirExprKind::Move`], and every other read
+//! of a place into a new owner copies it (running copy hooks); every other
+//! expression is a fresh value that moves. Locals are dropped only where a
+//! [`HirStmt::Drop`] says, and an assignment says what happens to the old
+//! value ([`HirOld`]).
 
 pub mod intrinsics;
 
@@ -104,14 +107,18 @@ pub struct HirProgram {
 
 impl HirExpr {
     /// Whether evaluating this has no effect: it calls nothing (operator
-    /// hooks and intrinsics are calls too) and is not a `@compile_error`.
+    /// hooks and intrinsics are calls too), moves nothing (a moved value
+    /// drops) and is not a `@compile_error`.
     #[must_use]
     pub fn has_no_effect(&self) -> bool {
         let mut effect = false;
         self.walk(&mut |e| {
             effect |= matches!(
                 e.kind,
-                HirExprKind::Call { .. } | HirExprKind::CompileError { .. } | HirExprKind::Poison
+                HirExprKind::Call { .. }
+                    | HirExprKind::CompileError { .. }
+                    | HirExprKind::Move(_)
+                    | HirExprKind::Poison
             );
         });
         !effect
@@ -301,8 +308,81 @@ pub struct HirFunc {
     pub body: Option<HirBlock>,
     /// `=>` function: always inlined by the backend.
     pub inline: bool,
+    /// Drop flags: each place that may be full or empty where it drops,
+    /// with its hidden `@bit8` local. Initializing a place sets the flags
+    /// of it and every place inside it; moving it clears them.
+    pub flags: Vec<(HirPath, LocalId)>,
     /// Whole-declaration span.
     pub span: Span,
+}
+
+/// An owned place: a local, or a field path inside it (`a.b.c`).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct HirPath {
+    /// The local.
+    pub local: LocalId,
+    /// Field indices from the local inward.
+    pub fields: Vec<u32>,
+}
+
+impl HirPath {
+    /// The local `local` itself.
+    #[must_use]
+    pub fn local(local: LocalId) -> HirPath {
+        HirPath {
+            local,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Whether `self` is `other` or a place inside it.
+    #[must_use]
+    pub fn within(&self, other: &HirPath) -> bool {
+        self.local == other.local && self.fields.starts_with(&other.fields)
+    }
+
+    /// The owned place `expr` names: a local, or fields of one (never
+    /// through a `ref`).
+    #[must_use]
+    pub fn of(expr: &HirExpr) -> Option<HirPath> {
+        match &expr.kind {
+            HirExprKind::Local(local) => Some(HirPath {
+                local: *local,
+                fields: Vec::new(),
+            }),
+            HirExprKind::Field { base, index } if !base.ty.is_ref => {
+                let mut path = Self::of(base)?;
+                path.fields.push(*index);
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One owned place to drop.
+#[derive(Clone, Debug)]
+pub struct HirDrop {
+    /// The place.
+    pub path: HirPath,
+    /// Its type.
+    pub ty: TypeRef,
+    /// When set, the place drops only when this flag is set (it may be
+    /// empty).
+    pub flag: Option<LocalId>,
+}
+
+/// What an assignment does with the value its place holds.
+#[derive(Clone, Debug)]
+pub enum HirOld {
+    /// The place is full (or is memory behind a `ref`, or a global):
+    /// `@on_override` runs, then the old value drops.
+    Full,
+    /// The place may be full: as [`HirOld::Full`] when the flag is set.
+    Maybe(LocalId),
+    /// The place is empty, or partly moved: what is left drops, then the
+    /// write fills it (no `@on_override`).
+    Empty(Vec<HirDrop>),
 }
 
 /// A function that can fail: a hidden `@bit8` out after its other outs,
@@ -350,12 +430,23 @@ pub enum HirStmt {
         /// The call (an [`HirExprKind::Call`]).
         call: HirExpr,
     },
-    /// `place = value` (runs `@on_override`, then drops the old value).
+    /// `place = value`: the value is evaluated, then the old value is
+    /// handled as `old` says, then the new one moves in.
     Assign {
         /// Target place.
         place: HirExpr,
         /// New value (already converted to the place's type).
         value: HirExpr,
+        /// What happens to the old value (decided by typeck's ownership
+        /// pass).
+        old: HirOld,
+    },
+    /// Drops owned places (scope ends and early exits), in order.
+    Drop {
+        /// The places.
+        drops: Vec<HirDrop>,
+        /// Where they drop: a block's closing `}`, or the exit leaving it.
+        span: Span,
     },
     /// An expression evaluated for its effects.
     Expr(HirExpr),
@@ -399,6 +490,9 @@ pub struct HirArm {
     pub pattern: HirPattern,
     /// Payload capture (a local initialized from the payload).
     pub capture: Option<LocalId>,
+    /// Whether the capture moves the payload out, which uses up the
+    /// matched value (else it copies).
+    pub moves: bool,
     /// Arm body.
     pub body: HirBlock,
 }
@@ -410,8 +504,12 @@ pub struct HirValueArm {
     pub pattern: HirPattern,
     /// Payload capture.
     pub capture: Option<LocalId>,
+    /// Whether the capture moves the payload out ([`HirArm::moves`]).
+    pub moves: bool,
     /// Arm value.
     pub value: HirExpr,
+    /// What drops once the value is taken (the capture, if still full).
+    pub drops: Vec<HirDrop>,
 }
 
 /// A match pattern.
@@ -459,6 +557,10 @@ pub enum HirExprKind {
     },
     /// The place a `ref T` value points at (place of type `T`).
     Deref(Box<HirExpr>),
+    /// A read that moves an owned place out (no copy hook runs; the place
+    /// is empty after). `move a` writes one; typeck's ownership pass adds
+    /// the rest.
+    Move(Box<HirExpr>),
     /// Integer or float literal bits (source bytes, typed by `ty`).
     Number(String),
     /// String literal bytes (`@byte_buffer`).
@@ -567,6 +669,7 @@ impl HirExpr {
         match &self.kind {
             HirExprKind::Field { base, .. }
             | HirExprKind::Deref(base)
+            | HirExprKind::Move(base)
             | HirExprKind::RefOf(base)
             | HirExprKind::Retype(base) => base.walk(f),
             HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
@@ -625,14 +728,15 @@ impl HirBlock {
             match stmt {
                 HirStmt::Let { value, .. } | HirStmt::Expr(value) => value.walk(f),
                 HirStmt::MultiLet { call, .. } => call.walk(f),
-                HirStmt::Assign { place, value } => {
+                HirStmt::Assign { place, value, .. } => {
                     place.walk(f);
                     value.walk(f);
                 }
                 HirStmt::Return(_)
                 | HirStmt::Fail(_)
                 | HirStmt::Break(_)
-                | HirStmt::Continue(_) => {}
+                | HirStmt::Continue(_)
+                | HirStmt::Drop { .. } => {}
                 HirStmt::If { cond, then, els } => {
                     cond.walk(f);
                     then.walk_exprs(f);

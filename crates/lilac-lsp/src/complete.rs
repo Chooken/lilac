@@ -261,10 +261,9 @@ impl<'a> Scope<'a> {
                 .members
                 .values()
                 .filter(|id| match &resolved.def(**id).kind {
-                    DefKind::Func(decl) => !decl
-                        .params
-                        .first()
-                        .is_some_and(|param| param.name.is_empty() && param.ty.is_self()),
+                    DefKind::Func(decl) => {
+                        decl.params.first().is_none_or(|param| !param.is_receiver())
+                    }
                     _ => false,
                 })
                 .filter_map(|id| self.item_entry(*id))
@@ -634,14 +633,13 @@ pub fn signature_help(
     let mut label = format!("{}(", info.qualified);
     let mut params = Vec::new();
     for (index, (param, ty)) in decl.params.iter().zip(&sig.params).enumerate() {
-        let is_self = param.name.is_empty() && param.ty.is_self();
-        if index == 0 && is_self && by_value {
+        if index == 0 && param.is_receiver() && by_value {
             continue;
         }
         if !params.is_empty() {
             label.push_str(", ");
         }
-        let text = if is_self {
+        let text = if param.is_ref_self() {
             "self".to_owned()
         } else {
             format!("{}: {}", param.name, types.display_ref(*ty))

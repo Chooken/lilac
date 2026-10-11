@@ -1,8 +1,10 @@
-//! Ownership: owned places and temporaries, scope drops, copies, and
-//! the drop and copy glue routines.
+//! Ownership: the drops and drop flags typeck decided, temporaries,
+//! copies, and the drop and copy glue routines.
 
-use lilac_hir::{HirPattern, Layout};
-use lilac_ir::{Label, LirCallee, LirInst, LirOperand, LirTerm, PlaceName, Symbol};
+use lilac_hir::{HirDrop, HirExpr, HirFunc, HirPath, HirPattern, Layout};
+use lilac_ir::{
+    Label, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy, PlaceName, Symbol,
+};
 use lilac_span::Span;
 use lilac_ty::TypeRef;
 
@@ -53,11 +55,86 @@ impl Lower<'_> {
         result
     }
 
-    /// Registers a declared local as owned by the current scope.
-    pub(crate) fn own(&mut self, state: &mut FnState, place: &PlaceName, ty: TypeRef) {
-        if self.needs_drop(ty) {
-            if let Some(scope) = state.scopes.last_mut() {
-                scope.locals.push((place.clone(), ty));
+    /// The place an owned path names: its local, then each field.
+    pub(crate) fn path_place(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        path: &HirPath,
+        span: Span,
+    ) -> Place {
+        let Some(name) = state.places.get(&path.local).cloned() else {
+            lilac_error::bug!(span, "a path through an undeclared local");
+        };
+        let mut place = Place::Direct(name);
+        let mut ty = func.local(path.local).ty;
+        for field in &path.fields {
+            let (name, field_ty) = self.field_name(ty.id, *field);
+            place = self.field_place(state, &place, *field, &name, field_ty, span);
+            ty = field_ty;
+        }
+        place
+    }
+
+    /// Sets (`on`) or clears the drop flag of every place inside `path`:
+    /// initializing a place sets them, moving it out clears them.
+    pub(crate) fn mark(state: &mut FnState, func: &HirFunc, path: &HirPath, on: bool, span: Span) {
+        for (flagged, flag) in &func.flags {
+            if !flagged.within(path) {
+                continue;
+            }
+            let Some(place) = state.places.get(flag).cloned() else {
+                lilac_error::bug!(span, "an undeclared drop flag");
+            };
+            let value = state.constant(LirConst::Int(u64::from(on)), LirTy::Bit(8), span);
+            state.emit(LirInst::CopyPlace {
+                src: value,
+                dst: place,
+                span,
+            });
+        }
+    }
+
+    /// [`Self::mark`] for the place `expr` names, when it is an owned path.
+    pub(crate) fn mark_expr(state: &mut FnState, func: &HirFunc, expr: &HirExpr, on: bool) {
+        if func.flags.is_empty() {
+            return;
+        }
+        if let Some(path) = HirPath::of(expr) {
+            Self::mark(state, func, &path, on, expr.span);
+        }
+    }
+
+    /// Drops each of `drops` (a flagged one only when its flag is set).
+    pub(crate) fn lower_drops(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        drops: &[HirDrop],
+        span: Span,
+    ) {
+        for drop in drops {
+            let skip = drop.flag.map(|flag| {
+                let Some(place) = state.places.get(&flag).cloned() else {
+                    lilac_error::bug!(span, "an undeclared drop flag");
+                };
+                let operand = state.read_place(&Place::Direct(place), &LirTy::Bit(8), span);
+                let cond = state.reg_of(operand, &LirTy::Bit(8), span);
+                let (body, skip) = (state.label(), state.label());
+                state.end(LirTerm::BranchIf {
+                    cond,
+                    then: body.clone(),
+                    els: Some(skip.clone()),
+                    span,
+                });
+                state.at(body);
+                skip
+            });
+            let place = self.path_place(state, func, &drop.path, span);
+            self.drop_place(state, &place, drop.ty, span);
+            if let Some(skip) = skip {
+                state.branch(&skip, span);
+                state.at(skip);
             }
         }
     }
@@ -87,17 +164,12 @@ impl Lower<'_> {
         }
     }
 
-    /// Drops everything scope `index` owns (temps, then locals, newest
-    /// first); `span` is where the scope ends (its closing `}`, or the
-    /// `return`/`break` leaving it).
+    /// Drops the temporaries scope `index` still owns, newest first; `span`
+    /// is where the scope ends (its closing `}`, or the `return`/`break`
+    /// leaving it). Locals drop where typeck's `HirStmt::Drop`s say.
     pub(crate) fn drop_scope(&mut self, state: &mut FnState, index: usize, span: Span) {
-        let owned: Vec<(PlaceName, TypeRef)> = state.scopes[index]
-            .temps
-            .iter()
-            .rev()
-            .chain(state.scopes[index].locals.iter().rev())
-            .cloned()
-            .collect();
+        let owned: Vec<(PlaceName, TypeRef)> =
+            state.scopes[index].temps.iter().rev().cloned().collect();
         for (place, ty) in owned {
             self.drop_place(state, &Place::Direct(place), ty, span);
         }

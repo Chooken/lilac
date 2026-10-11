@@ -528,18 +528,29 @@ impl Checker<'_> {
         self.record_use(tail_span(member_span, field), member);
         let template = self.sig_of(member);
         let template = self.callee(fcx, args, template)?;
-        let takes_self = template.params.first().is_some_and(|first| {
-            first.is_ref && self.type_parts(first.id).is_some_and(|(d, _)| d == def)
-        });
-        if !takes_self {
+        let of_owner = |c: &Self, ty: &TypeRef| c.type_parts(ty.id).is_some_and(|(d, _)| d == def);
+        let first = template.params.first();
+        let takes_ref = first.is_some_and(|first| first.is_ref && of_owner(self, first));
+        // `self: T` takes the receiver by value: it moves (or copies) in.
+        let takes_value = !takes_ref
+            && first.is_some_and(|first| !first.is_ref && of_owner(self, first))
+            && self
+                .res
+                .def(member)
+                .func()
+                .and_then(|decl| decl.params.first())
+                .is_some_and(|param| param.name == "self");
+        if !takes_ref && !takes_value {
             let error =
                 self.diags.emit(
                     Diagnostic::error(codes::E022, format!("method `{field}` takes no `self`"))
-                        .label(member_span, true, "first parameter must be `ref Self`"),
+                        .label(member_span, true, "first parameter must be `self`"),
                 );
             return Err(self.callee_failed(fcx, args, error));
         }
-        let receiver = if receiver.ty.is_ref {
+        let receiver = if takes_value {
+            Self::auto_deref(receiver)
+        } else if receiver.ty.is_ref {
             receiver
         } else {
             HirExpr {
@@ -769,7 +780,7 @@ impl Checker<'_> {
                 if decl
                     .params
                     .first()
-                    .is_some_and(|param| param.name.is_empty() && param.ty.is_self()) =>
+                    .is_some_and(lilac_ast::Param::is_receiver) =>
             {
                 (
                     format!("`{owner}.{function}` takes `self`"),

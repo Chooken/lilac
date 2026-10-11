@@ -77,14 +77,17 @@ impl Parser {
         })
     }
 
-    /// Prefix operators: `-x` (`@negate(x)`) and `ref x`.
+    /// Prefix operators: `-x` (`@negate(x)`), `ref x` and `move x`.
     pub(crate) fn parse_unary(
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<Expr, ErrorGuaranteed> {
         self.chain(diags, |p, diags, chain| {
             let mut prefixes = Vec::new();
-            while matches!(p.peek().kind, TokenKind::Minus | TokenKind::KwRef) {
+            while matches!(
+                p.peek().kind,
+                TokenKind::Minus | TokenKind::KwRef | TokenKind::KwMove
+            ) {
                 prefixes.push(p.bump());
             }
             let mut expr = p.parse_postfix(diags)?;
@@ -95,6 +98,11 @@ impl Parser {
                         callee: Box::new(Expr::Ident("@negate".to_owned(), prefix.span)),
                         generic_args: Vec::new(),
                         args: vec![expr],
+                        span,
+                    }
+                } else if prefix.kind == TokenKind::KwMove {
+                    Expr::Move {
+                        value: Box::new(expr),
                         span,
                     }
                 } else {
@@ -511,6 +519,7 @@ pub(crate) fn starts_expression(kind: TokenKind) -> bool {
             | TokenKind::FStrStart
             | TokenKind::At
             | TokenKind::KwRef
+            | TokenKind::KwMove
             | TokenKind::KwIf
             | TokenKind::KwMatch
             | TokenKind::KwSelf

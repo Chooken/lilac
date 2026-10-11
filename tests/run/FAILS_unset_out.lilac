@@ -1,0 +1,14 @@
+// expect-error: E065
+// expect-stderr: error[E065]: `value` may not be set when the function returns
+// An out starts empty, and the compiler never invents a value: every
+// path that returns sets it.
+
+pick: function (first: @bit8) value: @bit32 {
+    if first {
+        value = 0x1
+    }
+}
+
+main: function () nothing {
+    value: @bit32 = pick(0x1)
+}

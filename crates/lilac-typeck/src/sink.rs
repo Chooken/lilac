@@ -60,6 +60,11 @@ impl<'a> Sink<'a> {
         self.diags.error_count()
     }
 
+    /// Whether an error is held.
+    pub(crate) fn holds_error(&self) -> bool {
+        self.held.as_deref().is_some_and(has_error)
+    }
+
     /// The token for poison passed along after an error, reported or held.
     /// Debug builds check there is one.
     pub(crate) fn already_reported(&self) -> ErrorGuaranteed {

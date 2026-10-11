@@ -274,6 +274,8 @@ impl<'a> Lower<'a> {
                 };
                 Some(Value::Variant(*index, payload))
             }
+            // Only values with no hooks get here, so a move reads like a copy.
+            HirExprKind::Move(inner) => self.eval(eval, inner),
             HirExprKind::Field { base, index } => match self.eval(eval, base)? {
                 Value::Aggregate(mut fields) if (*index as usize) < fields.len() => {
                     Some(fields.swap_remove(*index as usize))
@@ -429,7 +431,7 @@ fn inline_body(func: &HirFunc) -> Option<&HirExpr> {
     if !func.inline {
         return None;
     }
-    let [HirStmt::Assign { place, value }] = func.body.as_ref()?.stmts.as_slice() else {
+    let [HirStmt::Assign { place, value, .. }] = func.body.as_ref()?.stmts.as_slice() else {
         return None;
     };
     match (&place.kind, func.returns.as_slice()) {

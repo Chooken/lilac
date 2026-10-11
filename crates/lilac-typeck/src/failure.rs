@@ -16,7 +16,7 @@ use lilac_hir::{HirBlock, HirCallee, HirExpr, HirExprKind, HirStmt, LocalId};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeRef};
 
-use crate::body::{empty_block, local_expr, never_finishes, set_flag, FnCx};
+use crate::body::{empty_block, local_expr, moved_local, never_finishes, set_flag, FnCx};
 use crate::calls::Called;
 use crate::Checker;
 
@@ -343,7 +343,7 @@ impl Checker<'_> {
         for (index, (binding, want)) in bindings.iter().zip(&declared).enumerate() {
             let value = match (successes.get(index), success.get(index)) {
                 (Some(local), Some(got)) => self.coerce(
-                    local_expr(*local, *got, binding.span),
+                    moved_local(*local, *got, binding.span),
                     *want,
                     binding.ty.span,
                 ),
@@ -352,6 +352,8 @@ impl Checker<'_> {
             let local = self.declare(fcx, &binding.name, *want, binding.span);
             out.push(HirStmt::Let { local, value });
         }
+        // The success outs no binding takes drop with the current scope.
+        out.extend(Self::bind_rest(fcx, &successes, &success, bindings.len()));
     }
 
     /// Binds every out of `call` to a hidden local: the statement, the
@@ -373,7 +375,8 @@ impl Checker<'_> {
 
     /// `block` as a scope that first binds `captures` from `locals` (of
     /// types `tys`) by position; a capture with no local is poison (its
-    /// error reported).
+    /// error reported). Every local moves out here: the ones no capture
+    /// takes move into hidden locals that drop with this scope.
     fn captured_block(
         &mut self,
         fcx: &mut FnCx,
@@ -382,24 +385,11 @@ impl Checker<'_> {
         locals: &[LocalId],
         tys: &[TypeRef],
     ) -> HirBlock {
-        if captures.is_empty() {
+        if captures.is_empty() && locals.is_empty() {
             return self.check_block(fcx, block);
         }
         fcx.open(block.span);
-        let mut stmts = Vec::new();
-        for (index, capture) in captures.iter().enumerate() {
-            let declared = self.resolve_type(&capture.ty);
-            let value = match (locals.get(index), tys.get(index)) {
-                (Some(local), Some(ty)) => self.coerce(
-                    local_expr(*local, *ty, capture.span),
-                    declared,
-                    capture.ty.span,
-                ),
-                _ => HirExpr::poison(capture.span),
-            };
-            let local = self.declare(fcx, &capture.name, declared, capture.span);
-            stmts.push(HirStmt::Let { local, value });
-        }
+        let mut stmts = self.bind_captures(fcx, captures, locals, tys);
         let inner = self.check_block(fcx, block);
         fcx.close();
         stmts.push(HirStmt::Block(inner));
@@ -409,7 +399,52 @@ impl Checker<'_> {
         }
     }
 
-    /// An `if`'s `else`: a block binding `captures` when it has them.
+    /// Binds `captures` from `locals` (of types `tys`) by position in the
+    /// current scope, then moves the rest of `locals` into hidden locals.
+    fn bind_captures(
+        &mut self,
+        fcx: &mut FnCx,
+        captures: &[Param],
+        locals: &[LocalId],
+        tys: &[TypeRef],
+    ) -> Vec<HirStmt> {
+        let mut stmts = Vec::new();
+        for (index, capture) in captures.iter().enumerate() {
+            let declared = self.resolve_type(&capture.ty);
+            let value = match (locals.get(index), tys.get(index)) {
+                (Some(local), Some(ty)) => self.coerce(
+                    moved_local(*local, *ty, capture.span),
+                    declared,
+                    capture.ty.span,
+                ),
+                _ => HirExpr::poison(capture.span),
+            };
+            let local = self.declare(fcx, &capture.name, declared, capture.span);
+            stmts.push(HirStmt::Let { local, value });
+        }
+        stmts.extend(Self::bind_rest(fcx, locals, tys, captures.len()));
+        stmts
+    }
+
+    /// Moves `locals` from index `from` on into hidden locals of the current
+    /// scope, so each drops with it.
+    fn bind_rest(fcx: &mut FnCx, locals: &[LocalId], tys: &[TypeRef], from: usize) -> Vec<HirStmt> {
+        locals
+            .iter()
+            .zip(tys)
+            .skip(from)
+            .map(|(local, ty)| {
+                let span = fcx.locals[local.0 as usize].span;
+                HirStmt::Let {
+                    local: fcx.hidden(*ty, span),
+                    value: moved_local(*local, *ty, span),
+                }
+            })
+            .collect()
+    }
+
+    /// An `if`'s `else`: a block binding `captures` (and moving the rest of
+    /// `locals`) when there are any.
     fn else_block(
         &mut self,
         fcx: &mut FnCx,
@@ -421,8 +456,18 @@ impl Checker<'_> {
     ) -> HirBlock {
         match els {
             Some(Stmt::Block(block)) => self.captured_block(fcx, block, captures, locals, tys),
-            Some(els) => self.check_stmt_block(fcx, els),
-            None => empty_block(span),
+            Some(els) if locals.is_empty() => self.check_stmt_block(fcx, els),
+            None if locals.is_empty() => empty_block(span),
+            _ => {
+                let span = els.map_or(span, Stmt::span);
+                fcx.open(span);
+                let mut stmts = self.bind_captures(fcx, captures, locals, tys);
+                if let Some(els) = els {
+                    stmts.push(HirStmt::Block(self.check_stmt_block(fcx, els)));
+                }
+                fcx.close();
+                HirBlock { stmts, span }
+            }
         }
     }
 

@@ -64,6 +64,7 @@ impl Checker<'_> {
                 kind: HirExprKind::Number(format!("0x{:X}", u32::from(*scalar))),
             },
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
+            Expr::Move { value, span } => self.check_move(fcx, value, *span, expected),
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
             Expr::Member { obj, field, span } => {
                 if let Some((name, span)) = self.qualified_name(fcx, expr) {
@@ -749,6 +750,33 @@ impl Checker<'_> {
         }
     }
 
+    /// `move place`: the ownership pass checks the place can be moved.
+    fn check_move(
+        &mut self,
+        fcx: &mut FnCx,
+        value: &Expr,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> HirExpr {
+        let place = self.check_expr(fcx, value, expected);
+        if place.ty.is_error() {
+            return place;
+        }
+        if !place.is_place() {
+            self.diags.emit(
+                Diagnostic::error(codes::E064, "only a variable or a field can be moved")
+                    .label(value.span(), true, "not a place")
+                    .help("a value that is not in a variable moves without `move`"),
+            );
+            return HirExpr::poison(span);
+        }
+        HirExpr {
+            ty: place.ty,
+            span,
+            kind: HirExprKind::Move(Box::new(place)),
+        }
+    }
+
     /// A place to take the address of (a local or field chain).
     fn check_place_for_ref(
         &mut self,
@@ -1095,6 +1123,8 @@ impl Checker<'_> {
                 pattern,
                 capture,
                 value: self.coerce(value, result, arm_span),
+                moves: false,
+                drops: Vec::new(),
             })
             .collect();
         let els = self.coerce(els, result, span);

@@ -1,4 +1,3 @@
-// pending: ownership plan phase 3 (drop flags)
 // expect-stdout: th|
 // expect-stdout: |h
 // A value moved on one branch only drops once either way: in `take`

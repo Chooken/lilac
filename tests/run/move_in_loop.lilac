@@ -1,0 +1,31 @@
+// expect-stdout: abc
+// A value moved in a loop's body is set again before the next iteration
+// reads it. Setting it drops nothing (it is empty then), and after the
+// last move nothing is left to drop.
+
+using Standard.Io
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+take: function (handle: Handle) nothing {
+}
+
+main: function () nothing {
+    handle: Handle = Handle { id = 'a' }
+    round: @bit32 = 0x0
+    loop {
+        take(handle)
+        round = @i_add_32(round, 0x1)
+        if round == 0x3 {
+            break
+        }
+        handle = Handle { id = @i_add_32('a', round) }
+    }
+    print_char(0xA)
+}

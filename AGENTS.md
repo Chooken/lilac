@@ -392,9 +392,10 @@
 
 lex → parse → `lilac-module` load (plus the generated `@builtin`
 namespaces) → `lilac-resolve` → `lilac-typeck` (a
-worklist of `(def, type args)` instances emitting HIR directly) →
-`lilac-lower` (HIR → LIR, including the ownership model: copies, moves,
-drops, drop/copy glue, and constant conditions: only the live arm of an
+worklist of `(def, type args)` instances emitting HIR directly, then the
+ownership pass over each body that checked) →
+`lilac-lower` (HIR → LIR: the moves, drops and drop flags typeck decided,
+copies, drop/copy glue, and constant conditions: only the live arm of an
 `if`/`and`/`or`/`match` on a constant expression is lowered) → runtime
 injection → DCE →
 live `@compile_error` check → stack-trace instrumentation (when on) →
@@ -428,7 +429,8 @@ Where things live:
   `types.rs`, `stmt.rs` and `expr.rs` parse each kind of syntax.
 - `lilac-lower`: `lib.rs` drives lowering and holds `FnState` (one
   function's emission state); `symbols.rs` (names, mangling, externs),
-  `ownership.rs` (copies, moves, drops, glue), `control.rs` (`if`,
+  `ownership.rs` (typeck's drops and flags, temporaries, copies, glue),
+  `control.rs` (`if`,
   `match`, loops, `and`/`or`), `expr.rs` (values by expression kind),
   `calls.rs` and `intrinsics.rs`.
 - `lilac-ir`: `lib.rs` holds the LIR types, `print.rs` the printer,
@@ -451,7 +453,34 @@ Where things live:
   `return`. A call that can fail is allowed only where `FnCx::handled`
   names it (a capture `if`, a guard, a `loop if`); elsewhere it is `E057`.
   Callers bind every out to hidden locals and branch on the flag, so
-  lowering and LIR need nothing new.
+  lowering and LIR need nothing new. Each side moves every hidden out it
+  owns into a capture or a hidden local (`bind_captures`, `bind_rest`):
+  the ownership pass tracks a hidden out as full only on its side of the
+  flag (`Own::Cond`, refined by `if flag`), so none is left to drop.
+- Ownership (`lilac-typeck/src/places.rs`, `Checker::check_places`): a
+  tree walk over each instance body that checked without an error
+  (`Sink::holds_error`). The state is an `Own` per local (full, empty,
+  maybe, per field, or `Cond`); branches merge and a loop body is walked
+  on copies (`dry`: no diagnostics, no flags) until its head state is
+  stable, then for real. It decides everything lowering does with
+  ownership: a moving read is `HirExprKind::Move` (`move a` writes one
+  too), each block ends in a `HirStmt::Drop` of its full locals (each
+  early exit drops the scopes it leaves, and outs per `E065`'s rule),
+  `HirStmt::Assign::old` says what happens to the old value (an out's
+  first assignment is `HirOld::Empty`), `HirArm::moves` says a capture
+  moves the payload, and `HirFunc::flags` are the drop flags of places
+  that may be empty where they drop. Lowering sets a place's flags (and
+  those inside it) when it is initialized and clears them when it moves
+  (`Lower::mark`), and never decides a drop itself; it only drops
+  statement temporaries. `Checker::is_copyable`/`needs_drop` are the
+  copy and drop rules (`Param` copies, so templates rarely fail).
+  `E063`/`E064` go through `emit_requirement` (`Requirement::Ownership`),
+  so a failing generic instance folds them into `E042`; `E065` is plain.
+  ``, `` and `` end a path, and a `match`
+  naming every variant has no `else` path.
+  A method whose first parameter is `self: T` (named `self`, of the
+  owner's type) takes its receiver by value (`Checker::method_call`);
+  bare `self` is `ref T` (`lilac_ast::Param::is_receiver`).
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`

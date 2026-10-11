@@ -2,8 +2,8 @@ Optional[T]: enum {
     Some: T
     None
 
-    // The value of a `Some`; fails on `None`.
-    get: function(self) value: T else nothing {
+    // The value of a `Some` (moved out of the optional); fails on `None`.
+    get: function(self: Optional[T]) value: T else nothing {
         match self {
             .Some -> some_value: T {
                 value = some_value
@@ -13,7 +13,7 @@ Optional[T]: enum {
         fail
     }
 
-    unwrap_or: function(self, default: T) value: T {
+    unwrap_or: function(self: Optional[T], default: T) value: T {
         match self {
             .Some -> some_value: T {
                 value = some_value
@@ -24,7 +24,7 @@ Optional[T]: enum {
     }
 
     // Only usable when T has a static `default()`; checked when called.
-    unwrap_or_default: function(self) value: T {
+    unwrap_or_default: function(self: Optional[T]) value: T {
         match self {
             .Some -> some_value: T {
                 value = some_value

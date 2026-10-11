@@ -1,0 +1,20 @@
+// expect-error: E064
+// expect-stderr: error[E064]: cannot move `Handle` out of a reference
+// A `ref` does not own what it points at, so a value that cannot be
+// copied cannot be read out through one.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+steal: function (from: ref Handle) taken: Handle {
+    taken = from
+}
+
+main: function () nothing {
+    a: Handle = Handle { id = 0x1 }
+    b: Handle = steal(ref a)
+}

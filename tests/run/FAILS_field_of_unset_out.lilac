@@ -1,0 +1,17 @@
+// expect-error: E063
+// expect-stderr: error[E063]: `point` is empty, so its fields cannot be set
+// An out starts empty: it is set whole before a field of it is.
+
+Point: object {
+    x: @bit32
+    y: @bit32
+}
+
+origin: function () point: Point {
+    point.x = 0x0
+    point.y = 0x0
+}
+
+main: function () nothing {
+    point: Point = origin()
+}

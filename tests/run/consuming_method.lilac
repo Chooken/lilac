@@ -1,0 +1,28 @@
+// expect-stdout: <x>|
+// `self: T` takes the receiver by value: the call moves it in, and the
+// method drops it unless it moves it on. The caller's variable is empty
+// after, so it does not drop again.
+
+using Standard.Io
+
+Token: object {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+
+    spend: function (self: Token) nothing {
+        print_char('<')
+    }
+}
+
+main: function () nothing {
+    {
+        token: Token = Token { c = 'x' }
+        token.spend()
+        print_char('>')
+        print_char('|')
+    }
+    print_char(0xA)
+}

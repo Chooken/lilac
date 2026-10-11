@@ -105,7 +105,7 @@ optionals: function () nothing {
 
 boxes: function () nothing {
     box: Box[Int32] = Box[Int32].create(0x5 as Int32)
-    moved: Box[Int32] = box.move()
+    moved: Box[Int32] = box
 }
 
 consts: function () nothing {

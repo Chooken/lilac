@@ -67,37 +67,56 @@ first = 0x41
 
 ### Universal Zero-Initialization
 
-All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac. This eliminates read before write bugs and guarantees deterministic padding bits, ensuring 100% reliability for bit equality checks.
+All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac: padding bits are deterministic, ensuring 100% reliability for bit equality checks. Zeroed storage is never a value, though: a place nothing has set yet is *empty* (see below), and reading it is an error rather than a zero.
 
 ### Ownership: copies, moves and drops
 
-Every value has exactly one owner (a local, a field, an out slot, or a
-statement temporary). The rules are mechanical, with no move intrinsic and no
-borrow checker:
+Every value has exactly one owner (a local, a by-value parameter, an out,
+a field of one of those, or a statement temporary). A `ref` never owns
+what it points at and never drops it. The compiler tracks every place it
+owns as **full** (it holds a live value) or **empty**, along every path
+through the function:
 
-* **Reading a place copies; a fresh value moves.** Reading an existing place
-  (a variable, a field, a dereferenced `ref`) into a new owner (`b: T = a`, a
-  by-value argument, a field initializer) makes a copy: the type's `@on_copy`
-  if it has one, otherwise a field-wise copy that runs each field's own copy
-  (a plain bitwise copy when nothing inside has a hook). A fresh value (a
-  call result, a literal, a struct literal) is moved into its owner without a
-  copy.
-* **By-value parameters:** the caller passes a fresh copy and the callee owns
-  (and drops) it.
-* **Drops:** locals are dropped in reverse declaration order when their block
-  ends, including on `return`, `break` and `continue`. Statement temporaries
-  are dropped at the end of their statement. Dropping an object runs its `@on_drop` first,
-  then drops its fields in declaration order; dropping an enum drops its live
-  payload. A type therefore only manages what it allocated itself.
-* **Assignment** (`place = value`) evaluates `value`, runs
-  `@on_override(ref place, ref value)` if defined, drops the old value, then
-  moves the new one in. Assigning a function's own out slot is
-  initialization: `@on_override` is skipped (so a guarded type can still be
-  returned) but the previous value is still dropped.
+* **Copy or move, by type.** Reading a place into a new owner (`b: T = a`,
+  a by-value argument or receiver, a field initializer, an assignment)
+  copies it when its type copies, and moves it otherwise. A type with its
+  own `@on_copy` copies through the hook; a type with its own `@on_drop`
+  and no `@on_copy` moves; any other type copies field by field when every
+  field (or payload) copies, and moves when one does not. Builtins, `ref`s,
+  function values and arrays copy bitwise. A fresh value (a call result, a
+  literal) moves into its owner.
+* **`move a`** moves any place, copyable or not, without its copy hook
+  (hand an `Rc` over without a bump). `a` is empty after.
+* **Empty places.** A place is empty after it moves, and an out is empty
+  until it is set. Reading an empty place, or one that is empty on some
+  path (moved in one branch, or in an earlier iteration of a loop), is
+  `E063`, and the error points at the move. Setting a place again fills
+  it.
+* **What can move.** Only owned places move: a local, a by-value
+  parameter, or a field of one, never through a `ref`, out of a global, or
+  out of a field of a temporary (`E064`). A field moves out only of a type
+  with no `@on_drop` of its own; the object can then not be used whole,
+  its other fields can, and those still full drop with it. Setting the
+  field again makes the object whole.
+* **Drops:** at the end of its block (or at the `return`, `fail`, `break`
+  or `continue` leaving it) each local that is still full is dropped, in
+  reverse declaration order; an empty one is skipped, and one that is full
+  on some paths only is dropped when a hidden flag says so. Statement
+  temporaries are dropped at the end of their statement. Dropping an
+  object runs its `@on_drop` first, then drops its fields in declaration
+  order; dropping an enum drops its live payload. A type therefore only
+  manages what it allocated itself.
+* **Assignment** (`place = value`) evaluates `value` first. A full place
+  then runs `@on_override(ref place, ref value)` if defined and drops the
+  old value; an empty place (an out's first assignment) is just filled.
+  Then the new value moves in. Memory behind a `ref` is always full.
+* **Outs** are set on every path that returns (`E065`): success outs at
+  each `return` and the end of the body, failure outs at each `fail`. An
+  out of the other side that is full there is dropped. Paths ending in
+  `@panic`, `@trap` or `@compile_error` are exempt.
 
 A value with no hooks anywhere inside it is copied and dropped bitwise, at no
-cost. Ownership transfer between owners (e.g. a heap `Box`) is ordinary code:
-copy the handle out, then reset the source (`self.value = .None`).
+cost.
 
 ## 2. Literals & Desugaring
 
@@ -419,7 +438,7 @@ takes three in-args (`ref #bit8`, `#bit_native`, `#bit8`) and yields nothing.
 
 ### Function Signatures & Multi-Return
 
-To return values from a function, named return variables **must** be specified in the signature. The `return` keyword takes no arguments; it simply returns the current state of the named return variables.
+To return values from a function, named return variables **must** be specified in the signature. The `return` keyword takes no arguments; it simply returns the current state of the named return variables. Each starts empty and must be set on every path that returns (§1, `E065`).
 
 ```lilac
 multi_func: function () result_1: @bit8, result_2: @bit16 {
@@ -613,6 +632,14 @@ match enum_val {
 }
 ```
 
+A capture follows the field rule of §1: a payload that copies is copied,
+and one that does not moves out of the matched value, which is then used
+up (it does not drop again). That needs an owned value (a local, a
+by-value parameter, a field of one, or a temporary such as
+`match make() { … }`) whose enum has no `@on_drop` of its own; matching
+through a `ref` cannot move a payload out (`E064`). A `match` that names
+every variant has no fall-through path, so an out set in every arm is set.
+
 Arm patterns are tags (`.Some` or `Enum.Some`); a payload binds with
 `-> name: Type`, and a single statement arm shortens to `=>`. Match is a
 statement: using a `match` as a value is rejected with `E001`. Because an arm
@@ -679,6 +706,19 @@ count: @bit32 = 0x2A
 origin: Point = Point { x = 0x3, y = 0x4 }
 scratch: @array(@bit8, 64)   // zeroed
 ```
+
+### Parameters and `self`
+
+A by-value parameter (`x: T`) takes ownership: the caller's value moves
+in (or is copied, for a type that copies) and the callee drops it unless
+it moves it on. A `ref T` parameter borrows: the caller keeps ownership,
+and nothing behind the reference moves out (`E064`). Both are passed by
+address; only ownership differs.
+
+The bare `self` receiver is `self: ref T`. A method that consumes its
+receiver writes `self: T` (`get: function (self: Optional[T]) value: T
+else nothing`), so `found.get()` moves `found` at the call site.
+`@on_drop`, `@on_copy` and the other hooks keep the bare `self`.
 
 ### References & Auto-Dereferencing
 
@@ -1133,9 +1173,9 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 
 | Hook | Signature | Invocation Trigger & Behavior Rules | Desugar |
 | --- | --- | --- | --- |
-| **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing place's value is overwritten (not when a function assigns its own out slot). **Rule:** The value in `prev` is dropped immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) drop(variable) variable = new` |
-| **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1). You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
-| **`@on_drop`** | `(ref Type) nothing` | Called when the owner of a value goes away (§1), before the value's fields are dropped. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type = value` -> `variable: Type = value defer drop(variable)` |
+| **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** a full place's value is overwritten (not when an empty place, such as an out, is first set). **Rule:** The value in `prev` is dropped immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) drop(variable) variable = new` |
+| **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1); `move` skips it. A type with an `@on_drop` and no `@on_copy` moves instead of copying. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
+| **`@on_drop`** | `(ref Type) nothing` | Called when a full owner of a value goes away (§1), before the value's fields are dropped; a moved-out place is empty and drops nothing. Its own `@on_drop` makes a type move rather than copy, and keeps fields from moving out of it. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type = value` -> `variable: Type = value defer drop(variable)` |
 
 There is no construction hook: a constructor is a static function, and
 `name: Type.function(args)` declares a variable with one (§5).

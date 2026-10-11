@@ -14,8 +14,9 @@ Result[T, E]: enum {
         }
     }
 
-    // The value of an `Ok`; fails with the error of an `Error`.
-    get: function(self) value: T else error: E {
+    // The value of an `Ok` (moved out of the result); fails with the
+    // error of an `Error`.
+    get: function(self: Result[T, E]) value: T else error: E {
         match self {
             .Ok -> ok_value: T {
                 value = ok_value
@@ -28,7 +29,7 @@ Result[T, E]: enum {
         fail
     }
 
-    unwrap_or: function(self, default: T) value: T {
+    unwrap_or: function(self: Result[T, E], default: T) value: T {
         match self {
             .Ok -> ok_value: T {
                 value = ok_value
@@ -39,7 +40,7 @@ Result[T, E]: enum {
     }
 
     // The error of an `Error`; fails on an `Ok`.
-    error: function(self) error: E else nothing {
+    error: function(self: Result[T, E]) error: E else nothing {
         match self {
             .Error -> why: E {
                 error = why

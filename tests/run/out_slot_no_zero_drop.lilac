@@ -1,4 +1,3 @@
-// pending: ownership plan phase 3 (out slots start empty)
 // expect-stdout: |x
 // The first assignment of an out slot fills it: nothing was there, so
 // nothing drops. A zero drop would print `z`.

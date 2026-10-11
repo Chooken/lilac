@@ -21,6 +21,7 @@ mod generics;
 mod indices;
 mod literals;
 mod paths;
+mod places;
 mod sigs;
 mod sink;
 mod suggest;
@@ -268,6 +269,9 @@ pub(crate) enum Requirement {
         /// Whether a `ref` was expected (the help suggests passing one).
         expected_ref: bool,
     },
+    /// An ownership error (`E063`, `E064`): a type that cannot be copied
+    /// was moved where it may not be.
+    Ownership,
 }
 
 pub(crate) struct Checker<'a> {
@@ -317,6 +321,10 @@ pub(crate) struct Checker<'a> {
     /// How many tags and members with no name (a `.` mid-edit, which the
     /// parser reported) were met; a selector that meets one is not decided.
     pub empty_names: usize,
+    /// [`Checker::is_copyable`] per laid-out type.
+    pub copyable: HashMap<TypeId, bool>,
+    /// [`Checker::needs_drop`] per laid-out type.
+    pub droppable: HashMap<TypeId, bool>,
 }
 
 /// Production instantiation depth cap; the test cap keeps `E051` cheap.
@@ -355,6 +363,8 @@ impl<'a> Checker<'a> {
             reported: HashSet::new(),
             origins: HashMap::new(),
             failures: Vec::new(),
+            copyable: HashMap::new(),
+            droppable: HashMap::new(),
         }
     }
 }

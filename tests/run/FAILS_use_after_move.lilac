@@ -1,0 +1,17 @@
+// expect-error: E063
+// expect-stderr: error[E063]: `a` is used after it was moved
+// A type with its own `@on_drop` and no `@on_copy` moves when read, so
+// the place it was read from is empty after.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+main: function () nothing {
+    a: Handle = Handle { id = 0x1 }
+    b: Handle = a
+    c: Handle = a
+}

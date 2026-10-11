@@ -49,7 +49,7 @@ spawn: function (entry: function (argument: ref unknown) nothing, argument: ref 
             result = posix_spawn_thread(entry, argument)
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
         result = .Error(.Unsupported)
     }
 }
@@ -87,7 +87,7 @@ join: function (thread: Thread) error: Optional[Error] {
             error = posix_join_thread(thread)
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 
@@ -104,7 +104,7 @@ yield_thread: function () nothing {
             sched_yield()
         }
     } else {
-        unsupported()
+        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 

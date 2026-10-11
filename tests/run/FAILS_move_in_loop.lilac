@@ -1,0 +1,21 @@
+// expect-error: E063
+// expect-stderr: error[E063]: `handle` may have been moved
+// A value moved in a loop's body is empty when the next iteration reads
+// it, unless the body sets it again.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+take: function (handle: Handle) nothing {
+}
+
+main: function () nothing {
+    handle: Handle = Handle { id = 0x1 }
+    loop {
+        take(handle)
+    }
+}

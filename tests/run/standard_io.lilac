@@ -1,5 +1,5 @@
 // expect-stdout: Hello, world
-// expect-stdout: é!
+// expect-stdout: !
 // expect-exit: 5
 // Standard.Io, Standard.Process and Box (over Standard.Heap.Allocator),
 // with no C library.
@@ -11,8 +11,9 @@ using Standard.Process
 Noisy: object {
     char: @bit32
 
-    // `Box.create` assigns into zeroed memory, dropping a zero `Noisy`
-    // first, so zero prints nothing.
+    // `Box.create` moves the value into zeroed memory, dropping a zero
+    // `Noisy` first, so zero prints nothing. The box does not drop its
+    // value yet (`box_drops_contents`), so nothing prints `é`.
     @on_drop: function (self) nothing {
         if @i_greater_than_u_32(self.char, 0x0) {
             print_char(self.char)

@@ -1,6 +1,6 @@
 # Ownership Plan
 
-> Status: Phases 0, 1 and 2 done. Source: the arena allocator review and the
+> Status: Phases 0 to 3 done. Source: the arena allocator review and the
 > ownership design discussion of 2026-10-11.
 > Goal: `Rc`, `Arc`, `Box` and custom allocators can be written in
 > `Standard` and used like plain values. No value ever has two owners or
@@ -358,6 +358,12 @@ follows its decisions and never re-derives them.
     §8.
   - `STDLIB.md` §5 gap 7 resolved.
   - `AGENTS.md` Pipeline and the lowering notes.
+- **Delivered notes.** `@compile_error` ends a path like `@panic`, so
+  `Standard.Os`'s unsupported-target arms need no outs; a `match` naming
+  every variant has no `else` path. The `ArenaAllocator` items wait for
+  the owner's `Standard` changes, which are not in the repository yet.
+  `standard_io`'s `é` came from `Box.create` dropping its parameter early
+  and is gone until `Box` drops its contents (Phase 4).
 
 ---
 

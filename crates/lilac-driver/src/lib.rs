@@ -1504,8 +1504,7 @@ helper: function () nothing {{
             "@exit: function (code: @bit8) nothing {
 }
 ",
-            "@entry: function () code: @bit32 {
-}
+            "@entry: function () code: @bit32 => 0x0
 ",
             "@compiler_print: function (text: ref @byte_buffer) nothing {
 }

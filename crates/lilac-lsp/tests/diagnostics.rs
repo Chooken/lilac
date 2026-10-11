@@ -185,6 +185,29 @@ fn unknown_name_is_e021() {
 }
 
 #[test]
+fn use_after_move_links_the_move() {
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    let text = "Handle: object {\n    id: @bit8\n\n    @on_drop: function (self) nothing {\n    }\n}\n\nmain: function () nothing {\n    a: Handle = Handle { id = 0x1 }\n    b: Handle = a\n    c: Handle = a\n}\n";
+    did_open(&client, &uri, text);
+    let params = publish_for(&client, &uri);
+    let error = params
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            matches!(&diagnostic.code, Some(NumberOrString::String(code)) if code == "E063")
+        })
+        .unwrap_or_else(|| panic!("{:?}", params.diagnostics));
+    assert_eq!(error.range.start.line, 10, "{error:?}");
+    let related = error.related_information.as_ref().expect("the move");
+    assert_eq!(related[0].message, "moved here");
+    assert_eq!(related[0].location.range.start.line, 9);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
 fn publishes_all_errors_past_the_cli_cap() {
     // The CLI caps error-level diagnostics at 10; the editor must show them all.
     let (client, handle) = start_server();

@@ -129,6 +129,14 @@ impl Lower<'_> {
             let place = self.place_of(state, func, expr);
             return self.copy_out(state, &place, expr.ty, expr.span);
         }
+        if let HirExprKind::Move(inner) = &expr.kind {
+            // The new owner takes the bits straight from the place.
+            let place = self.place_of(state, func, inner);
+            let lir = self.lir_ty(expr.ty);
+            let value = state.read_place(&place, &lir, expr.span);
+            Self::mark_expr(state, func, inner, false);
+            return value;
+        }
         let operand = self.value(state, func, expr);
         if let LirOperand::Place(place) = &operand {
             if is_fresh(place) {
@@ -188,6 +196,7 @@ impl Lower<'_> {
 
     /// Evaluates an expression without taking ownership: a fresh aggregate
     /// value stays registered for its statement's drop.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn value(
         &mut self,
         state: &mut FnState,
@@ -207,6 +216,21 @@ impl Lower<'_> {
             HirExprKind::Field { .. } | HirExprKind::Deref(_) | HirExprKind::Global(_) => {
                 let place = self.place_of(state, func, expr);
                 state.read_place(&place, &lir, span)
+            }
+            HirExprKind::Move(inner) => {
+                // The bits move into a temporary the statement owns until
+                // something takes it; the place is empty after.
+                let place = self.place_of(state, func, inner);
+                let value = state.read_place(&place, &lir, span);
+                let moved = self.tmp(state, expr.ty, span);
+                state.emit(LirInst::CopyPlace {
+                    src: value,
+                    dst: moved.clone(),
+                    span,
+                });
+                self.own_temp(state, &moved, expr.ty);
+                Self::mark_expr(state, func, inner, false);
+                LirOperand::Place(moved)
             }
             HirExprKind::Number(text) => state.constant(number_const(text, &lir, span), lir, span),
             HirExprKind::Str(bytes) => {

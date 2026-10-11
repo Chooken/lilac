@@ -12,8 +12,8 @@ use lilac_ast::{
 };
 use lilac_error::{codes, Diagnostic};
 use lilac_hir::{
-    FuncKey, HirArm, HirBlock, HirExpr, HirExprKind, HirFailure, HirFunc, HirLocal, HirPattern,
-    HirStmt, LocalId, LocalKind, SemanticKind,
+    FuncKey, HirArm, HirBlock, HirExpr, HirExprKind, HirFailure, HirFunc, HirLocal, HirOld,
+    HirPattern, HirStmt, LocalId, LocalKind, SemanticKind,
 };
 use lilac_span::Span;
 use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
@@ -137,6 +137,7 @@ pub(crate) fn set_flag(flag: LocalId, set: bool, span: Span) -> HirStmt {
             span,
             kind: HirExprKind::Number(if set { "0x1" } else { "0x0" }.to_owned()),
         },
+        old: HirOld::Full,
     }
 }
 
@@ -146,6 +147,15 @@ pub(crate) fn local_expr(id: LocalId, ty: TypeRef, span: Span) -> HirExpr {
         ty,
         span,
         kind: HirExprKind::Local(id),
+    }
+}
+
+/// A hidden local moved out (it is never read again).
+pub(crate) fn moved_local(id: LocalId, ty: TypeRef, span: Span) -> HirExpr {
+    HirExpr {
+        ty,
+        span,
+        kind: HirExprKind::Move(Box::new(local_expr(id, ty, span))),
     }
 }
 
@@ -167,7 +177,15 @@ impl Checker<'_> {
         let env = self.env_of(key.def, key.args.clone(), Some(key.clone()));
         let outer = self.diags.hold();
         self.entry_unresolved = false;
-        let func = self.with_env(env, |c| c.check_func(key, &decl, &sig, span));
+        let func = self.with_env(env, |c| {
+            let mut func = c.check_func(key, &decl, &sig, span);
+            // Ownership is decided on bodies that checked: an error left
+            // poison and error types it would only repeat.
+            if !c.diags.holds_error() {
+                c.check_places(&mut func);
+            }
+            func
+        });
         let held = self.diags.release(outer);
         if std::mem::take(&mut self.entry_unresolved) {
             // An `@entry` naming a missing root item, outside an executable:
@@ -267,6 +285,7 @@ impl Checker<'_> {
             locals: fcx.locals,
             body,
             inline: matches!(decl.body, Some(FuncBody::Inline(_))),
+            flags: Vec::new(),
             span,
         }
     }
@@ -294,6 +313,7 @@ impl Checker<'_> {
             stmts: vec![HirStmt::Assign {
                 place: local_expr(*out, ty, span),
                 value,
+                old: HirOld::Full,
             }],
             span,
         }
@@ -494,6 +514,7 @@ impl Checker<'_> {
                         HirArm {
                             pattern,
                             capture,
+                            moves: false,
                             body,
                         }
                     })
@@ -554,6 +575,7 @@ impl Checker<'_> {
         out.push(HirStmt::Assign {
             place,
             value: value_hir,
+            old: HirOld::Full,
         });
     }
 
@@ -684,7 +706,7 @@ impl Checker<'_> {
             bindings.iter().zip(&declared).zip(outs.iter().zip(&hidden))
         {
             let value = self.coerce(
-                local_expr(*local, *got, binding.span),
+                moved_local(*local, *got, binding.span),
                 *want,
                 binding.ty.span,
             );

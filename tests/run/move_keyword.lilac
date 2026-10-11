@@ -1,0 +1,29 @@
+// expect-stdout: c|dd
+// `move a` moves a value that copies, without its copy hook: an
+// `Rc`-like handle hands its count over without a bump (only `b`'s copy
+// prints `c`), and `a` is empty after, so only `c` and `b` drop.
+
+using Standard.Io
+
+Shared: object {
+    id: @bit32
+
+    @on_copy: function (self) copy: Shared {
+        print_char('c')
+        copy = Shared { id = self.id }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+main: function () nothing {
+    {
+        a: Shared = Shared { id = 'd' }
+        b: Shared = a
+        c: Shared = move a
+        print_char('|')
+    }
+    print_char(0xA)
+}

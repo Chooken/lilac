@@ -203,8 +203,8 @@ alloca #type %name : zeroed
 ```
 Legacy text `allocate #, %` means the same as `alloca`.
 
-`zero %x` re-zeroes a place (a function's out slots at entry, a struct
-literal's temporary before its fields are written):
+`zero %x` re-zeroes a place (a function's out slots and drop flags at entry,
+a struct literal's temporary before its fields are written):
 ```lilac-ir
 zero %out
 ```
