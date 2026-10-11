@@ -1,6 +1,6 @@
 # Export, Linux Leaves and Editor Plan
 
-> Status: Phases 0 to 3 done. Source: the review of the OS layer and
+> Status: all phases done. Source: the review of the OS layer and
 > the editor on 2026-10-10.
 > Goal: Lilac can define C-callable functions, the Linux-only intrinsics say
 > so in their names, namespaces color like types, and completion after `.`
@@ -177,7 +177,15 @@ on the child's stack. Every program that mounts `Standard` keeps its
 
 ---
 
-## Phase 4: Completion after `.` from the compiler
+## Phase 4: Completion after `.` from the compiler (done)
+
+As built: a tag's name must follow its `.` directly (SPEC), so a `.`
+ending a line does not take the next line's name; the empty tag's `E001`
+is at the `.`. Tag sites carry the variant names and payload types as
+text (`TagSite::variants`), since the selector checks use their own type
+tables. A parked completion is answered when the newest generation
+compiles; one asked after a compile panicked gets no answer. A tag arm
+with a name but no body also recovers (with its `E001`).
 
 - **4.1 Parser recovery.** A `.` with no name after it parses as a tag with
   an empty name, with one `E001`, and parsing continues: in expressions

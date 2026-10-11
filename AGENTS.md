@@ -332,6 +332,17 @@
   `LocalSite::scope` and `ty` (typeck's `FnCx::open`/`close` track block
   spans); `.` resolves the receiver path (local, field, type, namespace)
   to its members; `@` lists `Intrinsic::names()` and the builtin types.
+  A bare `.` (a tag, `complete::needs_current_compile`) instead waits for
+  a compile of the current text: the server parks the request
+  (`Server::parked`, skipping the debounce), answers it when a compile of
+  the newest generation finishes (an edit meanwhile keeps it parked) and
+  drops it on `$/cancelRequest`. The answer is the `HirProgram::tags`
+  site at the cursor: typeck records every tag (`Checker::record_tag`)
+  with the expected enum's variants, minus those other `match` arms name,
+  and none when no enum is expected; the driver adds the top-level
+  conditions' (`conditional::Sites`). The parser reads a `.` with no name
+  directly after it as an empty tag (one `E001`, at the `.`), so the rest
+  parses; a selector holding one stays undecided (`Checker::empty_tags`).
   A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
   `textDocument/codeAction` turns them into quick fixes without a compile.
 - Semantic tokens (`handlers::semantic_tokens`) merge item declarations

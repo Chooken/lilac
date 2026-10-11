@@ -119,6 +119,7 @@ pub fn check_selectors(
     let mut values = Vec::with_capacity(selectors.len());
     for (file, expr) in selectors {
         let before = checker.diags.error_count();
+        let empty_before = checker.empty_tags;
         let env = Env {
             file: Some(*file),
             ..Env::default()
@@ -146,7 +147,10 @@ pub fn check_selectors(
             }
             checker.drain_queue();
         }
-        values.push((checker.diags.error_count() == before).then_some(hir));
+        // A tag still being typed leaves the selector undecided (the
+        // parser reported it).
+        let decided = checker.diags.error_count() == before && checker.empty_tags == empty_before;
+        values.push(decided.then_some(hir));
     }
     Selectors {
         hir: std::mem::take(&mut checker.out),
@@ -309,6 +313,9 @@ pub(crate) struct Checker<'a> {
     /// Set when the `@entry` body being checked names a missing root item
     /// outside an executable, so the hook is dropped rather than reported.
     pub entry_unresolved: bool,
+    /// How many tags with no name (a `.` mid-edit, which the parser
+    /// reported) were met; a selector that meets one is not decided.
+    pub empty_tags: usize,
 }
 
 /// Production instantiation depth cap; the test cap keeps `E051` cheap.
@@ -331,6 +338,7 @@ impl<'a> Checker<'a> {
             native_bits: options.native_bits,
             require_entry: options.require_entry,
             entry_unresolved: false,
+            empty_tags: 0,
             sigs: HashMap::new(),
             failed_sigs: HashSet::new(),
             hooks: HashMap::new(),
@@ -686,6 +694,22 @@ impl Checker<'_> {
                 .semantics
                 .push(lilac_hir::SemanticSite { span, kind });
         }
+    }
+
+    /// Records a tag at `span` for the editor: the variants of `expected`
+    /// (when it is an enum) other than `taken`.
+    pub(crate) fn record_tag(&mut self, span: Span, expected: Option<TypeId>, taken: &[&str]) {
+        if span.is_dummy() {
+            return;
+        }
+        let variants = expected
+            .and_then(|ty| self.variants_of(ty))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(name, _)| !taken.contains(&name.as_str()))
+            .map(|(name, payload)| (name, payload.map(|payload| self.types.display_ref(payload))))
+            .collect();
+        self.out.tags.push(lilac_hir::TagSite { span, variants });
     }
 
     /// Records a local name for the editor: a use at `span` of `local`

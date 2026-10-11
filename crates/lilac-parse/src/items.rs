@@ -2,8 +2,8 @@
 //! blocks, and function signatures.
 
 use lilac_ast::{
-    ArmTest, Conditional, EnumVariant, Expr, FuncBody, FuncDecl, Item, ItemArm, ItemKind, Param,
-    Type, TypeShape,
+    ArmTest, Conditional, EnumVariant, Expr, FuncBody, FuncDecl, Item, ItemArm, ItemKind,
+    MatchPattern, Param, Type, TypeShape,
 };
 use lilac_error::ErrorGuaranteed;
 use lilac_lex::{Token, TokenKind};
@@ -410,6 +410,15 @@ impl Parser {
                     vec![self.parse_item(diags, false)?]
                 }
                 TokenKind::LBrace => self.parse_item_block(diags, false, "match arm items")?,
+                // A tag still being typed: an arm with no items (an empty
+                // tag already reported).
+                _ if matches!(&pattern, MatchPattern::Tag { .. }) => {
+                    if matches!(&pattern, MatchPattern::Tag { name, .. } if !name.is_empty()) {
+                        Self::expected(diags, self.peek(), "`=>` or `{` for match arm items");
+                        self.recover();
+                    }
+                    Vec::new()
+                }
                 _ => {
                     return Err(Self::expected(
                         diags,

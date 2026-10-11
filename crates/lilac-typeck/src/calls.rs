@@ -94,6 +94,12 @@ impl Checker<'_> {
                 )
             }
             Expr::Tag(name, tag_span) => {
+                self.record_tag(*tag_span, expected, &[]);
+                if name.is_empty() {
+                    // The parser reported the `.` with no name.
+                    self.empty_tags += 1;
+                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+                }
                 let Some(want) = expected else {
                     let error = self.diags.emit(
                         Diagnostic::error(codes::E024, "tag construction needs an expected type")

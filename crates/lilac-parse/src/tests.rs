@@ -501,17 +501,17 @@ match m {
         panic!("{:?}", stmts[0]);
     };
     assert!(
-        matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.head() == "A.Mode" && name == "On"),
+        matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: Some(q), name , .. } if q.head() == "A.Mode" && name == "On"),
         "{:?}",
         arms[0].pattern
     );
     assert!(
-        matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: None, name } if name == "Off"),
+        matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: None, name , .. } if name == "Off"),
         "{:?}",
         arms[1].pattern
     );
     assert!(
-        matches!(&arms[2].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.head() == "Opt" && name == "Some"),
+        matches!(&arms[2].pattern, MatchPattern::Tag { qualifier: Some(q), name , .. } if q.head() == "Opt" && name == "Some"),
         "{:?}",
         arms[2].pattern
     );
@@ -586,9 +586,11 @@ fn qualified_match_patterns() {
     let Stmt::Match { arms, .. } = &stmts[0] else {
         panic!("{:?}", stmts[0]);
     };
-    assert!(matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: None, name } if name == "A"));
     assert!(
-        matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: Some(q), name } if q.head() == "Opt" && name == "Some")
+        matches!(&arms[0].pattern, MatchPattern::Tag { qualifier: None, name , .. } if name == "A")
+    );
+    assert!(
+        matches!(&arms[1].pattern, MatchPattern::Tag { qualifier: Some(q), name , .. } if q.head() == "Opt" && name == "Some")
     );
     assert!(
         matches!(&arms[2].pattern, MatchPattern::Tag { qualifier: Some(q), .. } if q.args().len() == 1)
@@ -1208,7 +1210,7 @@ fn recovered_failure_before_missing_close_is_single_diagnostic() {
 fn malformed_initializer_recovers_to_expr_error() {
     // A *present-but-malformed* initializer survives as `Expr::Error`
     // (vs. a *missing* one, which stays `Stmt::Error`).
-    let src = "main: function () nothing {\n    x: @bit8 = .\n}\n";
+    let src = "main: function () nothing {\n    x: @bit8 = @\n}\n";
     let (program, _diags, had_errors, _) = parse_with_status(src);
     assert!(had_errors, "the expression failure is recorded");
     let ItemKind::Func(decl) = &program.items[0].kind else {
@@ -1477,4 +1479,60 @@ fn conditional_items_parse_if_chains_and_matches() {
         by_tag.arms[1].items[0].kind,
         ItemKind::Using { .. }
     ));
+}
+
+#[test]
+fn a_bare_dot_is_an_empty_tag() {
+    // Mid-edit: a `.` with no name is one E001, and the function and the
+    // rest of its `match` survive.
+    let src = "main: function () nothing {\n    x: Color = .\n    match x {\n        .Red => {}\n        .\n        .Blue => {}\n    }\n}\n";
+    let (program, diags, had_errors, _) = parse_with_status(src);
+    assert!(had_errors);
+    let errors: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == "E001")
+        .collect();
+    assert_eq!(errors.len(), 2, "one E001 per bare `.`: {errors:?}");
+    let ItemKind::Func(decl) = &program.items[0].kind else {
+        panic!("expected function, got {:?}", program.items[0].kind);
+    };
+    let Some(FuncBody::Block(block)) = &decl.body else {
+        panic!("expected block body, got {:?}", decl.body);
+    };
+    let [Stmt::Let { value, .. }, Stmt::Match { arms, .. }] = block.stmts.as_slice() else {
+        panic!("both statements survive, got {:?}", block.stmts);
+    };
+    assert!(matches!(value, Expr::Tag(name, _) if name.is_empty()));
+    let names: Vec<&str> = arms
+        .iter()
+        .map(|arm| match &arm.pattern {
+            MatchPattern::Tag { name, .. } => name.as_str(),
+            MatchPattern::Const(_) => "?",
+        })
+        .collect();
+    assert_eq!(names, ["Red", "", "Blue"]);
+}
+
+#[test]
+fn a_dot_ending_a_line_takes_no_name() {
+    let src = "main: function () nothing {\n    x: Color = .\n    y: Color = . Red\n    z: Color = .Red\n}\n";
+    let (program, diags, _, _) = parse_with_status(src);
+    let errors: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == "E001")
+        .collect();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    let ItemKind::Func(decl) = &program.items[0].kind else {
+        panic!("expected function, got {:?}", program.items[0].kind);
+    };
+    let Some(FuncBody::Block(block)) = &decl.body else {
+        panic!("expected block body, got {:?}", decl.body);
+    };
+    let Some(Stmt::Let { name, value, .. }) = block.stmts.last() else {
+        panic!("the last statement survives, got {:?}", block.stmts);
+    };
+    assert_eq!(name, "z");
+    assert!(matches!(value, Expr::Tag(tag, _) if tag == "Red"));
 }

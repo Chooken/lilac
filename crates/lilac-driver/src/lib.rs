@@ -423,7 +423,7 @@ impl Session {
         if failed && strict {
             return Err(self.diags.already_reported());
         }
-        let condition_semantics = conditional::select(
+        let condition_sites = conditional::select(
             &mut project,
             &mut programs,
             &mut self.diags,
@@ -447,6 +447,7 @@ impl Session {
         let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
+        hir.tags.extend(condition_sites.tags.iter().cloned());
         self.analysis =
             Some(Analysis {
                 resolved: resolved.clone(),
@@ -457,7 +458,7 @@ impl Session {
                         .hir
                         .semantics
                         .iter()
-                        .chain(&condition_semantics)
+                        .chain(&condition_sites.semantics)
                         .copied()
                         .chain(resolved.namespace_sites.iter().map(|&span| {
                             lilac_hir::SemanticSite {

@@ -303,8 +303,15 @@ impl Parser {
             TokenKind::KwMatch => self.parse_match_value(diags, token.span),
             TokenKind::FStrStart => self.parse_fstring(diags, token.span),
             TokenKind::KwSelf => Ok(Expr::Ident("self".to_owned(), token.span)),
+            // A `.` with no name after it (mid-edit) is a tag with an
+            // empty name, so the rest still parses and the editor can
+            // complete it.
             TokenKind::Dot => {
-                let tag = self.expect(diags, TokenKind::Ident, "tag name after `.`")?;
+                if !self.tag_name_follows(token.span) {
+                    self.nameless_tag(diags, token.span, "tag name after `.`");
+                    return Ok(Expr::Tag(String::new(), token.span));
+                }
+                let tag = self.bump();
                 let span = join_spans(token.span, tag.span);
                 Ok(Expr::Tag(tag.text, span))
             }

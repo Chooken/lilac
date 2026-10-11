@@ -429,8 +429,11 @@ pub enum MatchPattern {
     Tag {
         /// `Enum` / `Enum[T]` before the dot, if written.
         qualifier: Option<Type>,
-        /// Variant name.
+        /// Variant name (empty for a `.` with no name after it, mid-edit).
         name: String,
+        /// The tag: its `.` through the name, or the qualifier through the
+        /// name.
+        span: Span,
     },
     /// `0x0` byte pattern (source bytes).
     Const(String),

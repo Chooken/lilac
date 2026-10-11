@@ -439,7 +439,8 @@ impl Checker<'_> {
                     .iter()
                     .map(|arm| {
                         fcx.open(arm.span);
-                        let (pattern, capture) = self.check_pattern(fcx, arm, scrutinee.ty.id);
+                        let (pattern, capture) =
+                            self.check_pattern(fcx, arm, arms, scrutinee.ty.id);
                         let body = match &arm.body {
                             MatchArmBody::Block(block) => self.check_block(fcx, block),
                             MatchArmBody::Inline(stmt) => self.check_stmt_block(fcx, stmt),
@@ -792,16 +793,48 @@ impl Checker<'_> {
         Self::auto_deref(hir)
     }
 
-    /// Checks one arm pattern and declares its capture in the current scope.
+    /// Records the tag of `arm`, at `span`: the variants of `scrutinee`
+    /// the other `arms` do not name.
+    fn record_pattern_tag(
+        &mut self,
+        arm: &MatchArm,
+        arms: &[MatchArm],
+        span: Span,
+        scrutinee: TypeId,
+    ) {
+        let taken: Vec<&str> = arms
+            .iter()
+            .filter(|other| !std::ptr::eq(*other, arm))
+            .filter_map(|other| match &other.pattern {
+                MatchPattern::Tag { name, .. } => Some(name.as_str()),
+                MatchPattern::Const(_) => None,
+            })
+            .collect();
+        self.record_tag(span, Some(scrutinee), &taken);
+    }
+
+    /// Checks one arm pattern of `arms` and declares its capture in the
+    /// current scope.
     pub(crate) fn check_pattern(
         &mut self,
         fcx: &mut FnCx,
         arm: &MatchArm,
+        arms: &[MatchArm],
         scrutinee: TypeId,
     ) -> (HirPattern, Option<LocalId>) {
         let poison = (HirPattern::Variant(u32::MAX), None);
         match &arm.pattern {
-            MatchPattern::Tag { qualifier, name } => {
+            MatchPattern::Tag {
+                qualifier,
+                name,
+                span,
+            } => {
+                self.record_pattern_tag(arm, arms, *span, scrutinee);
+                if name.is_empty() {
+                    // The parser reported the `.` with no name.
+                    self.empty_tags += 1;
+                    return poison;
+                }
                 if let Some(qualifier) = qualifier {
                     let named = self.resolve_type(qualifier);
                     if !named.is_error() && scrutinee != TypeId::ERROR && named.id != scrutinee {

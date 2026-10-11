@@ -226,6 +226,19 @@ impl Parser {
             let block = self.parse_block(diags)?;
             let end = block.span;
             (MatchArmBody::Block(block), end)
+        } else if let MatchPattern::Tag { name, span, .. } = &pattern {
+            // A tag still being typed: an arm with no body, so the rest of
+            // the `match` still parses (an empty tag already reported).
+            if !name.is_empty() {
+                Self::expected(diags, self.peek(), "`=>` or `{` for match arm body");
+                self.recover();
+            }
+            let end = *span;
+            let block = Block {
+                stmts: Vec::new(),
+                span: end,
+            };
+            (MatchArmBody::Block(block), end)
         } else {
             return Err(Self::expected(
                 diags,
@@ -250,11 +263,19 @@ impl Parser {
         Ok(match self.peek().kind {
             TokenKind::Dot => {
                 let dot = self.bump();
-                let tag = self.expect(diags, TokenKind::Ident, "match tag after `.`")?;
+                // A `.` with no name (mid-edit) is an empty tag.
+                let (name, span) = if self.tag_name_follows(dot.span) {
+                    let tag = self.bump();
+                    (tag.text, join_spans(dot.span, tag.span))
+                } else {
+                    self.nameless_tag(diags, dot.span, "match tag after `.`");
+                    (String::new(), dot.span)
+                };
                 (
                     MatchPattern::Tag {
                         qualifier: None,
-                        name: tag.text,
+                        name,
+                        span,
                     },
                     dot.span,
                 )
@@ -282,6 +303,7 @@ impl Parser {
                     MatchPattern::Tag {
                         qualifier: Some(qualifier),
                         name: tag,
+                        span: join_spans(start, self.prev_span()),
                     },
                     start,
                 )

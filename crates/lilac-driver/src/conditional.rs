@@ -20,7 +20,7 @@ use lilac_ast::{
     ArmTest, Conditional, Expr, Item, ItemKind, MatchArm, MatchArmBody, Program, Stmt,
 };
 use lilac_error::{codes, Diagnostic, Diags, Level};
-use lilac_hir::SemanticSite;
+use lilac_hir::{SemanticSite, TagSite};
 use lilac_module::Project;
 use lilac_span::{FileId, SourceMap, Span};
 use lilac_target::Target;
@@ -43,7 +43,7 @@ struct Found<'p> {
 
 /// Decides every top-level conditional of `programs`, splicing in the
 /// selected arms, and refreshes `project`'s `using`s to the live ones.
-/// Returns the semantic-token sites of the checked conditions, which the
+/// Returns what the editor needs from the checked conditions, which the
 /// final check never sees.
 pub(crate) fn select(
     project: &mut Project,
@@ -51,11 +51,11 @@ pub(crate) fn select(
     diags: &mut Diags,
     sources: &SourceMap,
     target: Target,
-) -> Vec<SemanticSite> {
+) -> Sites {
     let mut any = false;
-    let mut semantics = Vec::new();
+    let mut sites = Sites::default();
     loop {
-        let decisions = round(project, programs, diags, sources, target, &mut semantics);
+        let decisions = round(project, programs, diags, sources, target, &mut sites);
         if decisions.is_empty() {
             break;
         }
@@ -67,19 +67,28 @@ pub(crate) fn select(
     if any {
         refresh_usings(project, programs);
     }
-    semantics
+    sites
+}
+
+/// The editor sites of the checked conditions.
+#[derive(Default)]
+pub(crate) struct Sites {
+    /// Semantic-token sites.
+    pub semantics: Vec<SemanticSite>,
+    /// Tags, for completion.
+    pub tags: Vec<TagSite>,
 }
 
 /// One round: the decision for each outermost conditional decided now
-/// (empty when there are none left). The conditions' semantic-token sites go
-/// to `semantics`.
+/// (empty when there are none left). The conditions' editor sites go to
+/// `sites`.
 fn round(
     project: &mut Project,
     programs: &[(FileId, Program)],
     diags: &mut Diags,
     sources: &SourceMap,
     target: Target,
-    semantics: &mut Vec<SemanticSite>,
+    sites: &mut Sites,
 ) -> HashMap<Span, Decision> {
     let mut found = Vec::new();
     for (file, program) in programs {
@@ -89,7 +98,14 @@ fn round(
         return HashMap::new();
     }
     refresh_usings(project, programs);
+    // Scratch starts with the errors so far (the parser's), so poison from a
+    // construct the parser reported finds its error.
     let mut scratch = Diags::new();
+    for diagnostic in diags.diagnostics() {
+        if diagnostic.level == Level::Error {
+            scratch.emit(diagnostic.clone());
+        }
+    }
     let resolved = lilac_resolve::resolve(project, programs, &mut scratch);
     let selectors: Vec<(FileId, Expr)> = found
         .iter()
@@ -102,7 +118,8 @@ fn round(
     };
     let checked =
         lilac_typeck::check_selectors(&resolved, &mut types, &mut scratch, options, &selectors);
-    semantics.extend_from_slice(&checked.hir.semantics);
+    sites.semantics.extend_from_slice(&checked.hir.semantics);
+    sites.tags.extend_from_slice(&checked.hir.tags);
     let values = lilac_lower::evaluate_selectors(
         &checked.hir,
         &resolved,

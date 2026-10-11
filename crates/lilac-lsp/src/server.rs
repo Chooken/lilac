@@ -31,6 +31,8 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const REQUEST_FAILED: i32 = -32803;
 /// JSON-RPC: the server failed (a request handler panicked).
 const INTERNAL_ERROR: i32 = -32603;
+/// LSP: the client cancelled the request.
+const REQUEST_CANCELLED: i32 = -32800;
 
 /// A request result as JSON (`null` for `None`).
 macro_rules! value {
@@ -49,6 +51,14 @@ macro_rules! params {
             Err(_) => return Some(Ok(serde_json::Value::Null)),
         }
     };
+}
+
+/// Why a tag completion is not answered right away.
+enum Wait {
+    /// A compile of the current text is due or running.
+    Compile,
+    /// No compile is coming.
+    Never,
 }
 
 /// Language-server state.
@@ -91,6 +101,12 @@ pub struct Server {
     /// Compiles of open files the project does not reach, by canonical URI
     /// (files of one unit share a compile).
     per_file: HashMap<Url, Arc<Retained>>,
+    /// The generation of the analysis the server holds (`None` before the
+    /// first compile finishes).
+    compiled: Option<u64>,
+    /// Tag completions waiting for a compile of the current text
+    /// ([`crate::complete::needs_current_compile`]), oldest first.
+    parked: Vec<Request>,
 }
 
 impl Server {
@@ -125,6 +141,8 @@ impl Server {
             shutdown: false,
             project: None,
             per_file: HashMap::new(),
+            compiled: None,
+            parked: Vec::new(),
         };
         server.configure();
         server
@@ -221,6 +239,58 @@ impl Server {
                 )))?;
             return Ok(());
         }
+        match self.tag_completion(&request) {
+            Some(Wait::Compile) => {
+                self.parked.push(request);
+                self.compile_now();
+                Ok(())
+            }
+            Some(Wait::Never) => {
+                let response = Response::new_ok(request.id, serde_json::Value::Null);
+                self.connection.sender.send(Message::Response(response))?;
+                Ok(())
+            }
+            None => self.respond(request),
+        }
+    }
+
+    /// For a tag completion ([`crate::complete::needs_current_compile`])
+    /// asked of text the analysis held has not seen: whether a compile of
+    /// it is due or running, or will not come (the last one panicked, so
+    /// it gets no answer). `None` for any other request, answered now.
+    fn tag_completion(&self, request: &Request) -> Option<Wait> {
+        if request.method != "textDocument/completion" || self.compiled == Some(self.generation) {
+            return None;
+        }
+        let params =
+            serde_json::from_value::<lsp_types::CompletionParams>(request.params.clone()).ok()?;
+        let position = &params.text_document_position;
+        let document = self.documents.get(&position.text_document.uri)?;
+        if !crate::complete::needs_current_compile(&document.text, position.position) {
+            return None;
+        }
+        Some(if self.compiling || self.deadline.is_some() {
+            Wait::Compile
+        } else {
+            Wait::Never
+        })
+    }
+
+    /// Starts the due compile now, skipping the debounce (or right after
+    /// the running one).
+    fn compile_now(&mut self) {
+        if self.deadline.is_none() {
+            return;
+        }
+        if self.compiling {
+            self.deadline = Some(Instant::now());
+        } else {
+            self.start_compile();
+        }
+    }
+
+    /// Answers `request` from the analysis held.
+    fn respond(&self, request: Request) -> Result<(), Box<dyn Error + Send + Sync>> {
         // A handler that panics answers with an internal error, and the
         // server keeps running.
         let response = match compile::guarded(|| self.query_response(&request)) {
@@ -523,7 +593,52 @@ impl Server {
                     }
                 }
             }
+            // A parked completion the client gave up on; others are
+            // answered too fast to cancel.
+            "$/cancelRequest" => {
+                if let Ok(params) =
+                    notification.extract::<lsp_types::CancelParams>("$/cancelRequest")
+                {
+                    let id: lsp_server::RequestId = match params.id {
+                        lsp_types::NumberOrString::Number(id) => id.into(),
+                        lsp_types::NumberOrString::String(id) => id.into(),
+                    };
+                    if let Some(at) = self.parked.iter().position(|request| request.id == id) {
+                        self.parked.remove(at);
+                        let _ = self
+                            .connection
+                            .sender
+                            .send(Message::Response(Response::new_err(
+                                id,
+                                REQUEST_CANCELLED,
+                                "cancelled".to_owned(),
+                            )));
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Settles the parked tag completions after a compile finished: each is
+    /// answered once the analysis is of the current text; while a compile
+    /// is due they wait for it, started now; with none coming (this one
+    /// panicked) they get no answer.
+    fn settle_parked(&mut self) {
+        if self.parked.is_empty() {
+            return;
+        }
+        if self.compiled != Some(self.generation) && self.deadline.is_some() {
+            self.compile_now();
+            return;
+        }
+        for request in std::mem::take(&mut self.parked) {
+            if self.compiled == Some(self.generation) {
+                let _ = self.respond(request);
+            } else {
+                let response = Response::new_ok(request.id, serde_json::Value::Null);
+                let _ = self.connection.sender.send(Message::Response(response));
+            }
         }
     }
 
@@ -564,10 +679,12 @@ impl Server {
                         "The Lilac compiler hit an internal error; diagnostics may be stale. {panic}"
                     ));
                 }
+                self.settle_parked();
                 return;
             }
         };
         self.reported_panic = None;
+        self.compiled = Some(generation);
         self.project = compiled.project;
         self.per_file = compiled.per_file;
         if generation == self.generation {
@@ -580,6 +697,7 @@ impl Server {
             }
             self.published = current;
         }
+        self.settle_parked();
 
         let _ = self
             .connection
@@ -762,6 +880,119 @@ mod tests {
         let shown = shown_errors(&client);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].contains("later"));
+    }
+
+    fn change(server: &mut Server, uri: &Url, version: i32, text: &str) {
+        server.handle_notification(Notification {
+            method: "textDocument/didChange".to_owned(),
+            params: serde_json::to_value(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_owned(),
+                }],
+            })
+            .expect("params"),
+        });
+    }
+
+    fn complete_request(uri: &Url, line: u32, character: u32) -> Request {
+        Request {
+            id: "complete".to_owned().into(),
+            method: "textDocument/completion".to_owned(),
+            params: serde_json::json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character },
+            }),
+        }
+    }
+
+    fn responses(client: &Connection) -> Vec<Response> {
+        client
+            .receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Response(response) => Some(response),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SHAPES: &str = "Shape: enum {\n    Dot\n    Line\n}\nPaint: enum {\n    Red\n    Blue\n}\nmain: function () nothing {\n    s: Shape = .\n}\n";
+
+    /// A tag completion waits for a compile of the text it was asked
+    /// about; an edit while it waits makes it wait for the next compile,
+    /// which answers it.
+    #[test]
+    fn a_parked_completion_is_answered_from_the_newest_compile() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-parked-completion");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(&mut server, &uri, SHAPES);
+        let stale = job(&server).run();
+        server
+            .handle_request(complete_request(&uri, 9, 16))
+            .expect("request");
+        assert_eq!(server.parked.len(), 1);
+        change(
+            &mut server,
+            &uri,
+            2,
+            &SHAPES.replace("s: Shape", "s: Paint"),
+        );
+
+        server.finish_compile(stale.generation, Ok(stale));
+        assert!(responses(&client).is_empty());
+        assert_eq!(server.parked.len(), 1);
+
+        let current = job(&server).run();
+        server.finish_compile(current.generation, Ok(current));
+        let answered = responses(&client);
+        let [response] = answered.as_slice() else {
+            panic!("one response: {answered:?}");
+        };
+        let items: Vec<lsp_types::CompletionItem> =
+            serde_json::from_value(response.response_result.clone().expect("result"))
+                .expect("items");
+        let mut labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels, ["Blue", "Red"]);
+        assert!(server.parked.is_empty());
+    }
+
+    /// A parked completion the client cancels is answered as cancelled.
+    #[test]
+    fn a_parked_completion_can_be_cancelled() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-cancelled-completion");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(&mut server, &uri, SHAPES);
+        server
+            .handle_request(complete_request(&uri, 9, 16))
+            .expect("request");
+        server.handle_notification(Notification {
+            method: "$/cancelRequest".to_owned(),
+            params: serde_json::json!({ "id": "complete" }),
+        });
+        assert!(server.parked.is_empty());
+        let answered = responses(&client);
+        let [response] = answered.as_slice() else {
+            panic!("one response: {answered:?}");
+        };
+        assert_eq!(
+            response
+                .response_result
+                .as_ref()
+                .err()
+                .map(|error| error.code),
+            Some(REQUEST_CANCELLED)
+        );
     }
 
     #[test]

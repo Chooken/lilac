@@ -26,6 +26,8 @@ limit: @bit8 = 0x10
 add: function (a: @bit8, b: @bit8) total: @bit8 {
     total = @i_add_8(a, b)
 }
+paint: function (shape: Shape) nothing {
+}
 main: function () nothing {
     first: @bit8 = add(0x1, limit)
     {
@@ -309,6 +311,110 @@ fn sorted(mut labels: Vec<&str>) -> Vec<&str> {
     labels
 }
 
+/// Replaces the `// EDIT` line with `edit` and asks right away for
+/// completions where `<|>` stands in it (the marker itself is removed).
+fn complete_marked(
+    client: &Connection,
+    uri: &Url,
+    version: i32,
+    edit: &str,
+) -> Vec<CompletionItem> {
+    let (before, after_marker) = edit.split_once("<|>").expect("marker");
+    let text = PROGRAM.replace("    // EDIT", &format!("{before}{after_marker}"));
+    did_change(client, uri, version, &text);
+    let prefix = PROGRAM[..PROGRAM.find("    // EDIT").expect("edit line")].to_owned() + before;
+    let result = request(
+        client,
+        "textDocument/completion",
+        position(uri, after(&prefix, before)),
+    )
+    .expect("completion");
+    match serde_json::from_value::<Option<CompletionResponse>>(result).expect("completions") {
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+        None => Vec::new(),
+    }
+}
+
+/// A bare `.` lists the variants of the enum the compiler expects there,
+/// and nothing where it expects none.
+#[test]
+fn tags_complete_from_the_expected_enum() {
+    let (client, handle, uri) = open_program();
+    let arm = complete_marked(
+        &client,
+        &uri,
+        2,
+        "    s: Shape = .Dot\n    match s {\n        .Line => {}\n        .<|>\n    }",
+    );
+    assert_eq!(labels(&arm), vec!["Dot"]);
+    let line = complete_marked(&client, &uri, 3, "    paint(.<|>)");
+    assert_eq!(sorted(labels(&line)), vec!["Dot", "Line"]);
+    let payload = line.iter().find(|item| item.label == "Line").expect("Line");
+    assert_eq!(payload.detail.as_deref(), Some("@bit8"));
+    let os = complete_marked(
+        &client,
+        &uri,
+        4,
+        "    b: @bit8 = @builtin.Target.os == .<|>",
+    );
+    let os = labels(&os);
+    assert!(os.contains(&"Linux") && os.contains(&"Windows"), "{os:?}");
+    let partial = complete_marked(&client, &uri, 5, "    s: Shape = .Li<|>");
+    assert_eq!(sorted(labels(&partial)), vec!["Dot", "Line"]);
+    let none = complete_marked(&client, &uri, 6, "    v: @bit8 = .<|>");
+    assert_eq!(labels(&none), Vec::<&str>::new());
+    let statement = complete_marked(&client, &uri, 7, "    .<|>");
+    assert_eq!(labels(&statement), Vec::<&str>::new());
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A top-level `match` is decided before the final check, which never sees
+/// its patterns; their tags still complete.
+#[test]
+fn top_level_match_tags_complete() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/top.lilac").expect("uri");
+    let text = "match @builtin.Target.os {\n    .Windows => {\n        a: @bit8 = 0x1\n    }\n    .\n}\nmain: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let result =
+        request(&client, "textDocument/completion", position(&uri, (4, 5))).expect("completion");
+    let Some(CompletionResponse::Array(items)) = serde_json::from_value(result).expect("items")
+    else {
+        panic!("completions");
+    };
+    let labels = labels(&items);
+    assert!(labels.contains(&"Linux"), "{labels:?}");
+    assert!(!labels.contains(&"Windows"), "{labels:?}");
+
+    // An undecided top-level condition adds no error of its own.
+    let text = format!(
+        "{text}if @builtin.Target.os == . {{
+}}
+"
+    );
+    did_change(&client, &uri, 2, &text);
+    let published = publish_for(&client, &uri);
+    assert_eq!(published.version, Some(2));
+    let errors: Vec<&str> = published
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            "expected match tag after `.`, found `}`",
+            "expected tag name after `.`, found `{`",
+        ]
+    );
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 #[test]
 fn members_complete_after_the_broken_buffer_compiles() {
     let (client, handle, uri) = open_program();
@@ -584,6 +690,35 @@ fn did_you_mean_is_a_quick_fix() {
     assert_eq!(edits[0].range.start, lsp_types::Position::new(2, 19));
     assert_eq!(edits[0].range.end, lsp_types::Position::new(2, 24));
 
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A bare `.` mid-edit is one parse error; the rest of its function is
+/// still checked.
+#[test]
+fn a_bare_dot_keeps_its_function_checked() {
+    let (client, handle, uri) = open_program();
+    let text = PROGRAM.replace(
+        "    // EDIT",
+        "    s: Shape = .Dot\n    match s {\n        .\n    }\n    t: Shape = .\n    u: @bit8 = missing",
+    );
+    did_change(&client, &uri, 2, &text);
+    let published = publish_for(&client, &uri);
+    let errors: Vec<&str> = published
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            "expected match tag after `.`, found `}`",
+            "expected tag name after `.`, found `u`",
+            "unresolved name `missing`",
+        ]
+    );
     shutdown(&client);
     handle.join().expect("server thread");
 }

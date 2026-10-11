@@ -3,7 +3,9 @@
 //! Requests arrive mid-edit, before the next compile, so the context (what
 //! precedes the cursor) is read from the document's current text and the
 //! names come from the last compile. The cursor is mapped into that
-//! compile's text by the edit between the two ([`map_offset`]).
+//! compile's text by the edit between the two ([`map_offset`]). A tag
+//! (a bare `.`) waits for a compile of the current text instead
+//! ([`needs_current_compile`]): only the compiler knows its enum.
 
 use std::collections::{HashMap, HashSet};
 
@@ -343,21 +345,24 @@ impl<'a> Scope<'a> {
         entries
     }
 
-    /// The variants of every visible enum (after a bare `.`).
-    fn variants(&self) -> Vec<Entry> {
-        let resolved = &self.analysis.resolved;
-        let Some(scope) = resolved.files.get(&self.file) else {
-            return Vec::new();
-        };
-        scope
-            .visible
-            .values()
-            .filter_map(|lookup| match lookup {
-                Lookup::One(id) if matches!(resolved.def(*id).kind, DefKind::Enum) => Some(*id),
-                _ => None,
+    /// The variants the tag at the cursor may name (after a bare `.`):
+    /// none when the compiler knows no enum is expected there.
+    fn tag_variants(&self) -> Vec<Entry> {
+        let mut sites = self.analysis.hir.tags.iter().filter(|site| {
+            site.span.file == self.file && site.span.lo.0 <= self.at && self.at <= site.span.hi.0
+        });
+        // A generic body checked more than once records a tag once per
+        // check; any that knows its enum answers.
+        sites
+            .find(|site| !site.variants.is_empty())
+            .map(|site| &site.variants)
+            .into_iter()
+            .flatten()
+            .map(|(name, payload)| Entry {
+                label: name.clone(),
+                kind: CompletionItemKind::ENUM_MEMBER,
+                detail: payload.clone(),
             })
-            .flat_map(|id| resolved.def(id).slots.clone())
-            .filter_map(|id| self.item_entry(id))
             .collect()
     }
 }
@@ -421,6 +426,25 @@ fn in_comment(text: &str, cursor: usize) -> bool {
     text[line_start..cursor].contains("//")
 }
 
+/// Whether a completion at `position` of `text` is of a tag (a bare `.`,
+/// maybe with part of a name): the compiler must check the text as it is
+/// now to know which enum the tag expects, so it waits for that compile.
+#[must_use]
+pub fn needs_current_compile(text: &str, position_at: Position) -> bool {
+    let Some(cursor) = byte_offset(text, position_at) else {
+        return false;
+    };
+    if in_comment(text, cursor) {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut start = cursor;
+    while start > 0 && is_ident(bytes[start - 1]) {
+        start -= 1;
+    }
+    start > 0 && bytes[start - 1] == b'.' && path_before(text, start - 1).is_empty()
+}
+
 /// `textDocument/completion` at `position` of the document `text`.
 #[must_use]
 pub fn completion(
@@ -460,7 +484,7 @@ pub fn completion(
     } else if start > 0 && bytes[start - 1] == b'.' {
         let receiver = path_before(text, start - 1);
         if receiver.is_empty() {
-            scope.variants()
+            scope.tag_variants()
         } else {
             let segments: Vec<&str> = receiver.split('.').collect();
             scope

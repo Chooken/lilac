@@ -409,6 +409,22 @@ impl Parser {
         )
     }
 
+    /// Whether a tag's name directly follows its `.` at `dot` (so a `.`
+    /// ending a line does not take the next line's first name).
+    fn tag_name_follows(&self, dot: Span) -> bool {
+        let next = self.peek();
+        next.kind == TokenKind::Ident && next.span.lo == dot.hi
+    }
+
+    /// A `.` at `dot` with no name after it (mid-edit): "expected {what},
+    /// found {token}", at the `.`, so the error lies inside what holds the
+    /// tag. The caller goes on with an empty tag.
+    fn nameless_tag(&mut self, diags: &mut lilac_error::Diags, dot: Span, what: &str) {
+        let msg = format!("expected {what}, found {}", self.peek().describe());
+        Self::err(diags, dot, &msg);
+        self.recover();
+    }
+
     /// "expected {what}, found {token}", at `found`.
     fn expected(diags: &mut lilac_error::Diags, found: &Token, what: &str) -> ErrorGuaranteed {
         let msg = format!("expected {what}, found {}", found.describe());

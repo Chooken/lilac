@@ -49,22 +49,7 @@ impl Checker<'_> {
     ) -> HirExpr {
         match expr {
             Expr::Ident(name, span) => self.check_ident(fcx, name, *span),
-            Expr::Tag(name, span) => {
-                let tag = tail_span(*span, name);
-                let Some(want) = expected.filter(|id| *id != TypeId::ERROR) else {
-                    if expected.is_none() {
-                        self.diags.emit(
-                            Diagnostic::error(
-                                codes::E024,
-                                "tag literal needs an expected enum type",
-                            )
-                            .label(*span, true, "annotate the binding"),
-                        );
-                    }
-                    return HirExpr::poison(*span);
-                };
-                self.variant_value(want, name, None, *span, tag)
-            }
+            Expr::Tag(name, span) => self.check_tag(name, *span, expected),
             Expr::Number(bytes, span) => self.check_number(bytes, *span, expected),
             Expr::Str(bytes, span) => HirExpr {
                 ty: Builtin::ByteBuffer.value(),
@@ -591,6 +576,27 @@ impl Checker<'_> {
     }
 
     /// Builds variant `name` of enum `ty`, checking the payload argument.
+    /// Checks a bare tag `.name` at `span` against the `expected` enum.
+    fn check_tag(&mut self, name: &str, span: Span, expected: Option<TypeId>) -> HirExpr {
+        self.record_tag(span, expected, &[]);
+        if name.is_empty() {
+            // The parser reported the `.` with no name.
+            self.empty_tags += 1;
+            return HirExpr::poison(span);
+        }
+        let tag = tail_span(span, name);
+        let Some(want) = expected.filter(|id| *id != TypeId::ERROR) else {
+            if expected.is_none() {
+                self.diags.emit(
+                    Diagnostic::error(codes::E024, "tag literal needs an expected enum type")
+                        .label(span, true, "annotate the binding"),
+                );
+            }
+            return HirExpr::poison(span);
+        };
+        self.variant_value(want, name, None, span, tag)
+    }
+
     pub(crate) fn variant_value(
         &mut self,
         ty: TypeId,
@@ -966,7 +972,7 @@ impl Checker<'_> {
         let mut failed = false;
         for arm in arms {
             fcx.open(arm.span);
-            let (pattern, capture) = self.check_pattern(fcx, arm, scrutinee.ty.id);
+            let (pattern, capture) = self.check_pattern(fcx, arm, arms, scrutinee.ty.id);
             let value = match &arm.body {
                 MatchArmBody::Inline(stmt) => {
                     if let Stmt::ExprStmt(value) = stmt.as_ref() {

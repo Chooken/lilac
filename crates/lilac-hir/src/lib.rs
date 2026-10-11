@@ -93,6 +93,9 @@ pub struct HirProgram {
     /// Expression statements whose value has no effect (no call anywhere
     /// in them, like `5 + 5`): an editor hint; they are still lowered.
     pub no_effect: Vec<Span>,
+    /// Every tag (`.Name`, a `.` mid-edit) with the variants it may name
+    /// (editor completion).
+    pub tags: Vec<TagSite>,
 }
 
 impl HirExpr {
@@ -177,6 +180,17 @@ pub struct SemanticSite {
     pub span: Span,
     /// What the name is.
     pub kind: SemanticKind,
+}
+
+/// One tag position: a `.Name` value or pattern, or a bare `.` mid-edit.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TagSite {
+    /// The tag, from its `.` through its name.
+    pub span: Span,
+    /// The variants it may name, each with its payload type displayed:
+    /// the expected enum's, empty when no enum is expected. In a `match`
+    /// pattern, the variants other arms name are left out.
+    pub variants: Vec<(String, Option<String>)>,
 }
 
 /// One local or parameter name: its declaration, or a use of it.
