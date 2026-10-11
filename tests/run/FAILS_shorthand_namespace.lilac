@@ -1,0 +1,8 @@
+// expect-error: E056
+// expect-stderr: error[E056]: `Standard.Os` is a namespace, not a type
+// In `name: A.B.function(args)` the path before the function is a type,
+// never a namespace.
+
+main: function () nothing {
+    memory: Standard.Os.allocate(0x10)
+}

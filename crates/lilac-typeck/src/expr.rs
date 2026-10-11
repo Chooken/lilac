@@ -102,6 +102,21 @@ impl Checker<'_> {
                 Ok(Called::Value(value)) => value,
                 Err(_) => HirExpr::poison(*span),
             },
+            Expr::Construct {
+                function,
+                member_span,
+                generic_args,
+                args,
+                span,
+            } => self.check_construct(
+                fcx,
+                function,
+                *member_span,
+                generic_args,
+                args,
+                *span,
+                expected,
+            ),
             Expr::BinOp { lhs, op, rhs, span } => {
                 self.check_binop(fcx, lhs, *op, rhs, *span, expected)
             }

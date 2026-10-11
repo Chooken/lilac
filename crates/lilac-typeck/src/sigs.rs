@@ -166,35 +166,19 @@ impl Checker<'_> {
                 }
             }
             "@init" => {
-                let decl = def.func().cloned();
-                if let Some(decl) = decl {
-                    for param in &decl.params {
-                        if param.ty.is_self() {
-                            self.diags.emit(
-                                Diagnostic::error(
-                                    codes::E022,
-                                    "`@init` can't have `self` as a parameter",
-                                )
-                                .label(
-                                    param.span,
-                                    true,
-                                    "factories take plain parameters",
-                                ),
-                            );
-                            return false;
-                        }
-                    }
-                }
-                let returns_owner = sig.returns.len() == 1
-                    && by_value(&sig.returns[0])
-                    && owner.is_none_or(|owner| sig.returns[0].id == owner.id);
-                if !returns_owner {
-                    return fail(
-                        self,
-                        "`@init` must return exactly its object type",
-                        "bad `@init` shape",
-                    );
-                }
+                self.diags.emit(
+                    Diagnostic::error(codes::E056, "there is no `@init` hook")
+                        .label(
+                            self.res.def(key.def).name_span,
+                            true,
+                            "make this a static function",
+                        )
+                        .help(
+                            "name it (`create: function (...) value: Type`) and declare \
+                             `variable: Type.create(...)`",
+                        ),
+                );
+                return false;
             }
             "@on_drop" | "@on_copy" | "@on_override" => {
                 let target = owner.map(|owner| owner.id).or_else(|| {

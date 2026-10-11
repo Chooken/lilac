@@ -118,7 +118,7 @@ impl Parser {
                 },
             })
         } else {
-            let ty = self.parse_type_starting(diags, kind_token)?;
+            let mut ty = self.parse_type_starting(diags, kind_token)?;
             if self.peek().kind == TokenKind::FatArrow {
                 self.bump();
                 let value = self.parse_expr(diags)?;
@@ -129,8 +129,8 @@ impl Parser {
                 let value = self.parse_expr(diags)?;
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
-            if !in_object && matches!(self.peek().kind, TokenKind::LBrace | TokenKind::LParen) {
-                let value = self.parse_decl_shorthand(diags, &ty)?;
+            if !in_object && self.at_decl_shorthand() {
+                let value = self.parse_decl_shorthand(diags, &mut ty)?;
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
             if !in_object {

@@ -780,3 +780,73 @@ fn a_bare_dot_keeps_its_function_checked() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// After `name: Type.` the declaration shorthand's static functions of
+/// `Type` complete (not its methods), mid-edit or with the call written,
+/// also after a generic type's arguments.
+#[test]
+fn static_functions_complete_in_a_declaration() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/shorthand.lilac").expect("uri");
+    let program = "\
+Pair: object {
+    a: @bit8
+    create: function (a: @bit8) pair: Pair {
+        pair = Pair { a = a }
+    }
+    zero: function () pair: Pair {
+        pair = Pair { a = 0x0 }
+    }
+    get: function (self) a: @bit8 {
+        a = self.a
+    }
+}
+Box[T]: object {
+    value: T
+    create: function (value: T) box: Box[T] {
+        box = Box[T] { value = value }
+    }
+    get: function (self) value: T {
+        value = self.value
+    }
+}
+main: function () nothing {
+    // EDIT
+}
+";
+    let mut version = 1;
+    let mut complete = |edit: &str, marker: &str| -> Vec<String> {
+        let text = program.replace("    // EDIT", edit);
+        if version == 1 {
+            did_open(&client, &uri, &text);
+        } else {
+            did_change(&client, &uri, version, &text);
+        }
+        version += 1;
+        let result = request(
+            &client,
+            "textDocument/completion",
+            position(&uri, after(&text, marker)),
+        )
+        .expect("completion");
+        let items = match serde_json::from_value::<Option<CompletionResponse>>(result)
+            .expect("completions")
+        {
+            Some(CompletionResponse::Array(items)) => items,
+            Some(CompletionResponse::List(list)) => list.items,
+            None => Vec::new(),
+        };
+        let mut labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
+        labels.sort_unstable();
+        labels
+    };
+    assert_eq!(complete("    p: Pair.", "Pair."), ["create", "zero"]);
+    assert_eq!(
+        complete("    p: Pair.cr(0x1)", "Pair.cr"),
+        ["create", "zero"]
+    );
+    assert_eq!(complete("    b: Box[@bit8].", "Box[@bit8]."), ["create"]);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

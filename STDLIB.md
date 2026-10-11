@@ -225,9 +225,10 @@ unsigned variants; float variants. Unsigned comparisons bind
 | `Arc[T]` | atomic reference count | same surface as `Rc[T]`; thread-safe |
 | `Weak[T]` | non-owning handle for cycles | `upgrade() Option[Rc[T] / Arc[T]]`, `strong_count` |
 
-Hooks: `@init` (allocate), `@on_copy` (`Unique` deep-copies or transfers;
-`Rc`/`Arc` bump the count), `@on_override` (drop the previous value),
-`@on_drop` (`Unique` frees; `Rc`/`Arc` decrement and free at zero).
+Constructors are static functions (`b: Unique[T].new(value)`). Hooks:
+`@on_copy` (`Unique` deep-copies or transfers; `Rc`/`Arc` bump the count),
+`@on_override` (drop the previous value), `@on_drop` (`Unique` frees;
+`Rc`/`Arc` decrement and free at zero).
 
 **Helpers:** `defer`/guard objects for RAII scopes; `align_up`; `mem_copy`,
 `mem_move`, `mem_set`, `mem_compare` (thin wrappers over `@memcpy`/`C`).

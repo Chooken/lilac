@@ -176,27 +176,8 @@ impl Parser {
                     expr = self.link(diags, chain, at, literal);
                 }
                 TokenKind::LBracket => {
-                    let open = self.bump();
-                    let mut generic_args = Vec::new();
-                    loop {
-                        generic_args.push(self.parse_type_inner(diags)?);
-                        match self.peek().kind {
-                            TokenKind::Comma => {
-                                self.bump();
-                            }
-                            TokenKind::RBracket => {
-                                self.bump();
-                                break;
-                            }
-                            _ => {
-                                return Err(Self::expected(
-                                    diags,
-                                    self.peek(),
-                                    "`,` or `]` in generic argument list",
-                                ));
-                            }
-                        }
-                    }
+                    let open = self.peek().span;
+                    let generic_args = self.parse_generic_args(diags)?;
                     if self.peek().kind == TokenKind::LParen {
                         let at = self.peek().span;
                         let call = self.finish_call(diags, expr, generic_args)?;
@@ -209,7 +190,7 @@ impl Parser {
                     let Some((name, name_span)) = path_of(&expr) else {
                         return Err(Self::err(
                             diags,
-                            open.span,
+                            open,
                             "expected `(` after generic arguments",
                         ));
                     };

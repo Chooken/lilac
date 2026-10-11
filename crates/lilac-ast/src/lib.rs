@@ -543,6 +543,22 @@ pub enum Expr {
     /// `Name[args]` in expression position: the receiver of a static member
     /// (`Box[@bit32].make()`, `Optional[T].Some(x)`).
     TypeApp(Box<Type>),
+    /// The initializer of the declaration shorthand `name: Type.function(args)`
+    /// (`name: Type = Type.function(args)`): the declared type is the
+    /// receiver, and `function` must be a static function of it returning
+    /// exactly one value of it.
+    Construct {
+        /// The static function's name.
+        function: String,
+        /// `Type.function`: the function's name is its tail.
+        member_span: Span,
+        /// Explicit generic arguments of the function (`Type.make[@bit32]`).
+        generic_args: Vec<Type>,
+        /// Call arguments.
+        args: Vec<Expr>,
+        /// `Type.function(args)`.
+        span: Span,
+    },
     /// An expression that failed to parse; its `span` covers the consumed
     /// tokens. Downstream passes map it to a poison value.
     Error {
@@ -611,6 +627,7 @@ impl Expr {
             | Self::Str(_, span)
             | Self::Char(_, span)
             | Self::Call { span, .. }
+            | Self::Construct { span, .. }
             | Self::Member { span, .. }
             | Self::BinOp { span, .. }
             | Self::IfValue { span, .. }

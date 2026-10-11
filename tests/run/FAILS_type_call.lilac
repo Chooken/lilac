@@ -1,0 +1,11 @@
+// expect-error: E056
+// expect-stderr: error[E056]: type `Pair` is not callable
+// A type is not a function: `Type(args)` is gone; call a static function.
+
+Pair: object {
+    a: @bit32
+}
+
+main: function () nothing {
+    p: Pair = Pair(0x1)
+}

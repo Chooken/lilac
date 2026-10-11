@@ -1,6 +1,6 @@
 //! Calls: one resolution path for every callee shape.
 //!
-//! `f(...)`, `Type.f(...)`, `value.f(...)`, `Type(...)` (`@init`),
+//! `f(...)`, `Type.f(...)`, `value.f(...)`, `name: Type.f(...)`,
 //! `@hook(...)`, `.Variant(...)` and intrinsics all end in either a call of a
 //! [`FuncKey`] (generic arguments resolved, instance requested) or a value
 //! (variant construction, folded literal, `@compile_error`).
@@ -128,7 +128,8 @@ impl Checker<'_> {
                     // `resolve_type` reported it.
                     return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
-                self.init_call(fcx, resolved, args, span)
+                let name = self.types.display_ref(resolved);
+                Err(self.type_call(fcx, &name, args, span))
             }
             _ => {
                 let _ = self.check_expr(fcx, callee, None);
@@ -211,10 +212,8 @@ impl Checker<'_> {
         }
         let receiver = Expr::Ident(name.to_owned(), name_span);
         if let Some(receiver) = self.static_receiver(fcx, &receiver) {
-            let receiver = self.callee(fcx, args, receiver)?;
-            let ty = self.static_init_type(receiver, name, generic_args, span, expected);
-            let ty = self.callee(fcx, args, ty)?;
-            return self.init_call(fcx, ty, args, span);
+            self.callee(fcx, args, receiver)?;
+            return Err(self.type_call(fcx, name, args, span));
         }
         let found = self.lookup_item(name, name_span);
         let Some(def) = self.callee(fcx, args, found)? else {
@@ -243,41 +242,6 @@ impl Checker<'_> {
             ),
         );
         Err(self.callee_failed(fcx, args, error))
-    }
-
-    /// The type `Name(...)` or `Name[T](...)` constructs, for a type named
-    /// by `receiver`: generic arguments given, else inferred.
-    fn static_init_type(
-        &mut self,
-        receiver: Receiver,
-        name: &str,
-        generic_args: &[AstType],
-        span: Span,
-        expected: Option<TypeId>,
-    ) -> Result<TypeRef, ErrorGuaranteed> {
-        let def = match receiver {
-            Receiver::Type(ty) => return Ok(ty),
-            Receiver::Bare(def) if generic_args.is_empty() => {
-                return self.infer_bare(def, expected, span);
-            }
-            Receiver::Bare(def) => def,
-        };
-        let mut resolved = Vec::new();
-        for arg in generic_args {
-            let arg = self.resolve_type(arg);
-            if arg.is_error() {
-                // `resolve_type` reported it.
-                return Err(self.diags.already_reported());
-            }
-            resolved.push(arg);
-        }
-        let count = self.res.def(def).generic_params.len();
-        if resolved.len() != count {
-            return Err(self.generic_arity(span, name, count, resolved.len()));
-        }
-        let ty = self.type_of_def(def, resolved);
-        self.ensure_type(ty, span)?;
-        Ok(ty)
     }
 
     /// A call whose callee failed (`error` reports it): still checks each
@@ -613,56 +577,168 @@ impl Checker<'_> {
         (!ty.is_error()).then_some(ty)
     }
 
-    /// `Type(args)`: the `@init` overload returning `Type`.
-    fn init_call(
+    /// `Type(args)`: a type is not callable; its static functions are.
+    fn type_call(
         &mut self,
         fcx: &mut FnCx,
-        ty: TypeRef,
+        name: &str,
         args: &[Expr],
         span: Span,
-    ) -> Result<Called, ErrorGuaranteed> {
-        let name = self.types.display(ty.id);
-        let overloads: Vec<Hook> = self
-            .overloads("@init")
-            .into_iter()
-            .filter(|hook| hook.sig.returns.first().is_some_and(|ret| ret.id == ty.id))
-            .collect();
-        if overloads.is_empty() {
-            let error = self.emit_involving(
-                Diagnostic::error(
-                    codes::E022,
-                    format!("type `{name}` has no `@init` constructor"),
-                )
-                .label(span, true, "define `@init` or use `= { ... }`"),
-                &[ty.id],
-            );
-            return Err(self.callee_failed(fcx, args, error));
-        }
-        let Some(hook) = self.select_overload(fcx, &overloads, args) else {
-            let error = self.diags.emit(
-                Diagnostic::error(
-                    codes::E022,
-                    format!(
-                        "no overload of `{name}.@init` takes {} arguments",
-                        args.len()
-                    ),
-                )
-                .label(span, true, "arity mismatch here"),
-            );
-            return Err(self.callee_failed(fcx, args, error));
+    ) -> ErrorGuaranteed {
+        let error = self.diags.emit(
+            Diagnostic::error(codes::E056, format!("type `{name}` is not callable"))
+                .label(span, true, "a type, not a function")
+                .help(format!(
+                    "call a static function: `{name}.create(...)`, or declare `variable: {name}.create(...)`"
+                )),
+        );
+        self.callee_failed(fcx, args, error)
+    }
+
+    /// The declared type of `name: Type.function(args)`: `Type`, which a
+    /// namespace is not.
+    pub(crate) fn construct_type(&mut self, ty: &AstType, function: &str) -> TypeRef {
+        let path = match &ty.shape {
+            lilac_ast::TypeShape::Named { name, args } if args.is_empty() => name.as_str(),
+            _ => return self.resolve_type(ty),
         };
-        if let Some(owner) = self.res.def(hook.key.def).parent {
-            if self.private_denied(hook.key.def, owner, span) {
-                // `private_denied` reported `E026`.
-                return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
-            }
+        if !self.names_namespace(path) {
+            return self.resolve_type(ty);
         }
-        let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
-        Ok(Called::Call {
-            callee: HirCallee::Func(hook.key),
+        self.diags.emit(
+            Diagnostic::error(codes::E056, format!("`{path}` is a namespace, not a type"))
+                .label(ty.span, true, "the declaration shorthand needs a type here")
+                .help(format!(
+                    "the name before `(` is a static function of the type before it; \
+                     to call `{path}.{function}`, write `variable: Type = {path}.{function}(...)`"
+                )),
+        );
+        TypeRef::ERROR
+    }
+
+    /// `name: Type.function(args)`: a call of `function`, a static function
+    /// of the declared type `expected` (no `self`), which must return
+    /// exactly one value of that type.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_construct(
+        &mut self,
+        fcx: &mut FnCx,
+        function: &str,
+        member_span: Span,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> HirExpr {
+        let Some(want) = expected.filter(|want| *want != TypeId::ERROR) else {
+            // The declared type reported it.
+            let _ = self.callee_failed(fcx, args, self.diags.already_reported());
+            return HirExpr::poison(span);
+        };
+        let ty = TypeRef::value(want);
+        let receiver = Receiver::Type(ty);
+        let owner = self
+            .type_parts(want)
+            .map(|(def, _)| MemberReceiver::Constructor(def));
+        if let Err(error) = self.record_member(member_span, function, owner) {
+            let _ = self.callee_failed(fcx, args, error);
+            return HirExpr::poison(span);
+        }
+        let name = tail_span(member_span, function);
+        if let Some(error) = self.construct_member_error(ty, function, name) {
+            let _ = self.callee_failed(fcx, args, error);
+            return HirExpr::poison(span);
+        }
+        let called = self.static_call(
+            fcx,
+            receiver,
+            function,
+            generic_args,
             args,
-            outs: hook.sig.returns,
-        })
+            span,
+            member_span,
+            expected,
+        );
+        let Ok(Called::Call { callee, args, outs }) = called else {
+            // `static_call` reported it (a variant was ruled out above).
+            return HirExpr::poison(span);
+        };
+        if outs.as_slice() != [ty] {
+            let owner = self.types.display_ref(ty);
+            let returns = if outs.is_empty() {
+                "nothing".to_owned()
+            } else {
+                let names: Vec<String> = outs
+                    .iter()
+                    .map(|out| self.types.display_ref(*out))
+                    .collect();
+                format!("`{}`", names.join(", "))
+            };
+            let mut involved = vec![want];
+            involved.extend(outs.iter().map(|out| out.id));
+            self.emit_involving(
+                Diagnostic::error(
+                    codes::E056,
+                    format!("`{owner}.{function}` returns {returns}, not one `{owner}`"),
+                )
+                .label(name, true, format!("must return exactly one `{owner}`"))
+                .help(format!(
+                    "the shorthand needs a function that makes a `{owner}`; otherwise write `variable: {owner} = ...`"
+                )),
+                &involved,
+            );
+            return HirExpr::poison(span);
+        }
+        HirExpr {
+            ty,
+            span,
+            kind: HirExprKind::Call {
+                callee,
+                args,
+                rest: Vec::new(),
+            },
+        }
+    }
+
+    /// Why member `function` of `ty` cannot be the shorthand's function: it
+    /// is a variant, or a method taking `self`. A missing member is left to
+    /// [`Self::static_call`].
+    fn construct_member_error(
+        &mut self,
+        ty: TypeRef,
+        function: &str,
+        name: Span,
+    ) -> Option<ErrorGuaranteed> {
+        let (def, _) = self.type_parts(ty.id)?;
+        let member = self.res.member(def, function)?;
+        let owner = self.types.display_ref(ty);
+        let (message, label, help) = match &self.res.def(member).kind {
+            DefKind::Variant(_) => (
+                format!("`{function}` is a variant of `{owner}`, not a static function"),
+                "a variant",
+                format!("write `variable: {owner} = .{function}`, with its payload if it has one"),
+            ),
+            DefKind::Func(decl)
+                if decl
+                    .params
+                    .first()
+                    .is_some_and(|param| param.name.is_empty() && param.ty.is_self()) =>
+            {
+                (
+                    format!("`{owner}.{function}` takes `self`"),
+                    "a method",
+                    "the shorthand calls a static function, one without `self`".to_owned(),
+                )
+            }
+            _ => return None,
+        };
+        Some(
+            self.diags.emit(
+                Diagnostic::error(codes::E056, message)
+                    .label(name, true, label)
+                    .help(help),
+            ),
+        )
     }
 
     /// `@hook(args)`: exact-match overload selection.

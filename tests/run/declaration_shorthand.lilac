@@ -1,4 +1,7 @@
 // expect-exit: 6
+// `name: Type { fields }` and `name: Type.function(args)` declare a
+// variable of the written type; the function is a static function of it
+// (with generic arguments on the type or the function).
 
 using Standard.Process
 
@@ -6,13 +9,27 @@ Pair: object {
     a: @bit32
     b: @bit32
 
-    @init: function (a: @bit32) out: Pair {
-        out = Pair { a = a, b = 0x2 }
+    create: function (a: @bit32) value: Pair {
+        value = Pair { a = a, b = 0x2 }
+    }
+}
+
+Holder[T]: object {
+    value: T
+
+    create: function (value: T) holder: Holder[T] {
+        holder = Holder[T] { value = value }
+    }
+
+    convert[U]: function (value: U) holder: Holder[T] {
+        holder = Holder[T] { value = @truncate(value) }
     }
 }
 
 main: function () nothing {
     p: Pair { a = 0x1, b = 0x3 }
-    q: Pair(0x0)
-    exit(@i_add_32(@i_add_32(p.a, p.b), q.b))
+    q: Pair.create(0x0)
+    h: Holder[@bit32].create(0x0)
+    c: Holder[@bit32].convert[@bit64](0x0)
+    exit(@i_add_32(@i_add_32(@i_add_32(p.a, p.b), q.b), @i_add_32(h.value, c.value)))
 }

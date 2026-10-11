@@ -819,58 +819,45 @@ fn method_without_self_is_e022() {
 }
 
 #[test]
-fn factory_call_checks() {
-    // `Type(args)` routes to the `@init` factory hook (SPEC §8 RAII).
+fn declaration_shorthand_calls_a_static_function() {
+    // `variable: Object.create(0x1)` is `variable: Object = Object.create(0x1)`,
+    // and its arguments convert like any call's.
     let diags = check_src(
-        "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object {\n            value = value\n        }\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        "Object: object {\n    value: @bit32\n    create: function (value: @bit32) result: Object {\n        result = Object { value = value }\n    }\n}\n@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\nmain: function () nothing {\n    b: @bit8 = 0x2\n    variable: Object.create(b)\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
 #[test]
-fn factory_missing_init_is_e022() {
+fn declaration_shorthand_method_is_e056() {
+    let diags = check_src(
+        "Object: object {\n    value: @bit8\n    copy: function (self) result: Object {\n        result = Object { value = self.value }\n    }\n}\nmain: function () nothing {\n    a: Object { value = 0x1 }\n    b: Object.copy(ref a)\n}\n",
+    );
+    assert!(has_code(&diags, "E056"), "{diags:?}");
+}
+
+#[test]
+fn declaration_shorthand_variant_is_e056() {
+    let diags = check_src(
+        "Shape: enum {\n    Dot\n}\nmain: function () nothing {\n    s: Shape.Dot()\n}\n",
+    );
+    assert!(has_code(&diags, "E056"), "{diags:?}");
+}
+
+#[test]
+fn calling_a_type_is_e056() {
     let diags = check_src(
         "Object: object {\n    value: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
     );
-    assert!(has_code(&diags, "E022"), "{diags:?}");
+    assert!(has_code(&diags, "E056"), "{diags:?}");
 }
 
 #[test]
-fn factory_self_param_is_e022() {
-    // Factories take plain parameters (Zig rejects `self` on `@init`).
+fn init_hook_is_e056() {
     let diags = check_src(
-        "Object: object {\n    value: @bit8\n    @init: function (self) result: Object {\n        result = Object {\n            value = 0x1\n        }\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object { value = value }\n    }\n}\nmain: function () nothing {\n}\n",
     );
-    assert!(has_code(&diags, "E022"), "{diags:?}");
-}
-
-#[test]
-fn factory_wrong_return_is_e022() {
-    let diags = check_src(
-        "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: @bit8 {\n        result = value\n    }\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
-    );
-    assert!(has_code(&diags, "E022"), "{diags:?}");
-}
-
-#[test]
-fn factory_selects_init_overload_by_arity() {
-    // Member hooks overload: `Object(0x1)` must pick the 1-arg `@init`,
-    // not the 0-arg one, and `Object()` must pick the 0-arg one.
-    let diags = check_src(
-        "Object: object {\n    value: @bit8\n    @init: function () result: Object {\n        result = Object { value = 0x1 }\n    }\n    @init: function (value: @bit8) result: Object {\n        result = Object { value = value }\n    }\n}\nmain: function () nothing {\n    a: Object = Object()\n    b: Object = Object(0x1)\n}\n",
-    );
-    assert!(!diags.has_errors(), "{diags:?}");
-}
-
-#[test]
-fn factory_does_not_convert_arguments() {
-    // A factory is a hook, so its arguments match exactly: `Object(b)` with
-    // `b: @bit8` and an `@bit8 -> @bit32` conversion is `E010`, not a
-    // conversion.
-    let diags = check_src(
-        "Object: object {\n    value: @bit32\n    @init: function (value: @bit32) result: Object {\n        result = Object { value = value }\n    }\n}\n@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\nmain: function () nothing {\n    b: @bit8 = 0x2\n    c: Object = Object(b)\n}\n",
-    );
-    assert!(has_code(&diags, "E010"), "{diags:?}");
+    assert!(has_code(&diags, "E056"), "{diags:?}");
 }
 
 #[test]
@@ -1069,14 +1056,14 @@ fn nested_private_object_field_resolves() {
     // Regression: a field wrapped in nested `private` blocks must flatten
     // into the object's member fields, not be routed as a top-level item
     // (which silently dropped it and produced a spurious `E021`).
-    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    @init: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n\n    get: function (instance: ref Object) result: @bit8 {\n        result = instance.f\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object()\n    value: @bit8 = variable.get()\n}\n";
+    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n\n    get: function (instance: ref Object) result: @bit8 {\n        result = instance.f\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.get()\n}\n";
     let diags = check_src(src);
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
 #[test]
 fn nested_private_object_field_is_e026_outside() {
-    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    @init: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object()\n    value: @bit8 = variable.f\n}\n";
+    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.f\n}\n";
     let diags = check_src(src);
     assert!(has_code(&diags, "E026"), "{diags:?}");
     assert!(!has_code(&diags, "E021"), "{diags:?}");
@@ -1767,7 +1754,7 @@ fn unused_generic_drops_errors_about_its_parameter() {
          p2[T]: function (x: T) out: @bit32 {\n    out = x.foo()\n}\n\
          p3[T]: function (x: T) out: @bit32 {\n    out = x\n}\n\
          p4[T]: function () out: T {\n    out = 0x5\n}\n\
-         p5[T]: function () out: T {\n    out = T(0x1)\n}\n\
+         p5[T]: function () out: T {\n    value: T.create(0x1)\n    out = value\n}\n\
          p6[T]: function (x: T) out: @bit32 {\n    out = 0x0\n    if x {\n        out = 0x1\n    }\n}\n\
          p7[T]: function (x: T) out: Box[T] {\n    out = Box[T] { value = 0x1 }\n}\n\
          main: function () nothing {\n}\n",

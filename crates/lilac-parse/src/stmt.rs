@@ -404,11 +404,17 @@ impl Parser {
                 }
                 return Err(diags.already_reported());
             }
-            let value = if bindings.len() == 1
-                && matches!(self.peek().kind, TokenKind::LBrace | TokenKind::LParen)
+            let value = if bindings.len() == 1 && self.at_decl_shorthand() {
+                self.parse_decl_shorthand(diags, &mut bindings[0].ty)?
+            } else if bindings.len() == 1
+                && self.peek().kind != TokenKind::Eq
+                && ends_with_empty_segment(&bindings[0].ty)
             {
-                let ty = bindings[0].ty.clone();
-                self.parse_decl_shorthand(diags, &ty)?
+                // `name: Type.` mid-edit (the `.` is reported): keep the
+                // declaration, so its type's path completes.
+                Expr::Error {
+                    span: bindings[0].ty.span,
+                }
             } else {
                 self.expect(diags, TokenKind::Eq, "`=` after variable type")?;
                 self.parse_expr_recover(diags)?
@@ -443,12 +449,29 @@ impl Parser {
         Ok(Stmt::ExprStmt(target))
     }
 
+    /// Whether a declaration shorthand follows `name: Type`: `{`, `(`, or
+    /// the `.` of `Box[T].create(args)` on the same line.
+    pub(crate) fn at_decl_shorthand(&self) -> bool {
+        let next = self.peek();
+        match next.kind {
+            TokenKind::LBrace | TokenKind::LParen => true,
+            TokenKind::Dot => !next.newline_before,
+            _ => false,
+        }
+    }
+
     /// The declaration shorthands after `name: Type`: `{ fields }` is
-    /// `= Type { fields }` and `(args)` is `= Type(args)` (the `@init` call).
+    /// `= Type { fields }`, and `.function(args)` is
+    /// `= Type.function(args)` (an [`Expr::Construct`]). A dotted type
+    /// name read before `(` loses its last segment to the function, which
+    /// takes the name's generic arguments (`Type.make[T](args)`); a type
+    /// with generic arguments is followed by its own `.function`
+    /// (`Box[T].create(args)`). `Type(args)` with no function stays a call
+    /// of the type, which typeck rejects.
     pub(crate) fn parse_decl_shorthand(
         &mut self,
         diags: &mut lilac_error::Diags,
-        ty: &Type,
+        ty: &mut Type,
     ) -> Result<Expr, ErrorGuaranteed> {
         if ty.is_ref || matches!(ty.shape, TypeShape::Function(_) | TypeShape::Error) {
             let found = self.peek();
@@ -459,15 +482,105 @@ impl Parser {
             return Err(diags.emit(
                 Diagnostic::error(codes::E001, msg)
                     .label(found.span, true, String::new())
-                    .help("`Type { ... }` and `Type(...)` shorthands need a named type"),
+                    .help("`Type { ... }` and `Type.function(...)` shorthands need a named type"),
             ));
         }
-        if self.peek().kind == TokenKind::LBrace {
-            return self.parse_struct_lit(diags, ty.clone());
+        match self.peek().kind {
+            TokenKind::LBrace => self.parse_struct_lit(diags, ty.clone()),
+            TokenKind::Dot => {
+                let dot = self.bump();
+                let (function, function_span) = if self.name_follows() {
+                    let name = self.bump();
+                    (name.text, name.span)
+                } else {
+                    // Mid-edit: an empty name, which the editor completes
+                    // with the type's static functions.
+                    self.nameless(diags, dot.span, "a static function name after `.`");
+                    (
+                        String::new(),
+                        Span::new(dot.span.hi.0, dot.span.hi.0, dot.span.file),
+                    )
+                };
+                let generic_args = if self.peek().kind == TokenKind::LBracket {
+                    self.parse_generic_args(diags)?
+                } else {
+                    Vec::new()
+                };
+                self.finish_construct(diags, ty, function, function_span, generic_args)
+            }
+            _ => {
+                if let Some((function, function_span, generic_args)) = split_function(ty) {
+                    return self.finish_construct(diags, ty, function, function_span, generic_args);
+                }
+                let callee = type_expr(ty);
+                self.finish_call(diags, callee, Vec::new())
+            }
         }
-        let callee = type_expr(ty);
-        self.finish_call(diags, callee, Vec::new())
     }
+
+    /// `(args)` after `Type.function` in the declaration shorthand.
+    fn finish_construct(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        ty: &Type,
+        function: String,
+        function_span: Span,
+        generic_args: Vec<Type>,
+    ) -> Result<Expr, ErrorGuaranteed> {
+        let member_span = join_spans(ty.span, function_span);
+        if function.is_empty() && self.peek().kind != TokenKind::LParen {
+            // Mid-edit (`Box[T].`; the `.` is reported): no call yet.
+            return Ok(Expr::Construct {
+                function,
+                member_span,
+                generic_args,
+                args: Vec::new(),
+                span: member_span,
+            });
+        }
+        let callee = Expr::Ident(function.clone(), member_span);
+        let Expr::Call { args, span, .. } = self.finish_call(diags, callee, Vec::new())? else {
+            unreachable!("`finish_call` builds a call");
+        };
+        Ok(Expr::Construct {
+            function,
+            member_span,
+            generic_args,
+            args,
+            span,
+        })
+    }
+}
+
+/// Whether a type's dotted name ends in a `.` with no name (`Type.`).
+fn ends_with_empty_segment(ty: &Type) -> bool {
+    matches!(&ty.shape, TypeShape::Named { name, .. } if name.ends_with('.'))
+}
+
+/// Splits the function off a dotted type name read before `(` in the
+/// declaration shorthand (`A.Type.make[T]`), leaving `A.Type`; the
+/// function takes the generic arguments. `None` for an undotted name.
+fn split_function(ty: &mut Type) -> Option<(String, Span, Vec<Type>)> {
+    let TypeShape::Named { name, args } = &mut ty.shape else {
+        return None;
+    };
+    let (path, function) = name.rsplit_once('.')?;
+    let function = function.to_owned();
+    let path_len = u32::try_from(path.len()).unwrap_or(u32::MAX);
+    let lo = ty.name_span.lo.0;
+    let function_span = Span::new(
+        ty.name_span
+            .hi
+            .0
+            .saturating_sub(u32::try_from(function.len()).unwrap_or(u32::MAX)),
+        ty.name_span.hi.0,
+        ty.name_span.file,
+    );
+    name.truncate(path.len());
+    let generic_args = std::mem::take(args);
+    ty.name_span = Span::new(lo, lo.saturating_add(path_len), ty.name_span.file);
+    ty.span = ty.name_span;
+    Some((function, function_span, generic_args))
 }
 
 /// Splits the tag off a dotted qualifier that swallowed it (`A.Enum.Tag`),

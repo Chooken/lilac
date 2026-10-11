@@ -214,6 +214,9 @@ pub enum MemberReceiver {
     /// An object or enum written as a type: its static functions and
     /// variants.
     Type(DefId),
+    /// An object or enum written as a declaration's type (`name: Type.`):
+    /// its static functions, for the declaration shorthand.
+    Constructor(DefId),
     /// A namespace: its items and child namespaces.
     Namespace(lilac_resolve::NsId),
 }

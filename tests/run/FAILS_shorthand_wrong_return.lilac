@@ -1,0 +1,17 @@
+// expect-error: E056
+// expect-stderr: error[E056]: `Pair.first` returns `@bit32`, not one `Pair`
+// `name: Type.function(args)` needs a function that returns exactly one
+// `Type`.
+
+Pair: object {
+    a: @bit32
+
+    first: function (pair: ref Pair) value: @bit32 {
+        value = pair.a
+    }
+}
+
+main: function () nothing {
+    other: Pair { a = 0x1 }
+    p: Pair.first(ref other)
+}

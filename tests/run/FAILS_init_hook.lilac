@@ -1,0 +1,13 @@
+// expect-error: E056
+// expect-stderr: error[E056]: there is no `@init` hook
+// `@init` is gone: a constructor is a named static function.
+
+Pair: object {
+    a: @bit32
+
+    @init: function (a: @bit32) value: Pair {
+        value = Pair { a = a }
+    }
+}
+
+main: function () nothing {}

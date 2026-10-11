@@ -333,7 +333,7 @@ fn multilet_parses() {
 #[test]
 fn declaration_shorthands_desugar() {
     let stmts = main_stmts(
-        "main: function () nothing {\n    a: Object {\n        member = 0x1\n    }\n    b: Box[@bit8] { value = 0x1 }\n    c: Object(0x1, 0x2)\n    d: Box[@bit8](0x1)\n}\n",
+        "main: function () nothing {\n    a: Object {\n        member = 0x1\n    }\n    b: Box[@bit8] { value = 0x1 }\n    c: Object.create(0x1, 0x2)\n    d: Box[@bit8].create(0x1)\n    e: A.Pair.make[@bit8](0x1)\n    f: Object(0x1)\n}\n",
     );
     let Stmt::Let { value, .. } = &stmts[0] else {
         panic!("{:?}", stmts[0]);
@@ -345,19 +345,37 @@ fn declaration_shorthands_desugar() {
         panic!("{:?}", stmts[1]);
     };
     assert!(matches!(value, Expr::StructLit { ty, .. } if ty.args().len() == 1));
-    let Stmt::Let { value, .. } = &stmts[2] else {
+    // The segment before `(` is the function; the rest is the type.
+    let Stmt::Let { ty, value, .. } = &stmts[2] else {
         panic!("{:?}", stmts[2]);
     };
-    let Expr::Call { callee, args, .. } = value else {
-        panic!("{value:?}");
-    };
-    assert!(matches!(callee.as_ref(), Expr::Ident(name, _) if name == "Object"));
-    assert_eq!(args.len(), 2);
-    let Stmt::Let { value, .. } = &stmts[3] else {
+    assert_eq!(ty.head(), "Object");
+    assert!(
+        matches!(value, Expr::Construct { function, args, .. } if function == "create" && args.len() == 2),
+        "{value:?}"
+    );
+    let Stmt::Let { ty, value, .. } = &stmts[3] else {
         panic!("{:?}", stmts[3]);
     };
+    assert_eq!((ty.head(), ty.args().len()), ("Box", 1));
     assert!(
-        matches!(value, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::TypeApp(ty) if ty.head() == "Box"))
+        matches!(value, Expr::Construct { function, generic_args, .. } if function == "create" && generic_args.is_empty()),
+        "{value:?}"
+    );
+    let Stmt::Let { ty, value, .. } = &stmts[4] else {
+        panic!("{:?}", stmts[4]);
+    };
+    assert_eq!((ty.head(), ty.args().len()), ("A.Pair", 0));
+    assert!(
+        matches!(value, Expr::Construct { function, generic_args, .. } if function == "make" && generic_args.len() == 1),
+        "{value:?}"
+    );
+    // `Type(args)` stays a call of the type, which typeck rejects.
+    let Stmt::Let { value, .. } = &stmts[5] else {
+        panic!("{:?}", stmts[5]);
+    };
+    assert!(
+        matches!(value, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident(name, _) if name == "Object"))
     );
 }
 

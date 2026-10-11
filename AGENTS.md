@@ -339,8 +339,10 @@
   cursor (`Scope::dot_entries`): a `HirProgram::members` site lists the
   members of what typeck looked the name up in (`Checker::record_member`:
   a value's fields and methods, a type's statics and variants, a
-  namespace's items, from `field_access`, `method_call`, the static
-  receivers and `lookup_item`'s path steps); else the `HirProgram::tags`
+  namespace's items, a declaration's type's static functions
+  (`MemberReceiver::Constructor`, for `name: Type.function(args)`), from
+  `field_access`, `method_call`, the static receivers, `check_construct`
+  and `lookup_item`'s path steps); else the `HirProgram::tags`
   site lists the expected enum's variants (`Checker::record_tag`), minus
   those other `match` arms name, and none when no enum is expected. The
   driver adds the top-level conditions' tags and namespace members

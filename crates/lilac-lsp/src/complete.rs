@@ -33,6 +33,9 @@ enum Named {
     Ns(NsId),
     /// An object or enum, written as a type (`Point.`, `Optional.`).
     Type(DefId),
+    /// An object or enum written as a declaration's type (`p: Point.`):
+    /// its static functions.
+    Constructor(DefId),
     /// A value of a type (a local, a field, a constant).
     Value(TypeRef),
     /// Another item (a function, a variant).
@@ -152,7 +155,9 @@ impl<'a> Scope<'a> {
                 Segment::Def(id) => Some(self.item(id)),
                 Segment::Ns(ns) => Some(Named::Ns(ns)),
             },
-            Named::Type(def) => resolved.member(def, segment).map(Named::Item),
+            Named::Type(def) | Named::Constructor(def) => {
+                resolved.member(def, segment).map(Named::Item)
+            }
             Named::Value(ty) => {
                 if let Some((_, field)) = self
                     .fields(ty)
@@ -248,6 +253,19 @@ impl<'a> Scope<'a> {
                         resolved.def(**id).kind,
                         DefKind::Func(_) | DefKind::Variant(_)
                     )
+                })
+                .filter_map(|id| self.item_entry(*id))
+                .collect(),
+            Named::Constructor(def) => resolved
+                .def(def)
+                .members
+                .values()
+                .filter(|id| match &resolved.def(**id).kind {
+                    DefKind::Func(decl) => !decl
+                        .params
+                        .first()
+                        .is_some_and(|param| param.name.is_empty() && param.ty.is_self()),
+                    _ => false,
                 })
                 .filter_map(|id| self.item_entry(*id))
                 .collect(),
@@ -365,6 +383,7 @@ impl<'a> Scope<'a> {
             self.members(match receiver {
                 MemberReceiver::Value(ty) => Named::Value(ty),
                 MemberReceiver::Type(def) => Named::Type(def),
+                MemberReceiver::Constructor(def) => Named::Constructor(def),
                 MemberReceiver::Namespace(ns) => Named::Ns(ns),
             })
         });

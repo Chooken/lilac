@@ -1,6 +1,6 @@
 # Ownership Plan
 
-> Status: Phase 0 done. Source: the arena allocator review and the
+> Status: Phases 0 and 1 done. Source: the arena allocator review and the
 > ownership design discussion of 2026-10-11.
 > Goal: `Rc`, `Arc`, `Box` and custom allocators can be written in
 > `Standard` and used like plain values. No value ever has two owners or

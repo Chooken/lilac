@@ -354,7 +354,10 @@ impl Checker<'_> {
                 value,
                 span,
             } => {
-                let declared = self.resolve_type(ty);
+                let declared = match value {
+                    Expr::Construct { function, .. } => self.construct_type(ty, function),
+                    _ => self.resolve_type(ty),
+                };
                 let expected = (!declared.is_error()).then_some(declared.id);
                 let value_hir = self.check_expr(fcx, value, expected);
                 let value_hir = self.coerce(value_hir, declared, ty.span);

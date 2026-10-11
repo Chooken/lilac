@@ -104,6 +104,24 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether the dotted `path` names a namespace (no item along it).
+    pub(crate) fn names_namespace(&self, path: &str) -> bool {
+        let mut parts = path.split('.');
+        let Head::One(mut segment) = self.lookup_head(parts.next().unwrap_or(path)) else {
+            return false;
+        };
+        for part in parts {
+            let Segment::Ns(ns) = segment else {
+                return false;
+            };
+            match self.res.ns_member(ns, part, self.file_ns()) {
+                Some(next) => segment = next,
+                None => return false,
+            }
+        }
+        matches!(segment, Segment::Ns(_))
+    }
+
     /// The `using … as` alias a local receiver hides: its name and the
     /// alias's span, when `receiver` is a local named like an alias of this
     /// file. Locals shadow aliases, so `Math.pow()` with a local `Math` is a
@@ -160,7 +178,16 @@ impl Checker<'_> {
         for (at, part) in parts.enumerate().map(|(at, part)| (at + 1, part)) {
             // An item ends the path.
             let Segment::Ns(ns) = segment else {
-                self.record_member(span_of(at), part, None)?;
+                // Only a declaration's type reads on past a type
+                // (`name: Type.`, mid-edit): the shorthand's static
+                // functions follow.
+                let receiver = match segment {
+                    Segment::Def(def) if self.res.def(def).is_type() => {
+                        Some(MemberReceiver::Constructor(def))
+                    }
+                    _ => None,
+                };
+                self.record_member(span_of(at), part, receiver)?;
                 return Ok(None);
             };
             self.record_member(span_of(at), part, Some(MemberReceiver::Namespace(ns)))?;

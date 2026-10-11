@@ -107,26 +107,8 @@ impl Parser {
         let mut end = name_token.span;
         let mut generic_args = Vec::new();
         if self.peek().kind == TokenKind::LBracket {
-            self.bump();
-            loop {
-                generic_args.push(self.parse_type_inner(diags)?);
-                match self.peek().kind {
-                    TokenKind::Comma => {
-                        self.bump();
-                    }
-                    TokenKind::RBracket => {
-                        end = self.bump().span;
-                        break;
-                    }
-                    _ => {
-                        return Err(Self::expected(
-                            diags,
-                            self.peek(),
-                            "`,` or `]` in generic argument list",
-                        ));
-                    }
-                }
-            }
+            generic_args = self.parse_generic_args(diags)?;
+            end = self.prev_span();
         }
         let shape = if name_token.kind == TokenKind::KwSelf {
             if !generic_args.is_empty() {
@@ -149,6 +131,34 @@ impl Parser {
             is_ref,
             span: join_spans(start, end),
         })
+    }
+
+    /// `[T, U]`: generic arguments, from the `[` through the `]`.
+    pub(crate) fn parse_generic_args(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Type>, ErrorGuaranteed> {
+        self.expect(diags, TokenKind::LBracket, "`[` to open generic arguments")?;
+        let mut args = Vec::new();
+        loop {
+            args.push(self.parse_type_inner(diags)?);
+            match self.peek().kind {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RBracket => {
+                    self.bump();
+                    return Ok(args);
+                }
+                _ => {
+                    return Err(Self::expected(
+                        diags,
+                        self.peek(),
+                        "`,` or `]` in generic argument list",
+                    ));
+                }
+            }
+        }
     }
 
     /// Parses `(Type, length)` after `@array`; the length is a number

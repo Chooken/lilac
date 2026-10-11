@@ -581,14 +581,23 @@ match number {
 
 Variables are declared using `name: Type = value` syntax. Two shorthands
 avoid writing the type twice: `name: Type { fields }` means
-`name: Type = Type { fields }`, and `name: Type(args)` means
-`name: Type = Type(args)` (the `@init` constructor). Both work for generic
-types (`b: Box[@bit32] { value = 0x1 }`).
+`name: Type = Type { fields }`, and `name: Type.function(args)` means
+`name: Type = Type.function(args)`. Both work for generic types
+(`b: Box[@bit32] { value = 0x1 }`, `b: Box[@bit32].create(0x1)`).
+
+In the second, `function` is a static function of `Type` (declared in its
+body, without `self`) that returns exactly one `Type`; anything else is
+`E056`. The segment before `(` is always the function and the rest is the
+type, so `name: A.Pair.make[@bit8](x)` calls `make[@bit8]` on `A.Pair`, and
+a namespace there is an error. A type is not callable: there is no
+`Type(args)` and no `@init` hook. A constructor is an ordinary static
+function with a name that says what it does (`create`, `with_capacity`);
+plain functions do not overload, so each constructor gets its own name.
 
 ```lilac
 counter: @bit32 = 0x0
 user: Object {}
-custom_user: Object(0x1, "Lilac") // Invokes @init with custom params
+custom_user: Object.create(0x1, "Lilac") // `Object = Object.create(0x1, "Lilac")`
 ```
 
 Redeclaring a name in the same block is `E020`; a nested block may shadow
@@ -721,8 +730,7 @@ marks members *object-private*: the member is found but inaccessible from outsid
 the object, which is `E026`. A private declaration still occupies its name (a
 private/public clash is `E020`), and `private` does not gate hook resolution:
 hooks are unit-global and scope-independent, so a `private` member hook is still
-found for operators and `@conversion`, while `private` still gates direct RAII
-access (such as a `@init` constructor call) from outside the object.
+found for operators and `@conversion`.
 
 **Collisions.** A same-named declaration in one namespace is `E020`, first
 binding wins. A local (or ancestor-reached) name shadows an imported one. If two
@@ -982,7 +990,7 @@ binding.
 
 #### Operator hooks
 
-Operator, `@conversion`, and RAII (`@init`/`@on_drop`) hooks are globally
+Operator, `@conversion`, and RAII (`@on_copy`/`@on_drop`) hooks are globally
 indexed by `(name, signature)`: each declaration is a distinct overload keyed by
 its parameter/return shape, so mixed-width bit algebra and custom-type operators
 coexist in one table. The index is unit-global and scope-independent — a
@@ -1071,19 +1079,21 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 
 | Hook | Signature | Invocation Trigger & Behavior Rules | Desugar |
 | --- | --- | --- | --- |
-| **`@init`** | `(...params) Type` | Called immediately after object instantiation. Can be defined with custom parameters and invoked directly as a constructor using the syntax `Type(params)`. | `variable: Type(...params)` -> `variable: Type = @init(...params)` |
 | **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** an existing place's value is overwritten (not when a function assigns its own out slot). **Rule:** The value in `prev` is dropped immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) drop(variable) variable = new` |
 | **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1). You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
-| **`@on_drop`** | `(ref Type) nothing` | Called when the owner of a value goes away (§1), before the value's fields are dropped. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type()` -> `variable: Type() defer drop(variable)` |
+| **`@on_drop`** | `(ref Type) nothing` | Called when the owner of a value goes away (§1), before the value's fields are dropped. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type = value` -> `variable: Type = value defer drop(variable)` |
 
-Example of defining custom constructors and RAII rules
+There is no construction hook: a constructor is a static function, and
+`name: Type.function(args)` declares a variable with one (§5).
+
+Example of defining a constructor and RAII rules
 
 ```lilac
 Buffer: object {
     ptr: ref @bit8
 
-    // Custom constructor called via Buffer(size)
-    @init: function (self, size: @bit32) nothing {
+    // A constructor: `buffer: Buffer.create(size)`
+    create: function (size: @bit32) buffer: Buffer {
         // allocation logic
     }
 

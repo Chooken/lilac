@@ -75,6 +75,8 @@ fn lir_snapshots_stable() {
 
 /// Legacy `tests/*.lilac` programs that still check cleanly.
 const LEGACY_CLEAN: &[&str] = &[
+    "constructor_decl.lilac",
+    "constructor_use.lilac",
     "match.lilac",
     "match_else.lilac",
     "match_enum_2.lilac",
@@ -87,8 +89,6 @@ const LEGACY_CLEAN: &[&str] = &[
     "op_mod.lilac",
     "op_mul.lilac",
     "op_sub.lilac",
-    "raii_init_decl.lilac",
-    "raii_init_use.lilac",
     "raii_on_copy_decl.lilac",
     "raii_on_copy_use.lilac",
     "raii_on_drop_decl.lilac",

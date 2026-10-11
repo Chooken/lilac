@@ -5,7 +5,7 @@ Object: object {
         }
     }
 
-    @init: function () result: Object {
+    create: function () result: Object {
         result = Object {
             f = 0x1
         }
@@ -13,6 +13,6 @@ Object: object {
 }
 
 main: function () nothing {
-    variable: Object = Object()
+    variable: Object = Object.create()
     value: @bit8 = variable.f
 }
