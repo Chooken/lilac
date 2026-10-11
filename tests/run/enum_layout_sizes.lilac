@@ -1,0 +1,71 @@
+// expect-exit: 0
+// Enums are tagged unions (robustness plan phase 4): the C
+// `struct { uintN_t tag; union { P0 p0; P1 p1; … } payload; }`, the tag the
+// smallest container holding the variant count and the payloads sharing one
+// area at the tag's size rounded up to the strictest payload alignment. No
+// payloads at all is just the tag; there are no niche layouts, so
+// `Optional[ref T]` keeps its tag. Pinned for the 64-bit hosts the run
+// tests build on.
+
+using Standard
+using Standard.Process
+
+Point: object {
+    x: @bit32
+    y: @bit32
+}
+
+Plain: enum {
+    A
+    B
+    C
+}
+
+Single: enum {
+    Only: @bit16
+}
+
+Mixed: enum {
+    Nothing
+    Byte: @bit8
+    Word: @bit64
+    Half: @bit16
+}
+
+Nested: enum {
+    Inner: Mixed
+    Flag: @bit8
+}
+
+Spread: object {
+    a: @bit8
+    items: @array(Mixed, 0x3)
+}
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+pin: function (size: @bit_native, align: @bit_native, want_size: @bit_native, want_align: @bit_native, code: @bit32) nothing {
+    check(size == want_size, code)
+    check(align == want_align, @i_add_32(code, 0x80))
+}
+
+main: function () nothing {
+    pin(@size_of(Plain), @align_of(Plain), 0x1, 0x1, 0x1)
+    pin(@size_of(Single), @align_of(Single), 0x4, 0x2, 0x2)
+    pin(@size_of(Mixed), @align_of(Mixed), 0x10, 0x8, 0x3)
+    pin(@size_of(Nested), @align_of(Nested), 0x18, 0x8, 0x4)
+    pin(@size_of(Spread), @align_of(Spread), 0x38, 0x8, 0x5)
+    pin(@size_of(Optional[@bit8]), @align_of(Optional[@bit8]), 0x2, 0x1, 0x6)
+    pin(@size_of(Optional[@bit64]), @align_of(Optional[@bit64]), 0x10, 0x8, 0x7)
+    pin(@size_of(Optional[ref Point]), @align_of(Optional[ref Point]), 0x10, 0x8, 0x8)
+    pin(@size_of(Optional[Point]), @align_of(Optional[Point]), 0xC, 0x4, 0x9)
+    pin(@size_of(Result[@bit32, @bit8]), @align_of(Result[@bit32, @bit8]), 0x8, 0x4, 0xA)
+    pin(@size_of(Result[@bit8, @bit64]), @align_of(Result[@bit8, @bit64]), 0x10, 0x8, 0xB)
+    pin(@size_of(Result[Point, @bit16]), @align_of(Result[Point, @bit16]), 0xC, 0x4, 0xC)
+    pin(@size_of(Optional[Optional[@bit8]]), @align_of(Optional[Optional[@bit8]]), 0x3, 0x1, 0xD)
+}

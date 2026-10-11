@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–3 done).
+> Status: in progress (Phases 0–4 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -577,6 +577,61 @@ payload positions.
 then a small one, then compares with a freshly built small one (`==` is
 true); a global holding each variant of a mixed enum; `Optional` and
 `Result` sizes pinned.
+
+- **Delivered notes.**
+  - 4.1: `Lower::lay_out` picks `LirLayoutKind::Tagged` for a
+    `Layout::Enum` (`Struct` for an object); the field list is still
+    `Layout::slots` (the tag, then each payload by variant name), so
+    `payload_field`, `slot_pairs`, the drop and copy glue and `match`
+    lowering are unchanged: the shared offset comes from the layout.
+    Typeck (`layout.rs`) sizes enums with `tagged_layout` over the same
+    slots, so `@size_of`, `E067` and lowering agree; an enum's `E067`
+    label says "this variant brings `E` to N bytes" at the payload that
+    crossed (`enum_sizes_are_tagged_unions`: two 1 GiB payloads now fit a
+    32-bit target).
+  - 4.2 audit, every way an enum place is written: a variant
+    (`variant_value`) is built in a fresh temporary that is `zero`ed
+    first; `let`, assignment (all `HirOld` cases, `replace`), outs,
+    `@write` (an assignment to `*p`), assignment through a `ref`, field
+    assignment, moves, arguments and the failure protocol's hidden outs
+    all write a whole value (`FnState::write`/`read_into`: a whole-object
+    `copy`, `copy ref` or `store`); outs and drop flags start zeroed in
+    the prologue; a `match` capture copies or moves the payload *out* and
+    never writes the enum; the copy glue is a whole-object copy and then
+    writes a whole payload value over the same variant's payload; drop
+    glue and `@discard` write nothing; globals encode over a zero object
+    (`encode` now places the payload through `payload_field` and the
+    module layout's offset, the area's); a `const` use lowers its
+    expression again, so through `variant_value`. No path writes one
+    payload into a place that held another variant, so nothing changed
+    in code; `enum_overwrite_equality` (a `--release` build) pins it for
+    a local, an out, a field, a `ref` and `@write`, including the bytes
+    past the small payload.
+  - 4.3: `@size_of`/`@align_of` already read the module layout
+    (`size_align`), and the constant evaluator folds enum `==` on
+    `Value::Variant`s, which equal bits under the zero-based rule.
+  - 4.5: the `lilac-layout` corpus gained mixed enums (every payload
+    alignment, `_Float16` and 128-bit float payloads where C has them,
+    nested enums, arrays of enums, enums in structs). Checking "Lilac's
+    real enum layout" needed the compiler, which `lilac-layout` cannot
+    depend on, so a new test, `crates/lilac-lower/tests/enum_c_layout.rs`,
+    checks and lowers a Lilac corpus (10 enums, 8 instances of a generic
+    one, a 257-variant enum with a 16-bit tag, enums in objects and arrays)
+    for the 34 supported targets and the six ABI variants, declares every
+    resulting layout in C (the shape from the HIR's object/enum kind, the
+    numbers from `LirModule::layouts`) and has Clang check over 100
+    asserts per target. Lowering enums as `Struct` again fails it.
+  - Sizes (64-bit hosts): `Optional[@bit8]` 2, `Optional[@bit64]` 16,
+    `Optional[ref T]` 16, `Optional[Point]` 12 (all unchanged: one
+    payload); `Result[@bit32, @bit8]` 12 → 8, `Result[@bit8, @bit64]` 16,
+    `Result[Point, @bit16]` 16 → 12; problem 5's enum 769 → 257;
+    `enum_globals`' six-payload enum 32 → 16; `enum_layout_sizes` pins
+    these and nested enums and arrays of enums.
+  - Snapshots: six `.lir` files changed, each only its enum's
+    `type #… {` line gaining `tagged` (`builtin_target_match`,
+    `enum_implicit_member`, `enum_payload_use`, `enum_use`, `match_enum`,
+    `match_enum_payload`); no snapshot has an enum with two payloads, so
+    no offset or size moved, and every `.ll` snapshot is unchanged.
 
 ---
 

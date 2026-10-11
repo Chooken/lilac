@@ -2135,6 +2135,26 @@ fn oversized_object_is_e067_at_the_crossing_field() {
     assert!(!check_src(src).has_errors());
 }
 
+/// An enum is a tagged union: its payloads share one area, so two 1 GiB
+/// payloads fit a 32-bit target, and `E067` is reported at the variant
+/// whose payload takes the union past the limit.
+#[test]
+fn enum_sizes_are_tagged_unions() {
+    let fits =
+        "Two: enum {\n    A: @array(@bit8, 0x40000000)\n    B: @array(@bit8, 0x40000000)\n}\n";
+    let (diags, ..) = run_native(fits, 32);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let src = "Big: enum {\n    A: @bit8\n    B: @array(@bit8, 0x7FFFFFFF)\n    C\n}\n";
+    let (diags, _, _, sm, _) = run_native(src, 32);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(rendered.matches("error[E067]").count(), 1, "{rendered}");
+    assert!(
+        rendered.contains("this variant brings `Big` to 2147483648 bytes"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("test.lilac:3:5"), "{rendered}");
+}
+
 /// An array whose elements together cross the limit is reported at its
 /// length, never wrapped (problem 2).
 #[test]

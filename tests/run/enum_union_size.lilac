@@ -1,4 +1,3 @@
-// pending: robustness plan phase 4 (enums lay payloads out side by side)
 // expect-exit: 0
 // An enum is a tagged union, the C `struct { uint8_t tag; union { … }
 // payload; }`: three 256-byte payloads share one area after the tag, so the

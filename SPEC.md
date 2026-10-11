@@ -802,9 +802,8 @@ alignment 1, as GCC and Clang lay out an empty struct. Alignment follows
 the target's C ABI, not the size: on 32-bit x86 off Windows, for one,
 `@bit64` and `@fbit64` align to 4, so `{ a: @bit8, b: @bit64 }` is 12
 bytes there and 16 on x86-64. No type may be larger than the target's
-`isize::MAX` bytes (2^31 − 1 or 2^63 − 1): a larger one is `E067`. (Enums
-keep a tag followed by every payload for now; they become tagged unions
-with a C layout of their own.)
+`isize::MAX` bytes (2^31 − 1 or 2^63 − 1): a larger one is `E067`. Enums
+have a C layout too: a tagged union (see Enums).
 
 ### Namespaces & Visibility
 
@@ -972,9 +971,9 @@ loaded, so each must name a folder that exists.
 ### Enums
 
 Enums are the single tagged-data type: a closed set of named variants,
-each optionally carrying a payload. They lower to standard objects with
-an explicit discriminator tag plus payload slots. The `=>` operator maps
-constructor branches to their resulting object state.
+each optionally carrying a payload. In memory an enum is a tagged union:
+an explicit discriminator tag, then one area every payload shares. The
+`=>` operator maps constructor branches to their resulting object state.
 
 ```lilac
 Enum: enum { One, Two }
@@ -995,8 +994,34 @@ enum. `match` arms test tags with `.Tag` patterns and bind payloads via
 line is an error).
 
 The tag is the smallest `@bitN` that holds the variant count (`@bit8` up to
-256 variants), followed by one slot per payload. Like every value, an enum
-starts zeroed, which is its **first** variant (with a zero payload). A type
+256 variants), and the tag of a variant is its index in declaration order.
+**An enum's layout is its C layout**, that of the C struct
+
+```c
+struct { uintN_t tag; union { P0 p0; P1 p1; /* … */ } payload; }
+```
+
+where `uintN_t` is the tag's container and the union has one member per
+variant with a payload, in declaration order, each mapped to C as an
+object's fields are (see Objects). Variants without a payload add no
+member, and an enum with no payloads at all is just its tag. So the tag is
+at offset 0, every payload starts at the tag's size rounded up to the
+strictest payload alignment, and the size is that offset plus the largest
+payload, padded to the enum's alignment (the larger of the tag's and the
+payloads'). For example `{ A: @array(@bit8, 0x100), B: @array(@bit8,
+0x100), C: @array(@bit8, 0x100) }` is 257 bytes, aligned 1, and
+`Result[@bit32, @bit8]` is 8 bytes, aligned 4. There are no niche layouts:
+`Optional[ref T]` keeps its tag (16 bytes on a 64-bit target). An enum
+crosses an `extern` behind a `ref` as a pointer to that C struct.
+
+Like every value, an enum starts zeroed, which is its **first** variant
+(with a zero payload). A variant is always built whole in a zeroed object,
+and every write of an enum (an assignment, an out, `@write`, a global's
+initializer, a copy) writes the whole value: the bytes of the payload area
+past the live payload, and the padding, are zero. `==` compares an enum's
+every byte, inactive payload bytes included, so two values of the same
+variant with equal payloads are equal whatever the place held before. A
+type
 that contains itself by value, directly or through other fields and
 payloads, is `E053`; store the recursive part behind a `ref`.
 
@@ -1106,7 +1131,7 @@ without them only the explicit intrinsic form works:
 }
 ```
 
-**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed, bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity.
+**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity.
 
 List of operators:
 | op | function |
@@ -1308,6 +1333,15 @@ would collide with the entry point the LLVM backend emits, and that is also
 declaration is user error and is diagnosed nowhere — declare carefully);
 libraries to link (`link = ["c"]`) are declared in the package manifest,
 never in code. No overloads, no calling-convention annotations in v1.
+
+**Aggregates cross as their C layout.** An object or enum is not passed by
+value, but behind a `ref` C sees exactly the C layout of the Lilac type: an
+`object` is the C struct of its fields in order, and an `enum` is
+`struct { uintN_t tag; union { … } payload; }` (see Objects and Enums), on
+every target, with the same `sizeof`, `_Alignof` and `offsetof`s. So a
+`ref Object` or `ref Enum` is a `struct … *` to C with no conversion, and a
+C header translates field by field. (An enum written by C must keep the
+zero bytes past its live payload for `==` to hold.)
 
 **Link names.** The symbol an `extern` links is its declared name, unmangled
 (no namespace prefix), unless a string after `extern` names it:

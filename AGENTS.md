@@ -155,10 +155,18 @@
 - `lilac-layout` (depends on `lilac-target` only) is the one layout
   function: `struct_layout`, `array_layout` and `tagged_layout` compose
   from `SizeAlign`s, `layout` does a whole `Shape` tree, and all
-  arithmetic is checked (`TooLarge`, never a wrap). `tagged_layout` is the
-  C `struct { tag; union { … } payload; }`; nothing uses it yet (enums are
-  still a struct of the tag and every payload, `lilac_hir::Layout::slots`,
-  the one place that says so).
+  arithmetic is checked (`TooLarge`, never a wrap).
+- **Enums are tagged unions**: the C `struct { uintN_t tag; union { P0
+  p0; … } payload; }` (`tagged_layout`), the union one member per payload
+  variant, none when no variant has a payload; no niche layouts.
+  `lilac_hir::Layout::slots` is the one place that says what an enum holds
+  (`tag`, then each payload by variant name); typeck sizes it with
+  `tagged_layout` and lowering lays it out as `LirLayoutKind::Tagged`, so
+  every payload field has the payload area's offset and `payload_field`
+  stays a field index. `==` is a `memcmp` over every byte, so every enum
+  write is a whole value: `variant_value` builds in a zeroed temporary,
+  copies are whole-object, and globals encode over a zero object; nothing
+  writes one payload into a place that held another variant.
 - Typeck lays out each concrete object, enum and array type when
   `ensure_type` first builds it (`layout.rs`, `Checker::sizes`); one past
   the limit is `E067` at the field or array length that crossed it, through
@@ -167,13 +175,15 @@
 - Lowering fills `LirModule::layouts` (`LirLayout`: kind, size, align, and
   each field's offset) once, from `lilac-layout`; everything after reads it
   (`lilac_ir::size_align` is a lookup, global initializers use the field
-  offsets). The verifier recomputes every layout for the module's target,
-  and the LLVM backend checks LLVM's placement of each struct against it
-  (`Lower::check_layout`, an ICE on a mismatch). `builtin_fields` /
-  `builtin_layout` are the builtin aggregates'.
+  offsets). The verifier recomputes every layout for the module's target;
+  the LLVM backend sees aggregates as `[size x i8]` and computes none.
+  `builtin_fields` / `builtin_layout` are the builtin aggregates'.
 - Conformance: `crates/lilac-layout/tests/c_conformance.rs` declares a
   corpus in C with `_Static_assert`s and checks it with the toolchain Clang
-  for every supported target (skipped without Clang); `target_tests` in
+  for every supported target (skipped without Clang);
+  `crates/lilac-lower/tests/enum_c_layout.rs` does the same for the
+  layouts lowering gives a corpus of real Lilac enums (the C shape from
+  the HIR kind, the numbers from `LirModule::layouts`); `target_tests` in
   `lilac-codegen-llvm` compares the scalar table with LLVM's data layout
   for every target `parse` accepts.
 

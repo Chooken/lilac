@@ -1,0 +1,106 @@
+// expect-exit: 0
+// build-arg: --release
+// An enum is built whole in a zeroed object, so bytes past its live payload
+// are zero, and writing a value writes all of it. A place that held a
+// large variant and then a small one equals a freshly built small one
+// (`==` compares every byte), whether the place is a local, an out, a
+// field, a place behind a `ref`, or a slot filled by `@write`.
+
+using Standard.Process
+
+Wide: object {
+    a: @bit64
+    b: @bit64
+    c: @bit64
+}
+
+// The tag at 0; every payload at 8; 32 bytes.
+Mixed: enum {
+    Nothing
+    Small: @bit8
+    Large: Wide
+}
+
+Holder: object {
+    first: @bit8
+    value: Mixed
+}
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+wide: function () value: Wide {
+    value = Wide { a = 0x1111111111111111, b = 0x2222222222222222, c = 0x3333333333333333 }
+}
+
+// The byte at `offset` of `value`.
+byte_at: function (value: ref Mixed, offset: @bit_native) byte: @bit8 {
+    byte = @load_u8(value as ref unknown as ref @bit8, offset)
+}
+
+// Every byte of `value` past the small payload (offset 8) is zero.
+rest_is_zero: function (value: ref Mixed) zero: @bit8 {
+    zero = 0x1
+    offset: @bit_native = 0x1
+    loop {
+        if @i_less_than_u_native(offset, 0x20) {
+            if offset == 0x8 {
+            } else if byte_at(value, offset) == 0x0 {
+            } else {
+                zero = 0x0
+            }
+            offset = @i_add_native(offset, 0x1)
+        } else break
+    }
+}
+
+// An out that holds a large variant, then a small one.
+overwritten: function () out: Mixed {
+    out = .Large(wide())
+    out = .Small(0x5)
+}
+
+main: function () nothing {
+    check(@size_of(Mixed) == 0x20, 0x1)
+
+    local: Mixed = .Large(wide())
+    local = .Small(0x5)
+    check(local == .Small(0x5), 0x2)
+    check(rest_is_zero(ref local), 0x3)
+    match local {
+        .Small -> small: @bit8 => check(small == 0x5, 0x4)
+    } else {
+        exit(0x5)
+    }
+
+    from_out: Mixed = overwritten()
+    check(from_out == .Small(0x5), 0x6)
+    check(rest_is_zero(ref from_out), 0x7)
+
+    holder: Holder = Holder { first = 0x1, value = .Large(wide()) }
+    holder.value = .Small(0x5)
+    check(holder.value == .Small(0x5), 0x8)
+    check(rest_is_zero(ref holder.value), 0x9)
+
+    target: Mixed = .Large(wide())
+    pointer: ref Mixed = ref target
+    pointer = .Small(0x5)
+    check(target == .Small(0x5), 0xA)
+    check(rest_is_zero(ref target), 0xB)
+
+    slot: Mixed = .Nothing
+    @write(ref slot, .Large(wide()))
+    @write(ref slot, .Small(0x5))
+    check(slot == .Small(0x5), 0xC)
+    check(rest_is_zero(ref slot), 0xD)
+
+    nothing_after: Mixed = .Large(wide())
+    nothing_after = .Nothing
+    check(nothing_after == .Nothing, 0xE)
+    check(byte_at(ref nothing_after, 0x8) == 0x0, 0xF)
+    check(rest_is_zero(ref nothing_after), 0x10)
+}

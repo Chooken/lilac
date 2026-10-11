@@ -131,7 +131,10 @@ impl Lower<'_> {
                     self.encode(value, ty, at + offset, scalars);
                 }
             }
-            (Value::Variant(index, payload), Some(layout @ Layout::Enum { variants, .. })) => {
+            // The tag at its offset, then the live payload at the payload
+            // area's (every payload field of a tagged layout has that
+            // offset); the rest of the area stays zero.
+            (Value::Variant(index, payload), Some(layout @ Layout::Enum { .. })) => {
                 let slots = layout.slots();
                 let offsets = self.offsets(ty);
                 let tag = slots[0].1;
@@ -146,12 +149,8 @@ impl Lower<'_> {
                     scalars,
                 );
                 if let Some(payload) = payload {
-                    let field = variants
-                        .iter()
-                        .take(*index as usize)
-                        .filter(|(_, payload)| payload.is_some())
-                        .count()
-                        + 1;
+                    let (field, _) = self.payload_field(ty.id, *index);
+                    let field = field as usize;
                     if let (Some((_, ty)), Some(offset)) = (slots.get(field), offsets.get(field)) {
                         self.encode(payload, *ty, at + offset, scalars);
                     }

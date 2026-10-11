@@ -38,8 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use lilac_error::{codes, Diagnostic, Diags};
 use lilac_hir::{FuncKey, HirFunc, HirPath, HirProgram, HirStmt, Layout, LocalId};
 use lilac_ir::{
-    ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule,
-    LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol,
+    ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirLayoutKind,
+    LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol,
 };
 use lilac_resolve::Resolved;
 use lilac_span::{BytePos, SourceMap, Span};
@@ -240,7 +240,11 @@ impl<'a> Lower<'a> {
             .iter()
             .map(|(name, ty)| (name.clone(), self.lir_ty(*ty)))
             .collect();
-        match LirLayout::of_struct(fields, &self.module.layouts, &self.target) {
+        let kind = match layout {
+            Layout::Object { .. } => LirLayoutKind::Struct,
+            Layout::Enum { .. } => LirLayoutKind::Tagged,
+        };
+        match LirLayout::new(kind, fields, &self.module.layouts, &self.target) {
             Ok(layout) => {
                 self.module.layouts.insert(name, layout);
             }

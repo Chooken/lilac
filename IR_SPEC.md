@@ -56,9 +56,14 @@ in layout order (sections print sorted by type name for deterministic
 snapshots):
 
 ```lilac-ir
-type #Number size 8 align 4 {
+type #Pair size 8 align 4 {
     tag: #bit8,
     val: #bit32,
+}
+type #Shape tagged size 16 align 8 {
+    tag: #bit8,
+    Byte: #bit8,
+    Word: #bit64,
 }
 ```
 
@@ -69,8 +74,16 @@ align 1. Scalars are laid out as `uint8_t`…`uint64_t`, `_Float16`,
 `float`, `double`, the 128-bit float, and `uintptr_t`/`T *` for
 `#bit_native`/`ref T` (`Target::scalar_layout`). A `type #Name tagged size
 S align A` section is a tagged union (the C `struct { tag; union { … }
-payload; }`): its first member is the integer tag and every other member a
-payload at one shared offset; lowering does not produce one yet. The
+payload; }`): its first member is the integer tag, at offset 0, and every
+other member a payload at one shared offset, the tag's size rounded up to
+the strictest payload's alignment; the size is that offset plus the largest
+payload, rounded up to the alignment (the tag's or the strictest payload's,
+whichever is larger), and with no payload members it is just the tag.
+Lowering lays out every enum this way: the tag (named `tag`), then one
+member per payload variant, named after it, in declaration order, so a
+variant's payload is the member after the tag counting only variants with
+a payload. A variant is built in a zeroed place, so the payload bytes past
+the live member stay zero, which `@memcmp` equality relies on. The
 verifier recomputes every section for the module's `target` and rejects one
 whose offsets, size or alignment differ; nothing after lowering computes a
 layout. The backend gives an aggregate the LLVM type `[size x i8]` aligned

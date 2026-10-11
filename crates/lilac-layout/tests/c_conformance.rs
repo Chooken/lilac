@@ -8,7 +8,10 @@
 //! The corpus covers every scalar after every other, nested structs, arrays
 //! of structs and arrays, trailing padding, empty structs (a GCC/Clang
 //! extension, size 0), and tagged unions as their C
-//! `struct { tag; union { … } payload; }`, plus a fixed-seed random set.
+//! `struct { tag; union { … } payload; }` (enums: mixed payload alignments,
+//! nested, in arrays and in structs), plus a fixed-seed random set.
+//! `lilac-lower`'s `enum_c_layout` test checks that the compiler gives real
+//! Lilac enums these layouts.
 //! `_Float16` and the 128-bit float are declared where the target's C has
 //! them (`__float128`, else a binary128 `long double`), which Clang's
 //! predefined macros say.
@@ -300,7 +303,69 @@ fn corpus() -> Vec<Shape> {
         ]),
         array(tagged(Scalar::Bit16, vec![s(Scalar::Bit64)]), 3),
     ]);
+    shapes.extend(enums());
     shapes
+}
+
+/// Enums as Lilac lays them out (robustness plan phase 4): mixed payloads
+/// of every alignment, nested enums, arrays of enums and enums in objects.
+fn enums() -> Vec<Shape> {
+    let mixed = tagged(
+        Scalar::Bit8,
+        vec![
+            s(Scalar::Bit8),
+            s(Scalar::Bit16),
+            s(Scalar::Bit64),
+            s(Scalar::Pointer),
+            s(Scalar::Float32),
+            s(Scalar::Float64),
+        ],
+    );
+    let lone = tagged(Scalar::Bit8, vec![s(Scalar::Bit16)]);
+    let odd = tagged(
+        Scalar::Bit8,
+        vec![array(s(Scalar::Bit8), 3), s(Scalar::Bit16)],
+    );
+    vec![
+        mixed.clone(),
+        lone.clone(),
+        odd.clone(),
+        tagged(Scalar::Bit16, vec![s(Scalar::Bit64), s(Scalar::Bit8)]),
+        tagged(Scalar::Bit8, vec![s(Scalar::Float16), s(Scalar::Bit8)]),
+        tagged(Scalar::Bit8, vec![s(Scalar::Float128), s(Scalar::Bit32)]),
+        tagged(
+            Scalar::Bit8,
+            vec![
+                object(vec![s(Scalar::Bit32), s(Scalar::Bit32)]),
+                s(Scalar::Bit8),
+            ],
+        ),
+        // Nested.
+        tagged(
+            Scalar::Bit8,
+            vec![mixed.clone(), s(Scalar::Bit8), odd.clone()],
+        ),
+        tagged(
+            Scalar::Bit8,
+            vec![tagged(Scalar::Bit8, vec![lone.clone()]), s(Scalar::Bit8)],
+        ),
+        tagged(
+            Scalar::Bit32,
+            vec![tagged(Scalar::Bit8, vec![s(Scalar::Bit8)])],
+        ),
+        // Arrays of enums, and enums in objects.
+        array(mixed.clone(), 3),
+        array(odd.clone(), 5),
+        tagged(Scalar::Bit8, vec![array(mixed.clone(), 2), lone.clone()]),
+        object(vec![
+            s(Scalar::Bit8),
+            mixed,
+            s(Scalar::Bit8),
+            array(odd, 3),
+            s(Scalar::Bit16),
+            lone,
+        ]),
+    ]
 }
 
 /// A small xorshift generator: the same shapes on every run.

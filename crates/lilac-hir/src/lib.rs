@@ -143,12 +143,12 @@ pub enum Layout {
 }
 
 impl Layout {
-    /// What the type holds in memory, in order, laid out as a C struct: an
-    /// object's fields; an enum's tag (named `tag`), then each payload by
-    /// its variant's name. Typeck sizes types from this and lowering lays
-    /// them out from it, so the two agree. (Enums become tagged unions in a
-    /// later phase of the robustness plan; until then every payload has its
-    /// own place.)
+    /// What the type holds in memory, in order: an object's fields, laid
+    /// out as a C struct; an enum's tag (named `tag`), then each payload by
+    /// its variant's name, laid out as a tagged union (the C
+    /// `struct { tag; union { payloads… } payload; }`, so every payload
+    /// starts at one offset). Typeck sizes types from this and lowering
+    /// lays them out from it, so the two agree.
     #[must_use]
     pub fn slots(&self) -> Vec<(String, TypeRef)> {
         match self {

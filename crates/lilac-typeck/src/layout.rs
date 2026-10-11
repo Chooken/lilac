@@ -1,6 +1,7 @@
 //! Sizes: every concrete object, enum and array type is laid out by
-//! `lilac-layout` for the target when it is first built (`ensure_type`), and
-//! one larger than the target allows is `E067`, at the field or array length
+//! `lilac-layout` for the target when it is first built (`ensure_type`): an
+//! object as a C struct, an enum as a tagged union (its tag, then one union
+//! of every payload), an array as a C array. One larger than the target allows is `E067`, at the field or array length
 //! where it crossed the limit. Templates are never laid out: a size is only
 //! known for concrete types.
 
@@ -31,7 +32,25 @@ impl Checker<'_> {
             .iter()
             .map(|(_, ty)| self.size_of_laid_out(*ty))
             .collect();
-        match lilac_layout::struct_layout(&self.target, &parts) {
+        // An enum's slots are its tag, then each payload: the parts of its
+        // tagged union, in the order `tagged_layout` numbers them.
+        let (placed, part) = match layout {
+            Layout::Object { .. } => (lilac_layout::struct_layout(&self.target, &parts), "field"),
+            Layout::Enum { tag, .. } => {
+                let Some(tag) = self.tag_scalar(*tag) else {
+                    lilac_error::bug!(
+                        Span::dummy(),
+                        "the tag of `{}` is no integer",
+                        self.types.display(id)
+                    );
+                };
+                (
+                    lilac_layout::tagged_layout(&self.target, tag, &parts[1..]),
+                    "variant",
+                )
+            }
+        };
+        match placed {
             Ok(placed) => {
                 self.sizes.insert(id, placed.size_align());
                 Ok(())
@@ -39,7 +58,8 @@ impl Checker<'_> {
             Err(too_large) => {
                 let index = match too_large.part {
                     Part::Field(index) => index,
-                    // A struct crosses the limit at a field, never a length.
+                    // A struct or tagged union crosses the limit at a part,
+                    // never a length.
                     Part::Length => 0,
                 };
                 let span = spans.get(index).copied().unwrap_or_else(Span::dummy);
@@ -48,7 +68,7 @@ impl Checker<'_> {
                     id,
                     too_large,
                     span,
-                    format!("this field brings `{name}` to {} bytes", too_large.size),
+                    format!("this {part} brings `{name}` to {} bytes", too_large.size),
                 ))
             }
         }
@@ -144,6 +164,17 @@ impl Checker<'_> {
             TypeKind::Unknown | TypeKind::Param { .. } | TypeKind::Error => {
                 lilac_error::bug!(Span::dummy(), "`{}` has no size", self.types.display(ty.id))
             }
+        }
+    }
+
+    /// The C integer an enum's tag container (`Checker::tag_type`) is.
+    fn tag_scalar(&self, tag: TypeId) -> Option<Scalar> {
+        match self.types.kind(tag) {
+            TypeKind::Bit8 => Some(Scalar::Bit8),
+            TypeKind::Bit16 => Some(Scalar::Bit16),
+            TypeKind::Bit32 => Some(Scalar::Bit32),
+            TypeKind::Bit64 => Some(Scalar::Bit64),
+            _ => None,
         }
     }
 
