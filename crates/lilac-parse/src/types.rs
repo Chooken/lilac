@@ -253,11 +253,16 @@ impl Parser {
         };
         // A path (`A.B.Type`, `@builtin.Os`). A `.` on a new line starts a
         // match arm (`.Tag`), not a segment.
-        while self.peek().kind == TokenKind::Dot
-            && !self.peek().newline_before
-            && self.peek_at(1).kind == TokenKind::Ident
-        {
-            self.bump();
+        while self.peek().kind == TokenKind::Dot && !self.peek().newline_before {
+            let dot = self.bump();
+            if !self.name_follows() {
+                // Mid-edit: an empty last segment, which the editor can
+                // complete.
+                self.nameless(diags, dot.span, "a name after `.`");
+                name.push('.');
+                span = join_spans(span, dot.span);
+                break;
+            }
             let segment = self.bump();
             name = format!("{name}.{}", segment.text);
             span = join_spans(span, segment.span);

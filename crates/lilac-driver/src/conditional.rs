@@ -20,7 +20,7 @@ use lilac_ast::{
     ArmTest, Conditional, Expr, Item, ItemKind, MatchArm, MatchArmBody, Program, Stmt,
 };
 use lilac_error::{codes, Diagnostic, Diags, Level};
-use lilac_hir::{SemanticSite, TagSite};
+use lilac_hir::{MemberReceiver, MemberSite, SemanticSite, TagSite};
 use lilac_module::Project;
 use lilac_span::{FileId, SourceMap, Span};
 use lilac_target::Target;
@@ -77,6 +77,10 @@ pub(crate) struct Sites {
     pub semantics: Vec<SemanticSite>,
     /// Tags, for completion.
     pub tags: Vec<TagSite>,
+    /// Namespace members, for completion. A round's types and definitions
+    /// are its own, so sites of a value or type receiver are dropped; a
+    /// namespace is the same in every round.
+    pub members: Vec<MemberSite>,
 }
 
 /// One round: the decision for each outermost conditional decided now
@@ -120,6 +124,13 @@ fn round(
         lilac_typeck::check_selectors(&resolved, &mut types, &mut scratch, options, &selectors);
     sites.semantics.extend_from_slice(&checked.hir.semantics);
     sites.tags.extend_from_slice(&checked.hir.tags);
+    sites.members.extend(
+        checked
+            .hir
+            .members
+            .iter()
+            .filter(|site| matches!(site.receiver, MemberReceiver::Namespace(_))),
+    );
     let values = lilac_lower::evaluate_selectors(
         &checked.hir,
         &resolved,

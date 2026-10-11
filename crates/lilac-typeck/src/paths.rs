@@ -10,7 +10,7 @@
 
 use lilac_ast::Expr;
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
-use lilac_hir::{HirExpr, HirExprKind, SemanticKind};
+use lilac_hir::{HirExpr, HirExprKind, MemberReceiver, SemanticKind};
 use lilac_resolve::{DefId, Lookup, NsId, Segment};
 use lilac_span::Span;
 
@@ -132,10 +132,13 @@ impl Checker<'_> {
         }
         // Each segment that names a namespace colors as one.
         let spans = segment_spans(span, name).unwrap_or_default();
-        let mut spans = spans.into_iter();
-        let mut record = |checker: &mut Self, segment: &Segment| {
-            if let (Some(span), Segment::Ns(_)) = (spans.next(), segment) {
-                checker.record_semantic(span, SemanticKind::Namespace);
+        let span_of = |at: usize| spans.get(at).copied().unwrap_or_else(Span::dummy);
+        let record = |checker: &mut Self, at: usize, segment: &Segment| {
+            if let Segment::Ns(_) = segment {
+                let span = span_of(at);
+                if !span.is_dummy() {
+                    checker.record_semantic(span, SemanticKind::Namespace);
+                }
             }
         };
         let mut segment = match self.lookup_head(head) {
@@ -153,17 +156,19 @@ impl Checker<'_> {
             }
             Head::Missing => return Ok(None),
         };
-        record(self, &segment);
-        for part in parts {
+        record(self, 0, &segment);
+        for (at, part) in parts.enumerate().map(|(at, part)| (at + 1, part)) {
             // An item ends the path.
             let Segment::Ns(ns) = segment else {
+                self.record_member(span_of(at), part, None)?;
                 return Ok(None);
             };
+            self.record_member(span_of(at), part, Some(MemberReceiver::Namespace(ns)))?;
             match self.res.ns_member(ns, part, self.file_ns()) {
                 Some(next) => segment = next,
                 None => return Ok(None),
             }
-            record(self, &segment);
+            record(self, at, &segment);
         }
         match segment {
             Segment::Def(def) => Ok(Some(def)),

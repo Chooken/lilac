@@ -96,6 +96,10 @@ pub struct HirProgram {
     /// Every tag (`.Name`, a `.` mid-edit) with the variants it may name
     /// (editor completion).
     pub tags: Vec<TagSite>,
+    /// Every member name after a `.` (`x.field`, `Type.method`,
+    /// `Ns.item`, a `.` mid-edit) with what it is looked up in (editor
+    /// completion).
+    pub members: Vec<MemberSite>,
 }
 
 impl HirExpr {
@@ -191,6 +195,27 @@ pub struct TagSite {
     /// the expected enum's, empty when no enum is expected. In a `match`
     /// pattern, the variants other arms name are left out.
     pub variants: Vec<(String, Option<String>)>,
+}
+
+/// One member name after a `.` and what it is looked up in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MemberSite {
+    /// The name (empty, just after the `.`, mid-edit).
+    pub span: Span,
+    /// What the name is a member of.
+    pub receiver: MemberReceiver,
+}
+
+/// What a member name after a `.` is looked up in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MemberReceiver {
+    /// A value: its fields and methods.
+    Value(TypeRef),
+    /// An object or enum written as a type: its static functions and
+    /// variants.
+    Type(DefId),
+    /// A namespace: its items and child namespaces.
+    Namespace(lilac_resolve::NsId),
 }
 
 /// One local or parameter name: its declaration, or a use of it.

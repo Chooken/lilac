@@ -264,11 +264,11 @@ impl Parser {
             TokenKind::Dot => {
                 let dot = self.bump();
                 // A `.` with no name (mid-edit) is an empty tag.
-                let (name, span) = if self.tag_name_follows(dot.span) {
+                let (name, span) = if self.name_follows() {
                     let tag = self.bump();
                     (tag.text, join_spans(dot.span, tag.span))
                 } else {
-                    self.nameless_tag(diags, dot.span, "match tag after `.`");
+                    self.nameless(diags, dot.span, "match tag after `.`");
                     (String::new(), dot.span)
                 };
                 (

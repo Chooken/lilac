@@ -448,6 +448,7 @@ impl Session {
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
         hir.tags.extend(condition_sites.tags.iter().cloned());
+        hir.members.extend(condition_sites.members.iter().copied());
         self.analysis =
             Some(Analysis {
                 resolved: resolved.clone(),

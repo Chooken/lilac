@@ -409,17 +409,18 @@ impl Parser {
         )
     }
 
-    /// Whether a tag's name directly follows its `.` at `dot` (so a `.`
-    /// ending a line does not take the next line's first name).
-    fn tag_name_follows(&self, dot: Span) -> bool {
+    /// Whether a name follows the `.` on its line (a tag's, a member's or
+    /// a path segment's), so a `.` ending a line does not take the next
+    /// line's first name.
+    fn name_follows(&self) -> bool {
         let next = self.peek();
-        next.kind == TokenKind::Ident && next.span.lo == dot.hi
+        next.kind == TokenKind::Ident && !next.newline_before
     }
 
     /// A `.` at `dot` with no name after it (mid-edit): "expected {what},
     /// found {token}", at the `.`, so the error lies inside what holds the
-    /// tag. The caller goes on with an empty tag.
-    fn nameless_tag(&mut self, diags: &mut lilac_error::Diags, dot: Span, what: &str) {
+    /// name. The caller goes on with an empty name.
+    fn nameless(&mut self, diags: &mut lilac_error::Diags, dot: Span, what: &str) {
         let msg = format!("expected {what}, found {}", self.peek().describe());
         Self::err(diags, dot, &msg);
         self.recover();

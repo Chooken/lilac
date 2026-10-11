@@ -119,7 +119,7 @@ pub fn check_selectors(
     let mut values = Vec::with_capacity(selectors.len());
     for (file, expr) in selectors {
         let before = checker.diags.error_count();
-        let empty_before = checker.empty_tags;
+        let empty_before = checker.empty_names;
         let env = Env {
             file: Some(*file),
             ..Env::default()
@@ -147,9 +147,9 @@ pub fn check_selectors(
             }
             checker.drain_queue();
         }
-        // A tag still being typed leaves the selector undecided (the
-        // parser reported it).
-        let decided = checker.diags.error_count() == before && checker.empty_tags == empty_before;
+        // A tag or member still being typed leaves the selector undecided
+        // (the parser reported it).
+        let decided = checker.diags.error_count() == before && checker.empty_names == empty_before;
         values.push(decided.then_some(hir));
     }
     Selectors {
@@ -313,9 +313,9 @@ pub(crate) struct Checker<'a> {
     /// Set when the `@entry` body being checked names a missing root item
     /// outside an executable, so the hook is dropped rather than reported.
     pub entry_unresolved: bool,
-    /// How many tags with no name (a `.` mid-edit, which the parser
-    /// reported) were met; a selector that meets one is not decided.
-    pub empty_tags: usize,
+    /// How many tags and members with no name (a `.` mid-edit, which the
+    /// parser reported) were met; a selector that meets one is not decided.
+    pub empty_names: usize,
 }
 
 /// Production instantiation depth cap; the test cap keeps `E051` cheap.
@@ -338,7 +338,7 @@ impl<'a> Checker<'a> {
             native_bits: options.native_bits,
             require_entry: options.require_entry,
             entry_unresolved: false,
-            empty_tags: 0,
+            empty_names: 0,
             sigs: HashMap::new(),
             failed_sigs: HashSet::new(),
             hooks: HashMap::new(),
@@ -710,6 +710,30 @@ impl Checker<'_> {
             .map(|(name, payload)| (name, payload.map(|payload| self.types.display_ref(payload))))
             .collect();
         self.out.tags.push(lilac_hir::TagSite { span, variants });
+    }
+
+    /// Records the member name `field` ending `access` for the editor,
+    /// with what it is looked up in (`None`: nothing completion lists).
+    /// `Err` when the name is empty (a `.` mid-edit, which the parser
+    /// reported): the access goes no further.
+    pub(crate) fn record_member(
+        &mut self,
+        access: Span,
+        field: &str,
+        receiver: Option<lilac_hir::MemberReceiver>,
+    ) -> Result<(), ErrorGuaranteed> {
+        if let Some(receiver) = receiver.filter(|_| !access.is_dummy()) {
+            self.out.members.push(lilac_hir::MemberSite {
+                span: crate::expr::tail_span(access, field),
+                receiver,
+            });
+        }
+        if field.is_empty() {
+            // The parser reported the `.` with no name.
+            self.empty_names += 1;
+            return Err(self.diags.already_reported());
+        }
+        Ok(())
     }
 
     /// Records a local name for the editor: a use at `span` of `local`

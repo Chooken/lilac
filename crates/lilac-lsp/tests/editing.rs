@@ -28,6 +28,12 @@ add: function (a: @bit8, b: @bit8) total: @bit8 {
 }
 paint: function (shape: Shape) nothing {
 }
+origin: function () p: Point {
+    p = Point {
+        x = 0x0
+        y = 0x0
+    }
+}
 main: function () nothing {
     first: @bit8 = add(0x1, limit)
     {
@@ -436,6 +442,53 @@ fn members_complete_after_the_broken_buffer_compiles() {
     handle.join().expect("server thread");
 }
 
+/// After `x.` the members are those of what the compiler looked the name
+/// up in: a call's result, a partly typed name, a namespace path in a type
+/// or an expression; nothing when it is a value with no members.
+#[test]
+fn members_complete_from_what_the_compiler_looked_up() {
+    let (client, handle, uri) = open_program();
+    let call = complete_marked(&client, &uri, 2, "    origin().<|>");
+    assert_eq!(sorted(labels(&call)), vec!["sum", "x", "y"]);
+    let partial = complete_marked(&client, &uri, 3, "    v: @bit8 = point.s<|>");
+    assert_eq!(sorted(labels(&partial)), vec!["sum", "x", "y"]);
+    let method = complete_marked(&client, &uri, 4, "    point.s<|>()");
+    assert_eq!(sorted(labels(&method)), vec!["sum", "x", "y"]);
+    let ty = complete_marked(&client, &uri, 5, "    q: @builtin.<|> = 0x1");
+    assert!(labels(&ty).contains(&"Target"), "{:?}", labels(&ty));
+    let path = complete_marked(&client, &uri, 6, "    b: @bit8 = @builtin.Target.<|>");
+    assert!(labels(&path).contains(&"os"), "{:?}", labels(&path));
+    let number = complete_marked(&client, &uri, 7, "    first.<|>");
+    assert_eq!(labels(&number), Vec::<&str>::new());
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A top-level condition's namespace paths complete, though the final
+/// check never sees the condition.
+#[test]
+fn top_level_condition_members_complete() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/top.lilac").expect("uri");
+    let text = "if @builtin.Target. == .Linux {\n}\nmain: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let result = request(
+        &client,
+        "textDocument/completion",
+        position(&uri, after(text, "Target.")),
+    )
+    .expect("completion");
+    let Some(CompletionResponse::Array(items)) = serde_json::from_value(result).expect("items")
+    else {
+        panic!("completions");
+    };
+    let labels = labels(&items);
+    assert!(labels.contains(&"os"), "{labels:?}");
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 #[test]
 fn intrinsics_complete_after_an_at_sign() {
     let (client, handle, uri) = open_program();
@@ -694,14 +747,15 @@ fn did_you_mean_is_a_quick_fix() {
     handle.join().expect("server thread");
 }
 
-/// A bare `.` mid-edit is one parse error; the rest of its function is
-/// still checked.
+/// A `.` with no name mid-edit (a tag, a member, a path segment) is one
+/// parse error; the rest of its function is still checked.
 #[test]
 fn a_bare_dot_keeps_its_function_checked() {
     let (client, handle, uri) = open_program();
     let text = PROGRAM.replace(
         "    // EDIT",
-        "    s: Shape = .Dot\n    match s {\n        .\n    }\n    t: Shape = .\n    u: @bit8 = missing",
+        "    s: Shape = .Dot\n    match s {\n        .\n    }\n    t: Shape = .\n    point.\n    \
+         origin().\n    q: @builtin. = 0x1\n    paint(@builtin.Target.)\n    u: @bit8 = missing",
     );
     did_change(&client, &uri, 2, &text);
     let published = publish_for(&client, &uri);
@@ -715,7 +769,11 @@ fn a_bare_dot_keeps_its_function_checked() {
         errors,
         [
             "expected match tag after `.`, found `}`",
-            "expected tag name after `.`, found `u`",
+            "expected tag name after `.`, found `point`",
+            "expected member name after `.`, found `origin`",
+            "expected member name after `.`, found `q`",
+            "expected a name after `.`, found `=`",
+            "expected member name after `.`, found `)`",
             "unresolved name `missing`",
         ]
     );

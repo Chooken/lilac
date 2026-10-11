@@ -53,7 +53,7 @@ macro_rules! params {
     };
 }
 
-/// Why a tag completion is not answered right away.
+/// Why a completion after a `.` is not answered right away.
 enum Wait {
     /// A compile of the current text is due or running.
     Compile,
@@ -239,7 +239,7 @@ impl Server {
                 )))?;
             return Ok(());
         }
-        match self.tag_completion(&request) {
+        match self.dot_completion(&request) {
             Some(Wait::Compile) => {
                 self.parked.push(request);
                 self.compile_now();
@@ -254,11 +254,11 @@ impl Server {
         }
     }
 
-    /// For a tag completion ([`crate::complete::needs_current_compile`])
+    /// For a completion after a `.` ([`crate::complete::needs_current_compile`])
     /// asked of text the analysis held has not seen: whether a compile of
     /// it is due or running, or will not come (the last one panicked, so
     /// it gets no answer). `None` for any other request, answered now.
-    fn tag_completion(&self, request: &Request) -> Option<Wait> {
+    fn dot_completion(&self, request: &Request) -> Option<Wait> {
         if request.method != "textDocument/completion" || self.compiled == Some(self.generation) {
             return None;
         }
@@ -620,7 +620,7 @@ impl Server {
         }
     }
 
-    /// Settles the parked tag completions after a compile finished: each is
+    /// Settles the parked `.` completions after a compile finished: each is
     /// answered once the analysis is of the current text; while a compile
     /// is due they wait for it, started now; with none coming (this one
     /// panicked) they get no answer.
@@ -924,7 +924,7 @@ mod tests {
 
     const SHAPES: &str = "Shape: enum {\n    Dot\n    Line\n}\nPaint: enum {\n    Red\n    Blue\n}\nmain: function () nothing {\n    s: Shape = .\n}\n";
 
-    /// A tag completion waits for a compile of the text it was asked
+    /// A `.` completion waits for a compile of the text it was asked
     /// about; an edit while it waits makes it wait for the next compile,
     /// which answers it.
     #[test]

@@ -563,7 +563,9 @@ Arm patterns are tags (`.Some` or `Enum.Some`); a payload binds with
 `-> name: Type`, and a single statement arm shortens to `=>`. Match is a
 statement: using a `match` as a value is rejected with `E001`. Because an arm
 starts with `.`, a `.` at the start of a line never continues the previous
-line's expression as a member access.
+line's expression as a member access. The name after a `.` (a member's, a
+path segment's, a tag's) is on the `.`'s line: a `.` ending a line is an
+error, not an access of the next line's first name.
 
 ```lilac
 match number {
@@ -843,8 +845,8 @@ Values construct as `Enum.Variant` / `Enum.Variant(payload)`, with the
 arguments of a generic enum spelled on the enum (`Optional[@bit32].Some(0x1)`),
 or as a bare `.Variant` / `.Variant(payload)` when the expected type names the
 enum. `match` arms test tags with `.Tag` patterns and bind payloads via
-`-> name: Type`. A bare tag's name follows its `.` directly (`. Red` and a
-`.` ending a line are errors).
+`-> name: Type`. A bare tag's name is on its `.`'s line (a `.` ending a
+line is an error).
 
 The tag is the smallest `@bitN` that holds the variant count (`@bit8` up to
 256 variants), followed by one slot per payload. Like every value, an enum

@@ -8,7 +8,7 @@
 use lilac_ast::{Expr, Type as AstType};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::intrinsics::{Intrinsic, Slot};
-use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, SemanticKind};
+use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, MemberReceiver, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
@@ -66,6 +66,8 @@ impl Checker<'_> {
                 }
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let receiver = self.callee(fcx, args, receiver)?;
+                    let recorded = self.record_static_member(receiver, *member_span, field);
+                    self.callee(fcx, args, recorded)?;
                     return self.static_call(
                         fcx,
                         receiver,
@@ -97,7 +99,7 @@ impl Checker<'_> {
                 self.record_tag(*tag_span, expected, &[]);
                 if name.is_empty() {
                     // The parser reported the `.` with no name.
-                    self.empty_tags += 1;
+                    self.empty_names += 1;
                     return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
                 let Some(want) = expected else {
@@ -482,6 +484,8 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
         let base = receiver.ty.deref();
+        let recorded = self.record_member(member_span, field, Some(MemberReceiver::Value(base)));
+        self.callee(fcx, args, recorded)?;
         let owner = self.types.display(base.id);
         let shadowed = self.shadowed_alias(fcx, &receiver);
         let Some((def, type_args)) = self.type_parts(base.id) else {

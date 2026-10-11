@@ -11,7 +11,9 @@ use lilac_ast::{
     BinOp, Expr, FStrPart, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType, TypeShape,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
-use lilac_hir::{FuncKey, HirCallee, HirExpr, HirExprKind, HirValueArm, Intrinsic, SemanticKind};
+use lilac_hir::{
+    FuncKey, HirCallee, HirExpr, HirExprKind, HirValueArm, Intrinsic, MemberReceiver, SemanticKind,
+};
 use lilac_resolve::{DefId, DefKind, Visibility};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
@@ -341,6 +343,22 @@ impl Checker<'_> {
         )
     }
 
+    /// Records the static member access `Type.field` ending `access` for
+    /// the editor ([`Self::record_member`]).
+    pub(crate) fn record_static_member(
+        &mut self,
+        receiver: Receiver,
+        access: Span,
+        field: &str,
+    ) -> Result<(), ErrorGuaranteed> {
+        let def = match receiver {
+            Receiver::Type(ty) if !ty.is_ref => self.type_parts(ty.id).map(|(def, _)| def),
+            Receiver::Type(_) => None,
+            Receiver::Bare(def) => Some(def),
+        };
+        self.record_member(access, field, def.map(MemberReceiver::Type))
+    }
+
     /// What `Name` names when it is the receiver of a static member access:
     /// a type (or generic parameter), or `None` when it is a value.
     pub(crate) fn static_receiver(
@@ -462,6 +480,10 @@ impl Checker<'_> {
         shadowed: Option<(String, Span)>,
     ) -> HirExpr {
         let base = Self::auto_deref(base);
+        let receiver = MemberReceiver::Value(base.ty);
+        if self.record_member(span, field, Some(receiver)).is_err() {
+            return HirExpr::poison(span);
+        }
         let ty = base.ty.id;
         if let Some(fields) = self.fields_of(ty) {
             if let Some(index) = fields.iter().position(|(name, _)| name == field) {
@@ -539,6 +561,9 @@ impl Checker<'_> {
             let Ok(receiver) = receiver else {
                 return HirExpr::poison(span);
             };
+            if self.record_static_member(receiver, span, field).is_err() {
+                return HirExpr::poison(span);
+            }
             let ty = match receiver {
                 Receiver::Type(ty) => ty,
                 Receiver::Bare(def) => match self.infer_bare(def, expected, span) {
@@ -581,7 +606,7 @@ impl Checker<'_> {
         self.record_tag(span, expected, &[]);
         if name.is_empty() {
             // The parser reported the `.` with no name.
-            self.empty_tags += 1;
+            self.empty_names += 1;
             return HirExpr::poison(span);
         }
         let tag = tail_span(span, name);

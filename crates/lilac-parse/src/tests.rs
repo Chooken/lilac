@@ -1516,7 +1516,7 @@ fn a_bare_dot_is_an_empty_tag() {
 
 #[test]
 fn a_dot_ending_a_line_takes_no_name() {
-    let src = "main: function () nothing {\n    x: Color = .\n    y: Color = . Red\n    z: Color = .Red\n}\n";
+    let src = "main: function () nothing {\n    x: Color = .\n    y: Color = . Red\n    p.\n    z: Color = .Red\n}\n";
     let (program, diags, _, _) = parse_with_status(src);
     let errors: Vec<_> = diags
         .diagnostics()
@@ -1530,9 +1530,14 @@ fn a_dot_ending_a_line_takes_no_name() {
     let Some(FuncBody::Block(block)) = &decl.body else {
         panic!("expected block body, got {:?}", decl.body);
     };
-    let Some(Stmt::Let { name, value, .. }) = block.stmts.last() else {
-        panic!("the last statement survives, got {:?}", block.stmts);
+    let [Stmt::Let { value: x, .. }, Stmt::Let { value: y, .. }, Stmt::ExprStmt(member), Stmt::Let { name, value: z, .. }] =
+        block.stmts.as_slice()
+    else {
+        panic!("every statement survives, got {:?}", block.stmts);
     };
+    assert!(matches!(x, Expr::Tag(tag, _) if tag.is_empty()));
+    assert!(matches!(y, Expr::Tag(tag, _) if tag == "Red"));
+    assert!(matches!(member, Expr::Member { field, .. } if field.is_empty()));
     assert_eq!(name, "z");
-    assert!(matches!(value, Expr::Tag(tag, _) if tag == "Red"));
+    assert!(matches!(z, Expr::Tag(tag, _) if tag == "Red"));
 }

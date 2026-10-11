@@ -20,10 +20,9 @@
 > - **Every `export` is kept**: each is a DCE root, in the project and in
 >   mounted libraries alike. `--export=<name>` is removed.
 >
-> Open decisions (recommendation first):
-> - **`x.` member completion.** It reads the receiver path from the text
->   (`complete::path_before`). Recommended: move it to recorded sites as
->   Phase 4 does for tags, in a later phase. Alternative: leave it.
+> - **`x.` member completion** moved to recorded sites as well
+>   (`HirProgram::members`, see AGENTS.md "Editing"). A name after a `.`
+>   must be on the `.`'s line, for tags, members and path segments alike.
 
 ## Ground rules
 

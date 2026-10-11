@@ -127,8 +127,22 @@ impl Parser {
                 // A `.` on a new line starts the next match arm (`.Tag`), not
                 // a member access.
                 TokenKind::Dot if !self.peek().newline_before => {
-                    self.bump();
-                    let field = self.expect(diags, TokenKind::Ident, "field name after `.`")?;
+                    let dot = self.bump();
+                    // A `.` with no name after it (mid-edit) accesses an
+                    // empty name, so the rest still parses and the editor
+                    // can complete it.
+                    let field = if self.name_follows() {
+                        self.bump()
+                    } else {
+                        self.nameless(diags, dot.span, "member name after `.`");
+                        Token::new(
+                            TokenKind::Ident,
+                            "",
+                            dot.span.hi.0 as usize,
+                            dot.span.hi.0 as usize,
+                            self.file,
+                        )
+                    };
                     let span = join_spans(expr.span(), field.span);
                     let member = Expr::Member {
                         obj: Box::new(expr),
@@ -307,8 +321,8 @@ impl Parser {
             // empty name, so the rest still parses and the editor can
             // complete it.
             TokenKind::Dot => {
-                if !self.tag_name_follows(token.span) {
-                    self.nameless_tag(diags, token.span, "tag name after `.`");
+                if !self.name_follows() {
+                    self.nameless(diags, token.span, "tag name after `.`");
                     return Ok(Expr::Tag(String::new(), token.span));
                 }
                 let tag = self.bump();

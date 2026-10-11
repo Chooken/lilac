@@ -3,15 +3,16 @@
 //! Requests arrive mid-edit, before the next compile, so the context (what
 //! precedes the cursor) is read from the document's current text and the
 //! names come from the last compile. The cursor is mapped into that
-//! compile's text by the edit between the two ([`map_offset`]). A tag
-//! (a bare `.`) waits for a compile of the current text instead
-//! ([`needs_current_compile`]): only the compiler knows its enum.
+//! compile's text by the edit between the two ([`map_offset`]). After a
+//! `.` (a tag or a member) the request waits for a compile of the current
+//! text instead ([`needs_current_compile`]): only the compiler knows the
+//! enum a tag expects and what a member is looked up in.
 
 use std::collections::{HashMap, HashSet};
 
 use lilac_driver::Analysis;
 use lilac_hir::intrinsics::Intrinsic;
-use lilac_hir::{Layout, LocalSite};
+use lilac_hir::{Layout, LocalSite, MemberReceiver};
 use lilac_resolve::{DefId, DefKind, Lookup, NsId, Segment, Visibility};
 use lilac_span::FileId;
 use lilac_ty::{TypeKind, TypeRef};
@@ -345,6 +346,38 @@ impl<'a> Scope<'a> {
         entries
     }
 
+    /// The entries after a `.`: the members of what the compiler looked
+    /// the name at the cursor up in, else the variants of the tag there.
+    /// A generic body checked once per instance records a site per check;
+    /// only the members they all have are offered.
+    fn dot_entries(&self) -> Vec<Entry> {
+        let mut receivers: Vec<MemberReceiver> = Vec::new();
+        for site in &self.analysis.hir.members {
+            if site.span.file == self.file
+                && site.span.lo.0 <= self.at
+                && self.at <= site.span.hi.0
+                && !receivers.contains(&site.receiver)
+            {
+                receivers.push(site.receiver);
+            }
+        }
+        let mut lists = receivers.into_iter().map(|receiver| {
+            self.members(match receiver {
+                MemberReceiver::Value(ty) => Named::Value(ty),
+                MemberReceiver::Type(def) => Named::Type(def),
+                MemberReceiver::Namespace(ns) => Named::Ns(ns),
+            })
+        });
+        let Some(mut entries) = lists.next() else {
+            return self.tag_variants();
+        };
+        for list in lists {
+            let labels: HashSet<String> = list.into_iter().map(|entry| entry.label).collect();
+            entries.retain(|entry| labels.contains(&entry.label));
+        }
+        entries
+    }
+
     /// The variants the tag at the cursor may name (after a bare `.`):
     /// none when the compiler knows no enum is expected there.
     fn tag_variants(&self) -> Vec<Entry> {
@@ -426,9 +459,10 @@ fn in_comment(text: &str, cursor: usize) -> bool {
     text[line_start..cursor].contains("//")
 }
 
-/// Whether a completion at `position` of `text` is of a tag (a bare `.`,
-/// maybe with part of a name): the compiler must check the text as it is
-/// now to know which enum the tag expects, so it waits for that compile.
+/// Whether a completion at `position` of `text` is after a `.` (a tag or
+/// a member, maybe with part of a name): the compiler must check the text
+/// as it is now to know the enum the tag expects or what the member is
+/// looked up in, so it waits for that compile.
 #[must_use]
 pub fn needs_current_compile(text: &str, position_at: Position) -> bool {
     let Some(cursor) = byte_offset(text, position_at) else {
@@ -442,7 +476,7 @@ pub fn needs_current_compile(text: &str, position_at: Position) -> bool {
     while start > 0 && is_ident(bytes[start - 1]) {
         start -= 1;
     }
-    start > 0 && bytes[start - 1] == b'.' && path_before(text, start - 1).is_empty()
+    start > 0 && bytes[start - 1] == b'.'
 }
 
 /// `textDocument/completion` at `position` of the document `text`.
@@ -482,15 +516,7 @@ pub fn completion(
         });
         entries
     } else if start > 0 && bytes[start - 1] == b'.' {
-        let receiver = path_before(text, start - 1);
-        if receiver.is_empty() {
-            scope.tag_variants()
-        } else {
-            let segments: Vec<&str> = receiver.split('.').collect();
-            scope
-                .resolve(&segments)
-                .map_or_else(Vec::new, |named| scope.members(named))
-        }
+        scope.dot_entries()
     } else {
         scope.names()
     };

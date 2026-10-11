@@ -832,7 +832,7 @@ impl Checker<'_> {
                 self.record_pattern_tag(arm, arms, *span, scrutinee);
                 if name.is_empty() {
                     // The parser reported the `.` with no name.
-                    self.empty_tags += 1;
+                    self.empty_names += 1;
                     return poison;
                 }
                 if let Some(qualifier) = qualifier {
