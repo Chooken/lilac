@@ -1,0 +1,22 @@
+// pending: robustness plan phase 3 (a 64 KiB copy crashes LLVM)
+// expect-exit: 7
+// A 64 KiB object is copied, then passed by value; the copy keeps every
+// byte. Aggregate copies are `memcpy`s, so their size costs LLVM nothing.
+
+using Standard.Process
+
+Block: object {
+    bytes: @array(@bit8, 0x10000)
+}
+
+last: function (block: Block) value: @bit8 {
+    value = @array_at(ref block.bytes, 0xFFFF)
+}
+
+main: function () nothing {
+    x: Block = Block { bytes = @array(@bit8, 0x10000) {} }
+    slot: ref @bit8 = @array_at(ref x.bytes, 0xFFFF)
+    slot = 0x7
+    y: Block = x
+    exit(@extend_zero(last(y)))
+}

@@ -1,0 +1,27 @@
+// pending: robustness plan phase 4 (enums lay payloads out side by side)
+// expect-exit: 0
+// An enum is a tagged union, the C `struct { uint8_t tag; union { … }
+// payload; }`: three 256-byte payloads share one area after the tag, so the
+// enum is 257 bytes, aligned 1.
+
+using Standard.Process
+
+Three: enum {
+    A: @array(@bit8, 0x100)
+    B: @array(@bit8, 0x100)
+    C: @array(@bit8, 0x100)
+}
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+main: function () nothing {
+    size: @bit_native = @size_of(Three)
+    align: @bit_native = @align_of(Three)
+    check(size == 0x101, 0x1)
+    check(align == 0x1, 0x2)
+}

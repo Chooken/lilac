@@ -1,0 +1,12 @@
+// pending: robustness plan phase 5 (a constant division by zero is not reported)
+// expect-error: E060
+// Both operands of a division are constant in a live arm, and the divisor
+// is zero: the panic is known at compile time.
+
+divide: function () quotient: @bit32 {
+    quotient = @i_div_u_32(0x1, 0x0)
+}
+
+main: function () nothing {
+    value: @bit32 = divide()
+}

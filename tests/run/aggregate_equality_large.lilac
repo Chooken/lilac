@@ -1,0 +1,29 @@
+// pending: robustness plan phase 3 (`==` on an object over 1 MiB is an internal error)
+// expect-exit: 0
+// `==` on 2 MiB objects compares every byte (a `memcmp`, not one LLVM
+// integer, which caps at 2^23 bits).
+
+using Standard.Process
+
+Page: object {
+    bytes: @array(@bit8, 0x200000)
+}
+
+g: Page
+h: Page
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+main: function () nothing {
+    check(g == h, 0x1)
+    slot: ref @bit8 = @array_at(ref h.bytes, 0x1FFFFF)
+    slot = 0x1
+    if g == h {
+        exit(0x2)
+    }
+}

@@ -1,0 +1,19 @@
+// pending: robustness plan phase 5 (division by zero is undefined)
+// expect-exit: 101
+// expect-stderr: panic: division by zero
+// expect-stderr:   at divide (division_by_zero.lilac:14:16)
+// expect-stderr:   at main (division_by_zero.lilac:18:10)
+// Integer division by zero panics in every mode and on every target. The
+// divisor is a global nothing writes, read at run time.
+
+using Standard.Process
+
+divisor: @bit32
+
+divide: function (value: @bit32) quotient: @bit32 {
+    quotient = @i_div_u_32(value, divisor)
+}
+
+main: function () nothing {
+    exit(divide(0x1))
+}
