@@ -9,6 +9,16 @@ use lsp_types::{
     NumberOrString, Position, Range, TextEdit, Url,
 };
 
+/// Where line 0's text starts: after a byte-order mark, which editors do
+/// not show as a column (as `lilac_span::SourceFile` counts lines).
+fn text_start(src: &str) -> usize {
+    if src.starts_with(lilac_span::BYTE_ORDER_MARK) {
+        lilac_span::BYTE_ORDER_MARK.len_utf8()
+    } else {
+        0
+    }
+}
+
 /// 0-based line and UTF-16-code-unit column for a byte offset.
 #[must_use]
 pub fn position(src: &str, byte: usize) -> Position {
@@ -16,12 +26,14 @@ pub fn position(src: &str, byte: usize) -> Position {
     let Some(before) = src.get(..byte) else {
         return Position::new(0, 0);
     };
-    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let line_start = before
+        .rfind('\n')
+        .map_or(text_start(src), |index| index + 1);
     let line = before.matches('\n').count();
-    let character = src[line_start..byte]
-        .chars()
-        .map(char::len_utf16)
-        .sum::<usize>();
+    // An offset inside a byte-order mark is the start of line 0.
+    let character = src
+        .get(line_start..byte)
+        .map_or(0, |text| text.chars().map(char::len_utf16).sum::<usize>());
     Position::new(
         u32::try_from(line).unwrap_or(u32::MAX),
         u32::try_from(character).unwrap_or(u32::MAX),
@@ -34,7 +46,7 @@ pub fn position(src: &str, byte: usize) -> Position {
 /// clamps to the line end.
 #[must_use]
 pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
-    let mut line_start = 0usize;
+    let mut line_start = text_start(src);
     let mut line = 0u32;
     while line < position.line {
         let newline = src[line_start..].find('\n')?;
@@ -59,7 +71,7 @@ pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
 /// Returns `0` when the line does not exist.
 #[must_use]
 pub(crate) fn line_len_utf16(src: &str, line: u32) -> u32 {
-    let mut start = 0usize;
+    let mut start = text_start(src);
     let mut current = 0u32;
     while current < line {
         let Some(newline) = src[start..].find('\n') else {
@@ -276,6 +288,20 @@ mod tests {
                 "byte {byte}"
             );
         }
+    }
+
+    /// A byte-order mark is no column: positions are those the editor
+    /// shows, and offsets stay the file's bytes.
+    #[test]
+    fn byte_order_mark_is_not_a_column() {
+        let src = "\u{FEFF}ab\ncd";
+        assert_eq!(position(src, 0), Position::new(0, 0));
+        assert_eq!(position(src, 3), Position::new(0, 0));
+        assert_eq!(position(src, 4), Position::new(0, 1));
+        assert_eq!(position(src, 7), Position::new(1, 1));
+        assert_eq!(byte_offset(src, Position::new(0, 1)), Some(4));
+        assert_eq!(byte_offset(src, Position::new(1, 0)), Some(6));
+        assert_eq!(line_len_utf16(src, 0), 2);
     }
 
     #[test]

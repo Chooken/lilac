@@ -4,9 +4,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use lilac_error::{
     codes, Diagnostic, Diags, Emitter, EmitterHuman, EmitterJson, ErrorGuaranteed, Level,
+    Unreported,
 };
 use lilac_ir::LirModule;
 use lilac_module::Fs;
@@ -211,6 +214,13 @@ pub struct Session {
     /// (`lilac_ir::trace`); the CLI sets it from the mode and
     /// `--stack-traces`.
     pub stack_traces: bool,
+    /// Cancels the compile when set, by whoever holds the other end (the
+    /// language server, when a newer compile is due). The pipeline checks
+    /// it between stages, before each function instance it type checks and
+    /// before each function it lowers. A cancelled compile returns an error
+    /// with no diagnostic of its own ([`Session::cancelled`] says why), its
+    /// diagnostics are incomplete, and it keeps no analysis.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Session {
@@ -233,6 +243,7 @@ impl Default for Session {
             entry: Entry::CMain,
             progress: None,
             stack_traces: false,
+            cancel: None,
         }
     }
 }
@@ -392,6 +403,22 @@ impl Session {
         self.analysis.as_ref()
     }
 
+    /// Whether [`Session::cancel`] is set: a compile that returned an
+    /// error was cut short, not failed, and its diagnostics are incomplete.
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+    }
+
+    /// Stops a cancelled compile: the partial analysis goes, so nothing
+    /// reads it as the program's.
+    fn stop_cancelled(&mut self) -> ErrorGuaranteed {
+        self.analysis = None;
+        ErrorGuaranteed::unreported(Unreported::Cancelled)
+    }
+
     /// Calls the progress hook, if any.
     fn report(&mut self, stage: Stage, event: StageEvent) {
         if let Some(Progress(hook)) = &mut self.progress {
@@ -404,6 +431,7 @@ impl Session {
     /// [`Session::stack_traces`] is set) → verify. Strict mode (the CLI) stops at the
     /// first failing stage; tolerant mode (editor tooling) keeps going through
     /// checking so the partial analysis is retained.
+    /// A set [`Session::cancel`] stops it at the next check.
     #[allow(clippy::too_many_lines)]
     fn run(
         &mut self,
@@ -411,6 +439,9 @@ impl Session {
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
         const DONE: StageEvent = StageEvent::End { count: None };
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         let strict = !self.retain_partial_analysis;
         let facts = builtin::Facts {
             target: self.target,
@@ -429,11 +460,18 @@ impl Session {
             &mut self.diags,
             &self.source_map,
             self.target,
+            self.cancel.as_ref(),
         );
         let project = &project;
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         self.report(Stage::Parse, DONE);
         self.report(Stage::Resolve, StageEvent::Begin);
         let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         if self.diags.has_errors() && strict {
             return Err(self.diags.already_reported());
         }
@@ -443,8 +481,12 @@ impl Session {
         let options = lilac_typeck::Options {
             native_bits: self.target.bit_native_width(),
             require_entry: self.require_entry,
+            cancel: self.cancel.clone(),
         };
         let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         let mut hir = checked.hir.clone();
         hir.funcs.extend(checked.templates.iter().cloned());
         hir.tags.extend(condition_sites.tags.iter().cloned());
@@ -496,7 +538,11 @@ impl Session {
             &self.source_map,
             &triple,
             ptr_bytes,
+            self.cancel.as_deref(),
         );
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         lilac_lower::check_constant_indices(&lowered, &mut self.diags);
         lilac_lower::check_global_initializers(&lowered, &mut self.diags);
         let mut lir = lowered.module;
@@ -522,6 +568,9 @@ impl Session {
             );
         }
         lilac_ir::prune_unreachable(&mut lir, &roots);
+        if self.cancelled() {
+            return Err(self.stop_cancelled());
+        }
         self.report(
             Stage::Prune,
             StageEvent::End {
@@ -887,6 +936,73 @@ main: function () nothing {}
             .expect("compiles")
             .to_text();
         assert!(!text.contains("@builtin"), "{text}");
+    }
+
+    /// A cancelled compile stops with no diagnostic and keeps no analysis,
+    /// not even one an earlier compile of the session left.
+    #[test]
+    fn a_cancelled_compile_stops_and_keeps_nothing() {
+        let src = "main: function () nothing {\n    x: @bit8 = nope\n}\n";
+        let mut session = Session::new();
+        session.retain_partial_analysis = true;
+        assert!(session.compile_lir("c.lilac", src).is_err());
+        assert!(session.analysis().is_some());
+        assert!(!session.cancelled());
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut session = Session::new();
+        session.retain_partial_analysis = true;
+        session.cancel = Some(Arc::clone(&cancel));
+        assert!(session.compile_lir("c.lilac", src).is_err());
+        assert!(session.cancelled());
+        assert!(session.analysis().is_none());
+        assert_eq!(
+            session.diags.error_count(),
+            0,
+            "{}",
+            session.render_diagnostics()
+        );
+
+        // An analysis from before the cancel is not left for a reader.
+        let mut session = Session::new();
+        session.retain_partial_analysis = true;
+        session.cancel = Some(Arc::new(AtomicBool::new(false)));
+        assert!(session.compile_lir("c.lilac", src).is_err());
+        assert!(session.analysis().is_some());
+        session.cancel = Some(cancel);
+        assert!(session.compile_lir("c.lilac", src).is_err());
+        assert!(session.analysis().is_none());
+    }
+
+    /// Cancelling a running check stops it at the next instance: a generic
+    /// that instantiates itself twice per level (tens of thousands of
+    /// instances, many seconds) stops soon after the token is set.
+    #[test]
+    fn cancelling_stops_a_slow_check() {
+        let src = "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\n\
+                   grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\n\
+                   main: function () nothing {\n    grow[@bit32]()\n}\n";
+        let cancel = Arc::new(AtomicBool::new(false));
+        let token = Arc::clone(&cancel);
+        let compile = std::thread::Builder::new()
+            .stack_size(COMPILE_STACK_BYTES)
+            .spawn(move || {
+                let mut session = Session::new();
+                session.cancel = Some(token);
+                let result = session.compile_lir("slow.lilac", src);
+                (result.is_err(), session.cancelled())
+            })
+            .expect("spawns a compile thread");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let set = std::time::Instant::now();
+        cancel.store(true, Ordering::Relaxed);
+        let (failed, cancelled) = compile.join().expect("the compile ends");
+        assert!(failed && cancelled);
+        assert!(
+            set.elapsed() < std::time::Duration::from_secs(2),
+            "stopped {:?} after the cancel",
+            set.elapsed()
+        );
     }
 
     #[test]

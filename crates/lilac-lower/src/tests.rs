@@ -13,6 +13,7 @@ fn lower_src(src: &str) -> (String, Diags) {
     let options = lilac_typeck::Options {
         native_bits: 64,
         require_entry: false,
+        cancel: None,
     };
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, options);
     assert!(!diags.has_errors(), "{diags:?}");
@@ -23,6 +24,7 @@ fn lower_src(src: &str) -> (String, Diags) {
         &sources,
         "x86_64-unknown-none",
         8,
+        None,
     )
     .module;
     let text = lir.to_text();

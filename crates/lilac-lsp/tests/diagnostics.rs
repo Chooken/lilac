@@ -595,3 +595,99 @@ fn an_unused_folder_compiles_in_its_project() {
     handle.join().expect("server thread");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The first diagnostics published for `uri` with document version
+/// `version`, waiting up to `limit` (earlier versions are skipped).
+fn publish_of_version(
+    client: &Connection,
+    uri: &Url,
+    version: i32,
+    limit: Duration,
+) -> PublishDiagnosticsParams {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match client.receiver.recv_timeout(left) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                let params: PublishDiagnosticsParams =
+                    serde_json::from_value(notification.params).expect("decode");
+                if &params.uri == uri && params.version == Some(version) {
+                    return params;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no diagnostics for version {version} of {uri}: {err}"),
+        }
+    }
+}
+
+/// Robustness plan problem 1: `$"a}` lexed forever, so the compile worker
+/// hung and no later edit got diagnostics. It is an error, and the fix
+/// that follows gets fresh diagnostics.
+#[test]
+fn an_edit_after_a_bad_fstring_gets_fresh_diagnostics() {
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    did_open(
+        &client,
+        &uri,
+        "main: function () nothing {\n    s: @bit8 = $\"a}\n}\n",
+    );
+    let params = publish_of_version(&client, &uri, 1, Duration::from_secs(10));
+    assert!(has_code(&params, "E000"), "{:?}", params.diagnostics);
+    did_change(&client, &uri, 2, "main: function () nothing {\n}\n");
+    let params = publish_of_version(&client, &uri, 2, Duration::from_secs(10));
+    assert!(params.diagnostics.is_empty(), "{:?}", params.diagnostics);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A slow compile (a generic that instantiates itself twice per level:
+/// tens of thousands of instances, many seconds in a debug build) is
+/// cancelled by the next edit, whose diagnostics come right after; the
+/// cancelled compile publishes nothing.
+#[test]
+fn an_edit_cancels_a_slow_compile() {
+    let (client, handle) = start_server();
+    initialize(&client, None);
+    let uri = main_uri();
+    did_open(
+        &client,
+        &uri,
+        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\n\
+         grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\n\
+         main: function () nothing {\n    grow[@bit32]()\n}\n",
+    );
+    // Past the debounce, so the slow compile is running.
+    std::thread::sleep(Duration::from_millis(600));
+    did_change(
+        &client,
+        &uri,
+        2,
+        "main: function () nothing {\n    x: @bit8 = nope\n}\n",
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let params = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match client.receiver.recv_timeout(left) {
+            Ok(Message::Notification(notification))
+                if notification.method == "textDocument/publishDiagnostics" =>
+            {
+                let params: PublishDiagnosticsParams =
+                    serde_json::from_value(notification.params).expect("decode");
+                if params.uri == uri {
+                    break params;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => panic!("the edit got no diagnostics within 5 s: {err}"),
+        }
+    };
+    assert_eq!(params.version, Some(2), "{params:?}");
+    assert!(has_code(&params, "E021"), "{:?}", params.diagnostics);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

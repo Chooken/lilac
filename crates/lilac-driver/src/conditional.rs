@@ -15,6 +15,8 @@
 //! are reported, and the final resolve reports everything else.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use lilac_ast::{
     ArmTest, Conditional, Expr, Item, ItemKind, MatchArm, MatchArmBody, Program, Stmt,
@@ -44,18 +46,25 @@ struct Found<'p> {
 /// Decides every top-level conditional of `programs`, splicing in the
 /// selected arms, and refreshes `project`'s `using`s to the live ones.
 /// Returns what the editor needs from the checked conditions, which the
-/// final check never sees.
+/// final check never sees. A set `cancel` stops between rounds (and the
+/// selector checks stop early); the caller then stops the compile.
 pub(crate) fn select(
     project: &mut Project,
     programs: &mut [(FileId, Program)],
     diags: &mut Diags,
     sources: &SourceMap,
     target: Target,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Sites {
     let mut any = false;
     let mut sites = Sites::default();
     loop {
-        let decisions = round(project, programs, diags, sources, target, &mut sites);
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return sites;
+        }
+        let decisions = round(
+            project, programs, diags, sources, target, cancel, &mut sites,
+        );
         if decisions.is_empty() {
             break;
         }
@@ -92,6 +101,7 @@ fn round(
     diags: &mut Diags,
     sources: &SourceMap,
     target: Target,
+    cancel: Option<&Arc<AtomicBool>>,
     sites: &mut Sites,
 ) -> HashMap<Span, Decision> {
     let mut found = Vec::new();
@@ -119,6 +129,7 @@ fn round(
     let options = lilac_typeck::Options {
         native_bits: target.bit_native_width(),
         require_entry: false,
+        cancel: cancel.cloned(),
     };
     let checked =
         lilac_typeck::check_selectors(&resolved, &mut types, &mut scratch, options, &selectors);

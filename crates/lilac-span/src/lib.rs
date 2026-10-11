@@ -66,6 +66,10 @@ impl Span {
     }
 }
 
+/// U+FEFF, the UTF-8 byte-order mark. At the start of a file it is trivia:
+/// the lexer skips it, and line 1 starts after it.
+pub const BYTE_ORDER_MARK: char = '\u{FEFF}';
+
 /// One source file: name, contents, and precomputed line starts.
 #[derive(Debug)]
 pub struct SourceFile {
@@ -78,7 +82,14 @@ pub struct SourceFile {
 
 impl SourceFile {
     fn new(name: String, src: String) -> Self {
-        let mut line_starts = vec![0];
+        // A byte-order mark is not part of line 1 (the lexer skips it, and
+        // editors do not show it), so columns match what the user sees.
+        let first = if src.starts_with(BYTE_ORDER_MARK) {
+            BYTE_ORDER_MARK.len_utf8()
+        } else {
+            0
+        };
+        let mut line_starts = vec![first];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
                 line_starts.push(i + 1);
@@ -101,6 +112,7 @@ impl SourceFile {
         }
         let line = self.line_of(off);
         let start = self.line_starts[line - 1];
+        let off = off.max(start);
         (line, self.src[start..off].chars().count() + 1)
     }
 
@@ -108,7 +120,10 @@ impl SourceFile {
     #[must_use]
     pub fn line_of(&self, offset: usize) -> usize {
         let off = offset.min(self.src.len());
-        self.line_starts.partition_point(|&start| start <= off)
+        // An offset inside a byte-order mark is on line 1.
+        self.line_starts
+            .partition_point(|&start| start <= off)
+            .max(1)
     }
 
     /// Byte offset where a 1-based line starts (clamped to the file).
@@ -271,6 +286,21 @@ mod tests {
         assert_eq!(sm.line_col(Span::new(5, 6, file)), Some((1, 5)));
         // An offset inside `é` snaps back to its start.
         assert_eq!(sm.line_col(Span::new(2, 3, file)), Some((1, 2)));
+    }
+
+    /// A byte-order mark is not a column of line 1, and offsets stay the
+    /// file's bytes.
+    #[test]
+    fn byte_order_mark_is_not_a_column() {
+        let mut sm = SourceMap::new();
+        let file = sm.add_file("main.lilac", "\u{FEFF}ab\ncd");
+        assert_eq!(sm.line_col(Span::new(3, 4, file)), Some((1, 1)));
+        assert_eq!(sm.line_col(Span::new(4, 5, file)), Some((1, 2)));
+        assert_eq!(sm.line_col(Span::new(0, 1, file)), Some((1, 1)));
+        assert_eq!(sm.line_col(Span::new(7, 8, file)), Some((2, 2)));
+        let source = sm.file(file).expect("file");
+        assert_eq!(source.line_text(1), "ab");
+        assert_eq!(source.line_of(1), 1);
     }
 
     #[test]

@@ -103,7 +103,6 @@ fn error_codes(stderr: &str) -> Vec<&str> {
 /// Problem 1: a lone `}` or a bad escape in an f-string left the lexer at
 /// the same position forever. Each input ends with `E000`.
 #[test]
-#[ignore = "robustness plan phase 1"]
 fn fstring_errors_end() {
     let dir = scratch("fstring_errors_end");
     let mut failures = Vec::new();
@@ -128,7 +127,6 @@ fn fstring_errors_end() {
 /// Problem 11: a bad escape ends a string today, and the rest re-lexes into
 /// more errors. It is one error, and the string still ends at its `"`.
 #[test]
-#[ignore = "robustness plan phase 1"]
 fn bad_string_escape_is_one_error() {
     let dir = scratch("bad_string_escape_is_one_error");
     write(
@@ -142,7 +140,6 @@ fn bad_string_escape_is_one_error() {
 
 /// Problem 12: a UTF-8 byte-order mark at the start of a file is trivia.
 #[test]
-#[ignore = "robustness plan phase 1"]
 fn byte_order_mark_is_trivia() {
     let dir = scratch("byte_order_mark_is_trivia");
     write(

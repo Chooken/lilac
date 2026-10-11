@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phase 0 done).
+> Status: in progress (Phases 0–1 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -221,6 +221,67 @@ memory also grows without bound.
 (token and error counts); an LSP test that sends `$"a}` then a fix and
 gets diagnostics for the fix; an LSP test where a slow compile is cancelled
 by an edit.
+
+- **Delivered notes.**
+  - The lexer's interface keeps `Iterator<Item = Result<Token,
+    Diagnostic>>`; `Err` is left for bytes that form no token (an
+    unexpected character, a lone `$`). Errors inside a token go to
+    `Lexer::take_diagnostics`, and `Lexer::lex_all` (every caller's entry
+    point) merges them in source order, so no caller changed.
+  - F-string text now ends at its line, like a string's (1.1 says so; the
+    old lexer ran on to the end of the file). An f-string its line or file
+    ends inside reports `E000` over `$"…` and is closed by a zero-width
+    `FStrEnd`, so the parser sees a whole f-string and adds no second
+    "unterminated f-string". That token and the end of file are the only
+    items that consume nothing, and the progress check (1.4) allows exactly
+    those: a zero-width `FStrEnd` only when leaving f-string text. Nested
+    f-strings keep their own `$"` offsets (`Lexer::fstrings`) for that span.
+  - A lone `}` is read as the literal brace its fix writes, and its
+    help is a real fix (`Diagnostic::suggest(…, "}}")`), so the editor
+    offers it. A bad escape decodes to nothing; the rest of the literal
+    keeps decoding. `'…'` that is unterminated consumes its line, like a
+    string; `''` is "empty char literal".
+  - Malformed numbers (1.2) are not `Err` items but number tokens plus a
+    side error, so the parser sees no hole: before, `x: @bit32 = 0b102`
+    also got `E001` "expected expression, found `}`". The token's text is
+    the well-formed literal read before the error (`0b10`, `0x1`, `1` for
+    `1.foo`; `0x0` when no digit was read), so the editor's tolerant
+    typeck adds no `E060` either. Messages name the bad digit ("invalid
+    digit `2` in binary literal"); `docs/errors/E000.md` follows.
+  - 1.4 in release: `force_progress` skips one character (or, at the end
+    of the file, leaves f-string text) with an internal `E000`, keeping any
+    error the stalled item carried. The property test runs with debug
+    assertions, so the `debug_assert!` fires on a regression (checked by
+    reintroducing an unconsumed closing quote: both property tests fail at
+    the stalled item); `a_stalled_lexer_skips_one_character` covers the
+    release path directly. The property now also checks side errors: each
+    covers consumed bytes, at most one per byte.
+  - 1.5: control, whitespace other than ASCII's, the common invisible
+    format characters (zero-width, bidi, variation selectors, tags) and
+    the backtick (which cannot be quoted in backticks) are named by code
+    point.
+  - 1.6 also makes positions agree: `lilac_span::SourceFile` starts line 1
+    after a byte-order mark and the language server's position conversion
+    skips it, so columns are the editor's while offsets stay the file's
+    bytes. `lilac_span::BYTE_ORDER_MARK` is the one constant.
+  - 1.7: `Session::cancel` is `Option<Arc<AtomicBool>>`; typeck takes it
+    in `Options::cancel` (so `Options` is `Clone`, no longer `Copy`),
+    lowering as a `lower` argument, and conditional selection checks it
+    between rounds. A cancelled compile returns
+    `ErrorGuaranteed::unreported(Unreported::Cancelled)`, reports nothing
+    of its own, and clears `Session::analysis`; `Session::cancelled` says
+    why it stopped. The server cancels the running compile when the next
+    one's debounce deadline passes (not on every keystroke), so a compile
+    that finishes within the debounce still installs its analysis;
+    `Outcome` is now `Compiled | Cancelled | Panicked`.
+  - The cancellation tests (`cancelling_stops_a_slow_check` in the driver,
+    `an_edit_cancels_a_slow_compile` in the LSP) use problem 8's program as
+    the slow compile. Once Phase 6 makes it fail fast they still pass but
+    no longer show anything; Phase 6 should give them a program that is
+    slow for another reason, or a test-only hook that keeps a compile busy.
+  - `fuzz.rs` lost `hits_fstring_hang`; a 5,000-mutant run (debug, 71 s)
+    found nothing. `$` and `\` are back in the progress test's main
+    alphabet.
 
 ---
 

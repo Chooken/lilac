@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -34,6 +35,9 @@ pub struct Job {
     pub root: Option<PathBuf>,
     /// Mounted libraries.
     pub libraries: Vec<(String, PathBuf)>,
+    /// Set by the server when a newer compile is due: every session of
+    /// this job stops at its next check, and [`Job::run`] returns `None`.
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// A finished compile.
@@ -50,13 +54,21 @@ pub struct Compiled {
     pub diagnostics: HashMap<Url, (Vec<LspDiagnostic>, Option<i32>)>,
 }
 
-/// A compile's outcome: the result, or the message of the compiler panic
-/// that ended it (also printed to stderr).
-pub type Outcome = Result<Compiled, String>;
+/// How a compile ended.
+pub enum Outcome {
+    /// It finished (boxed: the analyses are large, the other outcomes
+    /// small).
+    Compiled(Box<Compiled>),
+    /// It was cancelled ([`Job::cancel`]): it has nothing to install or
+    /// publish.
+    Cancelled,
+    /// The compiler panicked, with this message (also printed to stderr).
+    Panicked(String),
+}
 
 /// Starts the compile thread: it runs each job it receives and sends back
 /// its [`Outcome`] (the server keeps its previous analysis when the
-/// compiler panicked).
+/// compile was cancelled or the compiler panicked).
 ///
 /// # Panics
 ///
@@ -71,8 +83,12 @@ pub fn spawn_worker() -> (Sender<Job>, Receiver<(u64, Outcome)>) {
         .spawn(move || {
             for job in job_receiver {
                 let generation = job.generation;
-                let compiled = guarded(|| job.run());
-                if result_sender.send((generation, compiled)).is_err() {
+                let outcome = match guarded(|| job.run()) {
+                    Ok(Some(compiled)) => Outcome::Compiled(Box::new(compiled)),
+                    Ok(None) => Outcome::Cancelled,
+                    Err(panic) => Outcome::Panicked(panic),
+                };
+                if result_sender.send((generation, outcome)).is_err() {
                     break;
                 }
             }
@@ -97,24 +113,37 @@ pub fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 impl Job {
-    /// Compiles the project and every open file it does not reach.
+    /// Compiles the project and every open file it does not reach; `None`
+    /// when [`Job::cancel`] stopped it.
     #[must_use]
-    pub fn run(&self) -> Compiled {
+    pub fn run(&self) -> Option<Compiled> {
         let overlay = self.documents.overlay();
         let mut by_uri: HashMap<Url, Vec<LspDiagnostic>> = HashMap::new();
         let mut covered: HashSet<Url> = HashSet::new();
-        let project = self.root.as_ref().map(|root| {
-            let mut session = new_session(&self.libraries);
-            let mut fs = OverlayFs { overlay: &overlay };
-            let mut stages = LirStages::default();
-            let _ = session.compile_project_with_stages(root, &mut fs, &mut |name, lir| {
-                stages.modules.push((name, lir.clone()));
-            });
-            // Project-load errors (E025) can have no source span.
-            let anchor = self.project_anchor(root);
-            retain(session, stages, anchor.as_ref(), &mut covered, &mut by_uri)
-        });
-        let per_file = self.compile_units(&overlay, &mut covered, &mut by_uri);
+        let project = match &self.root {
+            Some(root) => {
+                let mut session = new_session(&self.libraries, &self.cancel);
+                let mut fs = OverlayFs { overlay: &overlay };
+                let mut stages = LirStages::default();
+                let _ = session.compile_project_with_stages(root, &mut fs, &mut |name, lir| {
+                    stages.modules.push((name, lir.clone()));
+                });
+                if self.cancelled() {
+                    return None;
+                }
+                // Project-load errors (E025) can have no source span.
+                let anchor = self.project_anchor(root);
+                Some(retain(
+                    session,
+                    stages,
+                    anchor.as_ref(),
+                    &mut covered,
+                    &mut by_uri,
+                ))
+            }
+            None => None,
+        };
+        let per_file = self.compile_units(&overlay, &mut covered, &mut by_uri)?;
 
         // Key everything by the client's spelling of an open document's URI
         // (`file:///c%3A/...`), so one document never gets two diagnostic
@@ -133,12 +162,17 @@ impl Job {
         for (uri, document) in self.documents.iter() {
             diagnostics.entry(uri.clone()).or_default().1 = Some(document.version);
         }
-        Compiled {
+        Some(Compiled {
             generation: self.generation,
             project,
             per_file,
             diagnostics,
-        }
+        })
+    }
+
+    /// Whether [`Job::cancel`] is set.
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     /// Where the project's diagnostics without a source span go: the
@@ -177,13 +211,14 @@ impl Job {
     }
 
     /// Compiles the open files the project did not cover (`covered`), one
-    /// compile per unit, and returns each file's compile by canonical URI.
+    /// compile per unit, and returns each file's compile by canonical URI;
+    /// `None` when [`Job::cancel`] stopped one.
     fn compile_units(
         &self,
         overlay: &HashMap<PathBuf, String>,
         covered: &mut HashSet<Url>,
         by_uri: &mut HashMap<Url, Vec<LspDiagnostic>>,
-    ) -> HashMap<Url, Arc<Retained>> {
+    ) -> Option<HashMap<Url, Arc<Retained>>> {
         // An open file the project does not reach is checked on its own unit
         // (see `unit_of`). Files sharing a unit share one compile, and a
         // compile also covers the open files of every unit it loads (a
@@ -209,7 +244,7 @@ impl Job {
             {
                 continue;
             }
-            let mut session = new_session(&self.libraries);
+            let mut session = new_session(&self.libraries, &self.cancel);
             let mut stages = LirStages::default();
             let mut capture = |name, lir: &lilac_ir::LirModule| {
                 stages.modules.push((name, lir.clone()));
@@ -224,11 +259,17 @@ impl Job {
                         &mut fs,
                         &mut capture,
                     );
+                    if self.cancelled() {
+                        return None;
+                    }
                     let anchor = uris.iter().min();
                     retain(session, stages, anchor, covered, by_uri)
                 }
                 Unit::Folder(dir) => {
                     let _ = session.compile_project_with_stages(dir, &mut fs, &mut capture);
+                    if self.cancelled() {
+                        return None;
+                    }
                     let anchor = self.unit_anchor(dir, &uris.iter().collect::<Vec<_>>());
                     retain(session, stages, anchor.as_ref(), covered, by_uri)
                 }
@@ -239,6 +280,9 @@ impl Job {
                     };
                     let name = document.path.to_string_lossy().into_owned();
                     let _ = session.compile_lir_with_stages(&name, &document.text, &mut capture);
+                    if self.cancelled() {
+                        return None;
+                    }
                     retain_single(session, stages, uri, covered, by_uri)
                 }
             });
@@ -248,15 +292,17 @@ impl Job {
                     .or_insert_with(|| Arc::clone(&retained));
             }
         }
-        new_per_file
+        Some(new_per_file)
     }
 }
 
 /// A compiler session for editor use. It analyzes tolerantly so
-/// hover/definition keep working while the buffer has syntax or type errors.
-fn new_session(libraries: &[(String, PathBuf)]) -> Session {
+/// hover/definition keep working while the buffer has syntax or type errors,
+/// and stops when `cancel` is set.
+fn new_session(libraries: &[(String, PathBuf)], cancel: &Arc<AtomicBool>) -> Session {
     let mut session = Session::new();
     session.libraries = libraries.to_vec();
+    session.cancel = Some(Arc::clone(cancel));
     session.retain_partial_analysis = true;
     session
 }

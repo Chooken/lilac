@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,9 +84,10 @@ pub struct Server {
     deadline: Option<Instant>,
     /// Counts changes; a compile is current when it saw the latest.
     generation: u64,
-    /// Whether the worker is compiling (one compile runs at a time; a due
-    /// one starts when it finishes).
-    compiling: bool,
+    /// The cancel token of the compile on the worker (`None` when it is
+    /// idle). One compile runs at a time: when the next is due, the running
+    /// one is cancelled, and the next starts once it has stopped.
+    running: Option<Arc<AtomicBool>>,
     /// Compile jobs for the worker thread.
     jobs: Sender<Job>,
     /// Finished compiles from the worker, by generation.
@@ -133,7 +135,7 @@ impl Server {
             next_request: 0,
             deadline: None,
             generation: 0,
-            compiling: false,
+            running: None,
             jobs,
             results,
             reported_panic: None,
@@ -190,10 +192,13 @@ impl Server {
             // A deadline, not a timeout per receive: a stream of requests
             // must not keep postponing the compile. Requests are answered
             // from the last compile while the worker runs the next.
-            let due = match self.deadline {
-                Some(_) if self.compiling => crossbeam_channel::never(),
-                Some(deadline) => crossbeam_channel::at(deadline),
-                None => crossbeam_channel::never(),
+            // A compile that is stopping after its cancel ends the wait.
+            let due = match (self.deadline, &self.running) {
+                (Some(_), Some(running)) if running.load(Ordering::Relaxed) => {
+                    crossbeam_channel::never()
+                }
+                (Some(deadline), _) => crossbeam_channel::at(deadline),
+                (None, _) => crossbeam_channel::never(),
             };
             let message = crossbeam_channel::select! {
                 recv(self.connection.receiver) -> message => match message {
@@ -207,7 +212,7 @@ impl Server {
                     continue;
                 }
                 recv(due) -> _ => {
-                    self.start_compile();
+                    self.compile_due();
                     continue;
                 }
             };
@@ -269,23 +274,29 @@ impl Server {
         if !crate::complete::needs_current_compile(&document.text, position.position) {
             return None;
         }
-        Some(if self.compiling || self.deadline.is_some() {
+        Some(if self.running.is_some() || self.deadline.is_some() {
             Wait::Compile
         } else {
             Wait::Never
         })
     }
 
-    /// Starts the due compile now, skipping the debounce (or right after
-    /// the running one).
+    /// Starts the due compile now, skipping the debounce (once the running
+    /// one, cancelled, has stopped).
     fn compile_now(&mut self) {
         if self.deadline.is_none() {
             return;
         }
-        if self.compiling {
-            self.deadline = Some(Instant::now());
-        } else {
-            self.start_compile();
+        self.deadline = Some(Instant::now());
+        self.compile_due();
+    }
+
+    /// The due compile's deadline passed: it starts, or, while an older
+    /// compile runs, that one is cancelled so it starts when that stops.
+    fn compile_due(&mut self) {
+        match &self.running {
+            Some(running) => running.store(true, Ordering::Relaxed),
+            None => self.start_compile(),
         }
     }
 
@@ -643,7 +654,7 @@ impl Server {
     }
 
     /// Schedules a recompile [`DEBOUNCE`] from now; a compile already
-    /// running is now stale.
+    /// running is now stale, and is cancelled when that time comes.
     fn touch(&mut self) {
         self.generation += 1;
         self.deadline = Some(Instant::now() + DEBOUNCE);
@@ -652,28 +663,35 @@ impl Server {
     /// Starts a compile of the current state on the worker.
     fn start_compile(&mut self) {
         self.deadline = None;
+        let cancel = Arc::new(AtomicBool::new(false));
         let job = Job {
             generation: self.generation,
             documents: self.documents.clone(),
             workspace: self.workspace.clone(),
             root: self.root.clone(),
             libraries: self.libraries.clone(),
+            cancel: Arc::clone(&cancel),
         };
         if self.jobs.send(job).is_ok() {
-            self.compiling = true;
+            self.running = Some(cancel);
         }
     }
 
     /// Takes a finished compile: its analysis answers requests from now on
     /// (it is newer than what the server had), and its diagnostics are
     /// published unless an edit arrived meanwhile (the next compile, already
-    /// scheduled, publishes instead). A compile that panicked changes
+    /// scheduled, publishes instead). A compile that was cancelled changes
+    /// nothing (the due one starts next). A compile that panicked changes
     /// nothing, but the user is told (once until a compile succeeds).
-    fn finish_compile(&mut self, generation: u64, compiled: Outcome) {
-        self.compiling = false;
-        let compiled = match compiled {
-            Ok(compiled) => compiled,
-            Err(panic) => {
+    fn finish_compile(&mut self, generation: u64, outcome: Outcome) {
+        self.running = None;
+        let compiled = match outcome {
+            Outcome::Compiled(compiled) => *compiled,
+            Outcome::Cancelled => {
+                self.settle_parked();
+                return;
+            }
+            Outcome::Panicked(panic) => {
                 if self.reported_panic.replace(generation).is_none() {
                     self.show_error(&format!(
                         "The Lilac compiler hit an internal error; diagnostics may be stale. {panic}"
@@ -784,6 +802,7 @@ mod tests {
             workspace: None,
             root: None,
             libraries: Vec::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -818,7 +837,7 @@ mod tests {
             &uri,
             "main: function () nothing {\n    x: @bit8 = y\n}\n",
         );
-        let stale = job(&server).run();
+        let stale = job(&server).run().expect("not cancelled");
 
         server.handle_notification(Notification {
             method: "textDocument/didChange".to_owned(),
@@ -835,12 +854,12 @@ mod tests {
             })
             .expect("params"),
         });
-        server.finish_compile(stale.generation, Ok(stale));
+        server.finish_compile(stale.generation, Outcome::Compiled(Box::new(stale)));
         assert!(server.retained_for(&uri).is_some());
         assert_eq!(published(&client), Vec::<i32>::new());
 
-        let current = job(&server).run();
-        server.finish_compile(current.generation, Ok(current));
+        let current = job(&server).run().expect("not cancelled");
+        server.finish_compile(current.generation, Outcome::Compiled(Box::new(current)));
         assert_eq!(published(&client), vec![2]);
     }
 
@@ -868,15 +887,15 @@ mod tests {
         let (connection, client) = Connection::memory();
         let mut server = Server::new(connection, None, Vec::new(), false);
         let failed = compile::guarded(|| -> Compiled { panic!("boom") });
-        server.finish_compile(0, failed);
-        server.finish_compile(1, Err("again".to_owned()));
+        server.finish_compile(0, Outcome::Panicked(failed.err().expect("panicked")));
+        server.finish_compile(1, Outcome::Panicked("again".to_owned()));
         let shown = shown_errors(&client);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].contains("internal error") && shown[0].contains("boom"));
 
-        let fine = job(&server).run();
-        server.finish_compile(fine.generation, Ok(fine));
-        server.finish_compile(2, Err("later".to_owned()));
+        let fine = job(&server).run().expect("not cancelled");
+        server.finish_compile(fine.generation, Outcome::Compiled(Box::new(fine)));
+        server.finish_compile(2, Outcome::Panicked("later".to_owned()));
         let shown = shown_errors(&client);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].contains("later"));
@@ -934,7 +953,7 @@ mod tests {
         let dir = std::env::temp_dir().join("lilac-lsp-parked-completion");
         let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
         open(&mut server, &uri, SHAPES);
-        let stale = job(&server).run();
+        let stale = job(&server).run().expect("not cancelled");
         server
             .handle_request(complete_request(&uri, 9, 16))
             .expect("request");
@@ -946,12 +965,12 @@ mod tests {
             &SHAPES.replace("s: Shape", "s: Paint"),
         );
 
-        server.finish_compile(stale.generation, Ok(stale));
+        server.finish_compile(stale.generation, Outcome::Compiled(Box::new(stale)));
         assert!(responses(&client).is_empty());
         assert_eq!(server.parked.len(), 1);
 
-        let current = job(&server).run();
-        server.finish_compile(current.generation, Ok(current));
+        let current = job(&server).run().expect("not cancelled");
+        server.finish_compile(current.generation, Outcome::Compiled(Box::new(current)));
         let answered = responses(&client);
         let [response] = answered.as_slice() else {
             panic!("one response: {answered:?}");
@@ -993,6 +1012,53 @@ mod tests {
                 .map(|error| error.code),
             Some(REQUEST_CANCELLED)
         );
+    }
+
+    /// A cancelled compile installs and publishes nothing: the previous
+    /// analysis keeps answering requests. A job whose token is set stops.
+    #[test]
+    fn a_cancelled_compile_changes_nothing() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-cancelled-compile");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(&mut server, &uri, "main: function () nothing {\n}\n");
+        let first = job(&server).run().expect("not cancelled");
+        let first_generation = first.generation;
+        server.finish_compile(first_generation, Outcome::Compiled(Box::new(first)));
+        assert_eq!(published(&client), vec![1]);
+
+        change(
+            &mut server,
+            &uri,
+            2,
+            "main: function () nothing {\n    x: @bit8 = y\n}\n",
+        );
+        let cancelled = job(&server);
+        cancelled.cancel.store(true, Ordering::Relaxed);
+        assert!(cancelled.run().is_none());
+        server.finish_compile(cancelled.generation, Outcome::Cancelled);
+        assert_eq!(published(&client), Vec::<i32>::new());
+        assert_eq!(server.compiled, Some(first_generation));
+        assert!(server.retained_for(&uri).is_some());
+    }
+
+    /// When the next compile is due while one runs, the running one is
+    /// cancelled rather than waited for.
+    #[test]
+    fn a_due_compile_cancels_the_running_one() {
+        let (connection, _client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-due-compile");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(&mut server, &uri, "main: function () nothing {\n}\n");
+        server.start_compile();
+        let running = server.running.clone().expect("a compile runs");
+        change(&mut server, &uri, 2, "main: function () nothing {\n\n}\n");
+        assert!(!running.load(Ordering::Relaxed));
+        server.compile_due();
+        assert!(running.load(Ordering::Relaxed));
+        assert!(server.deadline.is_some(), "the due compile still waits");
     }
 
     #[test]

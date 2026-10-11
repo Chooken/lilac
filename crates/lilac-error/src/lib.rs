@@ -298,6 +298,9 @@ pub enum Unreported {
     /// `@entry` names something that does not exist outside an executable,
     /// so the hook is dropped rather than reported.
     DroppedEntry,
+    /// The compile was cancelled (a newer one is due); it stops with
+    /// whatever it reported so far, which is incomplete.
+    Cancelled,
 }
 
 impl ErrorGuaranteed {

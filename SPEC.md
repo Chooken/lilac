@@ -186,6 +186,10 @@ values of length greater than one.
   UTF-8 bytes.
 * Chars: `'…'` holds exactly one scalar. Empty or multi-scalar char literals are
   lex errors; use a `String` for those.
+* A string, char or f-string literal ends on its line: one its line ends
+  inside is a lex error. (An f-string hole is code, and may span lines.)
+* A UTF-8 byte-order mark (U+FEFF) at the start of a file is whitespace;
+  anywhere else it is an unexpected character.
 
 ### Bracket reservation
 

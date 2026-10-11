@@ -314,37 +314,6 @@ fn mutant(corpus: &[Seed], index: usize) -> (&Seed, String) {
     (seed, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Whether `text` reaches the f-string lexer's known hang: a lone `}` or
-/// `{`, or a `\`, in the text of a `$"` literal. A hole (a lone `{`) counts
-/// too, since after it the literal resumes in the same state. This
-/// over-approximates (a `$"` inside a comment or string counts), never
-/// under: the lexer enters f-string text only at `$"` or after a hole.
-///
-/// Robustness plan phase 1 makes the lexer always progress and removes this
-/// exclusion.
-fn hits_fstring_hang(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while let Some(offset) = text[at..].find("$\"") {
-        let mut index = at + offset + 2;
-        while index < bytes.len() && bytes[index] != b'"' {
-            match bytes[index] {
-                b'\\' => return true,
-                brace @ (b'{' | b'}') => {
-                    if bytes.get(index + 1) != Some(&brace) {
-                        return true;
-                    }
-                    index += 1;
-                }
-                _ => {}
-            }
-            index += 1;
-        }
-        at = index.min(bytes.len());
-    }
-    false
-}
-
 /// Reads the disk, except for one path whose text is given.
 struct OverlayFs {
     /// The replaced file, canonical.
@@ -454,7 +423,6 @@ fn mutants_compile_without_panics_or_hangs() {
     assert!(!corpus.is_empty(), "the corpus is empty");
     let count = iterations();
     let next = AtomicUsize::new(0);
-    let skipped = AtomicUsize::new(0);
     let failures: Mutex<HashMap<usize, String>> = Mutex::new(HashMap::new());
     let workers = std::thread::available_parallelism().map_or(1, usize::from);
     std::thread::scope(|scope| {
@@ -465,10 +433,6 @@ fn mutants_compile_without_panics_or_hangs() {
                     break;
                 }
                 let (seed, text) = mutant(corpus, index);
-                if hits_fstring_hang(&text) {
-                    skipped.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
                 for mode in [Mode::Tolerant, Mode::Strict] {
                     let why = match compile_watched(seed, text.clone(), mode) {
                         Ok(()) => continue,
@@ -492,11 +456,7 @@ fn mutants_compile_without_panics_or_hangs() {
     let failures = failures.into_inner().expect("no worker panicked");
     let mut indices: Vec<&usize> = failures.keys().collect();
     indices.sort();
-    eprintln!(
-        "{count} mutants, {} skipped (f-string lexer hang), {} failed",
-        skipped.into_inner(),
-        failures.len()
-    );
+    eprintln!("{count} mutants, {} failed", failures.len());
     assert!(
         failures.is_empty(),
         "{} of {count} mutants failed (indices {indices:?}); the first:\n{}",

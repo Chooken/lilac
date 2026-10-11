@@ -19,6 +19,7 @@ fn run_native(
     let options = crate::Options {
         native_bits,
         require_entry: false,
+        cancel: None,
     };
     let checked = crate::check(&res, &mut types, &mut diags, options);
     (diags, checked.hir, types, sm, res)
@@ -2069,4 +2070,28 @@ fn a_generic_that_moves_its_argument_twice_fails_as_e042() {
         "{:?}",
         messages(&diags)
     );
+}
+
+/// A cancelled check stops before the next instance: nothing more is
+/// checked, and it reports nothing about what it skipped.
+#[test]
+fn a_cancelled_check_stops() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let src = "f: function () nothing {\n    x: @bit8 = nope\n}\nmain: function () nothing {\n    f()\n}\n";
+    let mut sm = SourceMap::new();
+    let mut diags = Diags::new();
+    let project = lilac_module::single_file("test.lilac", src, &mut sm);
+    let (programs, _) = lilac_module::parse_all(&project, &mut diags, false);
+    let res = lilac_resolve::resolve(&project, &programs, &mut diags);
+    let mut types = Types::new();
+    let options = crate::Options {
+        native_bits: 64,
+        require_entry: false,
+        cancel: Some(Arc::new(AtomicBool::new(true))),
+    };
+    let checked = crate::check(&res, &mut types, &mut diags, options);
+    assert!(checked.hir.funcs.is_empty(), "{:?}", checked.hir.funcs);
+    assert!(!diags.has_errors(), "{diags:?}");
 }

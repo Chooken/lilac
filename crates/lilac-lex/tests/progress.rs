@@ -1,11 +1,17 @@
 //! The lexer's progress property (robustness plan 0.3): for random input,
 //! lexing ends, yields at most one item per byte plus the end of file, and
 //! every error covers at least one byte past where the previous item ended,
-//! so no error repeats in place.
+//! so no error repeats in place. Errors found inside a token (side output)
+//! cover bytes already consumed, and there is at most one per byte.
+//!
+//! Tests build with debug assertions, so the lexer's own progress check
+//! (`debug_assert!` in `Lexer::next`) runs on every item here too: a
+//! regression fails at the item that stalled.
 //!
 //! Inputs are random strings over an alphabet weighted towards what the
 //! lexer branches on, from a fixed seed, so a failure reproduces exactly.
 
+use lilac_error::Diagnostic;
 use lilac_lex::Lexer;
 use lilac_span::SourceMap;
 
@@ -20,11 +26,11 @@ const PIECES: &[&str] = &[
     " ", "\n", "\t", "\r", "//", "/", "a", "_", "Z", "x", "main", "if", "0", "1", "9", "0x", "0b",
     "1.5", "_1", "F", "g", ".", "...", ":", ",", "=", "==", "->", "=>", "{", "}", "(", ")", "[",
     "]", "+", "-", "*", "%", "<", ">", "<=", "!", "@", "\"", "'", "#", "~", "^", "é", "\u{FEFF}",
-    "\u{0}",
+    "\u{0}", "$", "\\",
 ];
 
 /// Pieces that reach the f-string lexer, and escapes.
-const ESCAPE_PIECES: &[&str] = &["$", "$\"", "\\", "\\x", "\\n", "\\\"", "\\q", "}}", "{{"];
+const ESCAPE_PIECES: &[&str] = &["$\"", "\\x", "\\n", "\\\"", "\\q", "\\x4", "}}", "{{"];
 
 /// A xorshift64 generator: deterministic, and enough to pick pieces.
 struct Rng(u64);
@@ -44,14 +50,26 @@ impl Rng {
     }
 }
 
+/// The `[lo, hi)` byte range of a diagnostic's primary label.
+fn primary_range(diagnostic: &Diagnostic) -> Result<(u32, u32), String> {
+    diagnostic
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .map(|label| (label.span.lo.0, label.span.hi.0))
+        .ok_or_else(|| format!("error with no primary label: {diagnostic:?}"))
+}
+
 /// Checks the property on one input; `Err` says how it failed.
 fn check_progress(src: &str) -> Result<(), String> {
     let mut map = SourceMap::new();
     let file = map.add_file("fuzz.lilac", src);
     let cap = src.len() + 1;
     let mut items = 0;
+    let mut inside = 0;
     let mut previous_end = 0;
-    for item in Lexer::new(src, file) {
+    let mut lexer = Lexer::new(src, file);
+    while let Some(item) = lexer.next() {
         items += 1;
         if items > cap {
             return Err(format!("more than {cap} items (the lexer is not ending)"));
@@ -59,10 +77,7 @@ fn check_progress(src: &str) -> Result<(), String> {
         let end = match item {
             Ok(token) => token.span.hi.0,
             Err(diagnostic) => {
-                let Some(label) = diagnostic.labels.iter().find(|label| label.primary) else {
-                    return Err(format!("error with no primary label: {diagnostic:?}"));
-                };
-                let end = label.span.hi.0;
+                let (_, end) = primary_range(&diagnostic)?;
                 if end <= previous_end {
                     return Err(format!(
                         "error ending at {end} does not pass the previous item's end \
@@ -74,6 +89,20 @@ fn check_progress(src: &str) -> Result<(), String> {
             }
         };
         previous_end = previous_end.max(end);
+        for diagnostic in lexer.take_diagnostics() {
+            inside += 1;
+            let (lo, hi) = primary_range(&diagnostic)?;
+            if lo >= hi || hi > previous_end {
+                return Err(format!(
+                    "error inside a token at [{lo}, {hi}) is empty or past what was \
+                     lexed ({previous_end}): {:?}",
+                    diagnostic.msg
+                ));
+            }
+        }
+        if inside > src.len() {
+            return Err(format!("more than {} errors inside tokens", src.len()));
+        }
     }
     Ok(())
 }
@@ -94,20 +123,16 @@ fn check_random_inputs(seed: u64, pieces: &[&str]) {
 
 #[test]
 fn lexing_makes_progress() {
-    // No `$` or `\`: f-strings and escapes recover in robustness plan
-    // phase 1, and `lexing_makes_progress_through_escapes` covers them.
     check_random_inputs(0x9E37_79B9_7F4A_7C15, PIECES);
 }
 
 #[test]
-#[ignore = "robustness plan phase 1"]
 fn lexing_makes_progress_through_escapes() {
     let pieces: Vec<&str> = PIECES.iter().chain(ESCAPE_PIECES).copied().collect();
     check_random_inputs(0xD1B5_4A32_D192_ED03, &pieces);
 }
 
 #[test]
-#[ignore = "robustness plan phase 1"]
 fn fstring_errors_make_progress() {
     // The review's inputs: each lexed forever.
     for src in ["$\"a}b\"", "$\"\\q\"", "$\"a\\\"\n}\n"] {

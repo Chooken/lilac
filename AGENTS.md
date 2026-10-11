@@ -313,6 +313,18 @@
   requests are answered from the last compile meanwhile. One compile runs
   at a time; its analysis is installed when it finishes, but its
   diagnostics are published only if no edit arrived since (`generation`).
+  When the next compile is due while one runs, the running one is
+  cancelled: each `Job` carries a cancel token (`Job::cancel`, an
+  `Arc<AtomicBool>` the server keeps as `Server::running`) that every
+  session of the job gets as `Session::cancel`. The driver checks it
+  between stages, typeck before each instance (`drain_queue`) and
+  template, and lowering before each function; a cancelled compile
+  returns an error with no diagnostic (`Unreported::Cancelled`,
+  `Session::cancelled`) and drops its partial analysis. `Job::run` then
+  returns `None` (`Outcome::Cancelled`), which installs no analysis and
+  publishes nothing, and the due compile starts once it has stopped, so a
+  slow compile never holds up the next. The compiler crates take the token
+  as a plain `Arc<AtomicBool>` (std-only, no I/O).
   Each publish carries the version of the document it compiled. The
   retained analysis must stay `Send + Sync` (no `Rc` in `Resolved`, and
   `lilac_driver::Progress` is `Send + Sync`). A diagnostic without a span goes to
@@ -605,6 +617,21 @@ bug fix that changes generated code.
   "end of file"). A delimiter the file ends inside is `Parser::unclosed`:
   the error is at the opening `{`/`(`, with the end of file as a
   secondary label.
+- Lex errors (`E000`) never stop the lexer, and one typo is one error.
+  `Lexer` yields `Err` only for bytes that form no token (an unexpected
+  character, named as "`#`" or by code point "U+FEFF", or a lone `$`); an
+  error inside a token (a bad escape, a lone `}` in f-string text, a
+  literal its line ends inside, a malformed number) is side output
+  (`Lexer::take_diagnostics`, merged in source order by `lex_all`) and
+  the token is still yielded, so the parser sees no hole (a malformed
+  number keeps the well-formed part it read as its text). Every item
+  consumes input, except the end of file and the zero-width `FStrEnd`
+  closing an f-string its line ends inside: `Lexer::progressed` is a
+  `debug_assert!`, and a release build skips a character with an
+  internal `E000` (`force_progress`). `lilac-lex/tests/progress.rs`
+  checks the property on random input. A byte-order mark at offset 0 is
+  trivia, and `SourceFile` starts line 1 after it, so columns match the
+  editor's.
 - The CLI never dumps the usage on a usage error: it prints the problem,
   a did-you-mean when one is close, and "run `lilac help` for all
   options". `lilac explain <code>` prints the code's page

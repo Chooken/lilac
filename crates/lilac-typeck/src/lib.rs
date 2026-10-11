@@ -32,6 +32,8 @@ mod types;
 mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use lilac_ast::Expr;
 use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed, Unreported};
@@ -56,7 +58,7 @@ pub struct Checked {
 }
 
 /// What a unit is checked for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// The target's pointer width (`@bit_native` literal range).
     pub native_bits: u32,
@@ -65,6 +67,10 @@ pub struct Options {
     /// `@entry` that names a missing root item is dropped silently, since
     /// nothing enters the program.
     pub require_entry: bool,
+    /// Stops the check when set (a newer compile is due): the worklist
+    /// checks it before each instance and the template pass before each
+    /// template, and the output is then incomplete. `None`: never.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Checks every definition in `res`, generic functions nothing instantiates
@@ -326,6 +332,8 @@ pub(crate) struct Checker<'a> {
     pub copyable: HashMap<TypeId, bool>,
     /// [`Checker::needs_drop`] per laid-out type.
     pub droppable: HashMap<TypeId, bool>,
+    /// [`Options::cancel`].
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Production instantiation depth cap; the test cap keeps `E051` cheap.
@@ -366,6 +374,7 @@ impl<'a> Checker<'a> {
             failures: Vec::new(),
             copyable: HashMap::new(),
             droppable: HashMap::new(),
+            cancel: options.cancel,
         }
     }
 }
@@ -387,17 +396,32 @@ impl Checker<'_> {
             }
         }
         self.drain_queue();
+        if self.cancelled() {
+            return;
+        }
         self.finish_type_hooks();
         self.check_array_hooks();
         self.drain_queue();
     }
 
     /// Checks every queued instance, then emits the `E042`s they produced.
+    /// A cancelled check ([`Options::cancel`]) drops the rest of the queue.
     fn drain_queue(&mut self) {
         while let Some(key) = self.queue.pop_front() {
+            if self.cancelled() {
+                self.queue.clear();
+                return;
+            }
             self.check_instance(&key);
         }
         self.emit_failures();
+    }
+
+    /// Whether [`Options::cancel`] is set: the check stops, incomplete.
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
     /// Checks each generic function no instance reached, with its generic
@@ -412,6 +436,9 @@ impl Checker<'_> {
         let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
         self.instantiated = self.instances.keys().map(|key| key.def).collect();
         for id in self.res.ids() {
+            if self.cancelled() {
+                break;
+            }
             let def = self.res.def(id);
             if !matches!(def.kind, DefKind::Func(_)) || self.instantiated.contains(&id) {
                 continue;

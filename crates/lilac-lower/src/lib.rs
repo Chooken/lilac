@@ -33,6 +33,7 @@ pub use symbols::check_extern_signatures;
 use symbols::extern_symbol;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lilac_error::{codes, Diagnostic, Diags};
 use lilac_hir::{FuncKey, HirFunc, HirPath, HirProgram, HirStmt, Layout, LocalId};
@@ -108,7 +109,9 @@ pub fn check_global_initializers(lowered: &Lowered, diags: &mut Diags) {
 }
 
 /// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
-/// size (for `@size_of`); `sources` locates `@panic` sites.
+/// size (for `@size_of`); `sources` locates `@panic` sites. When `cancel` is
+/// set (a newer compile is due), lowering stops before the next function and
+/// the module is incomplete.
 #[must_use]
 pub fn lower(
     hir: &HirProgram,
@@ -117,11 +120,15 @@ pub fn lower(
     sources: &SourceMap,
     triple: &str,
     ptr_bytes: u64,
+    cancel: Option<&AtomicBool>,
 ) -> Lowered {
     let mut lower = Lower::new(hir, res, types, sources, triple, ptr_bytes);
     lower.lower_globals();
     let mut externs = HashSet::new();
     for func in &hir.funcs {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            break;
+        }
         let lowered = lower.lower_func(func);
         // Externs sharing a link name are one declaration (their signatures
         // match: `check_extern_signatures` rejected any that differ).
