@@ -1,0 +1,23 @@
+// pending: ownership plan phase 3 (a type with `@on_drop` and no `@on_copy` moves)
+// expect-stdout: |a
+// Reading a place whose type has its own `@on_drop` but no `@on_copy`
+// moves it: the handle has one owner, so it drops once.
+
+using Standard.Io
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+main: function () nothing {
+    {
+        a: Handle = Handle { id = 'a' }
+        b: Handle = a
+        print_char('|')
+    }
+    print_char(0xA)
+}

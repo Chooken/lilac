@@ -1,0 +1,30 @@
+// pending: ownership plan phase 3 (out slots start empty)
+// expect-stdout: |x
+// The first assignment of an out slot fills it: nothing was there, so
+// nothing drops. A zero drop would print `z`.
+
+using Standard.Io
+
+Tag: object {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        if self.c == 0x0 {
+            print_char('z')
+        } else {
+            print_char(self.c)
+        }
+    }
+}
+
+make: function () value: Tag {
+    value = Tag { c = 'x' }
+}
+
+main: function () nothing {
+    {
+        t: Tag = make()
+        print_char('|')
+    }
+    print_char(0xA)
+}

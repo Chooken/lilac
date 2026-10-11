@@ -1,0 +1,35 @@
+// pending: ownership plan phase 3 (drop flags)
+// expect-stdout: th|
+// expect-stdout: |h
+// A value moved on one branch only drops once either way: in `take`
+// when it moved, at scope end when it did not.
+
+using Standard
+using Standard.Io
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+take: function (handle: Handle) nothing {
+    print_char('t')
+}
+
+maybe: function (give: Bool) nothing {
+    handle: Handle = Handle { id = 'h' }
+    if give {
+        take(handle)
+    }
+    print_char('|')
+}
+
+main: function () nothing {
+    maybe(true)
+    print_char(0xA)
+    maybe(false)
+    print_char(0xA)
+}
