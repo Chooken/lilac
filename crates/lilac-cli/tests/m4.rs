@@ -1,5 +1,5 @@
 //! M4 UI tests: duck-typed generics monomorphize to concrete IR, `.lir`
-//! snapshots are byte-stable, and the `E042`/`E044`/`E051` FAILS pins hold.
+//! snapshots are byte-stable, and the `E042`/`E044`/`E051`/`E068` FAILS pins hold.
 //! The short-form and `--verbose` `FAILS_generic_duck_typing` renders are
 //! pinned as exact snapshots.
 
@@ -115,6 +115,31 @@ fn fails_generic_object_cycle_is_e051() {
     fails_with("FAILS_generic_object_cycle.lilac", "E051");
 }
 
+#[test]
+fn fails_generic_instance_budget_is_e068() {
+    // Wide fan-out with no recursion crosses the instance budget: one
+    // `E068` (no `E051`, since no generic recurses), naming the definitions
+    // with the most instances and how their arguments grow.
+    let (ok, stderr) = check("FAILS_generic_instance_budget.lilac", &[]);
+    assert!(!ok, "should fail");
+    assert_eq!(
+        stderr.matches("error[").count(),
+        1,
+        "exactly one error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("error[E068]: too many generic instances"),
+        "{stderr}"
+    );
+    for note in [
+        "= note: `level16` has ",
+        "= note: `level15` has 16384 instances, from level15[A[A[A[A[A[A[A[A[A[A[A[A[A[A[@bit32]]]]]]]]]]]]]]] to level15[B[B[B[B[B[B[B[B[B[B[B[B[B[B[@bit32]]]]]]]]]]]]]]]",
+        "= note: `level14` has 8192 instances, from ",
+        "= note: instantiation chain: level1[@bit32] -> ",
+    ] {
+        assert!(stderr.contains(note), "missing `{note}`:\n{stderr}");
+    }
+}
 #[test]
 fn no_cascade_single_e042() {
     // One failed instantiation reached from two call sites is exactly one

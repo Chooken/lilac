@@ -96,7 +96,7 @@ impl Checker<'_> {
         let elem = match self.types.kind(array.ty.id) {
             TypeKind::Array { elem, .. } if array.ty.is_ref => *elem,
             _ => {
-                let found = self.types.display_ref(array.ty);
+                let found = self.show(array.ty);
                 let diagnostic = Diagnostic::error(
                     codes::E010,
                     format!("mismatched types: expected a `ref` array, found `{found}`"),
@@ -138,7 +138,7 @@ impl Checker<'_> {
         self.intrinsic_arity("@array_len", 1, args.len(), span)?;
         let ty = self.size_of_operand(fcx, &args[0])?;
         let TypeKind::Array { len, .. } = self.types.kind(ty.id) else {
-            let found = self.types.display_ref(ty);
+            let found = self.show(ty);
             return Err(self.diags.emit(
                 Diagnostic::error(
                     codes::E010,
@@ -170,7 +170,7 @@ impl Checker<'_> {
                 continue;
             };
             if self.has_hooks(elem, &mut HashSet::new()) {
-                let elem = self.types.display(elem);
+                let elem = self.show_id(elem);
                 self.diags.emit(
                     Diagnostic::error(
                         codes::E010,

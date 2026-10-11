@@ -128,7 +128,7 @@ impl Checker<'_> {
                     // `resolve_type` reported it.
                     return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
                 }
-                let name = self.types.display_ref(resolved);
+                let name = self.show(resolved);
                 Err(self.type_call(fcx, &name, args, span))
             }
             _ => {
@@ -386,7 +386,7 @@ impl Checker<'_> {
                 self.callee(fcx, args, ty)?
             }
         };
-        let owner = self.types.display_ref(ty);
+        let owner = self.show(ty);
         let Some((def, type_args)) = self.type_parts(ty.id).filter(|_| !ty.is_ref) else {
             let mut diagnostic = Diagnostic::error(
                 codes::E010,
@@ -469,7 +469,7 @@ impl Checker<'_> {
         let base = receiver.ty.deref();
         let recorded = self.record_member(member_span, field, Some(MemberReceiver::Value(base)));
         self.callee(fcx, args, recorded)?;
-        let owner = self.types.display(base.id);
+        let owner = self.show_id(base.id);
         let shadowed = self.shadowed_alias(fcx, &receiver);
         let Some((def, type_args)) = self.type_parts(base.id) else {
             let diagnostic = Diagnostic::error(
@@ -731,14 +731,11 @@ impl Checker<'_> {
         let success = self.success_outs(&callee).unwrap_or(outs.len());
         let successes = &outs[..success];
         if successes != [ty] {
-            let owner = self.types.display_ref(ty);
+            let owner = self.show(ty);
             let returns = if successes.is_empty() {
                 "nothing".to_owned()
             } else {
-                let names: Vec<String> = successes
-                    .iter()
-                    .map(|out| self.types.display_ref(*out))
-                    .collect();
+                let names: Vec<String> = successes.iter().map(|out| self.show(*out)).collect();
                 format!("`{}`", names.join(", "))
             };
             let mut involved = vec![want];
@@ -769,7 +766,7 @@ impl Checker<'_> {
     ) -> Option<ErrorGuaranteed> {
         let (def, _) = self.type_parts(ty.id)?;
         let member = self.res.member(def, function)?;
-        let owner = self.types.display_ref(ty);
+        let owner = self.show(ty);
         let (message, label, help) = match &self.res.def(member).kind {
             DefKind::Variant(_) => (
                 format!("`{function}` is a variant of `{owner}`, not a static function"),
@@ -971,7 +968,7 @@ impl Checker<'_> {
         if passes {
             return Ok(value);
         }
-        let ty = self.types.display_ref(value.ty);
+        let ty = self.show(value.ty);
         Err(self.diags.emit(
             Diagnostic::error(codes::E028, format!("`{ty}` cannot be a variadic argument"))
                 .label(arg.span(), true, "not passable through `...`")
@@ -1135,8 +1132,8 @@ impl Checker<'_> {
                         codes::E010,
                         format!(
                             "mismatched types: expected {}, found {}",
-                            self.types.display(id),
-                            self.types.display(value.ty.id)
+                            self.show_id(id),
+                            self.show_id(value.ty.id)
                         ),
                     )
                     .label(arg.span(), true, "wrong operand type here");
@@ -1181,7 +1178,7 @@ impl Checker<'_> {
                     codes::E010,
                     format!(
                         "mismatched types: expected a bit container, found {}",
-                        self.types.display(value.ty.id)
+                        self.show_id(value.ty.id)
                     ),
                 )
                 .label(arg.span(), true, "not a bit container");

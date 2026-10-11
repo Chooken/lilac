@@ -1,6 +1,7 @@
 //! Types: the interner, `TypeRef`, and function signatures.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use lilac_resolve::DefId;
 
@@ -233,6 +234,11 @@ pub struct FuncSig {
 #[derive(Clone, Debug, Default)]
 pub struct Types {
     kinds: Vec<TypeKind>,
+    /// Per type, whether it mentions a generic parameter
+    /// ([`Types::contains_param`]), decided once when it is interned: a type
+    /// nested `n` deep is `n` entries here but can be a tree of `2^n` nodes
+    /// (`P[T, T]` applied again and again), too many to walk.
+    has_param: Vec<bool>,
     objects: HashMap<DefId, TypeId>,
     object_names: HashMap<DefId, String>,
     funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>, bool), TypeId>,
@@ -245,8 +251,31 @@ impl Types {
     /// Table with the 12 builtin types pre-interned.
     pub fn new() -> Self {
         let mut table = Self::default();
-        table.kinds.extend(Builtin::ALL.map(Builtin::kind));
+        for builtin in Builtin::ALL {
+            table.push(builtin.kind());
+        }
         table
+    }
+
+    /// Appends a new type, recording whether it mentions a parameter (its
+    /// parts are interned before it, so each is one lookup).
+    fn push(&mut self, kind: TypeKind) -> TypeId {
+        let has_param = match &kind {
+            TypeKind::Param { .. } => true,
+            TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
+            TypeKind::Array { elem, .. } => self.contains_param(*elem),
+            TypeKind::Func {
+                params, returns, ..
+            } => params
+                .iter()
+                .chain(returns.iter())
+                .any(|slot| self.contains_param(slot.id)),
+            _ => false,
+        };
+        let id = TypeId(next_id(self.kinds.len()));
+        self.kinds.push(kind);
+        self.has_param.push(has_param);
+        id
     }
 
     /// The builtin type spelled `name` (`@bit32`, `@byte_buffer`, `unknown`).
@@ -259,8 +288,7 @@ impl Types {
         if let Some(&id) = self.objects.get(&def) {
             return id;
         }
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Object(def));
+        let id = self.push(TypeKind::Object(def));
         self.objects.insert(def, id);
         id
     }
@@ -270,8 +298,7 @@ impl Types {
         if let Some(&id) = self.params.get(&(index, name.to_owned())) {
             return id;
         }
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Param {
+        let id = self.push(TypeKind::Param {
             index,
             name: name.to_owned(),
         });
@@ -286,8 +313,7 @@ impl Types {
         if let Some(&id) = self.instances.get(&key) {
             return id;
         }
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Instance {
+        let id = self.push(TypeKind::Instance {
             base: key.0,
             args: key.1.clone(),
         });
@@ -300,8 +326,7 @@ impl Types {
         if let Some(&id) = self.arrays.get(&(elem, len)) {
             return id;
         }
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Array { elem, len });
+        let id = self.push(TypeKind::Array { elem, len });
         self.arrays.insert((elem, len), id);
         id
     }
@@ -363,20 +388,10 @@ impl Types {
         }
     }
 
-    /// Whether `id` mentions an unsubstituted generic parameter anywhere.
+    /// Whether `id` mentions an unsubstituted generic parameter anywhere
+    /// (`false` for poison).
     pub fn contains_param(&self, id: TypeId) -> bool {
-        match self.kind(id) {
-            TypeKind::Param { .. } => true,
-            TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
-            TypeKind::Array { elem, .. } => self.contains_param(*elem),
-            TypeKind::Func {
-                params, returns, ..
-            } => params
-                .iter()
-                .chain(returns.iter())
-                .any(|slot| self.contains_param(slot.id)),
-            _ => false,
-        }
+        self.has_param.get(id.0 as usize).copied().unwrap_or(false)
     }
 
     /// Deterministic, collision-free, arity-tagged symbol name for IR.
@@ -464,8 +479,7 @@ impl Types {
         if let Some(&id) = self.funcs.get(&key) {
             return id;
         }
-        let id = TypeId(next_id(self.kinds.len()));
-        self.kinds.push(TypeKind::Func {
+        let id = self.push(TypeKind::Func {
             params: key.0.clone(),
             returns: key.1.clone(),
             c_abi,
@@ -490,51 +504,99 @@ impl Types {
 
     /// Pretty-prints a type in Lilac syntax (`@bit32`, `Number`).
     pub fn display(&self, id: TypeId) -> String {
-        match self.kind(id) {
-            TypeKind::Bit8 => "@bit8".to_owned(),
-            TypeKind::Bit16 => "@bit16".to_owned(),
-            TypeKind::Bit32 => "@bit32".to_owned(),
-            TypeKind::Bit64 => "@bit64".to_owned(),
-            TypeKind::BitNative => "@bit_native".to_owned(),
-            TypeKind::FBit16 => "@fbit16".to_owned(),
-            TypeKind::FBit32 => "@fbit32".to_owned(),
-            TypeKind::FBit64 => "@fbit64".to_owned(),
-            TypeKind::FBit128 => "@fbit128".to_owned(),
-            TypeKind::ByteBuffer => "@byte_buffer".to_owned(),
-            TypeKind::FormatArgs => "@format_args".to_owned(),
-            TypeKind::Unknown => "unknown".to_owned(),
-            TypeKind::Object(def) => self.object_name(*def),
-            TypeKind::Param { name, .. } => name.clone(),
-            TypeKind::Instance { base, args } => {
-                let args: Vec<String> = args.iter().map(|a| self.display_ref(*a)).collect();
-                format!("{}[{}]", self.object_name(*base), args.join(", "))
+        let mut out = String::new();
+        self.write_type(TypeRef::value(id), &mut out, usize::MAX);
+        out
+    }
+
+    /// Pretty-prints a possibly-`ref` type (`ref @bit8`).
+    pub fn display_ref(&self, ty: TypeRef) -> String {
+        let mut out = String::new();
+        self.write_type(ty, &mut out, usize::MAX);
+        out
+    }
+
+    /// [`Types::display_ref`] cut to about `limit` bytes, ending in `...`
+    /// when cut. It stops walking there, so it is cheap for a type whose
+    /// full text would be huge (each level of `P[T, T]` doubles it).
+    pub fn display_bounded(&self, ty: TypeRef, limit: usize) -> String {
+        let mut out = String::new();
+        self.write_type(ty, &mut out, limit);
+        if out.len() > limit {
+            let mut end = limit;
+            while !out.is_char_boundary(end) {
+                end -= 1;
             }
-            TypeKind::Array { elem, len } => format!("@array({}, {len})", self.display(*elem)),
+            out.truncate(end);
+            out.push_str("...");
+        }
+        out
+    }
+
+    /// Writes `ty`'s text to `out`, stopping once `out` is past `limit`.
+    fn write_type(&self, ty: TypeRef, out: &mut String, limit: usize) {
+        if out.len() > limit {
+            return;
+        }
+        if ty.is_ref {
+            out.push_str("ref ");
+        }
+        let list = |types: &Self, slots: &[TypeRef], out: &mut String| {
+            for (index, slot) in slots.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                types.write_type(*slot, out, limit);
+                if out.len() > limit {
+                    return;
+                }
+            }
+        };
+        match self.kind(ty.id) {
+            TypeKind::Object(def) => out.push_str(&self.object_name(*def)),
+            TypeKind::Param { name, .. } => out.push_str(name),
+            TypeKind::Instance { base, args } => {
+                out.push_str(&self.object_name(*base));
+                out.push('[');
+                list(self, args, out);
+                out.push(']');
+            }
+            TypeKind::Array { elem, len } => {
+                out.push_str("@array(");
+                self.write_type(TypeRef::value(*elem), out, limit);
+                // Writing to a `String` cannot fail.
+                let _ = write!(out, ", {len})");
+            }
             TypeKind::Func {
                 params,
                 returns,
                 c_abi,
             } => {
-                let abi = if *c_abi { "export " } else { "" };
-                let ps: Vec<String> = params.iter().map(|p| self.display_ref(*p)).collect();
-                let rs: Vec<String> = returns.iter().map(|r| self.display_ref(*r)).collect();
-                let rs = if rs.is_empty() {
-                    "nothing".to_owned()
+                if *c_abi {
+                    out.push_str("export ");
+                }
+                out.push_str("function (");
+                list(self, params, out);
+                out.push_str(") -> ");
+                if returns.is_empty() {
+                    out.push_str("nothing");
                 } else {
-                    rs.join(", ")
-                };
-                format!("{abi}function ({}) -> {rs}", ps.join(", "))
+                    list(self, returns, out);
+                }
             }
-            TypeKind::Error => "<error>".to_owned(),
-        }
-    }
-
-    /// Pretty-prints a possibly-`ref` type (`ref @bit8`).
-    pub fn display_ref(&self, ty: TypeRef) -> String {
-        if ty.is_ref {
-            format!("ref {}", self.display(ty.id))
-        } else {
-            self.display(ty.id)
+            TypeKind::Error => out.push_str("<error>"),
+            TypeKind::Bit8 => out.push_str("@bit8"),
+            TypeKind::Bit16 => out.push_str("@bit16"),
+            TypeKind::Bit32 => out.push_str("@bit32"),
+            TypeKind::Bit64 => out.push_str("@bit64"),
+            TypeKind::BitNative => out.push_str("@bit_native"),
+            TypeKind::FBit16 => out.push_str("@fbit16"),
+            TypeKind::FBit32 => out.push_str("@fbit32"),
+            TypeKind::FBit64 => out.push_str("@fbit64"),
+            TypeKind::FBit128 => out.push_str("@fbit128"),
+            TypeKind::ByteBuffer => out.push_str("@byte_buffer"),
+            TypeKind::FormatArgs => out.push_str("@format_args"),
+            TypeKind::Unknown => out.push_str("unknown"),
         }
     }
 }
@@ -808,5 +870,41 @@ mod tests {
                 is_ref: true
             }
         );
+    }
+
+    /// `P[x, x]` applied `depth` times to `@bit32`: `depth` table entries,
+    /// a tree of `2^depth` leaves.
+    fn doubled(types: &mut Types, depth: usize, leaf: TypeRef) -> TypeRef {
+        let pair = DefId(7);
+        types.set_object_name(pair, "P");
+        (0..depth).fold(leaf, |inner, _| {
+            TypeRef::value(types.intern_instance(pair, vec![inner, inner]))
+        })
+    }
+
+    #[test]
+    fn huge_types_are_cheap_to_ask_about() {
+        let mut types = Types::new();
+        let param = TypeRef::value(types.intern_param(0, "T"));
+        let concrete = doubled(&mut types, 200, Builtin::Bit32.value());
+        let template = doubled(&mut types, 200, param);
+        assert!(!types.contains_param(concrete.id));
+        assert!(types.contains_param(template.id));
+        assert!(!types.contains_param(TypeId::ERROR));
+
+        let shown = types.display_bounded(concrete, 40);
+        assert_eq!(shown, format!("{}...", "P[".repeat(20)));
+        let small = doubled(&mut types, 1, Builtin::Bit32.value());
+        assert_eq!(types.display_bounded(small, 40), "P[@bit32, @bit32]");
+        assert_eq!(
+            types.display_bounded(small, 40),
+            types.display_ref(small),
+            "an uncut display is the full one"
+        );
+        let reference = TypeRef {
+            id: small.id,
+            is_ref: true,
+        };
+        assert_eq!(types.display_bounded(reference, 6), "ref P[...");
     }
 }

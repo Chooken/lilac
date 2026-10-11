@@ -13,7 +13,7 @@ use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::paths::path_tail;
-use crate::{Checker, TypeState, MAX_DEPTH};
+use crate::{Checker, TypeState, MAX_RECURSION, MAX_TYPE_NESTING};
 
 impl Checker<'_> {
     /// Resolves type syntax in the current environment: generic parameter
@@ -231,8 +231,11 @@ impl Checker<'_> {
     }
 
     /// Makes sure a concrete type (and everything it contains) has a layout
-    /// and its hooks. A by-value cycle is `E053`; a layout chain that keeps
-    /// growing is `E051`.
+    /// and its hooks. A by-value cycle is `E053`. A definition laid out inside
+    /// itself past [`MAX_RECURSION`] times (a generic type that keeps growing),
+    /// or types nested past [`MAX_TYPE_NESTING`], is `E051`; once a definition
+    /// recursed too deep, a later layout of it inside itself fails with that
+    /// error, so a type that grows in two fields stops in linear time.
     pub(crate) fn ensure_type(&mut self, ty: TypeRef, span: Span) -> Result<(), ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
             TypeKind::Func {
@@ -263,7 +266,7 @@ impl Checker<'_> {
             }
             Some(TypeState::Active) if ty.is_ref => return Ok(()),
             Some(TypeState::Active) => {
-                let name = self.types.display(ty.id);
+                let name = self.show_id(ty.id);
                 return Err(self.diags.emit(
                     Diagnostic::error(codes::E053, format!("`{name}` contains itself by value"))
                         .label(
@@ -276,31 +279,33 @@ impl Checker<'_> {
             }
             None => {}
         }
-        if self.type_stack.len() >= MAX_DEPTH {
-            let mut frames: Vec<String> = self
-                .type_stack
-                .iter()
-                .map(|id| self.types.display(*id))
-                .collect();
-            frames.push(self.types.display(ty.id));
-            self.type_states.insert(ty.id, TypeState::Failed);
-            return Err(self.diags.emit(
-                Diagnostic::error(
-                    codes::E051,
-                    "generic instantiation is too deep (possible infinite recursion)",
-                )
-                .label(span, true, "instantiated here")
-                .note(format!("instantiation chain: {}", elide_chain(&frames))),
-            ));
-        }
         let Some((def, args)) = self.type_parts(ty.id) else {
             return Ok(());
         };
+        let count = self.type_counts.get(&def).copied().unwrap_or(0) + 1;
+        if count > 1 && self.type_recursion_limited.contains(&def) {
+            // The descent this definition started already reported `E051`.
+            if let Some(error) = self.recursion_error {
+                self.type_states.insert(ty.id, TypeState::Failed);
+                return Err(error);
+            }
+        }
+        if count > MAX_RECURSION || self.type_stack.len() >= MAX_TYPE_NESTING {
+            self.type_states.insert(ty.id, TypeState::Failed);
+            let error = self.type_depth_error(def, ty.id, span);
+            if count > MAX_RECURSION {
+                self.type_recursion_limited.insert(def);
+                self.recursion_error.get_or_insert(error);
+            }
+            return Err(error);
+        }
         self.type_states.insert(ty.id, TypeState::Active);
         self.type_stack.push(ty.id);
+        self.type_counts.insert(def, count);
         let env = self.env_of(def, args.clone(), None);
         let layout = self.with_env(env, |c| c.compute_layout(def));
         self.type_stack.pop();
+        self.type_counts.insert(def, count - 1);
         let Ok((layout, spans)) = layout else {
             // `compute_layout` reported it.
             self.type_states.insert(ty.id, TypeState::Failed);
@@ -316,6 +321,62 @@ impl Checker<'_> {
             self.register_instance_hooks(def, &args, span);
         }
         Ok(())
+    }
+
+    /// The definition behind an object/enum type.
+    fn type_def(&self, id: TypeId) -> Option<DefId> {
+        match self.types.kind(id) {
+            TypeKind::Object(def) | TypeKind::Instance { base: def, .. } => Some(*def),
+            _ => None,
+        }
+    }
+
+    /// The layout `E051` for `ty` (of definition `def`), met at `span`
+    /// while the types on [`Checker::type_stack`] are laid out: `def` would
+    /// appear past [`MAX_RECURSION`] times among them, or they would nest
+    /// past [`MAX_TYPE_NESTING`].
+    fn type_depth_error(&mut self, def: DefId, ty: TypeId, span: Span) -> ErrorGuaranteed {
+        let mut chain = self.type_stack.clone();
+        chain.push(ty);
+        let shown = |id: TypeId| self.show_id(id);
+        let chain_note = format!(
+            "instantiation chain: {}",
+            elide_chain(chain.len(), |index| shown(chain[index]))
+        );
+        let name = self.res.def(def).name.clone();
+        let recursive = self.type_counts.get(&def).copied().unwrap_or(0) >= MAX_RECURSION;
+        if !recursive {
+            return self.diags.emit(
+                Diagnostic::error(codes::E051, "types nest too deeply to lay out")
+                    .label(span, true, format!("`{name}` is nested here"))
+                    .note(chain_note)
+                    .note(format!(
+                        "a type's fields may nest types at most {MAX_TYPE_NESTING} deep"
+                    )),
+            );
+        }
+        let mut diagnostic = Diagnostic::error(
+            codes::E051,
+            "generic instantiation is too deep (possible infinite recursion)",
+        )
+        .label(span, true, "instantiated here")
+        .note(chain_note);
+        let mut repeats = chain
+            .iter()
+            .filter(|laid| self.type_def(**laid) == Some(def))
+            .filter_map(|laid| Some((*laid, self.type_parts(*laid)?.1)));
+        if let (Some((first, from)), Some((second, to))) = (repeats.next(), repeats.next()) {
+            if self.grew(&from, &to) {
+                diagnostic = diagnostic.note(format!(
+                    "the type arguments grow each time: {} -> {}",
+                    shown(first),
+                    shown(second)
+                ));
+            }
+        }
+        self.diags.emit(diagnostic.note(format!(
+            "a type may contain itself at most {MAX_RECURSION} times, and `{name}` would contain itself once more"
+        )))
     }
 
     /// Resolves a type's fields (or variants) in its own environment.
@@ -478,13 +539,14 @@ impl Checker<'_> {
     }
 }
 
-/// Joins chain frames with `->`, eliding the middle past five frames.
-pub(crate) fn elide_chain(frames: &[String]) -> String {
-    if frames.len() > 5 {
-        let head = frames[..2].join(" -> ");
-        let tail = frames[frames.len() - 2..].join(" -> ");
-        format!("{head} -> ... -> {tail} ({} frames)", frames.len())
+/// Joins the `len` chain frames `frame` writes with `->`, eliding the
+/// middle past five frames (only the shown ones are written).
+pub(crate) fn elide_chain(len: usize, frame: impl Fn(usize) -> String) -> String {
+    if len > 5 {
+        let head = [frame(0), frame(1)].join(" -> ");
+        let tail = [frame(len - 2), frame(len - 1)].join(" -> ");
+        format!("{head} -> ... -> {tail} ({len} frames)")
     } else {
-        frames.join(" -> ")
+        (0..len).map(frame).collect::<Vec<_>>().join(" -> ")
     }
 }

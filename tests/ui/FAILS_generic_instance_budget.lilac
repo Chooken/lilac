@@ -1,0 +1,98 @@
+// Wide fan-out with no recursion: each level instantiates the next at two
+// new argument types, so level 17 alone would have 65,536 instances. The
+// check stops at the instance budget with E068.
+
+A[T]: object {
+    value: T
+}
+
+B[T]: object {
+    value: T
+}
+
+level1[T]: function () nothing {
+    level2[A[T]]()
+    level2[B[T]]()
+}
+
+level2[T]: function () nothing {
+    level3[A[T]]()
+    level3[B[T]]()
+}
+
+level3[T]: function () nothing {
+    level4[A[T]]()
+    level4[B[T]]()
+}
+
+level4[T]: function () nothing {
+    level5[A[T]]()
+    level5[B[T]]()
+}
+
+level5[T]: function () nothing {
+    level6[A[T]]()
+    level6[B[T]]()
+}
+
+level6[T]: function () nothing {
+    level7[A[T]]()
+    level7[B[T]]()
+}
+
+level7[T]: function () nothing {
+    level8[A[T]]()
+    level8[B[T]]()
+}
+
+level8[T]: function () nothing {
+    level9[A[T]]()
+    level9[B[T]]()
+}
+
+level9[T]: function () nothing {
+    level10[A[T]]()
+    level10[B[T]]()
+}
+
+level10[T]: function () nothing {
+    level11[A[T]]()
+    level11[B[T]]()
+}
+
+level11[T]: function () nothing {
+    level12[A[T]]()
+    level12[B[T]]()
+}
+
+level12[T]: function () nothing {
+    level13[A[T]]()
+    level13[B[T]]()
+}
+
+level13[T]: function () nothing {
+    level14[A[T]]()
+    level14[B[T]]()
+}
+
+level14[T]: function () nothing {
+    level15[A[T]]()
+    level15[B[T]]()
+}
+
+level15[T]: function () nothing {
+    level16[A[T]]()
+    level16[B[T]]()
+}
+
+level16[T]: function () nothing {
+    level17[A[T]]()
+    level17[B[T]]()
+}
+
+level17[T]: function () nothing {
+}
+
+main: function () nothing {
+    level1[@bit32]()
+}

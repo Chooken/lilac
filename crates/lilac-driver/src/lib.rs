@@ -972,14 +972,33 @@ main: function () nothing {}
         assert!(session.analysis().is_none());
     }
 
-    /// Cancelling a running check stops it at the next instance: a generic
-    /// that instantiates itself twice per level (tens of thousands of
-    /// instances, many seconds) stops soon after the token is set.
+    /// A valid program that takes seconds to check in a debug build: 15
+    /// levels of generics, each instantiating the next at two new argument
+    /// types, so 32,767 instances (below typeck's instance budget), each
+    /// body copying its argument 40 times.
+    fn slow_program() -> String {
+        use std::fmt::Write as _;
+        let mut src =
+            String::from("A[T]: object {\n    value: T\n}\n\nB[T]: object {\n    value: T\n}\n\n");
+        for level in 1..15 {
+            let _ = writeln!(src, "f{level}[T]: function (x0: T) nothing {{");
+            for copy in 1..=40 {
+                let _ = writeln!(src, "    x{copy}: T = x{}", copy - 1);
+            }
+            let next = level + 1;
+            let _ = writeln!(src, "    f{next}[A[T]](A[T] {{ value = x40 }})");
+            let _ = writeln!(src, "    f{next}[B[T]](B[T] {{ value = x40 }})\n}}\n");
+        }
+        src.push_str("f15[T]: function (x0: T) nothing {\n}\n\n");
+        src.push_str("main: function () nothing {\n    f1[@bit32](0x1)\n}\n");
+        src
+    }
+
+    /// Cancelling a running check stops it at the next instance: the
+    /// [`slow_program`] stops soon after the token is set.
     #[test]
     fn cancelling_stops_a_slow_check() {
-        let src = "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\n\
-                   grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\n\
-                   main: function () nothing {\n    grow[@bit32]()\n}\n";
+        let src = slow_program();
         let cancel = Arc::new(AtomicBool::new(false));
         let token = Arc::clone(&cancel);
         let compile = std::thread::Builder::new()
@@ -987,7 +1006,7 @@ main: function () nothing {}
             .spawn(move || {
                 let mut session = Session::new();
                 session.cancel = Some(token);
-                let result = session.compile_lir("slow.lilac", src);
+                let result = session.compile_lir("slow.lilac", &src);
                 (result.is_err(), session.cancelled())
             })
             .expect("spawns a compile thread");

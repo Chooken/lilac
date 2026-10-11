@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–5 done).
+> Status: in progress (Phases 0–6 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -748,6 +748,102 @@ production.
 problem 8 un-pended (fails fast with `E051`, under 1 s in debug); the
 existing `E051`/`E042` fixtures keep their chains; a three-way branching
 recursion ends with `E051` or `E068` within the time bound.
+
+- **Delivered notes.**
+  - 6.1: `Instance::recursion` counts each generic definition on the
+    instance's first-origin chain (copied from the parent, its own count
+    bumped); `E051` when one would appear a 65th time (`MAX_RECURSION`
+    = 64 appearances). The chain note walks the whole chain
+    (`chain_keys`, no 64-frame cap) and writes only the four frames it
+    shows. Two additions the plan did not spell out:
+    - **Recursion runs depth first.** With the worklist breadth first,
+      factor-2 recursion only meets the per-definition limit after 2^64
+      instances, so problem 8 would have ended at the budget (`E068`), not
+      `E051`. A recursive request (its definition already on the chain)
+      is inserted at the front of the queue, after the earlier recursive
+      requests of the same body (`Checker::front`), as rustc's collector
+      descends. Requests that do not recurse keep their order: across
+      `lib/Standard` and the whole test suite no request is recursive
+      outside the `E051` fixtures, so no generated code moved.
+    - **One `E051` per definition.** After it, every other recursive
+      request of that definition (concrete and template chains apart)
+      fails with the same error (`recursion_limited`); otherwise each
+      pending sibling would start its own descent and the work would be
+      exponential again. Problem 8 now builds 255 instances (about 130
+      bodies checked, the rest refused at once) and reports once.
+    - `State::Unusable` carries its `ErrorGuaranteed` (later requests return
+      it instead of `already_reported`), since a template's `E051` is
+      dropped and nothing else proves it.
+    - Types: `type_stack` had the same flaw (17 distinct objects nested by
+      value were `E051`). A definition laid out inside itself past 64 times
+      is `E051` (`type_counts`, kept as the stack is pushed and popped, so
+      the count is O(1)), with the same poisoning for types that grow in
+      two fields. Without the old cap of 16, layout recursion depth was
+      unbounded: 20,000 distinct nested objects overflowed the 64 MiB
+      compile stack in a debug build (about 3.3 KiB per level). Types now
+      nest at most `MAX_TYPE_NESTING` = 1,024 deep (`E051`, "types nest too
+      deeply to lay out"); the deepest accepted nesting checks in a debug
+      build (`deep_type_nesting_is_bounded`).
+  - 6.2: `MAX_INSTANCES` = 50,000 generic instances per pass; the request
+    past it is `E068` (`instance_budget`), reported at once through
+    `Sink::report_now` (a held one could be dropped by a template's
+    settle), labelled at the use, with notes naming the three definitions
+    with the most instances (first and latest built, by
+    `Instance::serial`) and the chain. Later new instances fail with it.
+    The template pass has a budget of its own, so unused code never takes
+    instances from used code. Measured (Windows x86-64, `lilac check` wall
+    time to `E068`, process start included; release / debug):
+    two-way fan-out of empty bodies over 17 and 20 levels 0.53 s / 2.0 s,
+    three-way over 14 levels 0.78 s / 2.9 s, two-way with ten-statement
+    bodies 1.3 s / 5.6 s. At 100,000 the last took 2.4 s in release, so
+    50,000. Branching recursion of factor 2 and 3 ends with `E051` in
+    under 0.1 s in both builds (it never reaches the budget). Peak need:
+    `lib/Standard` (`tests/run/stdlib`) and the whole suite build at most 9
+    generic instances per check, 18 in the template pass.
+  - 6.3: the growth note ("the type arguments grow each time: `f[@bit32]`
+    -> `f[W[@bit32]]`") appears when the first two instances of the
+    definition differ and each argument of the second contains the one it
+    replaced (`Checker::grew`, a visited-set walk); also for types.
+  - 6.4: the test-only `MAX_DEPTH` is gone; typeck's unit tests reach 64.
+  - Growing arguments exposed exponential work in type *text*:
+    `grow[P[T, T, T, T]]` (a tree of 4^n nodes in n table entries) hung
+    the old compiler at depth 16 (over 30 s in release). Fixed here:
+    `Types::contains_param` is a flag decided at interning, and every type
+    typeck writes into a diagnostic or editor site goes through
+    `Checker::show` (`Types::display_bounded`, 200 characters, which stops
+    walking there). Not fixed (outside this phase): a *valid* program whose
+    types grow that way through distinct generics (no recursion, so no
+    limit) still mangles symbols and writes trace names in full in
+    `lilac-lower` (`Types::mangle`, `display_of`), exponential in the
+    nesting. That needs a type-length limit (rustc's `type_length_limit`)
+    or hashed long symbol names; a later phase should decide.
+  - Cancellation tests: `cancelling_stops_a_slow_check` (driver) and
+    `an_edit_cancels_a_slow_compile` (LSP) now compile a valid program:
+    15 levels of generics, each instantiating the next at two argument
+    types (32,767 instances, below the budget), each body copying its
+    argument 40 times; a debug build takes about 20 s to compile it. With
+    every cancellation check disabled, both tests fail (the driver one
+    after 20 s, `cancelled` false; the LSP one with no diagnostics within
+    5 s), as do `a_cancelled_compile_stops_and_keeps_nothing` and the
+    server's `a_cancelled_compile_changes_nothing`. With cancellation,
+    each stops in well under a second.
+  - Tests: `long_chain_of_distinct_generics_checks` (now 120 distinct
+    generics) and `branching_generic_recursion_fails_fast` (exactly one
+    `E051`, with the growth note) un-pended; new
+    `wider_generic_recursion_fails_fast` (three-way branching, and 4^n
+    argument growth with one field (`E051`) and four (`E067` folded into
+    `E042`), each under 1 s in debug) and `deep_type_nesting_is_bounded`;
+    the `FAILS_generic_instance_budget` fixture and
+    `fails_generic_instance_budget_is_e068` (exactly one error, the top
+    three definitions named); typeck unit tests for the growth note,
+    mutual recursion (129 frames, `a` named), no note when arguments do
+    not grow, branching recursion and branching type growth reporting
+    once, an unused branching generic checking cleanly, and 20 distinct
+    nested objects; `lilac-ty` tests for `contains_param` and
+    `display_bounded` on a 2^200-node type. Expected text: no existing
+    fixture's expected output changed; the `E051` notes now count 65
+    frames instead of 17 (no test pinned that count) and gained the
+    growth and limit notes.
 
 ---
 

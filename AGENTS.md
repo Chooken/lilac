@@ -645,11 +645,34 @@ bug fix that changes generated code.
 - One error must not hide another. An instance whose body failed is
   `State::BodyFailed`, and its callers are still checked against its
   declared signature; only `State::Unusable` (a signature type that failed,
-  the `E051` depth cap, a dropped `@entry`) makes `request` fail. When a
-  callee cannot be found or used, `Checker::callee_failed` (or `callee`,
-  for a `Result`) still checks every argument against the error type, so
-  errors inside them are reported. A silent `Err(ErrorGuaranteed::new())`
+  the `E051` recursion limit, the `E068` instance budget, a dropped
+  `@entry`; it keeps the error, which later requests return) makes
+  `request` fail. When a callee cannot be found or used,
+  `Checker::callee_failed` (or `callee`, for a `Result`) still checks
+  every argument against the error type, so errors inside them are
+  reported. A silent `Err(ErrorGuaranteed::new())`
   carries a comment naming the diagnostic that covers it.
+- Generic limits (`request`, `ensure_type`): recursion is counted per
+  definition, as rustc does. `Instance::recursion` counts each generic
+  definition on the instance's first-origin chain; one appearing past
+  `MAX_RECURSION` (64) is `E051` (`recursion_error`), and so is a
+  definition laid out inside itself past 64 times (`Checker::type_counts`
+  over `type_stack`). Chains of distinct generics are unlimited; types
+  nest at most `MAX_TYPE_NESTING` (1,024) deep, a native-stack bound (also
+  `E051`). A recursive request (its definition already on the chain) goes
+  to the front of the queue (`Checker::front`), so recursion runs depth
+  first and branching recursion meets `E051` after 64 bodies; then every
+  later recursive request of that definition fails with it
+  (`recursion_limited`, `type_recursion_limited`), so it ends in linear
+  time. When the arguments grew (each contains the one it replaced,
+  `Checker::grew`), a note shows the first two instances. Each pass (the
+  program, then the templates) builds at most `MAX_INSTANCES` (50,000)
+  generic instances; the next request is `E068` (`instance_budget`),
+  reported at once (`Sink::report_now`, never folded or dropped), naming
+  the busiest definitions; later new instances fail with it. Types in
+  typeck's diagnostics go through `Checker::show` (`Types::display_bounded`,
+  200 characters): a type nested `n` deep can be `2^n` long, so
+  `Types::contains_param` is decided once per type at interning.
 - `E042` traces every site that requested the failing instance
   (`Checker::origins`, recorded on every `request`, cached or not), through
   generic requesters down to plain functions (`Checker::instance_trace`).

@@ -1,6 +1,8 @@
 //! Checker tests: each runs the real pipeline front half (module, parse,
 //! resolve, check) on a single in-memory file.
 
+use std::fmt::Write as _;
+
 use lilac_error::Diags;
 use lilac_hir::{HirExprKind, HirProgram, HirStmt};
 use lilac_span::SourceMap;
@@ -1430,6 +1432,113 @@ fn cyclic_growing_object_layout_is_e051() {
         "readable nested arg: {note}"
     );
     assert!(!note.contains(".1.."), "mangled symbol leaked: {note}");
+}
+
+/// The `E051` notes of `src`'s one `E051`.
+fn e051_notes(src: &str) -> Vec<String> {
+    let (diags, _, _) = check(src);
+    let found: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == "E051")
+        .collect();
+    assert_eq!(found.len(), 1, "{diags:?}");
+    found[0].notes.clone()
+}
+
+#[test]
+fn e051_shows_how_the_arguments_grow() {
+    let notes = e051_notes(
+        "Box[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[Box[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
+    );
+    assert!(
+        notes.contains(
+            &"the type arguments grow each time: grow[@bit32] -> grow[Box[@bit32]]".to_owned()
+        ),
+        "{notes:?}"
+    );
+    assert!(
+        notes[0].ends_with("(65 frames)"),
+        "the chain reaches the 65th `grow`: {notes:?}"
+    );
+    let notes = e051_notes(
+        "GenObj[T]: object {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
+    );
+    assert!(
+        notes.contains(
+            &"the type arguments grow each time: GenObj[@bit32] -> GenObj[GenObj[@bit32]]"
+                .to_owned()
+        ),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn e051_counts_recursion_per_definition() {
+    // Mutual recursion: `a` and `b` alternate, and `a` is the first to
+    // appear a 65th time; the chain holds both.
+    let notes = e051_notes(
+        "Box[T]: object {\n    value: T\n}\n\na[T]: function () nothing {\n    b[Box[T]]()\n}\n\nb[T]: function () nothing {\n    a[T]()\n}\n\nmain: function () nothing {\n    a[@bit32]()\n}\n",
+    );
+    assert!(notes[0].ends_with("(129 frames)"), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("`a` would appear once more")),
+        "{notes:?}"
+    );
+    // Arguments that change without each containing the one it replaced
+    // get no growth note: `swap` exchanges its two (wrapping one, so they
+    // never repeat).
+    let notes = e051_notes(
+        "Box[T]: object {\n    value: T\n}\n\nswap[A, B]: function () nothing {\n    swap[B, Box[A]]()\n}\n\nmain: function () nothing {\n    swap[@bit32, @bit8]()\n}\n",
+    );
+    assert!(
+        !notes.iter().any(|note| note.contains("grow each time")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn branching_recursion_reports_once() {
+    // Each level requests two new instances: followed depth first, the
+    // first branch meets `E051`, and every other branch stops at `grow`.
+    let notes = e051_notes(
+        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
+    );
+    assert!(
+        notes.contains(
+            &"the type arguments grow each time: grow[@bit32] -> grow[W[@bit32]]".to_owned()
+        ),
+        "the first branch: {notes:?}"
+    );
+    // The same for a type laid out inside itself twice per level.
+    e051_notes(
+        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\nG[T]: object {\n    a: ref G[W[T]]\n    b: ref G[V[T]]\n}\n\nmain: function () nothing {\n    x: @bit64 = @size_of(G[@bit32])\n}\n",
+    );
+}
+
+#[test]
+fn unused_branching_recursion_checks_quickly() {
+    // Unused, `grow` is checked as a template: its recursion stops at the
+    // limit too (silently, as template errors about its parameters do).
+    let (diags, _, _) = check(
+        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n}\n",
+    );
+    assert_eq!(diags.error_count(), 0, "{diags:?}");
+}
+
+#[test]
+fn distinct_types_nest_past_the_old_limit() {
+    // Seventeen distinct objects nested by value: no recursion at all (the
+    // old limit counted every level, and stopped at sixteen).
+    let mut src = String::new();
+    for index in 1..20 {
+        let _ = write!(src, "O{index}: object {{\n    a: O{}\n}}\n\n", index + 1);
+    }
+    src += "O20: object {\n    a: @bit32\n}\n\nmain: function () nothing {\n}\n";
+    let (diags, _, _) = check(&src);
+    assert_eq!(diags.error_count(), 0, "{diags:?}");
 }
 
 #[test]

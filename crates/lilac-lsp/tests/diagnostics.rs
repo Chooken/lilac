@@ -645,22 +645,35 @@ fn an_edit_after_a_bad_fstring_gets_fresh_diagnostics() {
     handle.join().expect("server thread");
 }
 
-/// A slow compile (a generic that instantiates itself twice per level:
-/// tens of thousands of instances, many seconds in a debug build) is
-/// cancelled by the next edit, whose diagnostics come right after; the
-/// cancelled compile publishes nothing.
+/// A valid program that takes seconds to check in a debug build: 15 levels
+/// of generics, each instantiating the next at two new argument types, so
+/// 32,767 instances (below typeck's instance budget), each body copying its
+/// argument 40 times.
+fn slow_program() -> String {
+    let mut src =
+        String::from("A[T]: object {\n    value: T\n}\n\nB[T]: object {\n    value: T\n}\n\n");
+    for level in 1..15 {
+        let _ = writeln!(src, "f{level}[T]: function (x0: T) nothing {{");
+        for copy in 1..=40 {
+            let _ = writeln!(src, "    x{copy}: T = x{}", copy - 1);
+        }
+        let next = level + 1;
+        let _ = writeln!(src, "    f{next}[A[T]](A[T] {{ value = x40 }})");
+        let _ = writeln!(src, "    f{next}[B[T]](B[T] {{ value = x40 }})\n}}\n");
+    }
+    src.push_str("f15[T]: function (x0: T) nothing {\n}\n\n");
+    src.push_str("main: function () nothing {\n    f1[@bit32](0x1)\n}\n");
+    src
+}
+
+/// A slow compile ([`slow_program`]) is cancelled by the next edit, whose
+/// diagnostics come right after; the cancelled compile publishes nothing.
 #[test]
 fn an_edit_cancels_a_slow_compile() {
     let (client, handle) = start_server();
     initialize(&client, None);
     let uri = main_uri();
-    did_open(
-        &client,
-        &uri,
-        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\n\
-         grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\n\
-         main: function () nothing {\n    grow[@bit32]()\n}\n",
-    );
+    did_open(&client, &uri, &slow_program());
     // Past the debounce, so the slow compile is running.
     std::thread::sleep(Duration::from_millis(600));
     did_change(

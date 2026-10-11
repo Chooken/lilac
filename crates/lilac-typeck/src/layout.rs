@@ -41,7 +41,7 @@ impl Checker<'_> {
                     lilac_error::bug!(
                         Span::dummy(),
                         "the tag of `{}` is no integer",
-                        self.types.display(id)
+                        self.show_id(id)
                     );
                 };
                 (
@@ -63,7 +63,7 @@ impl Checker<'_> {
                     Part::Length => 0,
                 };
                 let span = spans.get(index).copied().unwrap_or_else(Span::dummy);
-                let name = self.types.display(id);
+                let name = self.show_id(id);
                 Err(self.too_large(
                     id,
                     too_large,
@@ -112,7 +112,7 @@ impl Checker<'_> {
         span: Span,
         label: String,
     ) -> ErrorGuaranteed {
-        let name = self.types.display(id);
+        let name = self.show_id(id);
         let diagnostic = Diagnostic::error(
             codes::E067,
             format!("type `{name}` is larger than the target allows"),
@@ -157,12 +157,12 @@ impl Checker<'_> {
                     None => lilac_error::bug!(
                         Span::dummy(),
                         "`{}` is used before it is laid out",
-                        self.types.display(ty.id)
+                        self.show_id(ty.id)
                     ),
                 }
             }
             TypeKind::Unknown | TypeKind::Param { .. } | TypeKind::Error => {
-                lilac_error::bug!(Span::dummy(), "`{}` has no size", self.types.display(ty.id))
+                lilac_error::bug!(Span::dummy(), "`{}` has no size", self.show_id(ty.id))
             }
         }
     }

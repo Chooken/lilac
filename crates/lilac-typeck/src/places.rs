@@ -656,7 +656,7 @@ impl Pass<'_, '_> {
                     if let Some(at) = empty.moved_at() {
                         diagnostic = diagnostic.label(at, false, "moved here");
                     }
-                    let shown = self.c.types.display(ty.id);
+                    let shown = self.c.show_id(ty.id);
                     self.report(diagnostic.help(format!(
                         "set the whole value first: `{name} = {shown} {{ … }}`"
                     )));
@@ -720,7 +720,7 @@ impl Pass<'_, '_> {
     fn out_name(&self, out: LocalId) -> String {
         let local = &self.locals[out.0 as usize];
         if local.name.is_empty() {
-            format!("the `{}` out", self.c.types.display_ref(local.ty))
+            format!("the `{}` out", self.c.show(local.ty))
         } else {
             format!("`{}`", local.name)
         }
@@ -915,7 +915,7 @@ impl Pass<'_, '_> {
         let span = self.locals[capture.0 as usize].span;
         let owner = scrutinee.ty.deref();
         if self.c.has_own_drop(owner) {
-            let shown = self.c.types.display(owner.id);
+            let shown = self.c.show_id(owner.id);
             self.report(
                 Diagnostic::error(
                     codes::E064,
@@ -925,7 +925,7 @@ impl Pass<'_, '_> {
                 .label(scrutinee.span, false, format!("a `{shown}`"))
                 .help(format!(
                     "`{}` cannot be copied; match through a method of `{shown}` instead",
-                    self.c.types.display_ref(ty)
+                    self.c.show(ty)
                 )),
             );
             return false;
@@ -937,7 +937,7 @@ impl Pass<'_, '_> {
             }
             None if !scrutinee.is_place() => true,
             None => {
-                let shown = self.c.types.display_ref(ty);
+                let shown = self.c.show(ty);
                 let (message, label) = match origin(scrutinee) {
                     Origin::Ref => (
                         "cannot move a payload out of a reference",
@@ -983,7 +983,7 @@ impl Pass<'_, '_> {
                 own = Some(parts[*field as usize].clone());
             }
             if !discarded && self.c.has_own_drop(ty) {
-                let shown = self.c.types.display(ty.id);
+                let shown = self.c.show_id(ty.id);
                 let parent = HirPath {
                     local: path.local,
                     fields: path.fields[..depth].to_vec(),
@@ -1010,7 +1010,7 @@ impl Pass<'_, '_> {
 
     /// `E064` for moving out of `place`, which is not an owned path.
     fn cannot_move(&mut self, place: &HirExpr, span: Span) {
-        let shown = self.c.types.display_ref(place.ty);
+        let shown = self.c.show(place.ty);
         let (message, label, help) = match origin(place) {
             Origin::Ref => (
                 format!("cannot move `{shown}` out of a reference"),

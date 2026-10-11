@@ -190,7 +190,7 @@ impl Checker<'_> {
                         codes::E060,
                         format!(
                             "value needs {bits} bits but {} holds {width}",
-                            self.types.display(ty)
+                            self.show_id(ty)
                         ),
                     )
                     .label(span, true, "literal overflows"),
@@ -274,7 +274,7 @@ impl Checker<'_> {
                         codes::E060,
                         format!(
                             "value needs {fit} bits but {} holds {width}",
-                            self.types.display(ty)
+                            self.show_id(ty)
                         ),
                     )
                     .label(span, true, "literal overflows"),
@@ -549,10 +549,7 @@ impl Checker<'_> {
             self.diags.emit(
                 Diagnostic::error(
                     codes::E060,
-                    format!(
-                        "float {what} does not fit in {}",
-                        self.types.display(target)
-                    ),
+                    format!("float {what} does not fit in {}", self.show_id(target)),
                 )
                 .label(span, true, label),
             );

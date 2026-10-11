@@ -117,7 +117,7 @@ impl Checker<'_> {
         if pointer.ty.is_ref && !unknown {
             return Ok(pointer);
         }
-        let found = self.types.display_ref(pointer.ty);
+        let found = self.show(pointer.ty);
         let (label, help) = if pointer.ty.is_ref {
             (
                 "`ref unknown` has no type to move or drop",
@@ -149,7 +149,7 @@ impl Checker<'_> {
             // The operand reported it.
             return Err(self.diags.already_reported());
         }
-        let shown = self.types.display_ref(place.ty);
+        let shown = self.show(place.ty);
         let owned = !place.ty.is_ref && HirPath::of(&place).is_some();
         if !owned {
             let help = if place.ty.is_ref {

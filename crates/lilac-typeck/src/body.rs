@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use lilac_ast::{
     Block, Expr, FuncBody, FuncDecl, MatchArm, MatchArmBody, MatchPattern, Param, Stmt,
 };
-use lilac_error::{codes, Diagnostic};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed, Unreported};
 use lilac_hir::{
     FuncKey, HirArm, HirBlock, HirExpr, HirExprKind, HirFailure, HirFunc, HirLocal, HirOld,
     HirPattern, HirStmt, LocalId, LocalKind, SemanticKind,
@@ -191,7 +191,8 @@ impl Checker<'_> {
             // An `@entry` naming a missing root item, outside an executable:
             // nothing enters the program, so the hook is left out.
             if let Some(instance) = self.instances.get_mut(key) {
-                instance.state = State::Unusable;
+                instance.state =
+                    State::Unusable(ErrorGuaranteed::unreported(Unreported::DroppedEntry));
             }
             self.report(held);
             return;
@@ -736,7 +737,7 @@ impl Checker<'_> {
         if let Some(converted) = self.try_convert(hir.clone(), bit8) {
             return converted;
         }
-        let found = self.types.display(hir.ty.id);
+        let found = self.show_id(hir.ty.id);
         self.emit_involving(
             Diagnostic::error(
                 codes::E010,
@@ -809,8 +810,8 @@ impl Checker<'_> {
                                 codes::E010,
                                 format!(
                                     "pattern names `{}`, but the match inspects `{}`",
-                                    self.types.display(named.id),
-                                    self.types.display(scrutinee)
+                                    self.show_id(named.id),
+                                    self.show_id(scrutinee)
                                 ),
                             )
                             .label(qualifier.span, true, "wrong enum"),
@@ -833,8 +834,8 @@ impl Checker<'_> {
                                     codes::E010,
                                     format!(
                                         "mismatched types: capture holds {}, declared {}",
-                                        self.types.display_ref(payload),
-                                        self.types.display_ref(declared)
+                                        self.show(payload),
+                                        self.show(declared)
                                     ),
                                 )
                                 .label(
@@ -869,7 +870,7 @@ impl Checker<'_> {
                             codes::E010,
                             format!(
                                 "byte patterns need a bit container scrutinee, found {}",
-                                self.types.display(scrutinee)
+                                self.show_id(scrutinee)
                             ),
                         )
                         .label(arm.span, true, "not a bit container"),
@@ -910,7 +911,7 @@ impl Checker<'_> {
             ));
         };
         let Some(index) = variants.iter().position(|(variant, _)| variant == name) else {
-            let owner = self.types.display(ty);
+            let owner = self.show_id(ty);
             let mut diagnostic = Diagnostic::error(
                 codes::E021,
                 format!("no variant `{name}` on `{owner}`"),

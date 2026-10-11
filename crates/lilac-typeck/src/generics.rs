@@ -1,20 +1,26 @@
 //! Diagnostics for generic instances: `E042` (an instance body failed a
-//! duck-typing requirement) and the instantiation chains `E042`/`E051` show.
+//! duck-typing requirement), the instantiation limits (`E051`: a definition
+//! recursing too deep, `E068`: too many instances) and the chains they show.
 //!
 //! An instance body is checked like any other; its diagnostics are captured
 //! and, when any is a recorded [`Requirement`], folded into one `E042` at the
 //! use that requested the instance. Requirements are recorded when emitted, so
 //! nothing here parses diagnostic text.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use lilac_error::{codes, Diagnostic, TraceFrame};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed, TraceFrame};
 use lilac_hir::FuncKey;
+use lilac_resolve::DefId;
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeRef};
+use lilac_ty::{TypeId, TypeKind, TypeRef};
 
 use crate::sink::{has_error, Pending};
-use crate::{Checker, Requirement};
+use crate::{Checker, Requirement, MAX_INSTANCES, MAX_RECURSION};
+
+/// How much of one type diagnostics show (`...` past it): a type nested `n`
+/// deep can take `2^n` characters to write out.
+pub(crate) const DISPLAY_LIMIT: usize = 200;
 
 impl Checker<'_> {
     /// Source name of a function for diagnostics: `name`, or `Owner.name`.
@@ -26,37 +32,46 @@ impl Checker<'_> {
         }
     }
 
+    /// A type as diagnostics and the editor show it ([`lilac_ty::Types::display_ref`]),
+    /// cut at [`DISPLAY_LIMIT`].
+    pub(crate) fn show(&self, ty: TypeRef) -> String {
+        self.types.display_bounded(ty, DISPLAY_LIMIT)
+    }
+
+    /// [`Self::show`] for a type by value.
+    pub(crate) fn show_id(&self, id: TypeId) -> String {
+        self.show(TypeRef::value(id))
+    }
+
     /// `name[@arg, ...]` for an instance (`name` alone when not generic).
     pub(crate) fn instance_display(&self, key: &FuncKey) -> String {
         let name = self.function_name(key.def);
         if key.args.is_empty() {
             return name;
         }
-        let args: Vec<String> = key
-            .args
-            .iter()
-            .map(|arg| self.types.display_ref(*arg))
-            .collect();
+        let args: Vec<String> = key.args.iter().map(|arg| self.show(*arg)).collect();
         format!("{name}[{}]", args.join(", "))
     }
 
-    /// The generic instances on `key`'s request chain, outermost first.
-    pub(crate) fn frames(&self, key: &FuncKey) -> Vec<String> {
-        let mut frames = Vec::new();
-        let mut current = Some(key.clone());
+    /// The generic instances on the first-origin chain that ends at `last`,
+    /// outermost first. The walk ends: an instance's first origin was
+    /// requested before it, so origins never form a cycle.
+    pub(crate) fn chain_keys(&self, last: Option<&FuncKey>) -> Vec<FuncKey> {
+        let mut keys = Vec::new();
+        let mut current = last.cloned();
         while let Some(key) = current {
-            if key.args.is_empty() || frames.len() > 64 {
+            if key.args.is_empty() {
                 break;
             }
-            frames.push(self.instance_display(&key));
             current = self
                 .instances
                 .get(&key)
-                .and_then(|instance| instance.origin.clone())
-                .and_then(|(parent, _)| parent);
+                .and_then(|instance| instance.origin.as_ref())
+                .and_then(|(parent, _)| parent.clone());
+            keys.push(key);
         }
-        frames.reverse();
-        frames
+        keys.reverse();
+        keys
     }
 
     /// The trace of a failure at `span` in instance `key`: every site that
@@ -123,9 +138,154 @@ impl Checker<'_> {
         }
     }
 
-    /// The `E051` chain text for `key`.
-    pub(crate) fn chain_text(&self, key: &FuncKey) -> String {
-        crate::types::elide_chain(&self.frames(key))
+    /// The `E051`/`E068` chain text for `keys` (outermost first).
+    pub(crate) fn chain_text(&self, keys: &[FuncKey]) -> String {
+        crate::types::elide_chain(keys.len(), |index| self.instance_display(&keys[index]))
+    }
+
+    /// `E051` for `key`, requested from `parent` at `use_span`: its
+    /// definition would appear past [`MAX_RECURSION`] times on its chain.
+    pub(crate) fn recursion_error(
+        &mut self,
+        key: &FuncKey,
+        parent: Option<&FuncKey>,
+        use_span: Span,
+    ) -> ErrorGuaranteed {
+        let mut keys = self.chain_keys(parent);
+        keys.push(key.clone());
+        let name = self.function_name(key.def);
+        let mut diagnostic = Diagnostic::error(
+            codes::E051,
+            "generic instantiation is too deep (possible infinite recursion)",
+        )
+        .label(use_span, true, "instantiated here")
+        .note(format!("instantiation chain: {}", self.chain_text(&keys)));
+        let mut repeats = keys.iter().filter(|chained| chained.def == key.def);
+        if let (Some(first), Some(second)) = (repeats.next(), repeats.next()) {
+            if self.grew(&first.args, &second.args) {
+                diagnostic = diagnostic.note(format!(
+                    "the type arguments grow each time: {} -> {}",
+                    self.instance_display(first),
+                    self.instance_display(second)
+                ));
+            }
+        }
+        self.diags.emit(diagnostic.note(format!(
+            "a generic may appear at most {MAX_RECURSION} times on one instantiation chain, and `{name}` would appear once more"
+        )))
+    }
+
+    /// Whether type arguments `to` grew from `from`: they differ, and each
+    /// still contains the one it replaced.
+    pub(crate) fn grew(&self, from: &[TypeRef], to: &[TypeRef]) -> bool {
+        from.len() == to.len()
+            && from != to
+            && from
+                .iter()
+                .zip(to)
+                .all(|(from, to)| self.mentions(to.id, from.id))
+    }
+
+    /// Whether `part` is `ty` or one of the types it is made of. Each type
+    /// is visited once, since a type nested `n` deep can be a tree of `2^n`
+    /// nodes.
+    fn mentions(&self, ty: TypeId, part: TypeId) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![ty];
+        while let Some(ty) = stack.pop() {
+            if ty == part {
+                return true;
+            }
+            if !seen.insert(ty) {
+                continue;
+            }
+            match self.types.kind(ty) {
+                TypeKind::Instance { args, .. } => stack.extend(args.iter().map(|arg| arg.id)),
+                TypeKind::Array { elem, .. } => stack.push(*elem),
+                TypeKind::Func {
+                    params, returns, ..
+                } => stack.extend(params.iter().chain(returns).map(|slot| slot.id)),
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// The `E068` that ends instantiating once the pass has built
+    /// [`MAX_INSTANCES`] generic instances: `None` while some are left.
+    /// Reported once, at the request that found none left; every later new
+    /// instance fails with it.
+    pub(crate) fn instance_budget(
+        &mut self,
+        key: &FuncKey,
+        use_span: Span,
+    ) -> Option<ErrorGuaranteed> {
+        if self.instance_limit.is_some() || self.generic_instances < MAX_INSTANCES {
+            return self.instance_limit;
+        }
+        let mut keys = self.chain_keys(self.env.key.clone().as_ref());
+        keys.push(key.clone());
+        let mut diagnostic = Diagnostic::error(codes::E068, "too many generic instances")
+            .label(
+                use_span,
+                true,
+                format!("`{}` would be one too many", self.instance_display(key)),
+            )
+            .note(format!(
+                "a check builds at most {MAX_INSTANCES} generic instances"
+            ));
+        for note in self.busiest_definitions() {
+            diagnostic = diagnostic.note(note);
+        }
+        let diagnostic =
+            diagnostic.note(format!("instantiation chain: {}", self.chain_text(&keys)));
+        let error = self.diags.report_now(diagnostic);
+        self.instance_limit = Some(error);
+        self.instance_limit
+    }
+
+    /// One note for each of the (up to three) definitions with the most
+    /// instances: how many, and the first and the latest one built, which
+    /// shows how their arguments grow.
+    fn busiest_definitions(&self) -> Vec<String> {
+        let mut busiest: HashMap<DefId, Built> = HashMap::new();
+        for (key, instance) in &self.instances {
+            if key.args.is_empty() {
+                continue;
+            }
+            let built = (instance.serial, key);
+            let entry = busiest.entry(key.def).or_insert(Built {
+                count: 0,
+                first: built,
+                latest: built,
+            });
+            entry.count += 1;
+            if built.0 < entry.first.0 {
+                entry.first = built;
+            }
+            if built.0 > entry.latest.0 {
+                entry.latest = built;
+            }
+        }
+        let mut busiest: Vec<Built> = busiest.into_values().collect();
+        busiest.sort_by_key(|built| (std::cmp::Reverse(built.count), built.first.0));
+        busiest
+            .into_iter()
+            .take(3)
+            .map(|built| {
+                let (first, latest) = (built.first.1, built.latest.1);
+                let name = self.function_name(first.def);
+                if built.count == 1 {
+                    return format!("`{name}` has 1 instance: {}", self.instance_display(first));
+                }
+                format!(
+                    "`{name}` has {} instances, from {} to {}",
+                    built.count,
+                    self.instance_display(first),
+                    self.instance_display(latest)
+                )
+            })
+            .collect()
     }
 
     /// Decides what to report of the diagnostics `held` while `key`'s body
@@ -178,11 +338,7 @@ impl Checker<'_> {
         };
         let name = self.function_name(key.def);
         let params = self.scope_of(key.def).join(", ");
-        let arg_list: Vec<String> = key
-            .args
-            .iter()
-            .map(|arg| self.types.display_ref(*arg))
-            .collect();
+        let arg_list: Vec<String> = key.args.iter().map(|arg| self.show(*arg)).collect();
         let pretty = self.instance_display(key);
         let mut diagnostic = Diagnostic::error(
             codes::E042,
@@ -285,7 +441,7 @@ impl Checker<'_> {
                     if exists {
                         helps.push(format!(
                             "a `@conversion` from `{}` exists; check its target",
-                            self.types.display(*from)
+                            self.show_id(*from)
                         ));
                     }
                 }
@@ -321,7 +477,7 @@ impl Checker<'_> {
                 return name.clone();
             }
         }
-        self.types.display_ref(ty)
+        self.show(ty)
     }
 
     /// The note describing the method a generic body requires, as a Lilac
@@ -392,4 +548,12 @@ fn phrase(diagnostic: &Diagnostic, requirement: &Requirement) -> String {
             .find(|label| label.primary)
             .map_or_else(|| diagnostic.msg.to_string(), |label| label.msg.clone()),
     }
+}
+
+/// The instances of one definition, for `E068`: how many, and the first and
+/// the latest built (by [`crate::Instance::serial`]).
+struct Built<'a> {
+    count: usize,
+    first: (usize, &'a FuncKey),
+    latest: (usize, &'a FuncKey),
 }

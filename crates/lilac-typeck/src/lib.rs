@@ -203,9 +203,11 @@ pub(crate) enum State {
     /// Body has an error. Callers are still checked against the signature,
     /// so their own errors are reported too.
     BodyFailed,
-    /// The instance cannot be called at all (a signature type failed, the
-    /// `E051` depth cap, or a dropped `@entry`); later uses stay silent.
-    Unusable,
+    /// The instance cannot be called at all (a signature type failed, its
+    /// definition recursed too deep (`E051`), the instance budget ran out
+    /// (`E068`), or a dropped `@entry`); later uses fail with the same
+    /// error and stay silent.
+    Unusable(ErrorGuaranteed),
 }
 
 /// One function instance.
@@ -215,8 +217,14 @@ pub(crate) struct Instance {
     pub sig: FuncSig,
     /// The instance whose body requested this one, and the use site.
     pub origin: Option<(Option<FuncKey>, Span)>,
-    /// Number of generic instances on the request chain (`E051` bound).
-    pub depth: usize,
+    /// How many times each generic definition appears on the instance's
+    /// first-origin chain, its own included (`E051` past
+    /// [`MAX_RECURSION`]). Empty for a non-generic instance: a chain
+    /// starts again at one.
+    pub recursion: Vec<(DefId, u32)>,
+    /// How many generic instances the pass had built before this one (the
+    /// order `E068` names them in).
+    pub serial: usize,
     /// Progress.
     pub state: State,
 }
@@ -309,6 +317,8 @@ pub(crate) struct Checker<'a> {
     pub sizes: HashMap<TypeId, lilac_layout::SizeAlign>,
     /// Types whose layout is being computed (innermost last).
     pub type_stack: Vec<TypeId>,
+    /// How many times each definition is on [`Checker::type_stack`].
+    pub type_counts: HashMap<DefId, u32>,
     /// Concrete array types met so far, with a span that names each, for
     /// the element hook check.
     pub arrays: Vec<(TypeId, Span)>,
@@ -343,13 +353,46 @@ pub(crate) struct Checker<'a> {
     pub droppable: HashMap<TypeId, bool>,
     /// [`Options::cancel`].
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Generic instances built so far in this pass (`E068` past
+    /// [`MAX_INSTANCES`]); the template pass counts its own.
+    pub generic_instances: usize,
+    /// The `E068` that stopped instantiating, once the budget ran out:
+    /// every later new instance fails with it.
+    pub instance_limit: Option<ErrorGuaranteed>,
+    /// Instances recursive requests put at the front of the queue while
+    /// the current body is checked ([`Checker::request`]).
+    pub front: usize,
+    /// Each generic definition that recursed too deep (`E051`), with whether
+    /// the chain was a template's: a later recursive request of it fails
+    /// rather than starting the descent again.
+    pub recursion_limited: HashSet<(DefId, bool)>,
+    /// Each definition whose layout recursed too deep (`E051`): a later
+    /// layout of it inside itself fails.
+    pub type_recursion_limited: HashSet<DefId>,
+    /// The first recursion `E051`, which those later failures carry.
+    pub recursion_error: Option<ErrorGuaranteed>,
 }
 
-/// Production instantiation depth cap; the test cap keeps `E051` cheap.
-#[cfg(not(test))]
-pub(crate) const MAX_DEPTH: usize = 16;
-#[cfg(test)]
-pub(crate) const MAX_DEPTH: usize = 4;
+/// How many times one generic definition may appear on an instantiation
+/// chain (a function instance's first-origin chain, or the types being laid
+/// out): past it is `E051`. As rustc does, recursion is counted per
+/// definition, so a chain of distinct generics is never too deep.
+pub(crate) const MAX_RECURSION: u32 = 64;
+
+/// How deep types may nest while one is laid out (`E051` past it), whatever
+/// they are: laying out recurses into each field's type, so this bounds the
+/// native stack. Far above real programs (the limit was 16 before recursion
+/// was counted per definition) and far below what
+/// `lilac_driver::COMPILE_STACK_BYTES` covers in a debug build (it
+/// overflows near 19,000 levels).
+pub(crate) const MAX_TYPE_NESTING: usize = 1024;
+
+/// How many generic function instances one pass of a check builds at most
+/// (`E068` past it). `lib/Standard` and the test suite need at most 9 (18
+/// in the template pass), and a release build reaches it in about 0.5 s
+/// (1.3 s with ten-statement bodies); `docs/errors/E068.md` has the
+/// measurements.
+pub(crate) const MAX_INSTANCES: usize = 50_000;
 
 impl<'a> Checker<'a> {
     fn new(
@@ -374,6 +417,7 @@ impl<'a> Checker<'a> {
             type_states: HashMap::new(),
             sizes: HashMap::new(),
             type_stack: Vec::new(),
+            type_counts: HashMap::new(),
             arrays: Vec::new(),
             const_types: HashMap::new(),
             out: HirProgram::default(),
@@ -385,6 +429,12 @@ impl<'a> Checker<'a> {
             copyable: HashMap::new(),
             droppable: HashMap::new(),
             cancel: options.cancel,
+            generic_instances: 0,
+            instance_limit: None,
+            front: 0,
+            recursion_limited: HashSet::new(),
+            type_recursion_limited: HashSet::new(),
+            recursion_error: None,
         }
     }
 }
@@ -415,6 +465,9 @@ impl Checker<'_> {
     }
 
     /// Checks every queued instance, then emits the `E042`s they produced.
+    /// A recursive request goes to the front of the queue ([`Self::request`]),
+    /// so recursion is followed depth first and meets `E051` after
+    /// [`MAX_RECURSION`] bodies, however many calls each level makes.
     /// A cancelled check ([`Options::cancel`]) drops the rest of the queue.
     fn drain_queue(&mut self) {
         while let Some(key) = self.queue.pop_front() {
@@ -422,6 +475,7 @@ impl Checker<'_> {
                 self.queue.clear();
                 return;
             }
+            self.front = 0;
             self.check_instance(&key);
         }
         self.emit_failures();
@@ -445,6 +499,10 @@ impl Checker<'_> {
         let funcs = self.out.funcs.len();
         let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
         self.instantiated = self.instances.keys().map(|key| key.def).collect();
+        // A budget of its own: what the program leaves unused never takes
+        // instances from what it uses, and the reverse.
+        self.generic_instances = 0;
+        self.instance_limit = None;
         for id in self.res.ids() {
             if self.cancelled() {
                 break;
@@ -537,6 +595,16 @@ impl Checker<'_> {
     /// `use_span`): computes its concrete signature and queues its body.
     /// `Err` when the signature failed, now (reported) or before (silent: it
     /// was reported then); a body that failed still gives its signature.
+    ///
+    /// Two limits keep instantiation finite and fast. A generic definition
+    /// may appear [`MAX_RECURSION`] times on an instance's chain (`E051`),
+    /// and a recursive instance (its definition already on the chain) is
+    /// checked next, so recursion is followed depth first: it meets `E051`
+    /// after [`MAX_RECURSION`] bodies even when each level requests several
+    /// instances, and every later recursive request of that definition
+    /// fails with the same error. A pass builds at most [`MAX_INSTANCES`]
+    /// generic instances (`E068`), which bounds wide fan-out that never
+    /// recurses.
     pub(crate) fn request(
         &mut self,
         key: FuncKey,
@@ -549,8 +617,7 @@ impl Checker<'_> {
         }
         if let Some(instance) = self.instances.get(&key) {
             return match instance.state {
-                // Reported when it became unusable.
-                State::Unusable => Err(self.diags.already_reported()),
+                State::Unusable(error) => Err(error),
                 _ => Ok(instance.sig.clone()),
             };
         }
@@ -568,40 +635,72 @@ impl Checker<'_> {
                 .collect(),
         };
         let origin_key = self.env.key.clone();
-        let parent_depth = origin_key
-            .as_ref()
-            .and_then(|parent| self.instances.get(parent))
-            .map_or(0, |parent| parent.depth);
-        let depth = parent_depth + usize::from(!key.args.is_empty());
+        let recursion = if key.args.is_empty() {
+            Vec::new()
+        } else {
+            let mut counts = origin_key
+                .as_ref()
+                .and_then(|parent| self.instances.get(parent))
+                .map(|parent| parent.recursion.clone())
+                .unwrap_or_default();
+            match counts.iter_mut().find(|(def, _)| *def == key.def) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((key.def, 1)),
+            }
+            counts
+        };
+        let count = recursion
+            .iter()
+            .find(|(def, _)| *def == key.def)
+            .map_or(0, |(_, count)| *count);
         let mut instance = Instance {
             sig: sig.clone(),
             origin: Some((origin_key, use_span)),
-            depth,
+            recursion,
+            serial: self.generic_instances,
             state: State::Queued,
         };
-        if depth > MAX_DEPTH {
-            instance.state = State::Unusable;
+        if !key.args.is_empty() {
+            if let Some(error) = self.instance_budget(&key, use_span) {
+                instance.state = State::Unusable(error);
+                self.instances.insert(key, instance);
+                return Err(error);
+            }
+            self.generic_instances += 1;
+        }
+        let template_chain = key.args.iter().any(|arg| self.types.contains_param(arg.id));
+        if count > 1 && self.recursion_limited.contains(&(key.def, template_chain)) {
+            // The descent this definition started already reported `E051`.
+            if let Some(error) = self.recursion_error {
+                instance.state = State::Unusable(error);
+                self.instances.insert(key, instance);
+                return Err(error);
+            }
+        }
+        if count > MAX_RECURSION {
+            let parent = self.env.key.clone();
+            let error = self.recursion_error(&key, parent.as_ref(), use_span);
+            instance.state = State::Unusable(error);
             self.instances.insert(key.clone(), instance);
-            let chain = self.chain_text(&key);
-            return Err(self.diags.emit(
-                Diagnostic::error(
-                    codes::E051,
-                    "generic instantiation is too deep (possible infinite recursion)",
-                )
-                .label(use_span, true, "instantiated here")
-                .note(format!("instantiation chain: {chain}")),
-            ));
+            self.recursion_limited.insert((key.def, template_chain));
+            self.recursion_error.get_or_insert(error);
+            return Err(error);
         }
         // Every type the signature mentions must exist before the body runs.
         for ty in sig.params.iter().chain(sig.returns.iter()) {
             if let Err(error) = self.ensure_type(*ty, use_span) {
-                instance.state = State::Unusable;
+                instance.state = State::Unusable(error);
                 self.instances.insert(key, instance);
                 return Err(error);
             }
         }
         self.instances.insert(key.clone(), instance);
-        self.queue.push_back(key);
+        if count > 1 {
+            self.queue.insert(self.front.min(self.queue.len()), key);
+            self.front += 1;
+        } else {
+            self.queue.push_back(key);
+        }
         Ok(sig)
     }
 
@@ -702,8 +801,8 @@ impl Checker<'_> {
         expected_span: Span,
         found_span: Span,
     ) -> ErrorGuaranteed {
-        let exp = self.types.display_ref(expected);
-        let got = self.types.display_ref(found);
+        let exp = self.show(expected);
+        let got = self.show(found);
         let diagnostic = Diagnostic::error(
             codes::E010,
             format!("mismatched types: expected {exp}, found {got}"),
@@ -756,7 +855,7 @@ impl Checker<'_> {
             .unwrap_or_default()
             .into_iter()
             .filter(|(name, _)| !taken.contains(&name.as_str()))
-            .map(|(name, payload)| (name, payload.map(|payload| self.types.display_ref(payload))))
+            .map(|(name, payload)| (name, payload.map(|payload| self.show(payload))))
             .collect();
         self.out.tags.push(lilac_hir::TagSite { span, variants });
     }

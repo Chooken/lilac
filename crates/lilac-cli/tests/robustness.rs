@@ -151,21 +151,20 @@ fn byte_order_mark_is_trivia() {
     assert!(out.success, "{}", out.stderr);
 }
 
-/// Problem 7: a chain of 18 different generic functions, none recursive,
+/// Problem 7: a chain of 120 different generic functions, none recursive,
 /// is no infinite recursion (`E051` counts recursion per definition).
 #[test]
-#[ignore = "robustness plan phase 6"]
 fn long_chain_of_distinct_generics_checks() {
     let dir = scratch("long_chain_of_distinct_generics_checks");
     let mut text = String::new();
-    for index in 1..18 {
+    for index in 1..120 {
         let next = index + 1;
         let _ = writeln!(
             text,
             "f{index}[T]: function (x: T) y: T {{ y = f{next}[T](x) }}"
         );
     }
-    text += "f18[T]: function (x: T) y: T { y = x }\n\n";
+    text += "f120[T]: function (x: T) y: T { y = x }\n\n";
     text += "main: function () nothing {\n    v: @bit32 = f1[@bit32](0x1)\n}\n";
     write(&dir, "main.lilac", text);
     let out = check(&dir, "main.lilac", Duration::from_secs(30));
@@ -173,9 +172,10 @@ fn long_chain_of_distinct_generics_checks() {
 }
 
 /// Problem 8: a generic that instantiates itself twice with growing types
-/// built 2^16 instances (16 s) before `E051`. It fails fast.
+/// built 2^16 instances (16 s) before `E051`. Recursion is followed depth
+/// first, so it fails fast, and once: every other branch stops at the
+/// definition that already failed.
 #[test]
-#[ignore = "robustness plan phase 6"]
 fn branching_generic_recursion_fails_fast() {
     let dir = scratch("branching_generic_recursion_fails_fast");
     write(
@@ -189,7 +189,81 @@ fn branching_generic_recursion_fails_fast() {
     // Under a second in a debug build, process start included.
     let out = check(&dir, "main.lilac", Duration::from_secs(1));
     assert!(!out.success, "{}", out.stderr);
-    assert!(error_codes(&out.stderr).contains(&"E051"), "{}", out.stderr);
+    assert_eq!(error_codes(&out.stderr), ["E051"], "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("note: the type arguments grow each time: grow[@bit32] -> grow[W[@bit32]]"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// Problem 8 with three branches per level (3^16 instances before), and with
+/// arguments whose text and tree grow 4^n (`P[T, T, T, T]`): each ends with
+/// `E051` within a second. When `P` holds all four, its size grows 4^n too,
+/// and the recursion ends sooner, at the object size limit (`E067`, folded
+/// into `E042`).
+#[test]
+fn wider_generic_recursion_fails_fast() {
+    let dir = scratch("wider_generic_recursion_fails_fast");
+    write(
+        &dir,
+        "three.lilac",
+        "W[T]: object {\n    value: T\n}\n\n\
+         V[T]: object {\n    value: T\n}\n\n\
+         U[T]: object {\n    value: T\n}\n\n\
+         grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n    grow[U[T]]()\n}\n\n\
+         main: function () nothing {\n    grow[@bit32]()\n}\n",
+    );
+    let quad = |fields: &str| {
+        format!(
+            "P[A, B, C, D]: object {{\n{fields}}}\n\n\
+             grow[T]: function () nothing {{\n    grow[P[T, T, T, T]]()\n}}\n\n\
+             main: function () nothing {{\n    grow[@bit32]()\n}}\n"
+        )
+    };
+    write(&dir, "quad.lilac", quad("    a: A\n"));
+    write(
+        &dir,
+        "wide.lilac",
+        quad("    a: A\n    b: B\n    c: C\n    d: D\n"),
+    );
+    for (file, code) in [
+        ("three.lilac", "E051"),
+        ("quad.lilac", "E051"),
+        ("wide.lilac", "E042"),
+    ] {
+        let out = check(&dir, file, Duration::from_secs(1));
+        assert!(!out.success, "{file}: {}", out.stderr);
+        assert_eq!(error_codes(&out.stderr), [code], "{file}: {}", out.stderr);
+    }
+}
+
+/// Types nested by value through distinct definitions are no recursion
+/// either: 1,024 levels (the deepest accepted) check in a debug build, and
+/// one more is `E051`, never a stack overflow.
+#[test]
+fn deep_type_nesting_is_bounded() {
+    let dir = scratch("deep_type_nesting_is_bounded");
+    let nested = |depth: usize| {
+        let mut text = String::new();
+        for index in 1..depth {
+            let _ = writeln!(text, "O{index}: object {{\n    a: O{}\n}}", index + 1);
+        }
+        let _ = writeln!(text, "O{depth}: object {{\n    a: @bit32\n}}\n");
+        text + "g: O1\n\nmain: function () nothing {\n    x: O1 = g\n}\n"
+    };
+    write(&dir, "deepest.lilac", nested(1024));
+    write(&dir, "deeper.lilac", nested(1025));
+    let out = check(&dir, "deepest.lilac", Duration::from_secs(30));
+    assert!(out.success, "{}", out.stderr);
+    let out = check(&dir, "deeper.lilac", Duration::from_secs(30));
+    assert_eq!(error_codes(&out.stderr), ["E051"], "{}", out.stderr);
+    assert!(
+        out.stderr.contains("types nest too deeply to lay out"),
+        "{}",
+        out.stderr
+    );
 }
 
 /// Problem 9: `x86` is the user-facing name of `i686`; the triple LLVM gets

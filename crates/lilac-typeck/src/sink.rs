@@ -55,6 +55,13 @@ impl<'a> Sink<'a> {
         }
     }
 
+    /// Reports `diagnostic` now, also while a body is checked: an error
+    /// about the whole check (`E068`), which no body may fold into `E042`
+    /// or drop.
+    pub(crate) fn report_now(&mut self, diagnostic: Diagnostic) -> ErrorGuaranteed {
+        self.diags.emit(diagnostic)
+    }
+
     /// How many errors were reported (held ones not included).
     pub(crate) fn error_count(&self) -> usize {
         self.diags.error_count()

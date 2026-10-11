@@ -175,8 +175,8 @@ impl Checker<'_> {
         if let Some(converted) = self.try_convert(expr.clone(), want.id) {
             return converted;
         }
-        let from = self.types.display(expr.ty.id);
-        let target = self.types.display(want.id);
+        let from = self.show_id(expr.ty.id);
+        let target = self.show_id(want.id);
         let source = expr.ty.id;
         let diagnostic = Diagnostic::error(
             codes::E043,
@@ -544,7 +544,7 @@ impl Checker<'_> {
                 };
             }
         }
-        let owner = self.types.display(ty);
+        let owner = self.show_id(ty);
         let mut diagnostic = Diagnostic::error(
             codes::E021,
             format!("no field `{field}` on `{owner}`"),
@@ -854,10 +854,7 @@ impl Checker<'_> {
                 }
                 let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
                 if left.ty.id != right.ty.id {
-                    let (l, r) = (
-                        self.types.display(left.ty.id),
-                        self.types.display(right.ty.id),
-                    );
+                    let (l, r) = (self.show_id(left.ty.id), self.show_id(right.ty.id));
                     self.diags.emit(
                         Diagnostic::error(
                             codes::E010,
@@ -903,8 +900,8 @@ impl Checker<'_> {
                 codes::E043,
                 format!(
                     "no {hook} for ({}, {})",
-                    self.types.display(left.ty.id),
-                    self.types.display(right.ty.id)
+                    self.show_id(left.ty.id),
+                    self.show_id(right.ty.id)
                 ),
             )
             .label(span, true, "no exact operator overload");
@@ -1000,8 +997,8 @@ impl Checker<'_> {
                     codes::E010,
                     format!(
                         "mismatched types: `if` branches produce {} and {}",
-                        self.types.display(then.ty.id),
-                        self.types.display(els.ty.id)
+                        self.show_id(then.ty.id),
+                        self.show_id(els.ty.id)
                     ),
                 )
                 .label(span, true, "branches disagree here"),
@@ -1190,7 +1187,7 @@ impl Checker<'_> {
         if matches!(self.types.kind(object.id), TypeKind::Array { .. }) {
             return self.array_literal(object, fields, span);
         }
-        let display = self.types.display(object.id);
+        let display = self.show_id(object.id);
         let Some(layout) = self.fields_of(object.id) else {
             self.diags.emit(
                 Diagnostic::error(codes::E010, format!("`{display}` is not an object")).label(
