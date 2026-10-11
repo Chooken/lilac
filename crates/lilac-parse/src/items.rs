@@ -534,6 +534,7 @@ impl Parser {
                             generic_params: Vec::new(),
                             params: func.params,
                             returns: func.returns,
+                            failures: func.failures,
                             body,
                             is_extern: false,
                             is_export: false,
@@ -601,12 +602,13 @@ impl Parser {
             }
         }
         self.bump();
-        let returns = self.parse_returns(diags)?;
+        let (returns, failures) = self.parse_returns(diags)?;
         let body = self.parse_func_body(diags, is_extern)?;
         Ok(FuncDecl {
             generic_params,
             params,
             returns,
+            failures,
             body,
             is_extern,
             is_export: false,
@@ -685,28 +687,54 @@ impl Parser {
         ) && second.kind != TokenKind::Colon
     }
 
+    /// A signature's outs: the success outs, then, for a function that can
+    /// fail, `else` and the failure outs (`else nothing` for none).
     pub(crate) fn parse_returns(
         &mut self,
         diags: &mut lilac_error::Diags,
-    ) -> Result<Vec<Param>, ErrorGuaranteed> {
-        match self.peek().kind {
-            TokenKind::LBrace | TokenKind::FatArrow | TokenKind::Eof => Ok(Vec::new()),
-            TokenKind::KwNothing => {
-                self.bump();
-                Ok(Vec::new())
+    ) -> Result<(Vec<Param>, Option<Vec<Param>>), ErrorGuaranteed> {
+        let returns = match self.peek().kind {
+            TokenKind::LBrace | TokenKind::FatArrow | TokenKind::Eof | TokenKind::KwElse => {
+                Vec::new()
             }
-            _ => {
-                let mut returns = Vec::new();
-                loop {
-                    returns.push(self.parse_param(diags)?);
-                    if self.peek().kind == TokenKind::Comma {
-                        self.bump();
-                        continue;
-                    }
-                    break;
-                }
-                Ok(returns)
-            }
+            _ => self.parse_out_slots(diags)?,
+        };
+        if self.peek().kind != TokenKind::KwElse {
+            return Ok((returns, None));
         }
+        self.bump();
+        if matches!(
+            self.peek().kind,
+            TokenKind::LBrace | TokenKind::FatArrow | TokenKind::Eof
+        ) {
+            return Err(Self::expected(
+                diags,
+                self.peek(),
+                "failure outs or `nothing` after `else`",
+            ));
+        }
+        let failures = self.parse_out_slots(diags)?;
+        Ok((returns, Some(failures)))
+    }
+
+    /// `nothing`, or `name: Type` slots separated by commas.
+    fn parse_out_slots(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Param>, ErrorGuaranteed> {
+        if self.peek().kind == TokenKind::KwNothing {
+            self.bump();
+            return Ok(Vec::new());
+        }
+        let mut slots = Vec::new();
+        loop {
+            slots.push(self.parse_param(diags)?);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        Ok(slots)
     }
 }

@@ -1,0 +1,12 @@
+// expect-error: E062
+// expect-stderr: error[E062]: `halve` has 1 success out, but 2 are bound
+// Captures bind outs by position; there cannot be more than outs.
+
+halve: function (n: @bit32) half: @bit32 else odd: @bit32 {
+    half = n
+}
+
+main: function () nothing {
+    if halve(0x8) -> half: @bit32, rest: @bit32 {
+    }
+}

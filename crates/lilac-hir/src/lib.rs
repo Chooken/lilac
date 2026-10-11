@@ -289,8 +289,12 @@ pub struct HirFunc {
     pub key: FuncKey,
     /// Parameter locals, in order.
     pub params: Vec<LocalId>,
-    /// Return-slot locals, in order.
+    /// Return-slot locals, in order: for a function that can fail, the
+    /// success outs, the failure outs, then its flag (see
+    /// [`HirFunc::failure`]).
     pub returns: Vec<LocalId>,
+    /// How a function that can fail reports it; `None` when it cannot.
+    pub failure: Option<HirFailure>,
     /// Every local, indexed by [`LocalId`].
     pub locals: Vec<HirLocal>,
     /// Body; `None` for `extern` declarations.
@@ -299,6 +303,16 @@ pub struct HirFunc {
     pub inline: bool,
     /// Whole-declaration span.
     pub span: Span,
+}
+
+/// A function that can fail: a hidden `@bit8` out after its other outs,
+/// set at entry and cleared by `fail`, tells the caller which outs it set.
+#[derive(Clone, Copy, Debug)]
+pub struct HirFailure {
+    /// How many of the outs are success outs (the failure outs follow).
+    pub success: usize,
+    /// The flag: the last out.
+    pub flag: LocalId,
 }
 
 impl HirFunc {
@@ -347,6 +361,9 @@ pub enum HirStmt {
     Expr(HirExpr),
     /// `return`.
     Return(Span),
+    /// `fail`: like `return`, after typeck cleared the success flag (see
+    /// [`HirFunc::failure`]).
+    Fail(Span),
     /// `break`.
     Break(Span),
     /// `continue`.
@@ -612,7 +629,10 @@ impl HirBlock {
                     place.walk(f);
                     value.walk(f);
                 }
-                HirStmt::Return(_) | HirStmt::Break(_) | HirStmt::Continue(_) => {}
+                HirStmt::Return(_)
+                | HirStmt::Fail(_)
+                | HirStmt::Break(_)
+                | HirStmt::Continue(_) => {}
                 HirStmt::If { cond, then, els } => {
                     cond.walk(f);
                     then.walk_exprs(f);

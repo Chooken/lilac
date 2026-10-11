@@ -511,7 +511,10 @@ fn stmt_span(stmt: &HirStmt) -> Span {
         },
         HirStmt::Let { value, .. } | HirStmt::Assign { value, .. } => value.span,
         HirStmt::Expr(expr) => expr.span,
-        HirStmt::Return(span) | HirStmt::Break(span) | HirStmt::Continue(span) => *span,
+        HirStmt::Return(span)
+        | HirStmt::Fail(span)
+        | HirStmt::Break(span)
+        | HirStmt::Continue(span) => *span,
         HirStmt::If { cond, .. } => cond.span,
         HirStmt::Loop(block) | HirStmt::Block(block) => block.span,
         HirStmt::Match { scrutinee, .. } => scrutinee.span,

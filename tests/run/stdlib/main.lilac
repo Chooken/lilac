@@ -92,8 +92,13 @@ bools: function () nothing {
 optionals: function () nothing {
     some: Optional[Int32] = .Some(0x9 as Int32)
     none: Optional[Int32] = .None
-    has: Bool, value: Int32 = some.unwrap()
-    expect(has, 0x30)
+    value: Int32 = some.get() else {
+        exit(0x30)
+        return
+    }
+    if none.get() -> nothing_here: Int32 {
+        exit(0x33)
+    }
     expect(value == 0x9 as Int32, 0x31)
     expect(none.unwrap_or(0x2 as Int32) == 0x2 as Int32, 0x32)
 }

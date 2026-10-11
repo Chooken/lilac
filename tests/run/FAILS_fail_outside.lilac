@@ -1,0 +1,7 @@
+// expect-error: E058
+// expect-stderr: error[E058]: `fail` outside a function that can fail
+// Only a function declared with `else` outs can `fail`.
+
+main: function () nothing {
+    fail
+}

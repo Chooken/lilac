@@ -43,6 +43,23 @@ impl Checker<'_> {
             );
             return None;
         }
+        if decl.failures.is_some() {
+            let what = if decl.is_extern || decl.is_export {
+                Some((codes::E028, "a C function cannot fail"))
+            } else if matches!(d.kind, DefKind::Hook(_)) {
+                Some((codes::E022, "a hook cannot fail"))
+            } else {
+                None
+            };
+            if let Some((code, message)) = what {
+                self.diags.emit(
+                    Diagnostic::error(code, message)
+                        .label(d.name_span, true, "declared with `else` outs")
+                        .help("return a `Result` instead"),
+                );
+                return None;
+            }
+        }
         let parent = d.parent;
         let env = self.env_of(def, Vec::new(), None);
         self.with_env(env, |c| {
@@ -64,7 +81,17 @@ impl Checker<'_> {
                 ty
             };
             let params = decl.params.iter().map(|p| slot(c, p)).collect();
-            let returns = decl.returns.iter().map(|p| slot(c, p)).collect();
+            // A function that can fail: the success outs, the failure outs,
+            // then its `@bit8` flag (`HirFunc::failure`).
+            let mut returns: Vec<TypeRef> = decl
+                .returns
+                .iter()
+                .chain(decl.failures.iter().flatten())
+                .map(|p| slot(c, p))
+                .collect();
+            if decl.failures.is_some() {
+                returns.push(Builtin::Bit8.value());
+            }
             ok.then_some(FuncSig { params, returns })
         })
     }

@@ -330,6 +330,25 @@ impl Checker<'_> {
             // `check_variadic_arg` reported it.
             return Err(self.diags.already_reported());
         }
+        let can_fail = self
+            .res
+            .def(def)
+            .func()
+            .is_some_and(|decl| decl.failures.is_some());
+        if can_fail && fcx.handled != Some(span) {
+            let name = self.function_name(def);
+            return Err(self.diags.emit(
+                Diagnostic::error(
+                    codes::E057,
+                    format!("`{name}` can fail, and the failure is not handled"),
+                )
+                .label(span, true, "this call can fail")
+                .help(
+                    "handle it where it happens: `value: T = call else { return }`, \
+                     `if call -> value: T { ... }`, or `loop if call -> value: T { ... } else break`",
+                ),
+            ));
+        }
         Ok(Called::Call {
             callee: HirCallee::Func(key),
             args: hir_args,
@@ -616,9 +635,7 @@ impl Checker<'_> {
         TypeRef::ERROR
     }
 
-    /// `name: Type.function(args)`: a call of `function`, a static function
-    /// of the declared type `expected` (no `self`), which must return
-    /// exactly one value of that type.
+    /// `name: Type.function(args)` as a value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_construct(
         &mut self,
@@ -630,10 +647,49 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> HirExpr {
+        let called = self.construct_call(
+            fcx,
+            function,
+            member_span,
+            generic_args,
+            args,
+            span,
+            expected,
+        );
+        match called {
+            // It cannot fail here (`func_call`), so its one out is the value.
+            Ok(Called::Call { callee, args, outs }) => HirExpr {
+                ty: outs.first().copied().unwrap_or(TypeRef::ERROR),
+                span,
+                kind: HirExprKind::Call {
+                    callee,
+                    args,
+                    rest: outs.get(1..).unwrap_or_default().to_vec(),
+                },
+            },
+            Ok(Called::Value(value)) => value,
+            Err(_) => HirExpr::poison(span),
+        }
+    }
+
+    /// `name: Type.function(args)`: a call of `function`, a static function
+    /// of the declared type `expected` (no `self`), whose success outs must
+    /// be exactly one value of that type. It may fail when a guard handles
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn construct_call(
+        &mut self,
+        fcx: &mut FnCx,
+        function: &str,
+        member_span: Span,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
         let Some(want) = expected.filter(|want| *want != TypeId::ERROR) else {
             // The declared type reported it.
-            let _ = self.callee_failed(fcx, args, self.diags.already_reported());
-            return HirExpr::poison(span);
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
         };
         let ty = TypeRef::value(want);
         let receiver = Receiver::Type(ty);
@@ -641,13 +697,11 @@ impl Checker<'_> {
             .type_parts(want)
             .map(|(def, _)| MemberReceiver::Constructor(def));
         if let Err(error) = self.record_member(member_span, function, owner) {
-            let _ = self.callee_failed(fcx, args, error);
-            return HirExpr::poison(span);
+            return Err(self.callee_failed(fcx, args, error));
         }
         let name = tail_span(member_span, function);
         if let Some(error) = self.construct_member_error(ty, function, name) {
-            let _ = self.callee_failed(fcx, args, error);
-            return HirExpr::poison(span);
+            return Err(self.callee_failed(fcx, args, error));
         }
         let called = self.static_call(
             fcx,
@@ -659,24 +713,26 @@ impl Checker<'_> {
             member_span,
             expected,
         );
-        let Ok(Called::Call { callee, args, outs }) = called else {
-            // `static_call` reported it (a variant was ruled out above).
-            return HirExpr::poison(span);
+        // `static_call` reported an error (a variant was ruled out above).
+        let Called::Call { callee, args, outs } = called? else {
+            lilac_error::bug!(span, "the shorthand's function is a variant");
         };
-        if outs.as_slice() != [ty] {
+        let success = self.success_outs(&callee).unwrap_or(outs.len());
+        let successes = &outs[..success];
+        if successes != [ty] {
             let owner = self.types.display_ref(ty);
-            let returns = if outs.is_empty() {
+            let returns = if successes.is_empty() {
                 "nothing".to_owned()
             } else {
-                let names: Vec<String> = outs
+                let names: Vec<String> = successes
                     .iter()
                     .map(|out| self.types.display_ref(*out))
                     .collect();
                 format!("`{}`", names.join(", "))
             };
             let mut involved = vec![want];
-            involved.extend(outs.iter().map(|out| out.id));
-            self.emit_involving(
+            involved.extend(successes.iter().map(|out| out.id));
+            return Err(self.emit_involving(
                 Diagnostic::error(
                     codes::E056,
                     format!("`{owner}.{function}` returns {returns}, not one `{owner}`"),
@@ -686,18 +742,9 @@ impl Checker<'_> {
                     "the shorthand needs a function that makes a `{owner}`; otherwise write `variable: {owner} = ...`"
                 )),
                 &involved,
-            );
-            return HirExpr::poison(span);
+            ));
         }
-        HirExpr {
-            ty,
-            span,
-            kind: HirExprKind::Call {
-                callee,
-                args,
-                rest: Vec::new(),
-            },
-        }
+        Ok(Called::Call { callee, args, outs })
     }
 
     /// Why member `function` of `ty` cannot be the shorthand's function: it

@@ -95,7 +95,7 @@ impl Lower<'_> {
                     let _ = self.value(state, func, expr);
                 }
             },
-            HirStmt::Return(span) => {
+            HirStmt::Return(span) | HirStmt::Fail(span) => {
                 for index in (0..state.scopes.len()).rev() {
                     self.drop_scope(state, index, *span);
                 }

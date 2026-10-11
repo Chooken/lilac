@@ -10,10 +10,10 @@ use lilac_error::{codes, Diagnostic};
 use lilac_span::{FileId, Span};
 
 /// Every keyword, for editor completion.
-pub const KEYWORDS: [&str; 22] = [
+pub const KEYWORDS: [&str; 23] = [
     "object", "function", "enum", "extern", "export", "using", "private", "ref", "self", "unknown",
     "nothing", "loop", "if", "then", "else", "match", "break", "continue", "and", "or", "return",
-    "as",
+    "as", "fail",
 ];
 
 /// The keyword token `word` spells, if it is a keyword.
@@ -41,6 +41,7 @@ pub fn keyword(word: &str) -> Option<TokenKind> {
         "and" => TokenKind::KwAnd,
         "or" => TokenKind::KwOr,
         "return" => TokenKind::KwReturn,
+        "fail" => TokenKind::KwFail,
         "as" => TokenKind::KwAs,
         _ => return None,
     })
@@ -105,6 +106,8 @@ pub enum TokenKind {
     KwOr,
     /// `return`.
     KwReturn,
+    /// `fail` (leave a function that can fail through its failure outs).
+    KwFail,
     /// `as` (postfix cast).
     KwAs,
     /// `:`.

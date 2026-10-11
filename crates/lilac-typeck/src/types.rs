@@ -42,6 +42,14 @@ impl Checker<'_> {
             // The parser already reported it.
             TypeShape::Error => TypeRef::ERROR,
             TypeShape::Function(func) => {
+                if func.failures.is_some() {
+                    self.diags.emit(
+                        Diagnostic::error(codes::E057, "a function type cannot fail")
+                            .label(ty.span, true, "declared with `else` outs")
+                            .help("only a named function can fail; call it directly"),
+                    );
+                    return TypeRef::ERROR;
+                }
                 let params = func
                     .params
                     .iter()

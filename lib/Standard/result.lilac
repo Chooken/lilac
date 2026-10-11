@@ -14,16 +14,18 @@ Result[T, E]: enum {
         }
     }
 
-    // `ok` and the value; on an error `value` stays zeroed.
-    unwrap: function(self) ok: Bool, value: T {
+    // The value of an `Ok`; fails with the error of an `Error`.
+    get: function(self) value: T else error: E {
         match self {
             .Ok -> ok_value: T {
-                ok = true
                 value = ok_value
+                return
             }
-        } else {
-            ok = false
+            .Error -> why: E {
+                error = why
+            }
         }
+        fail
     }
 
     unwrap_or: function(self, default: T) value: T {
@@ -36,15 +38,14 @@ Result[T, E]: enum {
         }
     }
 
-    // `failed` and the error; on success `error` stays zeroed.
-    error: function(self) failed: Bool, error: E {
+    // The error of an `Error`; fails on an `Ok`.
+    error: function(self) error: E else nothing {
         match self {
             .Error -> why: E {
-                failed = true
                 error = why
+                return
             }
-        } else {
-            failed = false
         }
+        fail
     }
 }

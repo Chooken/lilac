@@ -51,8 +51,10 @@ main: function () nothing {
         }
         job: ref Work = @array_at(at, index)
         job.counter = ref counter
-        ok: Bool, thread: Os.Thread = Os.spawn(work, job as ref unknown).unwrap()
-        check(ok, 0x1)
+        thread: Os.Thread = Os.spawn(work, job as ref unknown).get() else {
+            exit(0x1)
+            return
+        }
         stored: ref Os.Thread = @array_at(running, index)
         stored = thread
         index = @i_add_native(index, 0x1)

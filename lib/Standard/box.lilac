@@ -31,7 +31,7 @@ Box[T]: object {
     }
 
     @on_drop: function(self) nothing {
-        if self.value.unwrap() -> value: ref T {
+        if self.value.get() -> value: ref T {
             Allocator.destroy[T](value)
         }
     }

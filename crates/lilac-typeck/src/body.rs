@@ -12,7 +12,7 @@ use lilac_ast::{
 };
 use lilac_error::{codes, Diagnostic};
 use lilac_hir::{
-    FuncKey, HirArm, HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirLocal, HirPattern,
+    FuncKey, HirArm, HirBlock, HirExpr, HirExprKind, HirFailure, HirFunc, HirLocal, HirPattern,
     HirStmt, LocalId, LocalKind, SemanticKind,
 };
 use lilac_span::Span;
@@ -40,6 +40,11 @@ pub(crate) struct FnCx {
     pub signature_only: HashSet<LocalId>,
     /// `loop` nesting depth.
     pub loops: u32,
+    /// The span of the call a guard or capture `if` is checking: the one
+    /// call that may fail without an error.
+    pub handled: Option<Span>,
+    /// The flag out of a function that can fail (`HirFunc::failure`).
+    pub fail_flag: Option<LocalId>,
 }
 
 impl FnCx {
@@ -53,6 +58,8 @@ impl FnCx {
             params: HashSet::new(),
             signature_only: HashSet::new(),
             loops: 0,
+            handled: None,
+            fail_flag: None,
         }
     }
 
@@ -116,6 +123,20 @@ impl FnCx {
     pub(crate) fn decl_span(&self, id: LocalId) -> Span {
         let local = &self.locals[id.0 as usize];
         leading(local.span, &local.name)
+    }
+}
+
+/// `flag = 1` (or `0`): a function that can fail sets its flag out at
+/// entry, and `fail` clears it.
+pub(crate) fn set_flag(flag: LocalId, set: bool, span: Span) -> HirStmt {
+    let ty = Builtin::Bit8.value();
+    HirStmt::Assign {
+        place: local_expr(flag, ty, span),
+        value: HirExpr {
+            ty,
+            span,
+            kind: HirExprKind::Number(if set { "0x1" } else { "0x0" }.to_owned()),
+        },
     }
 }
 
@@ -203,16 +224,33 @@ impl Checker<'_> {
             .zip(&sig.params)
             .map(|(param, ty)| slot(self, &mut fcx, param, *ty, true))
             .collect();
-        let returns: Vec<LocalId> = decl
+        let mut returns: Vec<LocalId> = decl
             .returns
             .iter()
+            .chain(decl.failures.iter().flatten())
             .zip(&sig.returns)
             .map(|(param, ty)| slot(self, &mut fcx, param, *ty, false))
             .collect();
+        let failure = match (&decl.failures, sig.returns.get(returns.len())) {
+            (Some(_), Some(ty)) => {
+                let flag = fcx.hidden(*ty, span);
+                returns.push(flag);
+                fcx.fail_flag = Some(flag);
+                Some(HirFailure {
+                    success: decl.returns.len(),
+                    flag,
+                })
+            }
+            _ => None,
+        };
         let body = match &decl.body {
             None => None,
             Some(FuncBody::Block(block)) => {
                 let mut stmts = Vec::new();
+                if let Some(failure) = failure {
+                    // Set until a `fail` clears it.
+                    stmts.push(set_flag(failure.flag, true, block.span));
+                }
                 self.check_stmts(&mut fcx, &block.stmts, &mut stmts);
                 Some(HirBlock {
                     stmts,
@@ -225,6 +263,7 @@ impl Checker<'_> {
             key: key.clone(),
             params,
             returns,
+            failure,
             locals: fcx.locals,
             body,
             inline: matches!(decl.body, Some(FuncBody::Inline(_))),
@@ -292,7 +331,7 @@ impl Checker<'_> {
     }
 
     /// Checks one statement as its own scope (`else <stmt>`, `loop <stmt>`).
-    fn check_stmt_block(&mut self, fcx: &mut FnCx, stmt: &Stmt) -> HirBlock {
+    pub(crate) fn check_stmt_block(&mut self, fcx: &mut FnCx, stmt: &Stmt) -> HirBlock {
         if let Stmt::Block(block) = stmt {
             return self.check_block(fcx, block);
         }
@@ -379,6 +418,14 @@ impl Checker<'_> {
             } => self.check_assign(fcx, target, value, *span, out),
             Stmt::ExprStmt(expr) => self.check_expr_stmt(fcx, expr, out),
             Stmt::Return { span } => out.push(HirStmt::Return(*span)),
+            Stmt::Fail { span } => self.check_fail(fcx, *span, out),
+            Stmt::Guard {
+                bindings,
+                value,
+                captures,
+                els,
+                span,
+            } => self.check_guard(fcx, bindings, value, captures, els, *span, out),
             Stmt::Break { span } => {
                 if fcx.loops == 0 {
                     self.diags.emit(
@@ -405,26 +452,21 @@ impl Checker<'_> {
             }
             Stmt::If {
                 cond,
-                capture: Some(capture),
+                captures,
                 then,
+                else_captures,
                 els,
                 span,
-            } => self.check_if_capture(fcx, cond, capture, then, els.as_deref(), *span, out),
-            Stmt::If {
+            } => self.check_if(
+                fcx,
                 cond,
-                capture: None,
+                captures,
                 then,
-                els,
-                span,
-            } => {
-                let cond = self.check_cond(fcx, cond, "if");
-                let then = self.check_block(fcx, then);
-                let els = match els {
-                    Some(els) => self.check_stmt_block(fcx, els),
-                    None => empty_block(*span),
-                };
-                out.push(HirStmt::If { cond, then, els });
-            }
+                else_captures,
+                els.as_deref(),
+                *span,
+                out,
+            ),
             Stmt::Loop { body, .. } => {
                 fcx.loops += 1;
                 let body = self.check_stmt_block(fcx, body);
@@ -651,107 +693,6 @@ impl Checker<'_> {
         }
     }
 
-    /// `if f() -> name: T { } else ...`: binds every out slot to a hidden
-    /// local, tests the first, and exposes `name` in the `then` block.
-    #[allow(clippy::too_many_arguments)]
-    fn check_if_capture(
-        &mut self,
-        fcx: &mut FnCx,
-        cond: &Expr,
-        capture: &Param,
-        then: &Block,
-        els: Option<&Stmt>,
-        span: Span,
-        out: &mut Vec<HirStmt>,
-    ) {
-        let Expr::Call {
-            callee,
-            generic_args,
-            args,
-            span: call_span,
-        } = cond
-        else {
-            self.diags.emit(
-                Diagnostic::error(codes::E022, "`if` capture needs a call condition").label(
-                    span,
-                    true,
-                    "write `if f() -> name: Type`",
-                ),
-            );
-            return;
-        };
-        let Ok(Called::Call { callee, args, outs }) =
-            self.check_call(fcx, callee, generic_args, args, *call_span, None)
-        else {
-            self.diags.emit(
-                Diagnostic::error(codes::E022, "cannot capture from this call").label(
-                    *call_span,
-                    true,
-                    "capture needs a multi-return call",
-                ),
-            );
-            return;
-        };
-        if outs.is_empty() {
-            self.diags.emit(
-                Diagnostic::error(codes::E022, "cannot capture from a call with no returns").label(
-                    *call_span,
-                    true,
-                    "nothing to capture",
-                ),
-            );
-            return;
-        }
-        let slot_names: Vec<String> = match &callee {
-            HirCallee::Func(key) => self
-                .res
-                .def(key.def)
-                .func()
-                .map(|decl| decl.returns.iter().map(|slot| slot.name.clone()).collect())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let Some(position) = slot_names.iter().position(|name| *name == capture.name) else {
-            self.diags.emit(
-                Diagnostic::error(
-                    codes::E022,
-                    format!("no out-slot named `{}` to capture", capture.name),
-                )
-                .label(capture.span, true, "unknown slot"),
-            );
-            return;
-        };
-        let declared = self.resolve_type(&capture.ty);
-        let hidden: Vec<LocalId> = outs.iter().map(|ty| fcx.hidden(*ty, *call_span)).collect();
-        let mut stmts = vec![HirStmt::MultiLet {
-            locals: hidden.clone(),
-            call: HirExpr {
-                ty: outs[0],
-                span: *call_span,
-                kind: HirExprKind::Call {
-                    callee,
-                    args,
-                    rest: Vec::new(),
-                },
-            },
-        }];
-        let test = local_expr(hidden[0], outs[0], *call_span);
-        let cond = self.cond_of(test, "if");
-        let captured = local_expr(hidden[position], outs[position], capture.span);
-        let value = self.coerce(captured, declared, capture.ty.span);
-        fcx.open(then.span);
-        let local = self.declare(fcx, &capture.name, declared, capture.span);
-        stmts.push(HirStmt::Let { local, value });
-        let then = self.check_block(fcx, then);
-        fcx.close();
-        let els = match els {
-            Some(els) => self.check_stmt_block(fcx, els),
-            None => empty_block(span),
-        };
-        stmts.push(HirStmt::If { cond, then, els });
-        out.push(HirStmt::Block(HirBlock { stmts, span }));
-    }
-
     /// Checks a condition: exactly `@bit8`, or one `@conversion` to it.
     pub(crate) fn check_cond(&mut self, fcx: &mut FnCx, cond: &Expr, what: &str) -> HirExpr {
         let bit8 = Builtin::Bit8.id();
@@ -964,18 +905,20 @@ impl Checker<'_> {
     }
 }
 
-fn empty_block(span: Span) -> HirBlock {
+pub(crate) fn empty_block(span: Span) -> HirBlock {
     HirBlock {
         stmts: Vec::new(),
         span,
     }
 }
 
-/// Whether `stmt` never lets the block go on: `return`, `break`,
+/// Whether `stmt` never lets the block go on: `return`, `fail`, `break`,
 /// `continue`, or a call of `@panic` or `@trap`.
-fn never_finishes(stmt: &Stmt) -> bool {
+pub(crate) fn never_finishes(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        Stmt::Return { .. } | Stmt::Fail { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {
+            true
+        }
         Stmt::ExprStmt(Expr::Call { callee, .. }) => {
             matches!(&**callee, Expr::Ident(name, _) if name == "@panic" || name == "@trap")
         }

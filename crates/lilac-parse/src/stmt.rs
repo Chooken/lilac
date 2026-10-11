@@ -1,7 +1,7 @@
 //! Blocks and statements.
 
 use lilac_ast::{
-    Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Stmt, Type, TypeShape,
+    Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, Stmt, Type, TypeShape,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::TokenKind;
@@ -101,6 +101,17 @@ impl Parser {
                 }
                 Ok(Stmt::Return { span: keyword.span })
             }
+            TokenKind::KwFail => {
+                let keyword = self.bump();
+                if !self.peek().newline_before && starts_expression(self.peek().kind) {
+                    return Err(Self::err(
+                        diags,
+                        self.peek().span,
+                        "`fail` takes no arguments; assign the failure outs instead",
+                    ));
+                }
+                Ok(Stmt::Fail { span: keyword.span })
+            }
             TokenKind::KwBreak => {
                 let keyword = self.bump();
                 Ok(Stmt::Break { span: keyword.span })
@@ -117,19 +128,15 @@ impl Parser {
         }
     }
 
-    /// `if cond [-> capture] { ... } [else <stmt>]`.
+    /// `if cond [-> captures] { ... } [else [-> captures] <stmt>]`; an
+    /// `else` with captures takes a block.
     pub(crate) fn parse_if_stmt(
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
         let cond = self.with_struct_lit(false, |p| p.parse_expr(diags))?;
-        let capture = if self.peek().kind == TokenKind::Arrow {
-            self.bump();
-            Some(self.parse_param(diags)?)
-        } else {
-            None
-        };
+        let captures = self.parse_captures(diags)?;
         if self.peek().kind != TokenKind::LBrace {
             return Err(Self::expected(
                 diags,
@@ -138,19 +145,90 @@ impl Parser {
             ));
         }
         let then = self.parse_block(diags)?;
+        let mut else_captures = Vec::new();
         let els = if self.peek().kind == TokenKind::KwElse {
             self.bump();
-            Some(Box::new(self.parse_stmt(diags)?))
+            else_captures = self.parse_captures(diags)?;
+            if else_captures.is_empty() {
+                Some(Box::new(self.parse_stmt(diags)?))
+            } else {
+                Some(Box::new(Stmt::Block(self.parse_capture_block(diags)?)))
+            }
         } else {
             None
         };
         let end = els.as_ref().map_or(then.span, |stmt| stmt.span());
         Ok(Stmt::If {
             cond,
-            capture: capture.map(Box::new),
+            captures,
             then,
+            else_captures,
             els,
             span: join_spans(keyword.span, end),
+        })
+    }
+
+    /// `-> a: A, b: B` (none when no `->` follows): out bindings by
+    /// position.
+    pub(crate) fn parse_captures(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Param>, ErrorGuaranteed> {
+        let mut captures = Vec::new();
+        if self.peek().kind != TokenKind::Arrow {
+            return Ok(captures);
+        }
+        self.bump();
+        loop {
+            let name = self.expect(diags, TokenKind::Ident, "capture name")?;
+            self.expect(diags, TokenKind::Colon, "`:` after capture name")?;
+            let ty = self.parse_type(diags);
+            captures.push(Param {
+                name: name.text,
+                span: join_spans(name.span, ty.span),
+                ty,
+            });
+            if self.peek().kind != TokenKind::Comma {
+                return Ok(captures);
+            }
+            self.bump();
+        }
+    }
+
+    /// The `{ ... }` after `else -> captures`.
+    fn parse_capture_block(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Block, ErrorGuaranteed> {
+        if self.peek().kind != TokenKind::LBrace {
+            return Err(Self::expected(
+                diags,
+                self.peek(),
+                "`{` after `else` captures",
+            ));
+        }
+        self.parse_block(diags)
+    }
+
+    /// The `else [-> captures] { ... }` of a guard, after `bindings` and
+    /// the call `value`.
+    fn parse_guard(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        bindings: Vec<LetBinding>,
+        value: Expr,
+        start: Span,
+    ) -> Result<Stmt, ErrorGuaranteed> {
+        self.bump();
+        let captures = self.parse_captures(diags)?;
+        let els = self.parse_capture_block(diags)?;
+        let span = join_spans(start, els.span);
+        Ok(Stmt::Guard {
+            bindings,
+            value,
+            captures,
+            els,
+            span,
         })
     }
 
@@ -386,21 +464,7 @@ impl Parser {
                 if self.peek().kind == TokenKind::Eq && starts_expression(self.peek_at(1).kind) {
                     self.bump();
                     let value = self.parse_expr_recover(diags)?;
-                    let span = join_spans(bindings[0].span, value.span());
-                    if bindings.len() == 1 {
-                        let only = bindings.remove(0);
-                        return Ok(Stmt::Let {
-                            name: only.name,
-                            ty: Box::new(only.ty),
-                            value,
-                            span,
-                        });
-                    }
-                    return Ok(Stmt::MultiLet {
-                        bindings,
-                        value,
-                        span,
-                    });
+                    return self.finish_let(diags, bindings, value);
                 }
                 return Err(diags.already_reported());
             }
@@ -419,21 +483,7 @@ impl Parser {
                 self.expect(diags, TokenKind::Eq, "`=` after variable type")?;
                 self.parse_expr_recover(diags)?
             };
-            let span = join_spans(bindings[0].span, value.span());
-            if bindings.len() == 1 {
-                let only = bindings.remove(0);
-                return Ok(Stmt::Let {
-                    name: only.name,
-                    ty: Box::new(only.ty),
-                    value,
-                    span,
-                });
-            }
-            return Ok(Stmt::MultiLet {
-                bindings,
-                value,
-                span,
-            });
+            return self.finish_let(diags, bindings, value);
         }
         let target = self.parse_expr_recover(diags)?;
         if self.peek().kind == TokenKind::Eq {
@@ -446,7 +496,40 @@ impl Parser {
                 span,
             });
         }
+        if self.peek().kind == TokenKind::KwElse {
+            let start = target.span();
+            return self.parse_guard(diags, Vec::new(), target, start);
+        }
         Ok(Stmt::ExprStmt(target))
+    }
+
+    /// `bindings = value` as a `let`, a multi-`let`, or a guard when `else`
+    /// follows.
+    fn finish_let(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        mut bindings: Vec<LetBinding>,
+        value: Expr,
+    ) -> Result<Stmt, ErrorGuaranteed> {
+        let start = bindings[0].span;
+        if self.peek().kind == TokenKind::KwElse {
+            return self.parse_guard(diags, bindings, value, start);
+        }
+        let span = join_spans(start, value.span());
+        if bindings.len() == 1 {
+            let only = bindings.remove(0);
+            return Ok(Stmt::Let {
+                name: only.name,
+                ty: Box::new(only.ty),
+                value,
+                span,
+            });
+        }
+        Ok(Stmt::MultiLet {
+            bindings,
+            value,
+            span,
+        })
     }
 
     /// Whether a declaration shorthand follows `name: Type`: `{`, `(`, or
@@ -615,6 +698,10 @@ pub(crate) fn starts_stmt(kind: TokenKind) -> bool {
     starts_expression(kind)
         || matches!(
             kind,
-            TokenKind::KwLoop | TokenKind::KwReturn | TokenKind::KwBreak | TokenKind::KwContinue
+            TokenKind::KwLoop
+                | TokenKind::KwReturn
+                | TokenKind::KwFail
+                | TokenKind::KwBreak
+                | TokenKind::KwContinue
         )
 }

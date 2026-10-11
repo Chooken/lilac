@@ -177,6 +177,12 @@ starts `.lilac.` declares a hook defined elsewhere and keeps the place ABI
 verifier rejects two functions with the same name (`E070`), so a residual
 mangle collision or a user/prelude clash cannot reach a backend.
 
+A function that can fail (`SPEC.md` §4) has no LIR form of its own: its
+out slots are its success outs, then its failure outs, then a hidden
+`#bit8` flag, all in the place ABI. The body sets the flag to 1 at entry;
+`fail` stores 0 and returns. A caller binds every out and branches on the
+flag. Such functions are never `extern`, `export` or function values.
+
 A `drop %x` marker records that a place is destroyed; it does not itself run
 the destructor. Where the type needs dropping, the call that does it (the
 type's `@on_drop`, or the generated `.lilac.drop.<T>` glue that runs

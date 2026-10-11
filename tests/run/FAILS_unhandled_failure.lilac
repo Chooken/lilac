@@ -1,0 +1,12 @@
+// expect-error: E057
+// expect-stderr: error[E057]: `halve` can fail, and the failure is not handled
+// A call that can fail is handled where it happens: by a guard, a capture
+// `if` or a `loop if`.
+
+halve: function (n: @bit32) half: @bit32 else odd: @bit32 {
+    half = n
+}
+
+main: function () nothing {
+    half: @bit32 = halve(0x8)
+}

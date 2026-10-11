@@ -18,21 +18,27 @@ check: function (ok: Bool, code: @bit32) nothing {
 
 // The value of an `Ok`, else exits with `code`.
 value_of: function (result: Result[@bit_native, Os.Error], code: @bit32) value: @bit_native {
-    ok: Bool, got: @bit_native = result.unwrap()
-    check(ok, code)
-    value = got
+    if result.get() -> got: @bit_native {
+        value = got
+    } else {
+        exit(code)
+    }
 }
 
 value_of_64: function (result: Result[@bit64, Os.Error], code: @bit32) value: @bit64 {
-    ok: Bool, got: @bit64 = result.unwrap()
-    check(ok, code)
-    value = got
+    if result.get() -> got: @bit64 {
+        value = got
+    } else {
+        exit(code)
+    }
 }
 
 handle_of: function (result: Result[Os.Handle, Os.Error], code: @bit32) handle: Os.Handle {
-    ok: Bool, got: Os.Handle = result.unwrap()
-    check(ok, code)
-    handle = got
+    if result.get() -> got: Os.Handle {
+        handle = got
+    } else {
+        exit(code)
+    }
 }
 
 text_ptr: function (text: @byte_buffer) ref unknown => @byte_buffer_ptr(text) as ref unknown
@@ -71,9 +77,10 @@ files: function () nothing {
     check_none(Os.close(file), 0x1F)
 
     missing: Result[Os.Handle, Os.Error] = Os.open("os_layer.missing", .Read)
-    failed: Bool, why: Os.Error = missing.error()
-
-    check(failed, 0x20)
+    why: Os.Error = missing.error() else {
+        exit(0x20)
+        return
+    }
     match why {
         .NotFound => {
         }

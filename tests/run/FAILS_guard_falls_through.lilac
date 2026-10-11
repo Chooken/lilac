@@ -1,0 +1,13 @@
+// expect-error: E059
+// expect-stderr: error[E059]: a guard's `else` block must leave
+// The bindings of a guard have no value after its `else`, so the block
+// must leave.
+
+halve: function (n: @bit32) half: @bit32 else odd: @bit32 {
+    half = n
+}
+
+main: function () nothing {
+    half: @bit32 = halve(0x8) else {
+    }
+}

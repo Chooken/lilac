@@ -41,6 +41,8 @@ break
 // <---- keyword.control.lilac
 return
 // <----- keyword.control.lilac
+fail
+// <---- keyword.control.lilac
 and
 // <-- keyword.operator.lilac
 or

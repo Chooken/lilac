@@ -220,14 +220,13 @@ impl Parser {
             }
         }
         self.bump();
-        let returns = self.parse_returns(diags)?;
-        let end = returns
-            .last()
-            .map_or_else(|| self.prev_span(), |param| param.span);
+        let (returns, failures) = self.parse_returns(diags)?;
+        let end = self.prev_span();
         Ok(Type {
             shape: TypeShape::Function(FuncType {
                 params,
                 returns,
+                failures,
                 is_export: false,
             }),
             name_span,

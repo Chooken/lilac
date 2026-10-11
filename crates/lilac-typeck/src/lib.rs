@@ -16,6 +16,7 @@ mod arrays;
 mod body;
 mod calls;
 mod expr;
+mod failure;
 mod generics;
 mod indices;
 mod literals;

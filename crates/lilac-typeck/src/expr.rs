@@ -265,21 +265,8 @@ impl Checker<'_> {
                 // An `export` or `extern` is a C function: its value is the
                 // C symbol's address.
                 let c_abi = decl.is_export || decl.is_extern;
-                let generic = self.res.def(def).generic_params.len();
-                if generic > 0 {
-                    self.generic_arity(span, name, generic, 0);
-                    return HirExpr::poison(span);
-                }
-                let key = FuncKey::plain(def);
-                let Ok(sig) = self.request(key.clone(), span) else {
-                    return HirExpr::poison(span);
-                };
-                let id = self.types.intern_func_abi(sig.params, sig.returns, c_abi);
-                HirExpr {
-                    ty: TypeRef::value(id),
-                    span,
-                    kind: HirExprKind::FuncRef(key),
-                }
+                let fails = decl.failures.is_some();
+                self.func_value(def, name, span, c_abi, fails)
             }
             DefKind::Const { .. } => {
                 self.use_builtin_const(def);
@@ -329,6 +316,43 @@ impl Checker<'_> {
                 );
                 HirExpr::poison(span)
             }
+        }
+    }
+
+    /// A plain function named as a value.
+    fn func_value(
+        &mut self,
+        def: DefId,
+        name: &str,
+        span: Span,
+        c_abi: bool,
+        fails: bool,
+    ) -> HirExpr {
+        if fails {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E057,
+                    format!("`{name}` can fail, so it cannot be a value"),
+                )
+                .label(span, true, "a function value cannot fail")
+                .help("call it here, or wrap the call in a function that handles it"),
+            );
+            return HirExpr::poison(span);
+        }
+        let generic = self.res.def(def).generic_params.len();
+        if generic > 0 {
+            self.generic_arity(span, name, generic, 0);
+            return HirExpr::poison(span);
+        }
+        let key = FuncKey::plain(def);
+        let Ok(sig) = self.request(key.clone(), span) else {
+            return HirExpr::poison(span);
+        };
+        let id = self.types.intern_func_abi(sig.params, sig.returns, c_abi);
+        HirExpr {
+            ty: TypeRef::value(id),
+            span,
+            kind: HirExprKind::FuncRef(key),
         }
     }
 

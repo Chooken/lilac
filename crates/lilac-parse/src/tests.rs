@@ -1559,3 +1559,88 @@ fn a_dot_ending_a_line_takes_no_name() {
     assert_eq!(name, "z");
     assert!(matches!(z, Expr::Tag(tag, _) if tag == "Red"));
 }
+
+#[test]
+fn signatures_declare_failure_outs() {
+    let (program, diags, _) = parse(
+        "a: function () value: @bit8 else nothing {\n}\nb: function () else why: @bit8, code: @bit32 {\n}\nc: function () value: @bit8 {\n}\nE: enum {\n    V\n    get: function (self) value: @bit8 else nothing {\n    }\n}\n",
+    );
+    assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
+    let failures = |index: usize| match &program.items[index].kind {
+        ItemKind::Func(decl) => (decl.returns.len(), decl.failures.as_ref().map(Vec::len)),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(failures(0), (1, Some(0)));
+    assert_eq!(failures(1), (0, Some(2)));
+    assert_eq!(failures(2), (1, None));
+    // An enum body's functions are read as function types.
+    let ItemKind::Enum { members, .. } = &program.items[3].kind else {
+        panic!("{:?}", program.items[3].kind);
+    };
+    let ItemKind::Func(decl) = &members[0].kind else {
+        panic!("{:?}", members[0].kind);
+    };
+    assert_eq!(decl.failures.as_ref().map(Vec::len), Some(0));
+}
+
+#[test]
+fn failure_handling_statements() {
+    let stmts = main_stmts(
+        "main: function () nothing {\n    a: A, b: B = f() else -> why: E, code: C {\n        return\n    }\n    c: Box[T].create(x) else {\n        fail\n    }\n    f() else {\n        return\n    }\n    if f() -> d: D, e: E {\n    } else -> why: E {\n    }\n    loop if f() -> line: Text {\n    } else break\n    fail\n}\n",
+    );
+    let Stmt::Guard {
+        bindings,
+        captures,
+        els,
+        ..
+    } = &stmts[0]
+    else {
+        panic!("{:?}", stmts[0]);
+    };
+    assert_eq!((bindings.len(), captures.len()), (2, 2));
+    assert!(matches!(els.stmts.as_slice(), [Stmt::Return { .. }]));
+    let Stmt::Guard {
+        bindings, value, ..
+    } = &stmts[1]
+    else {
+        panic!("{:?}", stmts[1]);
+    };
+    assert_eq!(bindings.len(), 1);
+    assert!(matches!(value, Expr::Construct { function, .. } if function == "create"));
+    assert!(
+        matches!(&stmts[2], Stmt::Guard { bindings, captures, .. } if bindings.is_empty() && captures.is_empty())
+    );
+    let Stmt::If {
+        captures,
+        else_captures,
+        els: Some(els),
+        ..
+    } = &stmts[3]
+    else {
+        panic!("{:?}", stmts[3]);
+    };
+    assert_eq!((captures.len(), else_captures.len()), (2, 1));
+    assert!(matches!(**els, Stmt::Block(_)));
+    let Stmt::Loop { body, .. } = &stmts[4] else {
+        panic!("{:?}", stmts[4]);
+    };
+    assert!(matches!(&**body, Stmt::If { captures, .. } if captures.len() == 1));
+    assert!(matches!(stmts[5], Stmt::Fail { .. }));
+}
+
+#[test]
+fn failure_syntax_errors() {
+    for src in [
+        // `fail` takes no value.
+        "main: function () nothing {\n    fail 0x1\n}\n",
+        // `else` in a signature needs outs or `nothing`.
+        "main: function () value: @bit8 else {\n}\n",
+        // An `else` with captures needs a block.
+        "main: function () nothing {\n    if f() {\n    } else -> why: E return\n}\n",
+        // A capture is `name: Type`.
+        "main: function () nothing {\n    if f() -> @bit8 {\n    }\n}\n",
+    ] {
+        let (_, diags, _) = parse(src);
+        assert!(diags.has_errors(), "{src}");
+    }
+}

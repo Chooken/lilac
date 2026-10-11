@@ -38,7 +38,7 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`unknown`**: An opaque type of indeterminate size. It can only be instantiated behind a reference (`ref unknown`), serving as Lilac's mechanism for type-erased pointers (analogous to `void*`).
 
-* **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables. It is not a type and occupies no memory.
+* **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables (and in `else nothing`: a function that can fail with no failure outs, §4). It is not a type and occupies no memory.
 
 * **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing object type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
 
@@ -444,6 +444,67 @@ multi_func()                 // both are dropped
 Binding more values than the call returns, or using a call that returns
 `nothing` as a value, is `E022`.
 
+### Functions that can fail
+
+A function that can fail declares its failure outs after `else`, following
+its success outs (`else nothing` when a failure carries no value):
+
+```lilac
+get: function (self) value: T else nothing
+map: function (size: @bit_native) memory: ref unknown, length: @bit_native else error: Error
+```
+
+`return` (or reaching the end of the body) succeeds; `fail` fails. Like
+`return`, `fail` takes no arguments: set the failure outs first. `fail` in
+a function that cannot fail is `E058`.
+
+```lilac
+halve: function (n: @bit32) half: @bit32 else odd: @bit32 {
+    if @i_less_than_u_32(@i_mod_u_32(n, 0x2), 0x1) {
+        half = @i_div_u_32(n, 0x2)
+        return
+    }
+    odd = n
+    fail
+}
+```
+
+A call that can fail must be handled where it happens, in one of three
+forms; anywhere else it is `E057` (there is no automatic propagation: to
+pass a failure on, handle it and `fail`). Each binds outs **by position**,
+under any names; binding fewer than there are drops the rest, and more is
+`E062`:
+
+```lilac
+// Guard: the success outs land in the current scope. The `else` block
+// (with optional `-> captures` of the failure outs) must leave: it ends in
+// `return`, `fail`, `break`, `continue`, `@panic` or `@trap` (E059).
+half: @bit32 = halve(n) else -> odd: @bit32 {
+    return
+}
+halve(n) else { return }                // the statement form binds nothing
+
+// If: success outs in the `then` block, failure outs in the `else` block.
+if halve(n) -> half: @bit32 {
+    ...
+} else -> odd: @bit32 {
+    ...
+}
+
+// Loop: repeat until the call fails.
+loop if lines.next() -> line: Text {
+    ...
+} else break
+```
+
+Captures on a condition that cannot fail, and a guard on a call that
+cannot fail, are `E062`. The declaration shorthand may fail too:
+`arena: Arena.create(size) else -> why: Os.Error { return }`.
+
+A function that can fail cannot be a value, a function type cannot fail
+(`E057`), and neither can an `extern`, an `export` (`E028`) or a hook
+(`E022`).
+
 ### Control Flow
 
 A condition (`if`, value `if`, `and`/`or` operands) is a `@bit8` tested for
@@ -486,17 +547,10 @@ the `else` branch is required):
 status: @bit8 = if 0x0 then 0x0 else 0x1
 ```
 
-Value capturing from multi-return functions:
-A call condition may bind one of the callee's out-slots by name with
-`-> name: Type`. The call's first out-slot is the condition (same rule as
-above); the named slot must match a declared out-slot (`E022`
-otherwise) and is scoped to the `then` block:
-
-```lilac
-if get_multi() -> result: @bit32 {
-    // result is scoped here
-}
-```
+A call that can fail is a condition too: the `if` takes its `then` block
+when the call succeeds, and binds its outs with `-> captures` (see
+*Functions that can fail* above). Any other call is its first out, tested
+as above.
 
 `loop` repeats any single statement until a `break`:
 

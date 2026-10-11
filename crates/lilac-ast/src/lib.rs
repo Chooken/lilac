@@ -162,8 +162,11 @@ pub struct FuncDecl {
     pub generic_params: Vec<String>,
     /// Input parameters.
     pub params: Vec<Param>,
-    /// Named return slots (empty for `nothing`).
+    /// Named return slots: the success outs (empty for `nothing`).
     pub returns: Vec<Param>,
+    /// The failure outs after `else` (empty for `else nothing`); `None`
+    /// for a function that cannot fail.
+    pub failures: Option<Vec<Param>>,
     /// Body (`None` for `extern` declarations).
     pub body: Option<FuncBody>,
     /// Whether this is an `extern` (foreign, C ABI) declaration.
@@ -293,6 +296,10 @@ pub struct FuncType {
     pub params: Vec<Param>,
     /// Return slots.
     pub returns: Vec<Param>,
+    /// Failure outs after `else`. A function type cannot fail yet, so
+    /// typeck rejects one; an enum body's functions are read through this
+    /// and keep theirs.
+    pub failures: Option<Vec<Param>>,
     /// `export function (…)`: a C function's address, called with the C
     /// ABI.
     pub is_export: bool,
@@ -346,6 +353,12 @@ pub enum Stmt {
         /// Keyword span.
         span: Span,
     },
+    /// Bare `fail`: leaves a function that can fail through its failure
+    /// outs.
+    Fail {
+        /// Keyword span.
+        span: Span,
+    },
     /// `break` (loop exit).
     Break {
         /// Keyword span.
@@ -360,10 +373,14 @@ pub enum Stmt {
     If {
         /// Condition (strict non-zero `@bit8` test).
         cond: Expr,
-        /// Optional `-> binding: Type` multi-return capture.
-        capture: Option<Box<Param>>,
+        /// `-> a: A, b: B`: the success outs of a call that can fail, by
+        /// position.
+        captures: Vec<Param>,
         /// Live branch.
         then: Block,
+        /// `else -> e: E`: the failure outs, by position (its `els` is then a
+        /// block).
+        else_captures: Vec<Param>,
         /// Optional `else` statement (`else { }`, `else if ...`, `else break`).
         els: Option<Box<Stmt>>,
         /// Whole-statement span.
@@ -373,6 +390,22 @@ pub enum Stmt {
     Loop {
         /// Repeated statement.
         body: Box<Stmt>,
+        /// Whole-statement span.
+        span: Span,
+    },
+    /// `a: A, b: B = f() else -> e: E { ... }`: a call that can fail whose
+    /// success outs are bound (by position) in the current scope; the
+    /// `else` block, which must leave, sees the failure outs. With no
+    /// bindings it is the statement `f() else { ... }`.
+    Guard {
+        /// Success-out bindings (none for the statement form).
+        bindings: Vec<LetBinding>,
+        /// The call.
+        value: Expr,
+        /// `-> e: E` failure-out bindings.
+        captures: Vec<Param>,
+        /// The `else` block.
+        els: Block,
         /// Whole-statement span.
         span: Span,
     },
@@ -654,7 +687,9 @@ impl Stmt {
             Self::Let { span, .. }
             | Self::MultiLet { span, .. }
             | Self::Assign { span, .. }
+            | Self::Guard { span, .. }
             | Self::Return { span }
+            | Self::Fail { span }
             | Self::Break { span }
             | Self::Continue { span }
             | Self::If { span, .. }

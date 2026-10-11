@@ -200,3 +200,24 @@ fn a_scope_with_an_error_gets_no_hints() {
         published.diagnostics
     );
 }
+
+#[test]
+fn fail_ends_a_block_and_captures_are_locals() {
+    let uri = Url::parse("file:///c:/hints/fail.lilac").expect("uri");
+    let text = "halve: function (n: @bit32) half: @bit32 else odd: @bit32 {\n    \
+                if n == 0x9 {\n        odd = n\n        fail\n        n = 0x0\n    }\n    \
+                half = n\n}\n\
+                main: function () nothing {\n    \
+                if halve(0x2) -> half: @bit32 {\n    } else -> odd: @bit32 {\n    }\n}\n";
+    let published = published(None, &uri, text);
+    assert_eq!(
+        hints(&published),
+        vec![
+            (4, "unreachable code".to_owned()),
+            (9, "local `half` is never used".to_owned()),
+            (10, "local `odd` is never used".to_owned()),
+        ],
+        "{:?}",
+        published.diagnostics
+    );
+}

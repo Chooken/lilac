@@ -48,7 +48,10 @@ impl Checker<'_> {
                     self.expr_indices(place, guarded, bad);
                     self.expr_indices(value, guarded, bad);
                 }
-                HirStmt::Return(_) | HirStmt::Break(_) | HirStmt::Continue(_) => {}
+                HirStmt::Return(_)
+                | HirStmt::Fail(_)
+                | HirStmt::Break(_)
+                | HirStmt::Continue(_) => {}
                 HirStmt::If { cond, then, els } => {
                     self.expr_indices(cond, guarded, bad);
                     let arms = guarded || may_be_constant(cond);

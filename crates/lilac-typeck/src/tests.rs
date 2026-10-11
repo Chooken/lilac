@@ -926,20 +926,97 @@ fn if_condition_takes_one_conversion() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+/// A function that can fail, for the failure tests: `halve` fails on an
+/// odd number.
+const HALVE: &str = "halve: function (n: @bit32) half: @bit32, rest: @bit32 else odd: @bit32 {\n    if n == 0x3 {\n        odd = n\n        fail\n    }\n    half = n\n    rest = 0x0\n}\n";
+
+fn check_failing(main: &str) -> Diags {
+    check_src(&format!("{HALVE}main: function () nothing {{\n{main}}}\n"))
+}
+
 #[test]
-fn capture_binds_by_name() {
-    let diags = check_src(
-        "get_multi: function () condition: @bit8, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    if get_multi() -> result: @bit32 {\n    }\n}\n",
+fn captures_bind_by_position() {
+    let diags = check_failing(
+        "    if halve(0x2) -> a: @bit32, b: @bit32 {\n    } else -> why: @bit32 {\n    }\n    c: @bit32 = halve(0x2) else -> d: @bit32 {\n        return\n    }\n    loop if halve(0x2) -> e: @bit32 {\n    } else break\n    halve(0x2) else {\n        return\n    }\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
 #[test]
-fn unknown_capture_is_e022() {
-    let diags = check_src(
-        "get_multi: function () condition: @bit8, result: @bit32 {\n    condition = 0x1\n    result = 0x2\n}\nmain: function () nothing {\n    if get_multi() -> nope: @bit32 {\n    }\n}\n",
+fn unhandled_failure_is_e057() {
+    for main in [
+        "    a: @bit32 = halve(0x2)\n",
+        "    halve(0x2)\n",
+        "    a: @bit32, b: @bit32 = halve(0x2)\n",
+        "    if halve(halve(0x2)) -> a: @bit32 {\n    }\n",
+    ] {
+        let diags = check_failing(main);
+        assert!(has_code(&diags, "E057"), "{main}: {diags:?}");
+    }
+}
+
+#[test]
+fn failing_functions_are_not_values_or_types() {
+    let diags = check_failing("    f: function (n: @bit32) half: @bit32 = halve\n");
+    assert!(has_code(&diags, "E057"), "{diags:?}");
+    let diags = check_src("run: function (f: function () else nothing) nothing {\n}\n");
+    assert!(has_code(&diags, "E057"), "{diags:?}");
+    let diags = check_src("write: extern function () value: @bit32 else nothing\n");
+    assert!(has_code(&diags, "E028"), "{diags:?}");
+}
+
+#[test]
+fn fail_outside_a_failing_function_is_e058() {
+    let diags = check_src("main: function () nothing {\n    fail\n}\n");
+    assert!(has_code(&diags, "E058"), "{diags:?}");
+}
+
+#[test]
+fn guard_else_must_leave() {
+    let diags = check_failing("    a: @bit32 = halve(0x2) else {\n    }\n");
+    assert!(has_code(&diags, "E059"), "{diags:?}");
+    let diags = check_failing(
+        "    x: @bit8 = 0x1\n    a: @bit32 = halve(0x2) else {\n        if x {\n            return\n        } else {\n            @trap()\n        }\n    }\n",
     );
-    assert!(has_code(&diags, "E022"), "{diags:?}");
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn capture_mismatch_is_e062() {
+    // More bindings than outs.
+    for main in [
+        "    a: @bit32, b: @bit32, c: @bit32 = halve(0x2) else {
+        return
+    }
+",
+        "    if halve(0x2) -> a: @bit32 {
+    } else -> b: @bit32, c: @bit32 {
+    }
+",
+    ] {
+        let diags = check_failing(main);
+        assert!(has_code(&diags, "E062"), "{main}: {diags:?}");
+    }
+    // Captures or a guard on a call that cannot fail.
+    for main in [
+        "    if plain() -> a: @bit32 {
+    }
+",
+        "    a: @bit32 = plain() else {
+        return
+    }
+",
+    ] {
+        let diags = check_src(&format!(
+            "plain: function () value: @bit32 {{
+    value = 0x1
+}}
+main: function () nothing {{
+{main}}}
+"
+        ));
+        assert!(has_code(&diags, "E062"), "{main}: {diags:?}");
+    }
 }
 
 #[test]

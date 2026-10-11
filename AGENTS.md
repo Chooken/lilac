@@ -444,6 +444,14 @@ Where things live:
   `id()` is its fixed `TypeId` in every table; look one up by spelling
   (`Types::builtin`) only for source names. Intrinsic slots carry a
   `Builtin`.
+- Functions that can fail (`outs else outs`, `fail`): typeck
+  (`lilac-typeck/src/failure.rs`) lays out the outs as success, failure,
+  then a hidden `@bit8` flag (`HirFunc::failure`, a `HirFailure`), set at
+  body entry and cleared before `HirStmt::Fail`, which lowers like
+  `return`. A call that can fail is allowed only where `FnCx::handled`
+  names it (a capture `if`, a guard, a `loop if`); elsewhere it is `E057`.
+  Callers bind every out to hidden locals and branch on the flag, so
+  lowering and LIR need nothing new.
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`

@@ -50,9 +50,11 @@ namespace you import it from. Therefore the root namespace is a real prelude
 
 * **Recoverable** failures return `Result[T, E]` / `Option[T]` (files, parsing,
   allocation, network).
-* **Programmer errors** `panic` (index out of bounds, unwrap on `None`).
+* **Programmer errors** `panic` (index out of bounds).
 * `Result`/`Option` are plain `enum`s, driven by `match` (statements-only in
-  v1) and helper methods.
+  v1) and helper methods. Their `get` (and `Result.error`) are functions
+  that can fail (`SPEC.md` §4), so the caller handles the empty side with a
+  capture `if`, a guard or a `loop if`; there is no panicking `unwrap`.
 
 ### 0.4 The `==` hazard (why a conventions layer exists)
 
@@ -182,9 +184,10 @@ unsigned variants; float variants. Unsigned comparisons bind
 | `Never` | `enum {}` (empty) | uninhabited; result of `panic`/`abort` |
 | `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
 
-> **Today:** `Optional[T]` (`Some`, `None`; `unwrap`, `unwrap_or`,
-> `unwrap_or_default`) and a first `Result[T, E]` (`Ok`, `Error`; `is_ok`,
-> `unwrap`, `unwrap_or`, `error`). Both start zeroed as their first variant:
+> **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
+> `unwrap_or`, `unwrap_or_default`) and a first `Result[T, E]` (`Ok`,
+> `Error`; `is_ok`, `get: value: T else error: E`, `error: error: E else
+> nothing`, `unwrap_or`). Both start zeroed as their first variant:
 > a zeroed `Optional` is `Some`, so set `.None` explicitly.
 
 **Functions:**
