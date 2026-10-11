@@ -7,32 +7,40 @@ function @main
 {
   $entry:
     alloca #byte_buffer %part : zeroed
+    alloca #byte_buffer %tmp.1 : zeroed
     alloca #format_args %msg : zeroed
-    alloca #format_args %tmp.1 : zeroed
-    alloca #byte_buffer %tmp.2 : zeroed
-    alloca ref #format_args %tmp.3 : zeroed
-    alloca #byte_buffer %tmp.4 : zeroed
-    alloca ref #format_args %tmp.5 : zeroed
-    alloca #byte_buffer %tmp.6 : zeroed
-    alloca ref #format_args %tmp.7 : zeroed
-    &1: #byte_buffer = const !c0
-    copy &1 -> %part
-    call @.lilac.format_args_new (in) (out %tmp.1)
-    &2: #byte_buffer = const !c1
-    copy &2 -> %tmp.2
-    &3: ref #format_args = addr %tmp.1
-    copy &3 -> %tmp.3
-    call @.lilac.format_args_push (in %tmp.3, %tmp.2) (out)
-    copy %part -> %tmp.4
-    &4: ref #format_args = addr %tmp.1
-    copy &4 -> %tmp.5
-    call @.lilac.format_args_push (in %tmp.5, %tmp.4) (out)
-    &5: #byte_buffer = const !c2
-    copy &5 -> %tmp.6
-    &6: ref #format_args = addr %tmp.1
-    copy &6 -> %tmp.7
-    call @.lilac.format_args_push (in %tmp.7, %tmp.6) (out)
-    copy %tmp.1 -> %msg
+    alloca #format_args %tmp.2 : zeroed
+    alloca #byte_buffer %tmp.3 : zeroed
+    alloca ref #format_args %tmp.4 : zeroed
+    alloca #byte_buffer %tmp.5 : zeroed
+    alloca ref #format_args %tmp.6 : zeroed
+    alloca #byte_buffer %tmp.7 : zeroed
+    alloca ref #format_args %tmp.8 : zeroed
+    &1: ref #bit8 = const !c0
+    copy &1 -> %tmp.1.data  // idx 1
+    &2: #bit_native = const 0x1
+    copy &2 -> %tmp.1.len  // idx 0
+    copy %tmp.1 -> %part
+    call @.lilac.format_args_new (in) (out %tmp.2)
+    &3: ref #bit8 = const !c1
+    copy &3 -> %tmp.3.data  // idx 1
+    &4: #bit_native = const 0x1
+    copy &4 -> %tmp.3.len  // idx 0
+    &5: ref #format_args = addr %tmp.2
+    copy &5 -> %tmp.4
+    call @.lilac.format_args_push (in %tmp.4, %tmp.3) (out)
+    copy %part -> %tmp.5
+    &6: ref #format_args = addr %tmp.2
+    copy &6 -> %tmp.6
+    call @.lilac.format_args_push (in %tmp.6, %tmp.5) (out)
+    &7: ref #bit8 = const !c2
+    copy &7 -> %tmp.7.data  // idx 1
+    &8: #bit_native = const 0x1
+    copy &8 -> %tmp.7.len  // idx 0
+    &9: ref #format_args = addr %tmp.2
+    copy &9 -> %tmp.8
+    call @.lilac.format_args_push (in %tmp.8, %tmp.7) (out)
+    copy %tmp.2 -> %msg
     return
 }
 function @.lilac.format_args_new

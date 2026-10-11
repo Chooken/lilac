@@ -739,6 +739,7 @@ impl Intrinsic {
             Self::Memcpy => "@memcpy",
             Self::Memmove => "@memmove",
             Self::Memset => "@memset",
+            Self::PtrAdd => "@ptr_add",
             Self::LinuxSyscall => "@linux_syscall",
             Self::LinuxThreadClone => "@linux_thread_clone",
             Self::Trap => "@lilac_abort",

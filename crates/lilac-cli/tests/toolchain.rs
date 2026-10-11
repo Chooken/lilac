@@ -100,11 +100,28 @@ fn macos_externs_are_in_libsystem() {
         x86, arm,
         "the two libSystem.tbd files list different symbols"
     );
+    // What the backend itself calls on macOS: the C memory functions
+    // (aggregate `==` is `memcmp`; LLVM lowers copies and zeroing to the
+    // rest), float `%`, the stack probe and the lazy binder.
+    let backend = [
+        "memcmp",
+        "memcpy",
+        "memmove",
+        "memset",
+        "bzero",
+        "fmod",
+        "fmodf",
+        "__chkstk_darwin",
+    ];
     // Mach-O symbols carry a leading `_`.
-    let missing: Vec<_> = externs("lib/Standard/Os/MacOs")
+    let mut missing: Vec<_> = externs("lib/Standard/Os/MacOs")
         .into_iter()
+        .chain(backend.map(str::to_owned))
         .filter(|name| !x86.contains(&format!("_{name}")))
         .collect();
+    if !x86.contains("dyld_stub_binder") {
+        missing.push("dyld_stub_binder".to_owned());
+    }
     assert!(
         missing.is_empty(),
         "add to both toolchain/*-apple-darwin/libSystem.tbd: {missing:?}"

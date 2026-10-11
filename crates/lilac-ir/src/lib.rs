@@ -217,9 +217,12 @@ pub struct LirGlobal {
     pub name: Symbol,
     /// Stored type.
     pub ty: LirTy,
-    /// The initial bytes in the target's layout (little-endian), exactly
-    /// the type's size; `None` starts zeroed.
-    pub init: Option<Vec<u8>>,
+    /// The initial bytes, in the target's layout (little-endian), as runs
+    /// over an object that is otherwise zero: `(offset, bytes)` pairs in
+    /// increasing offset order, none empty, overlapping or reaching past
+    /// the type's size. Empty starts the global zeroed. A run costs only
+    /// its bytes, so a large zero array in an initialized global is free.
+    pub init: Vec<(u64, Vec<u8>)>,
     /// Declaration span.
     pub span: Span,
 }
@@ -455,7 +458,18 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `&d: #t = load %s` (deref-load through a place).
+    /// `copy ref %s -> %d`: copies the value the reference place `%s`
+    /// points to into the place `%d`. Registers hold only scalars, so this
+    /// is how an aggregate is read through a reference.
+    CopyDeref {
+        /// Reference place holding the source address.
+        src: PlaceName,
+        /// Destination place.
+        dst: PlaceName,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = load %s` (a scalar read through the reference in `%s`).
     Load {
         /// Source place.
         src: PlaceName,
@@ -723,8 +737,9 @@ pub enum LirConst {
     Int(u64),
     /// A float of a float type; prints so it reads back exactly (`5.25`).
     Float(f64),
-    /// A data constant's contents: a `#byte_buffer` of them, or their
-    /// address as a `ref #bit8` (`!c0`).
+    /// A data constant's address, as a `ref #bit8` (`!c0`). A
+    /// `#byte_buffer` over it is built in a place from the address and the
+    /// length ([`runtime::fill_byte_buffer`]).
     Data(Symbol),
 }
 
@@ -946,6 +961,11 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
         "@memset" => (
             vec![LirTy::byte_ref(), LirTy::Bit(8), LirTy::BitNative],
             vec![],
+        ),
+        // C's `memcmp`: zero exactly when the two ranges hold the same bytes.
+        "@memcmp" => (
+            vec![LirTy::byte_ref(), LirTy::byte_ref(), LirTy::BitNative],
+            vec![LirTy::Bit(32)],
         ),
         "@ptr_add" => (
             vec![LirTy::byte_ref(), LirTy::BitNative],

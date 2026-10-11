@@ -119,24 +119,10 @@ impl Lower<'_> {
                 let src = self.value_reg(state, func, &args[0]);
                 LirOperand::Reg(state.bitcast(src, lir, span))
             }
-            Intrinsic::PtrAdd => {
-                // `ptrtoint`, add, `inttoptr`: what the `@ptr_add` leaf does,
-                // inline, so the operand keeps its `ref #unknown` type.
-                let base = self.value_reg(state, func, &args[0]);
-                let address = state.bitcast(base, LirTy::BitNative, span);
-                let offset = self.value_reg(state, func, &args[1]);
-                let sum = state.reg();
-                state.emit(LirInst::Arith {
-                    op: ArithOp::IAdd,
-                    lhs: address,
-                    rhs: offset,
-                    dst: sum.clone(),
-                    ty: LirTy::BitNative,
-                    span,
-                });
-                LirOperand::Reg(state.bitcast(sum, lir, span))
-            }
-            Intrinsic::Memcpy
+            // `@ptr_add` calls its leaf, an address computation the backend
+            // keeps the pointer's provenance through (not integer arithmetic).
+            Intrinsic::PtrAdd
+            | Intrinsic::Memcpy
             | Intrinsic::Memmove
             | Intrinsic::Memset
             | Intrinsic::LinuxSyscall
@@ -256,19 +242,13 @@ impl Lower<'_> {
         span: Span,
     ) -> PlaceName {
         let name = self.intern_data(bytes);
-        let reg = state.reg();
-        state.emit(LirInst::Const {
-            dst: reg.clone(),
-            value: LirConst::Data(name),
-            ty: LirTy::byte_buffer(),
-            span,
-        });
-        self.fresh_place(
-            state,
-            LirOperand::Reg(reg),
-            Builtin::ByteBuffer.value(),
-            span,
-        )
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let place = self.tmp(state, Builtin::ByteBuffer.value(), span);
+        let regs = (state.reg(), state.reg());
+        for inst in lilac_ir::runtime::fill_byte_buffer(&place, name, len, regs, span) {
+            state.emit(inst);
+        }
+        place
     }
 
     /// Lowers `@array_at(ref array, index)`: the element address, kept in a

@@ -3,12 +3,11 @@ source_filename = "lilac"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-none"
 
-define ptr @.lilac.ptr_add(ptr %base, i64 %offset) {
+; Function Attrs: alwaysinline nounwind
+define ptr @.lilac.ptr_add(ptr %base, i64 %offset) #0 {
 entry:
-  %0 = ptrtoint ptr %base to i64
-  %1 = add i64 %0, %offset
-  %2 = inttoptr i64 %1 to ptr
-  ret ptr %2
+  %address = getelementptr i8, ptr %base, i64 %offset
+  ret ptr %address
 }
 
 define void @.root.root_bump(ptr %in0) {
@@ -87,3 +86,5 @@ entry:
   store i8 %4, ptr %3, align 1
   ret void
 }
+
+attributes #0 = { alwaysinline nounwind }

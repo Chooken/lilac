@@ -1021,6 +1021,14 @@ fn ptr_add_and_abort_builtin_signatures() {
     let abort = builtin_sig("@lilac_abort").expect("@lilac_abort is a builtin");
     assert!(abort.ins.is_empty(), "{:?}", abort.ins);
     assert!(abort.outs.is_empty(), "{:?}", abort.outs);
+
+    // Aggregate `==`: C's `memcmp`, an `int`.
+    let memcmp = builtin_sig("@memcmp").expect("@memcmp is a builtin");
+    assert_eq!(
+        memcmp.ins,
+        vec![t("ref #bit8"), t("ref #bit8"), t("#bit_native")]
+    );
+    assert_eq!(memcmp.outs, vec![t("#bit32")]);
 }
 
 /// After the runtime moved into LIR, only the three leaf intrinsics remain
@@ -1068,7 +1076,7 @@ fn data_symbol_const_verifies() {
             insts: vec![LirInst::Const {
                 dst: "1".into(),
                 value: LirConst::Data("c0".into()),
-                ty: t("#byte_buffer"),
+                ty: t("ref #bit8"),
                 span: test_span(),
             }],
             term: LirTerm::Return { span: test_span() },
@@ -1096,7 +1104,7 @@ fn unknown_data_symbol_rejected() {
             insts: vec![LirInst::Const {
                 dst: "1".into(),
                 value: LirConst::Data("c9".into()),
-                ty: t("#byte_buffer"),
+                ty: t("ref #bit8"),
                 span: test_span(),
             }],
             term: LirTerm::Return { span: test_span() },
@@ -1106,6 +1114,178 @@ fn unknown_data_symbol_rejected() {
     let mut diags = lilac_error::Diags::new();
     assert!(verify(&module, &mut diags).is_err());
     assert_eq!(e070_count(&diags), 1, "{diags:?}");
+}
+
+/// The canonical module with a `#Pair` layout, a `#Pair` place `%p`, a
+/// `ref #Pair` place `%r`, and `insts` after them.
+fn pair_module(insts: Vec<LirInst>) -> LirModule {
+    let mut module = canonical_module();
+    module.layouts.insert(
+        "Pair".to_owned(),
+        layout(&[("a", "#bit32"), ("b", "#bit8")]),
+    );
+    let block = &mut module.funcs[0].blocks[0].insts;
+    block.push(LirInst::Alloca {
+        ty: t("#Pair"),
+        place: "p".into(),
+        span: test_span(),
+    });
+    block.push(LirInst::Alloca {
+        ty: t("ref #Pair"),
+        place: "r".into(),
+        span: test_span(),
+    });
+    block.extend(insts);
+    module
+}
+
+fn verify_messages(module: &LirModule) -> Vec<String> {
+    let mut diags = lilac_error::Diags::new();
+    let _ = verify(module, &mut diags);
+    diags
+        .diagnostics()
+        .iter()
+        .map(|d| d.msg.to_string())
+        .collect()
+}
+
+/// Registers hold scalars: every instruction that defines a register of an
+/// aggregate type is `E070`.
+#[test]
+fn verify_rejects_aggregate_registers() {
+    let aggregates = [
+        LirInst::Load {
+            src: "r".into(),
+            dst: "2".into(),
+            ty: t("#Pair"),
+            span: test_span(),
+        },
+        LirInst::CopyReg {
+            src: LirOperand::Place("p".into()),
+            dst: "2".into(),
+            ty: t("#Pair"),
+            span: test_span(),
+        },
+        LirInst::CopyReg {
+            src: LirOperand::Place("p".into()),
+            dst: "2".into(),
+            ty: t("[4 x #bit8]"),
+            span: test_span(),
+        },
+        LirInst::Field {
+            obj: "p".into(),
+            name: "a".to_owned(),
+            idx: 0,
+            dst: "2".into(),
+            ty: t("#bit32"),
+            span: test_span(),
+        },
+    ];
+    for (index, inst) in aggregates.into_iter().enumerate() {
+        let errors = verify_messages(&pair_module(vec![inst]));
+        // The `field` of a scalar is the control: it verifies.
+        if index == 3 {
+            assert!(errors.is_empty(), "{errors:?}");
+        } else {
+            assert!(
+                errors.len() == 1 && errors[0].contains("aggregates live in places"),
+                "{errors:?}"
+            );
+        }
+    }
+    let mut module = pair_module(Vec::new());
+    module.data.push(LirData {
+        name: "c0".into(),
+        bytes: b"hi".to_vec(),
+        span: test_span(),
+    });
+    module.funcs[0].blocks[0].insts.push(LirInst::Const {
+        dst: "2".into(),
+        value: LirConst::Data("c0".into()),
+        ty: t("#byte_buffer"),
+        span: test_span(),
+    });
+    let errors = verify_messages(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("aggregates live in places"))
+            && errors.iter().any(|e| e.contains("needs `ref #bit8`")),
+        "{errors:?}"
+    );
+}
+
+/// `copy ref %r -> %p` reads an aggregate through a reference of its type.
+#[test]
+fn verify_checks_copy_deref() {
+    let copy = |src: &str| LirInst::CopyDeref {
+        src: src.into(),
+        dst: "p".into(),
+        span: test_span(),
+    };
+    assert!(verify_messages(&pair_module(vec![copy("r")])).is_empty());
+    let module = pair_module(vec![copy("p")]);
+    assert!(
+        module.to_text().contains("copy ref %p -> %p"),
+        "{}",
+        module.to_text()
+    );
+    let errors = verify_messages(&module);
+    assert!(
+        errors.len() == 1 && errors[0].contains("needs `ref #Pair`, found `#Pair`"),
+        "{errors:?}"
+    );
+    let errors = verify_messages(&pair_module(vec![copy("nowhere")]));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("undeclared place `%nowhere`")),
+        "{errors:?}"
+    );
+}
+
+/// A global's initializer is runs over zero bytes: in order, apart, inside
+/// the type, and printed with their offsets.
+#[test]
+fn global_initializer_runs_print_and_verify() {
+    let global = |init: Vec<(u64, Vec<u8>)>| {
+        let mut module = canonical_module();
+        module.layouts.insert(
+            "Pair".to_owned(),
+            layout(&[("a", "#bit32"), ("b", "#bit8")]),
+        );
+        module.globals.push(LirGlobal {
+            name: "g".into(),
+            ty: t("#Pair"),
+            init,
+            span: test_span(),
+        });
+        module
+    };
+    let module = global(Vec::new());
+    assert!(module.to_text().contains("global !g: #Pair = zeroed\n"));
+    assert!(verify_messages(&module).is_empty());
+    let module = global(vec![(0, vec![1, 0, 0, 0]), (4, vec![2])]);
+    assert!(
+        module
+            .to_text()
+            .contains("global !g: #Pair = bytes { 0: \"\\x01\\x00\\x00\\x00\", 4: \"\\x02\" }\n"),
+        "{}",
+        module.to_text()
+    );
+    assert!(verify_messages(&module).is_empty());
+    for bad in [
+        vec![(4, vec![2]), (0, vec![1])],
+        vec![(0, vec![1, 1]), (1, vec![1])],
+        vec![(7, vec![1, 1])],
+        vec![(0, Vec::new())],
+    ] {
+        let errors = verify_messages(&global(bad.clone()));
+        assert!(
+            errors.len() == 1 && errors[0].contains("initializer run"),
+            "{bad:?}: {errors:?}"
+        );
+    }
 }
 
 #[test]

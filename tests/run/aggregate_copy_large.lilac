@@ -1,4 +1,3 @@
-// pending: robustness plan phase 3 (a 64 KiB copy crashes LLVM)
 // expect-exit: 7
 // A 64 KiB object is copied, then passed by value; the copy keeps every
 // byte. Aggregate copies are `memcpy`s, so their size costs LLVM nothing.

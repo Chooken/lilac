@@ -1,7 +1,8 @@
 //! What a native object (no C runtime) defines for itself.
 //!
 //! LLVM lowers `llvm.memcpy`, `llvm.memmove`, `llvm.memset` and large copies
-//! to calls to the C library's `memcpy`, `memmove` and `memset`. On Windows
+//! to calls to the C library's `memcpy`, `memmove` and `memset`, and
+//! aggregate `==` calls `memcmp`. On Windows
 //! it also references `_fltused` from any function that uses floats, and
 //! calls `__chkstk` to probe stack frames larger than a page. With no C
 //! runtime linked, the object defines all of them itself, as Rust's
@@ -16,19 +17,11 @@
 //! native program links anyway, and which already defines the memory
 //! functions.
 
-use inkwell::attributes::AttributeLoc;
-use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::{BasicMetadataTypeEnum, IntType, PointerType};
-use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
-use inkwell::{AddressSpace, IntPredicate};
+use inkwell::types::IntType;
 
-use lilac_error::bug;
-use lilac_span::Span;
-
-use crate::lower::checked;
-use crate::threads::{append_assembly, has_thread_locals, windows_tls_directory};
+use crate::threads::{append_assembly, append_ir, has_thread_locals, windows_tls_directory};
 
 /// `__chkstk` for x86-64 Windows: probes each page from the stack pointer
 /// down to `rsp - rax`, preserving every register. From compiler-rt's
@@ -123,14 +116,8 @@ pub(crate) fn define<'ctx>(
     if is_apple(triple) {
         return;
     }
-    let support = Support {
-        context,
-        module,
-        native,
-    };
-    support.memcpy();
-    support.memmove();
-    support.memset();
+    let width = format!("i{}", native.get_bit_width());
+    append_ir(module, "memory", &MEMORY.replace("INATIVE", &width));
     if triple.contains("windows") {
         let fltused = module.add_global(context.i32_type(), None, "_fltused");
         fltused.set_initializer(&context.i32_type().const_zero());
@@ -160,191 +147,102 @@ fn is_apple(triple: &str) -> bool {
     triple.contains("-apple-")
 }
 
-struct Support<'ctx, 'm> {
-    context: &'ctx Context,
-    module: &'m Module<'ctx>,
-    native: IntType<'ctx>,
+/// `memcpy`, `memmove`, `memset` and `memcmp`, as C declares them, each a
+/// byte loop. They are marked `no-builtins` so the optimizer cannot turn a
+/// loop back into a call to itself, and address bytes with
+/// `getelementptr` (inkwell's GEP builders are `unsafe`, so they are IR
+/// text). `INATIVE` stands for the pointer-sized integer.
+const MEMORY: &str = r#"
+define ptr @memcpy(ptr %dest, ptr %src, INATIVE %len) #0 {
+entry:
+  br label %check
+check:
+  %index = phi INATIVE [ 0, %entry ], [ %next, %step ]
+  %more = icmp ult INATIVE %index, %len
+  br i1 %more, label %step, label %done
+step:
+  %from = getelementptr inbounds i8, ptr %src, INATIVE %index
+  %byte = load i8, ptr %from, align 1
+  %to = getelementptr inbounds i8, ptr %dest, INATIVE %index
+  store i8 %byte, ptr %to, align 1
+  %next = add INATIVE %index, 1
+  br label %check
+done:
+  ret ptr %dest
 }
 
-impl<'ctx> Support<'ctx, '_> {
-    fn ptr(&self) -> PointerType<'ctx> {
-        self.context.ptr_type(AddressSpace::default())
-    }
-
-    /// Declares `name(ptr, <second>, iNative) -> ptr` with an `entry`
-    /// block, marked `no-builtins` so the optimizer cannot turn its loop
-    /// back into a call to itself. Returns the function, its three
-    /// parameters, and a builder at the entry.
-    fn function(
-        &self,
-        name: &str,
-        second: BasicMetadataTypeEnum<'ctx>,
-    ) -> (
-        FunctionValue<'ctx>,
-        [BasicValueEnum<'ctx>; 3],
-        Builder<'ctx>,
-    ) {
-        let fn_type = self
-            .ptr()
-            .fn_type(&[self.ptr().into(), second, self.native.into()], false);
-        let function = self.module.add_function(name, fn_type, None);
-        let attribute = self.context.create_string_attribute("no-builtins", "");
-        function.add_attribute(AttributeLoc::Function, attribute);
-        let params = match function.get_params().as_slice() {
-            [a, b, c] => [*a, *b, *c],
-            _ => bug!(Span::dummy(), "`{name}` must take three parameters"),
-        };
-        let builder = self.context.create_builder();
-        let block = self.context.append_basic_block(function, "entry");
-        builder.position_at_end(block);
-        (function, params, builder)
-    }
-
-    /// The byte address `base + index`, by integer arithmetic (as
-    /// `lower::byte_ptr` does) rather than a GEP.
-    fn byte_at(
-        &self,
-        builder: &Builder<'ctx>,
-        base: PointerValue<'ctx>,
-        index: IntValue<'ctx>,
-    ) -> PointerValue<'ctx> {
-        let base = checked(
-            builder.build_ptr_to_int(base, self.native, ""),
-            "base address",
-        );
-        let address = checked(builder.build_int_add(base, index, ""), "byte address");
-        checked(
-            builder.build_int_to_ptr(address, self.ptr(), ""),
-            "byte pointer",
-        )
-    }
-
-    /// Emits a loop running `body(index)` for each index below `len`,
-    /// counting up (or down when `down`), and leaves the builder after it.
-    fn byte_loop(
-        &self,
-        function: FunctionValue<'ctx>,
-        builder: &Builder<'ctx>,
-        len: IntValue<'ctx>,
-        down: bool,
-        body: &dyn Fn(&Builder<'ctx>, IntValue<'ctx>),
-    ) {
-        let Some(start) = builder.get_insert_block() else {
-            bug!(Span::dummy(), "native support builder is not positioned");
-        };
-        let check = self.context.append_basic_block(function, "check");
-        let step = self.context.append_basic_block(function, "step");
-        let done = self.context.append_basic_block(function, "done");
-        checked(builder.build_unconditional_branch(check), "loop entry");
-
-        builder.position_at_end(check);
-        let remaining = checked(builder.build_phi(self.native, "remaining"), "loop phi");
-        let left = remaining.as_basic_value().into_int_value();
-        let more = checked(
-            builder.build_int_compare(IntPredicate::NE, left, self.native.const_zero(), ""),
-            "loop test",
-        );
-        checked(
-            builder.build_conditional_branch(more, step, done),
-            "loop branch",
-        );
-
-        builder.position_at_end(step);
-        let one = self.native.const_int(1, false);
-        let next = checked(builder.build_int_sub(left, one, ""), "loop decrement");
-        let index = if down {
-            next
-        } else {
-            checked(builder.build_int_sub(len, left, ""), "loop index")
-        };
-        body(builder, index);
-        checked(builder.build_unconditional_branch(check), "loop back");
-        remaining.add_incoming(&[(&len, start), (&next, step)]);
-
-        builder.position_at_end(done);
-    }
-
-    fn copy_loop(
-        &self,
-        function: FunctionValue<'ctx>,
-        builder: &Builder<'ctx>,
-        params: [BasicValueEnum<'ctx>; 3],
-        down: bool,
-    ) {
-        let [dest, src, len] = params;
-        let (dest, src) = (dest.into_pointer_value(), src.into_pointer_value());
-        self.byte_loop(
-            function,
-            builder,
-            len.into_int_value(),
-            down,
-            &|builder, index| {
-                let from = self.byte_at(builder, src, index);
-                let byte = checked(
-                    builder.build_load(self.context.i8_type(), from, ""),
-                    "load byte",
-                );
-                let to = self.byte_at(builder, dest, index);
-                checked(builder.build_store(to, byte), "store byte");
-            },
-        );
-    }
-
-    /// `memcpy(dest, src, len) -> dest`, copying forwards.
-    fn memcpy(&self) {
-        let (function, params, builder) = self.function("memcpy", self.ptr().into());
-        self.copy_loop(function, &builder, params, false);
-        checked(builder.build_return(Some(&params[0])), "memcpy return");
-    }
-
-    /// `memmove(dest, src, len) -> dest`: forwards when `dest < src`, else
-    /// backwards, so overlapping ranges copy correctly.
-    fn memmove(&self) {
-        let (function, params, builder) = self.function("memmove", self.ptr().into());
-        let forward = self.context.append_basic_block(function, "forward");
-        let backward = self.context.append_basic_block(function, "backward");
-        let dest = checked(
-            builder.build_ptr_to_int(params[0].into_pointer_value(), self.native, ""),
-            "dest address",
-        );
-        let src = checked(
-            builder.build_ptr_to_int(params[1].into_pointer_value(), self.native, ""),
-            "src address",
-        );
-        let below = checked(
-            builder.build_int_compare(IntPredicate::ULT, dest, src, ""),
-            "copy direction",
-        );
-        checked(
-            builder.build_conditional_branch(below, forward, backward),
-            "direction branch",
-        );
-        for (block, down) in [(forward, false), (backward, true)] {
-            builder.position_at_end(block);
-            self.copy_loop(function, &builder, params, down);
-            checked(builder.build_return(Some(&params[0])), "memmove return");
-        }
-    }
-
-    /// `memset(dest, value, len) -> dest`, storing the low byte of `value`.
-    fn memset(&self) {
-        let (function, params, builder) = self.function("memset", self.context.i32_type().into());
-        let [dest, value, len] = params;
-        let dest = dest.into_pointer_value();
-        let byte = checked(
-            builder.build_int_truncate(value.into_int_value(), self.context.i8_type(), ""),
-            "memset byte",
-        );
-        self.byte_loop(
-            function,
-            &builder,
-            len.into_int_value(),
-            false,
-            &|builder, index| {
-                let to = self.byte_at(builder, dest, index);
-                checked(builder.build_store(to, byte), "store byte");
-            },
-        );
-        checked(builder.build_return(Some(&params[0])), "memset return");
-    }
+define ptr @memmove(ptr %dest, ptr %src, INATIVE %len) #0 {
+entry:
+  %below = icmp ult ptr %dest, %src
+  br i1 %below, label %forward, label %backward
+forward:
+  %index = phi INATIVE [ 0, %entry ], [ %next, %forward.step ]
+  %more = icmp ult INATIVE %index, %len
+  br i1 %more, label %forward.step, label %done
+forward.step:
+  %from = getelementptr inbounds i8, ptr %src, INATIVE %index
+  %byte = load i8, ptr %from, align 1
+  %to = getelementptr inbounds i8, ptr %dest, INATIVE %index
+  store i8 %byte, ptr %to, align 1
+  %next = add INATIVE %index, 1
+  br label %forward
+backward:
+  %left = phi INATIVE [ %len, %entry ], [ %last, %backward.step ]
+  %any = icmp ne INATIVE %left, 0
+  br i1 %any, label %backward.step, label %done
+backward.step:
+  %last = sub INATIVE %left, 1
+  %back.from = getelementptr inbounds i8, ptr %src, INATIVE %last
+  %back.byte = load i8, ptr %back.from, align 1
+  %back.to = getelementptr inbounds i8, ptr %dest, INATIVE %last
+  store i8 %back.byte, ptr %back.to, align 1
+  br label %backward
+done:
+  ret ptr %dest
 }
+
+define ptr @memset(ptr %dest, i32 %value, INATIVE %len) #0 {
+entry:
+  %byte = trunc i32 %value to i8
+  br label %check
+check:
+  %index = phi INATIVE [ 0, %entry ], [ %next, %step ]
+  %more = icmp ult INATIVE %index, %len
+  br i1 %more, label %step, label %done
+step:
+  %to = getelementptr inbounds i8, ptr %dest, INATIVE %index
+  store i8 %byte, ptr %to, align 1
+  %next = add INATIVE %index, 1
+  br label %check
+done:
+  ret ptr %dest
+}
+
+define i32 @memcmp(ptr %left, ptr %right, INATIVE %len) #0 {
+entry:
+  br label %check
+check:
+  %index = phi INATIVE [ 0, %entry ], [ %next, %same ]
+  %more = icmp ult INATIVE %index, %len
+  br i1 %more, label %step, label %equal
+step:
+  %left.at = getelementptr inbounds i8, ptr %left, INATIVE %index
+  %left.byte = load i8, ptr %left.at, align 1
+  %right.at = getelementptr inbounds i8, ptr %right, INATIVE %index
+  %right.byte = load i8, ptr %right.at, align 1
+  %match = icmp eq i8 %left.byte, %right.byte
+  br i1 %match, label %same, label %differ
+same:
+  %next = add INATIVE %index, 1
+  br label %check
+differ:
+  %left.wide = zext i8 %left.byte to i32
+  %right.wide = zext i8 %right.byte to i32
+  %order = sub i32 %left.wide, %right.wide
+  ret i32 %order
+equal:
+  ret i32 0
+}
+
+attributes #0 = { nounwind "no-builtins" }
+"#;

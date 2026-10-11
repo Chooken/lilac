@@ -11,7 +11,7 @@ exports:
                        _dup, _dup2, _exit, _fcntl, _fmod, _fmodf, _free, _fsync,
                        _ftruncate, _getcwd, _getentropy, _getenv, _getpid, _isatty,
                        _kill, _lseek, _mach_absolute_time, _mach_timebase_info, _madvise,
-                       _malloc, _memcpy, _memmove, _memset, _mkdir, _mmap, _mprotect,
+                       _malloc, _memcmp, _memcpy, _memmove, _memset, _mkdir, _mmap, _mprotect,
                        _munmap, _nanosleep, _open, _os_unfair_lock_lock,
                        _os_unfair_lock_trylock, _os_unfair_lock_unlock, _pipe, _pread,
                        _pthread_create, _pthread_detach, _pthread_join, _pthread_self,

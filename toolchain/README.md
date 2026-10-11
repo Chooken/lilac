@@ -26,13 +26,15 @@ own import library with `--link-arg=`.
 
 A hand-written text stub (TAPI v4) for `/usr/lib/libSystem.B.dylib`, one
 per architecture, listing only the symbols `Standard.Os.MacOs` declares
-(with Mach-O's leading `_`) and the backend uses: `memcpy`/`memmove`/
-`memset`/`bzero` (LLVM lowers copies and zeroing to them), `fmod`/`fmodf`
-(float `%`), `___chkstk_darwin`, and `dyld_stub_binder`. lld needs nothing
-else from an SDK. Keep the two files' symbol lists the same; a symbol
-missing here is an `undefined symbol` link error.
+(with Mach-O's leading `_`) and the backend uses: `memcmp` (aggregate
+`==`), `memcpy`/`memmove`/`memset`/`bzero` (LLVM lowers copies and zeroing
+to them), `fmod`/`fmodf` (float `%`), `___chkstk_darwin`, and
+`dyld_stub_binder`. lld needs nothing else from an SDK. Keep the two
+files' symbol lists the same; a symbol missing here is an `undefined
+symbol` link error.
 
 `crates/lilac-cli/tests/toolchain.rs` checks that every `extern` of
 `Standard.Os.Windows` is in a `.def` (with both `.lib`s present) and every
-one of `Standard.Os.MacOs` is in both `.tbd`s, which match.
+one of `Standard.Os.MacOs`, and each symbol the backend calls, is in both
+`.tbd`s, which match.
 

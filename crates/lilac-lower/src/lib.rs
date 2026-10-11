@@ -346,10 +346,13 @@ impl FnState {
         place
     }
 
+    /// The value at `place`, read now: a direct place as itself; through a
+    /// reference, a scalar is loaded into a register and an aggregate is
+    /// copied into a fresh place (registers hold only scalars).
     fn read_place(&mut self, place: &Place, lir: &LirTy, span: Span) -> LirOperand {
         match place {
             Place::Direct(name) => LirOperand::Place(name.clone()),
-            Place::Indirect(name) => {
+            Place::Indirect(name) if lir.is_scalar() => {
                 let reg = self.reg();
                 self.emit(LirInst::Load {
                     src: name.clone(),
@@ -358,6 +361,35 @@ impl FnState {
                     span,
                 });
                 LirOperand::Reg(reg)
+            }
+            Place::Indirect(name) => {
+                let copy = self.tmp_lir(lir.clone(), span);
+                self.emit(LirInst::CopyDeref {
+                    src: name.clone(),
+                    dst: copy.clone(),
+                    span,
+                });
+                LirOperand::Place(copy)
+            }
+        }
+    }
+
+    /// Copies the value at `place` into `dst` ([`Self::read_place`] with
+    /// no temporary in between for an aggregate behind a reference).
+    fn read_into(&mut self, place: &Place, lir: &LirTy, dst: &PlaceName, span: Span) {
+        match place {
+            Place::Indirect(name) if !lir.is_scalar() => self.emit(LirInst::CopyDeref {
+                src: name.clone(),
+                dst: dst.clone(),
+                span,
+            }),
+            _ => {
+                let value = self.read_place(place, lir, span);
+                self.emit(LirInst::CopyPlace {
+                    src: value,
+                    dst: dst.clone(),
+                    span,
+                });
             }
         }
     }
@@ -377,7 +409,11 @@ impl FnState {
         }
     }
 
+    /// A scalar operand in a register (an aggregate never is one).
     fn reg_of(&mut self, operand: LirOperand, lir: &LirTy, span: Span) -> Reg {
+        if !lir.is_scalar() {
+            lilac_error::bug!(span, "the aggregate `{lir}` read into a register");
+        }
         match operand {
             LirOperand::Reg(reg) => reg,
             LirOperand::Place(place) => {

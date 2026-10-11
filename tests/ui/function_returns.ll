@@ -17,7 +17,7 @@ entry:
 
 define void @.root.get(ptr %out0) {
 entry:
-  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
+  call void @llvm.memset.p0.i64(ptr align 4 %out0, i8 0, i64 4, i1 false)
   store i32 1, ptr %out0, align 4
   ret void
 }

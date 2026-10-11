@@ -3,8 +3,9 @@
 //! The byte-buffer, format-args, and byte-access runtime is ordinary LIR
 //! (`.lilac.*` functions built by `lilac_ir::runtime` and lowered through the
 //! normal pointer-ABI function path), so the backend defines only the
-//! target-specific leaves: `@ptr_add`, `@memcpy` (`llvm.memcpy`),
-//! `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
+//! target-specific leaves: `@ptr_add` (a `getelementptr`), `@memcpy`
+//! (`llvm.memcpy`), `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
+//! `@memcmp` (C's `memcmp`),
 //! `@lilac_abort` (`llvm.trap` + `unreachable`), `@linux_syscall` (the Linux
 //! system-call instruction, as inline assembly), and `@trace_head` (the
 //! address of the shadow-stack head global). Each uses the value ABI from
@@ -13,9 +14,7 @@
 use inkwell::builder::Builder;
 use inkwell::module::Linkage;
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
-};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, ValueKind};
 use inkwell::ThreadLocalMode;
 
 use lilac_error::bug;
@@ -23,6 +22,7 @@ use lilac_span::Span;
 use lilac_target::{Arch, Os};
 
 use crate::lower::{checked, Lower};
+use crate::threads::append_ir;
 
 /// Emits each leaf runtime symbol a module actually calls, in the fixed order.
 ///
@@ -39,6 +39,9 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     }
     if used.contains("@memset") {
         memset(lower);
+    }
+    if used.contains("@memcmp") {
+        memcmp(lower);
     }
     if used.contains("@ptr_add") {
         ptr_add(lower);
@@ -175,26 +178,60 @@ fn memset(lower: &Lower<'_, '_>) {
     checked(builder.build_return(None), "return void");
 }
 
-/// `@ptr_add(ref i8, iNative) -> ref i8`: byte-addressed pointer arithmetic.
-///
-/// The body is `ptrtoint(base) + offset` then `inttoptr`, the same safe
-/// integer-arithmetic lowering `byte_ptr` uses in place of a dynamic GEP.
+/// `@ptr_add(ref i8, iNative) -> ref i8`: `base + offset`, a plain
+/// `getelementptr i8`, so the result keeps `base`'s provenance and may
+/// wrap or leave its object as integer arithmetic could. inkwell's GEP
+/// builders are `unsafe`, so it is linked in as IR text.
 /// `lower::builtin_symbol` maps the LIR builtin name `@ptr_add` here.
 fn ptr_add(lower: &Lower<'_, '_>) {
-    let native = lower.native_int();
+    let native = lower.native_int().get_bit_width();
+    let text = format!(
+        "define ptr @.lilac.ptr_add(ptr %base, i{native} %offset) alwaysinline nounwind {{\n\
+         entry:\n  \
+         %address = getelementptr i8, ptr %base, i{native} %offset\n  \
+         ret ptr %address\n\
+         }}\n"
+    );
+    append_ir(lower.module(), ".lilac.ptr_add", &text);
+}
+
+/// Defines `.lilac.offset(ptr %base, iNative %offset) -> ptr`, an internal,
+/// always-inline `getelementptr inbounds i8`: a field's or a bounds-checked
+/// element's address, which stays in its object (`Lower::offset_ptr`).
+pub(crate) fn offset_helper<'ctx>(lower: &Lower<'ctx, '_>) -> FunctionValue<'ctx> {
+    let native = lower.native_int().get_bit_width();
+    let text = format!(
+        "define ptr @.lilac.offset(ptr %base, i{native} %offset) alwaysinline nounwind {{\n\
+         entry:\n  \
+         %address = getelementptr inbounds i8, ptr %base, i{native} %offset\n  \
+         ret ptr %address\n\
+         }}\n"
+    );
+    // Linked as an external definition (the linker drops an unreferenced
+    // internal one), then made internal.
+    append_ir(lower.module(), ".lilac.offset", &text);
+    match lower.module().get_function(".lilac.offset") {
+        Some(function) => {
+            function.set_linkage(Linkage::Internal);
+            function
+        }
+        None => bug!(Span::dummy(), "`.lilac.offset` was not defined"),
+    }
+}
+
+/// `@memcmp(ref i8, ref i8, iNative) -> i32`: a declaration of C's
+/// `memcmp`, which aggregate `==` calls. The optimizer expands a small
+/// constant-size one inline; otherwise the C library defines it, or the
+/// object itself in a native build ([`crate::native`]).
+fn memcmp(lower: &Lower<'_, '_>) {
     let ptr = lower.ptr_type();
     let params = [
         BasicMetadataTypeEnum::from(ptr),
-        BasicMetadataTypeEnum::from(native),
+        BasicMetadataTypeEnum::from(ptr),
+        BasicMetadataTypeEnum::from(lower.native_int()),
     ];
-    let function = lower.runtime_fn(".lilac.ptr_add", ptr.fn_type(&params, false));
-    let builder = entry(lower, function);
-    let base = param(function, 0, "ptr_add").into_pointer_value();
-    let offset = param(function, 1, "ptr_add").into_int_value();
-    base.set_name("base");
-    offset.set_name("offset");
-    let address = byte_ptr(lower, &builder, base, offset);
-    checked(builder.build_return(Some(&address)), "return ptr_add");
+    let int = lower.context().i32_type();
+    lower.runtime_fn("memcmp", int.fn_type(&params, false));
 }
 
 /// `@.lilac.abort()`: `llvm.trap` then `unreachable`.
@@ -250,27 +287,4 @@ fn syscall(lower: &Lower<'_, '_>) {
         bug!(Span::dummy(), "`@linux_syscall` returned void");
     };
     checked(builder.build_return(Some(&result)), "return syscall");
-}
-
-/// Byte-addressed pointer `base + offset`, using safe integer arithmetic in
-/// place of a dynamic GEP.
-pub(crate) fn byte_ptr<'ctx>(
-    lower: &Lower<'ctx, '_>,
-    builder: &Builder<'ctx>,
-    base: PointerValue<'ctx>,
-    offset: IntValue<'ctx>,
-) -> PointerValue<'ctx> {
-    let native = lower.native_int();
-    let base_address = checked(
-        builder.build_ptr_to_int(base, native, ""),
-        "byte base address",
-    );
-    let address = checked(
-        builder.build_int_add(base_address, offset, ""),
-        "byte address",
-    );
-    checked(
-        builder.build_int_to_ptr(address, lower.ptr_type(), ""),
-        "byte pointer",
-    )
 }

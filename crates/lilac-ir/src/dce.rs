@@ -296,6 +296,7 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::AtomicRmw { ty, .. }
         | LirInst::CmpXchg { ty, .. } => Some(ty),
         LirInst::CopyPlace { .. }
+        | LirInst::CopyDeref { .. }
         | LirInst::Call { .. }
         | LirInst::StoreField { .. }
         | LirInst::Store { .. }

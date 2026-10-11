@@ -112,6 +112,14 @@ impl LirTy {
         }
     }
 
+    /// Whether a register may hold this type: a `#bit`, `#fbit`,
+    /// `#bit_native` or `ref`. Aggregates (a named layout or an array) live
+    /// in places.
+    #[must_use]
+    pub fn is_scalar(&self) -> bool {
+        self.scalar().is_some()
+    }
+
     /// The layout name of a `Named` type (without `#`).
     #[must_use]
     pub fn name(&self) -> Option<&str> {

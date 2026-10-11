@@ -344,13 +344,8 @@ impl Lower<'_> {
         state.ins.push(("from".into(), lir.clone().to_ref()));
         state.outs.push(("to".into(), lir.clone()));
         let span = Span::dummy();
-        let whole = state.read_place(&Place::Indirect("from".into()), &lir, span);
-        state.emit(LirInst::CopyPlace {
-            src: whole,
-            dst: "to".into(),
-            span,
-        });
         let from = Place::Indirect("from".into());
+        state.read_into(&from, &lir, &"to".into(), span);
         let to = Place::Direct("to".into());
         let pairs = self.slot_pairs(ty);
         for (field, name, slot_ty, variant) in pairs {

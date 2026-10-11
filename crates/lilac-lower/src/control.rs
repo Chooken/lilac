@@ -515,17 +515,17 @@ impl Lower<'_> {
         } = *func.local(capture);
         let (field, name) = self.payload_field(scrutinee.ty.id, *index);
         let payload = self.field_place(state, subject, field, &name, capture_ty, span);
-        let value = if moves {
+        if moves {
             let lir = self.lir_ty(capture_ty);
-            state.read_place(&payload, &lir, span)
+            state.read_into(&payload, &lir, &place, span);
         } else {
-            self.copy_out(state, &payload, capture_ty, span)
-        };
-        state.emit(LirInst::CopyPlace {
-            src: value,
-            dst: place,
-            span,
-        });
+            let value = self.copy_out(state, &payload, capture_ty, span);
+            state.emit(LirInst::CopyPlace {
+                src: value,
+                dst: place,
+                span,
+            });
+        }
         if moves {
             Self::mark_expr(state, func, scrutinee, false);
         }

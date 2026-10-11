@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–2 done).
+> Status: in progress (Phases 0–3 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -487,6 +487,61 @@ a parameter, an out, a field and a `ref`, then compared with `==` after a
 `--release` build; a verifier unit test for an aggregate register; the
 snapshots re-blessed once, with every change in the diff being a
 `memcpy`, `memset`, `memcmp`, alignment or offset.
+
+- **Delivered notes.**
+  - 3.1: the rule is `LirTy::is_scalar`, checked once where a register is
+    defined (`define_reg`), so every instruction that yields one is
+    covered. An aggregate behind a `ref` needed one new instruction,
+    `copy ref %src -> %dst` (`LirInst::CopyDeref`): a `memcpy` of what
+    `%src` points to into a place. `FnState::read_place` reads an
+    `Indirect` aggregate into a temporary with it, and `read_into` copies
+    straight into a destination (moves, copy glue, `match` captures).
+    The data `const` became a `ref #bit8` (the bytes' address), so a
+    string literal is a `#byte_buffer` place filled field by field
+    (`lilac_ir::runtime::fill_byte_buffer`), also in the panic handler and
+    the stack-trace instrumentation, which keeps the current site in a
+    `.lilac.site` place (`ref #byte_buffer`, set in the prologue). That
+    accounts for most of the `.lir` snapshot churn.
+  - 3.3: the builtin slot check now accepts any `ref` for a `ref` slot
+    (opaque pointers), so `@memcmp` takes the two places' addresses
+    without casts. A user `extern memcmp` must match the backend's
+    `i32 (ptr, ptr, iN)` declaration; a different one is `E028`
+    (`declare_func`), which `Standard.C`'s already satisfies.
+    `tests/toolchain.rs` now also checks the symbols the backend itself
+    calls on macOS (`memcmp`, `memcpy`, `memmove`, `memset`, `bzero`,
+    `fmod`, `fmodf`, `__chkstk_darwin`, `dyld_stub_binder`).
+  - 3.4: an aggregate over `u32::MAX` bytes (LLVM's array length is
+    32-bit in inkwell) is a packed struct of 2^31-byte chunks plus the
+    rest; nothing in the tests reaches it. The backend no longer builds a
+    `TargetData` or any struct type of its own.
+  - 3.5: `@ptr_add` now calls its leaf (`Intrinsic::leaf_builtin`), and
+    that leaf, `.lilac.ptr_add`, is itself the plan's wrapping helper:
+    IR text with a plain `getelementptr i8`, `alwaysinline`, so there is
+    no separate `.lilac.wrapping_offset`. `.lilac.offset` is linked only
+    when used and made `internal` after linking (the IR linker drops an
+    unreferenced internal definition). The native `memcpy`/`memmove`/
+    `memset`/`memcmp` became IR text as well (`native.rs`, GEPs, no
+    integer round trips), so no `ptrtoint`/`inttoptr` remains outside
+    `@ptr_to_address`/`@address_to_ptr`. At `-O0` no pass runs, so the
+    helpers stay calls in debug builds; `--release` inlines them.
+    `@array_at` still computes the element address before its bounds
+    check (an out-of-bounds `inbounds` offset is poison held in a place
+    the panic path never reads; the in-bounds path is unchanged).
+  - 3.6: runs closer than 16 zero bytes merge (`RUN_GAP` in
+    `lilac-lower/src/globals.rs`), so padding does not split one. The
+    encoder collects only nonzero scalars and sorts them; the verifier
+    checks runs are non-empty, ordered, disjoint and inside the size.
+    Globals print as `= bytes { 0: "…", 64: "…" }`.
+  - Measurements (`lilac build tests/run/aggregate_copy_large.lilac`, a
+    64 KiB object copied and passed by value, release compiler, Windows
+    x86-64): 76 ms in debug and 95 ms with `--release` as reported by
+    `Finished`, about 0.19 s and 0.20 s wall clock with linking; before,
+    LLVM crashed. The 2 MiB `==` program builds and runs in the same
+    range.
+  - At `-O0` an aggregate read through a `ref` and then stored still
+    copies twice (into a temporary, then the target); `-O` removes the
+    temporary. Aggregate `==` uses the places directly and copies
+    nothing.
 
 ---
 

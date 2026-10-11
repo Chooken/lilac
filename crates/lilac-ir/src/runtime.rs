@@ -21,7 +21,7 @@ use lilac_span::Span;
 
 use crate::{
     ArithOp, ConvertOp, LirBlock, LirCallee, LirConst, LirData, LirFunc, LirInst, LirOperand,
-    LirTerm, LirTy,
+    LirTerm, LirTy, PlaceName, Reg, Symbol,
 };
 
 /// How a program enters: which symbol calls the entry stub `.lilac.start`.
@@ -121,6 +121,16 @@ const PANIC_HEAD: &str = ".lilac.panic.head";
 const PANIC_NEWLINE: &str = ".lilac.panic.newline";
 const PANIC_ELIDED: &str = ".lilac.panic.elided";
 const PANIC_NO_TRACE: &str = ".lilac.panic.no_trace";
+/// Each panic data constant and its text.
+const PANIC_DATA: [(&str, &str); 4] = [
+    (PANIC_HEAD, "panic: "),
+    (PANIC_NEWLINE, "\n"),
+    (PANIC_ELIDED, "  ...\n"),
+    (
+        PANIC_NO_TRACE,
+        "  (stack trace disabled; build with --stack-traces=on)\n",
+    ),
+];
 /// Frames written before a trace is cut short (deep recursion).
 const PANIC_MAX_FRAMES: u64 = 128;
 /// A panicking process's exit code (101, Rust's convention).
@@ -141,22 +151,14 @@ const PANIC_EXIT_CODE: u64 = 101;
 /// both from a program that never panics.
 #[must_use]
 pub fn panic_runtime() -> (LirFunc, Vec<LirData>) {
-    let data = [
-        (PANIC_HEAD, "panic: "),
-        (PANIC_NEWLINE, "\n"),
-        (PANIC_ELIDED, "  ...\n"),
-        (
-            PANIC_NO_TRACE,
-            "  (stack trace disabled; build with --stack-traces=on)\n",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, text)| LirData {
-        name: name.into(),
-        bytes: text.as_bytes().to_vec(),
-        span: span(),
-    })
-    .collect();
+    let data = PANIC_DATA
+        .into_iter()
+        .map(|(name, text)| LirData {
+            name: name.into(),
+            bytes: text.as_bytes().to_vec(),
+            span: span(),
+        })
+        .collect();
     (panic_handler(), data)
 }
 
@@ -167,6 +169,7 @@ fn panic_handler() -> LirFunc {
         alloca(frame_ref.clone().to_ref(), "head"),
         alloca(frame_ref.clone(), "frame"),
         alloca(LirTy::BitNative, "count"),
+        alloca(LirTy::byte_buffer().to_ref(), "frame.site"),
     ];
     entry.extend(write_data(PANIC_HEAD, "a"));
     entry.push(write_buffer("msg"));
@@ -195,8 +198,9 @@ fn panic_handler() -> LirFunc {
     ];
 
     let mut print = vec![
-        field("frame", "site", 1, "site", LirTy::byte_buffer()),
-        copy_place(LirOperand::Reg("site".into()), "text"),
+        field_addr("frame", "site", 1, "site.at", LirTy::byte_buffer().to_ref()),
+        copy_place(LirOperand::Reg("site.at".into()), "frame.site"),
+        copy_deref("frame.site", "text"),
     ];
     print.push(write_buffer("text"));
     print.extend([
@@ -236,13 +240,63 @@ fn write_buffer(buffer: &str) -> LirInst {
     call(PRINT_HOOK, &[buffer], &[])
 }
 
-/// Writes the data constant `name` through `%text`.
+/// Writes the panic data constant `name` through `%text`.
 fn write_data(name: &str, tag: &str) -> Vec<LirInst> {
-    let reg = format!("{tag}.text");
-    vec![
-        constant(&reg, LirConst::Data(name.into()), LirTy::byte_buffer()),
-        copy_place(LirOperand::Reg(reg.into()), "text"),
-        write_buffer("text"),
+    let Some((_, text)) = PANIC_DATA.iter().find(|(data, _)| *data == name) else {
+        lilac_error::bug!(span(), "`{name}` is not panic data");
+    };
+    let mut insts = fill_byte_buffer(
+        &"text".into(),
+        name.into(),
+        u64::try_from(text.len()).unwrap_or(u64::MAX),
+        (format!("{tag}.text").into(), format!("{tag}.len").into()),
+        span(),
+    )
+    .to_vec();
+    insts.push(write_buffer("text"));
+    insts
+}
+
+/// Makes the `#byte_buffer` place `buffer` (or the one the `ref
+/// #byte_buffer` place `buffer` points to) span the `len` bytes of the data
+/// constant `data`: its address goes in `.data` through the register
+/// `address`, and `len` in `.len` through `count`. A buffer is an
+/// aggregate, so it is built in its place, never in a register.
+#[must_use]
+pub fn fill_byte_buffer(
+    buffer: &PlaceName,
+    data: Symbol,
+    len: u64,
+    (address, count): (Reg, Reg),
+    span: Span,
+) -> [LirInst; 4] {
+    [
+        LirInst::Const {
+            dst: address.clone(),
+            value: LirConst::Data(data),
+            ty: LirTy::byte_ref(),
+            span,
+        },
+        LirInst::StoreField {
+            value: LirOperand::Reg(address),
+            obj: buffer.clone(),
+            name: "data".to_owned(),
+            idx: 1,
+            span,
+        },
+        LirInst::Const {
+            dst: count.clone(),
+            value: LirConst::Int(len),
+            ty: LirTy::BitNative,
+            span,
+        },
+        LirInst::StoreField {
+            value: LirOperand::Reg(count),
+            obj: buffer.clone(),
+            name: "len".to_owned(),
+            idx: 0,
+            span,
+        },
     ]
 }
 
@@ -311,6 +365,14 @@ fn store(src: LirOperand, dst: &str) -> LirInst {
 fn copy_place(src: LirOperand, dst: &str) -> LirInst {
     LirInst::CopyPlace {
         src,
+        dst: dst.into(),
+        span: span(),
+    }
+}
+
+fn copy_deref(src: &str, dst: &str) -> LirInst {
+    LirInst::CopyDeref {
+        src: src.into(),
         dst: dst.into(),
         span: span(),
     }
@@ -681,8 +743,7 @@ fn format_args_piece(stride: u64) -> LirFunc {
                     call_builtin("@ptr_add", &["base", "offp"], &["slot"]),
                     alloca(LirTy::byte_buffer().to_ref(), "s"),
                     copy_place(LirOperand::Place("slot".into()), "s"),
-                    load("s", "v", LirTy::byte_buffer()),
-                    copy_place(LirOperand::Reg("v".into()), "out"),
+                    copy_deref("s", "out"),
                 ],
                 ret(),
             ),

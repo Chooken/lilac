@@ -8,9 +8,10 @@ function @Object.get
   out #Object %result
 {
   $entry:
+    alloca #Object %tmp.1 : zeroed
     zero %result
-    &1: #Object = load %self
-    copy &1 -> %result
+    copy ref %self -> %tmp.1
+    copy %tmp.1 -> %result
     return
 }
 function @main

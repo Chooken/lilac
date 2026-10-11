@@ -12,14 +12,16 @@ use std::collections::HashMap;
 
 use lilac_span::{SourceMap, Span};
 
+use crate::runtime::fill_byte_buffer;
 use crate::{
-    LirCallee, LirConst, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, Reg,
-    Symbol,
+    LirCallee, LirData, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, Reg, Symbol,
 };
 
-/// The frame record place and the place holding the head slot's address.
+/// The frame record place, the place holding the head slot's address, and
+/// the place holding the address of the frame's `site`.
 const FRAME: &str = ".lilac.frame";
 const HEAD: &str = ".lilac.head";
+const SITE: &str = ".lilac.site";
 
 /// One stack-trace line, newline included: `"  at main (main.lilac:3:5)\n"`,
 /// or `"  at main\n"` for a compiler-generated call with no location. The
@@ -46,7 +48,9 @@ pub fn is_hidden(func: &str) -> bool {
 ///   `frame.prev ← *head`, `*head ← addr frame`.
 /// - **Before each call** (not to a leaf builtin, which cannot panic):
 ///   `frame.site ← !site`, the call's [`site_text`] as a data constant,
-///   deduplicated.
+///   deduplicated, written field by field through `frame.site`'s address
+///   (a `#byte_buffer` is an aggregate, so it never passes through a
+///   register).
 /// - **Before each `return`**: `*head ← frame.prev`.
 ///
 /// `.lilac.*` runtime functions and `extern`s are skipped. `names` maps a
@@ -90,8 +94,14 @@ impl Sites {
         }
     }
 
-    fn intern(&mut self, text: String) -> Symbol {
+    /// The data constant holding `text`, and its length.
+    fn intern(&mut self, text: String) -> (Symbol, u64) {
         let bytes = text.into_bytes();
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        (self.symbol(bytes), len)
+    }
+
+    fn symbol(&mut self, bytes: Vec<u8>) -> Symbol {
         if let Some(name) = self.by_bytes.get(&bytes) {
             return name.clone();
         }
@@ -107,9 +117,11 @@ impl Sites {
 }
 
 /// Allocates the frame and links it: `frame.prev ← *head`, `*head ← addr
-/// frame`, through the registers `top` and `me`.
-fn prologue(top: Reg, me: Reg, span: Span) -> [LirInst; 7] {
+/// frame`, through the registers `top` and `me`; then keeps `frame.site`'s
+/// address in `.lilac.site`, through `site`.
+fn prologue(top: Reg, me: Reg, site: Reg, span: Span) -> [LirInst; 10] {
     let frame_ref = LirTy::trace_frame().to_ref();
+    let site_ref = LirTy::byte_buffer().to_ref();
     [
         LirInst::Alloca {
             ty: LirTy::trace_frame(),
@@ -119,6 +131,11 @@ fn prologue(top: Reg, me: Reg, span: Span) -> [LirInst; 7] {
         LirInst::Alloca {
             ty: frame_ref.clone().to_ref(),
             place: HEAD.into(),
+            span,
+        },
+        LirInst::Alloca {
+            ty: site_ref.clone(),
+            place: SITE.into(),
             span,
         },
         LirInst::Call {
@@ -151,6 +168,19 @@ fn prologue(top: Reg, me: Reg, span: Span) -> [LirInst; 7] {
             dst: HEAD.into(),
             span,
         },
+        LirInst::FieldAddr {
+            obj: FRAME.into(),
+            name: "site".to_owned(),
+            idx: 1,
+            dst: site.clone(),
+            ty: site_ref,
+            span,
+        },
+        LirInst::CopyPlace {
+            src: LirOperand::Reg(site),
+            dst: SITE.into(),
+            span,
+        },
     ]
 }
 
@@ -169,7 +199,7 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
             while let Some(alloca) = old.next_if(|inst| matches!(inst, LirInst::Alloca { .. })) {
                 insts.push(alloca);
             }
-            insts.extend(prologue(reg(), reg(), span));
+            insts.extend(prologue(reg(), reg(), reg(), span));
         }
         for inst in old {
             if let LirInst::Call {
@@ -180,21 +210,14 @@ fn instrument_func(func: &mut LirFunc, name: &str, sources: &SourceMap, sites: &
             {
                 if !matches!(callee, LirCallee::Builtin(_)) {
                     let location = sources.location(*call_span);
-                    let data = sites.intern(site_text(name, location.as_deref()));
-                    let site = reg();
-                    insts.push(LirInst::Const {
-                        dst: site.clone(),
-                        value: LirConst::Data(data),
-                        ty: LirTy::byte_buffer(),
-                        span: *call_span,
-                    });
-                    insts.push(LirInst::StoreField {
-                        value: LirOperand::Reg(site),
-                        obj: FRAME.into(),
-                        name: "site".to_owned(),
-                        idx: 1,
-                        span: *call_span,
-                    });
+                    let (data, len) = sites.intern(site_text(name, location.as_deref()));
+                    insts.extend(fill_byte_buffer(
+                        &SITE.into(),
+                        data,
+                        len,
+                        (reg(), reg()),
+                        *call_span,
+                    ));
                 }
             }
             insts.push(inst);
@@ -353,20 +376,34 @@ mod tests {
         assert!(matches!(&entry[0], LirInst::Alloca { place, .. } if place == "x"));
         assert!(matches!(&entry[1], LirInst::Alloca { place, .. } if place == ".lilac.frame"));
         assert!(matches!(&entry[2], LirInst::Alloca { place, .. } if place == ".lilac.head"));
-        assert!(calls_trace_head(&entry[3]));
+        assert!(matches!(&entry[3], LirInst::Alloca { place, .. } if place == ".lilac.site"));
+        assert!(calls_trace_head(&entry[4]));
 
-        // The call's site is stored just before it, under the source name.
+        // The call's site is stored just before it, under the source name:
+        // the data's address, then its length, through `frame.site`'s
+        // address.
         let call_at = entry
             .iter()
             .position(|inst| matches!(inst, LirInst::Call { func: LirCallee::Func(name), .. } if name == "g"))
             .expect("call kept");
-        assert!(matches!(
-            &entry[call_at - 1],
-            LirInst::StoreField { obj, name, value: LirOperand::Reg(_), .. }
-                if obj == ".lilac.frame" && name == "site"
-        ));
+        let stores = |index: usize, field: &str| {
+            matches!(
+                &entry[index],
+                LirInst::StoreField { obj, name, value: LirOperand::Reg(_), .. }
+                    if obj == ".lilac.site" && name == field
+            )
+        };
+        assert!(stores(call_at - 1, "len"));
         assert!(matches!(
             &entry[call_at - 2],
+            LirInst::Const {
+                value: crate::LirConst::Int(21),
+                ..
+            }
+        ));
+        assert!(stores(call_at - 3, "data"));
+        assert!(matches!(
+            &entry[call_at - 4],
             LirInst::Const { value: crate::LirConst::Data(name), .. } if *name == ".lilac.site.0"
         ));
         let site: Vec<&LirData> = module
@@ -383,7 +420,7 @@ mod tests {
         assert!(unlinks(&f.blocks[1].insts));
         assert!(unlinks(&f.blocks[2].insts));
         // `g` (no name given) is instrumented too.
-        assert!(calls_trace_head(&module.funcs[1].blocks[0].insts[2]));
+        assert!(calls_trace_head(&module.funcs[1].blocks[0].insts[3]));
 
         // Runtime functions and externs are untouched.
         assert_eq!(module.funcs[2].blocks[0].insts.len(), 1);

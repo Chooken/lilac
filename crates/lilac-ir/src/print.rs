@@ -121,11 +121,18 @@ pub(crate) fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
     )]
 }
 
-/// `global !name: #t = zeroed`, or `= bytes "…"` with its initial bytes.
+/// `global !name: #t = zeroed`, or `= bytes { 0: "…", 16: "…" }` with its
+/// initializer runs (every other byte is zero).
 pub(crate) fn print_global(global: &LirGlobal) -> (String, Option<Span>) {
-    let init = match &global.init {
-        None => "zeroed".to_owned(),
-        Some(bytes) => format!("bytes \"{}\"", escape_data(bytes)),
+    let init = if global.init.is_empty() {
+        "zeroed".to_owned()
+    } else {
+        let runs: Vec<String> = global
+            .init
+            .iter()
+            .map(|(offset, bytes)| format!("{offset}: \"{}\"", escape_data(bytes)))
+            .collect();
+        format!("bytes {{ {} }}", runs.join(", "))
     };
     (
         format!("global !{}: {} = {init}", global.name.as_str(), global.ty),
@@ -217,6 +224,7 @@ pub(crate) fn print_inst(inst: &LirInst) -> String {
             format!("copy {} -> {dst}", print_operand(src))
         }
         LirInst::Const { dst, value, ty, .. } => format!("{dst}: {ty} = const {value}"),
+        LirInst::CopyDeref { src, dst, .. } => format!("copy ref {src} -> {dst}"),
         LirInst::Load { src, dst, ty, .. } => format!("{dst}: {ty} = load {src}"),
         LirInst::Addr { place, dst, ty, .. } => {
             format!("{dst}: {ty} = addr {place}")
@@ -397,6 +405,7 @@ pub(crate) fn inst_span(inst: &LirInst) -> Span {
         LirInst::CopyReg { span, .. }
         | LirInst::CopyPlace { span, .. }
         | LirInst::Const { span, .. }
+        | LirInst::CopyDeref { span, .. }
         | LirInst::Load { span, .. }
         | LirInst::Addr { span, .. }
         | LirInst::AddrFunc { span, .. }

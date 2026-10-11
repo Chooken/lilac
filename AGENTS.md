@@ -22,13 +22,13 @@
   once as ordinary LIR in `lilac-ir::runtime` and shared by all backends. It
   makes no OS call: the compiler has no OS layer. Backends hand-write only
   the leaf intrinsics (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`,
-  `@lilac_abort`, `@linux_syscall`: the Linux system-call instruction, and the
-  thread leaves below).
-- Instruction builtins (`Intrinsic::leaf_builtin`): `@memcpy`/`@memmove`/
-  `@memset`/`@linux_syscall` call their leaf, `@trap` calls `@lilac_abort` then
-  ends the block `unreachable`, and the pointer builtins (`@ptr_add`,
-  `@ptr_to_address`, `@address_to_ptr`) lower inline to `bitcast`s (and an
-  `i.add`). `@align_of` is a constant like `@size_of`. A reachable user
+  `@memcmp`, `@lilac_abort`, `@linux_syscall`: the Linux system-call
+  instruction, and the thread leaves below).
+- Instruction builtins (`Intrinsic::leaf_builtin`): `@ptr_add`/`@memcpy`/
+  `@memmove`/`@memset`/`@linux_syscall` call their leaf (`.lilac.ptr_add`
+  is an always-inline wrapping `getelementptr i8`), `@trap` calls
+  `@lilac_abort` then ends the block `unreachable`, and `@ptr_to_address`/
+  `@address_to_ptr` lower inline to `bitcast`s. `@align_of` is a constant like `@size_of`. A reachable user
   `@linux_syscall` or `@linux_thread_clone` off Linux x86-64/aarch64
   (`Target::has_syscall`) is `E035`, checked after DCE like `E031`
   (`lilac_ir::check_live_syscalls`).
@@ -47,6 +47,20 @@
   Linux `.lilac.native_main` first calls `.lilac.main_tls` (builds the main
   thread's block unless a loader set the thread pointer), native Windows
   defines `_tls_used`/`_tls_index`, and macOS links `__tlv_bootstrap`.
+- Aggregates live in memory: a LIR register holds a scalar only
+  (`LirTy::is_scalar`; the verifier rejects an aggregate one), so an
+  object, array or builtin layout moves place to place. `copy` of one is a
+  `memcpy` and `zero` a `memset` of the layout's size at its alignment;
+  `copy ref %p -> %dst` (`LirInst::CopyDeref`) copies what a `ref` place
+  points to (`FnState::read_place`/`read_into`); aggregate `==` is
+  `@memcmp` of the two places against zero (the C `memcmp`; native mode
+  defines it). In LLVM an aggregate is `[size x i8]` with the layout's
+  alignment, a field is the base plus its offset (`.lilac.offset`, an
+  always-inline `getelementptr inbounds i8` linked by `append_ir`), and
+  every scalar load and store carries its alignment, so the IR's layout
+  (`lilac-layout`) is the only one and LLVM has no struct types. A data
+  `const` is a `ref #bit8`; string literals fill a `#byte_buffer` place
+  (`lilac_ir::runtime::fill_byte_buffer`).
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/
@@ -57,8 +71,9 @@
   `Checker::check_array_hooks`), so arrays copy and drop as bytes and need
   no glue. `@array(T, N) {}` is a zeroed `Struct` with no fields.
   `@array_at` lowers to an unsigned bounds check that panics, then the
-  `elem.addr` instruction (LLVM: `ptrtoint`/`inttoptr` arithmetic, since a
-  dynamic GEP is `unsafe` in inkwell); `@array_len` folds in typeck.
+  `elem.addr` instruction (LLVM: the index times the element size through
+  `.lilac.offset`, since a dynamic GEP is `unsafe` in inkwell);
+  `@array_len` folds in typeck.
 - Memory builtins (`Intrinsic::is_memory`, checked in
   `lilac-typeck/src/memory.rs`): `@move(place)` becomes
   `HirExprKind::Move`, `@needs_drop(T)` folds to a `@bit8` literal
@@ -72,8 +87,10 @@
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an
   assignment target too: `Checker::item_place`). `lilac-lower/src/globals.rs`
-  folds each initializer with the constant evaluator and encodes it to
-  bytes in the C layout (a non-constant one is `E038`,
+  folds each initializer with the constant evaluator and encodes it as
+  runs (`LirGlobal::init`: `(offset, bytes)` over an otherwise zero object,
+  never the whole object; the backend fills the gaps with
+  `zeroinitializer`) in the C layout (a non-constant one is `E038`,
   `check_global_initializers`); a use is `addr.global` into an indirect
   place. `LirModule::globals` are pruned by DCE like data, never dropped.
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
@@ -299,11 +316,12 @@
   calls the C-ABI `.lilac.native_main`. Standard's `@entry` stores them in
   `Standard.Os` (`argument_count`, `argument_vector`,
   `environment_vector`); `main` takes nothing. The backend also defines
-  `memcpy`/`memmove`/`memset` (marked `no-builtins`), plus `_fltused` and
+  `memcpy`/`memmove`/`memset`/`memcmp` (IR text marked `no-builtins`),
+  plus `_fltused` and
   `__chkstk` on Windows (`lilac-codegen-llvm`'s `native.rs`). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
   when a `--link-arg` names a shared library (`.so`, `-l`). macOS links
   `libSystem` (Apple's only stable system interface; lld ad-hoc signs arm64
-  executables) and takes `memcpy`/`memset`/`bzero` from it, so the backend
+  executables) and takes `memcpy`/`memset`/`bzero`/`memcmp` from it, so the backend
   defines none of the C-runtime replacements there; a `libSystem` function
   the stub does not list needs adding to `toolchain/*-apple-darwin/`.
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,

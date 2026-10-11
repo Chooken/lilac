@@ -221,21 +221,15 @@ impl Lower<'_> {
                 // The bits move into a temporary the statement owns until
                 // something takes it; the place is empty after.
                 let place = self.place_of(state, func, inner);
-                let value = state.read_place(&place, &lir, span);
                 let moved = self.tmp(state, expr.ty, span);
-                state.emit(LirInst::CopyPlace {
-                    src: value,
-                    dst: moved.clone(),
-                    span,
-                });
+                state.read_into(&place, &lir, &moved, span);
                 self.own_temp(state, &moved, expr.ty);
                 Self::mark_expr(state, func, inner, false);
                 LirOperand::Place(moved)
             }
             HirExprKind::Number(text) => state.constant(number_const(text, &lir, span), lir, span),
             HirExprKind::Str(bytes) => {
-                let name = self.intern_data(bytes);
-                state.constant(LirConst::Data(name), LirTy::byte_buffer(), span)
+                LirOperand::Place(self.byte_buffer_place(state, bytes, span))
             }
             HirExprKind::Struct(values) => self.struct_value(state, func, expr, values),
             HirExprKind::Variant { index, payload } => {
@@ -265,6 +259,9 @@ impl Lower<'_> {
                     span,
                 });
                 LirOperand::Reg(reg)
+            }
+            HirExprKind::Eq(lhs, rhs) if !self.lir_ty(lhs.ty).is_scalar() => {
+                self.aggregate_eq(state, func, lhs, rhs, span)
             }
             HirExprKind::Eq(lhs, rhs) => {
                 let regs = self.regs(state, func, &[(**lhs).clone(), (**rhs).clone()]);
@@ -326,7 +323,8 @@ impl Lower<'_> {
         (sized.size, sized.align)
     }
 
-    /// A field of a place, read straight out of it.
+    /// A field of a place, read straight out of it: a scalar into a
+    /// register, an aggregate through its address into a fresh place.
     fn field_value(
         &mut self,
         state: &mut FnState,
@@ -337,7 +335,11 @@ impl Lower<'_> {
         span: Span,
     ) -> LirOperand {
         let base_place = self.place_of(state, func, base);
-        let (name, _) = self.field_name(base.ty.id, index);
+        let (name, ty) = self.field_name(base.ty.id, index);
+        if !lir.is_scalar() {
+            let field = self.field_place(state, &base_place, index, &name, ty, span);
+            return state.read_place(&field, &lir, span);
+        }
         let reg = state.reg();
         state.emit(LirInst::Field {
             obj: base_place.name().to_owned(),
@@ -348,6 +350,57 @@ impl Lower<'_> {
             span,
         });
         LirOperand::Reg(reg)
+    }
+
+    /// `==` on an aggregate: `@memcmp` over the bytes of both sides' places,
+    /// compared with zero. Equality is over every byte, padding included
+    /// (`SPEC.md` §8), which byte-exact copies keep deterministic. A side
+    /// that is a place is compared where it is, never copied.
+    fn aggregate_eq(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        span: Span,
+    ) -> LirOperand {
+        let left = self.place_of(state, func, lhs);
+        let right = self.place_of(state, func, rhs);
+        let left = self.ref_place(state, &left, lhs.ty, span);
+        let right = self.ref_place(state, &right, rhs.ty, span);
+        let (size, _) = self.size_align(lhs.ty);
+        let size_value = state.constant(LirConst::Int(size), LirTy::BitNative, span);
+        let size = state.tmp_lir(LirTy::BitNative, span);
+        state.emit(LirInst::CopyPlace {
+            src: size_value,
+            dst: size.clone(),
+            span,
+        });
+        let order = state.tmp_lir(LirTy::Bit(32), span);
+        state.emit(LirInst::Call {
+            func: LirCallee::Builtin("@memcmp".to_owned()),
+            ins: vec![left, right, size],
+            outs: vec![order.clone()],
+            span,
+        });
+        let order = state.reg_of(LirOperand::Place(order), &LirTy::Bit(32), span);
+        let zero = state.reg();
+        state.emit(LirInst::Const {
+            dst: zero.clone(),
+            value: LirConst::Int(0),
+            ty: LirTy::Bit(32),
+            span,
+        });
+        let equal = state.reg();
+        state.emit(LirInst::Arith {
+            op: ArithOp::Eq,
+            lhs: order,
+            rhs: zero,
+            dst: equal.clone(),
+            ty: LirTy::Bit(8),
+            span,
+        });
+        LirOperand::Reg(equal)
     }
 
     /// A call's result: an intrinsic's value, or a temporary the call

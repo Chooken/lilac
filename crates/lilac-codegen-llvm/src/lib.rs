@@ -249,40 +249,28 @@ mod tests {
         module
     }
 
-    /// The `#format_args` LLVM struct is the 17-field expansion of
-    /// `builtin_layout` (a count plus sixteen named pieces), not an array.
-    fn format_args_llvm_type() -> String {
-        format!("{{ i64, {0} }}", ["{ i64, ptr }"; 16].join(", "))
-    }
-
+    /// Aggregates are their bytes to LLVM, `[size x i8]` at the layout's
+    /// alignment, and are zeroed with `llvm.memset`; scalars keep their LLVM
+    /// types and are zeroed with an aligned store.
     #[test]
     fn lowers_types_layouts_and_zero_init() {
         let text = emit(&type_module());
-        let format_args = format_args_llvm_type();
+        assert!(
+            !text.contains("type {"),
+            "no struct type is defined:\n{text}"
+        );
         for needle in [
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "ptr",
-            "%Pair = type { i32, i8 }",
-            "{ i64, ptr }",
-            format_args.as_str(),
-        ] {
-            assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
-        }
-        // Scalar zero values print as `0`/`null`; aggregate ones as
-        // `zeroinitializer` (LLVM canonicalizes both to the same constant).
-        let format_args_store = format!("store {format_args} zeroinitializer");
-        for needle in [
-            "store i8 0",
-            "store i16 0",
-            "store i32 0",
-            "store i64 0",
-            "store ptr null",
-            "store %Pair zeroinitializer",
-            "store { i64, ptr } zeroinitializer",
-            format_args_store.as_str(),
+            "%ppair = alloca [8 x i8], align 4",
+            "%pbb = alloca [16 x i8], align 8",
+            "%pfa = alloca [264 x i8], align 8",
+            "store i8 0, ptr %p8, align 1",
+            "store i16 0, ptr %p16, align 2",
+            "store i32 0, ptr %p32, align 4",
+            "store i64 0, ptr %p64, align 8",
+            "store ptr null, ptr %pr, align 8",
+            "call void @llvm.memset.p0.i64(ptr align 4 %ppair, i8 0, i64 8, i1 false)",
+            "call void @llvm.memset.p0.i64(ptr align 8 %pbb, i8 0, i64 16, i1 false)",
+            "call void @llvm.memset.p0.i64(ptr align 8 %pfa, i8 0, i64 264, i1 false)",
         ] {
             assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
         }
@@ -727,11 +715,13 @@ mod tests {
         let mut insts = Vec::new();
         for (place, ty) in [
             ("pair", "#Pair"),
+            ("pair2", "#Pair"),
+            ("rpair", "ref #Pair"),
             ("x", "#bit32"),
             ("x2", "#bit32"),
             ("b", "#bit8"),
             ("r", "ref #bit32"),
-            ("bbslot", "#byte_buffer"),
+            ("bpslot", "ref #bit8"),
             ("adslot", "ref #bit32"),
             ("afslot", "#bit64"),
             ("fslot", "#fbit32"),
@@ -753,9 +743,9 @@ mod tests {
         });
 
         insts.push(LirInst::Const {
-            dst: "bb".into(),
+            dst: "bp".into(),
             value: LirConst::Data("c0".into()),
-            ty: t("#byte_buffer"),
+            ty: t("ref #bit8"),
             span: span(),
         });
         insts.push(LirInst::Addr {
@@ -774,7 +764,21 @@ mod tests {
         copy_place(&mut insts, LirOperand::Reg("c".into()), "x");
         copy_place(&mut insts, LirOperand::Place("x".into()), "x2");
         copy_place(&mut insts, LirOperand::Reg("dec".into()), "b");
-        copy_place(&mut insts, LirOperand::Reg("bb".into()), "bbslot");
+        copy_place(&mut insts, LirOperand::Reg("bp".into()), "bpslot");
+        copy_place(&mut insts, LirOperand::Place("pair".into()), "pair2");
+        insts.push(LirInst::CopyDeref {
+            src: "rpair".into(),
+            dst: "pair2".into(),
+            span: span(),
+        });
+        insts.push(LirInst::Field {
+            obj: "pair".into(),
+            name: "b".to_owned(),
+            idx: 1,
+            dst: "fb".into(),
+            ty: t("#bit8"),
+            span: span(),
+        });
         copy_place(&mut insts, LirOperand::Reg("ad".into()), "adslot");
         copy_place(&mut insts, LirOperand::Reg("af".into()), "afslot");
         insts.push(LirInst::CopyReg {
@@ -905,9 +909,14 @@ mod tests {
             "load ptr, ptr %r",
             "ptr @f",
             "@c0",
-            "i64 2",
-            "store ptr %x, ptr %adslot",
-            "getelementptr inbounds %Pair",
+            "store ptr @c0, ptr %bpslot, align 8",
+            "store ptr %x, ptr %adslot, align 8",
+            "%pair = alloca [8 x i8], align 4",
+            "call void @llvm.memset.p0.i64(ptr align 4 %pair, i8 0, i64 8, i1 false)",
+            "call void @llvm.memcpy.p0.p0.i64(ptr align 4 %pair2, ptr align 4 %pair, i64 8, i1 false)",
+            "call ptr @.lilac.offset(ptr %pair, i64 4)",
+            "define internal ptr @.lilac.offset(ptr %base, i64 %offset)",
+            "getelementptr inbounds i8, ptr %base, i64 %offset",
             "trunc i32",
             "zext i8",
             "add i32",
@@ -935,8 +944,8 @@ mod tests {
     }
 
     /// `field %instance` on an `in ref #Pair` place must load the reference
-    /// out of the place before the GEP (the pointer ABI passes the address of
-    /// the caller's reference slot).
+    /// out of the place before adding the field's offset (the pointer ABI
+    /// passes the address of the caller's reference slot).
     #[test]
     fn field_through_ref_loads_reference_first() {
         let mut module =
@@ -948,10 +957,10 @@ mod tests {
         let insts = vec![
             LirInst::Field {
                 obj: "rp".into(),
-                name: "a".to_owned(),
-                idx: 0,
+                name: "b".to_owned(),
+                idx: 1,
                 dst: "v".into(),
-                ty: t("#bit32"),
+                ty: t("#bit8"),
                 span: span(),
             },
             LirInst::CopyPlace {
@@ -963,7 +972,7 @@ mod tests {
         module.funcs.push(LirFunc {
             name: "g".into(),
             ins: vec![("rp".into(), t("ref #Pair"))],
-            outs: vec![("o".into(), t("#bit32"))],
+            outs: vec![("o".into(), t("#bit8"))],
             is_extern: false,
             export: None,
             variadic: false,
@@ -977,7 +986,10 @@ mod tests {
         });
         let text = emit(&module);
         assert!(text.contains("load ptr, ptr %in0"), "{text}");
-        assert!(text.contains("getelementptr inbounds %Pair, ptr"), "{text}");
+        assert!(
+            text.contains("call ptr @.lilac.offset(ptr %0, i64 4)"),
+            "{text}"
+        );
     }
 
     /// A direct user call passes the address of every listed place (ins then
@@ -1164,8 +1176,9 @@ mod tests {
         }
     }
 
-    /// `@ptr_add` is emitted as `.lilac.ptr_add(ptr, iNative) -> ptr` using
-    /// safe `ptrtoint`/`add`/`inttoptr` integer arithmetic.
+    /// `@ptr_add` is emitted as `.lilac.ptr_add(ptr, iNative) -> ptr`, a plain
+    /// `getelementptr i8` that keeps the base pointer's provenance (no
+    /// integer arithmetic, and no `inbounds`: the result may leave the object).
     #[test]
     fn emits_ptr_add_runtime_definition() {
         let text = emit(&all_leaves_module());
@@ -1177,8 +1190,14 @@ mod tests {
             .split("\ndefine ")
             .find(|segment| segment.starts_with("ptr @.lilac.ptr_add"))
             .expect("ptr_add definition");
-        assert!(body.contains("ptrtoint ptr"), "{body}");
-        assert!(body.contains("inttoptr i64"), "{body}");
+        assert!(
+            body.contains("getelementptr i8, ptr %base, i64 %offset"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("ptrtoint") && !body.contains("inttoptr"),
+            "{body}"
+        );
     }
 
     /// A module that calls no leaf builtin emits none of the
@@ -1327,18 +1346,27 @@ mod tests {
         assert!(text.contains("@.lilac.panic.head = private"), "{text}");
     }
 
-    /// The builtin aggregate LLVM types come from `builtin_layout`: a
-    /// `{ iNative, ptr }` `#byte_buffer` and a 17-field `#format_args` (a count
-    /// plus sixteen named pieces, no array).
+    /// The builtin aggregates are their `builtin_layout` bytes on each
+    /// target: `#byte_buffer` is a pointer-sized count and a pointer,
+    /// `#format_args` a count plus sixteen of them.
     #[test]
     fn builtin_aggregates_follow_builtin_layout() {
         let text = emit(&type_module());
-        assert!(text.contains("{ i64, ptr }"), "{text}");
-        assert!(text.contains(format_args_llvm_type().as_str()), "{text}");
-        assert!(
-            !text.contains("[16 x { i64, ptr }]"),
-            "`#format_args` must be sixteen named fields, not an array:\n{text}"
-        );
+        assert!(text.contains("%pbb = alloca [16 x i8], align 8"), "{text}");
+        assert!(text.contains("%pfa = alloca [264 x i8], align 8"), "{text}");
+        let triple = "i686-unknown-linux-gnu";
+        let mut module = LirModule::new(lilac_target::Target::parse(triple).expect("triple"));
+        let mut insts = Vec::new();
+        alloca(&mut insts, "bb", "#byte_buffer");
+        alloca(&mut insts, "fa", "#format_args");
+        module
+            .funcs
+            .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
+        let text = lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0)
+            .emit_llvm(&module)
+            .expect("emits");
+        assert!(text.contains("%bb = alloca [8 x i8], align 4"), "{text}");
+        assert!(text.contains("%fa = alloca [132 x i8], align 4"), "{text}");
     }
 
     /// The backend still declares and defines the `llvm.trap`-backed abort
@@ -1516,12 +1544,12 @@ mod tests {
         assert!(!text.contains("drop"), "drop must not lower:\n{text}");
     }
 
-    /// The LIR verifier permits a `#format_args` data-symbol `const`, but a
-    /// byte global cannot become a piece-table value; codegen raises an
-    /// explicit ICE pinning the backend/verifier divergence.
+    /// A data-symbol `const` is its address: the verifier rejects one of an
+    /// aggregate type (registers hold scalars), and the backend, given one
+    /// anyway, raises an ICE rather than build an aggregate value.
     #[test]
-    #[should_panic(expected = "no codegen lowering")]
-    fn format_args_data_const_is_ice() {
+    #[should_panic(expected = "cannot be a")]
+    fn aggregate_data_const_is_ice() {
         let mut module =
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.data.push(LirData {
@@ -1797,7 +1825,12 @@ mod tests {
                 "{symbol}"
             );
         }
+        assert!(windows.contains("define i32 @memcmp("), "{windows}");
         assert!(windows.contains("\"no-builtins\""), "{windows}");
+        assert!(
+            !windows.contains("ptrtoint") && !windows.contains("inttoptr"),
+            "native support addresses bytes with `getelementptr`:\n{windows}"
+        );
         assert!(windows.contains("@_fltused = global i32 0"), "{windows}");
         assert!(windows.contains("__chkstk:"), "{windows}");
         let arm = native_ir("aarch64-pc-windows-msvc");

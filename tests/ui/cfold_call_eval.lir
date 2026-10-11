@@ -65,8 +65,10 @@ function @main
     alloca #bit_native %total : zeroed
     alloca #bit_native %tmp.1 : zeroed
     alloca #byte_buffer %tmp.2 : zeroed
-    &1: #byte_buffer = const !c0
-    copy &1 -> %tmp.2
+    &1: ref #bit8 = const !c0
+    copy &1 -> %tmp.2.data  // idx 1
+    &2: #bit_native = const 0x2
+    copy &2 -> %tmp.2.len  // idx 0
     call @.root.parse (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %total
     return

@@ -238,8 +238,9 @@ fn riscv64_format_args_stride_matches_byte_buffer() {
     }
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
 
-    // `#byte_buffer` is `{ i64, ptr }`: an 8-byte length plus an 8-byte pointer.
-    assert!(text.contains("{ i64, ptr }"), "{text}");
+    // `#byte_buffer` is 16 bytes aligned to 8: an 8-byte length plus an
+    // 8-byte pointer.
+    assert!(text.contains("alloca [16 x i8], align 8"), "{text}");
     // `fstring.lilac` reaches `format_args_push` (not `piece`, which DCE culls);
     // its piece stride must equal `#byte_buffer`'s 16-byte size. The driver
     // unit test covers both push and piece at the LIR level.
@@ -269,7 +270,8 @@ fn drops_and_zero_init_visible() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
-    assert!(text.contains("zeroinitializer"), "{text}");
+    // Aggregate places are zeroed with `memset`.
+    assert!(text.contains("call void @llvm.memset."), "{text}");
     assert!(
         text.contains("call void @\"GenBox.1..bit32.@on_drop:ref_GenBox[bit32]\""),
         "{text}"

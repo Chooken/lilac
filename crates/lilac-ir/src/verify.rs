@@ -167,6 +167,7 @@ impl Verifier<'_> {
             return;
         }
         self.verify_layouts();
+        self.verify_globals();
         let mut seen: HashSet<&str> = HashSet::new();
         for func in &self.module.funcs {
             if !seen.insert(func.name.as_str()) {
@@ -223,6 +224,47 @@ impl Verifier<'_> {
                     ),
                     Span::dummy(),
                 ),
+            }
+        }
+    }
+
+    /// Checks every global: a known type, and initializer runs that are
+    /// non-empty, in increasing offset order, not overlapping, and within the type's
+    /// size.
+    fn verify_globals(&mut self) {
+        for global in &self.module.globals {
+            let name = global.name.as_str();
+            if !self.valid_type(&global.ty) {
+                self.error(
+                    format!("global `!{name}` has the unknown type `{}`", global.ty),
+                    global.span,
+                );
+                continue;
+            }
+            let Some(size) = size_align(&self.module.layouts, &global.ty, &self.module.target)
+                .map(|sized| sized.size)
+            else {
+                continue;
+            };
+            let mut end = 0;
+            for (offset, bytes) in &global.init {
+                let run_end = u64::try_from(bytes.len())
+                    .ok()
+                    .and_then(|len| offset.checked_add(len));
+                let fits = !bytes.is_empty()
+                    && *offset >= end
+                    && run_end.is_some_and(|run_end| run_end <= size);
+                if !fits {
+                    self.error(
+                        format!(
+                            "global `!{name}`'s initializer run at offset {offset} ({} bytes) is empty, out of order, or past its {size} bytes",
+                            bytes.len()
+                        ),
+                        global.span,
+                    );
+                    break;
+                }
+                end = run_end.unwrap_or(size);
             }
         }
     }
@@ -365,6 +407,10 @@ impl Verifier<'_> {
             LirInst::CopyPlace { src, dst, span } => {
                 self.check_operand(src, regs, places, *span, func);
                 self.check_copy_place(src, dst, places, regs, *span, func);
+                assigned.insert(dst.as_str());
+            }
+            LirInst::CopyDeref { src, dst, span } => {
+                self.check_copy_deref(src, dst, places, *span, func);
                 assigned.insert(dst.as_str());
             }
             LirInst::Const {
@@ -656,6 +702,45 @@ impl Verifier<'_> {
         }
     }
 
+    /// Checks `copy ref %src -> %dst`: both places are declared, `%src`
+    /// holds a reference, and it points at `%dst`'s type (or at
+    /// `#unknown`).
+    fn check_copy_deref(
+        &mut self,
+        src: &PlaceName,
+        dst: &PlaceName,
+        places: &Places,
+        span: Span,
+        func: &LirFunc,
+    ) {
+        let src_ty = places.get(src.as_str()).copied();
+        let dst_ty = places.get(dst.as_str()).copied();
+        for (place, ty) in [(src, src_ty), (dst, dst_ty)] {
+            if ty.is_none() {
+                self.error(
+                    format!("copy through undeclared place `{place}` in `{}`", func.name),
+                    span,
+                );
+            }
+        }
+        let (Some(src_ty), Some(dst_ty)) = (src_ty, dst_ty) else {
+            return;
+        };
+        let fits = match src_ty {
+            LirTy::Ref(pointee) => **pointee == *dst_ty || pointee.name() == Some("unknown"),
+            _ => false,
+        };
+        if !fits {
+            self.error(
+                format!(
+                    "`copy ref {src}` in `{}` needs `ref {dst_ty}`, found `{src_ty}`",
+                    func.name
+                ),
+                span,
+            );
+        }
+    }
+
     /// Checks a `const` against its type: an integer must fit its bit
     /// container (or be the null reference), a float needs a float type,
     /// and data must be declared and taken as a buffer or a byte address.
@@ -678,8 +763,8 @@ impl Verifier<'_> {
         }
     }
 
-    /// Checks a data `const`: declared data, taken as a `#byte_buffer`,
-    /// `#format_args` or `ref #bit8`.
+    /// Checks a data `const`: declared data, taken as its address, a
+    /// `ref #bit8`.
     fn check_data_const(&mut self, name: &Symbol, ty: &LirTy, span: Span) {
         if !self.module.data.iter().any(|datum| datum.name == *name) {
             self.error(
@@ -687,11 +772,9 @@ impl Verifier<'_> {
                 span,
             );
         }
-        if *ty != LirTy::byte_buffer() && *ty != LirTy::format_args() && *ty != LirTy::byte_ref() {
+        if *ty != LirTy::byte_ref() {
             self.error(
-                format!(
-                    "data-symbol const needs `#byte_buffer`, `#format_args`, or `ref #bit8`, found `{ty}`"
-                ),
+                format!("data-symbol const needs `ref #bit8`, found `{ty}`"),
                 span,
             );
         }
@@ -980,7 +1063,10 @@ impl Verifier<'_> {
                     .chain(outs.iter().zip(&sig.outs).map(|slot| ("output", slot)));
                 for (side, (place, expected)) in slots {
                     match places.get(place.as_str()) {
-                        Some(actual) if *actual == expected => {}
+                        // Under opaque pointers any reference fits a
+                        // reference slot, as in a place copy.
+                        Some(actual)
+                            if *actual == expected || (actual.is_ref() && expected.is_ref()) => {}
                         actual => {
                             let actual =
                                 actual.map_or("undeclared".to_owned(), ToString::to_string);
@@ -1155,6 +1241,18 @@ impl Verifier<'_> {
         span: Span,
         func: &LirFunc,
     ) {
+        // A register holds a scalar; an aggregate lives in a place, and is
+        // copied, zeroed and compared there (an unknown type is reported
+        // as one already).
+        if !ty.is_scalar() && self.valid_type(ty) {
+            self.error(
+                format!(
+                    "register `{dst}` in `{}` holds the aggregate `{ty}`; aggregates live in places",
+                    func.name
+                ),
+                span,
+            );
+        }
         if regs.insert(dst.as_str(), RegDef { is_const, ty }).is_some() {
             self.error(
                 format!("register `{dst}` defined twice in `{}`", func.name),

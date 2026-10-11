@@ -1,0 +1,61 @@
+// expect-exit: 0
+// build-arg: --release
+// An aggregate is its bytes: a copy through a parameter, an out, a field
+// and a `ref` keeps the padding too (a `memcpy` of the whole object), and
+// `==` on two copies compares them byte for byte (a `memcmp`).
+
+using Standard.Process
+
+Padded: object {
+    a: @bit8
+    b: @bit64
+    c: @bit16
+}
+
+Holder: object {
+    tag: @bit8
+    inner: Padded
+}
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+// The padding byte at offset 3 of `value` (`b` sits at offset 8).
+padding: function (value: ref Padded) byte: @bit8 {
+    byte = @load_u8(value as ref unknown as ref @bit8, 0x3)
+}
+
+through: function (value: Padded) out: Padded {
+    out = value
+}
+
+main: function () nothing {
+    x: Padded = Padded { a = 0x11, b = 0x2233445566778899, c = 0xAABB }
+    @store_u8(ref x as ref unknown as ref @bit8, 0x3, 0x5A)
+    check(padding(ref x) == 0x5A, 0x1)
+
+    copied: Padded = through(x)
+    check(padding(ref copied) == 0x5A, 0x2)
+    check(copied == x, 0x3)
+
+    holder: Holder = Holder { tag = 0x1, inner = x }
+    from_field: Padded = holder.inner
+    check(padding(ref from_field) == 0x5A, 0x4)
+    check(from_field == x, 0x5)
+
+    pointer: ref Padded = ref holder.inner
+    from_ref: Padded = pointer
+    check(padding(ref from_ref) == 0x5A, 0x6)
+    check(from_ref == x, 0x7)
+    check(from_ref.b == 0x2233445566778899, 0x8)
+    check(from_ref.c == 0xAABB, 0x9)
+
+    from_ref.c = 0xAABC
+    if from_ref == x {
+        exit(0xA)
+    }
+}

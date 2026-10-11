@@ -20,13 +20,17 @@ impl Lower<'_> {
         globals.sort_by_key(|(def, _)| def.0);
         for (def, global) in globals {
             let ty = self.lir_ty(global.ty);
-            let init = global.value.as_ref().and_then(|value| {
-                let constant = self.constant(value);
-                if constant.is_none() {
-                    self.bad_globals.push(value.span);
-                }
-                self.encode_value(&constant?, global.ty)
-            });
+            let init = global
+                .value
+                .as_ref()
+                .and_then(|value| {
+                    let constant = self.constant(value);
+                    if constant.is_none() {
+                        self.bad_globals.push(value.span);
+                    }
+                    Some(self.encode_value(&constant?, global.ty))
+                })
+                .unwrap_or_default();
             let name = self.global_symbol(*def);
             self.module.globals.push(LirGlobal {
                 name,
@@ -81,33 +85,50 @@ impl Lower<'_> {
         Place::Indirect(holder)
     }
 
-    /// `value` as the bytes of a `ty` in the target's layout (little-endian),
-    /// or `None` when it is all zero bits.
-    fn encode_value(&self, value: &Value, ty: TypeRef) -> Option<Vec<u8>> {
-        let size = self.lir_size_align(&self.lir_ty(ty)).size;
-        let mut bytes = vec![0; usize::try_from(size).unwrap_or(0)];
-        self.encode(value, ty, &mut bytes, 0);
-        bytes.iter().any(|byte| *byte != 0).then_some(bytes)
+    /// `value` as the initializer runs of a `ty` in the target's layout
+    /// (little-endian): each nonzero scalar's bytes at its offset, in
+    /// offset order, merged across gaps shorter than [`RUN_GAP`]. Nothing
+    /// is allocated for zero bytes, so the work is proportional to the
+    /// initialized scalars, not the object's size. Empty when every bit is
+    /// zero.
+    fn encode_value(&self, value: &Value, ty: TypeRef) -> Vec<(u64, Vec<u8>)> {
+        let mut scalars = Vec::new();
+        self.encode(value, ty, 0, &mut scalars);
+        scalars.sort_by_key(|(offset, _)| *offset);
+        let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (offset, bytes) in scalars {
+            if let Some((start, run)) = runs.last_mut() {
+                let end = *start + run.len() as u64;
+                if offset < end {
+                    lilac_error::bug!(Span::dummy(), "two scalars of a global overlap");
+                }
+                if offset - end < RUN_GAP {
+                    run.resize(usize::try_from(offset - *start).unwrap_or(usize::MAX), 0);
+                    run.extend(bytes);
+                    continue;
+                }
+            }
+            runs.push((offset, bytes));
+        }
+        runs
     }
 
-    /// Writes `value` (of type `ty`) into `bytes` at `at`, each part at its
-    /// offset in the type's module layout.
-    fn encode(&self, value: &Value, ty: TypeRef, bytes: &mut [u8], at: u64) {
+    /// Adds the bytes of `value` (of type `ty`, at offset `at`) to
+    /// `scalars`: each nonzero scalar's at its offset in the type's module
+    /// layout.
+    fn encode(&self, value: &Value, ty: TypeRef, at: u64, scalars: &mut Vec<(u64, Vec<u8>)>) {
         match (value, self.layout(ty.id)) {
             (Value::Int(bits, width), _) => {
-                let len = (*width / 8) as usize;
-                let start = usize::try_from(at).unwrap_or(usize::MAX);
-                for (index, byte) in bits.to_le_bytes().iter().take(len).enumerate() {
-                    if let Some(slot) = bytes.get_mut(start + index) {
-                        *slot = *byte;
-                    }
+                if *bits != 0 {
+                    let len = (*width / 8) as usize;
+                    scalars.push((at, bits.to_le_bytes().into_iter().take(len).collect()));
                 }
             }
             (Value::Aggregate(values), Some(layout @ Layout::Object { .. })) => {
                 let slots = layout.slots();
                 let offsets = self.offsets(ty);
                 for ((value, (_, ty)), offset) in values.iter().zip(slots).zip(offsets) {
-                    self.encode(value, ty, bytes, at + offset);
+                    self.encode(value, ty, at + offset, scalars);
                 }
             }
             (Value::Variant(index, payload), Some(layout @ Layout::Enum { variants, .. })) => {
@@ -121,8 +142,8 @@ impl Lower<'_> {
                 self.encode(
                     &Value::Int(u64::from(*index), tag_width),
                     tag,
-                    bytes,
                     at + offsets[0],
+                    scalars,
                 );
                 if let Some(payload) = payload {
                     let field = variants
@@ -132,7 +153,7 @@ impl Lower<'_> {
                         .count()
                         + 1;
                     if let (Some((_, ty)), Some(offset)) = (slots.get(field), offsets.get(field)) {
-                        self.encode(payload, *ty, bytes, at + offset);
+                        self.encode(payload, *ty, at + offset, scalars);
                     }
                 }
             }
@@ -150,3 +171,8 @@ impl Lower<'_> {
         }
     }
 }
+
+/// Initializer runs closer than this many zero bytes are one run: the
+/// padding between a global's fields does not split it, and a long zero
+/// stretch (an array left zeroed) costs nothing.
+const RUN_GAP: u64 = 16;

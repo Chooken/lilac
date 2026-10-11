@@ -5,7 +5,7 @@ target triple = "x86_64-unknown-none"
 
 define void @"@conversion:bit32:bit8"(ptr %in0, ptr %out0) {
 entry:
-  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 ptrtoint (ptr getelementptr (i8, ptr null, i32 1) to i64), i1 false)
+  call void @llvm.memset.p0.i64(ptr align 1 %out0, i8 0, i64 1, i1 false)
   %0 = load i32, ptr %in0, align 4
   %1 = trunc i32 %0 to i8
   store i8 %1, ptr %out0, align 1

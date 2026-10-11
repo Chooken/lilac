@@ -8,6 +8,7 @@
 //! `unreachable`). Builtin calls use the value ABI and reuse the runtime
 //! definitions the `runtime` module emits before any user function.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use inkwell::attributes::{Attribute, AttributeLoc};
@@ -15,9 +16,8 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::targets::TargetData;
 use inkwell::types::{
-    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StructType,
+    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType,
 };
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
@@ -28,12 +28,12 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_fields, builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee,
-    LirConst, LirExport, LirFunc, LirInst, LirLayout, LirLayoutKind, LirModule, LirOperand,
-    LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
+    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst,
+    LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg,
+    RmwOp, Symbol,
 };
 use lilac_span::Span;
-use lilac_target::{is_64_bit_triple, Arch, Os, Target};
+use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
 
 /// Turns a fallible inkwell builder call into an ICE.
 pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
@@ -59,7 +59,9 @@ pub(crate) struct Lower<'ctx, 'a> {
     native: IntType<'ctx>,
     arch: Option<Arch>,
     os: Option<Os>,
-    named: HashMap<String, StructType<'ctx>>,
+    /// `.lilac.offset`, once a field or element address has needed it
+    /// ([`Self::offset_ptr`]).
+    offset: Cell<Option<FunctionValue<'ctx>>>,
 }
 
 impl<'ctx, 'a> Lower<'ctx, 'a> {
@@ -83,7 +85,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             native,
             arch: Target::parse(triple).ok().map(|target| target.arch),
             os: Target::parse(triple).ok().map(|target| target.os),
-            named: HashMap::new(),
+            offset: Cell::new(None),
         }
     }
 
@@ -117,15 +119,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.native
     }
 
-    /// Lowers layouts, data globals, the in-module runtime, and functions into
-    /// the module, in that fixed order. Every function is declared before any
-    /// body is lowered so calls and `addr.func` may reference functions defined
-    /// later, and the runtime is defined first so builtin calls reuse it.
+    /// Lowers data globals, global variables, the in-module runtime, and
+    /// functions into the module, in that fixed order. Every function is
+    /// declared before any body is lowered so calls and `addr.func` may
+    /// reference functions defined later, and the runtime is defined first so
+    /// builtin calls reuse it. Aggregates are byte arrays to LLVM
+    /// ([`Self::lir_type`]), so no layout is defined.
     ///
     /// An `extern` signature outside the supported C scalar/pointer set (or
     /// with more than one out) is `E028`.
     pub(crate) fn run(&mut self, entry: Entry) -> Result<(), Diagnostic> {
-        self.define_layouts();
         self.define_data();
         self.define_globals();
         self.emit_runtime();
@@ -212,7 +215,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         for value in [count.into(), arguments.into(), environment.into()] {
             let value: BasicValueEnum = value;
             let slot = checked(builder.build_alloca(value.get_type(), ""), "entry slot");
-            checked(builder.build_store(slot, value), "entry store");
+            self.store(&builder, slot, value, "entry store");
             slots.push(slot.into());
         }
         checked(builder.build_call(start, &slots, ""), "entry call");
@@ -245,7 +248,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         super::runtime::emit_runtime(self);
     }
 
-    /// Maps a LIR type to its LLVM type.
+    /// Maps a LIR type to its LLVM type. An aggregate (a named layout or an
+    /// array) is its bytes, `[size x i8]`: the compiler owns every layout,
+    /// so LLVM never computes one, and a field is its offset from the base
+    /// ([`Self::field_ptr`]).
     pub(crate) fn lir_type(&self, ty: &LirTy) -> BasicTypeEnum<'ctx> {
         match ty {
             LirTy::Ref(_) => self.ptr_type().into(),
@@ -258,15 +264,41 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirTy::FBit(32) => self.context.f32_type().into(),
             LirTy::FBit(64) => self.context.f64_type().into(),
             LirTy::FBit(128) => self.context.f128_type().into(),
-            LirTy::Named(name) if self.named.contains_key(name) => self.named[name].into(),
-            LirTy::Array(elem, len) => {
-                let Ok(len) = u32::try_from(*len) else {
-                    bug!(Span::dummy(), "array length `{len}` exceeds LLVM's limit");
-                };
-                self.lir_type(elem).array_type(len).into()
+            LirTy::Named(_) | LirTy::Array(..) => {
+                match lilac_ir::size_align(&self.lir.layouts, ty, &self.lir.target) {
+                    Some(sized) => self.bytes_type(sized.size),
+                    None => bug!(Span::dummy(), "unknown LIR type `{ty}`"),
+                }
             }
             other => bug!(Span::dummy(), "unknown LIR type `{other}`"),
         }
+    }
+
+    /// `[size x i8]`. LLVM counts array elements in 32 bits, so a larger
+    /// object is whole chunks of 2^31 bytes followed by the rest, packed.
+    pub(crate) fn bytes_type(&self, size: u64) -> BasicTypeEnum<'ctx> {
+        const CHUNK: u32 = 1 << 31;
+        let byte = self.context.i8_type();
+        if let Ok(size) = u32::try_from(size) {
+            return byte.array_type(size).into();
+        }
+        let chunks = u32::try_from(size / u64::from(CHUNK)).unwrap_or_else(|_| {
+            bug!(
+                Span::dummy(),
+                "an object of {size} bytes is past LLVM's limit"
+            )
+        });
+        let rest = u32::try_from(size % u64::from(CHUNK)).unwrap_or(0);
+        let chunk = byte.array_type(CHUNK);
+        self.context
+            .struct_type(
+                &[
+                    chunk.array_type(chunks).into(),
+                    byte.array_type(rest).into(),
+                ],
+                true,
+            )
+            .into()
     }
 
     /// The size and alignment of a LIR type, read from the module's layouts
@@ -276,103 +308,121 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .unwrap_or_else(|| bug!(Span::dummy(), "`{ty}` has no size on `{}`", self.lir.target))
     }
 
+    /// The alignment of a LIR type, as LLVM takes it.
+    fn align_of(&self, ty: &LirTy) -> u32 {
+        let align = self.size_align(ty).align;
+        u32::try_from(align)
+            .unwrap_or_else(|_| bug!(Span::dummy(), "`{ty}` is aligned to {align} bytes"))
+    }
+
+    /// The alignment of a scalar LLVM type: its C scalar's on the target
+    /// (`lilac_target::Target::scalar_layout`), the table every layout is
+    /// built from.
+    fn scalar_align(&self, ty: BasicTypeEnum<'ctx>) -> u32 {
+        let scalar = match ty {
+            BasicTypeEnum::IntType(int) => Scalar::bit(int.get_bit_width()),
+            BasicTypeEnum::FloatType(float) => [
+                (16, self.context.f16_type()),
+                (32, self.context.f32_type()),
+                (64, self.context.f64_type()),
+                (128, self.context.f128_type()),
+            ]
+            .into_iter()
+            .find(|(_, known)| *known == float)
+            .and_then(|(bits, _)| Scalar::float(bits)),
+            BasicTypeEnum::PointerType(_) => Some(Scalar::Pointer),
+            _ => None,
+        };
+        let Some(scalar) = scalar else {
+            bug!(Span::dummy(), "`{}` is not a scalar", ty.print_to_string());
+        };
+        let align = self.lir.target.scalar_layout(scalar).1;
+        u32::try_from(align).unwrap_or(1)
+    }
+
+    /// Loads a scalar of `ty` from `ptr`, aligned to it.
+    fn load(
+        &self,
+        builder: &Builder<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        ptr: PointerValue<'ctx>,
+        what: &str,
+    ) -> BasicValueEnum<'ctx> {
+        let value = checked(builder.build_load(ty, ptr, ""), what);
+        aligned(value.as_instruction_value(), self.scalar_align(ty), what);
+        value
+    }
+
+    /// Stores the scalar `value` to `ptr`, aligned to its type.
+    fn store(
+        &self,
+        builder: &Builder<'ctx>,
+        ptr: PointerValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        what: &str,
+    ) {
+        let store = checked(builder.build_store(ptr, value), what);
+        aligned(Some(store), self.scalar_align(value.get_type()), what);
+    }
+
+    /// Copies a `ty` from `src` to `dst`: an `llvm.memcpy` of its size, at
+    /// its alignment, so every byte (padding too) arrives.
+    fn copy_bytes(
+        &self,
+        builder: &Builder<'ctx>,
+        dst: PointerValue<'ctx>,
+        src: PointerValue<'ctx>,
+        ty: &LirTy,
+    ) {
+        let size = self.native.const_int(self.size_align(ty).size, false);
+        let align = self.align_of(ty);
+        checked(builder.build_memcpy(dst, align, src, align, size), "copy");
+    }
+
+    /// Zeroes the `ty` at `ptr`: a scalar with one store, an aggregate with
+    /// an `llvm.memset` of its size, at its alignment.
+    fn zero_bytes(&self, builder: &Builder<'ctx>, ptr: PointerValue<'ctx>, ty: &LirTy) {
+        if ty.is_scalar() {
+            self.store(builder, ptr, self.lir_type(ty).const_zero(), "zero");
+            return;
+        }
+        let size = self.native.const_int(self.size_align(ty).size, false);
+        let zero = self.context.i8_type().const_zero();
+        checked(
+            builder.build_memset(ptr, self.align_of(ty), zero, size),
+            "zero",
+        );
+    }
+
+    /// `base + offset`, keeping `base`'s provenance: a call of the
+    /// always-inline `.lilac.offset`, a `getelementptr inbounds i8`
+    /// (inkwell's own GEP builders are `unsafe`). The helper is defined the
+    /// first time an address needs it, so a module with no field or element
+    /// access has none.
+    fn offset_ptr(
+        &self,
+        builder: &Builder<'ctx>,
+        base: PointerValue<'ctx>,
+        offset: IntValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let helper = self.offset.get().unwrap_or_else(|| {
+            let helper = crate::runtime::offset_helper(self);
+            self.offset.set(Some(helper));
+            helper
+        });
+        let call = checked(
+            builder.build_call(helper, &[base.into(), offset.into()], ""),
+            "offset",
+        );
+        match call.try_as_basic_value() {
+            ValueKind::Basic(BasicValueEnum::PointerValue(address)) => address,
+            _ => bug!(Span::dummy(), "`.lilac.offset` returned no pointer"),
+        }
+    }
+
     /// The opaque `ptr` type used for every place under the pointer ABI.
     pub(crate) fn ptr_type(&self) -> PointerType<'ctx> {
         self.context.ptr_type(AddressSpace::default())
-    }
-
-    /// Defines one named LLVM struct per LIR layout, in sorted order so printed
-    /// IR is deterministic. Opaque shells are created first so fields may refer
-    /// to any layout regardless of name order.
-    ///
-    /// The builtin aggregates `#byte_buffer`/`#format_args`/`#.lilac.frame`
-    /// never appear in `module.layouts`, so they are built here from
-    /// `builtin_fields`, resolving `#byte_buffer` first (the other two embed
-    /// it).
-    ///
-    /// LLVM lays these structs out itself; each must land exactly where the
-    /// LIR layout (`lilac-layout`, the C layout) says, which
-    /// [`Self::check_layout`] makes sure of.
-    fn define_layouts(&mut self) {
-        let target_data =
-            TargetData::create(&self.module.get_data_layout().as_str().to_string_lossy());
-        for ty in [
-            LirTy::byte_buffer(),
-            LirTy::format_args(),
-            LirTy::trace_frame(),
-        ] {
-            let Some(fields) = builtin_fields(&ty) else {
-                continue;
-            };
-            let fields: Vec<BasicTypeEnum<'ctx>> =
-                fields.iter().map(|(_, ty)| self.lir_type(ty)).collect();
-            let struct_ty = self.context.struct_type(&fields, false);
-            if let Some(layout) = builtin_layout(&ty, &self.lir.target) {
-                self.check_layout(&target_data, &ty.to_string(), struct_ty, &layout);
-            }
-            if let Some(name) = ty.name() {
-                self.named.insert(name.to_owned(), struct_ty);
-            }
-        }
-        let mut names: Vec<&String> = self.lir.layouts.keys().collect();
-        names.sort_unstable();
-        for name in &names {
-            let struct_ty = self.context.opaque_struct_type(name);
-            self.named.insert((*name).clone(), struct_ty);
-        }
-        for name in &names {
-            let layout = &self.lir.layouts[name.as_str()];
-            let fields: Vec<BasicTypeEnum<'ctx>> = layout
-                .fields
-                .iter()
-                .map(|field| self.lir_type(&field.ty))
-                .collect();
-            if let Some(struct_ty) = self.named.get(name.as_str()).copied() {
-                if !struct_ty.set_body(&fields, false) {
-                    bug!(Span::dummy(), "failed to define layout `{name}`");
-                }
-            }
-        }
-        for name in &names {
-            if let Some(struct_ty) = self.named.get(name.as_str()).copied() {
-                let layout = &self.lir.layouts[name.as_str()];
-                self.check_layout(&target_data, &format!("#{name}"), struct_ty, layout);
-            }
-        }
-    }
-
-    /// An internal error unless LLVM lays `struct_ty` out as `layout` says:
-    /// the same size, alignment and field offsets. LIR only has struct
-    /// layouts that LLVM can place this way.
-    fn check_layout(
-        &self,
-        target_data: &TargetData,
-        name: &str,
-        struct_ty: StructType<'ctx>,
-        layout: &LirLayout,
-    ) {
-        if layout.kind != LirLayoutKind::Struct {
-            bug!(Span::dummy(), "layout `{name}` is not a struct");
-        }
-        let offsets: Vec<Option<u64>> = (0..layout.fields.len())
-            .map(|index| {
-                let index = u32::try_from(index).ok()?;
-                target_data.offset_of_element(&struct_ty, index)
-            })
-            .collect();
-        let expected: Vec<Option<u64>> = layout.fields.iter().map(|f| Some(f.offset)).collect();
-        let size = target_data.get_abi_size(&struct_ty);
-        let align = u64::from(target_data.get_abi_alignment(&struct_ty));
-        if size != layout.size || align != layout.align || offsets != expected {
-            bug!(
-                Span::dummy(),
-                "LLVM lays out `{name}` with size {size} align {align} and offsets {offsets:?}, \
-                 but its C layout on `{}` is size {} align {} and offsets {expected:?}",
-                self.lir.target,
-                layout.size,
-                layout.align
-            );
-        }
     }
 
     /// Emits each `!c` data constant as a private `[N x i8]` global, in
@@ -400,34 +450,44 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Defines each global variable: internal, aligned to its type, and
-    /// zeroed or holding its initial bytes (which LIR gives in the target's
-    /// layout, so the global is a byte array under an opaque pointer).
+    /// zeroed or holding its initializer runs ([`Self::global_bytes`]).
     fn define_globals(&self) {
         for global in &self.lir.globals {
-            let align = self.size_align(&global.ty).align;
-            let value = match &global.init {
-                None => {
-                    let ty = self.lir_type(&global.ty);
-                    let value = self.module.add_global(ty, None, global.name.as_str());
-                    value.set_initializer(&ty.const_zero());
-                    value
-                }
-                Some(bytes) => {
-                    let i8_ty = self.context.i8_type();
-                    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
-                    let values: Vec<_> = bytes
-                        .iter()
-                        .map(|byte| i8_ty.const_int(u64::from(*byte), false))
-                        .collect();
-                    let value =
-                        self.module
-                            .add_global(i8_ty.array_type(len), None, global.name.as_str());
-                    value.set_initializer(&i8_ty.const_array(&values));
-                    value
-                }
+            let sized = self.size_align(&global.ty);
+            let initializer = if global.init.is_empty() {
+                self.lir_type(&global.ty).const_zero()
+            } else {
+                self.global_bytes(&global.init, sized.size)
             };
+            let value = self
+                .module
+                .add_global(initializer.get_type(), None, global.name.as_str());
+            value.set_initializer(&initializer);
             value.set_linkage(Linkage::Internal);
-            value.set_alignment(u32::try_from(align).unwrap_or(1));
+            value.set_alignment(self.align_of(&global.ty));
+        }
+    }
+
+    /// A global's initial bytes, `size` in all: its runs with the zero gaps
+    /// between and after them, as one packed constant (or the run alone
+    /// when it covers the object). A gap is a `zeroinitializer`, so a large
+    /// zero array costs nothing.
+    fn global_bytes(&self, runs: &[(u64, Vec<u8>)], size: u64) -> BasicValueEnum<'ctx> {
+        let mut parts: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut at = 0;
+        for (offset, bytes) in runs {
+            if *offset > at {
+                parts.push(self.bytes_type(offset - at).const_zero());
+            }
+            parts.push(self.context.const_string(bytes, false).into());
+            at = offset + bytes.len() as u64;
+        }
+        if at < size {
+            parts.push(self.bytes_type(size - at).const_zero());
+        }
+        match parts.as_slice() {
+            [only] => *only,
+            _ => self.context.const_struct(&parts, true).into(),
         }
     }
 
@@ -440,7 +500,26 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     fn declare_func(&self, func: &LirFunc) -> Result<(), Diagnostic> {
         if func.uses_c_abi() {
             let fn_type = self.extern_fn_type(func)?;
-            self.module.add_function(func.name.as_str(), fn_type, None);
+            // The runtime declares the C functions the backend calls itself
+            // (`memcmp`); an `extern` of one shares that declaration, so it
+            // must agree with it.
+            match self.module.get_function(func.name.as_str()) {
+                Some(declared) if declared.get_type() == fn_type => {}
+                Some(declared) => {
+                    return Err(Diagnostic::error(
+                        codes::E028,
+                        format!(
+                            "`extern` function `{}` does not match the C signature `{}`",
+                            func.name,
+                            declared.get_type().print_to_string()
+                        ),
+                    )
+                    .help("declare it with the C library's own signature"));
+                }
+                None => {
+                    self.module.add_function(func.name.as_str(), fn_type, None);
+                }
+            }
             return Ok(());
         }
         let arity = func.ins.len() + func.outs.len();
@@ -553,7 +632,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             let Some(value) = entry.get_nth_param(u32::try_from(index).unwrap_or(u32::MAX)) else {
                 bug!(Span::dummy(), "export `{symbol}` lost a parameter");
             };
-            checked(builder.build_store(slot, value), "export argument store");
+            self.store(&builder, slot, value, "export argument store");
             slots.push(slot.into());
         }
         let outs: Vec<_> = export
@@ -573,7 +652,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         checked(builder.build_call(body, &slots, ""), "export call");
         match outs.first() {
             Some((ty, slot)) => {
-                let value = checked(builder.build_load(*ty, *slot, "result"), "export result");
+                let value = self.load(&builder, *ty, *slot, "export result");
                 checked(builder.build_return(Some(&value)), "export return");
             }
             None => {
@@ -671,9 +750,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::CopyPlace { src, dst, .. } => {
-                let value = self.operand(src, None, builder, state);
-                let ptr = place_ptr(dst, state);
-                checked(builder.build_store(ptr, value), "copy store");
+                self.write(src, place_ptr(dst, state), builder, state);
+            }
+            LirInst::CopyDeref { src, dst, .. } => {
+                let from = self.pointer_in(src, builder, state);
+                let Some(ty) = state.place_types.get(dst) else {
+                    bug!(Span::dummy(), "copy to undeclared place `{dst}`");
+                };
+                let to = place_ptr(dst, state);
+                if ty.is_scalar() {
+                    let value = self.load(builder, self.lir_type(ty), from, "copy load");
+                    self.store(builder, to, value, "copy store");
+                } else {
+                    self.copy_bytes(builder, to, from, ty);
+                }
             }
             LirInst::Const { dst, value, ty, .. } => {
                 let value = self.const_value(value, ty);
@@ -682,12 +772,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirInst::Load { src, dst, ty, .. } => {
                 // `load %src` always follows the pointer in `src`, even when
                 // the pointee is itself a `ref` (an `Optional[ref T]` payload).
-                let ptr = checked(
-                    builder.build_load(self.ptr_type(), place_ptr(src, state), ""),
-                    "load ref",
-                )
-                .into_pointer_value();
-                let value = checked(builder.build_load(self.lir_type(ty), ptr, ""), "load");
+                let ptr = self.pointer_in(src, builder, state);
+                let value = self.load(builder, self.lir_type(ty), ptr, "load");
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Addr { place, dst, .. } => {
@@ -705,10 +791,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 obj, idx, dst, ty, ..
             } => {
                 let field = self.field_ptr(obj, *idx, builder, state);
-                let value = checked(
-                    builder.build_load(self.lir_type(ty), field, ""),
-                    "field load",
-                );
+                let value = self.load(builder, self.lir_type(ty), field, "field load");
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::FieldAddr { obj, idx, dst, .. } => {
@@ -720,13 +803,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 value, obj, idx, ..
             } => {
                 let field = self.field_ptr(obj, *idx, builder, state);
-                let stored = self.operand(value, None, builder, state);
-                checked(builder.build_store(field, stored), "field store");
+                self.write(value, field, builder, state);
             }
             LirInst::Store { src, dst, .. } => {
                 let reference = self.load_place(dst, builder, state).into_pointer_value();
-                let value = self.operand(src, None, builder, state);
-                checked(builder.build_store(reference, value), "store through ref");
+                self.write(src, reference, builder, state);
             }
             LirInst::Convert {
                 op, src, dst, ty, ..
@@ -763,6 +844,23 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
+    /// The pointer held in the `ref` place `place` (what `load` and
+    /// `copy ref` follow).
+    fn pointer_in(
+        &self,
+        place: &PlaceName,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> PointerValue<'ctx> {
+        self.load(
+            builder,
+            self.ptr_type().into(),
+            place_ptr(place, state),
+            "load ref",
+        )
+        .into_pointer_value()
+    }
+
     /// The address of global `global` (`addr.global`).
     fn global_addr(&self, global: &Symbol) -> BasicValueEnum<'ctx> {
         let Some(value) = self.module.get_global(global.as_str()) else {
@@ -771,17 +869,42 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         value.as_pointer_value().into()
     }
 
-    /// Lowers `zero %place`: a `memset` of the place's size.
+    /// Writes the operand `src` to the memory at `dst`: an aggregate place
+    /// as an `llvm.memcpy` of its bytes, a scalar as an aligned store.
+    fn write(
+        &self,
+        src: &LirOperand,
+        dst: PointerValue<'ctx>,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        if let LirOperand::Place(name) = src {
+            match state.place_types.get(name) {
+                Some(ty) if !ty.is_scalar() => {
+                    self.copy_bytes(builder, dst, place_ptr(name, state), ty);
+                    return;
+                }
+                Some(_) => {}
+                None => bug!(Span::dummy(), "copy of undeclared place `{name}`"),
+            }
+        }
+        let value = self.operand(src, None, builder, state);
+        self.store(builder, dst, value, "copy store");
+    }
+
+    /// Lowers `zero %place`: an `llvm.memset` of the place's size, at its
+    /// alignment.
     fn lower_zero(&self, place: &PlaceName, builder: &Builder<'ctx>, state: &FnState<'ctx>) {
         let ptr = place_ptr(place, state);
         let Some(ty) = state.place_types.get(place) else {
             bug!(Span::dummy(), "zero of undeclared place `{place}`");
         };
-        let Some(size) = self.lir_type(ty).size_of() else {
-            bug!(Span::dummy(), "zero of unsized place `{place}`");
-        };
+        let size = self.native.const_int(self.size_align(ty).size, false);
         let zero = self.context.i8_type().const_zero();
-        checked(builder.build_memset(ptr, 1, zero, size), "zero place");
+        checked(
+            builder.build_memset(ptr, self.align_of(ty), zero, size),
+            "zero place",
+        );
     }
 
     /// Lowers an atomic instruction. `atomicrmw` and `cmpxchg` take their
@@ -927,7 +1050,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state.regs.insert(dst.to_owned(), value);
     }
 
-    /// Allocates a zeroed place of `ty` and binds it under `place`.
+    /// Allocates a zeroed place of `ty`, aligned to its layout, and binds it
+    /// under `place`.
     fn lower_alloca(
         &self,
         ty: &LirTy,
@@ -935,36 +1059,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &mut FnState<'ctx>,
     ) {
-        let value_ty = self.lir_type(ty);
-        let ptr = checked(builder.build_alloca(value_ty, place.as_str()), "alloca");
-        checked(
-            builder.build_store(ptr, value_ty.const_zero()),
-            "zero-init store",
+        let ptr = checked(
+            builder.build_alloca(self.lir_type(ty), place.as_str()),
+            "alloca",
         );
+        aligned(ptr.as_instruction(), self.align_of(ty), "alloca");
+        self.zero_bytes(builder, ptr, ty);
         state.places.insert(place.to_owned(), ptr);
         state.place_types.insert(place.to_owned(), ty.clone());
-    }
-
-    /// An `alloca` in the current function's entry block (so a loop does not
-    /// grow the stack).
-    fn entry_alloca(
-        &self,
-        ty: impl BasicType<'ctx>,
-        builder: &Builder<'ctx>,
-    ) -> PointerValue<'ctx> {
-        let Some(entry) = builder
-            .get_insert_block()
-            .and_then(inkwell::basic_block::BasicBlock::get_parent)
-            .and_then(inkwell::values::FunctionValue::get_first_basic_block)
-        else {
-            bug!(Span::dummy(), "alloca outside a function");
-        };
-        let at_entry = self.context.create_builder();
-        match entry.get_first_instruction() {
-            Some(first) => at_entry.position_before(&first),
-            None => at_entry.position_at_end(entry),
-        }
-        checked(at_entry.build_alloca(ty, ""), "entry alloca")
     }
 
     /// Materializes the address of `@name`, normalized to the instruction's
@@ -1051,10 +1153,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                         bug!(Span::dummy(), "extern `{name}` unexpectedly returned void")
                     }
                 };
-                checked(
-                    builder.build_store(place_ptr(out, state), value),
-                    "extern result store",
-                );
+                self.store(builder, place_ptr(out, state), value, "extern result store");
             }
         } else {
             let args = self.direct_call_args(callee, ins, outs, builder, state);
@@ -1123,7 +1222,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                         builder.build_alloca(self.ptr_type(), "ref.arg"),
                         "ref arg alloca",
                     );
-                    checked(builder.build_store(slot, ptr), "ref arg store");
+                    self.store(builder, slot, ptr.into(), "ref arg store");
                     BasicMetadataValueEnum::from(slot)
                 } else {
                     BasicMetadataValueEnum::from(ptr)
@@ -1217,10 +1316,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             let ValueKind::Basic(value) = result.try_as_basic_value() else {
                 bug!(Span::dummy(), "C call through `{reg}` returned void");
             };
-            checked(
-                builder.build_store(place_ptr(out, state), value),
-                "C call result store",
-            );
+            self.store(builder, place_ptr(out, state), value, "C call result store");
         }
     }
 
@@ -1278,8 +1374,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     bug!(Span::dummy(), "builtin `{name}` unexpectedly returned void")
                 }
             };
-            checked(
-                builder.build_store(place_ptr(out, state), value),
+            self.store(
+                builder,
+                place_ptr(out, state),
+                value,
                 "builtin result store",
             );
         }
@@ -1333,7 +1431,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.load_as(name, &ty, builder, state)
     }
 
-    /// Loads place `name` as the given LIR type.
+    /// Loads place `name` as the given (scalar) LIR type.
     fn load_as(
         &self,
         name: &PlaceName,
@@ -1345,17 +1443,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         // follows that pointer to the pointee first.
         let ptr = place_ptr(name, state);
         let ptr = match state.place_types.get(name) {
-            Some(place_ty) if place_ty.is_ref() && !ty.is_ref() => {
-                checked(builder.build_load(self.ptr_type(), ptr, ""), "load ref")
-                    .into_pointer_value()
-            }
+            Some(place_ty) if place_ty.is_ref() && !ty.is_ref() => self
+                .load(builder, self.ptr_type().into(), ptr, "load ref")
+                .into_pointer_value(),
             _ => ptr,
         };
-        checked(builder.build_load(self.lir_type(ty), ptr, ""), "load")
+        self.load(builder, self.lir_type(ty), ptr, "load")
     }
 
-    /// GEPs to field `idx` of place `obj`, loading the object pointer first
-    /// when the place holds a `ref`.
+    /// The address of field `idx` of place `obj` (loading the object's
+    /// pointer first when the place holds a `ref`): the base plus the
+    /// field's offset in the layout.
     fn field_ptr(
         &self,
         obj: &PlaceName,
@@ -1363,27 +1461,35 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &FnState<'ctx>,
     ) -> PointerValue<'ctx> {
-        let Some(place_ty) = state.place_types.get(obj).cloned() else {
+        let Some(place_ty) = state.place_types.get(obj) else {
             bug!(Span::dummy(), "field of undeclared place `{obj}`");
         };
-        let owner = place_ty.strip_ref();
-        let BasicTypeEnum::StructType(struct_ty) = self.lir_type(owner) else {
-            bug!(Span::dummy(), "field of non-struct place `{obj}`");
-        };
+        let offset = self.field_offset(place_ty.strip_ref(), idx);
         let base = if place_ty.is_ref() {
-            let raw = place_ptr(obj, state);
-            checked(builder.build_load(self.ptr_type(), raw, ""), "load ref").into_pointer_value()
+            self.load_place(obj, builder, state).into_pointer_value()
         } else {
             place_ptr(obj, state)
         };
-        checked(
-            builder.build_struct_gep(struct_ty, base, idx, ""),
-            "field gep",
-        )
+        if offset == 0 {
+            return base;
+        }
+        self.offset_ptr(builder, base, self.native.const_int(offset, false))
     }
 
-    /// `elem.addr`: the array's base plus `index` times the element size,
-    /// in integer arithmetic (no dynamic GEP).
+    /// The offset of field `idx` of the aggregate `owner`, from its layout
+    /// (a module layout, else a builtin one).
+    fn field_offset(&self, owner: &LirTy, idx: u32) -> u64 {
+        let field = |layout: &LirLayout| layout.fields.get(idx as usize).map(|field| field.offset);
+        let offset = match owner.name().and_then(|name| self.lir.layouts.get(name)) {
+            Some(layout) => field(layout),
+            None => builtin_layout(owner, &self.lir.target).and_then(|layout| field(&layout)),
+        };
+        offset.unwrap_or_else(|| bug!(Span::dummy(), "`{owner}` has no field {idx}"))
+    }
+
+    /// `elem.addr`: the array's base plus `index` times the element size.
+    /// Lowering checked the bounds (or the index is a constant in them), so
+    /// the address is in bounds.
     fn lower_elem_addr(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
         let LirInst::ElemAddr {
             array,
@@ -1404,16 +1510,25 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             ),
             "element offset",
         );
-        let elem = crate::runtime::byte_ptr(self, builder, reg_ptr(array, state), offset);
+        let elem = self.offset_ptr(builder, reg_ptr(array, state), offset);
         state.regs.insert(dst.clone(), elem.into());
     }
 
-    /// Materializes a `const`: a data-symbol address (or `#byte_buffer`
-    /// wrapper), a float immediate, or an integer/pointer immediate. The
-    /// verifier has checked the value against its type.
+    /// Materializes a `const`: a data-symbol address, a float immediate, or
+    /// an integer/pointer immediate. The verifier has checked the value
+    /// against its type.
     fn const_value(&self, value: &LirConst, ty: &LirTy) -> BasicValueEnum<'ctx> {
         match (value, self.lir_type(ty)) {
-            (LirConst::Data(name), _) => self.data_const(name, ty),
+            (LirConst::Data(name), BasicTypeEnum::PointerType(_)) => {
+                let Some(global) = self.module.get_global(name.as_str()) else {
+                    bug!(
+                        Span::dummy(),
+                        "const of undeclared data `!{}`",
+                        name.as_str()
+                    );
+                };
+                global.as_pointer_value().into()
+            }
             (LirConst::Float(value), BasicTypeEnum::FloatType(float_ty)) => {
                 float_ty.const_float(*value).into()
             }
@@ -1426,48 +1541,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 "`const {value}` cannot be a `{}` value",
                 other.print_to_string()
             ),
-        }
-    }
-
-    /// The value of a data-symbol `const`: `#byte_buffer` wraps `{len, ptr}`,
-    /// a reference type is the bare global address.
-    fn data_const(&self, name: &Symbol, ty: &LirTy) -> BasicValueEnum<'ctx> {
-        let Some(global) = self.module.get_global(name.as_str()) else {
-            bug!(
-                Span::dummy(),
-                "const of undeclared data `!{}`",
-                name.as_str()
-            );
-        };
-        let ptr = global.as_pointer_value();
-        if *ty == LirTy::byte_buffer() {
-            let len = self.data_len(name.as_str());
-            let len_value = self.native.const_int(len, false);
-            self.context
-                .const_struct(&[len_value.into(), ptr.into()], false)
-                .into()
-        } else if ty.is_ref() {
-            ptr.into()
-        } else {
-            // The LIR verifier's `check_const_lit` accepts `#byte_buffer`,
-            // `#format_args`, and `ref #bit8` data-symbol consts. A `[N x i8]`
-            // global can only become a `#byte_buffer` wrapper or a bare
-            // reference; `#format_args` (a seventeen-field piece table) has no
-            // meaningful lowering and no `lilac-lower` path emits one.
-            // This explicit, documented ICE pins the divergence
-            // (`format_args_data_const_is_ice`).
-            bug!(
-                Span::dummy(),
-                "data-symbol const type `{ty}` is accepted by the LIR verifier but has no codegen lowering"
-            );
-        }
-    }
-
-    /// Byte length of a data global (no NUL terminator).
-    fn data_len(&self, name: &str) -> u64 {
-        match self.lir.data.iter().find(|datum| datum.name == name) {
-            Some(datum) => u64::try_from(datum.bytes.len()).unwrap_or(u64::MAX),
-            None => bug!(Span::dummy(), "const of undeclared data `!{name}`"),
         }
     }
 
@@ -1621,27 +1694,6 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             Some(BasicValueEnum::PointerValue(value)) => {
                 checked(builder.build_ptr_to_int(value, self.native, ""), "ptrtoint")
             }
-            Some(BasicValueEnum::StructValue(value)) => {
-                // Aggregates compare as one integer over their bytes; the slot
-                // is zeroed first so padding is deterministic.
-                let ty = value.get_type();
-                let layout = self.module.get_data_layout();
-                let data = TargetData::create(layout.as_str().to_str().unwrap_or_default());
-                let bits = u32::try_from(data.get_abi_size(&ty) * 8).unwrap_or(u32::MAX);
-                let slot = self.entry_alloca(ty, builder);
-                let Some(size) = ty.size_of() else {
-                    bug!(Span::dummy(), "comparison of an unsized aggregate");
-                };
-                let zero = self.context.i8_type().const_zero();
-                checked(builder.build_memset(slot, 1, zero, size), "eq slot zero");
-                checked(builder.build_store(slot, value), "eq slot store");
-                let Some(int_ty) = std::num::NonZeroU32::new(bits)
-                    .and_then(|bits| self.context.custom_width_int_type(bits).ok())
-                else {
-                    bug!(Span::dummy(), "comparison of a zero-sized aggregate");
-                };
-                checked(builder.build_load(int_ty, slot, ""), "eq slot load").into_int_value()
-            }
             Some(BasicValueEnum::FloatValue(value)) => {
                 let int_ty = self.int_type_of_width(value.get_type().get_bit_width());
                 match checked(builder.build_bit_cast(value, int_ty, ""), "float bitcast") {
@@ -1737,12 +1789,16 @@ pub(crate) fn symbol(name: &str) -> &str {
 /// The LLVM symbol a `@`-prefixed leaf LIR builtin emits under. `@memcpy`
 /// becomes `.lilac.memcpy` so its in-module definition cannot collide with the
 /// host C library's `memcpy`; `@ptr_add`/`@lilac_abort`/`@linux_syscall` map to
-/// their `.lilac.` leaves (`syscall` is also a C library function).
+/// their `.lilac.` leaves (`syscall` is also a C library function). `@memcmp`
+/// is C's own `memcmp`, which the optimizer expands inline for a small
+/// constant size and the C library (or, natively, [`crate::native`])
+/// defines.
 fn builtin_symbol(name: &str) -> &str {
     match name {
         "@memcpy" => ".lilac.memcpy",
         "@memmove" => ".lilac.memmove",
         "@memset" => ".lilac.memset",
+        "@memcmp" => "memcmp",
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
         "@linux_syscall" => ".lilac.linux_syscall",
@@ -1894,5 +1950,15 @@ fn reg_float<'ctx>(name: &Reg, state: &FnState<'ctx>) -> FloatValue<'ctx> {
             other.get_type().print_to_string()
         ),
         None => bug!(Span::dummy(), "use of undefined register `{name}`"),
+    }
+}
+
+/// Sets a load's or store's alignment (`align` bytes).
+fn aligned(inst: Option<InstructionValue<'_>>, align: u32, what: &str) {
+    let Some(inst) = inst else {
+        bug!(Span::dummy(), "{what} is not an instruction");
+    };
+    if let Err(err) = inst.set_alignment(align) {
+        bug!(Span::dummy(), "cannot align {what} to {align}: {err}");
     }
 }

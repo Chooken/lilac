@@ -11,27 +11,31 @@ function @main
 {
   $entry:
     alloca #byte_buffer %s : zeroed
+    alloca #byte_buffer %tmp.1 : zeroed
     alloca #bit_native %n : zeroed
-    alloca #bit_native %tmp.1 : zeroed
-    alloca #bit32 %tmp.2 : zeroed
-    alloca #byte_buffer %tmp.3 : zeroed
-    alloca ref #bit8 %tmp.4 : zeroed
-    alloca ref #unknown %tmp.5 : zeroed
-    alloca #byte_buffer %tmp.6 : zeroed
-    alloca #bit_native %tmp.7 : zeroed
-    &1: #byte_buffer = const !c0
-    copy &1 -> %s
-    &2: #bit32 = const 0x1
-    copy &2 -> %tmp.2
-    copy %s -> %tmp.3
-    call @.lilac.byte_buffer_ptr (in %tmp.3) (out %tmp.4)
-    &3: ref #bit8 = copy %tmp.4
-    &4: ref #unknown = bitcast &3
-    copy &4 -> %tmp.5
-    copy %s -> %tmp.6
-    call @.lilac.byte_buffer_len (in %tmp.6) (out %tmp.7)
-    call @write (in %tmp.2, %tmp.5, %tmp.7) (out %tmp.1)
-    copy %tmp.1 -> %n
+    alloca #bit_native %tmp.2 : zeroed
+    alloca #bit32 %tmp.3 : zeroed
+    alloca #byte_buffer %tmp.4 : zeroed
+    alloca ref #bit8 %tmp.5 : zeroed
+    alloca ref #unknown %tmp.6 : zeroed
+    alloca #byte_buffer %tmp.7 : zeroed
+    alloca #bit_native %tmp.8 : zeroed
+    &1: ref #bit8 = const !c0
+    copy &1 -> %tmp.1.data  // idx 1
+    &2: #bit_native = const 0x3
+    copy &2 -> %tmp.1.len  // idx 0
+    copy %tmp.1 -> %s
+    &3: #bit32 = const 0x1
+    copy &3 -> %tmp.3
+    copy %s -> %tmp.4
+    call @.lilac.byte_buffer_ptr (in %tmp.4) (out %tmp.5)
+    &4: ref #bit8 = copy %tmp.5
+    &5: ref #unknown = bitcast &4
+    copy &5 -> %tmp.6
+    copy %s -> %tmp.7
+    call @.lilac.byte_buffer_len (in %tmp.7) (out %tmp.8)
+    call @write (in %tmp.3, %tmp.6, %tmp.8) (out %tmp.2)
+    copy %tmp.2 -> %n
     return
 }
 function @.lilac.byte_buffer_ptr

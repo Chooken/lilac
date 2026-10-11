@@ -1,4 +1,3 @@
-// pending: robustness plan phase 3 (`==` on an object over 1 MiB is an internal error)
 // expect-exit: 0
 // `==` on 2 MiB objects compares every byte (a `memcmp`, not one LLVM
 // integer, which caps at 2^23 bits).

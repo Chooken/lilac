@@ -10,17 +10,22 @@
 * \# = type
 * % = mutable place (allocad variable)
 * $ = Label (block)
-* & = SSA register value within a block (`&n: #type`, defined once before use)
+* & = SSA register value within a block (`&n: #type`, defined once before use).
+  A register holds a scalar only: a bit or float container, `#bit_native` or
+  a `ref`. Aggregates (`#Name`, arrays, the builtin layouts) live in places
+  and move between them with `copy`; an aggregate register is a
+  verification error.
 * `addr` / `addr.func` / `load` = explicit address and dereference operations.
   There is no bare `ref` modifier on operands.
 
 # Sections
 
 Data sections hold constant declarations: the bytes of string literals
-(`!c: str = "..."`). A string literal is read as a data-backed buffer value
-with `const !c:#byte_buffer`, never a call to the `.lilac.byte_buffer_from`
-runtime function. Number literals are `const` registers typed directly, not
-data. f-strings lower to `@format_args` construction plus conversions/calls
+(`!c: str = "..."`). A data `const` is the address of those bytes
+(`&1: ref #bit8 = const !c`); a string literal is a `#byte_buffer` place
+filled field by field with it and its length, never a call to the
+`.lilac.byte_buffer_from` runtime function. Number literals are `const`
+registers typed directly, not data. f-strings lower to `@format_args` construction plus conversions/calls
 and introduce no new instruction shapes (see `SPEC.md`).
 ```lilac-ir
 data {
@@ -29,11 +34,17 @@ data {
 ```
 
 Globals are mutable static storage, one declaration each, either zeroed or
-holding their initial bytes (little-endian, in the type's C layout).
+holding their initial bytes (little-endian, in the type's C layout) as runs:
+`offset: "bytes"` pairs over an otherwise zero object, in offset order,
+non-empty, not overlapping and within the type's size (the verifier checks
+all four). Lowering writes one run per stretch of nonzero scalars, joining
+runs less than 16 zero bytes apart, and never materializes the zeros; the
+backend emits a packed constant with `zeroinitializer` gaps.
 The symbol is the global's qualified name (a root global's under `.root.`);
 globals no `addr.global` names are removed by DCE.
 ```lilac-ir
-global !.root.count: #bit32 = bytes "*\x00\x00\x00"
+global !.root.count: #bit32 = bytes { 0: "*\x00\x00\x00" }
+global !.root.origin: #Point = bytes { 0: "\x03\x00\x00\x00\x04\x00\x00\x00" }
 global !.root.pointer: ref #bit32 = zeroed
 ```
 
@@ -62,8 +73,10 @@ payload; }`): its first member is the integer tag and every other member a
 payload at one shared offset; lowering does not produce one yet. The
 verifier recomputes every section for the module's `target` and rejects one
 whose offsets, size or alignment differ; nothing after lowering computes a
-layout. No layout, and no array, may be larger than the target's
-`isize::MAX` bytes (typeck reports one as `E067`).
+layout. The backend gives an aggregate the LLVM type `[size x i8]` aligned
+to the layout's alignment and addresses a field as the base plus its
+offset, so the layout here is the only one. No layout, and no array, may
+be larger than the target's `isize::MAX` bytes (typeck reports one as `E067`).
 
 Builtin aggregates usable in `#` positions are `#byte_buffer`,
 `#format_args` and `#.lilac.frame`. All are plain values with no hidden
@@ -84,15 +97,17 @@ types.
 The table is spelled out as sixteen named fields rather than an array.
 The verifier resolves `field`/`field.addr` against these layouts
 (`lilac_ir::builtin_fields`), laid out as C structs like any other
-(`lilac_ir::builtin_layout`); the backend builds matching structs.
+(`lilac_ir::builtin_layout`); the backend sizes them from that layout.
 
 The opaque type `#unknown` has no size and is valid only behind a reference:
 `ref #unknown` is the erased pointer (C `void*`), lowered to an LLVM `ptr`. A
 bare `#unknown` place is unsized and rejected by the verifier.
 
 An array type is spelled `[N x #t]`: `N` elements of `#t` (any sized type,
-including another array), laid out like a C array and lowered to LLVM
-`[N x T]`. Its elements are addressed with `elem.addr`.
+including another array), laid out like a C array and lowered, like every
+aggregate, to LLVM bytes. Its elements are addressed with `elem.addr`
+(the base plus the index times the element's size, an `inbounds` byte
+offset).
 
 Functions can be declared as:
 ```lilac-ir
@@ -220,7 +235,8 @@ alloca #type %name : zeroed
 Legacy text `allocate #, %` means the same as `alloca`.
 
 `zero %x` re-zeroes a place (a function's out slots and drop flags at entry,
-a struct literal's temporary before its fields are written):
+a struct literal's temporary before its fields are written); an aggregate
+place is a `memset` of its size at its alignment:
 ```lilac-ir
 zero %out
 ```
@@ -233,19 +249,27 @@ zero %out
   `&r: #t = load %p` reads the value that the pointer in `ref` place `%p`
   points to. `load` always follows the pointer, even when `#t` is itself a
   `ref` (reading an `Optional[ref T]` payload through the slot's address).
+  `#t` is a scalar (registers hold nothing else); an aggregate behind a
+  `ref` is read with `copy ref %p -> %dst`, which copies the `size` bytes
+  `%p` points to into the place `%dst` (a `memcpy`). Every scalar load
+  and store carries the scalar's alignment.
   Plain operand reads of a `ref` place (`copy %p`) yield the pointer.
 ```lilac-ir
 &1: ref #bit32 = addr %variable
 &2: #bit32 = load %ptr
+copy ref %self -> %tmp.1
 ```
 
 ### copy / const
 * `copy` moves between places and regs. Operands must share a type, except that
   two references are compatible under opaque pointers: `copy %a -> %b` with
   `ref X` -> `ref Y` is a pointer copy. A reference/value mix (`ref X` vs a
-  value) and two distinct value types are rejected.
+  value) and two distinct value types are rejected. A `copy` of an aggregate
+  is place to place, a `memcpy` of the layout's size at its alignment, so
+  it carries padding bytes too and costs LLVM nothing however large.
 * `const` defines a typed register from a literal: an integer, a float or a
-  data symbol (`LirConst`). The verifier checks it against the register type.
+  data symbol (`LirConst`; a data symbol's register is `ref #bit8`). The
+  verifier checks it against the register type.
 ```lilac-ir
 copy %a -> %b
 copy &1 -> %b
@@ -327,17 +351,18 @@ call c &f (in %a) (out %b)
 * Callee is a `@`-builtin **leaf** name (`call @ptr_add (in %base, %off) (out %s)`)
 * Only the target-specific leaves are builtins, verified against the
   signature table below. They lower to the `.lilac.*` backend symbols shown.
-  `@size_of`/`@align_of` are `const`s, `@ptr_add`/`@ptr_to_address`/
-  `@address_to_ptr` are `bitcast` (plus an `i.add`), and `@compile_error`
+  `@size_of`/`@align_of` are `const`s, `@ptr_to_address`/
+  `@address_to_ptr` are `bitcast`s, and `@compile_error`
   is a marker, never builtin calls
   (see `compile.error`)
 
 | builtin | in-args | out | LLVM lowering |
 | --- | --- | --- | --- |
-| `@ptr_add` | `ref #bit8`, `#bit_native` | `ref #bit8` | `ptrtoint` + `add` + `inttoptr` |
+| `@ptr_add` | `ref #bit8`, `#bit_native` | `ref #bit8` | `getelementptr i8` (wrapping: no `inbounds`) in an always-inline IR helper (as `.lilac.ptr_add`) |
 | `@memcpy` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memcpy` (as `.lilac.memcpy`) |
 | `@memmove` | `ref #bit8`, `ref #bit8`, `#bit_native` | — | `llvm.memmove` (as `.lilac.memmove`) |
 | `@memset` | `ref #bit8`, `#bit8`, `#bit_native` | — | `llvm.memset` (as `.lilac.memset`) |
+| `@memcmp` | `ref #bit8`, `ref #bit8`, `#bit_native` | `#bit32` | the C `memcmp` (aggregate `==`; a native executable defines it, `no-builtins`) |
 | `@linux_syscall` | `#bit_native` × 7 | `#bit_native` | the Linux system-call instruction, as inline assembly (as `.lilac.linux_syscall`; x86-64 and aarch64 Linux only, `E035` from user code elsewhere) |
 | `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`); `@trap()` lowers to it, then `unreachable` |
 | `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`), `thread_local` on Windows, Linux (local-exec) and macOS |
@@ -483,9 +508,10 @@ field %obj .name -> &1  // idx 2, #bit32
 ```
 
 ## Comparisons
-* ```&r: #bit8 = cmp.eql &a, &b``` — bit equality of any two same-typed
-  operands (integers, floats, pointers, and aggregates, which compare their
-  zero-padded bytes).
+* ```&r: #bit8 = cmp.eql &a, &b``` — bit equality of two same-typed
+  scalars (integers, floats, pointers). Aggregate `==` is a `@memcmp` of
+  the two places' addresses over the layout's size, compared with zero:
+  every byte, padding included.
 * ```i.cmp.lt``` / ```i.cmp.gt``` / ```i.cmp.le``` / ```i.cmp.ge``` (signed)
 * ```i.cmp.lt.u``` / ```i.cmp.gt.u``` / ```i.cmp.le.u``` / ```i.cmp.ge.u``` (unsigned)
 * ```f.cmp.lt``` / ```f.cmp.gt``` / ```f.cmp.le``` / ```f.cmp.ge``` (IEEE-754
@@ -513,12 +539,13 @@ Same width rule as integer arithmetic.
   `0x0`.
 * Floats: `&1: #fbit64 = const 1000.0`: the shortest text that reads back
   as the same `f64`, not the source spelling.
-* Strings: `!c: str = "..."` in `data`; a string literal is read with
-  `&1: #byte_buffer = const !c` (data-backed buffer value).
+* Strings: `!c: str = "..."` in `data`; `&1: ref #bit8 = const !c` is its
+  address, stored with the length into a `#byte_buffer` place.
 
 ## Verification (`lilac-ir::verify`, runs before any backend)
 1. Header present with supported `lilac_ir` version; `target` resolves `@bit_native`.
-2. All `!/@/#/%/$/&` names resolve; `&regs` defined once before use in block.
+2. All `!/@/#/%/$/&` names resolve; `&regs` defined once before use in block,
+   each of a scalar type (an aggregate register is rejected).
 3. Every block ends in exactly one terminator; all branch targets exist.
 4. `call` arity and `in/out` types match callee signature.
 5. `field .name` exists with index in bounds and matching type comment.
@@ -534,3 +561,6 @@ Same width rule as integer arithmetic.
     `acquire`/`acq_rel`, and a fence not `relaxed`.
 11. `elem.addr`: the array register is `ref [N x #t]`, the index
     `#bit_native`, and the result `ref #t`.
+12. `copy ref %src -> %dst`: `%src` is a `ref` place and `%dst` a place of
+    its pointee's type. A global's initializer runs are ordered, non-empty,
+    disjoint and inside its size.
