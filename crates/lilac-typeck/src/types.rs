@@ -30,10 +30,28 @@ impl Checker<'_> {
             let args = self.env.args.clone();
             self.types.substitute(template, &args)
         };
-        if !self.types.contains_param(resolved.id) && self.ensure_type(resolved, ty.span).is_err() {
+        if !self.types.contains_param(resolved.id) && self.ensure_syntax(resolved, ty).is_err() {
             return TypeRef::ERROR;
         }
         resolved
+    }
+
+    /// [`Self::ensure_type`] for a type resolved from `syntax`: an array
+    /// written in it is laid out at its own length, so an array too large
+    /// for the target (`E067`) is reported at the length that made it so.
+    fn ensure_syntax(&mut self, ty: TypeRef, syntax: &AstType) -> Result<(), ErrorGuaranteed> {
+        if let (
+            TypeShape::Array {
+                element, len_span, ..
+            },
+            TypeKind::Array { elem, .. },
+        ) = (&syntax.shape, self.types.kind(ty.id).clone())
+        {
+            self.ensure_syntax(TypeRef::value(elem), element)?;
+            self.note_array(ty.id, syntax.span);
+            return self.lay_out_array(ty.id, *len_span);
+        }
+        self.ensure_type(ty, syntax.span)
     }
 
     /// Resolves type syntax to a template (parameters stay `Param`).
@@ -228,15 +246,21 @@ impl Checker<'_> {
             TypeKind::Array { elem, .. } => {
                 self.ensure_type(TypeRef::value(elem), span)?;
                 self.note_array(ty.id, span);
-                return Ok(());
+                return self.lay_out_array(ty.id, span);
             }
             TypeKind::Object(_) | TypeKind::Instance { .. } => {}
             _ => return Ok(()),
         }
         match self.type_states.get(&ty.id) {
             Some(TypeState::Done) => return Ok(()),
-            // Reported when its layout first failed.
-            Some(TypeState::Failed) => return Err(self.diags.already_reported()),
+            // Reported when its layout first failed, maybe folded into an
+            // `E042` that waits for the worklist to drain.
+            Some(TypeState::Failed) => {
+                return Err(match self.failures.first() {
+                    Some((_, pending)) => ErrorGuaranteed::held(pending),
+                    None => self.diags.already_reported(),
+                });
+            }
             Some(TypeState::Active) if ty.is_ref => return Ok(()),
             Some(TypeState::Active) => {
                 let name = self.types.display(ty.id);
@@ -277,11 +301,15 @@ impl Checker<'_> {
         let env = self.env_of(def, args.clone(), None);
         let layout = self.with_env(env, |c| c.compute_layout(def));
         self.type_stack.pop();
-        let Ok(layout) = layout else {
+        let Ok((layout, spans)) = layout else {
             // `compute_layout` reported it.
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(self.diags.already_reported());
         };
+        if let Err(error) = self.lay_out_type(ty.id, &layout, &spans) {
+            self.type_states.insert(ty.id, TypeState::Failed);
+            return Err(error);
+        }
         self.out.layouts.insert(ty.id, layout);
         self.type_states.insert(ty.id, TypeState::Done);
         if !args.is_empty() {
@@ -291,19 +319,24 @@ impl Checker<'_> {
     }
 
     /// Resolves a type's fields (or variants) in its own environment.
-    fn compute_layout(&mut self, def: DefId) -> Result<Layout, ErrorGuaranteed> {
+    /// Returns the layout with where each of its [`Layout::slots`] is
+    /// declared (an enum's tag at the enum).
+    fn compute_layout(&mut self, def: DefId) -> Result<(Layout, Vec<Span>), ErrorGuaranteed> {
         let slots = self.res.def(def).slots.clone();
         let mut failed = false;
         if matches!(self.res.def(def).kind, DefKind::Enum) {
             let mut variants = Vec::with_capacity(slots.len());
+            let mut spans = vec![self.res.def(def).name_span];
             for slot in slots {
                 let variant = self.res.def(slot);
                 let name = variant.name.clone();
+                let span = variant.span;
                 let payload = match &variant.kind {
                     DefKind::Variant(Some(ty)) => {
                         let ty = ty.clone();
                         let resolved = self.resolve_type(&ty);
                         failed |= resolved.is_error();
+                        spans.push(span);
                         Some(resolved)
                     }
                     _ => None,
@@ -315,13 +348,15 @@ impl Checker<'_> {
             return if failed {
                 Err(self.diags.already_reported())
             } else {
-                Ok(Layout::Enum { variants, tag })
+                Ok((Layout::Enum { variants, tag }, spans))
             };
         }
         let mut fields = Vec::with_capacity(slots.len());
+        let mut spans = Vec::with_capacity(slots.len());
         for slot in slots {
             let field = self.res.def(slot);
             let name = field.name.clone();
+            let span = field.span;
             let DefKind::Field(ty) = &field.kind else {
                 continue;
             };
@@ -329,12 +364,13 @@ impl Checker<'_> {
             let resolved = self.resolve_type(&ty);
             failed |= resolved.is_error();
             fields.push((name, resolved));
+            spans.push(span);
         }
         // `resolve_type` reported each failed field.
         if failed {
             Err(self.diags.already_reported())
         } else {
-            Ok(Layout::Object { fields })
+            Ok((Layout::Object { fields }, spans))
         }
     }
 

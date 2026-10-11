@@ -127,7 +127,7 @@ fn round(
         .collect();
     let mut types = lilac_ty::Types::new();
     let options = lilac_typeck::Options {
-        native_bits: target.bit_native_width(),
+        target,
         require_entry: false,
         cancel: cancel.cloned(),
     };
@@ -147,8 +147,7 @@ fn round(
         &resolved,
         &types,
         sources,
-        &target.to_triple(),
-        u64::from(target.bit_native_width() / 8),
+        target,
         &checked.values,
     );
     // While some selector checks, the failed ones may be waiting on an item

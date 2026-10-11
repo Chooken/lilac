@@ -84,13 +84,14 @@ impl Lower<'_> {
     /// `value` as the bytes of a `ty` in the target's layout (little-endian),
     /// or `None` when it is all zero bits.
     fn encode_value(&self, value: &Value, ty: TypeRef) -> Option<Vec<u8>> {
-        let (size, _) = self.lir_size_align(&self.lir_ty(ty));
+        let size = self.lir_size_align(&self.lir_ty(ty)).size;
         let mut bytes = vec![0; usize::try_from(size).unwrap_or(0)];
         self.encode(value, ty, &mut bytes, 0);
         bytes.iter().any(|byte| *byte != 0).then_some(bytes)
     }
 
-    /// Writes `value` (of type `ty`) into `bytes` at `at`.
+    /// Writes `value` (of type `ty`) into `bytes` at `at`, each part at its
+    /// offset in the type's module layout.
     fn encode(&self, value: &Value, ty: TypeRef, bytes: &mut [u8], at: u64) {
         match (value, self.layout(ty.id)) {
             (Value::Int(bits, width), _) => {
@@ -102,24 +103,24 @@ impl Lower<'_> {
                     }
                 }
             }
-            (Value::Aggregate(values), Some(Layout::Object { fields })) => {
-                let types: Vec<TypeRef> = fields.iter().map(|(_, ty)| *ty).collect();
-                let offsets = self.offsets(&types);
-                for ((value, ty), offset) in values.iter().zip(types).zip(offsets) {
+            (Value::Aggregate(values), Some(layout @ Layout::Object { .. })) => {
+                let slots = layout.slots();
+                let offsets = self.offsets(ty);
+                for ((value, (_, ty)), offset) in values.iter().zip(slots).zip(offsets) {
                     self.encode(value, ty, bytes, at + offset);
                 }
             }
-            (Value::Variant(index, payload), Some(Layout::Enum { variants, tag })) => {
-                let mut types = vec![TypeRef::value(*tag)];
-                types.extend(variants.iter().filter_map(|(_, payload)| *payload));
-                let offsets = self.offsets(&types);
-                let tag_width = match self.lir_ty(types[0]) {
+            (Value::Variant(index, payload), Some(layout @ Layout::Enum { variants, .. })) => {
+                let slots = layout.slots();
+                let offsets = self.offsets(ty);
+                let tag = slots[0].1;
+                let tag_width = match self.lir_ty(tag) {
                     LirTy::Bit(width) => u32::from(width),
                     _ => 8,
                 };
                 self.encode(
                     &Value::Int(u64::from(*index), tag_width),
-                    types[0],
+                    tag,
                     bytes,
                     at + offsets[0],
                 );
@@ -130,7 +131,7 @@ impl Lower<'_> {
                         .filter(|(_, payload)| payload.is_some())
                         .count()
                         + 1;
-                    if let (Some(ty), Some(offset)) = (types.get(field), offsets.get(field)) {
+                    if let (Some((_, ty)), Some(offset)) = (slots.get(field), offsets.get(field)) {
                         self.encode(payload, *ty, bytes, at + offset);
                     }
                 }
@@ -140,23 +141,12 @@ impl Lower<'_> {
         }
     }
 
-    /// The byte offset of each field of a C-layout struct of `types`.
-    fn offsets(&self, types: &[TypeRef]) -> Vec<u64> {
-        let mut offset: u64 = 0;
-        types
-            .iter()
-            .map(|ty| {
-                let (size, align) = self.lir_size_align(&self.lir_ty(*ty));
-                let align = align.max(1);
-                offset = offset.div_ceil(align) * align;
-                let at = offset;
-                offset += size;
-                at
-            })
-            .collect()
-    }
-
-    fn lir_size_align(&self, ty: &LirTy) -> (u64, u64) {
-        lilac_ir::size_align(&self.module.layouts, ty, self.ptr_bytes)
+    /// The byte offset of each slot of `ty`'s module layout.
+    fn offsets(&self, ty: TypeRef) -> Vec<u64> {
+        let name = self.type_name(ty.id);
+        match self.module.layouts.get(&name) {
+            Some(layout) => layout.fields.iter().map(|field| field.offset).collect(),
+            None => lilac_error::bug!(Span::dummy(), "type `{name}` has no layout"),
+        }
     }
 }

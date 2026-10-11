@@ -1,4 +1,3 @@
-// pending: robustness plan phase 2 (the layout overflows instead of reporting)
 // expect-error: E067
 // An object larger than the target allows (`isize::MAX` bytes) is an
 // error, not an overflow.

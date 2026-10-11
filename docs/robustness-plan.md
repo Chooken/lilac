@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–1 done).
+> Status: in progress (Phases 0–2 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -356,6 +356,77 @@ used today. (The enum change waits for Phase 4.)
 `@size_of` values are pinned for objects and arrays; the 2.5 and 2.6
 target tests; snapshots byte-identical apart from the new layout header
 line in `.lir` files.
+
+- **Delivered notes.**
+  - 2.1: `lilac_target::Scalar` has one variant per C scalar (`Bit8`…
+    `Bit64`, `Float16`…`Float128`, `Pointer`); `@bit_native` is laid out
+    as `Pointer` (`uintptr_t` has the pointer's size and alignment on every
+    target, which the conformance test checks separately). The table
+    differs from the plan's in one place: 32-bit Arm on macOS (APCS) also
+    aligns `uint64_t`/`double` to 4, as do 32-bit x86 Darwin and bare
+    metal (i386 System V); Clang and LLVM agree. 32-bit Arm on Linux with
+    `gnu` is AAPCS in LLVM 18 and Clang 18 (natural alignment), so no
+    `gnueabi` rendering was needed.
+  - 2.5: `Target::parse` refuses WebAssembly with a vendor or an OS
+    (`ParseError::Unsupported`): LLVM builds a `TargetMachine` for
+    `wasm32-unknown-linux` but Clang has no C ABI for it, so no C layout
+    could be checked. Every other pair is accepted; `target_tests` in
+    `lilac-codegen-llvm` builds a `TargetMachine` for all 376 accepted
+    four-component triples and compares every scalar (and the pointer-sized
+    integer) with LLVM's data layout for each. `Target` implements
+    `Display` (its triple), `Target::supported()` lists one target per
+    accepted architecture and OS pair (34), and `parse` reads `i686`
+    back.
+  - 2.2: the API composes (`struct_layout`, `array_layout`,
+    `tagged_layout` over `SizeAlign`s; `layout` over a `Shape` tree), so
+    callers lay each type out once. `TooLarge` carries the crossing part
+    (`Part::Field(i)` or `Part::Length`), the exact size reached (a
+    `u128`) and the limit. Trailing padding that crosses is blamed on the
+    last field.
+  - 2.3: arrays are reported at their length (`Checker::ensure_syntax`
+    walks the written type, so `@array(@array(…), N)` blames the `N` that
+    crossed); a too-large array type is not remembered, so each place that
+    names it is an error, while an object that fails is `Failed` as
+    before. `Requirement::Size` folds a generic instance's `E067` into
+    `E042` (whose notes are now de-duplicated). A `Failed` type met again
+    takes its token from a pending `E042` when one waits for the worklist
+    to drain (`Diags::already_reported` would otherwise assert in debug
+    builds). Template instances (`Box[T]`) are never laid out.
+  - 2.4: `LirModule::target` is a `Target` (not a string), so the verifier
+    and the backend lay out for the module's own target.
+    `lilac_ir::builtin_layout` became `builtin_fields` (the field list)
+    plus `builtin_layout(ty, target)` (the computed `LirLayout`);
+    `size_align` returns `Option<SizeAlign>` (`None` for an unsized type
+    or an array past the limit, which the verifier also rejects as a
+    type). Lowering lays types out in dependency order (`Lower::lay_out`:
+    `TypeId` order puts an outer object before the types it holds), from
+    `lilac_hir::Layout::slots`, the one place that says an enum is its tag
+    then every payload. The LLVM backend also checks LLVM's placement of
+    every struct type against the `LirLayout` (`Lower::check_layout`, an
+    ICE on a mismatch) until Phase 3 removes the struct types.
+    `LILAC_IR_VERSION` stays `0.4`: bumping it would change every
+    snapshot's header, past the one-line diff this phase allows.
+  - 2.7: `crates/lilac-layout/tests/c_conformance.rs` checks the 34
+    supported targets plus six ABI variants (MinGW x86 and x86-64, musl on
+    x86-64, aarch64 and Arm, Arm bare metal): every scalar pair (alone and
+    between bytes), nested structs, arrays of structs and arrays, trailing
+    padding, empty structs, tagged unions as their C struct-with-union, and
+    200 fixed-seed random shapes; over 1,500 asserts per target (checked).
+    `_Float16` and the 128-bit float are declared where Clang's predefined
+    macros say C has them (`__FLT16_MANT_DIG__`; `__SIZEOF_FLOAT128__`,
+    else `__LDBL_MANT_DIG__ == 113`), and the test asserts the 128-bit
+    float was covered on x86 Linux, aarch64 Linux, RISC-V and wasm.
+    Exception: under the Microsoft C ABI (Windows `msvc` or no ABI) C has
+    no empty struct (Clang's emulation makes one 4 bytes), so shapes with
+    an empty struct are skipped there; Lilac keeps size 0, align 1, as
+    decided. Making the table wrong (for one, natural alignment on i686
+    Linux) fails it.
+  - Snapshots: 14 `tests/ui/*.lir` and 3 `tests/ui/modules/*.lir` files
+    changed, each only in its `type #… {` lines (now `type #… size S align
+    A {`); every `.ll` snapshot is unchanged. `tests/run/layout_sizes`
+    pins `@size_of`/`@align_of` of objects, nested objects, arrays of
+    objects, nested arrays, an empty object and `@fbit128` on 64-bit
+    hosts; `lilac-lower`'s `layouts_follow_the_target` pins i686.
 
 ---
 

@@ -252,6 +252,7 @@ dependencies = [
  "lilac-codegen",
  "lilac-error",
  "lilac-ir",
+ "lilac-layout",
  "lilac-span",
  "lilac-target",
 ]
@@ -294,7 +295,16 @@ name = "lilac-ir"
 version = "0.2.0"
 dependencies = [
  "lilac-error",
+ "lilac-layout",
  "lilac-span",
+ "lilac-target",
+]
+
+[[package]]
+name = "lilac-layout"
+version = "0.2.0"
+dependencies = [
+ "lilac-target",
 ]
 
 [[package]]
@@ -312,9 +322,11 @@ dependencies = [
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
+ "lilac-layout",
  "lilac-module",
  "lilac-resolve",
  "lilac-span",
+ "lilac-target",
  "lilac-ty",
  "lilac-typeck",
 ]
@@ -394,11 +406,13 @@ dependencies = [
  "lilac-ast",
  "lilac-error",
  "lilac-hir",
+ "lilac-layout",
  "lilac-lex",
  "lilac-module",
  "lilac-parse",
  "lilac-resolve",
  "lilac-span",
+ "lilac-target",
  "lilac-ty",
 ]
 

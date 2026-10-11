@@ -8,7 +8,9 @@ lilac-span = { path = "../lilac-span" }
 lilac-error = { path = "../lilac-error" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-ir = { path = "../lilac-ir" }
+lilac-layout = { path = "../lilac-layout" }
 lilac-resolve = { path = "../lilac-resolve" }
+lilac-target = { path = "../lilac-target" }
 lilac-ty = { path = "../lilac-ty" }
 
 [dev-dependencies]

@@ -273,7 +273,8 @@ mod tests {
     fn module(sources: &mut SourceMap) -> LirModule {
         let file = sources.add_file("m.lilac", "f()\n  g()\n");
         let at = Span::new(6, 9, file);
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs.push(LirFunc {
             ins: vec![("p".into(), LirTy::Bit(8))],
             ..func(

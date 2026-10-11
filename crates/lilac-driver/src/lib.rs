@@ -479,7 +479,7 @@ impl Session {
         self.report(Stage::Check, StageEvent::Begin);
         let mut types = lilac_ty::Types::new();
         let options = lilac_typeck::Options {
-            native_bits: self.target.bit_native_width(),
+            target: self.target,
             require_entry: self.require_entry,
             cancel: self.cancel.clone(),
         };
@@ -529,15 +529,12 @@ impl Session {
             },
         );
         self.report(Stage::Lower, StageEvent::Begin);
-        let ptr_bytes = u64::from(self.target.bit_native_width() / 8);
-        let triple = self.target.to_triple();
         let lowered = lilac_lower::lower(
             &checked.hir,
             &resolved,
             &types,
             &self.source_map,
-            &triple,
-            ptr_bytes,
+            self.target,
             self.cancel.as_deref(),
         );
         if self.cancelled() {

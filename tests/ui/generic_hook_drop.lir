@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #GenBox.1..bit32 {
+type #GenBox.1..bit32 size 4 align 4 {
     value: #bit32,
 }
 function @main

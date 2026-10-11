@@ -142,6 +142,30 @@ pub enum Layout {
     },
 }
 
+impl Layout {
+    /// What the type holds in memory, in order, laid out as a C struct: an
+    /// object's fields; an enum's tag (named `tag`), then each payload by
+    /// its variant's name. Typeck sizes types from this and lowering lays
+    /// them out from it, so the two agree. (Enums become tagged unions in a
+    /// later phase of the robustness plan; until then every payload has its
+    /// own place.)
+    #[must_use]
+    pub fn slots(&self) -> Vec<(String, TypeRef)> {
+        match self {
+            Self::Object { fields } => fields.clone(),
+            Self::Enum { variants, tag } => {
+                std::iter::once(("tag".to_owned(), TypeRef::value(*tag)))
+                    .chain(
+                        variants
+                            .iter()
+                            .filter_map(|(name, payload)| Some((name.clone(), (*payload)?))),
+                    )
+                    .collect()
+            }
+        }
+    }
+}
+
 /// One checked global variable.
 #[derive(Clone, Debug)]
 pub struct HirGlobal {

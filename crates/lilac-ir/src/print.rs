@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use lilac_span::Span;
 
 use crate::{
-    ArithOp, ConvertOp, LirCallee, LirData, LirFunc, LirGlobal, LirInst, LirModule, LirOperand,
-    LirTerm, LirTy, SpannedText,
+    ArithOp, ConvertOp, LirCallee, LirData, LirFunc, LirGlobal, LirInst, LirLayout, LirLayoutKind,
+    LirModule, LirOperand, LirTerm, SpannedText,
 };
 
 impl LirModule {
@@ -133,13 +133,24 @@ pub(crate) fn print_global(global: &LirGlobal) -> (String, Option<Span>) {
     )
 }
 
-/// Prints one type section (`type #Name` with `name: #ty` members in
-/// layout order; the section order itself is sorted in `to_text`). Type
+/// Prints one type section (`type #Name size S align A {` with
+/// `name: #ty` members in layout order; a tagged union says `tagged` before
+/// its size; the section order itself is sorted in `to_text`). Type
 /// sections are compiler-generated, so every line carries no span.
-pub(crate) fn print_layout(name: &str, members: &[(String, LirTy)]) -> Vec<(String, Option<Span>)> {
-    let mut lines = vec![(format!("type #{name} {{"), None)];
-    for (member, ty) in members {
-        lines.push((format!("    {member}: {ty},"), None));
+pub(crate) fn print_layout(name: &str, layout: &LirLayout) -> Vec<(String, Option<Span>)> {
+    let kind = match layout.kind {
+        LirLayoutKind::Struct => "",
+        LirLayoutKind::Tagged => "tagged ",
+    };
+    let mut lines = vec![(
+        format!(
+            "type #{name} {kind}size {} align {} {{",
+            layout.size, layout.align
+        ),
+        None,
+    )];
+    for field in &layout.fields {
+        lines.push((format!("    {}: {},", field.name, field.ty), None));
     }
     lines.push(("}".to_owned(), None));
     lines

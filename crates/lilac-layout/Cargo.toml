@@ -1,0 +1,10 @@
+[package]
+name = "lilac-layout"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-target = { path = "../lilac-target" }
+
+[lints]
+workspace = true

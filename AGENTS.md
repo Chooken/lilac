@@ -114,7 +114,51 @@
   `Arch::is_64_bit`) to bake the `format_args` piece stride into the injected
   runtime; `lilac-codegen-llvm` calls `is_64_bit_triple` (which also delegates
   to `Arch::is_64_bit`) to pick `@bit_native`'s LLVM width. Because both funnel
-  through `Arch::is_64_bit`, their widths cannot drift.
+  through `Arch::is_64_bit`, their widths cannot drift. Typeck takes the whole
+  `Target` (`Options::target`), lowering takes it as a `lower` argument, and
+  `LirModule::target` is a `Target` (printed as its triple).
+- `Target::to_triple` is the LLVM/Clang triple: `Arch::llvm_name` renders
+  `x86` as `i686` (the user-facing and `@builtin` name stays `x86`; `parse`
+  reads `i686` back). `Target::parse` refuses a pair no C ABI exists for
+  (`ParseError::Unsupported`: WebAssembly with a vendor or an OS), so every
+  accepted triple builds an LLVM `TargetMachine` (`target_tests` in
+  `lilac-codegen-llvm`). `Target::supported()` lists one target per
+  accepted architecture and OS pair.
+
+## Layouts (`lilac-layout`)
+
+- **Layouts are C layouts.** An `object` is the C struct with the same
+  fields in the same order on the target (equal `sizeof`, `_Alignof`,
+  every `offsetof`); fields are never reordered; an empty object is size 0,
+  align 1. `Target::scalar_layout(Scalar)` in `lilac-target` is the one
+  table of C ABI scalar sizes and alignments (8-byte scalars align to 4 on
+  32-bit x86 off Windows and on 32-bit Arm on macOS; the 128-bit float to
+  16 everywhere; otherwise natural); `Target::max_object_size` is the
+  target's `isize::MAX`.
+- `lilac-layout` (depends on `lilac-target` only) is the one layout
+  function: `struct_layout`, `array_layout` and `tagged_layout` compose
+  from `SizeAlign`s, `layout` does a whole `Shape` tree, and all
+  arithmetic is checked (`TooLarge`, never a wrap). `tagged_layout` is the
+  C `struct { tag; union { … } payload; }`; nothing uses it yet (enums are
+  still a struct of the tag and every payload, `lilac_hir::Layout::slots`,
+  the one place that says so).
+- Typeck lays out each concrete object, enum and array type when
+  `ensure_type` first builds it (`layout.rs`, `Checker::sizes`); one past
+  the limit is `E067` at the field or array length that crossed it, through
+  `emit_requirement` (`Requirement::Size`), so a generic instance folds it
+  into `E042`. Templates are never laid out.
+- Lowering fills `LirModule::layouts` (`LirLayout`: kind, size, align, and
+  each field's offset) once, from `lilac-layout`; everything after reads it
+  (`lilac_ir::size_align` is a lookup, global initializers use the field
+  offsets). The verifier recomputes every layout for the module's target,
+  and the LLVM backend checks LLVM's placement of each struct against it
+  (`Lower::check_layout`, an ICE on a mismatch). `builtin_fields` /
+  `builtin_layout` are the builtin aggregates'.
+- Conformance: `crates/lilac-layout/tests/c_conformance.rs` declares a
+  corpus in C with `_Static_assert`s and checks it with the toolchain Clang
+  for every supported target (skipped without Clang); `target_tests` in
+  `lilac-codegen-llvm` compares the scalar table with LLVM's data layout
+  for every target `parse` accepts.
 
 ## Folder modules and visibility (M6a)
 
@@ -432,7 +476,8 @@ the parser takes dotted type names after `@builtin`, typeck flattens a
 Its types and constants are checked on first use (not eagerly like user
 items), so a program that never names `@builtin` lowers byte-identically.
 `lilac-target` owns the variant names (`Arch::builtin_name`,
-`Os::builtin_name`) and `Target::page_size`.
+`Os::builtin_name`), `Target::page_size` and the C ABI scalar table
+(`Target::scalar_layout`).
 
 Every pass recurses over the tree, so depth is bounded once, in the
 parser: past `lilac_parse::MAX_NESTING` (256) levels is `E001`, reported

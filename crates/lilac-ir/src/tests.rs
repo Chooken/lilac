@@ -14,7 +14,7 @@ fn test_span() -> Span {
 pub(crate) fn canonical_module() -> LirModule {
     LirModule {
         version: LILAC_IR_VERSION.to_owned(),
-        target: "x86_64-unknown-none".to_owned(),
+        target: lilac_target::Target::default(),
         data: Vec::new(),
         funcs: vec![LirFunc {
             name: "gen_function__bit32".into(),
@@ -60,15 +60,129 @@ fn printer_emits_type_sections() {
     let mut module = canonical_module();
     module.layouts.insert(
         "Number".to_owned(),
-        vec![
-            ("tag".to_owned(), t("#bit8")),
-            ("val".to_owned(), t("#bit32")),
-        ],
+        layout(&[("tag", "#bit8"), ("val", "#bit32")]),
     );
     let text = module.to_text();
     assert!(
-        text.contains("type #Number {\n    tag: #bit8,\n    val: #bit32,\n}\n"),
+        text.contains("type #Number size 8 align 4 {\n    tag: #bit8,\n    val: #bit32,\n}\n"),
         "{text}"
+    );
+    let tagged = LirLayout::new(
+        LirLayoutKind::Tagged,
+        vec![
+            ("tag".to_owned(), t("#bit8")),
+            ("A".to_owned(), t("#bit64")),
+            ("B".to_owned(), t("#bit8")),
+        ],
+        &module.layouts,
+        &module.target,
+    )
+    .expect("a tagged layout");
+    assert_eq!(
+        tagged.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        [0, 8, 8]
+    );
+    module.layouts.insert("Choice".to_owned(), tagged);
+    let text = module.to_text();
+    assert!(
+        text.contains("type #Choice tagged size 16 align 8 {\n    tag: #bit8,\n"),
+        "{text}"
+    );
+}
+
+/// A C struct of `(name, type)` fields on the default target.
+fn layout(fields: &[(&str, &str)]) -> LirLayout {
+    LirLayout::of_struct(
+        fields
+            .iter()
+            .map(|(name, ty)| ((*name).to_owned(), t(ty)))
+            .collect(),
+        &HashMap::<String, LirLayout>::new(),
+        &lilac_target::Target::default(),
+    )
+    .expect("a layout")
+}
+
+/// Layouts are looked up, and on 32-bit x86 off Windows 8-byte scalars
+/// align to 4.
+#[test]
+fn size_align_follows_the_target() {
+    let i686 = lilac_target::Target::parse("x86-unknown-linux-gnu").expect("triple");
+    let mut layouts = HashMap::new();
+    let pair = LirLayout::of_struct(
+        vec![("a".to_owned(), t("#bit8")), ("b".to_owned(), t("#bit64"))],
+        &layouts,
+        &i686,
+    )
+    .expect("fits");
+    assert_eq!((pair.size, pair.align, pair.fields[1].offset), (12, 4, 4));
+    layouts.insert("Pair".to_owned(), pair);
+    let size = |ty: &str| size_align(&layouts, &t(ty), &i686).map(|s| (s.size, s.align));
+    assert_eq!(size("#Pair"), Some((12, 4)));
+    assert_eq!(size("[3 x #Pair]"), Some((36, 4)));
+    assert_eq!(size("#fbit64"), Some((8, 4)));
+    assert_eq!(size("#fbit128"), Some((16, 16)));
+    assert_eq!(size("ref #Pair"), Some((4, 4)));
+    assert_eq!(size("#bit_native"), Some((4, 4)));
+    assert_eq!(size("#byte_buffer"), Some((8, 4)));
+    assert_eq!(size("#format_args"), Some((132, 4)));
+    assert_eq!(size("#unknown"), None);
+    assert_eq!(size("#Missing"), None);
+    // Past the target's limit is no size, never a wrapped one.
+    assert_eq!(size("[4294967295 x [4294967295 x #bit64]]"), None);
+    let too_large = LirLayout::of_struct(
+        vec![
+            ("a".to_owned(), t("[1073741824 x #bit8]")),
+            ("b".to_owned(), t("[1073741824 x #bit8]")),
+        ],
+        &layouts,
+        &i686,
+    )
+    .expect_err("too large");
+    assert!(matches!(too_large, LayoutError::TooLarge(_)), "{too_large}");
+}
+
+/// The verifier recomputes every layout for the module's target.
+#[test]
+fn verify_rejects_a_layout_that_is_not_the_c_layout() {
+    let mut module = canonical_module();
+    let mut wrong = layout(&[("tag", "#bit8"), ("val", "#bit32")]);
+    wrong.fields[1].offset = 1;
+    wrong.size = 5;
+    module.layouts.insert("Number".to_owned(), wrong);
+    let mut diags = lilac_error::Diags::new();
+    assert!(verify(&module, &mut diags).is_err());
+    let message = diags.diagnostics()[0].msg.to_string();
+    assert!(
+        message.contains("size 5 align 4, offsets [0, 1], expected size 8 align 4, offsets [0, 4]"),
+        "{message}"
+    );
+
+    // A layout computed for another target is wrong here too.
+    let mut module = canonical_module();
+    let i686 = lilac_target::Target::parse("x86-unknown-linux-gnu").expect("triple");
+    let on_i686 = LirLayout::of_struct(
+        vec![("a".to_owned(), t("#bit8")), ("b".to_owned(), t("#fbit64"))],
+        &HashMap::<String, LirLayout>::new(),
+        &i686,
+    )
+    .expect("fits");
+    module.layouts.insert("Pair".to_owned(), on_i686);
+    let mut diags = lilac_error::Diags::new();
+    assert!(verify(&module, &mut diags).is_err());
+
+    // A field with no size has no layout.
+    let mut module = canonical_module();
+    let mut sizeless = layout(&[("tag", "#bit8")]);
+    sizeless.fields[0].ty = t("#Missing");
+    module.layouts.insert("Bad".to_owned(), sizeless);
+    let mut diags = lilac_error::Diags::new();
+    assert!(verify(&module, &mut diags).is_err());
+    assert!(
+        diags.diagnostics()[0]
+            .msg
+            .contains("`#Missing` has no size"),
+        "{diags:?}"
     );
 }
 
@@ -97,7 +211,8 @@ fn verify_accepts_clean() {
 
 #[test]
 fn verify_accepts_fbit_types() {
-    let module = LirModule::new("x86_64-unknown-none");
+    let module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     let mut diags = lilac_error::Diags::new();
     let verifier = Verifier {
         module: &module,
@@ -128,10 +243,11 @@ fn verify_rejects_old_copy() {
 /// is ill-typed and must be rejected, not silently pointer-copied.
 #[test]
 fn verify_rejects_copy_place_type_mismatch() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module
         .layouts
-        .insert("Object".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
+        .insert("Object".to_owned(), layout(&[("value", "#bit32")]));
     module.funcs.push(LirFunc {
         name: "mismatch".into(),
         ins: Vec::new(),
@@ -178,7 +294,8 @@ fn verify_rejects_copy_place_type_mismatch() {
 /// the constant `&v`, returning the `E070` messages.
 fn atomic_errors(insts: Vec<LirInst>) -> Vec<String> {
     let span = test_span();
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     let mut func = trivial_func("atomics");
     func.blocks[0].insts = vec![
         LirInst::Alloca {
@@ -220,7 +337,8 @@ fn atomic_errors(insts: Vec<LirInst>) -> Vec<String> {
 fn verify_checks_elem_addr() {
     let span = test_span();
     let elem_errors = |array_ty: &str, index_ty: &str, ty: &str| {
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         let mut func = trivial_func("arrays");
         func.blocks[0].insts = vec![
             LirInst::Alloca {
@@ -420,7 +538,8 @@ fn trivial_func(name: &str) -> LirFunc {
 
 #[test]
 fn verify_rejects_duplicate_function_names() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(trivial_func("dup"));
     module.funcs.push(trivial_func("dup"));
     let mut diags = lilac_error::Diags::new();
@@ -441,7 +560,8 @@ fn verify_rejects_duplicate_function_names() {
 /// opaque pointers: `copy` between them is a pointer copy, not a value copy.
 #[test]
 fn verify_accepts_ref_to_ref_copy() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(LirFunc {
         name: "refcopy".into(),
         ins: Vec::new(),
@@ -754,7 +874,7 @@ fn verify_rejects_empty_function() {
 fn printer_emits_bodyless_extern() {
     let module = LirModule {
         version: LILAC_IR_VERSION.to_owned(),
-        target: "x86_64-unknown-none".to_owned(),
+        target: lilac_target::Target::default(),
         data: Vec::new(),
         funcs: vec![LirFunc {
             name: "puts".into(),
@@ -792,7 +912,7 @@ fn verifier_rejects_extern_with_block() {
 fn extern_module() -> LirModule {
     LirModule {
         version: LILAC_IR_VERSION.to_owned(),
-        target: "x86_64-unknown-none".to_owned(),
+        target: lilac_target::Target::default(),
         data: Vec::new(),
         funcs: vec![LirFunc {
             name: "puts".into(),
@@ -864,7 +984,8 @@ fn verifier_rejects_non_extern_duplicate_places() {
 
 #[test]
 fn builtin_call_prints_and_verifies() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(LirFunc {
         name: "main".into(),
         ins: Vec::new(),
@@ -927,7 +1048,8 @@ fn builtin_sig_shrinks_to_leaves() {
 
 #[test]
 fn data_symbol_const_verifies() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.data.push(LirData {
         name: "c0".into(),
         bytes: "hi".as_bytes().to_vec(),
@@ -959,7 +1081,8 @@ fn data_symbol_const_verifies() {
 
 #[test]
 fn unknown_data_symbol_rejected() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(LirFunc {
         name: "main".into(),
         ins: Vec::new(),
@@ -987,18 +1110,25 @@ fn unknown_data_symbol_rejected() {
 
 #[test]
 fn builtin_layout_has_expected_fields() {
-    let byte_buffer = builtin_layout(&t("#byte_buffer")).expect("#byte_buffer has a layout");
+    let byte_buffer = builtin_fields(&t("#byte_buffer")).expect("#byte_buffer has fields");
     assert_eq!(byte_buffer[0], ("len".to_owned(), t("#bit_native")));
-    let format_args = builtin_layout(&t("#format_args")).expect("#format_args has a layout");
+    let format_args = builtin_fields(&t("#format_args")).expect("#format_args has fields");
     assert_eq!(format_args.len(), 17);
     assert_eq!(format_args[1], ("p0".to_owned(), t("#byte_buffer")));
+    let target = lilac_target::Target::default();
+    let format_args = builtin_layout(&t("#format_args"), &target).expect("a layout");
+    assert_eq!((format_args.size, format_args.align), (264, 8));
+    assert_eq!(format_args.fields[2].offset, 24);
+    let frame = builtin_layout(&LirTy::trace_frame(), &target).expect("a layout");
+    assert_eq!((frame.size, frame.fields[1].offset), (24, 8));
 }
 
 /// A `field` on a builtin aggregate resolves against `builtin_layout`
 /// (these types never appear in `module.layouts`).
 #[test]
 fn field_on_byte_buffer_uses_builtin_layout() {
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(LirFunc {
         name: "main".into(),
         ins: vec![("buffer".into(), t("#byte_buffer"))],
@@ -1041,7 +1171,7 @@ fn spanned_text_matches_to_text_byte_for_byte() {
     let mut module = canonical_module();
     module
         .layouts
-        .insert("Number".to_owned(), vec![("tag".to_owned(), t("#bit8"))]);
+        .insert("Number".to_owned(), layout(&[("tag", "#bit8")]));
     module.data.push(LirData {
         name: "c0".into(),
         bytes: "hi".as_bytes().to_vec(),
@@ -1082,7 +1212,8 @@ fn spanned_lines_carry_their_own_distinct_spans() {
     let arith_span = Span::new(150, 170, FileId(0));
     let term_span = Span::new(380, 390, FileId(0));
 
-    let mut module = LirModule::new("x86_64-unknown-none");
+    let mut module =
+        LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
     module.funcs.push(LirFunc {
         name: "main".into(),
         ins: Vec::new(),
@@ -1146,7 +1277,7 @@ fn spanned_header_and_layout_lines_have_no_span() {
     let mut module = canonical_module();
     module
         .layouts
-        .insert("Number".to_owned(), vec![("tag".to_owned(), t("#bit8"))]);
+        .insert("Number".to_owned(), layout(&[("tag", "#bit8")]));
     let spanned = module.to_text_spanned();
     let lines: Vec<&str> = spanned.text.lines().collect();
     for needle in [

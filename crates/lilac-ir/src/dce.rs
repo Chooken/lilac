@@ -264,8 +264,8 @@ fn prune_layouts(module: &mut LirModule) {
             LirTy::Ref(inner) | LirTy::Array(inner, _) => pending.push(inner),
             LirTy::Named(name) => {
                 if used.insert(name) {
-                    if let Some(fields) = module.layouts.get(name) {
-                        pending.extend(fields.iter().map(|(_, ty)| ty));
+                    if let Some(layout) = module.layouts.get(name) {
+                        pending.extend(layout.fields.iter().map(|field| &field.ty));
                     }
                 }
             }
@@ -384,7 +384,8 @@ mod tests {
     /// function carries a `Const` reference to `data[0]` when data is given,
     /// so a dead function can pin otherwise-dead data.
     fn module_with(names: &[&str], data: &[&str]) -> LirModule {
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         for (i, name) in names.iter().enumerate() {
             let root = i == 0 && names.len() > 1;
             let calls: Vec<&str> = if root && names.len() > 2 {
@@ -442,16 +443,23 @@ mod tests {
         };
         module.funcs[0].blocks[0].insts.push(alloca("#Outer"));
         module.funcs[2].blocks[0].insts.push(alloca("#Dead"));
-        module.layouts.insert(
-            "Outer".to_owned(),
-            vec![("inner".to_owned(), t("ref #Inner"))],
-        );
+        let layout = |name: &str, ty: &str| {
+            crate::LirLayout::of_struct(
+                vec![(name.to_owned(), t(ty))],
+                &HashMap::<String, crate::LirLayout>::new(),
+                &lilac_target::Target::default(),
+            )
+            .expect("a layout")
+        };
         module
             .layouts
-            .insert("Inner".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
+            .insert("Outer".to_owned(), layout("inner", "ref #Inner"));
         module
             .layouts
-            .insert("Dead".to_owned(), vec![("value".to_owned(), t("#bit32"))]);
+            .insert("Inner".to_owned(), layout("value", "#bit32"));
+        module
+            .layouts
+            .insert("Dead".to_owned(), layout("value", "#bit32"));
         prune_unreachable(&mut module, &HashSet::new());
         let mut layouts: Vec<&str> = module.layouts.keys().map(String::as_str).collect();
         layouts.sort_unstable();
@@ -544,7 +552,8 @@ mod tests {
     #[test]
     fn trace_lists_every_call_site() {
         // main -> a -> c, main -> c, b -> c: c has three callers.
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs.push(func("main", &["a", "c"], &[]));
         module.funcs.push(func("a", &["c"], &[]));
         module.funcs.push(func("b", &["c"], &[]));
@@ -554,7 +563,8 @@ mod tests {
 
     #[test]
     fn trace_marks_recursion_as_repeat() {
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs.push(func("main", &["f"], &[]));
         module.funcs.push(func("f", &["f"], &[]));
         assert_eq!(trace_of(&module, "f"), "f (main, f ^)");
@@ -563,7 +573,8 @@ mod tests {
     #[test]
     fn trace_splices_out_hidden_glue() {
         // main -> .lilac.drop.T -> hook, and the glue recurses on itself.
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs.push(func("main", &[".lilac.drop.T"], &[]));
         module
             .funcs
@@ -580,7 +591,8 @@ mod tests {
 
     #[test]
     fn trace_names_come_from_the_map() {
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs.push(func(".root.f", &["g"], &[]));
         module.funcs.push(func("g", &[], &[]));
         let names = HashMap::from([(".root.f".to_owned(), "f".to_owned())]);

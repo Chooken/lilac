@@ -699,7 +699,8 @@ mod tests {
     /// declarations.
     #[test]
     fn panic_handler_and_entry_verify() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs = runtime(8);
         module.funcs.extend(hook_externs());
         module.funcs.push(LirFunc {
@@ -804,7 +805,8 @@ mod tests {
 
     #[test]
     fn runtime_module_verifies() {
-        let mut module = LirModule::new("x86_64-unknown-none");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
         module.funcs = runtime(8);
         let mut diags = lilac_error::Diags::new();
         assert!(

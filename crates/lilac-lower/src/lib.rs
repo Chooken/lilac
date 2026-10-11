@@ -38,11 +38,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use lilac_error::{codes, Diagnostic, Diags};
 use lilac_hir::{FuncKey, HirFunc, HirPath, HirProgram, HirStmt, Layout, LocalId};
 use lilac_ir::{
-    ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirModule, LirOperand,
-    LirTerm, LirTy, PlaceName, Reg, Symbol,
+    ConvertOp, Label, LirBlock, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule,
+    LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol,
 };
 use lilac_resolve::Resolved;
 use lilac_span::{BytePos, SourceMap, Span};
+use lilac_target::Target;
 use lilac_ty::{TypeId, TypeKind, TypeRef, Types};
 
 /// Lowered LIR plus each function's source name.
@@ -108,8 +109,8 @@ pub fn check_global_initializers(lowered: &Lowered, diags: &mut Diags) {
     }
 }
 
-/// Lowers checked, error-free HIR to LIR. `ptr_bytes` is the target's pointer
-/// size (for `@size_of`); `sources` locates `@panic` sites. When `cancel` is
+/// Lowers checked, error-free HIR to LIR for `target` (which fixes every
+/// layout and `@size_of`); `sources` locates `@panic` sites. When `cancel` is
 /// set (a newer compile is due), lowering stops before the next function and
 /// the module is incomplete.
 #[must_use]
@@ -118,11 +119,10 @@ pub fn lower(
     res: &Resolved,
     types: &Types,
     sources: &SourceMap,
-    triple: &str,
-    ptr_bytes: u64,
+    target: Target,
     cancel: Option<&AtomicBool>,
 ) -> Lowered {
-    let mut lower = Lower::new(hir, res, types, sources, triple, ptr_bytes);
+    let mut lower = Lower::new(hir, res, types, sources, target);
     lower.lower_globals();
     let mut externs = HashSet::new();
     for func in &hir.funcs {
@@ -154,11 +154,10 @@ pub fn evaluate_selectors(
     res: &Resolved,
     types: &Types,
     sources: &SourceMap,
-    triple: &str,
-    ptr_bytes: u64,
+    target: Target,
     selectors: &[Option<lilac_hir::HirExpr>],
 ) -> Vec<Option<u64>> {
-    let mut lower = Lower::new(hir, res, types, sources, triple, ptr_bytes);
+    let mut lower = Lower::new(hir, res, types, sources, target);
     selectors
         .iter()
         .map(|selector| match lower.constant(selector.as_ref()?)? {
@@ -176,8 +175,7 @@ impl<'a> Lower<'a> {
         res: &'a Resolved,
         types: &'a Types,
         sources: &'a SourceMap,
-        triple: &str,
-        ptr_bytes: u64,
+        target: Target,
     ) -> Self {
         let mut lower = Lower {
             hir,
@@ -187,8 +185,8 @@ impl<'a> Lower<'a> {
             names: HashMap::new(),
             bad_indices: Vec::new(),
             bad_globals: Vec::new(),
-            ptr_bytes,
-            module: LirModule::new(triple),
+            target,
+            module: LirModule::new(target),
             symbols: HashMap::new(),
             externs: HashSet::new(),
             drop_glue: HashMap::new(),
@@ -211,28 +209,56 @@ impl<'a> Lower<'a> {
             }
             lower.symbols.insert(func.key.clone(), symbol.into());
         }
-        let mut layouts: Vec<(&TypeId, &Layout)> = hir.layouts.iter().collect();
-        layouts.sort_by_key(|(id, _)| id.0);
-        for (id, layout) in layouts {
-            let name = lower.type_name(*id);
-            let fields = match layout {
-                Layout::Object { fields } => fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), lower.lir_ty(*ty)))
-                    .collect(),
-                Layout::Enum { variants, tag } => {
-                    let mut fields = vec![("tag".to_owned(), lower.lir_ty(TypeRef::value(*tag)))];
-                    for (name, payload) in variants {
-                        if let Some(payload) = payload {
-                            fields.push((name.clone(), lower.lir_ty(*payload)));
-                        }
-                    }
-                    fields
-                }
-            };
-            lower.module.layouts.insert(name, fields);
+        let mut ids: Vec<TypeId> = hir.layouts.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            lower.lay_out(id);
         }
         lower
+    }
+
+    /// Adds the layout of type `id` to the module, computed by
+    /// `lilac-layout` for the target, after the layouts of every type it
+    /// holds by value (directly or as array elements), whose sizes it
+    /// needs. Typeck rejected by-value cycles (`E053`) and types larger
+    /// than the target allows (`E067`), so this always succeeds.
+    fn lay_out(&mut self, id: TypeId) {
+        let name = self.type_name(id);
+        if self.module.layouts.contains_key(&name) {
+            return;
+        }
+        let Some(layout) = self.hir.layouts.get(&id) else {
+            return;
+        };
+        let slots = layout.slots();
+        for (_, ty) in &slots {
+            if !ty.is_ref {
+                self.lay_out_held(ty.id);
+            }
+        }
+        let fields = slots
+            .iter()
+            .map(|(name, ty)| (name.clone(), self.lir_ty(*ty)))
+            .collect();
+        match LirLayout::of_struct(fields, &self.module.layouts, &self.target) {
+            Ok(layout) => {
+                self.module.layouts.insert(name, layout);
+            }
+            Err(error) => lilac_error::bug!(
+                Span::dummy(),
+                "type `{name}` has no layout on `{}`: {error}",
+                self.target
+            ),
+        }
+    }
+
+    /// Lays out the named type `id` is or (as an array) holds.
+    fn lay_out_held(&mut self, id: TypeId) {
+        match self.types.kind(id) {
+            TypeKind::Array { elem, .. } => self.lay_out_held(*elem),
+            TypeKind::Object(_) | TypeKind::Instance { .. } => self.lay_out(id),
+            _ => {}
+        }
     }
 }
 
@@ -248,7 +274,8 @@ struct Lower<'a> {
     bad_indices: Vec<BadIndex>,
     /// Global initializers that are not constant (`E038`).
     bad_globals: Vec<Span>,
-    ptr_bytes: u64,
+    /// The target: every layout, and `@bit_native`'s width.
+    target: Target,
     module: LirModule,
     /// LIR symbol of every function instance.
     symbols: HashMap<FuncKey, Symbol>,
@@ -562,6 +589,19 @@ impl Lower<'_> {
         } else {
             base
         }
+    }
+
+    /// The size and alignment of a LIR type, read from the module's layouts
+    /// (never computed here). Every type lowering sizes was checked to fit.
+    fn lir_size_align(&self, ty: &LirTy) -> lilac_layout::SizeAlign {
+        lilac_ir::size_align(&self.module.layouts, ty, &self.target).unwrap_or_else(|| {
+            lilac_error::bug!(Span::dummy(), "`{ty}` has no size on `{}`", self.target)
+        })
+    }
+
+    /// `@bit_native`'s width in bits.
+    fn native_bits(&self) -> u32 {
+        self.target.bit_native_width()
     }
 
     fn layout(&self, ty: TypeId) -> Option<&Layout> {

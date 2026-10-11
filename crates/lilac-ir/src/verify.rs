@@ -8,9 +8,9 @@ use lilac_span::Span;
 
 use crate::print::print_op;
 use crate::{
-    builtin_layout, builtin_sig, fields_of, is_c_abi_type, is_variadic_arg_type, trace, ArithOp,
-    AtomicOrdering, CallGraph, LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst,
-    LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
+    builtin_fields, builtin_sig, fields_of, is_c_abi_type, is_variadic_arg_type, size_align, trace,
+    ArithOp, AtomicOrdering, CallGraph, LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst,
+    LirLayout, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
 };
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
@@ -166,6 +166,7 @@ impl Verifier<'_> {
             );
             return;
         }
+        self.verify_layouts();
         let mut seen: HashSet<&str> = HashSet::new();
         for func in &self.module.funcs {
             if !seen.insert(func.name.as_str()) {
@@ -189,16 +190,57 @@ impl Verifier<'_> {
         }
     }
 
+    /// Checks every module layout against `lilac-layout` on the module's
+    /// target: each must be exactly what its fields lay out to (offsets,
+    /// size and alignment), since lowering and the backends read layouts
+    /// and never compute them.
+    fn verify_layouts(&mut self) {
+        let mut names: Vec<&String> = self.module.layouts.keys().collect();
+        names.sort_unstable();
+        for name in names {
+            let layout = &self.module.layouts[name];
+            let expected = LirLayout::new(
+                layout.kind,
+                layout.members(),
+                &self.module.layouts,
+                &self.module.target,
+            );
+            match expected {
+                Ok(expected) if expected == *layout => {}
+                Ok(expected) => self.error(
+                    format!(
+                        "layout `#{name}` is not its C layout on `{}`: {}, expected {}",
+                        self.module.target,
+                        describe_layout(layout),
+                        describe_layout(&expected)
+                    ),
+                    Span::dummy(),
+                ),
+                Err(error) => self.error(
+                    format!(
+                        "layout `#{name}` has no layout on `{}`: {error}",
+                        self.module.target
+                    ),
+                    Span::dummy(),
+                ),
+            }
+        }
+    }
+
     /// Whether a type is known: a scalar, a pointer to a known type or to
-    /// `#unknown` (the opaque `void*`; bare `#unknown` has no size), or a
-    /// builtin or module layout.
+    /// `#unknown` (the opaque `void*`; bare `#unknown` has no size), a
+    /// builtin or module layout, or an array of a known type that the target
+    /// can hold.
     pub(crate) fn valid_type(&self, ty: &LirTy) -> bool {
         match ty {
             LirTy::Bit(_) | LirTy::BitNative | LirTy::FBit(_) => true,
             LirTy::Ref(inner) => inner.name() == Some("unknown") || self.valid_type(inner),
-            LirTy::Array(elem, _) => self.valid_type(elem),
+            LirTy::Array(elem, _) => {
+                self.valid_type(elem)
+                    && size_align(&self.module.layouts, ty, &self.module.target).is_some()
+            }
             LirTy::Named(name) => {
-                builtin_layout(ty).is_some() || self.module.layouts.contains_key(name)
+                builtin_fields(ty).is_some() || self.module.layouts.contains_key(name)
             }
         }
     }
@@ -1177,4 +1219,19 @@ impl Verifier<'_> {
             LirTerm::Return { .. } | LirTerm::Unreachable { .. } => {}
         }
     }
+}
+
+/// `size S align A, offsets [..]`, for a layout mismatch.
+fn describe_layout(layout: &LirLayout) -> String {
+    let offsets: Vec<String> = layout
+        .fields
+        .iter()
+        .map(|field| field.offset.to_string())
+        .collect();
+    format!(
+        "size {} align {}, offsets [{}]",
+        layout.size,
+        layout.align,
+        offsets.join(", ")
+    )
 }

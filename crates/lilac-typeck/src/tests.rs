@@ -17,12 +17,22 @@ fn run_native(
     let res = lilac_resolve::resolve(&project, &programs, &mut diags);
     let mut types = Types::new();
     let options = crate::Options {
-        native_bits,
+        target: target_of_width(native_bits),
         require_entry: false,
         cancel: None,
     };
     let checked = crate::check(&res, &mut types, &mut diags, options);
     (diags, checked.hir, types, sm, res)
+}
+
+/// A target whose `@bit_native` is `native_bits` wide: the default x86-64
+/// one, or bare-metal 32-bit RISC-V.
+fn target_of_width(native_bits: u32) -> lilac_target::Target {
+    match native_bits {
+        64 => lilac_target::Target::default(),
+        32 => lilac_target::Target::parse("riscv32-unknown-none").expect("triple"),
+        other => panic!("no target is {other} bits wide"),
+    }
 }
 
 fn run(src: &str) -> (Diags, HirProgram, Types, SourceMap) {
@@ -2087,11 +2097,73 @@ fn a_cancelled_check_stops() {
     let res = lilac_resolve::resolve(&project, &programs, &mut diags);
     let mut types = Types::new();
     let options = crate::Options {
-        native_bits: 64,
+        target: lilac_target::Target::default(),
         require_entry: false,
         cancel: Some(Arc::new(AtomicBool::new(true))),
     };
     let checked = crate::check(&res, &mut types, &mut diags, options);
     assert!(checked.hir.funcs.is_empty(), "{:?}", checked.hir.funcs);
     assert!(!diags.has_errors(), "{diags:?}");
+}
+
+/// `E067`: a field that takes an object past the target's limit is
+/// reported at that field, with the size reached; 32-bit targets stop at
+/// 2^31 - 1 bytes.
+#[test]
+fn oversized_object_is_e067_at_the_crossing_field() {
+    let src = "Big: object {\n    a: @bit64\n    b: @array(@bit8, 0x7FFFFFF9)\n}\n";
+    let (diags, ..) = run_native(src, 32);
+    let e067: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "E067")
+        .collect();
+    assert_eq!(e067.len(), 1, "{diags:?}");
+    let label = &e067[0].labels[0];
+    assert!(
+        label.msg == "this field brings `Big` to 2147483649 bytes",
+        "{label:?}"
+    );
+    assert!(
+        e067[0]
+            .notes
+            .iter()
+            .any(|note| note.contains("at most 2147483647 bytes")),
+        "{diags:?}"
+    );
+    // The same object fits a 64-bit target.
+    assert!(!check_src(src).has_errors());
+}
+
+/// An array whose elements together cross the limit is reported at its
+/// length, never wrapped (problem 2).
+#[test]
+fn oversized_array_is_e067_at_its_length() {
+    let src = "Big: object {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(rendered.matches("error[E067]").count(), 1, "{rendered}");
+    assert!(
+        rendered.contains("this length makes the array 147573952520956936200 bytes"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("test.lilac:2:43"), "{rendered}");
+}
+
+/// A generic instance that builds an oversized type fails as `E042`, and
+/// its template alone reports nothing.
+#[test]
+fn oversized_generic_instance_folds_into_e042() {
+    let src = "Row: object {\n    a: @array(@bit64, 0xFFFFFFFF)\n}\n\nmake[T]: function () nothing {\n    rows: @array(T, 0xFFFFFFFF) = @array(T, 0xFFFFFFFF) {}\n}\n\nmain: function () nothing {\n    make[Row]()\n}\n";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
+    assert!(!rendered.contains("error[E067]"), "{rendered}");
+    assert!(
+        rendered.contains("this length makes the array"),
+        "{rendered}"
+    );
+    let template =
+        "make[T]: function () nothing {\n    rows: @array(T, 0xFFFFFFFF) = @array(T, 0xFFFFFFFF) {}\n}\n";
+    assert!(!check_src(template).has_errors());
 }

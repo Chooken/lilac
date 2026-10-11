@@ -230,7 +230,7 @@ impl<'a> Lower<'a> {
     fn int_width(&self, ty: TypeRef) -> Option<u32> {
         match self.lir_ty(ty) {
             LirTy::Bit(bits) => Some(u32::from(bits)),
-            LirTy::BitNative => u32::try_from(self.ptr_bytes * 8).ok(),
+            LirTy::BitNative => Some(self.native_bits()),
             _ => None,
         }
     }
@@ -248,12 +248,11 @@ impl<'a> Lower<'a> {
             }
             HirExprKind::SizeOf(ty) | HirExprKind::AlignOf(ty) => {
                 let lir = self.lir_ty(*ty);
-                let (size, align) =
-                    lilac_ir::size_align(&self.module.layouts, &lir, self.ptr_bytes);
+                let sized = self.lir_size_align(&lir);
                 let value = if matches!(expr.kind, HirExprKind::SizeOf(_)) {
-                    size
+                    sized.size
                 } else {
-                    align
+                    sized.align
                 };
                 let width = self.int_width(expr.ty)?;
                 Some(Value::Int(value & mask_of(width), width))

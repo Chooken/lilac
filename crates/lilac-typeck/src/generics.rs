@@ -234,7 +234,10 @@ impl Checker<'_> {
         }
         for (captured, _) in &requirements {
             for note in &captured.notes {
-                diagnostic = diagnostic.note(note.clone());
+                // Two failures of one kind share their note.
+                if !diagnostic.notes.contains(note) {
+                    diagnostic = diagnostic.note(note.clone());
+                }
             }
         }
         for help in self.requirement_helps(&requirements) {

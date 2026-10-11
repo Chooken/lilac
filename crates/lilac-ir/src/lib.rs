@@ -5,14 +5,16 @@
 //!
 //! LIR types print exactly as they read (`#bit32`, `ref #bit8`). Names are
 //! typed by what they name ([`Reg`], [`PlaceName`], [`Label`], [`Symbol`])
-//! and constants are values ([`LirConst`]). Layouts
-//! (object field orders) ride in the module for the verifier only; they
-//! never print.
+//! and constants are values ([`LirConst`]). Layouts ([`LirLayout`]: each
+//! object's fields with their offsets, size and alignment) are computed once
+//! by `lilac-layout` for the module's target; everything after reads them.
 
 use std::collections::HashMap;
 use std::fmt;
 
+use lilac_layout::{SizeAlign, TooLarge};
 use lilac_span::Span;
+use lilac_target::{Scalar, Target};
 
 mod dce;
 mod names;
@@ -36,16 +38,152 @@ pub const LILAC_IR_VERSION: &str = "0.4";
 pub struct LirModule {
     /// `lilac_ir = "..."` header value.
     pub version: String,
-    /// `target = "..."` header value (fixes `@bit_native` width).
-    pub target: String,
+    /// `target = "..."` header value: fixes `@bit_native`'s width and every
+    /// layout.
+    pub target: Target,
     /// Typed constants (`!c0: str`, `!c1: numlit`).
     pub data: Vec<LirData>,
     /// Global variables (`global !name: #t = …`).
     pub globals: Vec<LirGlobal>,
     /// Functions in source order.
     pub funcs: Vec<LirFunc>,
-    /// Layout name (without `#`) → `(field, type)` in order.
-    pub layouts: HashMap<String, Vec<(String, LirTy)>>,
+    /// Layout name (without `#`) → its layout on `target`.
+    pub layouts: HashMap<String, LirLayout>,
+}
+
+/// One named aggregate's layout on the module's target, as `lilac-layout`
+/// computed it: the verifier checks it, and the printer, lowering and the
+/// backends read it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LirLayout {
+    /// How the fields are placed.
+    pub kind: LirLayoutKind,
+    /// `sizeof`, in bytes.
+    pub size: u64,
+    /// `_Alignof`, in bytes.
+    pub align: u64,
+    /// The fields, in order, each with its offset.
+    pub fields: Vec<LirField>,
+}
+
+/// How a [`LirLayout`] places its fields.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum LirLayoutKind {
+    /// A C struct: each field after the last ([`lilac_layout::struct_layout`]).
+    Struct,
+    /// A tagged union: the first field is the integer tag, and every other
+    /// field is a payload at one shared offset
+    /// ([`lilac_layout::tagged_layout`]).
+    Tagged,
+}
+
+/// One field of a [`LirLayout`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LirField {
+    /// Field name.
+    pub name: String,
+    /// Field type.
+    pub ty: LirTy,
+    /// Byte offset from the start of the aggregate.
+    pub offset: u64,
+}
+
+/// Why a layout could not be computed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum LayoutError {
+    /// A field's type has no size: `#unknown`, or a name with no layout
+    /// (yet).
+    Unsized(LirTy),
+    /// A tagged layout's first field is not an integer.
+    BadTag(LirTy),
+    /// A tagged layout has no fields, so no tag.
+    NoTag,
+    /// Larger than the target allows.
+    TooLarge(TooLarge),
+}
+
+impl fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsized(ty) => write!(f, "`{ty}` has no size"),
+            Self::BadTag(ty) => write!(f, "the tag `{ty}` is not an integer"),
+            Self::NoTag => f.write_str("a tagged layout has no tag field"),
+            Self::TooLarge(too_large) => too_large.fmt(f),
+        }
+    }
+}
+
+impl LirLayout {
+    /// Lays `fields` out on `target` as `kind` says. Every named type a
+    /// field holds by value must be in `layouts` or be a builtin aggregate.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError`] when a field is unsized, a tag is no integer, or the
+    /// aggregate is larger than the target allows.
+    pub fn new<S: std::hash::BuildHasher>(
+        kind: LirLayoutKind,
+        fields: Vec<(String, LirTy)>,
+        layouts: &HashMap<String, LirLayout, S>,
+        target: &Target,
+    ) -> Result<Self, LayoutError> {
+        let sizes = |fields: &[(String, LirTy)]| {
+            fields
+                .iter()
+                .map(|(_, ty)| {
+                    size_align(layouts, ty, target).ok_or_else(|| LayoutError::Unsized(ty.clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let placed = match kind {
+            LirLayoutKind::Struct => lilac_layout::struct_layout(target, &sizes(&fields)?),
+            LirLayoutKind::Tagged => {
+                let Some(((_, tag), payloads)) = fields.split_first() else {
+                    return Err(LayoutError::NoTag);
+                };
+                let tag = match tag {
+                    LirTy::Bit(bits) => Scalar::bit(u32::from(*bits)),
+                    _ => None,
+                }
+                .ok_or_else(|| LayoutError::BadTag(tag.clone()))?;
+                lilac_layout::tagged_layout(target, tag, &sizes(payloads)?)
+            }
+        }
+        .map_err(LayoutError::TooLarge)?;
+        Ok(Self {
+            kind,
+            size: placed.size,
+            align: placed.align,
+            fields: fields
+                .into_iter()
+                .zip(placed.fields)
+                .map(|((name, ty), offset)| LirField { name, ty, offset })
+                .collect(),
+        })
+    }
+
+    /// A C struct of `fields` ([`LirLayout::new`] with
+    /// [`LirLayoutKind::Struct`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`LirLayout::new`].
+    pub fn of_struct<S: std::hash::BuildHasher>(
+        fields: Vec<(String, LirTy)>,
+        layouts: &HashMap<String, LirLayout, S>,
+        target: &Target,
+    ) -> Result<Self, LayoutError> {
+        Self::new(LirLayoutKind::Struct, fields, layouts, target)
+    }
+
+    /// The `(name, type)` of each field, in order.
+    #[must_use]
+    pub fn members(&self) -> Vec<(String, LirTy)> {
+        self.fields
+            .iter()
+            .map(|field| (field.name.clone(), field.ty.clone()))
+            .collect()
+    }
 }
 
 /// Canonical module text plus the source span of each physical line.
@@ -770,10 +908,10 @@ impl LirTerm {
 impl LirModule {
     /// Creates a module for `target` under the current IR version.
     #[must_use]
-    pub fn new(target: &str) -> Self {
+    pub fn new(target: Target) -> Self {
         Self {
             version: LILAC_IR_VERSION.to_owned(),
-            target: target.to_owned(),
+            target,
             data: Vec::new(),
             globals: Vec::new(),
             funcs: Vec::new(),
@@ -784,7 +922,7 @@ impl LirModule {
 
 impl Default for LirModule {
     fn default() -> Self {
-        Self::new("x86_64-unknown-none")
+        Self::new(Target::default())
     }
 }
 
@@ -857,13 +995,14 @@ pub fn is_variadic_arg_type(ty: &LirTy) -> bool {
     )
 }
 
-/// Fixed field layouts of the builtin aggregate types (`#byte_buffer`,
+/// Fixed fields of the builtin aggregate types (`#byte_buffer`,
 /// `#format_args`: a count plus sixteen pieces, since LIR has no arrays, and
-/// `#.lilac.frame`: a shadow-stack record, see [`trace`]).
+/// `#.lilac.frame`: a shadow-stack record, see [`trace`]), laid out as C
+/// structs like any other ([`builtin_layout`]).
 /// These never appear in `module.layouts`, so the verifier and the backend
 /// both consult this table.
 #[must_use]
-pub fn builtin_layout(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
+pub fn builtin_fields(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
     match ty.name()? {
         "byte_buffer" => Some(vec![
             ("len".to_owned(), LirTy::BitNative),
@@ -882,44 +1021,72 @@ pub fn builtin_layout(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
     }
 }
 
-/// The fields of an aggregate: a module layout, else a builtin one.
+/// The layout of a builtin aggregate on `target`: its [`builtin_fields`] as
+/// a C struct.
+#[must_use]
+pub fn builtin_layout(ty: &LirTy, target: &Target) -> Option<LirLayout> {
+    let no_layouts: HashMap<String, LirLayout> = HashMap::new();
+    LirLayout::of_struct(builtin_fields(ty)?, &no_layouts, target).ok()
+}
+
+/// The fields of an aggregate: a module layout's, else a builtin one's.
 #[must_use]
 pub fn fields_of<S: std::hash::BuildHasher>(
-    layouts: &HashMap<String, Vec<(String, LirTy)>, S>,
+    layouts: &HashMap<String, LirLayout, S>,
     ty: &LirTy,
 ) -> Option<Vec<(String, LirTy)>> {
     ty.name()
-        .and_then(|name| layouts.get(name).cloned())
-        .or_else(|| builtin_layout(ty))
+        .and_then(|name| layouts.get(name))
+        .map(LirLayout::members)
+        .or_else(|| builtin_fields(ty))
 }
 
-/// Size and alignment in bytes of an IR type, by C layout rules (fields in
-/// order, each aligned; the struct padded to its largest alignment), which is
-/// what LLVM's data layouts use for our targets. `ptr_bytes` is the target's
-/// pointer width.
+/// The layout of an aggregate on `target`: a module layout, else a builtin
+/// one.
+#[must_use]
+pub fn layout_of<S: std::hash::BuildHasher>(
+    layouts: &HashMap<String, LirLayout, S>,
+    ty: &LirTy,
+    target: &Target,
+) -> Option<LirLayout> {
+    ty.name()
+        .and_then(|name| layouts.get(name))
+        .cloned()
+        .or_else(|| builtin_layout(ty, target))
+}
+
+/// The size and alignment in bytes of a LIR type on `target`, looked up,
+/// never laid out anew: a scalar's from the target's C ABI table, a named
+/// type's from its layout (a module layout, else a builtin one), an array's
+/// as a C array of its element. `None` for a type with no size
+/// (`#unknown`, a name with no layout) or an array larger than the target
+/// allows.
 #[must_use]
 pub fn size_align<S: std::hash::BuildHasher>(
-    layouts: &HashMap<String, Vec<(String, LirTy)>, S>,
+    layouts: &HashMap<String, LirLayout, S>,
     ty: &LirTy,
-    ptr_bytes: u64,
-) -> (u64, u64) {
-    let ptr_bits = u32::try_from(ptr_bytes * 8).unwrap_or(u32::MAX);
-    if let Some(bits) = ty.bits(ptr_bits) {
-        let size = u64::from(bits / 8);
-        return (size, size);
+    target: &Target,
+) -> Option<SizeAlign> {
+    if let Some(scalar) = ty.scalar() {
+        return Some(SizeAlign::scalar(target, scalar));
     }
-    if let LirTy::Array(elem, len) = ty {
-        let (size, align) = size_align(layouts, elem, ptr_bytes);
-        return (size * len, align);
+    match ty {
+        LirTy::Array(elem, len) => {
+            let elem = size_align(layouts, elem, target)?;
+            lilac_layout::array_layout(target, elem, *len).ok()
+        }
+        LirTy::Named(name) => match layouts.get(name) {
+            Some(layout) => Some(SizeAlign {
+                size: layout.size,
+                align: layout.align,
+            }),
+            None => builtin_layout(ty, target).map(|layout| SizeAlign {
+                size: layout.size,
+                align: layout.align,
+            }),
+        },
+        LirTy::Bit(_) | LirTy::BitNative | LirTy::FBit(_) | LirTy::Ref(_) => None,
     }
-    let mut size = 0u64;
-    let mut align = 1u64;
-    for (_, field) in &fields_of(layouts, ty).unwrap_or_default() {
-        let (field_size, field_align) = size_align(layouts, field, ptr_bytes);
-        size = size.next_multiple_of(field_align) + field_size;
-        align = align.max(field_align);
-    }
-    (size.next_multiple_of(align), align)
 }
 
 #[cfg(test)]

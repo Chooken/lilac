@@ -172,6 +172,19 @@ mod tests {
         Span::dummy()
     }
 
+    /// A C struct of `(name, type)` fields on the tests' x86-64 targets.
+    fn struct_layout(fields: &[(&str, &str)]) -> lilac_ir::LirLayout {
+        lilac_ir::LirLayout::of_struct(
+            fields
+                .iter()
+                .map(|(name, ty)| ((*name).to_owned(), t(ty)))
+                .collect(),
+            &std::collections::HashMap::<String, lilac_ir::LirLayout>::new(),
+            &lilac_target::Target::default(),
+        )
+        .expect("a layout")
+    }
+
     fn backend() -> lilac_codegen_llvm::LlvmBackend {
         lilac_codegen_llvm::LlvmBackend::new("x86_64-pc-windows-msvc", OptLevel::O0)
     }
@@ -184,10 +197,11 @@ mod tests {
     /// builtin aggregates, and whose body allocas every type (including the
     /// `#Pair` layout) so the stores are observable.
     fn type_module() -> LirModule {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.layouts.insert(
             "Pair".to_owned(),
-            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
+            struct_layout(&[("a", "#bit32"), ("b", "#bit8")]),
         );
         let allocas = [
             ("p8", "#bit8"),
@@ -291,7 +305,8 @@ mod tests {
     /// the pointer-place ABI internal functions use, and emits no body.
     #[test]
     fn extern_decl_uses_c_signature() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "write".into(),
             ins: vec![
@@ -316,7 +331,8 @@ mod tests {
     /// An aggregate parameter is still `E028`.
     #[test]
     fn extern_float_types_use_c_signature() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "scale".into(),
             ins: vec![("x".into(), t("#fbit64"))],
@@ -330,7 +346,8 @@ mod tests {
         let text = emit(&module);
         assert!(text.contains("declare float @scale(double)"), "{text}");
 
-        let mut bad = LirModule::new("x86_64-pc-windows-msvc");
+        let mut bad =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         bad.funcs.push(LirFunc {
             name: "puts".into(),
             ins: vec![("s".into(), t("#byte_buffer"))],
@@ -353,7 +370,8 @@ mod tests {
     /// pointer-place ABI.
     #[test]
     fn extern_call_uses_c_abi() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.data.push(LirData {
             name: "data".into(),
             bytes: "hi".as_bytes().to_vec(),
@@ -443,7 +461,9 @@ mod tests {
     /// places by value after the fixed ones.
     #[test]
     fn variadic_extern_call_passes_extras() {
-        let mut module = LirModule::new("x86_64-unknown-linux-gnu");
+        let mut module = LirModule::new(
+            lilac_target::Target::parse("x86_64-unknown-linux-gnu").expect("triple"),
+        );
         module.funcs.push(LirFunc {
             name: "open".into(),
             ins: vec![
@@ -492,7 +512,8 @@ mod tests {
     /// mis-compiled struct pointer.
     #[test]
     fn extern_aggregate_param_is_e028() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "puts".into(),
             ins: vec![("s".into(), t("#byte_buffer"))],
@@ -512,7 +533,8 @@ mod tests {
     /// An `extern` declaring more than one out place is `E028`.
     #[test]
     fn extern_multi_out_is_e028() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "pair".into(),
             ins: Vec::new(),
@@ -536,7 +558,8 @@ mod tests {
     /// rather than panic when driven directly.
     #[test]
     fn extern_main_does_not_ice() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "main".into(),
             ins: Vec::new(),
@@ -554,7 +577,8 @@ mod tests {
 
     #[test]
     fn lowers_data_globals_in_order() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.data.push(LirData {
             name: "c0".into(),
             bytes: "hi".as_bytes().to_vec(),
@@ -646,7 +670,8 @@ mod tests {
 
     /// A `main` calling all three leaf builtins, so every leaf must be emitted.
     fn all_leaves_module() -> LirModule {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         for (place, ty) in [
             ("dest", "ref #bit8"),
@@ -687,10 +712,11 @@ mod tests {
     /// LLVM's builder cannot fold the opcodes away.
     #[allow(clippy::too_many_lines)]
     fn inst_module() -> LirModule {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.layouts.insert(
             "Pair".to_owned(),
-            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
+            struct_layout(&[("a", "#bit32"), ("b", "#bit8")]),
         );
         module.data.push(LirData {
             name: "c0".into(),
@@ -913,10 +939,11 @@ mod tests {
     /// the caller's reference slot).
     #[test]
     fn field_through_ref_loads_reference_first() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.layouts.insert(
             "Pair".to_owned(),
-            vec![("a".to_owned(), t("#bit32")), ("b".to_owned(), t("#bit8"))],
+            struct_layout(&[("a", "#bit32"), ("b", "#bit8")]),
         );
         let insts = vec![
             LirInst::Field {
@@ -957,7 +984,8 @@ mod tests {
     /// outs); the place ABI means the callee signature is all `ptr`.
     #[test]
     fn lowers_direct_call_with_place_pointers() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(func(
             "g",
             &[("a", "#bit32")],
@@ -979,7 +1007,8 @@ mod tests {
     /// by the block's single `ret void` — no phantom out argument.
     #[test]
     fn lowers_void_call_with_no_places() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module
             .funcs
             .push(func("g", &[], &[], vec![ret_block("entry", Vec::new())]));
@@ -998,7 +1027,8 @@ mod tests {
     /// verifies the module.
     #[test]
     fn lowers_forward_referenced_callee() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         alloca(&mut insts, "x", "#bit32");
         alloca(&mut insts, "y", "#bit32");
@@ -1030,7 +1060,8 @@ mod tests {
     /// address, `inttoptr` at the call) and passes the same place pointers.
     #[test]
     fn lowers_indirect_call_through_addr_func() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(func(
             "addOne",
             &[("v", "#bit32")],
@@ -1070,7 +1101,8 @@ mod tests {
     /// place.
     #[test]
     fn lowers_leaf_builtin_call_with_value_abi() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         alloca(&mut insts, "base", "ref #bit8");
         alloca(&mut insts, "off", "#bit_native");
@@ -1153,7 +1185,8 @@ mod tests {
     /// three leaf definitions and never declares `llvm.trap`.
     #[test]
     fn culls_all_unused_leaf_builtins() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
@@ -1176,7 +1209,8 @@ mod tests {
     /// `llvm.trap` declaration.
     #[test]
     fn emits_only_the_called_leaf_builtin() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         for (place, ty) in [
             ("dest", "ref #bit8"),
@@ -1204,7 +1238,8 @@ mod tests {
     /// A `@ptr_add` call emits `.lilac.ptr_add` but not `.lilac.memcpy`.
     #[test]
     fn emits_ptr_add_only_when_called() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         for (place, ty) in [
             ("base", "ref #bit8"),
@@ -1231,7 +1266,8 @@ mod tests {
     /// `.lilac.abort` runtime definition, not an undefined `@lilac_abort`.
     #[test]
     fn lilac_abort_builtin_calls_runtime_definition() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         call(
             &mut insts,
@@ -1251,7 +1287,8 @@ mod tests {
     /// returns a zeroed internal pointer global.
     #[test]
     fn trace_head_builtin_returns_the_slot() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = vec![LirInst::Alloca {
             ty: lilac_ir::LirTy::trace_frame().to_ref().to_ref(),
             place: "head".into(),
@@ -1278,7 +1315,8 @@ mod tests {
     /// The panic handler (its shadow-stack walk included) lowers to LLVM.
     #[test]
     fn panic_handler_lowers() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs = lilac_ir::build_runtime(8);
         module.funcs.extend(lilac_ir::hook_externs());
         let (handler, data) = lilac_ir::panic_runtime();
@@ -1308,7 +1346,8 @@ mod tests {
     /// `format_args`/`byte_buffer` runtime is gone.
     #[test]
     fn keeps_only_the_trap_backed_leaf_runtime() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         call(
             &mut insts,
@@ -1329,7 +1368,8 @@ mod tests {
     /// with the high bit set must trap, not read out of bounds.
     #[test]
     fn format_args_bounds_checks_are_unsigned() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs = lilac_ir::runtime::build_runtime(8);
         let text = emit(&module);
         for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
@@ -1346,7 +1386,8 @@ mod tests {
     /// with explicit then/else edges.
     #[test]
     fn lowers_branch_and_branch_if() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut entry = Vec::new();
         alloca(&mut entry, "c", "#bit8");
         entry.push(LirInst::CopyReg {
@@ -1400,7 +1441,8 @@ mod tests {
     /// the false edge.
     #[test]
     fn lowers_branch_if_fallthrough() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut entry = Vec::new();
         alloca(&mut entry, "c", "#bit8");
         entry.push(LirInst::CopyReg {
@@ -1444,7 +1486,8 @@ mod tests {
     /// nothing.
     #[test]
     fn lowers_terminators_and_drop() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module
             .funcs
             .push(func("ret", &[], &[], vec![ret_block("entry", Vec::new())]));
@@ -1479,7 +1522,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "no codegen lowering")]
     fn format_args_data_const_is_ice() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.data.push(LirData {
             name: "c0".into(),
             bytes: "hi".as_bytes().to_vec(),
@@ -1513,7 +1557,8 @@ mod tests {
     fn unknown_type_is_ice() {
         let context = inkwell::context::Context::create();
         let module = context.create_module("ice");
-        let lir = LirModule::new("x86_64-pc-windows-msvc");
+        let lir =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let lower = crate::lower::Lower::new(&context, module, &lir, "x86_64-pc-windows-msvc");
         let _ = lower.lir_type(&t("#bogus"));
     }
@@ -1522,7 +1567,8 @@ mod tests {
     fn lir_type_maps_fbit_types() {
         let context = inkwell::context::Context::create();
         let module = context.create_module("fbits");
-        let lir = LirModule::new("x86_64-pc-windows-msvc");
+        let lir =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let lower = crate::lower::Lower::new(&context, module, &lir, "x86_64-pc-windows-msvc");
         for (ty, expected) in [
             ("#fbit16", "half"),
@@ -1540,7 +1586,8 @@ mod tests {
 
     #[test]
     fn lowers_fbit_bitcast() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let insts = vec![
             LirInst::CopyReg {
                 src: LirOperand::Place("x".into()),
@@ -1585,7 +1632,8 @@ mod tests {
     /// bitcast to `i32` and compared with `icmp`, never `fcmp`.
     #[test]
     fn lowers_float_eq_as_bit_equality() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let insts = vec![
             LirInst::CopyReg {
                 src: LirOperand::Place("a".into()),
@@ -1642,7 +1690,9 @@ mod tests {
                 "noop"
             }
         }
-        let m = lilac_ir::LirModule::new("x86_64-pc-windows-msvc");
+        let m = lilac_ir::LirModule::new(
+            lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"),
+        );
         let err = Noop.emit_llvm(&m).expect_err("noop cannot emit LLVM IR");
         assert!(err.contains("noop"), "error must name the backend: {err}");
         let err = Noop
@@ -1652,7 +1702,7 @@ mod tests {
     }
 
     fn main_module(triple: &str) -> LirModule {
-        let mut module = LirModule::new(triple);
+        let mut module = LirModule::new(lilac_target::Target::parse(triple).expect("triple"));
         module
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", Vec::new())]));
@@ -1662,7 +1712,7 @@ mod tests {
     /// An executable: `main` with `insts`, an `@entry` hook (`.lilac.entry`)
     /// calling it, the other two hooks declared, and the entry stub.
     fn executable_module(triple: &str, insts: Vec<LirInst>) -> LirModule {
-        let mut module = LirModule::new(triple);
+        let mut module = LirModule::new(lilac_target::Target::parse(triple).expect("triple"));
         module
             .funcs
             .push(func("main", &[], &[], vec![ret_block("entry", insts)]));
@@ -1952,7 +2002,9 @@ mod tests {
     #[test]
     fn emits_for_non_native_triple() {
         let backend = lilac_codegen_llvm::LlvmBackend::new("aarch64-apple-darwin", OptLevel::O0);
-        let module = lilac_ir::LirModule::new("aarch64-apple-darwin");
+        let module = lilac_ir::LirModule::new(
+            lilac_target::Target::parse("aarch64-apple-darwin").expect("triple"),
+        );
         let text = backend.emit_llvm(&module).expect("non-native target emits");
         assert!(
             text.contains("target triple = \"aarch64-apple-darwin\""),
@@ -1966,7 +2018,9 @@ mod tests {
             "x86_64-pc-windows-msvc",
             lilac_codegen::OptLevel::O0,
         );
-        let module = lilac_ir::LirModule::new("x86_64-pc-windows-msvc");
+        let module = lilac_ir::LirModule::new(
+            lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"),
+        );
         let text = backend.emit_llvm(&module).expect("emits");
         assert!(
             text.contains("target triple = \"x86_64-pc-windows-msvc\""),
@@ -1995,10 +2049,11 @@ mod tests {
     /// pointer out of it), not the value's own address.
     #[test]
     fn coerces_value_argument_to_ref_parameter() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module
             .layouts
-            .insert("Pair".to_owned(), vec![("a".to_owned(), t("#bit32"))]);
+            .insert("Pair".to_owned(), struct_layout(&[("a", "#bit32")]));
         module.funcs.push(func(
             "hook",
             &[("from", "ref #Pair")],
@@ -2021,7 +2076,9 @@ mod tests {
     /// wrapper, even with a `main`.
     #[test]
     fn omits_entry_wrapper_without_the_stub() {
-        let text = emit(&LirModule::new("x86_64-pc-windows-msvc"));
+        let text = emit(&LirModule::new(
+            lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"),
+        ));
         assert!(!text.contains(".lilac.main"), "{text}");
         assert!(!text.contains("define i32 @main"), "{text}");
         let text = emit(&main_module("x86_64-pc-windows-msvc"));
@@ -2033,7 +2090,8 @@ mod tests {
     /// renamed `.lilac.main` symbol.
     #[test]
     fn renames_calls_and_addr_func_to_main() {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         alloca(&mut insts, "fptr", "#bit64");
         call(&mut insts, LirCallee::Func("main".into()), &[], &[]);
@@ -2064,7 +2122,8 @@ mod tests {
     /// keeps the `add`/`mul`, `-O2` folds them away, so the two printouts
     /// differ (the pass pipeline ran).
     fn redundant_arith_module() -> LirModule {
-        let mut module = LirModule::new("x86_64-pc-windows-msvc");
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         let mut insts = Vec::new();
         alloca(&mut insts, "a", "#bit32");
         insts.push(LirInst::Const {
@@ -2105,5 +2164,151 @@ mod tests {
             .emit_llvm(&module)
             .expect("O2 emits");
         assert_ne!(o0, o2, "the -O2 pipeline must change the IR");
+    }
+}
+
+/// The target table against LLVM: every target `Target::parse` accepts
+/// builds a `TargetMachine` (2.5), and LLVM's data layout agrees with
+/// `Target::scalar_layout` on every scalar (2.6) and with `lilac-layout` on
+/// a struct of them, so the table cannot drift from what LLVM emits.
+#[cfg(test)]
+mod target_tests {
+    use inkwell::context::Context;
+    use inkwell::targets::{
+        CodeModel, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
+        TargetTriple,
+    };
+    use inkwell::types::BasicTypeEnum;
+    use inkwell::{AddressSpace, OptimizationLevel};
+    use lilac_codegen::{Backend, OptLevel};
+    use lilac_ir::{LirLayout, LirModule, LirTy};
+    use lilac_target::{Abi, Arch, Os, Scalar, Target, Vendor};
+
+    /// Every four-component triple `Target::parse` accepts.
+    fn accepted() -> Vec<Target> {
+        let mut targets = Vec::new();
+        for arch in Arch::ALL {
+            for vendor in Vendor::ALL {
+                for os in Os::ALL {
+                    for abi in Abi::ALL {
+                        let triple = format!(
+                            "{}-{}-{}-{}",
+                            arch.as_str(),
+                            vendor.as_str(),
+                            os.as_str(),
+                            abi.as_str()
+                        );
+                        if let Ok(target) = Target::parse(&triple) {
+                            targets.push(target);
+                        }
+                    }
+                }
+            }
+        }
+        targets
+    }
+
+    fn machine(target: Target) -> TargetMachine {
+        LlvmTarget::initialize_all(&InitializationConfig::default());
+        let triple = TargetTriple::create(&target.to_triple());
+        let llvm = LlvmTarget::from_triple(&triple)
+            .unwrap_or_else(|error| panic!("LLVM has no target `{target}`: {error}"));
+        llvm.create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::None,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .unwrap_or_else(|| panic!("no target machine for `{target}`"))
+    }
+
+    #[test]
+    fn every_accepted_target_builds_a_target_machine() {
+        let targets = accepted();
+        assert!(targets.len() > 300, "{} targets", targets.len());
+        for target in &targets {
+            machine(*target);
+        }
+    }
+
+    #[test]
+    fn scalar_layouts_match_llvm() {
+        let context = Context::create();
+        for target in accepted() {
+            let data = machine(target).get_target_data();
+            for scalar in Scalar::ALL {
+                let ty: BasicTypeEnum = match scalar {
+                    Scalar::Bit8 => context.i8_type().into(),
+                    Scalar::Bit16 => context.i16_type().into(),
+                    Scalar::Bit32 => context.i32_type().into(),
+                    Scalar::Bit64 => context.i64_type().into(),
+                    Scalar::Float16 => context.f16_type().into(),
+                    Scalar::Float32 => context.f32_type().into(),
+                    Scalar::Float64 => context.f64_type().into(),
+                    Scalar::Float128 => context.f128_type().into(),
+                    Scalar::Pointer => context.ptr_type(AddressSpace::default()).into(),
+                };
+                let llvm = (
+                    data.get_abi_size(&ty),
+                    u64::from(data.get_abi_alignment(&ty)),
+                );
+                assert_eq!(target.scalar_layout(scalar), llvm, "{target} {scalar:?}");
+            }
+            // `@bit_native` is LLVM's pointer-sized integer.
+            let native = context.ptr_sized_int_type(&data, None);
+            assert_eq!(
+                target.scalar_layout(Scalar::Pointer),
+                (
+                    data.get_abi_size(&native),
+                    u64::from(data.get_abi_alignment(&native))
+                ),
+                "{target} @bit_native"
+            );
+        }
+    }
+
+    /// The backend checks every layout against LLVM's placement; a struct of
+    /// every scalar, an array and a nested struct lowers on every supported
+    /// target.
+    #[test]
+    fn layouts_lower_on_every_supported_target() {
+        let t = |text: &str| LirTy::parse(text).expect("type spelling");
+        for target in Target::supported() {
+            let mut module = LirModule::new(target);
+            let inner = LirLayout::of_struct(
+                vec![("a".to_owned(), t("#bit8")), ("b".to_owned(), t("#fbit64"))],
+                &module.layouts,
+                &target,
+            )
+            .expect("fits");
+            module.layouts.insert("Inner".to_owned(), inner);
+            let fields = [
+                "#bit8",
+                "#bit64",
+                "#bit16",
+                "#fbit128",
+                "#bit8",
+                "#fbit16",
+                "#bit32",
+                "ref #Inner",
+                "#fbit32",
+                "#bit_native",
+                "#Inner",
+                "[3 x #Inner]",
+                "#byte_buffer",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| (format!("f{index}"), t(ty)))
+            .collect();
+            let outer = LirLayout::of_struct(fields, &module.layouts, &target).expect("fits");
+            module.layouts.insert("Outer".to_owned(), outer);
+            let backend = crate::LlvmBackend::new(&target.to_triple(), OptLevel::O0);
+            backend
+                .emit_llvm(&module)
+                .unwrap_or_else(|error| panic!("{target}: {error}"));
+        }
     }
 }

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use lilac_target::Scalar;
+
 /// A LIR value type. It prints as its text spelling (`#bit32`,
 /// `ref #Object`), which is also what [`LirTy::parse`] reads.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -94,6 +96,18 @@ impl LirTy {
         match self {
             Self::Bit(bits) | Self::FBit(bits) => Some(u32::from(*bits)),
             Self::BitNative | Self::Ref(_) => Some(ptr_bits),
+            Self::Named(_) | Self::Array(..) => None,
+        }
+    }
+
+    /// The C ABI scalar a scalar type is laid out as (`#bit_native` as a
+    /// pointer, `uintptr_t`); `None` for aggregates.
+    #[must_use]
+    pub fn scalar(&self) -> Option<Scalar> {
+        match self {
+            Self::Bit(bits) => Scalar::bit(u32::from(*bits)),
+            Self::FBit(bits) => Scalar::float(u32::from(*bits)),
+            Self::BitNative | Self::Ref(_) => Some(Scalar::Pointer),
             Self::Named(_) | Self::Array(..) => None,
         }
     }

@@ -39,16 +39,31 @@ global !.root.pointer: ref #bit32 = zeroed
 
 String const bytes are raw bytes: printable ASCII and newlines print as is, `"` and `\` are escaped with a backslash, and any other byte prints as `\xHH` (one byte, as in source).
 
-Types are defined as like (members carry their field names in layout order;
-sections print sorted by type name for deterministic snapshots):
+Types are defined with their layout on the module's target: the size and
+alignment in bytes after the name, and the members with their field names
+in layout order (sections print sorted by type name for deterministic
+snapshots):
 
 ```lilac-ir
-type #Number {
+type #Number size 8 align 4 {
     tag: #bit8,
     val: #bit32,
 }
 ```
-as produced by `tests/ui/match_enum.lir`.
+
+A layout is the C layout of its fields on the target (`lilac-layout`): a C
+struct, each field at the next multiple of its alignment and the size
+padded to the largest alignment, with no reordering; no fields is size 0,
+align 1. Scalars are laid out as `uint8_t`…`uint64_t`, `_Float16`,
+`float`, `double`, the 128-bit float, and `uintptr_t`/`T *` for
+`#bit_native`/`ref T` (`Target::scalar_layout`). A `type #Name tagged size
+S align A` section is a tagged union (the C `struct { tag; union { … }
+payload; }`): its first member is the integer tag and every other member a
+payload at one shared offset; lowering does not produce one yet. The
+verifier recomputes every section for the module's `target` and rejects one
+whose offsets, size or alignment differ; nothing after lowering computes a
+layout. No layout, and no array, may be larger than the target's
+`isize::MAX` bytes (typeck reports one as `E067`).
 
 Builtin aggregates usable in `#` positions are `#byte_buffer`,
 `#format_args` and `#.lilac.frame`. All are plain values with no hidden
@@ -68,6 +83,7 @@ types.
 `#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
 The table is spelled out as sixteen named fields rather than an array.
 The verifier resolves `field`/`field.addr` against these layouts
+(`lilac_ir::builtin_fields`), laid out as C structs like any other
 (`lilac_ir::builtin_layout`); the backend builds matching structs.
 
 The opaque type `#unknown` has no size and is valid only behind a reference:

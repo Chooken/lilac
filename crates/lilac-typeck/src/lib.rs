@@ -19,6 +19,7 @@ mod expr;
 mod failure;
 mod generics;
 mod indices;
+mod layout;
 mod literals;
 mod memory;
 mod paths;
@@ -40,6 +41,7 @@ use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed, Unreported};
 use lilac_hir::{FuncKey, HirExpr, HirFunc, HirProgram};
 use lilac_resolve::{DefId, DefKind, Resolved};
 use lilac_span::{FileId, Span};
+use lilac_target::Target;
 use lilac_ty::{Builtin, FuncSig, TypeId, TypeKind, TypeRef, Types};
 use sink::{Pending, Sink};
 
@@ -60,8 +62,9 @@ pub struct Checked {
 /// What a unit is checked for.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// The target's pointer width (`@bit_native` literal range).
-    pub native_bits: u32,
+    /// The target: `@bit_native`'s width (its literal range) and every
+    /// type's layout, which must fit it (`E067`).
+    pub target: Target,
     /// Whether the unit is an executable (`lilac build`): a name `@entry`
     /// cannot find in the root namespace is then `E032`. Otherwise an
     /// `@entry` that names a missing root item is dropped silently, since
@@ -279,13 +282,16 @@ pub(crate) enum Requirement {
     /// An ownership error (`E063`, `E064`): a type that cannot be copied
     /// was moved where it may not be.
     Ownership,
+    /// A type the instance lays out is larger than the target allows
+    /// (`E067`).
+    Size,
 }
 
 pub(crate) struct Checker<'a> {
     pub res: &'a Resolved,
     pub types: &'a mut Types,
     pub diags: Sink<'a>,
-    pub native_bits: u32,
+    pub target: Target,
     /// Declared signatures by definition (templates for generic ones).
     pub sigs: HashMap<DefId, FuncSig>,
     /// Definitions whose signature failed (callers stay silent).
@@ -298,6 +304,9 @@ pub(crate) struct Checker<'a> {
     pub queue: VecDeque<FuncKey>,
     /// Concrete object/enum types seen so far.
     pub type_states: HashMap<TypeId, TypeState>,
+    /// The size and alignment of each concrete object, enum and array type
+    /// laid out so far (`layout.rs`).
+    pub sizes: HashMap<TypeId, lilac_layout::SizeAlign>,
     /// Types whose layout is being computed (innermost last).
     pub type_stack: Vec<TypeId>,
     /// Concrete array types met so far, with a span that names each, for
@@ -353,7 +362,7 @@ impl<'a> Checker<'a> {
             res,
             types,
             diags: Sink::new(diags),
-            native_bits: options.native_bits,
+            target: options.target,
             require_entry: options.require_entry,
             entry_unresolved: false,
             empty_names: 0,
@@ -363,6 +372,7 @@ impl<'a> Checker<'a> {
             instances: HashMap::new(),
             queue: VecDeque::new(),
             type_states: HashMap::new(),
+            sizes: HashMap::new(),
             type_stack: Vec::new(),
             arrays: Vec::new(),
             const_types: HashMap::new(),
@@ -821,7 +831,7 @@ impl Checker<'_> {
             TypeKind::Bit16 => 16,
             TypeKind::Bit32 => 32,
             TypeKind::Bit64 => 64,
-            TypeKind::BitNative => self.native_bits,
+            TypeKind::BitNative => self.target.bit_native_width(),
             _ => lilac_error::bug!(Span::dummy(), "bit width of a non-bit type"),
         }
     }

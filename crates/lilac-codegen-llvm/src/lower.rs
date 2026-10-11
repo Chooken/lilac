@@ -28,9 +28,9 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst,
-    LirExport, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp,
-    Symbol,
+    builtin_fields, builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee,
+    LirConst, LirExport, LirFunc, LirInst, LirLayout, LirLayoutKind, LirModule, LirOperand,
+    LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Target};
@@ -269,6 +269,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
+    /// The size and alignment of a LIR type, read from the module's layouts
+    /// (never computed here); the verifier checked every type is sized.
+    fn size_align(&self, ty: &LirTy) -> lilac_layout::SizeAlign {
+        lilac_ir::size_align(&self.lir.layouts, ty, &self.lir.target)
+            .unwrap_or_else(|| bug!(Span::dummy(), "`{ty}` has no size on `{}`", self.lir.target))
+    }
+
     /// The opaque `ptr` type used for every place under the pointer ABI.
     pub(crate) fn ptr_type(&self) -> PointerType<'ctx> {
         self.context.ptr_type(AddressSpace::default())
@@ -280,20 +287,29 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ///
     /// The builtin aggregates `#byte_buffer`/`#format_args`/`#.lilac.frame`
     /// never appear in `module.layouts`, so they are built here from
-    /// `builtin_layout`, resolving `#byte_buffer` first (the other two embed
+    /// `builtin_fields`, resolving `#byte_buffer` first (the other two embed
     /// it).
+    ///
+    /// LLVM lays these structs out itself; each must land exactly where the
+    /// LIR layout (`lilac-layout`, the C layout) says, which
+    /// [`Self::check_layout`] makes sure of.
     fn define_layouts(&mut self) {
+        let target_data =
+            TargetData::create(&self.module.get_data_layout().as_str().to_string_lossy());
         for ty in [
             LirTy::byte_buffer(),
             LirTy::format_args(),
             LirTy::trace_frame(),
         ] {
-            let Some(layout) = builtin_layout(&ty) else {
+            let Some(fields) = builtin_fields(&ty) else {
                 continue;
             };
             let fields: Vec<BasicTypeEnum<'ctx>> =
-                layout.iter().map(|(_, ty)| self.lir_type(ty)).collect();
+                fields.iter().map(|(_, ty)| self.lir_type(ty)).collect();
             let struct_ty = self.context.struct_type(&fields, false);
+            if let Some(layout) = builtin_layout(&ty, &self.lir.target) {
+                self.check_layout(&target_data, &ty.to_string(), struct_ty, &layout);
+            }
             if let Some(name) = ty.name() {
                 self.named.insert(name.to_owned(), struct_ty);
             }
@@ -305,17 +321,57 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             self.named.insert((*name).clone(), struct_ty);
         }
         for name in &names {
-            let fields: Vec<BasicTypeEnum<'ctx>> = self
-                .lir
-                .layouts
-                .get(name.as_str())
-                .map(|members| members.iter().map(|(_, ty)| self.lir_type(ty)).collect())
-                .unwrap_or_default();
+            let layout = &self.lir.layouts[name.as_str()];
+            let fields: Vec<BasicTypeEnum<'ctx>> = layout
+                .fields
+                .iter()
+                .map(|field| self.lir_type(&field.ty))
+                .collect();
             if let Some(struct_ty) = self.named.get(name.as_str()).copied() {
                 if !struct_ty.set_body(&fields, false) {
                     bug!(Span::dummy(), "failed to define layout `{name}`");
                 }
             }
+        }
+        for name in &names {
+            if let Some(struct_ty) = self.named.get(name.as_str()).copied() {
+                let layout = &self.lir.layouts[name.as_str()];
+                self.check_layout(&target_data, &format!("#{name}"), struct_ty, layout);
+            }
+        }
+    }
+
+    /// An internal error unless LLVM lays `struct_ty` out as `layout` says:
+    /// the same size, alignment and field offsets. LIR only has struct
+    /// layouts that LLVM can place this way.
+    fn check_layout(
+        &self,
+        target_data: &TargetData,
+        name: &str,
+        struct_ty: StructType<'ctx>,
+        layout: &LirLayout,
+    ) {
+        if layout.kind != LirLayoutKind::Struct {
+            bug!(Span::dummy(), "layout `{name}` is not a struct");
+        }
+        let offsets: Vec<Option<u64>> = (0..layout.fields.len())
+            .map(|index| {
+                let index = u32::try_from(index).ok()?;
+                target_data.offset_of_element(&struct_ty, index)
+            })
+            .collect();
+        let expected: Vec<Option<u64>> = layout.fields.iter().map(|f| Some(f.offset)).collect();
+        let size = target_data.get_abi_size(&struct_ty);
+        let align = u64::from(target_data.get_abi_alignment(&struct_ty));
+        if size != layout.size || align != layout.align || offsets != expected {
+            bug!(
+                Span::dummy(),
+                "LLVM lays out `{name}` with size {size} align {align} and offsets {offsets:?}, \
+                 but its C layout on `{}` is size {} align {} and offsets {expected:?}",
+                self.lir.target,
+                layout.size,
+                layout.align
+            );
         }
     }
 
@@ -347,9 +403,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// zeroed or holding its initial bytes (which LIR gives in the target's
     /// layout, so the global is a byte array under an opaque pointer).
     fn define_globals(&self) {
-        let ptr_bytes = u64::from(self.native.get_bit_width() / 8);
         for global in &self.lir.globals {
-            let (_, align) = lilac_ir::size_align(&self.lir.layouts, &global.ty, ptr_bytes);
+            let align = self.size_align(&global.ty).align;
             let value = match &global.init {
                 None => {
                     let ty = self.lir_type(&global.ty);
@@ -1340,8 +1395,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         else {
             bug!(Span::dummy(), "non-`elem.addr` instruction `{inst:?}`");
         };
-        let ptr_bytes = u64::from(self.native.get_bit_width() / 8);
-        let (size, _) = lilac_ir::size_align(&self.lir.layouts, ty.strip_ref(), ptr_bytes);
+        let size = self.size_align(ty.strip_ref()).size;
         let offset = checked(
             builder.build_int_mul(
                 reg_int(index, state),

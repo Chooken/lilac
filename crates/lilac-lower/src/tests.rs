@@ -4,6 +4,11 @@ use lilac_span::SourceMap;
 use lilac_ty::Types;
 
 fn lower_src(src: &str) -> (String, Diags) {
+    lower_src_on(src, lilac_target::Target::default())
+}
+
+/// Lowers `src` for `target`.
+fn lower_src_on(src: &str, target: lilac_target::Target) -> (String, Diags) {
     let mut sources = SourceMap::new();
     let mut diags = Diags::new();
     let project = lilac_module::single_file("test.lilac", src, &mut sources);
@@ -11,22 +16,13 @@ fn lower_src(src: &str) -> (String, Diags) {
     let res = lilac_resolve::resolve(&project, &programs, &mut diags);
     let mut types = Types::new();
     let options = lilac_typeck::Options {
-        native_bits: 64,
+        target,
         require_entry: false,
         cancel: None,
     };
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, options);
     assert!(!diags.has_errors(), "{diags:?}");
-    let lir = lower(
-        &checked.hir,
-        &res,
-        &types,
-        &sources,
-        "x86_64-unknown-none",
-        8,
-        None,
-    )
-    .module;
+    let lir = lower(&checked.hir, &res, &types, &sources, target, None).module;
     let text = lir.to_text();
     let mut verify_diags = Diags::new();
     assert!(
@@ -289,4 +285,23 @@ fn constant_condition_drops_dead_compile_error() {
         "main: function () nothing {\n    if 0x0 {\n        @compile_error(\"dead\")\n    }\n}\n",
     );
     assert!(!text.contains("@compile_error"), "{text}");
+}
+
+/// Layouts and `@size_of` follow the target's C ABI: on i386 System V an
+/// 8-byte integer is aligned to 4, so `{ @bit8, @bit64 }` is 12 bytes.
+#[test]
+fn layouts_follow_the_target() {
+    let src = "Pair: object {\n    a: @bit8\n    b: @bit64\n}\n\nmain: function () nothing {\n    size: @bit_native = @size_of(Pair)\n    align: @bit_native = @align_of(Pair)\n}\n";
+    let i686 = lilac_target::Target::parse("x86-unknown-linux-gnu").expect("triple");
+    let (text, _) = lower_src_on(src, i686);
+    assert!(
+        text.contains("target = \"i686-unknown-linux-gnu\""),
+        "{text}"
+    );
+    assert!(text.contains("type #Pair size 12 align 4 {"), "{text}");
+    assert!(text.contains("#bit_native = const 0xc"), "{text}");
+    assert!(text.contains("#bit_native = const 0x4"), "{text}");
+    let (text, _) = lower_src(src);
+    assert!(text.contains("type #Pair size 16 align 8 {"), "{text}");
+    assert!(text.contains("#bit_native = const 0x10"), "{text}");
 }

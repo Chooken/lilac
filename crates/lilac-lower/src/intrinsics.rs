@@ -57,7 +57,7 @@ impl Lower<'_> {
                 let ones = state.reg();
                 let width = match lir {
                     LirTy::Bit(bits) => u32::from(bits),
-                    _ => u32::try_from(self.ptr_bytes * 8).unwrap_or(64),
+                    _ => self.native_bits(),
                 };
                 state.emit(LirInst::Const {
                     dst: ones.clone(),

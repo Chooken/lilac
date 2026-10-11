@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #Holder {
+type #Holder size 20 align 4 {
     tag: #bit8,
     items: [4 x #bit32],
 }

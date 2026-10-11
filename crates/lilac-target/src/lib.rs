@@ -3,7 +3,9 @@
 //! This crate is the single source of truth for target triples. It parses a
 //! triple into its four structured components (`arch`, `vendor`, `os`, `abi`)
 //! and renders it back in canonical form. [`Target::link_info`] is the one
-//! table of per-OS linking facts.
+//! table of per-OS linking facts, and [`Target::scalar_layout`] the one table
+//! of the target C ABI's scalar sizes and alignments, from which
+//! `lilac-layout` builds every aggregate layout.
 
 /// Instruction-set architecture component of a target triple.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -54,11 +56,12 @@ impl Arch {
         }
     }
 
-    /// Parses an architecture name.
+    /// Parses an architecture name. `i686`, LLVM's name for 32-bit x86, is
+    /// accepted so that a rendered triple ([`Target::to_triple`]) reads back.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "x86" => Some(Self::X86),
+            "x86" | "i686" => Some(Self::X86),
             "x86_64" => Some(Self::X86_64),
             "arm" => Some(Self::Arm),
             "aarch64" => Some(Self::Aarch64),
@@ -85,6 +88,23 @@ impl Arch {
         }
     }
 
+    /// The architecture's name in an LLVM (and Clang) triple: `i686` for
+    /// 32-bit x86, whose user-facing name `x86` LLVM does not know; every
+    /// other name is LLVM's already.
+    #[must_use]
+    pub fn llvm_name(self) -> &'static str {
+        match self {
+            Self::X86 => "i686",
+            other => other.as_str(),
+        }
+    }
+
+    /// Whether this is a WebAssembly architecture.
+    #[must_use]
+    pub fn is_wasm(self) -> bool {
+        matches!(self, Self::Wasm32 | Self::Wasm64)
+    }
+
     /// Returns whether pointers on this architecture are 64 bits wide.
     #[must_use]
     pub fn is_64_bit(self) -> bool {
@@ -107,6 +127,9 @@ pub enum Vendor {
 }
 
 impl Vendor {
+    /// Every vendor, in declaration order.
+    pub const ALL: [Self; 3] = [Self::Unknown, Self::Pc, Self::Apple];
+
     /// Parses a vendor name.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -145,6 +168,15 @@ pub enum Os {
 }
 
 impl Os {
+    /// Every operating system, in declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Unknown,
+        Self::Linux,
+        Self::Windows,
+        Self::Macos,
+    ];
+
     /// Parses an operating-system name.
     ///
     /// `"macos"` is accepted as an input alias; [`Os::as_str`] always renders
@@ -200,6 +232,9 @@ pub enum Abi {
 }
 
 impl Abi {
+    /// Every ABI, in declaration order.
+    pub const ALL: [Self; 4] = [Self::None, Self::Gnu, Self::Msvc, Self::Musl];
+
     /// Parses an ABI name.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -246,8 +281,54 @@ impl Target {
     /// # Errors
     ///
     /// Returns [`ParseError`] if the triple is empty, has too many components,
-    /// or contains an unrecognized architecture, vendor, OS, or ABI.
+    /// contains an unrecognized architecture, vendor, OS, or ABI, or names a
+    /// combination with no C ABI ([`ParseError::Unsupported`]).
     pub fn parse(s: &str) -> Result<Self, ParseError> {
+        let target = Self::parse_components(s)?;
+        // WebAssembly's C ABI (and LLVM's and Clang's support for it) exists
+        // only without an operating system or vendor.
+        if target.arch.is_wasm()
+            && (target.vendor != Vendor::Unknown || !matches!(target.os, Os::None | Os::Unknown))
+        {
+            return Err(ParseError::Unsupported(format!(
+                "`{}` has no operating system or vendor: write `{}-unknown-unknown`",
+                target.arch.as_str(),
+                target.arch.as_str()
+            )));
+        }
+        Ok(target)
+    }
+
+    /// Every target [`Target::parse`] accepts, one per architecture and
+    /// operating system: that system's usual vendor and ABI (`pc` and
+    /// `msvc` on Windows, `apple` on macOS, `gnu` on Linux).
+    #[must_use]
+    pub fn supported() -> Vec<Self> {
+        let mut targets = Vec::new();
+        for arch in Arch::ALL {
+            for os in Os::ALL {
+                let (vendor, abi) = match os {
+                    Os::Windows => (Vendor::Pc, Abi::Msvc),
+                    Os::Macos => (Vendor::Apple, Abi::None),
+                    Os::Linux => (Vendor::Unknown, Abi::Gnu),
+                    Os::None | Os::Unknown => (Vendor::Unknown, Abi::None),
+                };
+                let target = Self {
+                    arch,
+                    vendor,
+                    os,
+                    abi,
+                };
+                if Self::parse(&target.to_triple()).is_ok() {
+                    targets.push(target);
+                }
+            }
+        }
+        targets
+    }
+
+    /// The four components of a triple, each recognized on its own.
+    fn parse_components(s: &str) -> Result<Self, ParseError> {
         let parts: Vec<&str> = s.split('-').collect();
         if s.is_empty() {
             return Err(ParseError::Empty);
@@ -312,10 +393,12 @@ impl Target {
         }
     }
 
-    /// Renders the target in canonical `arch-vendor-os[-abi]` form.
+    /// Renders the target in canonical `arch-vendor-os[-abi]` form, the
+    /// triple LLVM and Clang take (the architecture by
+    /// [`Arch::llvm_name`]: `x86` renders as `i686`).
     #[must_use]
     pub fn to_triple(&self) -> String {
-        let arch = self.arch.as_str();
+        let arch = self.arch.llvm_name();
         let vendor = self.vendor.as_str();
         let os = self.os.as_str();
         if self.abi == Abi::None {
@@ -418,6 +501,130 @@ impl Target {
             32
         }
     }
+
+    /// The size and alignment in bytes of a scalar in the target's C ABI:
+    /// the one table every layout is built from.
+    ///
+    /// Sizes are the scalar's width. Alignment is natural (equal to the
+    /// size) except for:
+    /// - `uint64_t` and `double` on 32-bit x86 off Windows (i386 System V
+    ///   and Darwin) and on 32-bit Arm on macOS (APCS): 4;
+    /// - the 128-bit float (`__float128`, or a binary128 `long double`):
+    ///   16 everywhere.
+    ///
+    /// `lilac-codegen-llvm` checks this table against LLVM's data layout and
+    /// `lilac-layout` against Clang's C layouts, for every supported target.
+    #[must_use]
+    pub fn scalar_layout(&self, scalar: Scalar) -> (u64, u64) {
+        let size = scalar.size(self);
+        let align = match scalar {
+            Scalar::Bit64 | Scalar::Float64 if self.aligns_8_byte_scalars_to_4() => 4,
+            Scalar::Float128 => 16,
+            _ => size,
+        };
+        (size, align)
+    }
+
+    /// Whether the C ABI aligns 8-byte integers and doubles to 4 bytes:
+    /// 32-bit x86 except on Windows, and 32-bit Arm on macOS.
+    fn aligns_8_byte_scalars_to_4(self) -> bool {
+        match self.arch {
+            Arch::X86 => self.os != Os::Windows,
+            Arch::Arm => self.os == Os::Macos,
+            _ => false,
+        }
+    }
+
+    /// The largest object the target allows, in bytes: its `isize::MAX`
+    /// (`2^31 − 1` or `2^63 − 1`), so every offset fits a signed
+    /// pointer-width integer.
+    #[must_use]
+    pub fn max_object_size(&self) -> u64 {
+        (1u64 << (self.bit_native_width() - 1)) - 1
+    }
+}
+
+impl std::fmt::Display for Target {
+    /// The triple, as [`Target::to_triple`] renders it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_triple())
+    }
+}
+
+/// A scalar of the target's C ABI: what every layout is built from.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Scalar {
+    /// `uint8_t` (`@bit8`).
+    Bit8,
+    /// `uint16_t` (`@bit16`).
+    Bit16,
+    /// `uint32_t` (`@bit32`).
+    Bit32,
+    /// `uint64_t` (`@bit64`).
+    Bit64,
+    /// `_Float16` (`@fbit16`).
+    Float16,
+    /// `float` (`@fbit32`).
+    Float32,
+    /// `double` (`@fbit64`).
+    Float64,
+    /// `__float128`, or a binary128 `long double` (`@fbit128`).
+    Float128,
+    /// `T *` (`ref T`), and `uintptr_t` (`@bit_native`), which has the
+    /// pointer's size and alignment on every target.
+    Pointer,
+}
+
+impl Scalar {
+    /// Every scalar, in declaration order.
+    pub const ALL: [Self; 9] = [
+        Self::Bit8,
+        Self::Bit16,
+        Self::Bit32,
+        Self::Bit64,
+        Self::Float16,
+        Self::Float32,
+        Self::Float64,
+        Self::Float128,
+        Self::Pointer,
+    ];
+
+    /// The integer scalar `bits` wide (8, 16, 32 or 64).
+    #[must_use]
+    pub fn bit(bits: u32) -> Option<Self> {
+        match bits {
+            8 => Some(Self::Bit8),
+            16 => Some(Self::Bit16),
+            32 => Some(Self::Bit32),
+            64 => Some(Self::Bit64),
+            _ => None,
+        }
+    }
+
+    /// The float scalar `bits` wide (16, 32, 64 or 128).
+    #[must_use]
+    pub fn float(bits: u32) -> Option<Self> {
+        match bits {
+            16 => Some(Self::Float16),
+            32 => Some(Self::Float32),
+            64 => Some(Self::Float64),
+            128 => Some(Self::Float128),
+            _ => None,
+        }
+    }
+
+    /// The size in bytes on `target`.
+    #[must_use]
+    pub fn size(self, target: &Target) -> u64 {
+        match self {
+            Self::Bit8 => 1,
+            Self::Bit16 | Self::Float16 => 2,
+            Self::Bit32 | Self::Float32 => 4,
+            Self::Bit64 | Self::Float64 => 8,
+            Self::Float128 => 16,
+            Self::Pointer => u64::from(target.bit_native_width() / 8),
+        }
+    }
 }
 
 impl Default for Target {
@@ -493,6 +700,9 @@ pub enum ParseError {
     UnknownOs(String),
     /// The ABI component was not recognized.
     UnknownAbi(String),
+    /// Each component is known, but together they name no C ABI (LLVM or
+    /// Clang has none): the reason, for the user.
+    Unsupported(String),
 }
 
 impl std::fmt::Display for ParseError {
@@ -504,6 +714,7 @@ impl std::fmt::Display for ParseError {
             Self::UnknownVendor(v) => write!(f, "unknown vendor `{v}`"),
             Self::UnknownOs(v) => write!(f, "unknown os `{v}`"),
             Self::UnknownAbi(v) => write!(f, "unknown abi `{v}`"),
+            Self::Unsupported(why) => write!(f, "unsupported target: {why}"),
         }
     }
 }
@@ -530,7 +741,7 @@ mod tests {
         for t in [
             "x86_64-unknown-none",
             "x86_64-pc-windows-msvc",
-            "x86-unknown-linux-gnu",
+            "i686-unknown-linux-gnu",
             "aarch64-apple-darwin",
             "riscv32-unknown-none",
         ] {
@@ -686,6 +897,161 @@ mod tests {
         assert_eq!(LinkFlavor::Coff.lld_flavor(), "link");
         assert_eq!(LinkFlavor::Elf.lld_flavor(), "gnu");
         assert_eq!(LinkFlavor::MachO.lld_flavor(), "darwin");
+    }
+
+    #[test]
+    fn x86_renders_as_llvm_names_it() {
+        let t = Target::parse("x86-linux").expect("valid");
+        assert_eq!(t.arch, Arch::X86);
+        assert_eq!(t.arch.as_str(), "x86");
+        assert_eq!(t.arch.builtin_name(), "X86");
+        assert_eq!(t.to_triple(), "i686-unknown-linux");
+        assert_eq!(t.to_string(), "i686-unknown-linux");
+        assert_eq!(
+            Target::parse("i686-pc-windows-msvc").expect("valid").arch,
+            Arch::X86
+        );
+        for arch in Arch::ALL {
+            if arch != Arch::X86 {
+                assert_eq!(arch.llvm_name(), arch.as_str(), "{arch:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn webassembly_has_no_os_or_vendor() {
+        for ok in [
+            "wasm32-unknown-unknown",
+            "wasm32",
+            "wasm64-unknown-none",
+            "wasm32-unknown-none-musl",
+        ] {
+            assert!(Target::parse(ok).is_ok(), "{ok}");
+        }
+        for refused in [
+            "wasm32-linux",
+            "wasm32-unknown-linux-gnu",
+            "wasm64-pc-windows-msvc",
+            "wasm32-apple-darwin",
+            "wasm32-pc-none",
+        ] {
+            let error = Target::parse(refused).expect_err(refused);
+            assert!(matches!(error, ParseError::Unsupported(_)), "{refused}");
+            assert!(
+                error.to_string().contains("no operating system or vendor"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_is_every_accepted_pair() {
+        let supported = Target::supported();
+        assert_eq!(supported.len(), 6 * Os::ALL.len() + 2 * 2);
+        for target in &supported {
+            assert_eq!(Target::parse(&target.to_triple()).as_ref(), Ok(target));
+        }
+        for arch in Arch::ALL {
+            for os in Os::ALL {
+                let accepted = Target::parse(&format!("{}-{}", arch.as_str(), os.as_str())).is_ok();
+                let listed = supported.iter().any(|t| (t.arch, t.os) == (arch, os));
+                assert_eq!(accepted, listed, "{arch:?} {os:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_layouts_follow_the_c_abi() {
+        let layouts = |triple: &str| -> Vec<(u64, u64)> {
+            let target = Target::parse(triple).expect("valid");
+            Scalar::ALL
+                .iter()
+                .map(|scalar| target.scalar_layout(*scalar))
+                .collect()
+        };
+        // Bit8 Bit16 Bit32 Bit64 Float16 Float32 Float64 Float128 Pointer
+        let natural_64 = [
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (16, 16),
+            (8, 8),
+        ];
+        let natural_32 = [
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (16, 16),
+            (4, 4),
+        ];
+        let packed_32 = [
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 4),
+            (2, 2),
+            (4, 4),
+            (8, 4),
+            (16, 16),
+            (4, 4),
+        ];
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "riscv64-unknown-none",
+            "wasm64-unknown-unknown",
+        ] {
+            assert_eq!(layouts(triple), natural_64, "{triple}");
+        }
+        for triple in [
+            "x86-pc-windows-msvc",
+            "x86-pc-windows-gnu",
+            "arm-unknown-linux-gnu",
+            "arm-pc-windows-msvc",
+            "riscv32-unknown-none",
+            "wasm32-unknown-unknown",
+        ] {
+            assert_eq!(layouts(triple), natural_32, "{triple}");
+        }
+        for triple in [
+            "x86-unknown-linux-gnu",
+            "x86-unknown-none",
+            "x86-apple-darwin",
+            "arm-apple-darwin",
+        ] {
+            assert_eq!(layouts(triple), packed_32, "{triple}");
+        }
+    }
+
+    #[test]
+    fn max_object_size_is_isize_max() {
+        let max = |triple: &str| Target::parse(triple).expect("valid").max_object_size();
+        assert_eq!(max("x86_64-unknown-linux-gnu"), (1 << 63) - 1);
+        assert_eq!(max("x86-unknown-linux-gnu"), (1 << 31) - 1);
+        assert_eq!(max("wasm32-unknown-unknown"), 0x7fff_ffff);
+    }
+
+    #[test]
+    fn scalar_widths_round_trip() {
+        for bits in [8, 16, 32, 64] {
+            let scalar = Scalar::bit(bits).expect("integer width");
+            assert_eq!(scalar.size(&Target::default()) * 8, u64::from(bits));
+        }
+        for bits in [16, 32, 64, 128] {
+            let scalar = Scalar::float(bits).expect("float width");
+            assert_eq!(scalar.size(&Target::default()) * 8, u64::from(bits));
+        }
+        assert_eq!(Scalar::bit(128), None);
+        assert_eq!(Scalar::float(8), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #Store {
+type #Store size 8 align 8 {
     Data: ref #unknown,
 }
 extern @malloc

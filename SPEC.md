@@ -787,6 +787,25 @@ Types are declared only at the top level of a file: an `object` or `enum`
 declared inside another type's body is `E036`. Group related types with a
 folder namespace instead.
 
+**An object's layout is its C layout.** An `object` is laid out exactly as
+the C struct with the same fields in the same order on the target:
+`sizeof`, `_Alignof` and every `offsetof` are the target C compiler's. Each
+field sits at the next multiple of its alignment and the size is padded to
+a multiple of the largest alignment; fields are never reordered. Field
+types map to C as `@bit8`…`@bit64` → `uint8_t`…`uint64_t`, `@bit_native`
+→ `uintptr_t`, `@fbit16`/`@fbit32`/`@fbit64` → `_Float16`/`float`/`double`,
+`@fbit128` → the target's 128-bit float (`__float128`, or a binary128 `long
+double`), `ref T` → `T *`, and `@array(T, N)` → `T[N]`. So a `ref Object`
+crosses an `extern` as a `struct Object *` with no conversion, and a C
+header translates field by field. An object with no fields has size 0 and
+alignment 1, as GCC and Clang lay out an empty struct. Alignment follows
+the target's C ABI, not the size: on 32-bit x86 off Windows, for one,
+`@bit64` and `@fbit64` align to 4, so `{ a: @bit8, b: @bit64 }` is 12
+bytes there and 16 on x86-64. No type may be larger than the target's
+`isize::MAX` bytes (2^31 − 1 or 2^63 − 1): a larger one is `E067`. (Enums
+keep a tag followed by every payload for now; they become tagged unions
+with a C layout of their own.)
+
 ### Namespaces & Visibility
 
 Namespaces mirror folders; no declaration introduces one. Every `*.lilac` file

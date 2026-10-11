@@ -322,8 +322,8 @@ impl Lower<'_> {
 
     /// The size and alignment of `ty`, in bytes.
     fn size_align(&self, ty: TypeRef) -> (u64, u64) {
-        let lir = self.lir_ty(ty);
-        lilac_ir::size_align(&self.module.layouts, &lir, self.ptr_bytes)
+        let sized = self.lir_size_align(&self.lir_ty(ty));
+        (sized.size, sized.align)
     }
 
     /// A field of a place, read straight out of it.

@@ -1,9 +1,9 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #a.Thing {
+type #a.Thing size 4 align 4 {
     a_field: #bit32,
 }
-type #b.Thing {
+type #b.Thing size 4 align 4 {
     b_field: #bit32,
 }
 function @b.Thing.@on_drop:ref_b.Thing

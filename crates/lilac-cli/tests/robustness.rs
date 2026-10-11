@@ -195,7 +195,6 @@ fn branching_generic_recursion_fails_fast() {
 /// Problem 9: `x86` is the user-facing name of `i686`; the triple LLVM gets
 /// is `i686-unknown-linux`, not `x86-unknown-linux` (an internal error).
 #[test]
-#[ignore = "robustness plan phase 2"]
 fn x86_target_emits_i686() {
     let dir = scratch("x86_target_emits_i686");
     write(&dir, "main.lilac", "main: function () nothing {}\n");
