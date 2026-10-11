@@ -558,7 +558,7 @@ pub enum HirExprKind {
     /// The place a `ref T` value points at (place of type `T`).
     Deref(Box<HirExpr>),
     /// A read that moves an owned place out (no copy hook runs; the place
-    /// is empty after). `move a` writes one; typeck's ownership pass adds
+    /// is empty after). `@move(a)` writes one; typeck's ownership pass adds
     /// the rest.
     Move(Box<HirExpr>),
     /// Integer or float literal bits (source bytes, typed by `ty`).

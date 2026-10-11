@@ -212,6 +212,14 @@ unsigned variants; float variants. Unsigned comparisons bind
 
 ### 3.2 `Standard.Memory`
 
+> **Today:** `Standard.Heap.Allocator` over `Standard.Os`:
+> `create[T](value) ref T` (allocate, then `@write` the value in),
+> `destroy[T](ref T)` (`@drop`, then free) and `free[T](ref T)` (free a
+> slot whose value was moved out with `@read`). `Box[T]` (in `Standard`)
+> is the owned heap box: `create(value)`, `into_inner() T` (by `@discard`
+> and `@read`), and its drop drops the value and frees it. The inventory
+> below is the target design.
+
 **Allocators:**
 
 | Type | Purpose | Key methods |
@@ -577,8 +585,10 @@ stdlib workaround via `extern`.
    through `equals`/`compare`/`hash` conventions (§0.4), never `==`.
 7. ~~**No move/non-copyable types.**~~ Resolved: a type with its own
    `@on_drop` and no `@on_copy` moves, the compiler tracks moved-out places
-   (`SPEC.md` §1), and `move a` moves a copyable value. `Box` and `Unique[T]`
-   need no `move()`.
+   (`SPEC.md` §1), and `@move(a)` moves a copyable value. `Box` and `Unique[T]`
+   need no `move()`; `@write`/`@read`/`@drop` move values in and out of
+   raw memory, and `@discard` lets a type end itself without its `@on_drop`
+   (`Box.into_inner`).
 8. **Non-transitive `using`, no re-export.** There is no umbrella import; each
    domain is imported explicitly, and cross-domain needs are explicit imports.
 9. **libm dependency.** `sqrt`/`pow`/trig come from libm (`link = ["m"]`) via

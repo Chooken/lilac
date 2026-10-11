@@ -2029,10 +2029,18 @@ fn ownership_errors_have_their_codes() {
             "E064",
         ),
         (
-            "    a: @bit32 = 0x1\n    b: @bit32 = move a\n    c: @bit32 = a\n",
+            "    a: @bit32 = 0x1\n    b: @bit32 = @move(a)\n    c: @bit32 = a\n",
             "E063",
         ),
-        ("    b: @bit32 = move 0x1\n", "E064"),
+        ("    b: @bit32 = @move(0x1)\n", "E064"),
+        (
+            "    a: Handle = Handle { id = 0x1 }\n    @discard(a)\n",
+            "E066",
+        ),
+        (
+            "    a: Handle = Handle { id = 0x1 }\n    @drop(a)\n",
+            "E010",
+        ),
     ] {
         let diags = check_src(&format!("{HANDLE}main: function () nothing {{\n{body}}}\n"));
         assert!(has_code(&diags, code), "{body}: {:?}", messages(&diags));

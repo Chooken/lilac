@@ -586,13 +586,6 @@ pub enum Expr {
         /// Whole-expression span (`ref` through value).
         span: Span,
     },
-    /// `move place` (moves the place out, whatever its type).
-    Move {
-        /// Place expression.
-        value: Box<Expr>,
-        /// Whole-expression span (`move` through value).
-        span: Span,
-    },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
     Cast(Box<Expr>, Box<Type>),
     /// `Name[args]` in expression position: the receiver of a static member
@@ -689,7 +682,6 @@ impl Expr {
             | Self::MatchValue { span, .. }
             | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
-            | Self::Move { span, .. }
             | Self::FString { span, .. }
             | Self::Error { span } => *span,
             Self::TypeApp(ty) => ty.span,

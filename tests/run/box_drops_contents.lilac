@@ -1,4 +1,3 @@
-// pending: ownership plan phase 4 (`Box` moves its value in and drops it)
 // expect-stdout: |x
 // `Box.create` moves the value into the heap (no early drop of the
 // parameter, no zero drop of the fresh slot), and dropping the box drops

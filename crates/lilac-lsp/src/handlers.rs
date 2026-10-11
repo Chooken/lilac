@@ -218,6 +218,12 @@ pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
         Intrinsic::ArrayLen => Some("(ref array) @bit_native"),
         Intrinsic::ArrayAt => Some("(ref array, index: @bit_native) ref element"),
         Intrinsic::CompileError => Some("(message) nothing"),
+        Intrinsic::Move => Some("(place) value"),
+        Intrinsic::Write => Some("(ref T, value: T) nothing"),
+        Intrinsic::Read => Some("(ref T) T"),
+        Intrinsic::Drop => Some("(ref T) nothing"),
+        Intrinsic::NeedsDrop => Some("(Type) @bit8"),
+        Intrinsic::Discard => Some("(place) nothing"),
         _ => None,
     };
     if let Some(special) = special {

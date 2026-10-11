@@ -1019,6 +1019,9 @@ impl Checker<'_> {
             }
             Intrinsic::ArrayAt => return self.check_array_at(fcx, args, span),
             Intrinsic::ArrayLen => return self.check_array_len(fcx, args, span),
+            _ if intrinsic.is_memory() => {
+                return self.check_memory(fcx, intrinsic, name, args, span, expected);
+            }
             Intrinsic::CompileError => {
                 self.intrinsic_arity(name, 1, args.len(), span)?;
                 let Expr::Str(msg, msg_span) = &args[0] else {

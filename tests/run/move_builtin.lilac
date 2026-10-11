@@ -1,5 +1,5 @@
 // expect-stdout: c|dd
-// `move a` moves a value that copies, without its copy hook: an
+// `@move(a)` moves a value that copies, without its copy hook: an
 // `Rc`-like handle hands its count over without a bump (only `b`'s copy
 // prints `c`), and `a` is empty after, so only `c` and `b` drop.
 
@@ -22,7 +22,7 @@ main: function () nothing {
     {
         a: Shared = Shared { id = 'd' }
         b: Shared = a
-        c: Shared = move a
+        c: Shared = @move(a)
         print_char('|')
     }
     print_char(0xA)

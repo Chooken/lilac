@@ -56,7 +56,7 @@
         { "match": "\\b(using)\\b", "name": "keyword.control.import.lilac" },
         { "match": "\\b(private)\\b", "name": "storage.modifier.lilac" },
         { "match": "\\b(ref|unknown|nothing|self)\\b", "name": "storage.type.lilac" },
-        { "match": "\\b(if|then|else|loop|match|break|continue|return|fail|move)\\b", "name": "keyword.control.lilac" },
+        { "match": "\\b(if|then|else|loop|match|break|continue|return|fail)\\b", "name": "keyword.control.lilac" },
         { "match": "\\b(and|or)\\b", "name": "keyword.operator.lilac" },
         { "match": "\\b(as)\\b", "name": "keyword.other.as.lilac" }
       ]

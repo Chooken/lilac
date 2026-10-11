@@ -4,12 +4,24 @@ using Standard.Os
 
 Allocator: object {
 
-    // A zeroed allocation, so the first assignment drops a zero value.
-    create[T]: function() allocation: ref T {
+    // A new allocation holding `value`, moved in. Free it with `destroy`.
+    create[T]: function(value: T) allocation: ref T {
         allocation = allocate(@size_of(T)) as ref T
+        if @ptr_to_address(allocation as ref unknown) == 0x0 {
+            @panic("out of memory")
+        }
+        @write(allocation, value)
     }
 
+    // Drops the value at `allocation` and frees it.
     destroy[T]: function(allocation: ref T) nothing {
+        @drop(allocation)
+        deallocate(allocation as ref unknown)
+    }
+
+    // Frees `allocation` without dropping anything: its value was moved
+    // out (`@read`).
+    free[T]: function(allocation: ref T) nothing {
         deallocate(allocation as ref unknown)
     }
 }

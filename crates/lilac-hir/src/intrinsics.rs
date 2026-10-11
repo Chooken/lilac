@@ -387,6 +387,23 @@ pub enum Intrinsic {
     ArrayAt,
     /// `@array_len(Type)` / `@array_len(value)`: an array's length.
     ArrayLen,
+    /// `@move(place)`: moves the place out, whatever its type (no copy
+    /// hook runs; the place is empty after).
+    Move,
+    /// `@write(ref T, value)`: moves `value` into the empty slot at the
+    /// address (nothing there is dropped).
+    Write,
+    /// `@read(ref T) T`: moves the `T` at the address out, leaving the slot
+    /// empty (no copy hook runs).
+    Read,
+    /// `@drop(ref T)`: drops the `T` at the address, leaving the slot empty.
+    Drop,
+    /// `@needs_drop(Type)`: whether dropping a `Type` does anything (a
+    /// constant `@bit8`).
+    NeedsDrop,
+    /// `@discard(place)`: inside a function of `T`, ends `T`'s whole life
+    /// without its `@on_drop`; its fields become places of their own.
+    Discard,
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -413,7 +430,7 @@ pub struct Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 27] = [
+    const PLAIN: [(&'static str, Self); 33] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -441,7 +458,24 @@ impl Intrinsic {
         ("@panic", Self::Panic),
         ("@array_at", Self::ArrayAt),
         ("@array_len", Self::ArrayLen),
+        ("@move", Self::Move),
+        ("@write", Self::Write),
+        ("@read", Self::Read),
+        ("@drop", Self::Drop),
+        ("@needs_drop", Self::NeedsDrop),
+        ("@discard", Self::Discard),
     ];
+
+    /// Whether this is a memory builtin: `@move`, `@write`, `@read`, `@drop`,
+    /// `@needs_drop` or `@discard` (checked specially, by typeck's
+    /// `memory.rs`).
+    #[must_use]
+    pub fn is_memory(self) -> bool {
+        matches!(
+            self,
+            Self::Move | Self::Write | Self::Read | Self::Drop | Self::NeedsDrop | Self::Discard
+        )
+    }
 
     /// Looks an intrinsic up by `@`-name.
     #[must_use]
@@ -559,13 +593,21 @@ impl Intrinsic {
     }
 
     /// The signature every call is checked against. `@size_of`, `@align_of`,
-    /// `@array_len` and `@compile_error` take a type/literal operand and
-    /// `@array_at` any array, so they are checked specially and their
-    /// parameter list is empty here.
+    /// `@array_len`, `@needs_drop` and `@compile_error` take a type/literal
+    /// operand, `@array_at` any array, and `@move`, `@write`, `@read`,
+    /// `@drop` and `@discard` a place or a `ref` of any type, so they are
+    /// checked specially and their parameter list is empty here.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn signature(self) -> Signature {
         use Slot::{AnyBit, Builtin, ExpectedBit, Ref};
         let sig = |params: Vec<Slot>, result: Option<Slot>| Signature { params, result };
+        if self.is_memory() {
+            return sig(
+                Vec::new(),
+                (self == Self::NeedsDrop).then_some(Builtin(Ty::Bit8)),
+            );
+        }
         match self {
             Self::Int(op, width) => {
                 let ty = Builtin(width.builtin());
@@ -609,9 +651,16 @@ impl Intrinsic {
             Self::SizeOf | Self::AlignOf | Self::ArrayLen => {
                 sig(Vec::new(), Some(Builtin(Ty::BitNative)))
             }
-            Self::CompileError | Self::Trap | Self::Fence(_) | Self::ArrayAt => {
-                sig(Vec::new(), None)
-            }
+            Self::NeedsDrop => sig(Vec::new(), Some(Builtin(Ty::Bit8))),
+            Self::CompileError
+            | Self::Trap
+            | Self::Fence(_)
+            | Self::ArrayAt
+            | Self::Move
+            | Self::Write
+            | Self::Read
+            | Self::Drop
+            | Self::Discard => sig(Vec::new(), None),
             Self::Atomic(op, _, width) => {
                 let ty = width.builtin();
                 let params = match op {
@@ -756,6 +805,8 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@align_of"), Some(Intrinsic::AlignOf));
         assert_eq!(Intrinsic::lookup("@ptr_add"), Some(Intrinsic::PtrAdd));
         assert_eq!(Intrinsic::lookup("@trap"), Some(Intrinsic::Trap));
+        assert_eq!(Intrinsic::lookup("@move"), Some(Intrinsic::Move));
+        assert_eq!(Intrinsic::lookup("@needs_drop"), Some(Intrinsic::NeedsDrop));
     }
 
     #[test]

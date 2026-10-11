@@ -20,6 +20,7 @@ mod failure;
 mod generics;
 mod indices;
 mod literals;
+mod memory;
 mod paths;
 mod places;
 mod sigs;

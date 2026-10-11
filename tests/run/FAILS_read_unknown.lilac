@@ -1,0 +1,12 @@
+// expect-error: E010
+// expect-stderr: error[E010]: `@read` needs a `ref` to a known type, found `ref unknown`
+// `ref unknown` has no type to move out, so the memory builtins refuse
+// it: cast it to the type the memory holds first.
+
+using Standard.Os
+
+main: function () nothing {
+    memory: ref unknown = allocate(0x8)
+    value: @bit64 = @read(memory)
+    deallocate(memory)
+}

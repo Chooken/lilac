@@ -229,10 +229,13 @@ fn a_library_file_checks_clean_and_highlights_generic_bodies() {
         );
         if name == "box.lilac" {
             let tokens = decode(&semantic_tokens_at(&client, &uri));
-            // `ptr` declared in the generic `create`, and `self` in `@on_drop`.
-            let ptr = token_after(&tokens, &text, "ptr: ref T", 0);
-            assert_eq!(ptr.token_type, VARIABLE, "{ptr:?}");
-            let this = token_after(&tokens, &text, "self.value.get()", 0);
+            // The out `box` and the parameter `data` in the generic `create`,
+            // and `self` in `@on_drop`.
+            let out = token_after(&tokens, &text, "box = Box[T]", 0);
+            assert_eq!(out.token_type, VARIABLE, "{out:?}");
+            let data = token_after(&tokens, &text, "data)", 0);
+            assert_eq!(data.token_type, PARAMETER, "{data:?}");
+            let this = token_after(&tokens, &text, "destroy[T](self", 11);
             assert_eq!(this.token_type, PARAMETER, "{this:?}");
         }
     }

@@ -1,6 +1,6 @@
 # Ownership Plan
 
-> Status: Phases 0 to 3 done. Source: the arena allocator review and the
+> Status: Phases 0 to 4 done. Source: the arena allocator review and the
 > ownership design discussion of 2026-10-11.
 > Goal: `Rc`, `Arc`, `Box` and custom allocators can be written in
 > `Standard` and used like plain values. No value ever has two owners or
@@ -12,8 +12,10 @@
 >   owns are full or empty and drops only full ones. There are no "empty"
 >   states and no zero tricks: a handle with id 0 is an ordinary value.
 > - **Moves are implicit**: reading a non-copyable place moves it
->   (`b = a`). `move a` moves a copyable value without its copy hook
->   (hand off an `Rc` without a bump).
+>   (`b = a`). `@move(a)` moves a copyable value without its copy hook
+>   (hand off an `Rc` without a bump). It is a builtin, not a keyword:
+>   like `@read` and `@discard` it is a rare, low-level operation that
+>   skips a hook, and `ref` is a keyword only because it is also a type.
 > - **Fields and `match` payloads move by one rule**: out of an owned
 >   value whose type has no `@on_drop` of its own, never through a `ref`.
 >   Field moves arrive with the ownership checker.
@@ -364,6 +366,7 @@ follows its decisions and never re-derives them.
   the owner's `Standard` changes, which are not in the repository yet.
   `standard_io`'s `é` came from `Box.create` dropping its parameter early
   and is gone until `Box` drops its contents (Phase 4).
+  (Phase 4 brought it back.)
 
 ---
 
@@ -401,6 +404,21 @@ follows its decisions and never re-derives them.
   - `FAILS_` tests: `@discard` outside the type, the memory builtins on
     `ref unknown`.
   - `SPEC.md` §3, `AGENTS.md` runtime notes.
+- **Delivered notes.**
+  - `move a` became `@move(a)` (owner's call, 2026-10-11): the keyword
+    is gone, so `move` is an ordinary name again.
+  - `@needs_drop` folds in typeck (`Checker::needs_drop`, the rule the
+    ownership pass uses), like `@array_len`, rather than in lowering.
+  - `@write`/`@read`/`@drop` lower through the existing assignment, move
+    and drop paths on `*p`; they need no LIR of their own.
+  - `@discard` errors are `E066`, also for discarding on some paths only
+    (torn: one path would run `@on_drop`, the other not). Using the value
+    whole after is `E063`. A type with no `@on_drop` of its own discards
+    as a no-op. Enums cannot be discarded (no fields to keep).
+  - `Allocator` also gained `free[T](ref T)` for a slot whose value was
+    moved out with `@read` (`Box.into_inner`); Phase 5 replaces it.
+  - `Os.allocate` still zeroes (it is the OS heap's contract); nothing
+    relies on it any more.
 
 ---
 

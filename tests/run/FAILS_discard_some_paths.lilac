@@ -1,0 +1,22 @@
+// expect-error: E066
+// expect-stderr: error[E066]: `self` is discarded on some paths only
+// Where the paths join, the `@on_drop` would run on one and not the
+// other.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+
+    maybe_end: function (self: Handle, end: @bit8) nothing {
+        if end {
+            @discard(self)
+        }
+    }
+}
+
+main: function () nothing {
+    handle: Handle = Handle { id = 0x1 }
+    handle.maybe_end(0x1)
+}

@@ -85,7 +85,7 @@ through the function:
   field (or payload) copies, and moves when one does not. Builtins, `ref`s,
   function values and arrays copy bitwise. A fresh value (a call result, a
   literal) moves into its owner.
-* **`move a`** moves any place, copyable or not, without its copy hook
+* **`@move(a)`** moves any place, copyable or not, without its copy hook
   (hand an `Rc` over without a bump). `a` is empty after.
 * **Empty places.** A place is empty after it moves, and an out is empty
   until it is set. Reading an empty place, or one that is empty on some
@@ -114,6 +114,13 @@ through the function:
   each `return` and the end of the body, failure outs at each `fail`. An
   out of the other side that is full there is dropped. Paths ending in
   `@panic`, `@trap` or `@compile_error` are exempt.
+* **Ending a value without its `@on_drop`.** Inside a function declared
+  in a type `T`, `@discard(x)` (`x` an owned `T`) ends `x`'s life without
+  running `T`'s `@on_drop`: its fields become places of their own, so the
+  function can move out what it needs, and the fields still full drop at
+  the end of the scope as usual. Using `x` whole after is `E063`; anywhere
+  else, or on some paths only, it is `E066`. So for every other caller
+  `@on_drop` is a guarantee.
 
 A value with no hooks anywhere inside it is copied and dropped bitwise, at no
 cost.
@@ -405,6 +412,12 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
 | **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
+| **`@move`** | `(place)` | Moves an owned place out, whatever its type, without its copy hook (§1). |
+| **`@write`** | `(ref T, value: T)` | Moves `value` into the slot at the address, which must be empty: nothing there is dropped. |
+| **`@read`** | `(ref T): T` | Moves the `T` at the address out, bit for bit (no copy hook), leaving the slot empty. |
+| **`@drop`** | `(ref T)` | Drops the `T` at the address, leaving the slot empty. |
+| **`@needs_drop`** | `(T)` or `(value)` | Whether dropping a `T` does anything (its own `@on_drop`, or a field or payload that needs a drop), as a `@bit8` constant. |
+| **`@discard`** | `(place)` | Ends an owned value's life without its `@on_drop`, inside a function of its type (§1, `E066`). |
 
 Atomics are sequentially consistent unless the name carries an ordering
 before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
@@ -414,6 +427,14 @@ before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
 `@bitW`, the address is a `ref @bitW` (`ref place`), and every access is
 aligned to its width. A compare-swap's failure ordering is the strongest one
 valid for its ordering (`acquire` for `acq_rel`, `relaxed` for `release`).
+
+The raw memory builtins (`@write`, `@read`, `@drop`) are for buffer and
+allocator authors: they move values in and out of memory the compiler does
+not track (behind a `ref`), so whether a slot is full is up to the caller.
+Assignment through a `ref` (`p = value`) is for a full slot (it drops the
+old value); `@write` is for an empty one. They need a `ref` to a known type
+(`E010` for `ref unknown`: there is no type to move or drop). `@needs_drop`
+is a constant, so `if @needs_drop(T)` lowers only the live arm.
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference
@@ -1174,7 +1195,7 @@ Memory lifecycle events trigger specific compiler hooks if defined for a type.
 | Hook | Signature | Invocation Trigger & Behavior Rules | Desugar |
 | --- | --- | --- | --- |
 | **`@on_override`** | `(ref prev, ref new) nothing` | Called **before** a full place's value is overwritten (not when an empty place, such as an out, is first set). **Rule:** The value in `prev` is dropped immediately afterwards, so you must **not** override or free anything in `prev` during `@on_override`. | `variable = new` -> `@on_override(ref variable, ref new) drop(variable) variable = new` |
-| **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1); `move` skips it. A type with an `@on_drop` and no `@on_copy` moves instead of copying. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
+| **`@on_copy`** | `(ref Type) new_copy` | Called when a place is read into a new owner (see §1); `@move` skips it. A type with an `@on_drop` and no `@on_copy` moves instead of copying. You are manually responsible for creating and returning the new copied value (`new_copy`). **Rule:** Extreme care must be taken not to recursively trigger the copy mechanism while constructing `new_copy`. | `copied: Type = variable` -> `copied: Type = @on_copy(ref variable)` |
 | **`@on_drop`** | `(ref Type) nothing` | Called when a full owner of a value goes away (§1), before the value's fields are dropped; a moved-out place is empty and drops nothing. Its own `@on_drop` makes a type move rather than copy, and keeps fields from moving out of it. Used for resource deallocation and cleanup of what this type allocated. | `variable: Type = value` -> `variable: Type = value defer drop(variable)` |
 
 There is no construction hook: a constructor is a static function, and

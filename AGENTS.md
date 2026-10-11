@@ -59,6 +59,15 @@
   `@array_at` lowers to an unsigned bounds check that panics, then the
   `elem.addr` instruction (LLVM: `ptrtoint`/`inttoptr` arithmetic, since a
   dynamic GEP is `unsafe` in inkwell); `@array_len` folds in typeck.
+- Memory builtins (`Intrinsic::is_memory`, checked in
+  `lilac-typeck/src/memory.rs`): `@move(place)` becomes
+  `HirExprKind::Move`, `@needs_drop(T)` folds to a `@bit8` literal
+  (`Checker::needs_drop`), and `@write`/`@read`/`@drop` take a `ref` to a
+  known type (`E010` for `ref unknown`). Lowering treats `@write(p, v)` as
+  an assignment to `*p` with `HirOld::Empty`, `@read(p)` as a move out of
+  `*p`, and `@drop(p)` as the drop routine on `*p`. `@discard(x)` (`E066`:
+  an owned object, in a function of its type, `Env::owner`) lowers to
+  nothing; the ownership pass gives it its meaning.
 - Globals: a top-level `name: T = constant` (or `name: T`, zeroed) is a
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an
@@ -463,7 +472,7 @@ Where things live:
   maybe, per field, or `Cond`); branches merge and a loop body is walked
   on copies (`dry`: no diagnostics, no flags) until its head state is
   stable, then for real. It decides everything lowering does with
-  ownership: a moving read is `HirExprKind::Move` (`move a` writes one
+  ownership: a moving read is `HirExprKind::Move` (`@move(a)` writes one
   too), each block ends in a `HirStmt::Drop` of its full locals (each
   early exit drops the scopes it leaves, and outs per `E065`'s rule),
   `HirStmt::Assign::old` says what happens to the old value (an out's
@@ -476,8 +485,11 @@ Where things live:
   copy and drop rules (`Param` copies, so templates rarely fail).
   `E063`/`E064` go through `emit_requirement` (`Requirement::Ownership`),
   so a failing generic instance folds them into `E042`; `E065` is plain.
-  ``, `` and `` end a path, and a `match`
-  naming every variant has no `else` path.
+  `@panic`, `@trap` and `@compile_error` end a path, and a `match`
+  naming every variant has no `else` path. `@discard(x)` makes `x`
+  `Own::Discarded`: per field like `Parts`, but its `@on_drop` does not
+  run and its fields may move out; a path that joins one without
+  discarding it makes it `torn` (`E066`, reported where it drops).
   A method whose first parameter is `self: T` (named `self`, of the
   owner's type) takes its receiver by value (`Checker::method_call`);
   bare `self` is `ref T` (`lilac_ast::Param::is_receiver`).

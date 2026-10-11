@@ -46,6 +46,14 @@ enum Own {
     Maybe(Option<Span>),
     /// An object some of whose fields moved out: one entry per field.
     Parts(Vec<Own>),
+    /// An object `@discard` ended (`at`): its `@on_drop` does not run and
+    /// each field is a place of its own. `torn` when a path that reaches
+    /// here did not discard it (`E066`, reported where it drops).
+    Discarded {
+        at: Span,
+        parts: Vec<Own>,
+        torn: bool,
+    },
     /// An out of a call that can fail, bound to a hidden local: full when
     /// the call's flag (a local) is `full_when`.
     Cond { flag: LocalId, full_when: bool },
@@ -58,9 +66,15 @@ impl Own {
             (Own::Full, Own::Full)
             | (Own::Empty(_), Own::Empty(_))
             | (Own::Maybe(_), Own::Maybe(_)) => true,
-            (Own::Parts(a), Own::Parts(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same(b))
-            }
+            (Own::Parts(a), Own::Parts(b)) => same_parts(a, b),
+            (
+                Own::Discarded { parts, torn, .. },
+                Own::Discarded {
+                    parts: other,
+                    torn: other_torn,
+                    ..
+                },
+            ) => torn == other_torn && same_parts(parts, other),
             (
                 Own::Cond { flag, full_when },
                 Own::Cond {
@@ -76,7 +90,9 @@ impl Own {
     fn moved_at(&self) -> Option<Span> {
         match self {
             Own::Empty(at) | Own::Maybe(at) => *at,
-            Own::Parts(parts) => parts.iter().find_map(Own::moved_at),
+            Own::Parts(parts) | Own::Discarded { parts, .. } => {
+                parts.iter().find_map(Own::moved_at)
+            }
             Own::Full | Own::Cond { .. } => None,
         }
     }
@@ -98,13 +114,23 @@ impl Own {
                     Summary::Partly(self.moved_at())
                 }
             }
+            Own::Discarded { at, parts, .. } => {
+                if parts
+                    .iter()
+                    .all(|part| matches!(part.summary(), Summary::Empty(_)))
+                {
+                    Summary::Empty(self.moved_at())
+                } else {
+                    Summary::Discarded(*at)
+                }
+            }
         }
     }
 
     /// One entry per field: the parts, or `n` copies of a leaf.
     fn expand(&self, n: usize) -> Vec<Own> {
         match self {
-            Own::Parts(parts) => parts.clone(),
+            Own::Parts(parts) | Own::Discarded { parts, .. } => parts.clone(),
             leaf => vec![leaf.clone(); n],
         }
     }
@@ -120,12 +146,19 @@ impl Own {
     }
 }
 
+/// Whether two field lists say the same, spans aside.
+fn same_parts(a: &[Own], b: &[Own]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same(b))
+}
+
 /// [`Own::summary`].
 enum Summary {
     Full,
     Empty(Option<Span>),
     Maybe(Option<Span>),
     Partly(Option<Span>),
+    /// `@discard`ed (where) with fields left in it.
+    Discarded(Span),
 }
 
 /// The state at one point: each local's [`Own`], or `None` where no path
@@ -185,6 +218,7 @@ impl Checker<'_> {
             frames: vec![func.params.clone()],
             loops: Vec::new(),
             dry: false,
+            torn: Vec::new(),
         };
         let mut stmts = Vec::new();
         for stmt in std::mem::take(&mut body.stmts) {
@@ -298,6 +332,8 @@ struct Pass<'p, 'a> {
     loops: Vec<LoopFrame>,
     /// A trial walk of a loop body's copy: no diagnostics and no flags.
     dry: bool,
+    /// The `@discard`s reported as torn (`E066`), so each is reported once.
+    torn: Vec<Span>,
 }
 
 impl Pass<'_, '_> {
@@ -575,7 +611,9 @@ impl Pass<'_, '_> {
                     HirOld::Empty(Vec::new())
                 }
             }
-            Own::Parts(_) => {
+            // What is left in it drops field by field (a discarded value's
+            // `@on_drop` does not run).
+            Own::Parts(_) | Own::Discarded { .. } => {
                 let mut drops = Vec::new();
                 self.drops_of(path.clone(), ty, &own, &mut drops);
                 HirOld::Empty(drops)
@@ -599,7 +637,7 @@ impl Pass<'_, '_> {
         let mut ty = self.local_ty(path.local);
         for (depth, field) in path.fields.iter().enumerate() {
             match own {
-                Own::Parts(parts) => {
+                Own::Parts(parts) | Own::Discarded { parts, .. } => {
                     own = parts[*field as usize].clone();
                     ty = self.c.field_types(ty)[*field as usize];
                 }
@@ -646,7 +684,7 @@ impl Pass<'_, '_> {
             let (what, label) = match own.summary() {
                 Summary::Full => continue,
                 Summary::Empty(_) => ("is not set", "not set"),
-                Summary::Maybe(_) | Summary::Partly(_) => {
+                Summary::Maybe(_) | Summary::Partly(_) | Summary::Discarded(_) => {
                     ("may not be set", "not set on every path")
                 }
             };
@@ -735,6 +773,15 @@ impl Pass<'_, '_> {
             HirExprKind::Variant { payload, .. } => {
                 if let Some(payload) = payload {
                     self.expr(payload, true);
+                }
+            }
+            HirExprKind::Call {
+                callee: HirCallee::Intrinsic(Intrinsic::Discard),
+                args,
+                ..
+            } => {
+                if let [place] = args.as_slice() {
+                    self.discard(place, span);
                 }
             }
             HirExprKind::Call { callee, args, .. } => {
@@ -924,8 +971,18 @@ impl Pass<'_, '_> {
     fn move_path(&mut self, path: &HirPath, span: Span) {
         self.require_full(path, span);
         let mut ty = self.local_ty(path.local);
+        let mut own = self
+            .state
+            .as_ref()
+            .and_then(|state| state.get(&path.local))
+            .cloned();
         for (depth, field) in path.fields.iter().enumerate() {
-            if self.c.has_own_drop(ty) {
+            // A discarded value's `@on_drop` no longer runs.
+            let discarded = matches!(own, Some(Own::Discarded { .. }));
+            if let Some(Own::Parts(parts) | Own::Discarded { parts, .. }) = own {
+                own = Some(parts[*field as usize].clone());
+            }
+            if !discarded && self.c.has_own_drop(ty) {
                 let shown = self.c.types.display(ty.id);
                 let parent = HirPath {
                     local: path.local,
@@ -1017,12 +1074,21 @@ impl Pass<'_, '_> {
                 "used here as a whole",
                 at.map(|at| (at, "moved here")),
             ),
+            Summary::Discarded(at) => (
+                format!("`{name}` was discarded"),
+                "used here as a whole",
+                Some((at, "discarded here")),
+            ),
         };
+        let discarded = matches!(own.summary(), Summary::Discarded(_));
         let mut diagnostic = Diagnostic::error(codes::E063, message).label(span, true, used);
         diagnostic = match moved {
             Some((at, label)) => diagnostic.label(at, false, label),
             None => diagnostic.help("an out starts empty: set it before reading it"),
         };
+        if discarded {
+            diagnostic = diagnostic.help("after `@discard`, use its fields one by one");
+        }
         self.report(diagnostic);
         // Reported once: treat it as full from here.
         self.set(path, Own::Full);
@@ -1036,7 +1102,7 @@ impl Pass<'_, '_> {
         let mut own = self.state.as_ref()?.get(&path.local)?;
         for field in &path.fields {
             match own {
-                Own::Parts(parts) => own = &parts[*field as usize],
+                Own::Parts(parts) | Own::Discarded { parts, .. } => own = &parts[*field as usize],
                 leaf => return Some(leaf.clone()),
             }
         }
@@ -1067,8 +1133,8 @@ impl Pass<'_, '_> {
     }
 
     /// The drops of what `path` (of type `ty`) holds: a full place drops, a
-    /// maybe-full one drops when its flag is set, and a partly moved object
-    /// drops the fields still in it, in declaration order.
+    /// maybe-full one drops when its flag is set, and a partly moved or
+    /// discarded object drops the fields still in it, in declaration order.
     fn drops_of(&mut self, path: HirPath, ty: TypeRef, own: &Own, out: &mut Vec<HirDrop>) {
         if !self.c.needs_drop(ty) {
             return;
@@ -1090,7 +1156,10 @@ impl Pass<'_, '_> {
                     flag: Some(flag),
                 });
             }
-            Own::Parts(parts) => {
+            Own::Parts(parts) | Own::Discarded { parts, .. } => {
+                if let Own::Discarded { at, torn: true, .. } = own {
+                    self.torn(&path, *at);
+                }
                 let tys = self.c.field_types(ty);
                 for (index, (part, ty)) in parts.iter().zip(tys).enumerate() {
                     let mut field = path.clone();
@@ -1099,6 +1168,49 @@ impl Pass<'_, '_> {
                 }
             }
         }
+    }
+
+    /// `E066` (once) for `path`, discarded at `at` on some paths only.
+    fn torn(&mut self, path: &HirPath, at: Span) {
+        if self.dry || self.torn.contains(&at) {
+            return;
+        }
+        self.torn.push(at);
+        let name = self.path_name(path);
+        self.report(
+            Diagnostic::error(
+                codes::E066,
+                format!("`{name}` is discarded on some paths only"),
+            )
+            .label(at, true, "discarded here")
+            .note(format!(
+                "where the paths join, `{name}`'s `@on_drop` would run on some and not on others"
+            ))
+            .help("discard it on every path that keeps it, or on none"),
+        );
+    }
+
+    /// `@discard(place)`: the place's `@on_drop` will not run, and its
+    /// fields become places of their own. (Typeck checked it is an owned
+    /// object of this function's type.)
+    fn discard(&mut self, place: &HirExpr, span: Span) {
+        let Some(path) = HirPath::of(place) else {
+            return;
+        };
+        self.require_full(&path, place.span);
+        if !self.c.has_own_drop(place.ty) {
+            // Nothing to skip: its fields already drop one by one.
+            return;
+        }
+        let count = self.c.field_types(place.ty).len();
+        self.set(
+            &path,
+            Own::Discarded {
+                at: span,
+                parts: vec![Own::Full; count],
+                torn: false,
+            },
+        );
     }
 
     /// The drop flag of `path`, added the first time it is needed.
@@ -1162,7 +1274,7 @@ fn set_in(c: &Checker, node: &mut Own, ty: TypeRef, fields: &[u32], value: Own) 
         *node = value;
         return;
     };
-    if !matches!(node, Own::Parts(_)) {
+    if !matches!(node, Own::Parts(_) | Own::Discarded { .. }) {
         if rest.is_empty() && node.same(&value) {
             return;
         }
@@ -1170,7 +1282,9 @@ fn set_in(c: &Checker, node: &mut Own, ty: TypeRef, fields: &[u32], value: Own) 
         *node = Own::Parts(node.expand(tys.len()));
     }
     let tys = c.field_types(ty);
-    if let (Own::Parts(parts), Some(field_ty)) = (&mut *node, tys.get(*first as usize)) {
+    if let (Own::Parts(parts) | Own::Discarded { parts, .. }, Some(field_ty)) =
+        (&mut *node, tys.get(*first as usize))
+    {
         set_in(c, &mut parts[*first as usize], *field_ty, rest, value);
     }
     *node = std::mem::replace(node, Own::Full).normalize();
@@ -1182,6 +1296,28 @@ fn merge(c: &Checker, ty: TypeRef, a: &Own, b: &Own) -> Own {
         (Own::Full, Own::Full) => Own::Full,
         (Own::Empty(at), Own::Empty(other)) => Own::Empty(at.or(*other)),
         (Own::Cond { .. }, Own::Cond { .. }) if a.same(b) => a.clone(),
+        // A path that neither discarded it nor moved it out still runs its
+        // `@on_drop`: torn.
+        (Own::Discarded { at, parts, torn }, other)
+        | (other, Own::Discarded { at, parts, torn }) => {
+            let tys = c.field_types(ty);
+            let other_torn = match other {
+                Own::Discarded { torn, .. } => *torn,
+                Own::Empty(_) => false,
+                _ => true,
+            };
+            let parts = parts
+                .iter()
+                .zip(other.expand(tys.len()).iter())
+                .zip(&tys)
+                .map(|((one, other), ty)| merge(c, *ty, one, other))
+                .collect();
+            Own::Discarded {
+                at: *at,
+                parts,
+                torn: *torn || other_torn,
+            }
+        }
         (Own::Parts(_), _) | (_, Own::Parts(_)) => {
             let tys = c.field_types(ty);
             let parts = a

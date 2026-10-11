@@ -1,0 +1,40 @@
+// expect-stdout: aab||b
+// `@write` moves a value into an empty slot (nothing there drops),
+// `@read` moves it out again (no copy hook: nothing prints `!`, and the
+// slot is left empty) and `@drop` drops one in place. Each value drops
+// exactly once: `a` as the statement's temporary, right after its `c` is
+// printed, the first `b` at `@drop`, the second where `moved` ends.
+
+using Standard
+using Standard.Io
+using Standard.Os
+
+Leaf: object {
+    c: @bit32
+
+    @on_copy: function (self) copy: Leaf {
+        print_char('!')
+        copy = Leaf { c = self.c }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+main: function () nothing {
+    slots: ref Leaf = allocate(@i_mul_native(@size_of(Leaf), 0x2)) as ref Leaf
+    second: ref Leaf = @ptr_add(slots as ref unknown, @size_of(Leaf)) as ref Leaf
+    {
+        @write(slots, Leaf { c = 'a' })
+        @write(second, Leaf { c = 'b' })
+        print_char(@read(slots).c)
+        @drop(second)
+        print_char('|')
+        @write(second, Leaf { c = 'b' })
+        moved: Leaf = @read(second)
+        print_char('|')
+    }
+    deallocate(slots as ref unknown)
+    print_char(0xA)
+}

@@ -1,0 +1,19 @@
+// expect-error: E066
+// expect-stderr: error[E066]: `@discard` of a `Handle` outside `Handle`
+// Only a function declared in the type may end one of its values without
+// its `@on_drop`.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+leak: function (handle: Handle) nothing {
+    @discard(handle)
+}
+
+main: function () nothing {
+    leak(Handle { id = 0x1 })
+}

@@ -2,7 +2,7 @@
 //! atomics.
 
 use lilac_hir::intrinsics::{AtomicOp, Intrinsic, NumOp, Ordering};
-use lilac_hir::{HirExpr, HirFunc};
+use lilac_hir::{HirExpr, HirExprKind, HirFunc, HirOld};
 use lilac_ir::{
     ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy,
     PlaceName, Reg, RmwOp,
@@ -174,9 +174,32 @@ impl Lower<'_> {
                 LirOperand::Reg(Reg::default())
             }
             Intrinsic::ArrayAt => self.lower_array_at(state, func, args, span),
-            Intrinsic::ArrayLen => {
-                lilac_error::bug!(span, "`@array_len` folds to a literal in typeck")
+            Intrinsic::ArrayLen | Intrinsic::Move | Intrinsic::NeedsDrop => {
+                lilac_error::bug!(span, "`{intrinsic:?}` is rewritten in typeck")
             }
+            Intrinsic::Write => {
+                // An assignment into an empty slot: nothing there drops.
+                let target = deref(&args[0]);
+                self.lower_assign(state, func, &target, &args[1], &HirOld::Empty(Vec::new()));
+                LirOperand::Reg(Reg::default())
+            }
+            Intrinsic::Read => {
+                // The bits move out, with no copy glue.
+                let moved = HirExpr {
+                    ty,
+                    span,
+                    kind: HirExprKind::Move(Box::new(deref(&args[0]))),
+                };
+                self.value(state, func, &moved)
+            }
+            Intrinsic::Drop => {
+                let target = deref(&args[0]);
+                let place = self.place_of(state, func, &target);
+                self.drop_place(state, &place, target.ty, span);
+                LirOperand::Reg(Reg::default())
+            }
+            // The ownership pass already turned its fields into places.
+            Intrinsic::Discard => LirOperand::Reg(Reg::default()),
             _ => {
                 let Some(symbol) = intrinsic.runtime_symbol() else {
                     lilac_error::bug!(span, "intrinsic `{intrinsic:?}` has no lowering");
@@ -414,5 +437,14 @@ pub(crate) fn rmw_op(op: AtomicOp) -> RmwOp {
         AtomicOp::Load | AtomicOp::Store | AtomicOp::CompareSwap => {
             lilac_error::bug!(Span::dummy(), "`{op:?}` is not a read-modify-write")
         }
+    }
+}
+
+/// The place a `ref` operand points at.
+fn deref(pointer: &HirExpr) -> HirExpr {
+    HirExpr {
+        ty: pointer.ty.deref(),
+        span: pointer.span,
+        kind: HirExprKind::Deref(Box::new(pointer.clone())),
     }
 }

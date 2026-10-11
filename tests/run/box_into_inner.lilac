@@ -1,0 +1,25 @@
+// expect-stdout: |x|
+// `Box.into_inner` moves the value out of the box (`@discard` skips the
+// box's `@on_drop`, `@read` moves the value out of the heap, and the
+// memory is freed): the value drops once, where its new owner ends.
+
+using Standard
+using Standard.Io
+
+Leaf: object {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+main: function () nothing {
+    {
+        box: Box[Leaf] = Box[Leaf].create(Leaf { c = 'x' })
+        print_char('|')
+        leaf: Leaf = box.into_inner()
+    }
+    print_char('|')
+    print_char(0xA)
+}

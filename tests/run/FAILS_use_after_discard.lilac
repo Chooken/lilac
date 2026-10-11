@@ -1,0 +1,20 @@
+// expect-error: E063
+// expect-stderr: error[E063]: `self` was discarded
+// After `@discard`, only the fields are places: the whole value is gone.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+
+    end: function (self: Handle) copy: Handle {
+        @discard(self)
+        copy = self
+    }
+}
+
+main: function () nothing {
+    handle: Handle = Handle { id = 0x1 }
+    copy: Handle = handle.end()
+}
