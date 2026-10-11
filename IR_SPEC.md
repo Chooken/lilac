@@ -537,6 +537,16 @@ Result is `#bit8` (`0x0` false, otherwise true). Input types must match;
 * ```i.div.u &a, &b -> &r``` / ```i.mod.u &a, &b -> &r``` (`udiv`/`urem`)
 All operands share one `#bit8/16/32/64/Native` width, carried on the result reg.
 
+Precondition: the divisor of `i.div`, `i.div.u`, `i.mod` and `i.mod.u` is
+never zero, and the operands of `i.div` and `i.mod` are never the minimum
+signed value with `-1`. The producer guarantees it: lowering tests each
+division first (`cmp.eql` with `0`, and for the signed forms with `MIN` and
+`-1`) and branches to a `@.lilac.panic` call with "division by zero" or
+"division overflow" and the intrinsic call's site, leaving out a test that
+constant operands rule out. A backend may therefore lower them to
+`sdiv`/`udiv`/`srem`/`urem` directly; executing one that breaks the
+precondition is undefined.
+
 ## Float Arithmetic
 * ```f.add &a, &b -> &r``` / ```f.sub``` / ```f.mul``` / ```f.div``` / ```f.mod```
 Same width rule as integer arithmetic.

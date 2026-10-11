@@ -8,21 +8,23 @@
 //! The evaluator walks the expression tree with an environment of `=>`
 //! parameters and `match` captures. It has no memory model, no loops and no
 //! fuel: a `=>` call whose definition is already being expanded is not
-//! constant, so evaluation always terminates. `None` means "not constant";
-//! it is never an error.
+//! constant, so evaluation always terminates. `None` means "not constant",
+//! which is never an error by itself; when the reason is a division that
+//! panics, the evaluator says so ([`DivisionPanic`]), and lowering reports
+//! the live ones as `E060`.
 
 use std::collections::HashMap;
 
 use lilac_hir::intrinsics::{Intrinsic, NumOp};
 use lilac_hir::{
-    HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirStmt, HirValueArm, LocalId,
+    FuncKey, HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirStmt, HirValueArm, LocalId,
 };
 use lilac_ir::{ArithOp, LirConst, LirTy};
 use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::TypeRef;
 
-use crate::Lower;
+use crate::{DivisionPanic, Lower};
 
 /// A constant value.
 #[derive(Clone, PartialEq, Debug)]
@@ -137,10 +139,55 @@ pub(crate) fn sign_extend(value: u64, width: u32) -> i64 {
     (value << shift).cast_signed() >> shift
 }
 
+/// Why integer operation `op` on `left` (when known) and `right` at
+/// `width` bits panics at run time: a zero divisor, or a signed `MIN`
+/// divided by `-1`. The divisor alone decides a division by zero.
+pub(crate) fn division_panic(
+    op: &ArithOp,
+    left: Option<u64>,
+    right: u64,
+    width: u32,
+) -> Option<DivisionPanic> {
+    if !is_division(op) {
+        return None;
+    }
+    let mask = mask_of(width);
+    if right & mask == 0 {
+        return Some(DivisionPanic::ByZero);
+    }
+    let signed = matches!(op, ArithOp::IDiv | ArithOp::IMod);
+    let min = 1u64 << (width - 1);
+    let overflows = signed && right & mask == mask && left.is_some_and(|left| left & mask == min);
+    overflows.then_some(DivisionPanic::Overflow)
+}
+
+/// Whether `op` is an integer division or remainder (the operations that
+/// can panic).
+pub(crate) fn is_division(op: &ArithOp) -> bool {
+    matches!(
+        op,
+        ArithOp::IDiv | ArithOp::IDivU | ArithOp::IMod | ArithOp::IModU
+    )
+}
+
 /// Integer arithmetic with LIR semantics (wrapping, signed and unsigned
 /// variants) at operand width `width`; comparisons give `Int(0|1, 8)`.
-/// Floats and division or modulo by zero are not constant.
-pub(crate) fn eval_arith(op: &ArithOp, left: u64, right: u64, width: u32) -> Option<Value> {
+/// `Ok(None)` is not constant (floats); a division or remainder that
+/// panics at run time is `Err` with the reason.
+pub(crate) fn eval_arith(
+    op: &ArithOp,
+    left: u64,
+    right: u64,
+    width: u32,
+) -> Result<Option<Value>, DivisionPanic> {
+    match division_panic(op, Some(left), right, width) {
+        Some(panic) => Err(panic),
+        None => Ok(fold_arith(op, left, right, width)),
+    }
+}
+
+/// [`eval_arith`] once the operation is known not to panic.
+fn fold_arith(op: &ArithOp, left: u64, right: u64, width: u32) -> Option<Value> {
     let mask = mask_of(width);
     let (left, right) = (left & mask, right & mask);
     let signed = |value: u64| sign_extend(value, width);
@@ -150,12 +197,10 @@ pub(crate) fn eval_arith(op: &ArithOp, left: u64, right: u64, width: u32) -> Opt
         ArithOp::IAdd => int(left.wrapping_add(right)),
         ArithOp::ISub => int(left.wrapping_sub(right)),
         ArithOp::IMul => int(left.wrapping_mul(right)),
-        ArithOp::IDiv if right != 0 => {
-            int(signed(left).wrapping_div(signed(right)).cast_unsigned())
-        }
-        ArithOp::IMod if right != 0 => {
-            int(signed(left).wrapping_rem(signed(right)).cast_unsigned())
-        }
+        // `division_panic` ruled out a zero divisor and `MIN / -1` (at 64
+        // bits the only quotient `i64` cannot hold).
+        ArithOp::IDiv => int(signed(left).checked_div(signed(right))?.cast_unsigned()),
+        ArithOp::IMod => int(signed(left).checked_rem(signed(right))?.cast_unsigned()),
         ArithOp::IDivU => int(left.checked_div(right)?),
         ArithOp::IModU => int(left.checked_rem(right)?),
         ArithOp::Eq => flag(left == right),
@@ -183,6 +228,13 @@ pub(crate) fn eval_arith(op: &ArithOp, left: u64, right: u64, width: u32) -> Opt
 pub(crate) struct Eval {
     stack: Vec<DefId>,
     frames: Vec<HashMap<LocalId, Value>>,
+    /// Set when evaluation stopped at a division that panics: the reason
+    /// the value is not constant.
+    panic: Option<DivisionPanic>,
+    /// A `=>` call's arguments that are not constant leave their
+    /// parameters unbound instead of making the call not constant
+    /// ([`Lower::inline_call_panic`]). Only [`Eval::panic`] is read then.
+    partial: bool,
 }
 
 /// Which arm a constant scrutinee selects: an arm index, or `None` for
@@ -192,9 +244,60 @@ pub(crate) type Choice = Option<usize>;
 impl<'a> Lower<'a> {
     /// The value of `expr` if it is a constant expression.
     pub(crate) fn constant(&mut self, expr: &HirExpr) -> Option<Value> {
+        self.constant_or_panic(expr).ok()
+    }
+
+    /// The value of `expr` if it is a constant expression, else why not:
+    /// `Some` when evaluating it reaches a division that panics.
+    pub(crate) fn constant_or_panic(
+        &mut self,
+        expr: &HirExpr,
+    ) -> Result<Value, Option<DivisionPanic>> {
         let mut eval = Eval::default();
         eval.frames.push(HashMap::new());
-        self.eval(&mut eval, expr)
+        self.eval(&mut eval, expr).ok_or(eval.panic)
+    }
+
+    /// The panic a call to the `=>` function `key` reaches whatever its
+    /// non-constant arguments hold: its body evaluated with the constant
+    /// arguments bound and the others unknown. A panic in an argument is
+    /// not the call's (each argument is lowered and checked on its own),
+    /// nor is one behind a condition that reads an unknown, nor one the
+    /// body reaches with no argument known (the body's own function
+    /// reports that one, where it is lowered).
+    pub(crate) fn inline_call_panic(
+        &mut self,
+        key: &FuncKey,
+        args: &[HirExpr],
+    ) -> Option<DivisionPanic> {
+        let callee: &'a HirFunc = self.funcs.get(key).copied()?;
+        let body = inline_body(callee)?;
+        if self.partial_panic(key.def, HashMap::new(), body).is_some() {
+            return None;
+        }
+        let mut frame = HashMap::new();
+        for (param, arg) in callee.params.iter().zip(args) {
+            if let Some(value) = self.constant(arg) {
+                frame.insert(*param, value);
+            }
+        }
+        self.partial_panic(key.def, frame, body)
+    }
+
+    /// The panic evaluating `def`'s `body` with `frame` bound (and every
+    /// other parameter unknown) reaches.
+    fn partial_panic(
+        &mut self,
+        def: DefId,
+        frame: HashMap<LocalId, Value>,
+        body: &HirExpr,
+    ) -> Option<DivisionPanic> {
+        let mut eval = Eval {
+            partial: true,
+            ..Eval::default()
+        };
+        self.expand(&mut eval, def, frame, body);
+        eval.panic
     }
 
     /// The arm a `match` on `scrutinee` takes, when the scrutinee is constant,
@@ -318,15 +421,7 @@ impl<'a> Lower<'a> {
                 callee: HirCallee::Func(key),
                 args,
                 ..
-            } => {
-                let callee: &'a HirFunc = self.funcs.get(key).copied()?;
-                let body = inline_body(callee)?;
-                let mut frame = HashMap::new();
-                for (param, arg) in callee.params.iter().zip(args) {
-                    frame.insert(*param, self.eval(eval, arg)?);
-                }
-                self.expand(eval, key.def, frame, body)
-            }
+            } => self.eval_inline_call(eval, key, args),
             HirExprKind::Call { .. }
             | HirExprKind::Global(_)
             | HirExprKind::Deref(_)
@@ -338,6 +433,31 @@ impl<'a> Lower<'a> {
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => None,
         }
+    }
+
+    /// A call to the `=>` function `key`: its body with the arguments bound.
+    fn eval_inline_call(
+        &mut self,
+        eval: &mut Eval,
+        key: &FuncKey,
+        args: &[HirExpr],
+    ) -> Option<Value> {
+        let callee: &'a HirFunc = self.funcs.get(key).copied()?;
+        let body = inline_body(callee)?;
+        let mut frame = HashMap::new();
+        for (param, arg) in callee.params.iter().zip(args) {
+            match self.eval(eval, arg) {
+                Some(value) => {
+                    frame.insert(*param, value);
+                }
+                // Every argument is evaluated before the call: an unknown
+                // one leaves its parameter unknown, and a panic in one is
+                // reached.
+                None if eval.partial && eval.panic.is_none() => {}
+                None => return None,
+            }
+        }
+        self.expand(eval, key.def, frame, body)
     }
 
     /// Evaluates the body of `def` (an inline constant or `=>` function)
@@ -391,6 +511,11 @@ impl<'a> Lower<'a> {
         ty: TypeRef,
     ) -> Option<Value> {
         let width = self.int_width(ty)?;
+        if let (Intrinsic::Int(op, _), [dividend, divisor]) = (intrinsic, args) {
+            if let Some(op) = arith_op(op, false).filter(is_division) {
+                return self.eval_division(eval, &op, dividend, divisor);
+            }
+        }
         let mut ints = Vec::with_capacity(args.len());
         for arg in args {
             let Value::Int(bits, arg_width) = self.eval(eval, arg)? else {
@@ -400,13 +525,13 @@ impl<'a> Lower<'a> {
         }
         match (intrinsic, ints.as_slice()) {
             (Intrinsic::Int(NumOp::Negate, _), [(bits, _)]) => {
-                eval_arith(&ArithOp::ISub, 0, *bits, width)
+                fold_arith(&ArithOp::ISub, 0, *bits, width)
             }
             (Intrinsic::Int(NumOp::Not, _), [(bits, _)]) => {
-                eval_arith(&ArithOp::Xor, *bits, u64::MAX, width)
+                fold_arith(&ArithOp::Xor, *bits, u64::MAX, width)
             }
             (Intrinsic::Int(op, _), [(left, operand_width), (right, _)]) => {
-                eval_arith(&arith_op(op, false)?, *left, *right, *operand_width)
+                fold_arith(&arith_op(op, false)?, *left, *right, *operand_width)
             }
             (Intrinsic::Truncate | Intrinsic::ExtendZero, [(bits, _)]) => {
                 Some(Value::Int(bits & mask_of(width), width))
@@ -421,6 +546,35 @@ impl<'a> Lower<'a> {
                 Some(Value::Int(extended & mask_of(width), width))
             }
             _ => None,
+        }
+    }
+
+    /// A division or remainder: the divisor first, since a zero divisor
+    /// panics whatever the dividend is, then the dividend. A panic is
+    /// recorded in `eval` as the reason the value is not constant.
+    fn eval_division(
+        &mut self,
+        eval: &mut Eval,
+        op: &ArithOp,
+        dividend: &HirExpr,
+        divisor: &HirExpr,
+    ) -> Option<Value> {
+        let Value::Int(right, width) = self.eval(eval, divisor)? else {
+            return None;
+        };
+        if let Some(panic) = division_panic(op, None, right, width) {
+            eval.panic = Some(panic);
+            return None;
+        }
+        let Value::Int(left, _) = self.eval(eval, dividend)? else {
+            return None;
+        };
+        match eval_arith(op, left, right, width) {
+            Ok(value) => value,
+            Err(panic) => {
+                eval.panic = Some(panic);
+                None
+            }
         }
     }
 }
@@ -447,17 +601,21 @@ mod tests {
     fn eval_arith_unsigned_semantics() {
         assert_eq!(
             eval_arith(&ArithOp::IGtU, u64::MAX, 1, 64),
-            Some(Value::Int(1, 8))
+            Ok(Some(Value::Int(1, 8)))
         );
         assert_eq!(
             eval_arith(&ArithOp::IDivU, u64::MAX, 2, 64),
-            Some(Value::Int(0x7fff_ffff_ffff_ffff, 64))
+            Ok(Some(Value::Int(0x7fff_ffff_ffff_ffff, 64)))
         );
         assert_eq!(
             eval_arith(&ArithOp::IModU, 7, 3, 64),
-            Some(Value::Int(1, 64))
+            Ok(Some(Value::Int(1, 64)))
         );
-        assert_eq!(eval_arith(&ArithOp::IDivU, 1, 0, 64), None);
+        // `MIN` and `-1` bit patterns are ordinary unsigned operands.
+        assert_eq!(
+            eval_arith(&ArithOp::IDivU, 0x80, 0xff, 8),
+            Ok(Some(Value::Int(0, 8)))
+        );
     }
 
     #[test]
@@ -465,21 +623,60 @@ mod tests {
         // 0xff is -1 at 8 bits.
         assert_eq!(
             eval_arith(&ArithOp::ILt, 0xff, 0, 8),
-            Some(Value::Int(1, 8))
+            Ok(Some(Value::Int(1, 8)))
         );
         assert_eq!(
             eval_arith(&ArithOp::ILtU, 0xff, 0, 8),
-            Some(Value::Int(0, 8))
+            Ok(Some(Value::Int(0, 8)))
         );
         assert_eq!(
             eval_arith(&ArithOp::IAdd, 0xff, 2, 8),
-            Some(Value::Int(1, 8))
+            Ok(Some(Value::Int(1, 8)))
         );
         assert_eq!(
             eval_arith(&ArithOp::IDiv, 0xfe, 0xff, 8),
-            Some(Value::Int(2, 8))
+            Ok(Some(Value::Int(2, 8)))
         );
-        assert_eq!(eval_arith(&ArithOp::IMod, 5, 0, 8), None);
-        assert_eq!(eval_arith(&ArithOp::FAdd, 1, 2, 32), None);
+        // -7 % 2 is -1: the remainder takes the dividend's sign.
+        assert_eq!(
+            eval_arith(&ArithOp::IMod, 0xf9, 2, 8),
+            Ok(Some(Value::Int(0xff, 8)))
+        );
+        assert_eq!(eval_arith(&ArithOp::FAdd, 1, 2, 32), Ok(None));
+    }
+
+    #[test]
+    fn eval_arith_says_why_a_division_panics() {
+        for op in [ArithOp::IDiv, ArithOp::IDivU, ArithOp::IMod, ArithOp::IModU] {
+            assert_eq!(eval_arith(&op, 5, 0, 8), Err(DivisionPanic::ByZero));
+            // Only the operand width's bits count.
+            assert_eq!(eval_arith(&op, 5, 0x100, 8), Err(DivisionPanic::ByZero));
+        }
+        for (min, width) in [(0x80, 8), (0x8000, 16), (0x8000_0000, 32), (1 << 63, 64)] {
+            let minus_one = mask_of(width);
+            for op in [ArithOp::IDiv, ArithOp::IMod] {
+                assert_eq!(
+                    eval_arith(&op, min, minus_one, width),
+                    Err(DivisionPanic::Overflow),
+                    "{op:?} at {width} bits"
+                );
+            }
+            // One more than `MIN`, or `MIN` by -2, is fine.
+            assert_eq!(
+                eval_arith(&ArithOp::IDiv, min + 1, minus_one, width),
+                Ok(Some(Value::Int(min - 1, width)))
+            );
+            assert_eq!(
+                eval_arith(&ArithOp::IDiv, min, minus_one - 1, width),
+                Ok(Some(Value::Int(min >> 1, width)))
+            );
+        }
+        // A zero divisor is known without the dividend; the overflow is not.
+        assert_eq!(
+            division_panic(&ArithOp::IDivU, None, 0, 32),
+            Some(DivisionPanic::ByZero)
+        );
+        assert_eq!(division_panic(&ArithOp::IDiv, None, 0xffff_ffff, 32), None);
+        assert_eq!(division_panic(&ArithOp::IAdd, Some(1), 0, 32), None);
     }
 }

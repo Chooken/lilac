@@ -616,6 +616,23 @@ bug fix that changes generated code.
   `lilac_lower::check_constant_indices` before DCE, traced through the full
   call graph, so it fires in functions nothing calls. Arms a constant
   condition rules out are never lowered, so they are not checked.
+- Integer division (`@i_div*`/`@i_mod*`) panics: lowering
+  (`Lower::check_division`) tests the operands before the `i.div`/`i.mod`
+  and branches to `.lilac.panic` with "division by zero", and for the
+  signed forms `MIN` with `-1`, "division overflow", sited at the
+  intrinsic call. A test the constant operands rule out is not emitted,
+  so a backend never sees a zero divisor or the overflow (an `IR_SPEC.md`
+  precondition); `branches` counts a division as branching. The constant
+  evaluator says why a division is not constant
+  (`constant::division_panic`, `eval_arith`'s `Err(DivisionPanic)`), and
+  a live one that panics is `E060` like `E037`: `Lowered::bad_divisions`,
+  reported by `lilac_lower::check_constant_divisions` before DCE. It is
+  found at the intrinsic (a constant zero divisor alone, or both
+  operands for `MIN / -1`), at a `=>` call whose body reaches one with
+  the call's constant arguments and the others unknown
+  (`Lower::inline_call_panic`: `Standard`'s `/` hooks; a body that panics
+  with no argument known is its own function's report), and in a global
+  initializer. Typeck's literal fold (`1 / 0`) uses the same message.
 - Typeck emits through `Checker::diags`, a `Sink` (`sink.rs`): while an
   instance body is checked it holds each diagnostic as a `Pending` (with
   its `Requirement` and whether it is `dependent` on a parameter), and

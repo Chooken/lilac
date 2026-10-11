@@ -1,0 +1,11 @@
+// expect-error: E060
+// A signed `MIN / -1` with both operands constant in a live arm panics on
+// every run: it is known at compile time.
+
+divide: function () quotient: @bit16 {
+    quotient = @i_div_16(0x8000, 0xFFFF)
+}
+
+main: function () nothing {
+    value: @bit16 = divide()
+}

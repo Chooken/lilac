@@ -1,0 +1,11 @@
+// expect-error: E060
+// `/` on `Standard`'s integers calls a `=>` hook that divides; a constant
+// zero divisor reaches it whatever the dividend holds, so the operator is
+// `E060` too.
+
+using Standard
+
+main: function () nothing {
+    value: Int32 = 0x7
+    quotient: Int32 = value / 0x0 as Int32
+}

@@ -1,4 +1,3 @@
-// pending: robustness plan phase 5 (a constant division by zero is not reported)
 // expect-error: E060
 // Both operands of a division are constant in a live arm, and the divisor
 // is zero: the panic is known at compile time.

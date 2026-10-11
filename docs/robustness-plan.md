@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–4 done).
+> Status: in progress (Phases 0–5 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -653,6 +653,70 @@ true); a global holding each variant of a mixed enum; `Optional` and
 **Tests:** problem 6 un-pended; run tests for each panic (exit 101,
 message, trace) on x86-64 and aarch64 where available; a `FAILS_` test for
 each constant form; snapshots re-blessed for the added checks.
+
+- **Delivered notes.**
+  - 5.1: `Lower::check_division` runs after the operands are lowered: a
+    `cmp.eql` with `0` branching to `.lilac.panic("division by zero",
+    site)`, then for `@i_div_W`/`@i_mod_W` `(a == MIN) and (b == -1)`
+    branching to "division overflow"; the site is the intrinsic call's
+    `at` line, exactly as for `@panic`. Registers do not cross blocks, so
+    a tested pair is kept in two places and reloaded after each test.
+    Rather than relying on LLVM alone, lowering leaves out a test the
+    constant operands rule out (like `@array_at`'s in-bounds constant),
+    so a constant nonzero divisor emits no check even at `-O0`;
+    `Lower::branches` counts a division as branching. `IR_SPEC.md` states
+    the precondition (no zero divisor, no signed `MIN` with `-1`), so the
+    LLVM backend's `sdiv`/`udiv`/`srem`/`urem` lowering is unchanged.
+  - 5.2: `division_panic` and `eval_arith` (now `Result<Option<Value>,
+    DivisionPanic>`) say why; `fold_arith` uses `checked_div`/`checked_rem`
+    after the check, so no wrapping is left. The evaluator takes a
+    division's divisor first (a zero divisor panics whatever the dividend
+    is) and records the panic in `Eval`. `E060` is `Lowered::bad_divisions`
+    (`BadDivision`), reported by `check_constant_divisions` right after
+    `check_constant_indices`, traced through the full call graph. Beyond
+    the plan:
+    - **A constant zero divisor alone is `E060`** (the plan's 5.2
+      wording), whatever the dividend; `MIN / -1` needs both operands
+      constant.
+    - **`=>` calls are checked.** `Standard`'s `/` and `%` are `=>` hooks
+      whose bodies see only parameters, so `value / 0x0 as Int32` would
+      otherwise slip through. At each `=>` call (`Lower::inline_call_panic`)
+      the body is evaluated with the constant arguments bound and the rest
+      unknown (`Eval::partial`); a panic it reaches is `E060` at the call.
+      One the body reaches with no argument known is its own function's
+      report, so nested hooks report once.
+    - **Globals.** An initializer that divides that way is `E060`, not
+      `E038` (`BadDivision::func` is `None`, so there is no trace). A
+      top-level condition (selector) that divides by zero is still `E039`
+      (not constant).
+    - Typeck's literal fold now says "division by zero" / "the divisor is
+      zero", the same message and label as lowering's.
+  - Snapshot harnesses: a panic site embeds the source name as given, so
+    the `.lir`/`.ll` sweeps (`m1`–`m5b`) now run `lilac` in `tests/ui`
+    with the bare file name, as the run tests do; otherwise a snapshot
+    holding a site would differ by path separator between harnesses and
+    hosts.
+  - Snapshots: only `unsigned_ops.lir`/`.ll` changed (the only snapshot
+    dividing by a runtime value): four zero tests, their panic calls and
+    site strings, the spilled operands, and the panic runtime that is now
+    reachable (`.lilac.panic` and its data, `.lilac.abort`,
+    `.lilac.trace_head`). No other snapshot moved.
+  - Release IR: in a `--release` `emit-llvm` of `x / 0x3 as Int32`
+    (through `Standard.Int32.@div`) and `@i_div_32(x, 0x2)`, both callers
+    are a bare `sdiv` with no compare or branch: the hook's checks fold
+    away once inlined, and the direct one emits none.
+  - Tests: `division_by_zero` and `FAILS_division_by_zero_constant`
+    un-pended (the trace lines moved up one with the `pending` line); run
+    tests `division_overflow`, `remainder_overflow`, `remainder_by_zero`,
+    `division_by_zero_release` (`--release`), `division_widths` (every
+    width and signedness, truncation toward zero, `MIN` by `2`, `-2` and
+    `1`) and `division_constant_guard` (dead arms, constant divisors);
+    `FAILS_division_overflow_constant`, `FAILS_division_by_zero_uncalled`
+    and `FAILS_division_by_zero_hook`; unit tests in `lilac-lower`
+    (`eval_arith`'s reasons at every width, what is collected and what is
+    not, which tests are emitted). The host is x86-64 Windows: aarch64 is
+    covered by `emit-llvm --target=aarch64-unknown-linux` building, not by
+    running.
 
 ---
 

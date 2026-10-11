@@ -1,0 +1,13 @@
+// expect-error: E060
+// A constant zero divisor is `E060` even in a function nothing calls (like
+// a constant out-of-bounds `@array_at` index, `E037`), and whatever the
+// dividend is.
+
+divisor: @bit64 => 0x0
+
+never_called: function (value: @bit64) rest: @bit64 {
+    rest = @i_mod_u_64(value, divisor)
+}
+
+main: function () nothing {
+}

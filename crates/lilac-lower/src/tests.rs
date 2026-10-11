@@ -9,6 +9,13 @@ fn lower_src(src: &str) -> (String, Diags) {
 
 /// Lowers `src` for `target`.
 fn lower_src_on(src: &str, target: lilac_target::Target) -> (String, Diags) {
+    let (lowered, diags) = lowered_on(src, target);
+    (lowered.module.to_text(), diags)
+}
+
+/// Lowers `src` for `target`, keeping everything lowering collected. The
+/// module verifies once the panic handler the driver injects is added.
+fn lowered_on(src: &str, target: lilac_target::Target) -> (Lowered, Diags) {
     let mut sources = SourceMap::new();
     let mut diags = Diags::new();
     let project = lilac_module::single_file("test.lilac", src, &mut sources);
@@ -22,14 +29,21 @@ fn lower_src_on(src: &str, target: lilac_target::Target) -> (String, Diags) {
     };
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, options);
     assert!(!diags.has_errors(), "{diags:?}");
-    let lir = lower(&checked.hir, &res, &types, &sources, target, None).module;
-    let text = lir.to_text();
+    let lowered = lower(&checked.hir, &res, &types, &sources, target, None);
+    let text = lowered.module.to_text();
+    let mut lir = lowered.module.clone();
+    lir.funcs
+        .extend(lilac_ir::build_runtime(target.bit_native_width() / 8));
+    lir.funcs.extend(lilac_ir::hook_externs());
+    let (panic, data) = lilac_ir::panic_runtime();
+    lir.funcs.push(panic);
+    lir.data.extend(data);
     let mut verify_diags = Diags::new();
     assert!(
         lilac_ir::verify(&lir, &mut verify_diags).is_ok() || text.contains("@compile_error"),
         "{verify_diags:?}\n{text}"
     );
-    (text, diags)
+    (lowered, diags)
 }
 
 #[test]
@@ -206,6 +220,125 @@ fn constant_literals_and_arithmetic() {
 #[test]
 fn division_by_zero_is_not_constant() {
     assert_arm("", "@i_div_32(0x1, 0x0) == 0x0", None);
+    assert_arm("", "@i_div_8(0x80, 0xff) == 0x80", None);
+    assert_arm("", "@i_div_8(0x81, 0xff) == 0x7f", Some(true));
+}
+
+/// The function (by source name) and panic of each collected `E060`.
+fn bad_divisions(src: &str) -> Vec<(String, DivisionPanic)> {
+    let (lowered, _) = lowered_on(src, lilac_target::Target::default());
+    lowered
+        .bad_divisions
+        .iter()
+        .map(|bad| {
+            let name = bad
+                .func
+                .as_ref()
+                .map_or_else(|| "<global>".to_owned(), |func| lowered.names[func].clone());
+            (name, bad.panic)
+        })
+        .collect()
+}
+
+#[test]
+fn constant_divisions_that_panic_are_collected() {
+    let found = bad_divisions(
+        "div: function (a: @bit32, b: @bit32) r: @bit32 => @i_div_32(a, b)
+twice: function (a: @bit32) r: @bit32 => div(a, 0x0)
+pass: function (a: @bit32, b: @bit32) r: @bit32 => div(a, b)
+zero: @bit32 => 0x0
+by_zero: function () r: @bit32 {
+    r = @i_div_u_32(0x1, 0x0)
+}
+runtime_dividend: function (a: @bit8) r: @bit8 {
+    r = @i_mod_8(a, 0x0)
+}
+overflow: function () r: @bit64 {
+    r = @i_mod_64(0x8000000000000000, 0xFFFFFFFFFFFFFFFF)
+}
+through_hook: function (a: @bit32) r: @bit32 {
+    r = div(a, zero)
+}
+through_nested: function (a: @bit32) r: @bit32 {
+    r = twice(a)
+}
+through_pass: function (a: @bit32) r: @bit32 {
+    r = pass(a, 0x0)
+}
+fine: function (a: @bit32, b: @bit32) r: @bit32 {
+    r = @i_div_32(a, 0xFFFFFFFF)
+    r = @i_div_32(0x80000000, b)
+    r = @i_div_32(0x80000000, 0x2)
+    r = div(a, 0x3)
+    if 0x0 {
+        r = @i_div_u_32(a, 0x0)
+    }
+}
+main: function () nothing {
+}
+",
+    );
+    let found: Vec<(&str, DivisionPanic)> = found
+        .iter()
+        .map(|(name, panic)| (name.as_str(), *panic))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            // `twice`'s own body divides by zero; its callers are not
+            // reported again (`through_nested`), but one whose constant
+            // argument reaches a division is (`through_pass`).
+            ("twice", DivisionPanic::ByZero),
+            ("by_zero", DivisionPanic::ByZero),
+            ("runtime_dividend", DivisionPanic::ByZero),
+            ("overflow", DivisionPanic::Overflow),
+            ("through_hook", DivisionPanic::ByZero),
+            ("through_pass", DivisionPanic::ByZero),
+        ]
+    );
+}
+
+#[test]
+fn a_global_initializer_that_divides_by_zero_is_e060() {
+    let found =
+        bad_divisions("g: @bit32 = @i_div_u_32(0x1, 0x0)\nmain: function () nothing {\n}\n");
+    assert_eq!(found, [("<global>".to_owned(), DivisionPanic::ByZero)]);
+}
+
+/// Each division gets only the tests its constant operands leave open.
+#[test]
+fn division_checks_skip_what_constants_rule_out() {
+    let (text, _) = lower_src(
+        "f: function (a: @bit32, b: @bit32) r: @bit32 {
+    r = @i_div_32(a, b)
+}
+g: function (a: @bit32, b: @bit32) r: @bit32 {
+    r = @i_div_u_32(a, b)
+}
+h: function (a: @bit32) r: @bit32 {
+    r = @i_div_32(a, 0x7)
+}
+k: function (a: @bit32) r: @bit32 {
+    r = @i_mod_32(a, 0xFFFFFFFF)
+}
+main: function () nothing {
+}
+",
+    );
+    let body = |name: &str| {
+        let start = text.find(&format!("function @.root.{name}\n")).expect(name);
+        let rest = &text[start..];
+        rest[..rest.find("\n}").expect("end")].to_owned()
+    };
+    let panics = |name: &str| body(name).matches("call @.lilac.panic").count();
+    // Signed: zero and `MIN / -1`; unsigned: zero only.
+    assert_eq!(panics("f"), 2, "{}", body("f"));
+    assert_eq!(panics("g"), 1, "{}", body("g"));
+    // A nonzero constant divisor other than -1 needs no test.
+    assert_eq!(panics("h"), 0, "{}", body("h"));
+    // A constant -1 leaves only the overflow test.
+    assert_eq!(panics("k"), 1, "{}", body("k"));
+    assert!(body("k").contains("const 0x80000000"), "{}", body("k"));
 }
 
 #[test]

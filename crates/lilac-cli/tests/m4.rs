@@ -49,9 +49,12 @@ fn lir_snapshots_stable() {
     assert!(!snapshots.is_empty(), "no .lir snapshots found");
     for snapshot in snapshots {
         let source = snapshot.with_extension("lilac");
+        // Run in `tests/ui` with the bare name, so panic sites read the same
+        // on every machine.
         let output = lilac()
+            .current_dir("../../tests/ui")
             .args(["emit-ir", "--check"])
-            .arg(&source)
+            .arg(source.file_name().expect("a file name"))
             .output()
             .expect("runs lilac");
         assert!(

@@ -1,5 +1,21 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
+!c0: str = "division by zero"
+!c1: str = "  at run (unsigned_ops.lilac:4:24)
+"
+!c2: str = "  at run (unsigned_ops.lilac:5:25)
+"
+!c3: str = "  at run (unsigned_ops.lilac:14:34)
+"
+!c4: str = "  at run (unsigned_ops.lilac:15:35)
+"
+!.lilac.panic.head: str = "panic: "
+!.lilac.panic.newline: str = "
+"
+!.lilac.panic.elided: str = "  ...
+"
+!.lilac.panic.no_trace: str = "  (stack trace disabled; build with --stack-traces=on)
+"
 function @.root.run
   in #bit32 %a
   in #bit32 %b
@@ -9,11 +25,27 @@ function @.root.run
     alloca #bit32 %one : zeroed
     alloca #bit32 %divisor : zeroed
     alloca #bit32 %quotient : zeroed
+    alloca #bit32 %tmp.1 : zeroed
+    alloca #bit32 %tmp.2 : zeroed
+    alloca #byte_buffer %tmp.3 : zeroed
+    alloca #byte_buffer %tmp.4 : zeroed
     alloca #bit32 %remainder : zeroed
+    alloca #bit32 %tmp.5 : zeroed
+    alloca #bit32 %tmp.6 : zeroed
+    alloca #byte_buffer %tmp.7 : zeroed
+    alloca #byte_buffer %tmp.8 : zeroed
     alloca #bit_native %native_one : zeroed
     alloca #bit_native %wide_divisor : zeroed
     alloca #bit_native %wide_quotient : zeroed
+    alloca #bit_native %tmp.9 : zeroed
+    alloca #bit_native %tmp.10 : zeroed
+    alloca #byte_buffer %tmp.11 : zeroed
+    alloca #byte_buffer %tmp.12 : zeroed
     alloca #bit_native %wide_remainder : zeroed
+    alloca #bit_native %tmp.13 : zeroed
+    alloca #bit_native %tmp.14 : zeroed
+    alloca #byte_buffer %tmp.15 : zeroed
+    alloca #byte_buffer %tmp.16 : zeroed
     &1: #bit32 = const 0x1
     copy &1 -> %one
     &2: #bit32 = copy %b
@@ -22,48 +54,124 @@ function @.root.run
     copy &4 -> %divisor
     &5: #bit32 = copy %a
     &6: #bit32 = copy %divisor
-    &7: #bit32 = i.div.u &5, &6
-    copy &7 -> %quotient
-    &8: #bit32 = copy %a
-    &9: #bit32 = copy %divisor
-    &10: #bit32 = i.mod.u &8, &9
-    copy &10 -> %remainder
-    &11: #bit32 = copy %a
-    &12: #bit32 = copy %divisor
-    &13: #bit8 = i.cmp.lt.u &11, &12
-    branch.if &13, $l.1, $l.2
+    copy &5 -> %tmp.1
+    copy &6 -> %tmp.2
+    &7: #bit32 = const 0x0
+    &8: #bit8 = cmp.eql &6, &7
+    branch.if &8, $l.1, $l.2
   $l.1:
-    &14: #bit32 = const 0x1
-    copy &14 -> %quotient
-    branch $l.3
+    &9: ref #bit8 = const !c0
+    copy &9 -> %tmp.3.data  // idx 1
+    &10: #bit_native = const 0x10
+    copy &10 -> %tmp.3.len  // idx 0
+    &11: ref #bit8 = const !c1
+    copy &11 -> %tmp.4.data  // idx 1
+    &12: #bit_native = const 0x23
+    copy &12 -> %tmp.4.len  // idx 0
+    call @.lilac.panic (in %tmp.3, %tmp.4) (out)
+    unreachable
   $l.2:
-    branch $l.3
+    &13: #bit32 = copy %tmp.1
+    &14: #bit32 = copy %tmp.2
+    &15: #bit32 = i.div.u &13, &14
+    copy &15 -> %quotient
+    &16: #bit32 = copy %a
+    &17: #bit32 = copy %divisor
+    copy &16 -> %tmp.5
+    copy &17 -> %tmp.6
+    &18: #bit32 = const 0x0
+    &19: #bit8 = cmp.eql &17, &18
+    branch.if &19, $l.3, $l.4
   $l.3:
-    &15: #bit32 = copy %a
-    &16: #bit32 = copy %divisor
-    &17: #bit8 = i.cmp.gt.u &15, &16
-    branch.if &17, $l.4, $l.5
+    &20: ref #bit8 = const !c0
+    copy &20 -> %tmp.7.data  // idx 1
+    &21: #bit_native = const 0x10
+    copy &21 -> %tmp.7.len  // idx 0
+    &22: ref #bit8 = const !c2
+    copy &22 -> %tmp.8.data  // idx 1
+    &23: #bit_native = const 0x23
+    copy &23 -> %tmp.8.len  // idx 0
+    call @.lilac.panic (in %tmp.7, %tmp.8) (out)
+    unreachable
   $l.4:
-    &18: #bit32 = const 0x1
-    copy &18 -> %remainder
-    branch $l.6
+    &24: #bit32 = copy %tmp.5
+    &25: #bit32 = copy %tmp.6
+    &26: #bit32 = i.mod.u &24, &25
+    copy &26 -> %remainder
+    &27: #bit32 = copy %a
+    &28: #bit32 = copy %divisor
+    &29: #bit8 = i.cmp.lt.u &27, &28
+    branch.if &29, $l.5, $l.6
   $l.5:
-    branch $l.6
+    &30: #bit32 = const 0x1
+    copy &30 -> %quotient
+    branch $l.7
   $l.6:
-    &19: #bit_native = const 0x1
-    copy &19 -> %native_one
-    &20: #bit_native = copy %w
-    &21: #bit_native = copy %native_one
-    &22: #bit_native = i.add &20, &21
-    copy &22 -> %wide_divisor
-    &23: #bit_native = copy %w
-    &24: #bit_native = copy %wide_divisor
-    &25: #bit_native = i.div.u &23, &24
-    copy &25 -> %wide_quotient
-    &26: #bit_native = copy %w
-    &27: #bit_native = copy %wide_divisor
-    &28: #bit_native = i.mod.u &26, &27
-    copy &28 -> %wide_remainder
+    branch $l.7
+  $l.7:
+    &31: #bit32 = copy %a
+    &32: #bit32 = copy %divisor
+    &33: #bit8 = i.cmp.gt.u &31, &32
+    branch.if &33, $l.8, $l.9
+  $l.8:
+    &34: #bit32 = const 0x1
+    copy &34 -> %remainder
+    branch $l.10
+  $l.9:
+    branch $l.10
+  $l.10:
+    &35: #bit_native = const 0x1
+    copy &35 -> %native_one
+    &36: #bit_native = copy %w
+    &37: #bit_native = copy %native_one
+    &38: #bit_native = i.add &36, &37
+    copy &38 -> %wide_divisor
+    &39: #bit_native = copy %w
+    &40: #bit_native = copy %wide_divisor
+    copy &39 -> %tmp.9
+    copy &40 -> %tmp.10
+    &41: #bit_native = const 0x0
+    &42: #bit8 = cmp.eql &40, &41
+    branch.if &42, $l.11, $l.12
+  $l.11:
+    &43: ref #bit8 = const !c0
+    copy &43 -> %tmp.11.data  // idx 1
+    &44: #bit_native = const 0x10
+    copy &44 -> %tmp.11.len  // idx 0
+    &45: ref #bit8 = const !c3
+    copy &45 -> %tmp.12.data  // idx 1
+    &46: #bit_native = const 0x24
+    copy &46 -> %tmp.12.len  // idx 0
+    call @.lilac.panic (in %tmp.11, %tmp.12) (out)
+    unreachable
+  $l.12:
+    &47: #bit_native = copy %tmp.9
+    &48: #bit_native = copy %tmp.10
+    &49: #bit_native = i.div.u &47, &48
+    copy &49 -> %wide_quotient
+    &50: #bit_native = copy %w
+    &51: #bit_native = copy %wide_divisor
+    copy &50 -> %tmp.13
+    copy &51 -> %tmp.14
+    &52: #bit_native = const 0x0
+    &53: #bit8 = cmp.eql &51, &52
+    branch.if &53, $l.13, $l.14
+  $l.13:
+    &54: ref #bit8 = const !c0
+    copy &54 -> %tmp.15.data  // idx 1
+    &55: #bit_native = const 0x10
+    copy &55 -> %tmp.15.len  // idx 0
+    &56: ref #bit8 = const !c4
+    copy &56 -> %tmp.16.data  // idx 1
+    &57: #bit_native = const 0x24
+    copy &57 -> %tmp.16.len  // idx 0
+    call @.lilac.panic (in %tmp.15, %tmp.16) (out)
+    unreachable
+  $l.14:
+    &58: #bit_native = copy %tmp.13
+    &59: #bit_native = copy %tmp.14
+    &60: #bit_native = i.mod.u &58, &59
+    copy &60 -> %wide_remainder
     return
 }
 function @main
@@ -80,4 +188,82 @@ function @main
     copy &3 -> %tmp.3
     call @.root.run (in %tmp.1, %tmp.2, %tmp.3) (out)
     return
+}
+extern @.lilac.exit
+  in #bit32 %code
+extern @.lilac.compiler_print
+  in #byte_buffer %text
+function @.lilac.panic
+  in #byte_buffer %msg
+  in #byte_buffer %site
+{
+  $entry:
+    alloca #byte_buffer %text : zeroed
+    alloca ref ref #.lilac.frame %head : zeroed
+    alloca ref #.lilac.frame %frame : zeroed
+    alloca #bit_native %count : zeroed
+    alloca ref #byte_buffer %frame.site : zeroed
+    &a.text: ref #bit8 = const !.lilac.panic.head
+    copy &a.text -> %text.data  // idx 1
+    &a.len: #bit_native = const 0x7
+    copy &a.len -> %text.len  // idx 0
+    call @.lilac.compiler_print (in %text) (out)
+    call @.lilac.compiler_print (in %msg) (out)
+    &c.text: ref #bit8 = const !.lilac.panic.newline
+    copy &c.text -> %text.data  // idx 1
+    &c.len: #bit_native = const 0x1
+    copy &c.len -> %text.len  // idx 0
+    call @.lilac.compiler_print (in %text) (out)
+    call @trace_head (in) (out %head)
+    &top: ref #.lilac.frame = load %head
+    copy &top -> %frame
+    &untraced.address: #bit_native = bitcast &top
+    &untraced.zero: #bit_native = const 0x0
+    &untraced: #bit8 = cmp.eql &untraced.address, &untraced.zero
+    branch.if &untraced, $untraced, $walk
+  $untraced:
+    call @.lilac.compiler_print (in %site) (out)
+    &b.text: ref #bit8 = const !.lilac.panic.no_trace
+    copy &b.text -> %text.data  // idx 1
+    &b.len: #bit_native = const 0x37
+    copy &b.len -> %text.len  // idx 0
+    call @.lilac.compiler_print (in %text) (out)
+    branch $exit
+  $walk:
+    &cur: ref #.lilac.frame = copy %frame
+    &done.address: #bit_native = bitcast &cur
+    &done.zero: #bit_native = const 0x0
+    &done: #bit8 = cmp.eql &done.address, &done.zero
+    branch.if &done, $exit, $check
+  $check:
+    &n: #bit_native = copy %count
+    &max: #bit_native = const 0x80
+    &full: #bit8 = cmp.eql &n, &max
+    branch.if &full, $elided, $print
+  $print:
+    &site.at: ref #byte_buffer = field.addr %frame .site  // idx 1
+    copy &site.at -> %frame.site
+    copy ref %frame.site -> %text
+    call @.lilac.compiler_print (in %text) (out)
+    &prev: ref #.lilac.frame = field %frame .prev  // idx 0
+    copy &prev -> %frame
+    &n: #bit_native = copy %count
+    &one: #bit_native = const 0x1
+    &next: #bit_native = i.add &n, &one
+    copy &next -> %count
+    branch $walk
+  $elided:
+    &a.text: ref #bit8 = const !.lilac.panic.elided
+    copy &a.text -> %text.data  // idx 1
+    &a.len: #bit_native = const 0x6
+    copy &a.len -> %text.len  // idx 0
+    call @.lilac.compiler_print (in %text) (out)
+    branch $exit
+  $exit:
+    alloca #bit32 %code : zeroed
+    &code.value: #bit32 = const 0x65
+    copy &code.value -> %code
+    call @.lilac.exit (in %code) (out)
+    call @lilac_abort (in) (out)
+    unreachable
 }

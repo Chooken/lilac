@@ -1,0 +1,19 @@
+// expect-exit: 101
+// expect-stderr: panic: division overflow
+// expect-stderr:   at divide (division_overflow.lilac:14:16)
+// expect-stderr:   at main (division_overflow.lilac:18:10)
+// A signed `MIN / -1` does not fit: it panics in every mode and on every
+// target. The operands are globals, read at run time.
+
+using Standard.Process
+
+minimum: @bit32 = 0x80000000
+minus_one: @bit32 = 0xFFFFFFFF
+
+divide: function (value: @bit32) quotient: @bit32 {
+    quotient = @i_div_32(value, minus_one)
+}
+
+main: function () nothing {
+    exit(divide(minimum))
+}

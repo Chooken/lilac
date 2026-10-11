@@ -67,13 +67,16 @@ fn ll_snapshots_stable() {
 
     for snapshot in snapshots {
         let source = snapshot.with_extension("lilac");
+        // Run in `tests/ui` with the bare name, so panic sites read the same
+        // on every machine.
         let output = lilac()
+            .current_dir(ui_dir())
             .args([
                 "emit-llvm",
                 "--check",
                 &format!("--target={CANONICAL_TARGET}"),
             ])
-            .arg(&source)
+            .arg(source.file_name().expect("a file name"))
             .output()
             .expect("runs lilac");
         assert!(

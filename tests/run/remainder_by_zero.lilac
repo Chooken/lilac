@@ -1,0 +1,17 @@
+// expect-exit: 101
+// expect-stderr: panic: division by zero
+// expect-stderr:   at remainder (remainder_by_zero.lilac:12:22)
+// expect-stderr:   at main (remainder_by_zero.lilac:16:10)
+// A remainder by zero panics like a division by zero, signed or not.
+
+using Standard.Process
+
+divisor: @bit64
+
+remainder: function (value: @bit64) rest: @bit32 {
+    rest = @truncate(@i_mod_64(value, divisor))
+}
+
+main: function () nothing {
+    exit(remainder(0x7))
+}

@@ -56,6 +56,9 @@ pub struct Lowered {
     /// Constant `@array_at` indexes past the array's end, in lowering order
     /// ([`check_constant_indices`] reports them).
     pub bad_indices: Vec<BadIndex>,
+    /// Integer divisions and remainders that panic whatever runs before
+    /// them, in lowering order ([`check_constant_divisions`] reports them).
+    pub bad_divisions: Vec<BadDivision>,
     /// Global initializers that are not constant expressions
     /// ([`check_global_initializers`] reports them).
     pub bad_globals: Vec<Span>,
@@ -72,6 +75,69 @@ pub struct BadIndex {
     pub index: u64,
     /// The array's length.
     pub len: u64,
+}
+
+/// Why an integer division or remainder panics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DivisionPanic {
+    /// The divisor is zero.
+    ByZero,
+    /// A signed `MIN` divided by `-1`: the quotient does not fit.
+    Overflow,
+}
+
+impl DivisionPanic {
+    /// The panic message, also the `E060` message.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ByZero => "division by zero",
+            Self::Overflow => "division overflow",
+        }
+    }
+
+    /// The `E060` label at the operation.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ByZero => "the divisor is zero",
+            Self::Overflow => "the minimum signed value divided by -1 does not fit",
+        }
+    }
+}
+
+/// A division or remainder in a live arm whose constant operands make it
+/// panic: `E060`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadDivision {
+    /// LIR symbol of the function holding it (`None` in a global's
+    /// initializer).
+    pub func: Option<String>,
+    /// The intrinsic call, or the `=>` call whose body divides.
+    pub span: Span,
+    /// Why it panics.
+    pub panic: DivisionPanic,
+}
+
+/// Reports every [`Lowered::bad_divisions`] entry as `E060`, traced like
+/// [`check_constant_indices`]: through every caller, live or not. Run it
+/// before DCE.
+pub fn check_constant_divisions(lowered: &Lowered, diags: &mut Diags) {
+    if lowered.bad_divisions.is_empty() {
+        return;
+    }
+    let graph = lilac_ir::CallGraph::new(&lowered.module);
+    for bad in &lowered.bad_divisions {
+        let mut diagnostic = Diagnostic::error(codes::E060, bad.panic.message()).label(
+            bad.span,
+            true,
+            bad.panic.label(),
+        );
+        if let Some(func) = &bad.func {
+            diagnostic = diagnostic.trace(graph.trace(func, bad.span, &lowered.names));
+        }
+        diags.emit(diagnostic);
+    }
 }
 
 /// Reports every [`Lowered::bad_indices`] entry as `E037`, traced through
@@ -141,6 +207,7 @@ pub fn lower(
         module: lower.module,
         names: lower.names,
         bad_indices: lower.bad_indices,
+        bad_divisions: lower.bad_divisions,
         bad_globals: lower.bad_globals,
     }
 }
@@ -184,6 +251,7 @@ impl<'a> Lower<'a> {
             sources,
             names: HashMap::new(),
             bad_indices: Vec::new(),
+            bad_divisions: Vec::new(),
             bad_globals: Vec::new(),
             target,
             module: LirModule::new(target),
@@ -276,6 +344,8 @@ struct Lower<'a> {
     names: HashMap<String, String>,
     /// Constant out-of-bounds `@array_at` indexes (`E037`).
     bad_indices: Vec<BadIndex>,
+    /// Divisions and remainders that panic on constant operands (`E060`).
+    bad_divisions: Vec<BadDivision>,
     /// Global initializers that are not constant (`E038`).
     bad_globals: Vec<Span>,
     /// The target: every layout, and `@bit_native`'s width.

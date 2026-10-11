@@ -409,14 +409,15 @@ impl Checker<'_> {
                     }
                 };
                 let (left, right) = (signed(ln, lm), signed(rn, rm));
+                // The same `E060` lowering reports for a constant zero
+                // divisor (`lilac_lower::DivisionPanic`).
                 if matches!(op, BinOp::Div | BinOp::Mod) && right == 0 {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            codes::E060,
-                            "division by zero in integer literal expression",
-                        )
-                        .label(span, true, "divide by zero"),
-                    );
+                    self.diags
+                        .emit(Diagnostic::error(codes::E060, "division by zero").label(
+                            span,
+                            true,
+                            "the divisor is zero",
+                        ));
                     return None;
                 }
                 let result = match op {

@@ -1,0 +1,20 @@
+// expect-exit: 101
+// build-arg: --release
+// expect-stderr: panic: division by zero
+// expect-stderr:   at divide (division_by_zero_release.lilac:15:26)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// The checks are part of the program's meaning, not a debug aid: an
+// optimized build panics too (LLVM may not assume the divisor is nonzero).
+// The divisor is a global nothing writes.
+
+using Standard.Process
+
+divisor: @bit_native
+
+divide: function (value: @bit_native) quotient: @bit32 {
+    quotient = @truncate(@i_div_u_native(value, divisor))
+}
+
+main: function () nothing {
+    exit(divide(0x9))
+}

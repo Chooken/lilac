@@ -11,7 +11,7 @@ use lilac_span::Span;
 use lilac_ty::{Builtin, TypeKind, TypeRef};
 
 use crate::constant;
-use crate::{BadIndex, FnState, Lower};
+use crate::{BadDivision, BadIndex, DivisionPanic, FnState, Lower};
 
 impl Lower<'_> {
     #[allow(clippy::too_many_lines)]
@@ -81,7 +81,10 @@ impl Lower<'_> {
                 let Some(op) = constant::arith_op(op, float) else {
                     lilac_error::bug!(span, "intrinsic without an IR operation");
                 };
-                let regs = self.regs(state, func, args);
+                let mut regs = self.regs(state, func, args);
+                if !float && constant::is_division(&op) {
+                    regs = self.check_division(state, func, &op, args, regs, span);
+                }
                 let reg = state.reg();
                 state.emit(LirInst::Arith {
                     op,
@@ -232,6 +235,118 @@ impl Lower<'_> {
             span,
         });
         state.end(LirTerm::Unreachable { span });
+    }
+
+    /// Emits, before the integer division or remainder `op` of `regs` (the
+    /// lowered `args`), the tests that keep it defined: a zero divisor
+    /// panics with "division by zero", and for a signed `op`, `MIN` with
+    /// `-1` panics with "division overflow". A test the constant operands
+    /// rule out is not emitted, so the backend never divides by zero or
+    /// overflows. Constant operands that make it panic are `E060`
+    /// ([`BadDivision`]). Returns the operands in the block that divides
+    /// (registers do not cross blocks, so a tested pair is kept in places).
+    fn check_division(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        op: &ArithOp,
+        args: &[HirExpr],
+        regs: Vec<Reg>,
+        span: Span,
+    ) -> Vec<Reg> {
+        let lir = &self.lir_ty(args[1].ty);
+        let width = match lir {
+            LirTy::Bit(bits) => u32::from(*bits),
+            _ => self.native_bits(),
+        };
+        let mask = constant::mask_of(width);
+        let min = 1u64 << (width - 1);
+        let mut known = |expr: &HirExpr| match self.constant(expr) {
+            Some(constant::Value::Int(bits, _)) => Some(bits & mask),
+            _ => None,
+        };
+        let divisor = known(&args[1]);
+        let dividend = known(&args[0]);
+        if let Some(panic) =
+            divisor.and_then(|right| constant::division_panic(op, dividend, right, width))
+        {
+            self.bad_divisions.push(BadDivision {
+                func: Some(self.symbols[&func.key].as_str().to_owned()),
+                span,
+                panic,
+            });
+        }
+        let by_zero = divisor.is_none_or(|right| right == 0);
+        let overflow = matches!(op, ArithOp::IDiv | ArithOp::IMod)
+            && divisor.is_none_or(|right| right == mask)
+            && dividend.is_none_or(|left| left == min);
+        if !by_zero && !overflow {
+            return regs;
+        }
+        let places: Vec<PlaceName> = regs
+            .iter()
+            .map(|reg| {
+                let place = state.tmp_lir(lir.clone(), span);
+                state.emit(LirInst::CopyPlace {
+                    src: LirOperand::Reg(reg.clone()),
+                    dst: place.clone(),
+                    span,
+                });
+                place
+            })
+            .collect();
+        let reload = |state: &mut FnState| -> Vec<Reg> {
+            places
+                .iter()
+                .map(|place| state.reg_of(LirOperand::Place(place.clone()), lir, span))
+                .collect()
+        };
+        // `operands` are the registers valid in the current block.
+        let mut operands = regs;
+        if by_zero {
+            let zero = equals_const(state, &operands[1], 0, lir, span);
+            self.panic_when(state, func, zero, DivisionPanic::ByZero, span);
+            operands = reload(state);
+        }
+        if overflow {
+            let is_min = equals_const(state, &operands[0], min, lir, span);
+            let minus_one = equals_const(state, &operands[1], mask, lir, span);
+            let both = state.reg();
+            state.emit(LirInst::Arith {
+                op: ArithOp::And,
+                lhs: is_min,
+                rhs: minus_one,
+                dst: both.clone(),
+                ty: LirTy::Bit(8),
+                span,
+            });
+            self.panic_when(state, func, both, DivisionPanic::Overflow, span);
+            operands = reload(state);
+        }
+        operands
+    }
+
+    /// Panics with `panic`'s message when `cond` (a `#bit8`) is nonzero;
+    /// emission continues where it is zero.
+    fn panic_when(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        cond: Reg,
+        panic: DivisionPanic,
+        span: Span,
+    ) {
+        let (fail, ok) = (state.label(), state.label());
+        state.end(LirTerm::BranchIf {
+            cond,
+            then: fail.clone(),
+            els: Some(ok.clone()),
+            span,
+        });
+        state.at(fail);
+        let msg = self.byte_buffer_place(state, panic.message().as_bytes(), span);
+        self.panic_with(state, func, msg, span);
+        state.at(ok);
     }
 
     /// A fresh `#byte_buffer` place over the data constant `bytes`.
@@ -388,6 +503,27 @@ impl Lower<'_> {
         state.emit(inst);
         LirOperand::Reg(dst)
     }
+}
+
+/// A `#bit8` register: whether `reg` (of type `lir`) equals `value`.
+fn equals_const(state: &mut FnState, reg: &Reg, value: u64, lir: &LirTy, span: Span) -> Reg {
+    let constant = state.reg();
+    state.emit(LirInst::Const {
+        dst: constant.clone(),
+        value: LirConst::Int(value),
+        ty: lir.clone(),
+        span,
+    });
+    let test = state.reg();
+    state.emit(LirInst::Arith {
+        op: ArithOp::Eq,
+        lhs: reg.clone(),
+        rhs: constant,
+        dst: test.clone(),
+        ty: LirTy::Bit(8),
+        span,
+    });
+    test
 }
 
 /// The LIR ordering of an atomic intrinsic's ordering.

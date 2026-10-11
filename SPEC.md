@@ -289,12 +289,15 @@ and nothing else. In particular:
   since skipping it would skip the hook.
 - **A recursive `=>` call** (to a `=>` function already being expanded) is not
   constant, so evaluation always terminates. There is no step limit.
-- Integer arithmetic wraps like the runtime operation; a division or modulo by
-  zero is not constant. Float arithmetic is never constant.
+- Integer arithmetic wraps like the runtime operation; a division or
+  remainder that panics (see [Integer division](#integer-division)) is not
+  constant. Float arithmetic is never constant.
 
 Not being constant is never an error: the condition is simply a runtime
-branch. Optimizing constant arithmetic and calls elsewhere is the backend's
-job (LLVM folds them at `-O1` and above) and never changes which programs
+branch. The one exception is a division that would panic, which is `E060`
+wherever it is compiled ([Integer division](#integer-division)).
+Optimizing constant arithmetic and calls elsewhere is the backend's job
+(LLVM folds them at `-O1` and above) and never changes which programs
 compile.
 
 `true` and `false` in `Standard` are inline constants built from `=>`
@@ -352,10 +355,10 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@i_add_W`** | `(@bitW, @bitW): @bitW` | Integer addition using standard two's-complement logic. |
 | **`@i_sub_W`** | `(@bitW, @bitW): @bitW` | Integer subtraction. |
 | **`@i_mul_W`** | `(@bitW, @bitW): @bitW` | Integer multiplication. |
-| **`@i_div_W`** | `(@bitW, @bitW): @bitW` | Signed integer division. |
-| **`@i_div_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer division. |
-| **`@i_mod_W`** | `(@bitW, @bitW): @bitW` | Signed integer modulo. |
-| **`@i_mod_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer modulo. |
+| **`@i_div_W`** | `(@bitW, @bitW): @bitW` | Signed integer division, truncating toward zero. Panics on a zero divisor or `MIN / -1` ([Integer division](#integer-division)). |
+| **`@i_div_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer division. Panics on a zero divisor. |
+| **`@i_mod_W`** | `(@bitW, @bitW): @bitW` | Signed integer remainder, with the dividend's sign. Panics on a zero divisor or `MIN % -1`. |
+| **`@i_mod_u_W`** | `(@bitW, @bitW): @bitW` | Unsigned integer remainder. Panics on a zero divisor. |
 | **`@i_negate_W`** | `(@bitW): @bitW` | Integer two's-complement negation. |
 | **`@i_less_than_W`** | `(@bitW, @bitW): @bit8` | Signed integer less-than (two's-complement). Returns `@bit8` (`0x0` false, otherwise true). |
 | **`@i_greater_than_W`** | `(@bitW, @bitW): @bit8` | Signed integer greater-than. Returns `@bit8`. |
@@ -431,6 +434,41 @@ before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
 `@bitW`, the address is a `ref @bitW` (`ref place`), and every access is
 aligned to its width. A compare-swap's failure ordering is the strongest one
 valid for its ordering (`acquire` for `acq_rel`, `relaxed` for `release`).
+
+### Integer division
+
+Integer arithmetic wraps in two's complement, with one exception: division
+and remainder have no wrapped answer, so they panic instead, in every build
+mode and on every target:
+
+- `@i_div_W`, `@i_div_u_W`, `@i_mod_W` and `@i_mod_u_W` with a zero divisor
+  panic with `division by zero`;
+- `@i_div_W` and `@i_mod_W` of the minimum signed value (`0x80…0`) by `-1`
+  (all ones) panic with `division overflow` (the quotient does not fit, and
+  the remainder, though mathematically `0`, is computed by the same
+  division).
+
+Otherwise signed division truncates toward zero and the signed remainder
+takes the dividend's sign (`-7 / 2` is `-3`, `-7 % 2` is `-1`). The panic is
+an ordinary `@panic` whose site is the intrinsic call, so it prints the
+message and stack trace and exits with `101`. `Standard`'s `/` and `%` on its
+integer types call these intrinsics, so they panic the same way. The check
+costs nothing when the divisor is a constant that rules it out (any nonzero
+constant for an unsigned division, any but `0` and `-1` for a signed one): it
+is not emitted.
+
+A division that panics whatever runs before it is a compile-time error,
+`E060`, wherever it is compiled (in every function, called or not, but never
+in an arm a constant condition rules out):
+
+- a constant zero divisor, whatever the dividend;
+- a constant minimum signed value divided by a constant `-1`;
+- a call to a `=>` function whose body reaches one of these with the call's
+  constant arguments (`value / 0x0 as Int32` through `Standard`'s `@div`);
+- a global's initializer that divides that way.
+
+Literal arithmetic (`1 / 0`, §2) is folded before any type is known and is
+the same `E060`.
 
 The raw memory builtins (`@write`, `@read`, `@drop`) are for buffer and
 allocator authors: they move values in and out of memory the compiler does

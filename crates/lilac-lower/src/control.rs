@@ -10,7 +10,7 @@ use lilac_ir::{ArithOp, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy
 use lilac_span::Span;
 use lilac_ty::TypeRef;
 
-use crate::constant::number_const;
+use crate::constant::{arith_op, is_division, number_const};
 use crate::{end_of, stmt_span, FnState, Lower, Place, Scope};
 
 impl Lower<'_> {
@@ -534,7 +534,8 @@ impl Lower<'_> {
         }
     }
 
-    /// Whether lowering `expr` creates blocks.
+    /// Whether lowering `expr` creates blocks (an integer division may: its
+    /// checks branch to a panic).
     pub(crate) fn branches(&self, expr: &HirExpr) -> bool {
         let mut found = false;
         expr.walk(&mut |e| match &e.kind {
@@ -546,6 +547,12 @@ impl Lower<'_> {
                 ..
             } => {
                 found = true;
+            }
+            HirExprKind::Call {
+                callee: HirCallee::Intrinsic(Intrinsic::Int(op, _)),
+                ..
+            } => {
+                found |= arith_op(*op, false).is_some_and(|op| is_division(&op));
             }
             HirExprKind::Const(def) => {
                 if let Some(value) = self.hir.consts.get(def) {

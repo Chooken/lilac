@@ -541,6 +541,7 @@ impl Session {
             return Err(self.stop_cancelled());
         }
         lilac_lower::check_constant_indices(&lowered, &mut self.diags);
+        lilac_lower::check_constant_divisions(&lowered, &mut self.diags);
         lilac_lower::check_global_initializers(&lowered, &mut self.diags);
         let mut lir = lowered.module;
         on_stage("lower", &lir);

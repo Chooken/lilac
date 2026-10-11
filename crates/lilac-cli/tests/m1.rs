@@ -37,8 +37,11 @@ fn check_4_ports_clean() {
 #[test]
 fn lir_4_snapshots_stable() {
     for port in PORTS {
+        // Run in `tests/ui` with the bare name, so panic sites read the same
+        // on every machine.
         let output = lilac()
-            .args(["emit-ir", "--check", &ui(port)])
+            .current_dir("../../tests/ui")
+            .args(["emit-ir", "--check", port])
             .output()
             .expect("runs lilac");
         assert!(
