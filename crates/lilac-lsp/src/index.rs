@@ -112,6 +112,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
             DefKind::Hook(_) => "hook",
             DefKind::Object => "object",
             DefKind::Enum => "enum",
+            DefKind::Alias(_) => "alias",
             DefKind::Const { .. } => "const",
             DefKind::Global { .. } => "global",
             DefKind::Field(_) => "field",

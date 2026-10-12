@@ -591,3 +591,88 @@ fn hovers_show_fields_variants_globals_and_intrinsics() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+const ALIASES: &str = "\
+Point: object {
+    x: @bit8
+}
+Spot: alias Point
+make: function () spot: Spot {
+    spot = Spot { x = 0x1 }
+}
+main: function () nothing {
+    here: Spot = make()
+}
+";
+
+/// A type alias is an item: hover shows its declaration, definition and
+/// references find it, type definition goes on to the type it names, and
+/// a rename changes every spelling of it but not the type.
+#[test]
+fn aliases_hover_navigate_and_rename() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    did_open(&client, &uri, ALIASES);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(lsp_types::DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+    let use_site = at(ALIASES, "here: Spot", 0, 7);
+
+    let hover = request(&client, "textDocument/hover", position(&uri, use_site)).expect("hover");
+    let hover = hover.to_string();
+    assert!(hover.contains("Spot: alias Point"), "{hover}");
+
+    let definition =
+        request(&client, "textDocument/definition", position(&uri, use_site)).expect("definition");
+    let definition: Location = serde_json::from_value(definition).expect("location");
+    let declared = at(ALIASES, "Spot: alias", 0, 0);
+    assert_eq!(
+        definition.range.start,
+        lsp_types::Position::new(declared.0, declared.1)
+    );
+
+    let type_definition = request(
+        &client,
+        "textDocument/typeDefinition",
+        position(&uri, use_site),
+    )
+    .expect("type definition");
+    let type_definition: Location = serde_json::from_value(type_definition).expect("location");
+    let point = at(ALIASES, "Point: object", 0, 0);
+    assert_eq!(
+        type_definition.range.start,
+        lsp_types::Position::new(point.0, point.1)
+    );
+
+    let spots = [
+        at(ALIASES, "Spot", 0, 0),
+        at(ALIASES, "Spot", 1, 0),
+        at(ALIASES, "Spot", 2, 0),
+        at(ALIASES, "Spot", 3, 0),
+    ];
+    assert_eq!(
+        starts(&references(&client, &uri, use_site, true)),
+        spots.to_vec()
+    );
+
+    let mut params = position(&uri, use_site);
+    params["newName"] = serde_json::json!("Place");
+    let edit: WorkspaceEdit =
+        serde_json::from_value(request(&client, "textDocument/rename", params).expect("rename"))
+            .expect("edit");
+    let place = |at: (u32, u32)| (at, "Place".to_owned());
+    assert_eq!(
+        edits_by_start(&edit),
+        spots.into_iter().map(place).collect::<Vec<_>>()
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

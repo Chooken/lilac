@@ -31,8 +31,11 @@ that namespace's public names **into the importing file only**; imports are
 non-transitive. A namespace automatically sees its **ancestors** (ancestor
 reach) and its descendants.
 
-There is **no re-export and no alias**: an item must be *defined* in the
-namespace you import it from. Therefore the root namespace is a real prelude
+There is **no re-export**: an item must be *defined* in the namespace you
+import it from. Type aliases (`Name: alias Type`, `SPEC.md` §6) exist,
+but an alias is a new item naming a type, not a way to re-export an item
+under its own name (a function or namespace cannot be aliased into
+another namespace). Therefore the root namespace is a real prelude
 (items *defined* at `Standard`), not an umbrella that re-exports its children.
 `Standard` plays the role `System` plays in C#.
 
@@ -607,6 +610,6 @@ stdlib workaround via `extern`.
   deferred (`SPEC.md` §9). Not in this layout yet.
 * **Networking, JSON, regex, compression** — Tier-3 extras, later.
 * **A `Standard` umbrella that re-exports children** — impossible without
-  re-export/alias; the root is a real prelude instead.
+  re-export; the root is a real prelude instead.
 * **Floating-point formatting edge cases** — depends on `lilac-decimal` and
   libm; specified when `Text` lands.

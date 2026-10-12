@@ -1083,6 +1083,44 @@ An enum body may also declare members exactly like an object: methods
 it spelled the same type. Legacy `union { ... }` declarations fail to
 parse; rename them to `enum`.)
 
+### Type aliases
+
+`Name: alias Type` gives a type a second name:
+
+```lilac
+Byte: alias @bit8
+Bytes: alias List[@bit8]
+Callback: alias function (Event) nothing
+```
+
+* **An alias is its type**, not a wrapper: `Bytes` and `List[@bit8]` are
+  one type, so values pass between them with no conversion, and they
+  have the same hooks, layout and symbols. A hook declared over one
+  spelling is the hook of the other; two that differ only in spelling
+  are a duplicate (`E020`).
+* An alias may be written wherever a type can: a parameter, out, local,
+  field, payload, generic argument, `as`, `ref Bytes`. An alias of an
+  object or enum also names its statics and builds its literals
+  (`Spot.origin()`, `Spot { x = 0x1 }`); an alias of a generic instance
+  has its arguments already, so `Bytes { ... }` infers nothing.
+* It is an item like an object: declared at the top level of a file only
+  (inside a type body it is `E036`), namespaced and visible like any item
+  (`private { }`, `using`), and its name clashes like one (`E020`). It is
+  not a value (`E021`).
+* It is **not generic**: `Name[T]: alias …` is a syntax error (`E001`),
+  but it may name an instance. Generic arguments on an alias where it is
+  used, and a generic type named without its arguments, are `E044`.
+* It names a type, never a reference: `Name: alias ref T` is `E001`;
+  write `ref Name` where it is used. `unknown` lives only behind a `ref`,
+  so `alias unknown` is `E023`.
+* An alias that needs itself to be known, directly or through other
+  aliases (`Pair: alias Both[Pair]`), is `E074`, reported once at the use
+  that closes the loop.
+* **Diagnostics** show a type written with arguments (an instance, an
+  array or a function type) by its alias when exactly one alias names it:
+  `no conversion from Bytes to @bit32`. A plain name (`@bit8`, `Point`)
+  is always shown as itself, so `Byte` never renames `@bit8` elsewhere.
+
 ## 7. Generics & Inline Declarations
 
 ### Generics

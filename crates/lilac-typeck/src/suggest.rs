@@ -42,9 +42,11 @@ impl Checker<'_> {
     }
 
     /// The names a type can be spelled with here: the file's visible
-    /// objects and enums, the generic parameters, and the builtins.
+    /// objects, enums and aliases, the generic parameters, and the builtins.
     pub(crate) fn type_names(&self) -> Vec<String> {
-        let mut names = self.visible_names(|kind| matches!(kind, DefKind::Object | DefKind::Enum));
+        let mut names = self.visible_names(|kind| {
+            matches!(kind, DefKind::Object | DefKind::Enum | DefKind::Alias(_))
+        });
         names.extend(self.env.params.iter().cloned());
         names.extend(lilac_ty::Builtin::ALL.map(|builtin| builtin.name().to_owned()));
         names
@@ -99,7 +101,7 @@ impl Checker<'_> {
     ) -> Diagnostic {
         if name.contains('.') {
             return self.suggest_path(diagnostic, name, span, |kind| {
-                matches!(kind, DefKind::Object | DefKind::Enum)
+                matches!(kind, DefKind::Object | DefKind::Enum | DefKind::Alias(_))
             });
         }
         let names = self.type_names();

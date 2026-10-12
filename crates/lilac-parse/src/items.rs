@@ -68,6 +68,9 @@ impl Parser {
                 decl.link_name = link_name;
                 ItemKind::Func(decl)
             }
+            TokenKind::KwAlias => {
+                self.parse_alias_rest(diags, &name, name_span, &generic_params)?
+            }
             TokenKind::KwObject => {
                 let members = self.parse_object_members(diags)?;
                 return Ok(Item {
@@ -95,6 +98,42 @@ impl Parser {
             name,
             kind,
         })
+    }
+
+    /// The type after `name: alias`. An alias is not generic, is not a
+    /// hook, and names a type rather than a reference: `ref` goes where
+    /// the alias is used.
+    fn parse_alias_rest(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        name: &str,
+        name_span: Span,
+        generic_params: &[String],
+    ) -> Result<ItemKind, ErrorGuaranteed> {
+        // The type is read first, so the next item parses after an error.
+        let ty = self.parse_type(diags);
+        if name.starts_with('@') {
+            return Err(Self::err(
+                diags,
+                name_span,
+                "a hook is a function, not an alias",
+            ));
+        }
+        if !generic_params.is_empty() {
+            return Err(Self::err(
+                diags,
+                name_span,
+                "an alias takes no generic parameters; it may name an instance (`alias List[@bit8]`)",
+            ));
+        }
+        if ty.is_ref {
+            return Err(Self::err(
+                diags,
+                ty.span,
+                "an alias names a type, not a reference; write `ref` where the alias is used",
+            ));
+        }
+        Ok(ItemKind::Alias { ty })
     }
 
     pub(crate) fn parse_item_tail(
@@ -496,7 +535,7 @@ impl Parser {
                     && self.peek_at(1).kind == TokenKind::Colon
                     && matches!(
                         self.peek_at(2).kind,
-                        TokenKind::KwObject | TokenKind::KwEnum
+                        TokenKind::KwObject | TokenKind::KwEnum | TokenKind::KwAlias
                     ));
             if is_member {
                 let before = self.pos;

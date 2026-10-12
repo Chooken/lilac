@@ -49,6 +49,12 @@ pub enum ItemKind {
         /// Generic parameters.
         generic_params: Vec<String>,
     },
+    /// `name: alias Type`: another name for a type (the same type, not a
+    /// wrapper).
+    Alias {
+        /// The type it names (never `ref`).
+        ty: Type,
+    },
     /// `using Standard` (folder import, non-transitive), or `using *.C`
     /// (relative to the importing file's own namespace).
     Using {

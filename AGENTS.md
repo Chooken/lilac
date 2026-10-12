@@ -268,7 +268,16 @@
 - Types are top-level only: the resolver rejects an `object`/`enum` in a
   type's body as `E036` (`Collector::nested_type`) and defines nothing for
   it. The parser still accepts the syntax (also in enum bodies) so the
-  error is that one, not a parse error.
+  error is that one, not a parse error. A type alias (`Name: alias Type`,
+  `DefKind::Alias`) follows the same rule.
+- Type aliases (`lilac-typeck/src/aliases.rs`) are transparent: an alias
+  is its type's `TypeId`. Typeck resolves every alias first
+  (`Checker::resolve_aliases`, before the hooks, in the alias's own file
+  scope, memoized; a cycle is `E074`), so an alias's error is never folded
+  into an instance's `E042`; `resolve_named`, `static_receiver` and
+  `check_struct_lit` then see through it. `Types::add_alias` records it
+  for display only (a type spelled with arguments that one alias names
+  prints as the alias); mangling and layouts never see aliases.
 - Namespace qualification: every non-root symbol/type is prefixed by its dotted
   namespace path (`A.B.foo`, `A.Object.Method`). A **root free function is
   `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it

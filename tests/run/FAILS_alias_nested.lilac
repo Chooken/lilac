@@ -1,0 +1,8 @@
+// expect-error: E036
+// Aliases, like types, are declared only at the top level of a file.
+
+Outer: object {
+    Inner: alias @bit8
+}
+
+main: function () nothing {}

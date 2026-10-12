@@ -139,6 +139,23 @@ impl Checker<'_> {
         let Ok(found) = self.lookup_item(name, ty.name_span) else {
             return TypeRef::ERROR;
         };
+        if let Some(def) = found.filter(|def| matches!(self.res.def(*def).kind, DefKind::Alias(_)))
+        {
+            self.record_use(name_span, def);
+            if !args.is_empty() {
+                self.arity_error(ty, name, Some(def), args.len());
+                return TypeRef::ERROR;
+            }
+            // The alias's own error was reported at its declaration.
+            let target = self.alias_type(def, ty.name_span);
+            if target.is_error() {
+                return TypeRef::ERROR;
+            }
+            return TypeRef {
+                id: target.id,
+                is_ref: ty.is_ref,
+            };
+        }
         let Some(def) = found.filter(|def| self.res.def(*def).is_type()) else {
             let diagnostic = Diagnostic::error(codes::E023, format!("unknown type `{name}`"))
                 .label(ty.span, true, "no such type in scope");
@@ -501,6 +518,16 @@ impl Checker<'_> {
                 // `@builtin`'s generated types are laid out on first use, so
                 // they stay out of programs that never name them.
                 DefKind::Object | DefKind::Enum if self.is_builtin(id) => {}
+                // Laid out like a type of its own, so an unused alias of a
+                // type too large (`E067`) is still reported.
+                DefKind::Alias(_) => {
+                    let span = def.span;
+                    let ty = self.alias_type(id, def.name_span);
+                    if !ty.is_error() {
+                        let env = self.env_of(id, Vec::new(), None);
+                        let _ = self.with_env(env, |c| c.ensure_type(ty, span));
+                    }
+                }
                 DefKind::Object | DefKind::Enum if def.generic_params.is_empty() => {
                     let span = def.span;
                     let ty = self.type_of_def(id, Vec::new());

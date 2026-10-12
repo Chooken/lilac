@@ -54,6 +54,8 @@ pub enum DefKind {
     Object,
     /// `name: enum { ... }`.
     Enum,
+    /// `name: alias Type`: another name for a type.
+    Alias(AstType),
     /// `member: Type` inside an object.
     Field(AstType),
     /// `Variant` / `Variant: Type` inside an enum.
@@ -560,6 +562,7 @@ impl Collector<'_> {
             ItemKind::Func(decl) => DefKind::Func(Arc::new(decl.clone())),
             ItemKind::Object { .. } => DefKind::Object,
             ItemKind::Enum { .. } => DefKind::Enum,
+            ItemKind::Alias { ty } => DefKind::Alias(ty.clone()),
             ItemKind::Field { ty } => DefKind::Field(ty.clone()),
             ItemKind::Const { ty, value } => DefKind::Const {
                 ty: ty.clone(),
@@ -617,7 +620,10 @@ impl Collector<'_> {
                 self.members(owner, items, Visibility::Private);
                 continue;
             }
-            if matches!(item.kind, ItemKind::Object { .. } | ItemKind::Enum { .. }) {
+            if matches!(
+                item.kind,
+                ItemKind::Object { .. } | ItemKind::Enum { .. } | ItemKind::Alias { .. }
+            ) {
                 self.nested_type(owner, item);
                 continue;
             }
@@ -637,20 +643,17 @@ impl Collector<'_> {
 
     /// `E036`: types are declared only at the top level of a file.
     fn nested_type(&mut self, owner: DefId, item: &Item) {
-        let kind = if matches!(item.kind, ItemKind::Object { .. }) {
-            "object"
-        } else {
-            "enum"
+        let kind = match item.kind {
+            ItemKind::Object { .. } => "an object",
+            ItemKind::Enum { .. } => "an enum",
+            _ => "an alias",
         };
         let owner = self.resolved.def(owner);
         let (owner_name, owner_span) = (owner.name.clone(), owner.name_span);
         self.diags.emit(
             Diagnostic::error(
                 codes::E036,
-                format!(
-                    "`{}` is an {kind} declared inside `{owner_name}`",
-                    item.name
-                ),
+                format!("`{}` is {kind} declared inside `{owner_name}`", item.name),
             )
             .label(
                 leading_name_span(item.span, &item.name),
@@ -1301,5 +1304,34 @@ shown: function () nothing {}
         let resolved = resolve(&project, &[(file, program)], &mut diags);
         assert_eq!(resolved.defs.len(), 1);
         assert_eq!(resolved.defs[0].name, "ok");
+    }
+
+    #[test]
+    fn aliases_are_items() {
+        let (resolved, file, diags) =
+            resolve_one("Byte: alias @bit8\nprivate {\n    Word: alias @bit32\n}\n");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let byte = one(&resolved, file, "Byte");
+        assert!(matches!(resolved.def(byte).kind, DefKind::Alias(_)));
+        assert!(!resolved.def(byte).is_type());
+        let word = one(&resolved, file, "Word");
+        assert_eq!(resolved.def(word).vis, Visibility::Private);
+    }
+
+    #[test]
+    fn alias_names_clash_like_any_item() {
+        let (_, _, diags) = resolve_one("Thing: alias @bit8\nThing: object {}\n");
+        assert_eq!(e020(&diags), 1);
+    }
+
+    #[test]
+    fn aliases_inside_types_are_e036() {
+        let (resolved, file, diags) = resolve_one(
+            "Thing: object {\n    Inner: alias @bit8\n}\nKind: enum {\n    One\n    Inner: alias @bit8\n}\n",
+        );
+        let codes: Vec<_> = diags.diagnostics().iter().map(|d| d.code).collect();
+        assert_eq!(codes, ["E036", "E036"]);
+        let thing = one(&resolved, file, "Thing");
+        assert!(resolved.member(thing, "Inner").is_none());
     }
 }

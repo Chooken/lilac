@@ -2468,3 +2468,110 @@ fn oversized_type_is_an_error_type_for_later_uses() {
     let src = "Big: object {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n\nmain: function () nothing {\n    b: Big = .B\n    c: Big = Big { a = .X }\n}\n";
     assert_eq!(codes_of(&check_src(src)), ["E067"]);
 }
+
+// ---- type aliases -------------------------------------------------------
+
+const BOX: &str = "Box[T]: object {\n    value: T\n    make: function (value: T) b: Box[T] {\n        b = Box[T] { value = value }\n    }\n}\n";
+
+/// An alias is its type: values move between the two spellings with no
+/// conversion, through statics, struct literals and generic instances.
+#[test]
+fn an_alias_is_the_type_it_names() {
+    let src = format!(
+        "{BOX}Small: alias Box[@bit8]\nByte: alias @bit8\nOther: alias Small\n\
+         main: function () nothing {{\n    \
+             a: Small = Small.make(0x1)\n    \
+             b: Box[@bit8] = a\n    \
+             c: Other = Small {{ value = 0x2 }}\n    \
+             d: Byte = c.value\n    \
+             e: ref Small = ref b\n\
+         }}\n"
+    );
+    let diags = check_src(&src);
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+/// Two hooks whose signatures differ only in spelling are one signature.
+#[test]
+fn hooks_see_through_aliases() {
+    let src = format!(
+        "{BOX}Small: alias Box[@bit8]\n\
+         @negate: function (value: Small) Small => value\n\
+         @negate: function (value: Box[@bit8]) Box[@bit8] => value\n"
+    );
+    assert!(has_code(&check_src(&src), "E020"));
+}
+
+/// A type written with arguments that one alias names displays as the
+/// alias; a plain name never does, and two aliases of one type leave it
+/// as written.
+#[test]
+fn diagnostics_name_types_through_their_alias() {
+    let src = format!(
+        "{BOX}Small: alias Box[@bit8]\nByte: alias @bit8\n\
+         main: function () nothing {{\n    a: Small = Small.make(0x1)\n    b: @bit32 = a\n    c: Byte = 0x1\n    d: @bit32 = c\n}}\n"
+    );
+    let shown = messages(&check_src(&src));
+    assert!(
+        shown
+            .iter()
+            .any(|m| m == "no conversion from Small to @bit32"),
+        "{shown:?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|m| m == "no conversion from @bit8 to @bit32"),
+        "{shown:?}"
+    );
+    let twice = format!(
+        "{BOX}Small: alias Box[@bit8]\nTiny: alias Box[@bit8]\n\
+         main: function () nothing {{\n    a: Small = Small.make(0x1)\n    b: @bit32 = a\n}}\n"
+    );
+    let shown = messages(&check_src(&twice));
+    assert!(
+        shown
+            .iter()
+            .any(|m| m == "no conversion from Box[@bit8] to @bit32"),
+        "{shown:?}"
+    );
+}
+
+#[test]
+fn an_alias_that_reaches_itself_is_e074_once() {
+    let direct = format!("{BOX}Loop: alias Box[Loop]\nuse: function (x: Loop) nothing {{}}\n");
+    assert_eq!(codes_of(&check_src(&direct)), ["E074"]);
+    let chain = "First: alias Second\nSecond: alias Third\nThird: alias First\nuse: function (x: First, y: Second) nothing {}\n";
+    let diags = check_src(chain);
+    assert_eq!(codes_of(&diags), ["E074"]);
+    assert_eq!(messages(&diags), ["alias `First` refers to itself"]);
+}
+
+#[test]
+fn arguments_on_an_alias_are_e044() {
+    let src = format!(
+        "{BOX}Small: alias Box[@bit8]\nBare: alias Box\nuse: function (x: Small[@bit8]) nothing {{}}\n"
+    );
+    assert_eq!(codes_of(&check_src(&src)), ["E044", "E044"]);
+}
+
+/// An alias's error is reported once, at the alias, even when only a
+/// generic instance names it.
+#[test]
+fn an_alias_error_is_reported_at_the_alias() {
+    let src = format!(
+        "{BOX}Broken: alias Box[Missing]\n\
+         take[T]: function (value: T) nothing {{\n    size: @bit_native = @size_of(Broken)\n}}\n\
+         main: function () nothing {{\n    take(0x1 as @bit8)\n}}\n"
+    );
+    let diags = check_src(&src);
+    assert_eq!(codes_of(&diags)[0], "E023", "{diags:?}");
+    assert!(!has_code(&diags, "E042"), "{diags:?}");
+}
+
+#[test]
+fn an_alias_is_not_a_value() {
+    let diags =
+        check_src("Byte: alias @bit8\nmain: function () nothing {\n    x: @bit8 = Byte\n}\n");
+    assert_eq!(codes_of(&diags), ["E021"]);
+}

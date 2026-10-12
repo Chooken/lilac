@@ -65,6 +65,7 @@ const TOKENS: &[&str] = &[
     "continue",
     "return",
     "fail",
+    "alias",
     "using",
     "private",
     "export",

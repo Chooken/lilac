@@ -185,7 +185,13 @@ impl Checker<'_> {
                     Segment::Def(def) if self.res.def(def).is_type() => {
                         Some(MemberReceiver::Constructor(def))
                     }
-                    _ => None,
+                    // An alias of an object or enum lists that type's.
+                    Segment::Def(def) => self
+                        .types
+                        .alias(def)
+                        .and_then(|ty| self.type_parts(ty))
+                        .map(|(def, _)| MemberReceiver::Constructor(def)),
+                    Segment::Ns(_) => None,
                 };
                 self.record_member(span_of(at), part, receiver)?;
                 return Ok(None);

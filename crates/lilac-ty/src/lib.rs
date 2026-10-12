@@ -249,6 +249,11 @@ pub struct Types {
     has_param: Vec<bool>,
     objects: HashMap<DefId, TypeId>,
     object_names: HashMap<DefId, String>,
+    /// Each type alias, by its definition: the type it names.
+    aliases: HashMap<DefId, TypeId>,
+    /// The name a type displays as: the one alias that names it, `None`
+    /// when two do ([`Types::add_alias`]).
+    alias_names: HashMap<TypeId, Option<String>>,
     funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>, bool), TypeId>,
     params: HashMap<(u32, String), TypeId>,
     instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
@@ -446,6 +451,33 @@ impl Types {
         id
     }
 
+    /// Records the type alias `def`, named `name`, of `id`. A type written
+    /// with arguments (an instance, an array or a function type) that
+    /// exactly one alias names displays as that alias; a plain name never
+    /// does, so an alias of `@bit8` leaves every `@bit8` as written.
+    /// Symbols and layouts never see aliases: an alias is its type.
+    pub fn add_alias(&mut self, def: DefId, name: &str, id: TypeId) {
+        if self.aliases.insert(def, id).is_some() {
+            return;
+        }
+        let spelled_with_arguments = matches!(
+            self.kind(id),
+            TypeKind::Instance { .. } | TypeKind::Array { .. } | TypeKind::Func { .. }
+        );
+        if !spelled_with_arguments {
+            return;
+        }
+        self.alias_names
+            .entry(id)
+            .and_modify(|shown| *shown = None)
+            .or_insert_with(|| Some(name.to_owned()));
+    }
+
+    /// The type the alias `def` names, once typeck resolved it.
+    pub fn alias(&self, def: DefId) -> Option<TypeId> {
+        self.aliases.get(&def).copied()
+    }
+
     /// Records the source name of an object type for diagnostics.
     pub fn set_object_name(&mut self, def: DefId, name: &str) {
         self.object_names.insert(def, name.to_owned());
@@ -497,6 +529,10 @@ impl Types {
         }
         if ty.is_ref {
             out.push_str("ref ");
+        }
+        if let Some(Some(name)) = self.alias_names.get(&ty.id) {
+            out.push_str(name);
+            return;
         }
         let list = |types: &Self, slots: &[TypeRef], out: &mut String| {
             for (index, slot) in slots.iter().enumerate() {

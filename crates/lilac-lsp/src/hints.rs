@@ -139,6 +139,7 @@ fn unused_private_items(retained: &Retained, hints: &mut Vec<Hint>) {
             DefKind::Func(_)
                 | DefKind::Object
                 | DefKind::Enum
+                | DefKind::Alias(_)
                 | DefKind::Const { .. }
                 | DefKind::Global { .. }
         );

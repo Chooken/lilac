@@ -289,7 +289,7 @@ impl Checker<'_> {
                     kind: HirExprKind::Global(def),
                 }
             }
-            DefKind::Object | DefKind::Enum => {
+            DefKind::Object | DefKind::Enum | DefKind::Alias(_) => {
                 self.diags.emit(
                     Diagnostic::error(codes::E021, format!("cannot use type `{name}` as a value"))
                         .label(span, true, "name a variable instead"),
@@ -434,6 +434,15 @@ impl Checker<'_> {
                 }
                 let def = match self.lookup_item(name, *span) {
                     Ok(Some(def)) if self.res.def(def).is_type() => def,
+                    Ok(Some(def)) if matches!(self.res.def(def).kind, DefKind::Alias(_)) => {
+                        self.record_use(path_tail(*span, name), def);
+                        let ty = self.alias_type(def, *span);
+                        if ty.is_error() {
+                            // Reported at the alias.
+                            return Some(Err(self.diags.already_reported()));
+                        }
+                        return Some(self.ensure_type(ty, *span).map(|()| Receiver::Type(ty)));
+                    }
                     Ok(_) => return None,
                     Err(guaranteed) => return Some(Err(guaranteed)),
                 };
@@ -1130,6 +1139,18 @@ impl Checker<'_> {
                 return self.struct_lit_failed(fcx, fields, span);
             };
             match found {
+                // An alias names its type whole (a generic one with its
+                // arguments), so there is nothing to infer.
+                Some(def) if matches!(self.res.def(def).kind, DefKind::Alias(_)) => {
+                    let tail = path_tail(ty.name_span, name);
+                    self.record_use(tail, def);
+                    self.record_semantic(tail, SemanticKind::UserType);
+                    let target = self.alias_type(def, ty.name_span);
+                    if target.is_error() || self.ensure_type(target, span).is_err() {
+                        return self.struct_lit_failed(fcx, fields, span);
+                    }
+                    target
+                }
                 Some(def) if self.res.def(def).is_type() => {
                     let tail = path_tail(ty.name_span, name);
                     self.record_use(tail, def);

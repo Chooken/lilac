@@ -12,6 +12,7 @@
 //! (expressions and places), `calls` (call and member resolution), `literals`
 //! (number literals), `generics` (instance diagnostics).
 
+mod aliases;
 mod arrays;
 mod body;
 mod calls;
@@ -319,6 +320,10 @@ pub(crate) struct Checker<'a> {
     pub type_stack: Vec<TypeId>,
     /// How many times each definition is on [`Checker::type_stack`].
     pub type_counts: HashMap<DefId, u32>,
+    /// Each type alias met so far ([`aliases::AliasState`]).
+    pub(crate) aliases: HashMap<DefId, aliases::AliasState>,
+    /// The aliases being resolved, innermost last (for `E074`'s chain).
+    pub(crate) alias_stack: Vec<DefId>,
     /// Concrete array types met so far, with a span that names each, for
     /// the element hook check.
     pub arrays: Vec<(TypeId, Span)>,
@@ -423,6 +428,8 @@ impl<'a> Checker<'a> {
             sizes: HashMap::new(),
             type_stack: Vec::new(),
             type_counts: HashMap::new(),
+            aliases: HashMap::new(),
+            alias_stack: Vec::new(),
             arrays: Vec::new(),
             noted_arrays: HashSet::new(),
             ensured: HashSet::new(),
@@ -448,6 +455,7 @@ impl<'a> Checker<'a> {
 
 impl Checker<'_> {
     fn run(&mut self) {
+        self.resolve_aliases();
         self.collect_hooks();
         self.check_types();
         self.check_consts();

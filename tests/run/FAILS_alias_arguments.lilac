@@ -1,0 +1,12 @@
+// expect-error: E044
+// An alias is not generic: it takes no arguments where it is used.
+
+Holder[T]: object {
+    value: T
+}
+
+Small: alias Holder[@bit8]
+
+take: function (value: Small[@bit8]) nothing {}
+
+main: function () nothing {}

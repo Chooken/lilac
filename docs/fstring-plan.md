@@ -320,9 +320,14 @@ Format: alias @format_args(Formatter)
   instance (`Bytes: alias List[@bit8]`). Arguments on an alias, or a
   generic named without its arguments, are `E044`. An alias that reaches
   itself is `E074`.
-- **Display**: a type exactly one alias names prints through it
-  (`Types::display`), so diagnostics and hovers say `Format`, not
-  `@format_args(Formatter)`. Symbols and layouts never use aliases.
+- **Display**: a type written with arguments (an instance, an array, a
+  function type, and `@format_args(W)` from Phase 4) that exactly one
+  alias names prints through it (`Types::display`), so diagnostics and
+  hovers say `Format`, not `@format_args(Formatter)`. A plain name never
+  does, so `Byte: alias @bit8` does not rename every `@bit8`. Symbols and
+  layouts never use aliases.
+- **Names a type, not a reference**: `Name: alias ref T` is `E001`;
+  `ref Name` is written where it is used.
 - **Editor**: an alias is a `DefId` like any item, so definition,
   references, rename, hover and semantic tokens (as a type) come from the
   existing index.

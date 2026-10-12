@@ -1,0 +1,10 @@
+// expect-error: E020
+// An alias is an item, so it cannot share a name with another one.
+
+Thing: alias @bit8
+
+Thing: object {
+    x: @bit8
+}
+
+main: function () nothing {}

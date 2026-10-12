@@ -233,6 +233,10 @@ pub fn type_definition(retained: &Retained, uri: &Url, position: Position) -> Op
         Some((_, Target::Item(def))) => match index.defs.get(&def)?.kind {
             "object" | "enum" => Some(def),
             "variant" => index.defs.get(&def)?.parent,
+            "alias" => {
+                let ty = retained.session.analysis()?.types.alias(def)?;
+                Some(type_def(retained, ty)?)
+            }
             _ => None,
         },
         _ => None,
@@ -449,6 +453,7 @@ fn symbol_kind(info: &DefInfo) -> SymbolKind {
         "hook" => SymbolKind::OPERATOR,
         "object" => SymbolKind::STRUCT,
         "enum" => SymbolKind::ENUM,
+        "alias" => SymbolKind::TYPE_PARAMETER,
         "const" => SymbolKind::CONSTANT,
         "global" => SymbolKind::VARIABLE,
         "field" => SymbolKind::FIELD,

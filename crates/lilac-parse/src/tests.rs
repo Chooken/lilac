@@ -1650,3 +1650,61 @@ fn failure_syntax_errors() {
         assert!(diags.has_errors(), "{src}");
     }
 }
+
+#[test]
+fn aliases_parse() {
+    let src = "Format: alias @format_args\nBytes: alias List[@bit8]\nCallback: alias function (@bit32) nothing\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let names: Vec<_> = program
+        .items
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect();
+    assert_eq!(names, ["Format", "Bytes", "Callback"]);
+    let ItemKind::Alias { ty } = &program.items[1].kind else {
+        panic!("expected an alias, got {:?}", program.items[1].kind);
+    };
+    let TypeShape::Named { name, args } = &ty.shape else {
+        panic!("expected a named type, got {ty:?}");
+    };
+    assert_eq!(name, "List");
+    assert_eq!(args.len(), 1);
+    let ItemKind::Alias { ty } = &program.items[2].kind else {
+        panic!("expected an alias");
+    };
+    assert!(matches!(ty.shape, TypeShape::Function(_)));
+}
+
+#[test]
+fn bad_aliases_are_e001_and_parsing_goes_on() {
+    for src in [
+        "Thing[T]: alias @bit8\nmain: function () nothing {}\n",
+        "Thing: alias ref @bit8\nmain: function () nothing {}\n",
+        "@thing: alias @bit8\nmain: function () nothing {}\n",
+    ] {
+        let (program, diags, _) = parse(src);
+        let errors: Vec<_> = diags.diagnostics().iter().map(|d| d.code).collect();
+        assert_eq!(errors, ["E001"], "{src}: {diags:?}");
+        assert!(
+            program.items.iter().any(|item| item.name == "main"),
+            "{src}: the next item parses"
+        );
+    }
+}
+
+#[test]
+fn aliases_in_type_bodies_parse_for_the_resolver() {
+    // Rejected by the resolver (`E036`), like nested types.
+    let src = "Thing: object {\n    Inner: alias @bit8\n}\nKind: enum {\n    One\n    Inner: alias @bit8\n}\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Object { members, .. } = &program.items[0].kind else {
+        panic!("expected an object");
+    };
+    assert!(matches!(members[0].kind, ItemKind::Alias { .. }));
+    let ItemKind::Enum { members, .. } = &program.items[1].kind else {
+        panic!("expected an enum");
+    };
+    assert!(matches!(members[0].kind, ItemKind::Alias { .. }));
+}

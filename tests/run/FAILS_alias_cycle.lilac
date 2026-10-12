@@ -1,0 +1,8 @@
+// expect-error: E074
+// An alias that reaches itself through other aliases names no type.
+
+First: alias Second
+Second: alias Third
+Third: alias First
+
+main: function () nothing {}

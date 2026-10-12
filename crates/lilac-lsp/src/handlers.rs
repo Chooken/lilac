@@ -380,7 +380,7 @@ fn encode(mut raw: Vec<(Range, u32, u32)>, src: &str) -> SemanticTokens {
 fn colored(sources: &lilac_span::SourceMap, span: Span, kind: &str) -> Option<(Range, u32)> {
     let token_type = match kind {
         "function" | "hook" => TOKEN_FUNCTION,
-        "object" => TOKEN_TYPE,
+        "object" | "alias" => TOKEN_TYPE,
         "enum" => TOKEN_ENUM,
         "field" => TOKEN_PROPERTY,
         "const" | "global" => TOKEN_VARIABLE,
@@ -433,5 +433,13 @@ mod tests {
         let tokens = encode(vec![(range, token_type, 0)], src);
         assert_eq!(tokens.data.len(), 1);
         assert_eq!(tokens.data[0].length, 3); // "foo"
+    }
+
+    #[test]
+    fn an_alias_colors_as_a_type() {
+        let mut sources = SourceMap::new();
+        let file = sources.add_file("main.lilac", "Spot\n");
+        let (_, token_type) = colored(&sources, Span::new(0, 4, file), "alias").expect("range");
+        assert_eq!(token_type, TOKEN_TYPE);
     }
 }

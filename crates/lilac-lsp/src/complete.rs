@@ -138,6 +138,16 @@ impl<'a> Scope<'a> {
     fn item(&self, id: DefId) -> Named {
         match &self.analysis.resolved.def(id).kind {
             DefKind::Object | DefKind::Enum => Named::Type(id),
+            // An alias of an object or enum has that type's statics.
+            DefKind::Alias(_) => {
+                let types = &self.analysis.types;
+                match types.alias(id).map(|ty| types.kind(ty)) {
+                    Some(TypeKind::Object(def) | TypeKind::Instance { base: def, .. }) => {
+                        Named::Type(*def)
+                    }
+                    _ => Named::Item(id),
+                }
+            }
             DefKind::Const { .. } => self
                 .analysis
                 .hir
@@ -212,6 +222,7 @@ impl<'a> Scope<'a> {
             DefKind::Hook(_) => return None,
             DefKind::Object => CompletionItemKind::STRUCT,
             DefKind::Enum => CompletionItemKind::ENUM,
+            DefKind::Alias(_) => CompletionItemKind::TYPE_PARAMETER,
             DefKind::Const { .. } => CompletionItemKind::CONSTANT,
             DefKind::Global { .. } => CompletionItemKind::VARIABLE,
             DefKind::Field(_) => CompletionItemKind::FIELD,
