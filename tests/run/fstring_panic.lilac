@@ -1,0 +1,14 @@
+// pending: f-string rework (docs/fstring-plan.md, Phase 5)
+// no-standard
+// lib: FormatRuntime=tests/libs/FormatRuntime
+// expect-exit: 101
+// expect-stderr: panic: bad 7
+// expect-stderr:   at main (fstring_panic.lilac:13:5)
+// `@panic` takes what `@compiler_print` takes: here a format, so the
+// message is an f-string, formatted by the runtime library's own `@format`
+// hook for its hole.
+
+main: function () nothing {
+    x: @bit32 = 0x7
+    @panic($"bad {x}")
+}

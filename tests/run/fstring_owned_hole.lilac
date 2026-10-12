@@ -1,0 +1,46 @@
+// pending: f-string rework (docs/fstring-plan.md, Phase 4)
+// expect-stdout: [noisy] [noisy]
+// expect-stdout: drop
+// A hole borrows its value: an owned object used in a hole is still owned
+// afterwards, is formatted where the format is written, and drops once.
+// (With a `@conversion` to `@byte_buffer` the hole consumed it, and the
+// second use was `E063`.)
+
+using Standard.Os as Os
+
+// Writes formatted text straight to standard output.
+Out: object {
+    write: function (self, text: @format_args(Out)) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            write_bytes(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
+
+Noisy: object {
+    value: @bit32
+
+    @format: function (self, out: ref Out) nothing {
+        write_bytes("noisy")
+    }
+
+    @on_drop: function (self) nothing {
+        write_bytes("drop\n")
+    }
+}
+
+write_bytes: function (bytes: @byte_buffer) nothing {
+    Os.write_all(Os.standard_output(), @byte_buffer_ptr(bytes) as ref unknown, @byte_buffer_len(bytes))
+}
+
+main: function () nothing {
+    out: Out = Out {}
+    noisy: Noisy = Noisy { value = 0x7 }
+    out.write($"[{noisy}] ")
+    out.write($"[{noisy}]\n")
+}

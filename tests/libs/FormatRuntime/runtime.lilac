@@ -1,0 +1,96 @@
+// A runtime library for the run tests whose `@compiler_print` takes a
+// format rather than a `@byte_buffer`, so `@panic` takes one too
+// (docs/fstring-plan.md, Phase 5). It formats into its own `Err`, which
+// writes to standard error, and formats `@bit32` holes in decimal.
+// `@entry` runs the program's `main`.
+
+@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
+    main()
+}
+
+@exit: function (code: @bit32) nothing {
+    match @builtin.Target.os {
+        .Windows => ExitProcess(code)
+        .Linux => match @builtin.Target.arch {
+            .X86_64 => {
+                result: @bit_native = @linux_syscall(0xe7, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+            }
+            .Aarch64 => {
+                result: @bit_native = @linux_syscall(0x5e, @extend_zero(code), 0x0, 0x0, 0x0, 0x0, 0x0)
+            }
+        } else {
+            exit(code)
+        }
+        .MacOs => exit(code)
+        .None => exit(code)
+    }
+}
+
+@compiler_print: function (text: @format_args(Err)) nothing {
+    err: Err = Err {}
+    err.write(text)
+}
+
+// Writes formatted text to standard error.
+Err: object {
+    write: function (self, text: @format_args(Err)) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            write_error(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
+
+// A `@bit32` in unsigned decimal.
+@format: function (value: ref @bit32, out: ref Err) nothing {
+    write_decimal(value)
+}
+
+private {
+    write_decimal: function (value: @bit32) nothing {
+        if @i_greater_than_or_equal_u_32(value, 0xA) {
+            write_decimal(@i_div_u_32(value, 0xA))
+        }
+        digit: @bit_native = @extend_zero(@i_mod_u_32(value, 0xA))
+        digits: ref unknown = @byte_buffer_ptr("0123456789") as ref unknown
+        write_error(@byte_buffer_from(@ptr_add(digits, digit) as ref @bit8, 0x1))
+    }
+
+    // All of `bytes` to standard error; a failure is dropped.
+    write_error: function (bytes: @byte_buffer) nothing {
+        data: ref unknown = @byte_buffer_ptr(bytes) as ref unknown
+        length: @bit_native = @byte_buffer_len(bytes)
+        match @builtin.Target.os {
+            .Windows => {
+                written: @bit32 = 0x0
+                ok: @bit32 = WriteFile(GetStdHandle(0xFFFFFFF4), data, @truncate(length), ref written, @address_to_ptr(0x0))
+            }
+            .Linux => match @builtin.Target.arch {
+                .X86_64 => {
+                    result: @bit_native = @linux_syscall(0x1, 0x2, @ptr_to_address(data), length, 0x0, 0x0, 0x0)
+                }
+                .Aarch64 => {
+                    result: @bit_native = @linux_syscall(0x40, 0x2, @ptr_to_address(data), length, 0x0, 0x0, 0x0)
+                }
+            } else {
+                result: @bit_native = write(0x2, data, length)
+            }
+            .MacOs => {
+                result: @bit_native = write(0x2, data, length)
+            }
+            .None => {
+                result: @bit_native = write(0x2, data, length)
+            }
+        }
+    }
+
+    ExitProcess: extern function (code: @bit32) nothing
+    GetStdHandle: extern function (nStdHandle: @bit32) handle: ref unknown
+    WriteFile: extern function (hFile: ref unknown, lpBuffer: ref unknown, nNumberOfBytesToWrite: @bit32, lpNumberOfBytesWritten: ref @bit32, lpOverlapped: ref unknown) ok: @bit32
+    exit: extern function (code: @bit32) nothing
+    write: extern function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native
+}
