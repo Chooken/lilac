@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
-use lilac_driver::Session;
-use lilac_error::Diagnostic;
+use lilac_driver::{Keep, Session};
+use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_ir::LirModule;
 use lilac_span::FileId;
 use lsp_types::{Diagnostic as LspDiagnostic, Url};
 
@@ -38,12 +39,18 @@ pub struct Job {
     /// Set by the server when a newer compile is due: every session of
     /// this job stops at its next check, and [`Job::run`] returns `None`.
     pub cancel: Arc<AtomicBool>,
+    /// Whether to keep the IR at each stage for the IR view (`lilac/lir`);
+    /// the server sets it once the client has asked for one. Otherwise no
+    /// stage is copied.
+    pub capture_lir: bool,
 }
 
 /// A finished compile.
 pub struct Compiled {
     /// The [`Job::generation`] it was compiled from.
     pub generation: u64,
+    /// Whether it kept its IR stages ([`Job::capture_lir`]).
+    pub captured_lir: bool,
     /// The project compile (project mode).
     pub project: Option<Retained>,
     /// Compiles of open files the project does not reach, by canonical URI.
@@ -124,10 +131,11 @@ impl Job {
             Some(root) => {
                 let mut session = new_session(&self.libraries, &self.cancel);
                 let mut fs = OverlayFs { overlay: &overlay };
-                let mut stages = LirStages::default();
-                let _ = session.compile_project_with_stages(root, &mut fs, &mut |name, lir| {
-                    stages.modules.push((name, lir.clone()));
-                });
+                let mut capture = Capture::new(self.capture_lir);
+                let result =
+                    session.compile_project_with_stages(root, &mut fs, &mut |name, lir| {
+                        capture.stage(name, lir);
+                    });
                 if self.cancelled() {
                     return None;
                 }
@@ -135,7 +143,7 @@ impl Job {
                 let anchor = self.project_anchor(root);
                 Some(retain(
                     session,
-                    stages,
+                    capture.finish(result),
                     anchor.as_ref(),
                     &mut covered,
                     &mut by_uri,
@@ -164,6 +172,7 @@ impl Job {
         }
         Some(Compiled {
             generation: self.generation,
+            captured_lir: self.capture_lir,
             project,
             per_file,
             diagnostics,
@@ -245,46 +254,36 @@ impl Job {
                 continue;
             }
             let mut session = new_session(&self.libraries, &self.cancel);
-            let mut stages = LirStages::default();
-            let mut capture = |name, lir: &lilac_ir::LirModule| {
-                stages.modules.push((name, lir.clone()));
-            };
+            let mut capture = Capture::new(self.capture_lir);
+            let mut on_stage = |name, lir: &LirModule| capture.stage(name, lir);
             let mut fs = OverlayFs { overlay };
-            let retained = Arc::new(match &unit {
+            let result = match &unit {
                 Unit::Namespace(namespace) => {
                     let root = self.root.clone().unwrap_or_default();
-                    let _ = session.compile_namespace_with_stages(
-                        &root,
-                        namespace,
-                        &mut fs,
-                        &mut capture,
-                    );
-                    if self.cancelled() {
-                        return None;
-                    }
-                    let anchor = uris.iter().min();
-                    retain(session, stages, anchor, covered, by_uri)
+                    session.compile_namespace_with_stages(&root, namespace, &mut fs, &mut on_stage)
                 }
                 Unit::Folder(dir) => {
-                    let _ = session.compile_project_with_stages(dir, &mut fs, &mut capture);
-                    if self.cancelled() {
-                        return None;
-                    }
-                    let anchor = self.unit_anchor(dir, &uris.iter().collect::<Vec<_>>());
-                    retain(session, stages, anchor.as_ref(), covered, by_uri)
+                    session.compile_project_with_stages(dir, &mut fs, &mut on_stage)
                 }
                 Unit::File(_) => {
-                    let uri = &uris[0];
-                    let Some(document) = self.documents.get(uri) else {
+                    let Some(document) = self.documents.get(&uris[0]) else {
                         continue;
                     };
                     let name = document.path.to_string_lossy().into_owned();
-                    let _ = session.compile_lir_with_stages(&name, &document.text, &mut capture);
-                    if self.cancelled() {
-                        return None;
-                    }
-                    retain_single(session, stages, uri, covered, by_uri)
+                    session.compile_lir_with_stages(&name, &document.text, &mut on_stage)
                 }
+            };
+            if self.cancelled() {
+                return None;
+            }
+            let stages = capture.finish(result);
+            let retained = Arc::new(match &unit {
+                Unit::Namespace(_) => retain(session, stages, uris.iter().min(), covered, by_uri),
+                Unit::Folder(dir) => {
+                    let anchor = self.unit_anchor(dir, &uris.iter().collect::<Vec<_>>());
+                    retain(session, stages, anchor.as_ref(), covered, by_uri)
+                }
+                Unit::File(_) => retain_single(session, stages, &uris[0], covered, by_uri),
             });
             for uri in retained.uri_files.keys().chain(&uris) {
                 new_per_file
@@ -296,15 +295,48 @@ impl Job {
     }
 }
 
-/// A compiler session for editor use. It analyzes tolerantly so
-/// hover/definition keep working while the buffer has syntax or type errors,
-/// and stops when `cancel` is set.
+/// A compiler session for editor use. It analyzes tolerantly and keeps
+/// the analysis, so hover/definition keep working while the buffer has
+/// syntax or type errors, and stops when `cancel` is set.
 fn new_session(libraries: &[(String, PathBuf)], cancel: &Arc<AtomicBool>) -> Session {
     let mut session = Session::new();
     session.libraries = libraries.to_vec();
     session.cancel = Some(Arc::clone(cancel));
-    session.retain_partial_analysis = true;
+    session.keep_analysis = Keep::Partial;
     session
+}
+
+/// A compile's IR stages for the IR view, when [`Job::capture_lir`] asks
+/// for them; otherwise nothing is kept.
+struct Capture {
+    on: bool,
+    stages: LirStages,
+}
+
+impl Capture {
+    fn new(on: bool) -> Self {
+        Self {
+            on,
+            stages: LirStages::default(),
+        }
+    }
+
+    /// The compile's `on_stage` callback: copies each stage but the last,
+    /// `final`, which is the compile's result ([`Capture::finish`]).
+    fn stage(&mut self, name: &'static str, lir: &LirModule) {
+        if self.on && name != "final" {
+            self.stages.modules.push((name, lir.clone()));
+        }
+    }
+
+    /// The stages, with the module a compile that got through returned
+    /// moved in as `final`.
+    fn finish(mut self, result: Result<LirModule, ErrorGuaranteed>) -> LirStages {
+        if let (true, Ok(module)) = (self.on, result) {
+            self.stages.modules.push(("final", module));
+        }
+        self.stages
+    }
 }
 
 /// What an open file outside the project is compiled as.

@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–8 done).
+> Status: in progress (Phases 0–9 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -1075,6 +1075,51 @@ and `@fbit128` constants.
 
 **Tests:** the existing driver and LSP tests; an LSP test that the IR view
 still works after its first request.
+
+- **Delivered notes.**
+  - 9.1: `Session::run` stops after type checking, and
+    `Session::lower_checked` lowers from borrows of the resolver output,
+    the type table and the HIR. Only then, and only when the session keeps
+    an analysis, `Analysis::new` moves them in: the HIR with the
+    top-level conditions' tag and member sites added, its semantic sites
+    merged into `Analysis::semantics`, and the template bodies in
+    `Analysis::templates`, apart from `hir.funcs`. Nothing is cloned;
+    `Analysis` no longer derives `Clone`. The language server's index
+    walks `hir.funcs` and `templates`.
+  - The two session flags became one setting, because only some
+    combinations mean anything: `Session::keep_analysis` is a `Keep`.
+    `Nothing` is the CLI's: stop at the first failing stage, keep
+    nothing. `Analysis` keeps the analysis of a compile that got through
+    checking. `Partial` is the language server's: run past parse and type
+    errors and keep the partial analysis. `retain_partial_analysis` is
+    gone (running past errors without keeping what it finds did nothing
+    useful). A cancelled compile keeps none, as before.
+  - A compile drops the last one's analysis when it starts
+    (`Session::begin_load`). Before, a compile that stopped before type
+    checking left the previous compile's analysis in place, as if it were
+    its own.
+  - 9.2: `Job::capture_lir` is set once the client has sent a
+    `lilac/lir` request (`IrView`: `Unused`, `Waiting`, `Held`); until
+    then no stage is copied. With it on, `compile::Capture` copies the
+    `lower` and `runtime` stages and moves the compile's result in as
+    `final`, so a compile copies the module twice, not three times. The
+    first request is parked, like a `.` completion, until a compile that
+    kept the stages finishes (`Server::lir_wait`), so the client's stage
+    picker never sees "unavailable" just because nobody had asked yet.
+  - 9.3: every compile goes through `begin_load` and `run_loaded`, the
+    single-file and namespace compiles included, so each reports the Load
+    stage and records its files.
+  - Tests: the driver keeps no analysis under `Keep::Nothing` and drops a
+    stale one; templates stay out of `hir.funcs` and out of the LIR; a
+    namespace compile reports Load with its file count. The server keeps
+    no IR until asked, parks the first request until a capturing compile,
+    and keeps capturing after an edit; end to end, the IR view keeps
+    working after its first request and follows an edit.
+  - Measured: `lilac check` of `tests/run/stdlib` (release, six runs
+    each) takes the same time before and after, about 140 ms. The
+    clones were a small share of a compile, so the gain is memory (one
+    copy of each pass's output, no LIR copies in the editor until the IR
+    view opens), not wall time.
 
 ---
 

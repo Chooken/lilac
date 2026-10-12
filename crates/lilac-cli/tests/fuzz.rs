@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
-use lilac_driver::{Entry, Session};
+use lilac_driver::{Entry, Keep, Session};
 use lilac_module::Fs;
 
 /// Mutants per `cargo test` run.
@@ -353,7 +353,7 @@ fn compile(seed: &Seed, text: &str, mode: Mode) {
     let mut session = Session::new();
     session.libraries.clone_from(&seed.libraries);
     match mode {
-        Mode::Tolerant => session.retain_partial_analysis = true,
+        Mode::Tolerant => session.keep_analysis = Keep::Partial,
         Mode::Strict => {
             session.target = session.host;
             session.require_entry = true;

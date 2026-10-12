@@ -314,3 +314,33 @@ fn lir_request_falls_back_for_a_file_outside_the_project() {
     handle.join().expect("server thread");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The server keeps no IR until the client asks for it. The first request
+/// waits for a compile that keeps it; after that every compile keeps it, so
+/// the view follows an edit.
+#[test]
+fn the_ir_view_keeps_working_after_its_first_request() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    did_open(&client, &uri, "main: function () nothing {\n}\n");
+    let _ = publish_for(&client, &uri);
+
+    let value = lir_request(&client, &uri, "lower");
+    let text = value["text"].as_str().expect("text");
+    assert!(text.contains("function @main"), "{value}");
+    assert!(!text.contains("@.root.extra"), "{value}");
+
+    did_change(
+        &client,
+        &uri,
+        "extra: function () nothing {\n}\nmain: function () nothing {\n}\n",
+    );
+    while publish_for(&client, &uri).version != Some(2) {}
+    let value = lir_request(&client, &uri, "lower");
+    let text = value["text"].as_str().expect("text");
+    assert!(text.contains("@.root.extra"), "{value}");
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

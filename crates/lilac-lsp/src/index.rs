@@ -151,7 +151,7 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
 
     let mut exprs = Vec::new();
     let mut record = |expr: &lilac_hir::HirExpr| exprs.push((expr.span, expr.ty));
-    for func in &analysis.hir.funcs {
+    for func in analysis.hir.funcs.iter().chain(&analysis.templates) {
         if let Some(body) = &func.body {
             body.walk_exprs(&mut record);
         }
@@ -180,6 +180,7 @@ mod tests {
 
     fn retained(src: &str) -> Retained {
         let mut session = lilac_driver::Session::new();
+        session.keep_analysis = lilac_driver::Keep::Analysis;
         let _ = session.compile_lir("test.lilac", src);
         let uri = Url::parse("file:///c:/test.lilac").expect("uri");
         Retained::build(

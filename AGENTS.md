@@ -387,9 +387,15 @@
 - Compile units: the project (`lilac.json` `root`, else the workspace
   folder); an open file it does not reach is compiled as its library
   namespace (`Session::compile_namespace_with_stages`), else its folder, else
-  alone (`server::unit_of`). Sessions run tolerant
-  (`retain_partial_analysis`); the template HIR of uninstantiated generics
-  (`Checked::templates`) feeds highlighting and hovers. URIs are compared via
+  alone (`server::unit_of`). Sessions run tolerant and keep their
+  analysis (`Session::keep_analysis` is `Keep::Partial`; the CLI's is
+  `Keep::Nothing`). `Analysis` owns the resolver output, the type table
+  and the HIR, which lowering borrowed before they moved in, so keeping it
+  copies nothing; the bodies of uninstantiated generics
+  (`Analysis::templates`, apart from the lowered `hir.funcs`) feed
+  highlighting and hovers. Every compile goes through
+  `Session::begin_load` and `run_loaded`, which drop the last compile's
+  analysis and report the Load stage. URIs are compared via
   `roots::canonical_file_uri`.
 - A diagnostic with a trace is also published at each call site in it, in
   that site's file (`convert::trace_diagnostics`), linking back to the
@@ -494,8 +500,13 @@
   uses to attach diagnostics to document URIs.
 - The `lilac/lir` request and `lilac/lirInvalidated` notification are the
   IR-view protocol: the request serves a captured stage's rendered LIR text, and
-  the notification tells the client the view is stale. `lilac-ir` is now also a
-  `lilac-lsp` dependency (alongside the compiler crates).
+  the notification tells the client the view is stale. Compiles capture no
+  stage until the client asks (`Job::capture_lir`, on from the first
+  request): that request is parked until a compile that captured finishes
+  (`Server::lir_wait`, `IrView`), and `compile::Capture`
+  copies each stage but `final`, the compile's result, which it moves in.
+  `lilac-ir` is now also a `lilac-lsp` dependency (alongside the compiler
+  crates).
 
 ## Pipeline
 

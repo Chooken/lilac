@@ -54,7 +54,7 @@ macro_rules! params {
     };
 }
 
-/// Why a completion after a `.` is not answered right away.
+/// Why a request is not answered right away (see [`Server::parked`]).
 enum Wait {
     /// A compile of the current text is due or running.
     Compile,
@@ -106,9 +106,26 @@ pub struct Server {
     /// The generation of the analysis the server holds (`None` before the
     /// first compile finishes).
     compiled: Option<u64>,
-    /// Tag completions waiting for a compile of the current text
-    /// ([`crate::complete::needs_current_compile`]), oldest first.
+    /// Requests waiting for a compile, oldest first: completions after a
+    /// `.` wait for one of the current text
+    /// ([`crate::complete::needs_current_compile`]), and `lilac/lir`
+    /// requests for one that kept its IR stages.
     parked: Vec<Request>,
+    /// Whether compiles keep their IR stages, and whether the one held did.
+    ir_view: IrView,
+}
+
+/// The IR view's state: compiles keep their IR stages
+/// ([`Job::capture_lir`]) once the client has sent a `lilac/lir` request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IrView {
+    /// The client never asked: no compile keeps its stages.
+    Unused,
+    /// Compiles keep their stages, but the one held did not (it started
+    /// before the first request): `lilac/lir` waits for one that did.
+    Waiting,
+    /// The compile held kept its stages.
+    Held,
 }
 
 impl Server {
@@ -145,6 +162,7 @@ impl Server {
             per_file: HashMap::new(),
             compiled: None,
             parked: Vec::new(),
+            ir_view: IrView::Unused,
         };
         server.configure();
         server
@@ -244,7 +262,10 @@ impl Server {
                 )))?;
             return Ok(());
         }
-        match self.dot_completion(&request) {
+        let wait = self
+            .dot_completion(&request)
+            .or_else(|| self.lir_wait(&request));
+        match wait {
             Some(Wait::Compile) => {
                 self.parked.push(request);
                 self.compile_now();
@@ -273,6 +294,31 @@ impl Server {
         let document = self.documents.get(&position.text_document.uri)?;
         if !crate::complete::needs_current_compile(&document.text, position.position) {
             return None;
+        }
+        Some(if self.running.is_some() || self.deadline.is_some() {
+            Wait::Compile
+        } else {
+            Wait::Never
+        })
+    }
+
+    /// For a `lilac/lir` request while the compile held kept no IR stages
+    /// (they are kept only once the client asks): a compile that keeps them
+    /// is due or running (the first request turns keeping on and makes one
+    /// due now), or none is coming (the last one panicked). `None` when the
+    /// stages are held, or for any other request: answered now.
+    fn lir_wait(&mut self, request: &Request) -> Option<Wait> {
+        if request.method != "lilac/lir" {
+            return None;
+        }
+        match self.ir_view {
+            IrView::Held => return None,
+            IrView::Waiting => {}
+            IrView::Unused => {
+                self.ir_view = IrView::Waiting;
+                // The compile held, and any running, keep no stages.
+                self.deadline = Some(Instant::now());
+            }
         }
         Some(if self.running.is_some() || self.deadline.is_some() {
             Wait::Compile
@@ -631,25 +677,31 @@ impl Server {
         }
     }
 
-    /// Settles the parked `.` completions after a compile finished: each is
-    /// answered once the analysis is of the current text; while a compile
-    /// is due they wait for it, started now; with none coming (this one
-    /// panicked) they get no answer.
+    /// Settles the parked requests after a compile finished: each is
+    /// answered once the analysis held can (a `.` completion when it is of
+    /// the current text, `lilac/lir` when it kept its IR stages); while a
+    /// compile is due they wait for it, started now; with none coming (this
+    /// one panicked) they get no answer.
     fn settle_parked(&mut self) {
-        if self.parked.is_empty() {
-            return;
-        }
-        if self.compiled != Some(self.generation) && self.deadline.is_some() {
-            self.compile_now();
-            return;
-        }
+        let mut waiting = Vec::new();
         for request in std::mem::take(&mut self.parked) {
-            if self.compiled == Some(self.generation) {
+            let ready = if request.method == "lilac/lir" {
+                self.ir_view == IrView::Held
+            } else {
+                self.compiled == Some(self.generation)
+            };
+            if ready {
                 let _ = self.respond(request);
+            } else if self.deadline.is_some() || self.running.is_some() {
+                waiting.push(request);
             } else {
                 let response = Response::new_ok(request.id, serde_json::Value::Null);
                 let _ = self.connection.sender.send(Message::Response(response));
             }
+        }
+        self.parked = waiting;
+        if !self.parked.is_empty() {
+            self.compile_now();
         }
     }
 
@@ -671,6 +723,7 @@ impl Server {
             root: self.root.clone(),
             libraries: self.libraries.clone(),
             cancel: Arc::clone(&cancel),
+            capture_lir: self.ir_view != IrView::Unused,
         };
         if self.jobs.send(job).is_ok() {
             self.running = Some(cancel);
@@ -705,6 +758,13 @@ impl Server {
         self.compiled = Some(generation);
         self.project = compiled.project;
         self.per_file = compiled.per_file;
+        if self.ir_view != IrView::Unused {
+            self.ir_view = if compiled.captured_lir {
+                IrView::Held
+            } else {
+                IrView::Waiting
+            };
+        }
         if generation == self.generation {
             let current: HashSet<Url> = compiled.diagnostics.keys().cloned().collect();
             for (uri, (diagnostics, version)) in compiled.diagnostics {
@@ -803,6 +863,7 @@ mod tests {
             root: None,
             libraries: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            capture_lir: server.ir_view != IrView::Unused,
         }
     }
 
@@ -982,6 +1043,62 @@ mod tests {
         labels.sort_unstable();
         assert_eq!(labels, ["Blue", "Red"]);
         assert!(server.parked.is_empty());
+    }
+
+    fn lir_request(uri: &Url) -> Request {
+        Request {
+            id: "lir".to_owned().into(),
+            method: "lilac/lir".to_owned(),
+            params: serde_json::json!({ "uri": uri.as_str(), "stage": "final" }),
+        }
+    }
+
+    /// The IR text of the one response the client got.
+    fn lir_answer(client: &Connection) -> String {
+        let answered = responses(client);
+        let [response] = answered.as_slice() else {
+            panic!("one response: {answered:?}");
+        };
+        let result = response.response_result.clone().expect("result");
+        result["text"].as_str().expect("text").to_owned()
+    }
+
+    /// Compiles keep no IR until the client asks for it: its first
+    /// `lilac/lir` request waits for a compile that keeps it, and every
+    /// compile after keeps it too.
+    #[test]
+    fn the_ir_is_kept_once_the_client_asks_for_it() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, None, Vec::new(), false);
+        let dir = std::env::temp_dir().join("lilac-lsp-ir-on-demand");
+        let uri = Url::from_file_path(dir.join("main.lilac")).expect("uri");
+        open(&mut server, &uri, "main: function () nothing {\n}\n");
+        let plain = job(&server).run().expect("not cancelled");
+        server.finish_compile(plain.generation, Outcome::Compiled(Box::new(plain)));
+        let held = server.retained_for(&uri).expect("retained");
+        assert!(held.stages.modules.is_empty());
+
+        server.handle_request(lir_request(&uri)).expect("request");
+        assert_eq!(server.parked.len(), 1);
+        assert!(responses(&client).is_empty());
+        let kept = job(&server).run().expect("not cancelled");
+        server.finish_compile(kept.generation, Outcome::Compiled(Box::new(kept)));
+        assert!(lir_answer(&client).contains("function @main"));
+        let held = server.retained_for(&uri).expect("retained");
+        let stages: Vec<&str> = held.stages.modules.iter().map(|(name, _)| *name).collect();
+        assert_eq!(stages, ["lower", "runtime", "final"]);
+
+        change(
+            &mut server,
+            &uri,
+            2,
+            "main: function () nothing {\n    x: @bit16 = 0x1\n}\n",
+        );
+        let next = job(&server).run().expect("not cancelled");
+        server.finish_compile(next.generation, Outcome::Compiled(Box::new(next)));
+        server.handle_request(lir_request(&uri)).expect("request");
+        assert!(server.parked.is_empty());
+        assert!(lir_answer(&client).contains("#bit16"));
     }
 
     /// A parked completion the client cancels is answered as cancelled.

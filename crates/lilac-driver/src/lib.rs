@@ -144,8 +144,25 @@ pub struct Opts {
     /// Colour human diagnostics with ANSI codes.
     pub color: bool,
 }
-/// Retained analysis artifacts from the last compile (for editor tooling).
-#[derive(Clone, Debug)]
+/// What a compile keeps for editor tooling ([`Session::keep_analysis`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Keep {
+    /// Nothing (the CLI): the pipeline stops at the first failing stage,
+    /// and the passes' outputs go once lowered.
+    #[default]
+    Nothing,
+    /// The [`Analysis`] of a compile that got through type checking; the
+    /// pipeline still stops at the first failing stage.
+    Analysis,
+    /// The [`Analysis`], with the passes run past parse and type errors so
+    /// a broken program has a partial one (the language server).
+    Partial,
+}
+
+/// What the last compile found, for editor tooling
+/// ([`Session::keep_analysis`]). It owns the passes' outputs: the pipeline
+/// lowers from them and then moves them in, so keeping it copies nothing.
+#[derive(Debug)]
 pub struct Analysis {
     /// Resolved definitions, namespaces and per-file scopes.
     pub resolved: lilac_resolve::Resolved,
@@ -153,12 +170,61 @@ pub struct Analysis {
     pub types: lilac_ty::Types,
     /// Declared signature of every function and hook.
     pub sigs: std::collections::HashMap<lilac_resolve::DefId, lilac_ty::FuncSig>,
-    /// Checked HIR (carries `uses`), plus the never-lowered bodies of
-    /// uninstantiated generic functions (`Checked::templates`).
+    /// Checked HIR (carries `uses`), with the top-level conditions' tag and
+    /// member sites added. Its `semantics` moved to [`Analysis::semantics`].
     pub hir: lilac_hir::HirProgram,
+    /// The never-lowered bodies of uninstantiated generic functions
+    /// (`Checked::templates`), for semantic tokens and hovers.
+    pub templates: Vec<lilac_hir::HirFunc>,
     /// Non-item semantic-token sites, deduped by `(span, kind)` and sorted by
     /// `(file, lo)`.
     pub semantics: Vec<lilac_hir::SemanticSite>,
+}
+
+impl Analysis {
+    /// Takes the check's outputs and the top-level conditions' editor
+    /// sites.
+    fn new(
+        resolved: lilac_resolve::Resolved,
+        types: lilac_ty::Types,
+        checked: lilac_typeck::Checked,
+        conditions: conditional::Sites,
+    ) -> Self {
+        let lilac_typeck::Checked {
+            mut hir,
+            sigs,
+            templates,
+        } = checked;
+        hir.tags.extend(conditions.tags);
+        hir.members.extend(conditions.members);
+        let namespaces = resolved
+            .namespace_sites
+            .iter()
+            .map(|&span| lilac_hir::SemanticSite {
+                span,
+                kind: lilac_hir::SemanticKind::Namespace,
+            });
+        let semantics = merge_semantics(
+            std::mem::take(&mut hir.semantics)
+                .into_iter()
+                .chain(conditions.semantics)
+                .chain(namespaces),
+        );
+        Self {
+            resolved,
+            types,
+            sigs,
+            hir,
+            templates,
+            semantics,
+        }
+    }
+}
+
+/// What a cancelled compile stops with ([`Session::cancelled`]): no
+/// diagnostic of its own, and it keeps no analysis.
+fn stopped() -> ErrorGuaranteed {
+    ErrorGuaranteed::unreported(Unreported::Cancelled)
 }
 
 /// Dedups semantic-token sites by `(span, kind)` and sorts them by
@@ -190,16 +256,17 @@ pub struct Session {
     pub opts: Opts,
     /// Optimization level (read by the LLVM backend).
     pub optimize: OptimizeMode,
-    /// Loaded project files: identity to path (empty outside project compiles).
+    /// The last compile's loaded files: identity to path.
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Mounted libraries (`--lib Name=dir`): `using Name.X` loads `dir/X`.
     pub libraries: Vec<(String, PathBuf)>,
-    /// Retained analysis from the last compile (best-effort; editor tooling).
+    /// The last compile's analysis, when [`Session::keep_analysis`] keeps
+    /// one and the compile got through type checking (a later failure
+    /// keeps it).
     pub analysis: Option<Analysis>,
-    /// Whether to run the passes past parse/type errors and keep the partial
-    /// analysis (editor tooling). Strict (the CLI) leaves this `false`, so the
-    /// stage gates reproduce today's stop-at-the-first-failing-stage behavior.
-    pub retain_partial_analysis: bool,
+    /// What a compile keeps for editor tooling, and so whether it runs
+    /// past errors.
+    pub keep_analysis: Keep,
     /// Whether the unit is an executable (`lilac build`): it needs the three
     /// platform hooks (`E033`), its `@entry` must find what it calls
     /// (`E032`), and the entry stub `.lilac.start` is added as the root.
@@ -238,7 +305,7 @@ impl Default for Session {
             project_files: Vec::new(),
             libraries: Vec::new(),
             analysis: None,
-            retain_partial_analysis: false,
+            keep_analysis: Keep::Nothing,
             require_entry: false,
             entry: Entry::CMain,
             progress: None,
@@ -272,11 +339,9 @@ impl Session {
         src: &str,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        self.project_files.clear();
-        self.report(Stage::Load, StageEvent::Begin);
+        self.begin_load();
         let project = lilac_module::single_file(name, src, &mut self.source_map);
-        self.report(Stage::Load, StageEvent::End { count: Some(1) });
-        self.run(&project, on_stage)
+        self.run_loaded(&project, false, on_stage)
     }
 
     /// Compiles a folder project rooted at `root`, loading every file reachable
@@ -298,8 +363,7 @@ impl Session {
         fs: &mut dyn Fs,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        self.project_files.clear();
-        self.report(Stage::Load, StageEvent::Begin);
+        self.begin_load();
         let (project, failed) = lilac_module::load_with_status(
             root,
             &self.libraries,
@@ -321,8 +385,7 @@ impl Session {
         fs: &mut dyn Fs,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        self.project_files.clear();
-        self.report(Stage::Load, StageEvent::Begin);
+        self.begin_load();
         let (project, failed) = lilac_module::load_file(
             name,
             src,
@@ -334,8 +397,17 @@ impl Session {
         self.run_loaded(&project, failed, on_stage)
     }
 
+    /// Starts a compile: the last one's files and analysis go, and the Load
+    /// stage begins.
+    fn begin_load(&mut self) {
+        self.project_files.clear();
+        self.analysis = None;
+        self.report(Stage::Load, StageEvent::Begin);
+    }
+
     /// Records a loaded project's files, ends the Load stage, and runs the
-    /// pipeline unless loading failed.
+    /// pipeline unless loading failed. Every compile goes through here
+    /// after [`Session::begin_load`].
     fn run_loaded(
         &mut self,
         project: &lilac_module::Project,
@@ -369,7 +441,7 @@ impl Session {
         fs: &mut dyn Fs,
         on_stage: &mut dyn FnMut(&'static str, &LirModule),
     ) -> Result<LirModule, ErrorGuaranteed> {
-        self.project_files.clear();
+        self.begin_load();
         let (project, failed) = lilac_module::load_namespace(
             root,
             namespace,
@@ -378,26 +450,17 @@ impl Session {
             &mut self.source_map,
             &mut self.diags,
         );
-        self.project_files = project
-            .files
-            .iter()
-            .map(|file| (file.file, file.path.clone()))
-            .collect();
-        if failed {
-            return Err(self.diags.already_reported());
-        }
-        self.run(&project, on_stage)
+        self.run_loaded(&project, failed, on_stage)
     }
 
-    /// The loaded project's file identities and paths (empty outside project
-    /// compiles); maps diagnostic spans to file paths.
+    /// The last compile's loaded files, identities and paths; maps
+    /// diagnostic spans to file paths.
     #[must_use]
     pub fn project_files(&self) -> &[(FileId, PathBuf)] {
         &self.project_files
     }
 
-    /// Retained analysis from the last compile (populated best-effort, so it
-    /// survives a compile that later failed).
+    /// The last compile's analysis ([`Session::analysis`]).
     #[must_use]
     pub fn analysis(&self) -> Option<&Analysis> {
         self.analysis.as_ref()
@@ -412,13 +475,6 @@ impl Session {
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
-    /// Stops a cancelled compile: the partial analysis goes, so nothing
-    /// reads it as the program's.
-    fn stop_cancelled(&mut self) -> ErrorGuaranteed {
-        self.analysis = None;
-        ErrorGuaranteed::unreported(Unreported::Cancelled)
-    }
-
     /// Calls the progress hook, if any.
     fn report(&mut self, stage: Stage, event: StageEvent) {
         if let Some(Progress(hook)) = &mut self.progress {
@@ -429,10 +485,9 @@ impl Session {
     /// Parse → resolve → check → lower → inject runtime → prune → live
     /// `@compile_error` check (with the reach chain) → trace (when
     /// [`Session::stack_traces`] is set) → verify. Strict mode (the CLI) stops at the
-    /// first failing stage; tolerant mode (editor tooling) keeps going through
-    /// checking so the partial analysis is retained.
+    /// first failing stage; under [`Keep::Partial`] (editor tooling) it keeps going
+    /// through checking, so a broken program has a partial analysis.
     /// A set [`Session::cancel`] stops it at the next check.
-    #[allow(clippy::too_many_lines)]
     fn run(
         &mut self,
         project: &lilac_module::Project,
@@ -440,9 +495,9 @@ impl Session {
     ) -> Result<LirModule, ErrorGuaranteed> {
         const DONE: StageEvent = StageEvent::End { count: None };
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
-        let strict = !self.retain_partial_analysis;
+        let strict = self.keep_analysis != Keep::Partial;
         let facts = builtin::Facts {
             target: self.target,
             entry: self.entry,
@@ -464,13 +519,13 @@ impl Session {
         );
         let project = &project;
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
         self.report(Stage::Parse, DONE);
         self.report(Stage::Resolve, StageEvent::Begin);
         let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
         if self.diags.has_errors() && strict {
             return Err(self.diags.already_reported());
@@ -485,39 +540,34 @@ impl Session {
         };
         let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
-        let mut hir = checked.hir.clone();
-        hir.funcs.extend(checked.templates.iter().cloned());
-        hir.tags.extend(condition_sites.tags.iter().cloned());
-        hir.members.extend(condition_sites.members.iter().copied());
-        self.analysis =
-            Some(Analysis {
-                resolved: resolved.clone(),
-                types: types.clone(),
-                sigs: checked.sigs.clone(),
-                semantics: merge_semantics(
-                    checked
-                        .hir
-                        .semantics
-                        .iter()
-                        .chain(&condition_sites.semantics)
-                        .copied()
-                        .chain(resolved.namespace_sites.iter().map(|&span| {
-                            lilac_hir::SemanticSite {
-                                span,
-                                kind: lilac_hir::SemanticKind::Namespace,
-                            }
-                        })),
-                ),
-                hir,
-            });
+        let result = self.lower_checked(&checked.hir, &resolved, &types, on_stage);
+        // Kept even when a later stage failed; a cancelled compile's is
+        // incomplete, so it is not.
+        if self.keep_analysis != Keep::Nothing && !self.cancelled() {
+            self.analysis = Some(Analysis::new(resolved, types, checked, condition_sites));
+        }
+        result
+    }
+
+    /// The pipeline past type checking: lower `hir` (unless checking
+    /// failed), inject the runtime, prune, then the live checks, stack-trace
+    /// instrumentation and verification.
+    fn lower_checked(
+        &mut self,
+        hir: &lilac_hir::HirProgram,
+        resolved: &lilac_resolve::Resolved,
+        types: &lilac_ty::Types,
+        on_stage: &mut dyn FnMut(&'static str, &LirModule),
+    ) -> Result<LirModule, ErrorGuaranteed> {
+        const DONE: StageEvent = StageEvent::End { count: None };
         if self.diags.has_errors() {
             return Err(self.diags.already_reported());
         }
-        lilac_lower::check_extern_signatures(&checked.hir, &resolved, &types, &mut self.diags);
+        lilac_lower::check_extern_signatures(hir, resolved, types, &mut self.diags);
         if self.require_entry {
-            self.check_platform_hooks(&resolved);
+            self.check_platform_hooks(resolved);
         }
         if self.diags.has_errors() {
             return Err(self.diags.already_reported());
@@ -525,20 +575,20 @@ impl Session {
         self.report(
             Stage::Check,
             StageEvent::End {
-                count: Some(checked.hir.funcs.len()),
+                count: Some(hir.funcs.len()),
             },
         );
         self.report(Stage::Lower, StageEvent::Begin);
         let lowered = lilac_lower::lower(
-            &checked.hir,
-            &resolved,
-            &types,
+            hir,
+            resolved,
+            types,
             &self.source_map,
             self.target,
             self.cancel.as_deref(),
         );
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
         lilac_lower::check_constant_indices(&lowered, &mut self.diags);
         lilac_lower::check_constant_divisions(&lowered, &mut self.diags);
@@ -567,7 +617,7 @@ impl Session {
         }
         lilac_ir::prune_unreachable(&mut lir, &roots);
         if self.cancelled() {
-            return Err(self.stop_cancelled());
+            return Err(stopped());
         }
         self.report(
             Stage::Prune,
@@ -942,14 +992,14 @@ main: function () nothing {}
     fn a_cancelled_compile_stops_and_keeps_nothing() {
         let src = "main: function () nothing {\n    x: @bit8 = nope\n}\n";
         let mut session = Session::new();
-        session.retain_partial_analysis = true;
+        session.keep_analysis = Keep::Partial;
         assert!(session.compile_lir("c.lilac", src).is_err());
         assert!(session.analysis().is_some());
         assert!(!session.cancelled());
 
         let cancel = Arc::new(AtomicBool::new(true));
         let mut session = Session::new();
-        session.retain_partial_analysis = true;
+        session.keep_analysis = Keep::Partial;
         session.cancel = Some(Arc::clone(&cancel));
         assert!(session.compile_lir("c.lilac", src).is_err());
         assert!(session.cancelled());
@@ -963,7 +1013,7 @@ main: function () nothing {}
 
         // An analysis from before the cancel is not left for a reader.
         let mut session = Session::new();
-        session.retain_partial_analysis = true;
+        session.keep_analysis = Keep::Partial;
         session.cancel = Some(Arc::new(AtomicBool::new(false)));
         assert!(session.compile_lir("c.lilac", src).is_err());
         assert!(session.analysis().is_some());
@@ -1082,6 +1132,7 @@ main: function () nothing {}
     #[test]
     fn analysis_is_retained_on_a_type_error() {
         let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
         let result = session.compile_lir(
             "bad.lilac",
             "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n}\n",
@@ -1101,7 +1152,7 @@ main: function () nothing {}
         // does not stop the pipeline, and the surviving items still contribute
         // name/type sites to the retained HIR.
         let mut session = Session::new();
-        session.retain_partial_analysis = true;
+        session.keep_analysis = Keep::Partial;
         let result = session.compile_lir(
             "syntax.lilac",
             "broken: function ( {\n}\npi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
@@ -1117,7 +1168,7 @@ main: function () nothing {}
         // (b) A type error in one body: `check_bodies` runs to completion and
         // its partial HIR is retained.
         let mut session = Session::new();
-        session.retain_partial_analysis = true;
+        session.keep_analysis = Keep::Partial;
         let result = session.compile_lir(
             "type.lilac",
             "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n    x: @bit32 = pi\n}\n",
@@ -1137,6 +1188,7 @@ main: function () nothing {}
     #[test]
     fn strict_analysis_is_not_retained_on_syntax_error() {
         let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
         let result = session.compile_lir(
             "syntax.lilac",
             "broken: function ( {\n}\npi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
@@ -1151,6 +1203,7 @@ main: function () nothing {}
     #[test]
     fn analysis_is_retained_on_success() {
         let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
         let result = session.compile_lir(
             "ok.lilac",
             "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n",
@@ -1160,9 +1213,53 @@ main: function () nothing {}
         assert!(!analysis.hir.uses.is_empty(), "{:?}", analysis.hir.uses);
     }
 
+    /// The CLI keeps no analysis: with `Keep::Nothing` the passes'
+    /// outputs go once lowered. A compile drops the last one's at its start,
+    /// so one that stops before checking holds none.
+    #[test]
+    fn analysis_is_kept_only_when_asked() {
+        let src = "pi: @bit32 = 0x2A\nmain: function () nothing {\n    x: @bit32 = pi\n}\n";
+        let mut session = Session::new();
+        assert!(session.compile_lir("ok.lilac", src).is_ok());
+        assert!(session.analysis().is_none());
+
+        let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
+        assert!(session.compile_lir("ok.lilac", src).is_ok());
+        assert!(session.analysis().is_some());
+        assert!(session
+            .compile_lir("bad.lilac", "main: function ( {\n}\n")
+            .is_err());
+        assert!(session.analysis().is_none());
+    }
+
+    /// An uninstantiated generic's checked body is kept beside the HIR, not
+    /// in it: only `funcs` is lowered.
+    #[test]
+    fn templates_are_kept_apart_from_the_lowered_functions() {
+        let src = "same[T]: function (value: T) result: T {\n    result = value\n}\nmain: function () nothing {}\n";
+        let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
+        let lir = session
+            .compile_lir("t.lilac", src)
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let analysis = session.analysis().expect("analysis kept");
+        let [template] = analysis.templates.as_slice() else {
+            panic!("one template: {:?}", analysis.templates);
+        };
+        assert_eq!(analysis.resolved.def(template.key.def).name, "same");
+        assert!(analysis
+            .hir
+            .funcs
+            .iter()
+            .all(|func| func.key.def != template.key.def));
+        assert!(!lir.to_text().contains("same"), "{}", lir.to_text());
+    }
+
     #[test]
     fn semantic_analysis_populated_on_success_and_type_error() {
         let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
         let result = session.compile_lir(
             "ok.lilac",
             "main: function () nothing {\n    x: @bit32 = 0x1\n    y: @bit32 = x\n}\n",
@@ -1176,6 +1273,7 @@ main: function () nothing {}
         );
 
         let mut session = Session::new();
+        session.keep_analysis = Keep::Analysis;
         let result = session.compile_lir(
             "bad.lilac",
             "pi: @bit32 = 0x2A\nmain: function () nothing {\n    y: @bit8 = pi\n}\n",
@@ -1817,5 +1915,40 @@ helper: function () nothing {{
         let mut session = Session::new();
         let _ = session.compile_project(&root, &mut fs);
         assert_eq!(session.project_files(), [(FileId(0), main)]);
+    }
+
+    /// A library namespace compiled alone loads like a project: the Load
+    /// stage is reported with its file count, and its files are recorded.
+    #[test]
+    fn a_namespace_compile_reports_its_load() {
+        use std::sync::{Arc, Mutex};
+        let lib = PathBuf::from("lib");
+        let file = lib.join("util.lilac");
+        let mut fs = TestFs {
+            files: [(file.clone(), "helper: function () nothing {}\n".to_owned())]
+                .into_iter()
+                .collect(),
+            dirs: [(lib.clone(), vec![file.clone()])].into_iter().collect(),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let mut session = Session::new();
+        session.libraries = vec![("Util".to_owned(), lib)];
+        session.progress = Some(Progress::new(move |stage, event| {
+            sink.lock().expect("unpoisoned").push((stage, event));
+        }));
+        session
+            .compile_namespace_with_stages(Path::new("proj"), "Util", &mut fs, &mut |_, _| {})
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let events = events.lock().expect("unpoisoned");
+        assert_eq!(
+            events[..2],
+            [
+                (Stage::Load, StageEvent::Begin),
+                (Stage::Load, StageEvent::End { count: Some(1) }),
+            ],
+            "{events:?}"
+        );
+        assert_eq!(session.project_files(), [(FileId(0), file)]);
     }
 }
