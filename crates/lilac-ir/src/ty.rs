@@ -37,6 +37,21 @@ impl LirTy {
         Self::Named("format_args".to_owned())
     }
 
+    /// `#.lilac.format_args`: an f-string, the template it was built from
+    /// and the addresses of its holes (see [`crate::LirInst::Format`]).
+    #[must_use]
+    pub fn format_view() -> Self {
+        Self::Named(".lilac.format_args".to_owned())
+    }
+
+    /// `#.lilac.format_part`: one part of an f-string template, a piece's
+    /// text and the formatter of the hole after it
+    /// ([`crate::format_template_layout`]).
+    #[must_use]
+    pub fn format_part() -> Self {
+        Self::Named(".lilac.format_part".to_owned())
+    }
+
     /// `#.lilac.frame`: one shadow-stack record (`prev`, `site`; see
     /// [`crate::trace`]). The leading `.` keeps it apart from user types.
     #[must_use]

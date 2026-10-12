@@ -28,9 +28,9 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, FloatWidth, LirCallee,
-    LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm, LirTy,
-    PlaceName, Reg, RmwOp, Symbol,
+    builtin_layout, builtin_sig, format_template_layout, ArithOp, AtomicOrdering, ConvertOp,
+    FloatWidth, LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand,
+    LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
@@ -166,6 +166,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         for func in &self.lir.funcs {
             self.declare_func(func)?;
         }
+        self.define_formats();
         for func in &self.lir.funcs {
             self.lower_func(func);
             if let Some(export) = &func.export {
@@ -872,7 +873,178 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             | LirInst::AtomicRmw { .. }
             | LirInst::CmpXchg { .. }
             | LirInst::Fence { .. } => self.lower_atomic(inst, builder, state),
+            LirInst::Format { .. } => self.lower_format(inst, builder, state),
         }
+    }
+
+    /// Defines each template as a private constant in its layout
+    /// ([`format_template_layout`]): the hole count, then for each piece a
+    /// `#byte_buffer` over its own private bytes (an empty piece too, so
+    /// no piece is null) and the address of the formatter of the hole after
+    /// it (null after the last piece). Run after every function is
+    /// declared, since a template points at its formatters.
+    fn define_formats(&self) {
+        let target = &self.lir.target;
+        let (Some(part), Some(text)) = (
+            builtin_layout(&LirTy::format_part(), target),
+            builtin_layout(&LirTy::byte_buffer(), target),
+        ) else {
+            bug!(self.at(), "the template parts have no layout");
+        };
+        let ptr = self.ptr_type();
+        for format in &self.lir.formats {
+            let Some(layout) = format_template_layout(format.formats.len(), target) else {
+                bug!(
+                    format.span,
+                    "template `!{}` has no layout",
+                    format.name.as_str()
+                );
+            };
+            let (Some(count), Some(parts)) = (layout.fields.first(), layout.fields.get(1)) else {
+                bug!(
+                    format.span,
+                    "template `!{}` has no parts",
+                    format.name.as_str()
+                );
+            };
+            let word = |value: usize| -> BasicValueEnum<'ctx> {
+                self.native.const_int(value as u64, false).into()
+            };
+            let mut values = vec![(count.offset, word(format.formats.len()))];
+            for (index, piece) in format.pieces.iter().enumerate() {
+                let at = parts.offset + index as u64 * part.size;
+                let text_at = at + part.fields[0].offset;
+                let bytes = self.context.const_string(piece, false);
+                let global = self.module.add_global(bytes.get_type(), None, "");
+                global.set_linkage(Linkage::Private);
+                global.set_constant(true);
+                global.set_unnamed_addr(true);
+                global.set_initializer(&bytes);
+                values.push((text_at + text.fields[0].offset, word(piece.len())));
+                values.push((
+                    text_at + text.fields[1].offset,
+                    global.as_pointer_value().into(),
+                ));
+                let formatter = match format.formats.get(index) {
+                    Some(name) => match self.module.get_function(symbol(name.as_str())) {
+                        Some(function) => function.as_global_value().as_pointer_value(),
+                        None => bug!(format.span, "formatter `{name}` was not declared"),
+                    },
+                    None => ptr.const_null(),
+                };
+                values.push((at + part.fields[1].offset, formatter.into()));
+            }
+            let init = self.packed_at(&values, layout.size);
+            let global = self
+                .module
+                .add_global(init.get_type(), None, format.name.as_str());
+            global.set_linkage(Linkage::Private);
+            global.set_constant(true);
+            global.set_unnamed_addr(true);
+            global.set_initializer(&init);
+            global.set_alignment(u32::try_from(layout.align).unwrap_or(1));
+        }
+    }
+
+    /// A packed constant of `size` bytes holding each scalar `value` at its
+    /// offset (in increasing order) and zeros between them.
+    fn packed_at(&self, values: &[(u64, BasicValueEnum<'ctx>)], size: u64) -> BasicValueEnum<'ctx> {
+        let pointer = self.lir.target.scalar_layout(Scalar::Pointer).0;
+        let mut parts: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut at = 0;
+        for (offset, value) in values {
+            if *offset > at {
+                parts.push(self.bytes_type(offset - at).const_zero());
+            }
+            parts.push(*value);
+            at = offset
+                + match value.get_type() {
+                    BasicTypeEnum::IntType(int) => u64::from(int.get_bit_width() / 8),
+                    _ => pointer,
+                };
+        }
+        if at < size {
+            parts.push(self.bytes_type(size - at).const_zero());
+        }
+        self.context.const_struct(&parts, true).into()
+    }
+
+    /// Lowers `format !t (holes) -> %dst`: the hole addresses go in an
+    /// array allocated in the entry block (so a `format` in a loop reuses
+    /// one), and `%dst` gets the template's address and the array's (null
+    /// when there are no holes).
+    fn lower_format(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &FnState<'ctx>) {
+        let LirInst::Format {
+            template,
+            holes,
+            dst,
+            ..
+        } = inst
+        else {
+            bug!(self.at(), "non-`format` instruction `{inst:?}`");
+        };
+        let Some(global) = self.module.get_global(template.as_str()) else {
+            bug!(
+                self.at(),
+                "format of undeclared template `!{}`",
+                template.as_str()
+            );
+        };
+        let (pointer, align) = self.lir.target.scalar_layout(Scalar::Pointer);
+        let array = if holes.is_empty() {
+            self.ptr_type().const_null()
+        } else {
+            let array = self.entry_alloca(builder, self.bytes_type(pointer * holes.len() as u64));
+            self.aligned(
+                array.as_instruction(),
+                u32::try_from(align).unwrap_or(1),
+                "hole array",
+            );
+            for (index, reg) in holes.iter().enumerate() {
+                let slot = if index == 0 {
+                    array
+                } else {
+                    let offset = self.native.const_int(pointer * index as u64, false);
+                    self.offset_ptr(builder, array, offset)
+                };
+                self.store(
+                    builder,
+                    slot,
+                    self.reg_ptr(reg, state).into(),
+                    "format hole",
+                );
+            }
+            array
+        };
+        let view = self.place_ptr(dst, state);
+        let fields = [global.as_pointer_value(), array];
+        for (index, value) in (0u32..).zip(fields) {
+            let offset = self.field_offset(&LirTy::format_view(), index);
+            let field = if offset == 0 {
+                view
+            } else {
+                self.offset_ptr(builder, view, self.native.const_int(offset, false))
+            };
+            self.store(builder, field, value.into(), "format field");
+        }
+    }
+
+    /// An `alloca` of `ty` at the start of the current function's entry
+    /// block, so it is made once per call however often its use runs.
+    fn entry_alloca(&self, builder: &Builder<'ctx>, ty: BasicTypeEnum<'ctx>) -> PointerValue<'ctx> {
+        let Some(entry) = builder
+            .get_insert_block()
+            .and_then(BasicBlock::get_parent)
+            .and_then(FunctionValue::get_first_basic_block)
+        else {
+            bug!(self.at(), "an `alloca` outside a function");
+        };
+        let at_entry = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => at_entry.position_before(&first),
+            None => at_entry.position_at_end(entry),
+        }
+        self.checked(at_entry.build_alloca(ty, ""), "entry alloca")
     }
 
     /// The pointer held in the `ref` place `place` (what `load` and

@@ -8,9 +8,10 @@ use lilac_span::Span;
 
 use crate::print::print_op;
 use crate::{
-    builtin_fields, builtin_sig, fields_of, is_c_abi_type, is_variadic_arg_type, size_align, trace,
-    ArithOp, AtomicOrdering, CallGraph, LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst,
-    LirLayout, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
+    builtin_fields, builtin_sig, fields_of, format_template_layout, is_c_abi_type,
+    is_variadic_arg_type, size_align, trace, ArithOp, AtomicOrdering, CallGraph, LirBlock,
+    LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm,
+    LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
 };
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
@@ -168,6 +169,8 @@ impl Verifier<'_> {
         }
         self.verify_layouts();
         self.verify_globals();
+        self.verify_symbols();
+        self.verify_formats();
         let mut seen: HashSet<&str> = HashSet::new();
         for func in &self.module.funcs {
             if !seen.insert(func.name.as_str()) {
@@ -265,6 +268,170 @@ impl Verifier<'_> {
                     break;
                 }
                 end = run_end.unwrap_or(size);
+            }
+        }
+    }
+
+    /// Checks that each `!` symbol (data, template or global) is defined
+    /// once.
+    fn verify_symbols(&mut self) {
+        let module = self.module;
+        let symbols = module
+            .data
+            .iter()
+            .map(|datum| (&datum.name, datum.span))
+            .chain(
+                module
+                    .formats
+                    .iter()
+                    .map(|format| (&format.name, format.span)),
+            )
+            .chain(
+                module
+                    .globals
+                    .iter()
+                    .map(|global| (&global.name, global.span)),
+            );
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (name, span) in symbols {
+            if !seen.insert(name.as_str()) {
+                self.error(format!("duplicate symbol `!{}`", name.as_str()), span);
+            }
+        }
+    }
+
+    /// Checks every template: one more piece than holes, a layout the
+    /// target can hold, and formatters that are place-ABI functions with
+    /// ins `ref #T, ref #W` (one `#W` for the template) and no outs.
+    fn verify_formats(&mut self) {
+        let module = self.module;
+        for format in &module.formats {
+            let name = format.name.as_str();
+            if format.pieces.len() != format.formats.len() + 1 {
+                self.error(
+                    format!(
+                        "template `!{name}` has {} pieces for {} holes; it needs one more piece than holes",
+                        format.pieces.len(),
+                        format.formats.len()
+                    ),
+                    format.span,
+                );
+            }
+            if format_template_layout(format.formats.len(), &module.target).is_none() {
+                self.error(
+                    format!("template `!{name}` is too large for `{}`", module.target),
+                    format.span,
+                );
+            }
+            let mut writer: Option<&LirTy> = None;
+            for formatter in &format.formats {
+                let Some(found) = module.funcs.iter().find(|func| func.name == *formatter) else {
+                    self.error(
+                        format!("template `!{name}` names the unknown function `{formatter}`"),
+                        format.span,
+                    );
+                    continue;
+                };
+                let shape = match found.ins.as_slice() {
+                    [(_, value), (_, out)]
+                        if value.is_ref()
+                            && out.is_ref()
+                            && found.outs.is_empty()
+                            && !found.uses_c_abi()
+                            && !found.variadic =>
+                    {
+                        Some(out)
+                    }
+                    _ => None,
+                };
+                let Some(out) = shape else {
+                    self.error(
+                        format!(
+                            "formatter `{formatter}` in template `!{name}` must take `ref #T, ref #W` and return nothing"
+                        ),
+                        format.span,
+                    );
+                    continue;
+                };
+                match writer {
+                    Some(first) if first != out => self.error(
+                        format!(
+                            "template `!{name}` formats into both `{}` and `{}`",
+                            first.strip_ref(),
+                            out.strip_ref()
+                        ),
+                        format.span,
+                    ),
+                    Some(_) => {}
+                    None => writer = Some(out),
+                }
+            }
+        }
+    }
+
+    /// Checks `format !t (holes) -> %dst`: a declared template, one
+    /// register per hole, each the `ref #T` its formatter takes, and a
+    /// `#.lilac.format_args` destination.
+    fn verify_format(
+        &mut self,
+        template: &Symbol,
+        holes: &[Reg],
+        dst: &PlaceName,
+        span: Span,
+        places: &Places,
+        regs: &Regs,
+    ) {
+        let module = self.module;
+        match places.get(dst.as_str()) {
+            None => self.error(format!("format into undeclared place `{dst}`"), span),
+            Some(ty) if **ty != LirTy::format_view() => self.error(
+                format!(
+                    "format into `{dst}` of type `{ty}`, expected `{}`",
+                    LirTy::format_view()
+                ),
+                span,
+            ),
+            Some(_) => {}
+        }
+        let Some(format) = module
+            .formats
+            .iter()
+            .find(|format| format.name == *template)
+        else {
+            self.error(
+                format!("format of undeclared template `!{}`", template.as_str()),
+                span,
+            );
+            return;
+        };
+        if holes.len() != format.formats.len() {
+            self.error(
+                format!(
+                    "template `!{}` has {} holes, but `format` passes {}",
+                    template.as_str(),
+                    format.formats.len(),
+                    holes.len()
+                ),
+                span,
+            );
+            return;
+        }
+        for (reg, formatter) in holes.iter().zip(&format.formats) {
+            let Some(found) = regs.get(reg.as_str()).map(|def| def.ty) else {
+                self.error(format!("use of undefined register `{reg}`"), span);
+                continue;
+            };
+            let takes = module
+                .funcs
+                .iter()
+                .find(|func| func.name == *formatter)
+                .and_then(|func| func.ins.first())
+                .map(|(_, ty)| ty);
+            if let Some(takes) = takes.filter(|takes| *takes != found) {
+                self.error(
+                    format!("hole `{reg}` is `{found}`, but its formatter `{formatter}` takes `{takes}`"),
+                    span,
+                );
             }
         }
     }
@@ -533,6 +700,15 @@ impl Verifier<'_> {
                 self.verify_elem_addr(array, index, ty, *span, regs);
                 self.check_type(ty, *span);
                 self.define_reg(regs, dst, ty, false, *span, func);
+            }
+            LirInst::Format {
+                template,
+                holes,
+                dst,
+                span,
+            } => {
+                self.verify_format(template, holes, dst, *span, places, regs);
+                assigned.insert(dst.as_str());
             }
         }
     }

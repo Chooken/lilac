@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use lilac_span::Span;
 
 use crate::{
-    ArithOp, ConvertOp, LirCallee, LirData, LirFunc, LirGlobal, LirInst, LirLayout, LirLayoutKind,
-    LirModule, LirOperand, LirTerm, SpannedText,
+    ArithOp, ConvertOp, LirCallee, LirData, LirFormat, LirFunc, LirGlobal, LirInst, LirLayout,
+    LirLayoutKind, LirModule, LirOperand, LirTerm, SpannedText,
 };
 
 impl LirModule {
@@ -32,6 +32,9 @@ impl LirModule {
         let mut lines = self.header_lines();
         for data in &self.data {
             lines.extend(print_data(data));
+        }
+        for format in &self.formats {
+            lines.push(print_format(format));
         }
         for global in &self.globals {
             lines.push(print_global(global));
@@ -119,6 +122,19 @@ pub(crate) fn print_data(data: &LirData) -> Vec<(String, Option<Span>)> {
         ),
         Some(data.span),
     )]
+}
+
+/// `!fmt0: format "a" {@f} "b"`: the pieces with each hole's formatter
+/// between them, as the f-string reads.
+pub(crate) fn print_format(format: &LirFormat) -> (String, Option<Span>) {
+    let mut text = format!("!{}: format", format.name.as_str());
+    for (index, piece) in format.pieces.iter().enumerate() {
+        let _ = write!(text, " \"{}\"", escape_data(piece));
+        if let Some(formatter) = format.formats.get(index) {
+            let _ = write!(text, " {{{formatter}}}");
+        }
+    }
+    (text, Some(format.span))
 }
 
 /// `global !name: #t = zeroed`, or `= bytes { 0: "…", 16: "…" }` with its
@@ -312,7 +328,27 @@ pub(crate) fn print_inst(inst: &LirInst) -> String {
         | LirInst::AtomicRmw { .. }
         | LirInst::CmpXchg { .. }
         | LirInst::Fence { .. } => print_atomic(inst),
+        LirInst::Format { .. } => print_format_inst(inst),
     }
+}
+
+/// Prints `format !t (&h0, …) -> %d`.
+fn print_format_inst(inst: &LirInst) -> String {
+    let LirInst::Format {
+        template,
+        holes,
+        dst,
+        ..
+    } = inst
+    else {
+        lilac_error::bug!(Span::dummy(), "non-format instruction in print_format_inst");
+    };
+    let holes: Vec<String> = holes.iter().map(ToString::to_string).collect();
+    format!(
+        "format !{} ({}) -> {dst}",
+        template.as_str(),
+        holes.join(", ")
+    )
 }
 
 /// Prints `field.addr` or `elem.addr`.
@@ -425,7 +461,8 @@ pub(crate) fn inst_span(inst: &LirInst) -> Span {
         | LirInst::AtomicStore { span, .. }
         | LirInst::AtomicRmw { span, .. }
         | LirInst::CmpXchg { span, .. }
-        | LirInst::Fence { span, .. } => *span,
+        | LirInst::Fence { span, .. }
+        | LirInst::Format { span, .. } => *span,
         LirInst::CompileError { call_span, .. } => *call_span,
     }
 }

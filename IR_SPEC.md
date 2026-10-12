@@ -1,6 +1,6 @@
-# Lilac IR Specification (0.4)
+# Lilac IR Specification (0.5)
 
-> Version: `lilac_ir = "0.4"`. Status: normative for the Rust rewrite.
+> Version: `lilac_ir = "0.5"`. Status: normative for the Rust rewrite.
 > `SPEC.md` is normative for language semantics; this file is normative for IR text,
 > verification, and backend contract. Plan-only material lives in `docs/history/RUST_REWRITE_PLAN.md`.
 
@@ -25,13 +25,39 @@ Data sections hold constant declarations: the bytes of string literals
 (`&1: ref #bit8 = const !c`); a string literal is a `#byte_buffer` place
 filled field by field with it and its length, never a call to the
 `.lilac.byte_buffer_from` runtime function. Number literals are `const`
-registers typed directly, not data. f-strings lower to `@format_args` construction plus conversions/calls
-and introduce no new instruction shapes (see `SPEC.md`).
+registers typed directly, not data. f-strings still lower to
+`@format_args` construction plus conversions and calls (see `SPEC.md`);
+the template form below is what they move to.
 ```lilac-ir
 data {
     !c0: str = "String",
 }
 ```
+
+A template is the static half of an f-string: its literal pieces and, for
+each hole, the function that formats it, printed as the f-string reads
+(`LirModule::formats`). Piece `i` comes before hole `i`, so there is one
+more piece than holes, and any piece may be empty:
+```lilac-ir
+!fmt0: format "a" {@@format(ReR9FormatterE)} "b"
+```
+A formatter is an ordinary place-ABI function with ins `ref #T, ref #W`
+(its hole's type, and the one type every formatter of the template writes
+into) and no outs, so a consumer calls it with the hole's address as is.
+In memory a template is the C struct
+```c
+struct template {
+    uintptr_t holes;
+    struct {
+        struct { uintptr_t len; const uint8_t *data; } text;  /* #byte_buffer */
+        void (*format)(void);   /* null after the last piece */
+    } parts[holes + 1];          /* #.lilac.format_part */
+};
+```
+(`lilac_ir::format_template_layout`, from `lilac-layout` like every other
+layout). Each piece points at its own read-only bytes, an empty one too,
+so no piece's `data` is null. DCE keeps a template while a live `format`
+names it, and a template keeps its formatters.
 
 Globals are mutable static storage, one declaration each, either zeroed or
 holding their initial bytes (little-endian, in the type's C layout) as runs:
@@ -92,15 +118,22 @@ offset, so the layout here is the only one. No layout, and no array, may
 be larger than the target's `isize::MAX` bytes (typeck reports one as `E067`).
 
 Builtin aggregates usable in `#` positions are `#byte_buffer`,
-`#format_args` and `#.lilac.frame`. All are plain values with no hidden
-behavior, and their field layouts are fixed by the IR rather than declared in
-a `type` section:
+`#format_args`, `#.lilac.format_args`, `#.lilac.format_part` and
+`#.lilac.frame`. All are plain values with no hidden behavior, and their
+field layouts are fixed by the IR rather than declared in a `type` section:
 
 ```lilac-ir
 #byte_buffer { len: #bit_native, data: ref #bit8 }
 #format_args { count: #bit_native, p0: #byte_buffer, …, p15: #byte_buffer }
+#.lilac.format_args { template: ref #unknown, holes: ref #unknown }
+#.lilac.format_part { text: #byte_buffer, format: ref #unknown }
 #.lilac.frame { prev: ref #.lilac.frame, site: #byte_buffer }
 ```
+
+`#.lilac.format_args` is an f-string built by `format`: its template and
+its array of hole addresses (null with no holes). `#.lilac.format_part` is
+one part of a template. When f-strings move to templates, the first takes
+the name `#format_args` and the 16-piece table goes.
 
 `#.lilac.frame` is one shadow-stack record for panic stack traces (see
 *Panics and stack traces* below); the leading `.` keeps it apart from user
@@ -124,7 +157,7 @@ offset).
 
 Functions can be declared as:
 ```lilac-ir
-lilac_ir = "0.4"
+lilac_ir = "0.5"
 target = "x86_64-unknown-none"
 function @func_name
     in #type %param_1,
@@ -438,6 +471,23 @@ as produced by `tests/ui/atomics.lir`.
 ```
 as produced by `tests/ui/arrays.lir`.
 
+### format
+* `format !t (&h0, …) -> %d` builds an f-string from the template `!t`:
+  register `i` is the address of hole `i`, of the type its formatter takes
+  first, and `%d` is a `#.lilac.format_args` place. It stores the hole
+  addresses in an array that lives as long as the function's frame (one
+  per instruction, so a `format` in a loop reuses it), then sets
+  `%d.template` to the template and `%d.holes` to the array (null when
+  there are no holes). It calls nothing, so stack traces add no site.
+```lilac-ir
+&3: ref #byte_buffer = addr %part
+format !fmt0 (&3) -> %msg
+```
+The LLVM backend emits the template as a constant in its layout, with
+relocations to the piece bytes and the formatters, and the instruction as
+an entry-block `alloca` of the array, one store per hole and two field
+stores.
+
 ## Control Flow
 
 ### call 
@@ -682,3 +732,10 @@ Same width rule as integer arithmetic.
 12. `copy ref %src -> %dst`: `%src` is a `ref` place and `%dst` a place of
     its pointee's type. A global's initializer runs are ordered, non-empty,
     disjoint and inside its size.
+13. Every `!` symbol (data, template or global) is defined once.
+14. A template has one more piece than holes, and each formatter is a
+    place-ABI function (not a C `extern`, not variadic) with ins `ref #T,
+    ref #W` and no outs, with one `#W` for the whole template. A `format`
+    names a declared template, passes one register per hole, register `i`
+    of exactly the type hole `i`'s formatter takes first, and writes a
+    `#.lilac.format_args` place.

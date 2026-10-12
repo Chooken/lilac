@@ -32,7 +32,7 @@ pub use ty::LirTy;
 pub use verify::{check_live_compile_errors, check_live_syscalls, verify};
 
 /// IR version header; bump on any normative IR change.
-pub const LILAC_IR_VERSION: &str = "0.4";
+pub const LILAC_IR_VERSION: &str = "0.5";
 
 /// An IR module: versioned header plus data, functions, and layouts.
 #[derive(Clone, Debug)]
@@ -44,6 +44,8 @@ pub struct LirModule {
     pub target: Target,
     /// Typed constants (`!c0: str`, `!c1: numlit`).
     pub data: Vec<LirData>,
+    /// f-string templates (`!fmt0: format "a" {@f} "b"`).
+    pub formats: Vec<LirFormat>,
     /// Global variables (`global !name: #t = …`).
     pub globals: Vec<LirGlobal>,
     /// Functions in source order.
@@ -208,6 +210,28 @@ pub struct LirData {
     /// Raw bytes (`!c0: str = "hi"`; any byte, not necessarily UTF-8).
     pub bytes: Vec<u8>,
     /// Definition span.
+    pub span: Span,
+}
+
+/// One f-string template: its literal pieces and, for each hole, the
+/// function that formats it. Printed `!fmt0: format "a" {@f} "b"`, as the
+/// f-string reads. In memory it is a [`format_template_layout`]: the hole
+/// count, then one [`LirTy::format_part`] per piece (the piece's text and
+/// the formatter of the hole after it, null after the last piece).
+///
+/// A formatter is an ordinary place-ABI function with ins `ref #T, ref #W`
+/// and no outs, where `#T` is its hole's type and `#W` the one type every
+/// formatter of the template writes into.
+#[derive(Clone, Debug)]
+pub struct LirFormat {
+    /// Template name (`fmt0` prints as `!fmt0`).
+    pub name: Symbol,
+    /// The literal pieces, one more than the holes; piece `i` comes before
+    /// hole `i`. Any may be empty.
+    pub pieces: Vec<Vec<u8>>,
+    /// Each hole's formatter.
+    pub formats: Vec<Symbol>,
+    /// The f-string's span.
     pub span: Span,
 }
 
@@ -728,6 +752,20 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
+    /// `format !fmt0 (&1, &2) -> %d`: points the `#.lilac.format_args`
+    /// place `%d` at the template `!fmt0` and at the hole addresses, which
+    /// it stores in an array that lives as long as the function's frame.
+    /// Register `i` is a `ref` to hole `i`, of the type its formatter takes.
+    Format {
+        /// The template.
+        template: Symbol,
+        /// One address register per hole.
+        holes: Vec<Reg>,
+        /// Destination place.
+        dst: PlaceName,
+        /// Instruction span.
+        span: Span,
+    },
 }
 
 /// The value of a `const`.
@@ -940,6 +978,7 @@ impl LirModule {
             version: LILAC_IR_VERSION.to_owned(),
             target,
             data: Vec::new(),
+            formats: Vec::new(),
             globals: Vec::new(),
             funcs: Vec::new(),
             layouts: HashMap::new(),
@@ -1028,7 +1067,9 @@ pub fn is_variadic_arg_type(ty: &LirTy) -> bool {
 }
 
 /// Fixed fields of the builtin aggregate types (`#byte_buffer`,
-/// `#format_args`: a count plus sixteen pieces, since LIR has no arrays, and
+/// `#format_args`: a count plus sixteen pieces, `#.lilac.format_args`: an
+/// f-string, its template and its hole addresses, `#.lilac.format_part`:
+/// one part of a template, see [`format_template_layout`], and
 /// `#.lilac.frame`: a shadow-stack record, see [`trace`]), laid out as C
 /// structs like any other ([`builtin_layout`]).
 /// These never appear in `module.layouts`, so the verifier and the backend
@@ -1045,12 +1086,42 @@ pub fn builtin_fields(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
                 .chain((0..16).map(|index| (format!("p{index}"), LirTy::byte_buffer())))
                 .collect(),
         ),
+        ".lilac.format_args" => Some(vec![
+            ("template".to_owned(), LirTy::opaque_ref()),
+            ("holes".to_owned(), LirTy::opaque_ref()),
+        ]),
+        ".lilac.format_part" => Some(vec![
+            ("text".to_owned(), LirTy::byte_buffer()),
+            ("format".to_owned(), LirTy::opaque_ref()),
+        ]),
         ".lilac.frame" => Some(vec![
             ("prev".to_owned(), LirTy::trace_frame().to_ref()),
             ("site".to_owned(), LirTy::byte_buffer()),
         ]),
         _ => None,
     }
+}
+
+/// The layout of a template with `holes` holes ([`LirFormat`]) on
+/// `target`: the C struct `{ uintptr_t holes; struct format_part
+/// parts[holes + 1]; }`, fields `holes` and `parts`. `None` when it is
+/// larger than the target allows.
+#[must_use]
+pub fn format_template_layout(holes: usize, target: &Target) -> Option<LirLayout> {
+    let parts = u64::try_from(holes).ok()?.checked_add(1)?;
+    let no_layouts: HashMap<String, LirLayout> = HashMap::new();
+    LirLayout::of_struct(
+        vec![
+            ("holes".to_owned(), LirTy::BitNative),
+            (
+                "parts".to_owned(),
+                LirTy::Array(Box::new(LirTy::format_part()), parts),
+            ),
+        ],
+        &no_layouts,
+        target,
+    )
+    .ok()
 }
 
 /// The layout of a builtin aggregate on `target`: its [`builtin_fields`] as

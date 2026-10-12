@@ -61,6 +61,16 @@
   (`lilac-layout`) is the only one and LLVM has no struct types. A data
   `const` is a `ref #bit8`; string literals fill a `#byte_buffer` place
   (`lilac_ir::runtime::fill_byte_buffer`).
+- f-string templates (`LirModule::formats`, `LirFormat`: pieces and one
+  formatter per hole, printed `!fmt0: format "a" {@f} "b"`) and the
+  `format !fmt0 (&h) -> %d` instruction (`LirInst::Format`) are in the IR
+  and the LLVM backend, but lowering does not emit them yet (f-string plan
+  phase 4). A template is a constant in `format_template_layout` (the hole
+  count, then `#.lilac.format_part`s); `format` fills a
+  `#.lilac.format_args` place (template, hole-address array). The
+  verifier checks each formatter is place-ABI `ref #T, ref #W` with no
+  outs and each hole register is its `ref #T`; DCE keeps a template a
+  live `format` names and treats its formatters as taken addresses.
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/

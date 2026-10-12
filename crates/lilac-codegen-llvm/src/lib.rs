@@ -587,6 +587,118 @@ mod tests {
         assert!(first < second, "{text}");
     }
 
+    /// A `main` that formats `%x: #bit32` through `!fmt0: format "a" {@show}
+    /// "" ` and then, in a second block, `!fmt1: format "none"`.
+    fn format_module(triple: &str) -> LirModule {
+        let mut module = LirModule::new(lilac_target::Target::parse(triple).expect("triple"));
+        module.formats.push(lilac_ir::LirFormat {
+            name: "fmt0".into(),
+            pieces: vec![b"a".to_vec(), Vec::new()],
+            formats: vec!["show".into()],
+            span: span(),
+        });
+        module.formats.push(lilac_ir::LirFormat {
+            name: "fmt1".into(),
+            pieces: vec![b"none".to_vec()],
+            formats: Vec::new(),
+            span: span(),
+        });
+        let mut entry = Vec::new();
+        alloca(&mut entry, "x", "#bit32");
+        alloca(&mut entry, "f", "#.lilac.format_args");
+        alloca(&mut entry, "g", "#.lilac.format_args");
+        let next = vec![
+            LirInst::Addr {
+                place: "x".into(),
+                dst: "1".into(),
+                ty: t("ref #bit32"),
+                span: span(),
+            },
+            LirInst::Format {
+                template: "fmt0".into(),
+                holes: vec!["1".into()],
+                dst: "f".into(),
+                span: span(),
+            },
+            LirInst::Format {
+                template: "fmt1".into(),
+                holes: Vec::new(),
+                dst: "g".into(),
+                span: span(),
+            },
+        ];
+        module.funcs.push(func(
+            "main",
+            &[],
+            &[],
+            vec![
+                LirBlock {
+                    label: "entry".into(),
+                    insts: entry,
+                    term: LirTerm::Branch {
+                        target: "next".into(),
+                        span: span(),
+                    },
+                    span: span(),
+                },
+                ret_block("next", next),
+            ],
+        ));
+        module.funcs.push(func(
+            "show",
+            &[("value", "ref #bit32"), ("out", "ref #byte_buffer")],
+            &[],
+            vec![ret_block("entry", Vec::new())],
+        ));
+        module
+    }
+
+    /// A template is a constant in its C layout pointing at its pieces and
+    /// formatters; `format` stores the hole addresses in an entry-block
+    /// array and the two pointers in the place, with no call.
+    #[test]
+    fn lowers_format_templates_and_instructions() {
+        let module = format_module("x86_64-pc-windows-msvc");
+        let mut diags = lilac_error::Diags::new();
+        assert!(lilac_ir::verify(&module, &mut diags).is_ok(), "{diags:?}");
+        let text = emit(&module);
+        assert!(
+            text.contains("@fmt0 = private unnamed_addr constant <{ i64, i64, ptr, ptr, i64, ptr, ptr }> <{ i64 1, i64 1, ptr @0, ptr @show, i64 0, ptr @1, ptr null }>, align 8"),
+            "{text}"
+        );
+        assert!(
+            text.contains("@fmt1 = private unnamed_addr constant <{ i64, i64, ptr, ptr }> <{ i64 0, i64 4, ptr @2, ptr null }>, align 8"),
+            "{text}"
+        );
+        assert!(
+            text.contains("@1 = private unnamed_addr constant [0 x i8] zeroinitializer"),
+            "{text}"
+        );
+        let main = &text[text.find("define void @.lilac.main").expect("main")..];
+        let entry = &main[..main.find("next:").expect("next block")];
+        assert!(entry.contains("alloca [8 x i8], align 8"), "{main}");
+        assert!(main.contains("store ptr @fmt0"), "{main}");
+        assert!(main.contains("store ptr @fmt1"), "{main}");
+        assert!(main.contains("store ptr null"), "{main}");
+        assert!(!main.contains("call void @show"), "{main}");
+    }
+
+    /// The template's 32-bit layout: four-byte counts and pointers.
+    #[test]
+    fn lowers_format_templates_on_32_bit_targets() {
+        let text = backend_for("i686-unknown-linux-gnu")
+            .emit_llvm(&format_module("i686-unknown-linux-gnu"))
+            .expect("emits");
+        assert!(
+            text.contains("@fmt0 = private unnamed_addr constant <{ i32, i32, ptr, ptr, i32, ptr, ptr }> <{ i32 1, i32 1, ptr @0, ptr @show, i32 0, ptr @1, ptr null }>, align 4"),
+            "{text}"
+        );
+    }
+
+    fn backend_for(triple: &str) -> lilac_codegen_llvm::LlvmBackend {
+        lilac_codegen_llvm::LlvmBackend::new(triple, OptLevel::O0)
+    }
+
     fn alloca(insts: &mut Vec<LirInst>, place: &str, ty: &str) {
         insts.push(LirInst::Alloca {
             ty: t(ty),
@@ -2354,6 +2466,40 @@ mod target_tests {
                     u64::from(data.get_abi_alignment(&native))
                 ),
                 "{target} @bit_native"
+            );
+        }
+    }
+
+    /// A template ([`lilac_ir::format_template_layout`]) is laid out as
+    /// LLVM lays out the C struct `{ iN holes; { { iN, ptr }, ptr } parts[3];
+    /// }` on every accepted target.
+    #[test]
+    fn template_layouts_match_llvm() {
+        let context = Context::create();
+        for target in accepted() {
+            let data = machine(target).get_target_data();
+            let native = context.ptr_sized_int_type(&data, None);
+            let ptr = context.ptr_type(AddressSpace::default());
+            let text = context.struct_type(&[native.into(), ptr.into()], false);
+            let part = context.struct_type(&[text.into(), ptr.into()], false);
+            let template = context.struct_type(&[native.into(), part.array_type(3).into()], false);
+            let ours = lilac_ir::format_template_layout(2, &target).expect("fits");
+            let theirs = (
+                data.get_abi_size(&template),
+                u64::from(data.get_abi_alignment(&template)),
+                data.offset_of_element(&template, 1),
+            );
+            assert_eq!(
+                (ours.size, ours.align, Some(ours.fields[1].offset)),
+                theirs,
+                "{target}"
+            );
+            let our_part =
+                lilac_ir::builtin_layout(&LirTy::format_part(), &target).expect("a part");
+            assert_eq!(
+                (our_part.size, Some(our_part.fields[1].offset)),
+                (data.get_abi_size(&part), data.offset_of_element(&part, 1)),
+                "{target}"
             );
         }
     }

@@ -1,4 +1,4 @@
-lilac_ir = "0.4"
+lilac_ir = "0.5"
 target = "x86_64-unknown-none"
 type #a.GenBox[m] size 4 align 4 {
     value: #bit32,

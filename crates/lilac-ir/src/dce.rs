@@ -1,6 +1,6 @@
 //! Reachability sweep: drops functions with no path from `main`, data
-//! consts no surviving instruction names, and layouts no surviving type
-//! names.
+//! consts and templates no surviving instruction names, and layouts no
+//! surviving type names.
 //!
 //! The frontend lowers every declaration, so a function that nothing calls and a
 //! `!data` const nothing references still survive into `verify`. This pass is
@@ -15,14 +15,15 @@ use lilac_error::TraceFrame;
 use lilac_span::Span;
 
 use crate::trace::is_hidden;
-use crate::{LirCallee, LirConst, LirFunc, LirInst, LirModule, LirTy, Symbol};
+use crate::{LirCallee, LirConst, LirFormat, LirFunc, LirInst, LirModule, LirTy, Symbol};
 
-/// How a caller reaches a callee: a direct `call` or a taken `addr.func`.
+/// How a caller reaches a callee: a direct `call`, or a taken address
+/// (`addr.func`, or a formatter in a `format`'s template).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeKind {
     /// `call @f`.
     Call,
-    /// `addr.func @f`.
+    /// `addr.func @f`, or a `format` whose template names `@f`.
     Address,
 }
 
@@ -65,9 +66,10 @@ impl CallGraph {
     /// live callers, before it to see every caller).
     #[must_use]
     pub fn new(module: &LirModule) -> Self {
+        let formats = formats_by_name(module);
         let mut callers: HashMap<Symbol, Vec<Edge>> = HashMap::new();
         for func in &module.funcs {
-            for (target, span, kind) in callees(func) {
+            for (target, span, kind) in callees(func, &formats) {
                 callers.entry(target).or_default().push(Edge {
                     caller: func.name.clone(),
                     span,
@@ -169,6 +171,7 @@ pub fn reach<S: BuildHasher>(
         .iter()
         .map(|func| (func.name.as_str(), func))
         .collect();
+    let formats = formats_by_name(module);
     let mut reached: HashSet<Symbol> = HashSet::new();
     let mut queue: VecDeque<Symbol> = VecDeque::new();
     for func in &module.funcs {
@@ -191,7 +194,7 @@ pub fn reach<S: BuildHasher>(
         let Some(func) = funcs.get(name.as_str()) else {
             continue;
         };
-        for (target, _, _) in callees(func) {
+        for (target, _, _) in callees(func, &formats) {
             if funcs.contains_key(target.as_str()) && reached.insert(target.clone()) {
                 queue.push_back(target);
             }
@@ -206,8 +209,10 @@ pub fn reach<S: BuildHasher>(
 /// Roots are every function named `main` plus every name in `extra_roots`
 /// (build-system export hints). Reachability follows direct `call` and
 /// `addr.func` targets (an address-taken function survives even when it is
-/// never called directly). Data consts survive only when a surviving
-/// instruction names them (a `const` of [`LirConst::Data`]). Layouts
+/// never called directly). A `format` reaches its template's formatters.
+/// Data consts survive only when a surviving instruction names them (a
+/// `const` of [`LirConst::Data`]), and templates when a surviving `format`
+/// does. Layouts
 /// survive when a surviving function's signature or instruction type names
 /// them, directly or through another surviving layout's fields. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
@@ -231,7 +236,8 @@ pub fn prune_unreachable<S: BuildHasher>(
                         value: LirConst::Data(name),
                         ..
                     }
-                    | LirInst::AddrGlobal { global: name, .. } => {
+                    | LirInst::AddrGlobal { global: name, .. }
+                    | LirInst::Format { template: name, .. } => {
                         referenced.insert(name);
                     }
                     _ => {}
@@ -241,6 +247,9 @@ pub fn prune_unreachable<S: BuildHasher>(
     }
     let referenced: HashSet<Symbol> = referenced.into_iter().cloned().collect();
     module.data.retain(|datum| referenced.contains(&datum.name));
+    module
+        .formats
+        .retain(|format| referenced.contains(&format.name));
     module
         .globals
         .retain(|global| referenced.contains(&global.name));
@@ -303,13 +312,24 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::Drop { .. }
         | LirInst::CompileError { .. }
         | LirInst::Zero { .. }
-        | LirInst::Fence { .. } => None,
+        | LirInst::Fence { .. }
+        | LirInst::Format { .. } => None,
     }
 }
 
+/// The module's templates by name.
+fn formats_by_name(module: &LirModule) -> HashMap<&str, &LirFormat> {
+    module
+        .formats
+        .iter()
+        .map(|format| (format.name.as_str(), format))
+        .collect()
+}
+
 /// Direct `call` and `addr.func` targets of every instruction in `func`, in
-/// order, with their spans.
-fn callees(func: &LirFunc) -> Vec<(Symbol, Span, EdgeKind)> {
+/// order, with their spans. A `format` takes the address of each formatter
+/// in its template (`formats`).
+fn callees(func: &LirFunc, formats: &HashMap<&str, &LirFormat>) -> Vec<(Symbol, Span, EdgeKind)> {
     let mut targets = Vec::new();
     for block in &func.blocks {
         for inst in &block.insts {
@@ -321,6 +341,14 @@ fn callees(func: &LirFunc) -> Vec<(Symbol, Span, EdgeKind)> {
                 } => targets.push((name.clone(), *span, EdgeKind::Call)),
                 LirInst::AddrFunc { func, span, .. } => {
                     targets.push((func.clone(), *span, EdgeKind::Address));
+                }
+                LirInst::Format { template, span, .. } => {
+                    let formatters = formats
+                        .get(template.as_str())
+                        .map_or(&[][..], |format| format.formats.as_slice());
+                    for formatter in formatters {
+                        targets.push((formatter.clone(), *span, EdgeKind::Address));
+                    }
                 }
                 _ => {}
             }

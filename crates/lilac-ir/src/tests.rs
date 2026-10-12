@@ -16,6 +16,7 @@ pub(crate) fn canonical_module() -> LirModule {
         version: LILAC_IR_VERSION.to_owned(),
         target: lilac_target::Target::default(),
         data: Vec::new(),
+        formats: Vec::new(),
         funcs: vec![LirFunc {
             name: "gen_function__bit32".into(),
             ins: vec![("in".into(), t("#bit32"))],
@@ -51,7 +52,7 @@ pub(crate) fn canonical_module() -> LirModule {
 #[test]
 fn printer_emits_canonical() {
     let text = canonical_module().to_text();
-    let expected = "lilac_ir = \"0.4\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
+    let expected = "lilac_ir = \"0.5\"\ntarget = \"x86_64-unknown-none\"\nfunction @gen_function__bit32\n  in #bit32 %in\n  out #bit32 %out\n{\n  $entry:\n    &1: #bit32 = copy %in\n    copy &1 -> %out\n    return\n}\n";
     assert_eq!(text, expected);
 }
 
@@ -888,6 +889,7 @@ fn printer_emits_bodyless_extern() {
         version: LILAC_IR_VERSION.to_owned(),
         target: lilac_target::Target::default(),
         data: Vec::new(),
+        formats: Vec::new(),
         funcs: vec![LirFunc {
             name: "puts".into(),
             ins: vec![("s".into(), t("#byte_buffer"))],
@@ -926,6 +928,7 @@ fn extern_module() -> LirModule {
         version: LILAC_IR_VERSION.to_owned(),
         target: lilac_target::Target::default(),
         data: Vec::new(),
+        formats: Vec::new(),
         funcs: vec![LirFunc {
             name: "puts".into(),
             ins: vec![("s".into(), t("#byte_buffer"))],
@@ -1537,4 +1540,200 @@ fn spanned_data_literal_with_newlines_keeps_physical_lines_aligned() {
     assert_eq!(lines[data_line + 1], "b\"");
     assert_eq!(spanned.lines[data_line], Some(test_span()));
     assert_eq!(spanned.lines[data_line + 1], Some(test_span()));
+}
+
+/// A formatter: `ref <value>, ref #byte_buffer` in, nothing out.
+fn formatter(name: &str, value: &str) -> LirFunc {
+    let mut func = trivial_func(name);
+    func.ins = vec![
+        ("value".into(), t(value)),
+        ("out".into(), t("ref #byte_buffer")),
+    ];
+    func
+}
+
+/// `canonical_module` plus `!fmt0: format "a" {@fmt_a} "" {@fmt_b} "b"`,
+/// which its function formats with `%x: #bit32` and `%y: #bit8`.
+fn format_module() -> LirModule {
+    let mut module = canonical_module();
+    module.funcs.push(formatter("fmt_a", "ref #bit32"));
+    module.funcs.push(formatter("fmt_b", "ref #bit8"));
+    module.formats.push(LirFormat {
+        name: "fmt0".into(),
+        pieces: vec![b"a".to_vec(), Vec::new(), b"b".to_vec()],
+        formats: vec!["fmt_a".into(), "fmt_b".into()],
+        span: test_span(),
+    });
+    let alloca = |ty: &str, place: &str| LirInst::Alloca {
+        ty: t(ty),
+        place: place.into(),
+        span: test_span(),
+    };
+    let addr = |place: &str, dst: &str, ty: &str| LirInst::Addr {
+        place: place.into(),
+        dst: dst.into(),
+        ty: t(ty),
+        span: test_span(),
+    };
+    module.funcs[0].blocks[0].insts.extend([
+        alloca("#bit32", "x"),
+        alloca("#bit8", "y"),
+        addr("x", "2", "ref #bit32"),
+        addr("y", "3", "ref #bit8"),
+        alloca("#.lilac.format_args", "f"),
+        LirInst::Format {
+            template: "fmt0".into(),
+            holes: vec!["2".into(), "3".into()],
+            dst: "f".into(),
+            span: test_span(),
+        },
+    ]);
+    module
+}
+
+/// Breaks one part of a valid module, for a verifier test.
+type Breaker<T> = fn(&mut T);
+
+/// The function's `format` instruction.
+fn format_inst(module: &mut LirModule) -> &mut LirInst {
+    module.funcs[0].blocks[0]
+        .insts
+        .iter_mut()
+        .find(|inst| matches!(inst, LirInst::Format { .. }))
+        .expect("a format")
+}
+
+#[test]
+fn format_prints_as_the_fstring_reads_and_verifies() {
+    let module = format_module();
+    let text = module.to_text();
+    assert!(
+        text.contains("\n!fmt0: format \"a\" {@fmt_a} \"\" {@fmt_b} \"b\"\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n    format !fmt0 (&2, &3) -> %f\n"),
+        "{text}"
+    );
+    assert_eq!(verify_messages(&module), Vec::<String>::new());
+    let spanned = module.to_text_spanned();
+    assert_eq!(spanned.text, text);
+    assert_eq!(spanned.lines.len(), text.lines().count());
+}
+
+#[test]
+fn verify_rejects_bad_templates() {
+    let cases: Vec<(&str, Breaker<LirModule>)> = vec![
+        ("one more piece than holes", |module| {
+            module.formats[0].pieces.pop();
+        }),
+        ("unknown function", |module| {
+            module.formats[0].formats[1] = "missing".into();
+        }),
+        ("must take `ref #T, ref #W`", |module| {
+            module.funcs[1].outs = vec![("o".into(), t("#bit8"))];
+        }),
+        ("must take `ref #T, ref #W`", |module| {
+            module.funcs[2].ins.pop();
+        }),
+        ("formats into both", |module| {
+            module.funcs[2].ins[1].1 = t("ref #bit8");
+        }),
+        ("duplicate symbol `!fmt0`", |module| {
+            module.data.push(LirData {
+                name: "fmt0".into(),
+                bytes: Vec::new(),
+                span: test_span(),
+            });
+        }),
+    ];
+    for (expected, break_it) in cases {
+        let mut module = format_module();
+        break_it(&mut module);
+        let errors = verify_messages(&module);
+        assert!(
+            errors.iter().any(|error| error.contains(expected)),
+            "{expected}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn verify_rejects_bad_format_instructions() {
+    let cases: Vec<(&str, Breaker<LirInst>)> = vec![
+        ("has 2 holes, but `format` passes 1", |inst| {
+            if let LirInst::Format { holes, .. } = inst {
+                holes.pop();
+            }
+        }),
+        ("takes `ref #bit32`", |inst| {
+            if let LirInst::Format { holes, .. } = inst {
+                holes.swap(0, 1);
+            }
+        }),
+        ("undefined register", |inst| {
+            if let LirInst::Format { holes, .. } = inst {
+                holes[0] = "9".into();
+            }
+        }),
+        ("undeclared template", |inst| {
+            if let LirInst::Format { template, .. } = inst {
+                *template = "fmt9".into();
+            }
+        }),
+        ("expected `#.lilac.format_args`", |inst| {
+            if let LirInst::Format { dst, .. } = inst {
+                *dst = "x".into();
+            }
+        }),
+    ];
+    for (expected, break_it) in cases {
+        let mut module = format_module();
+        break_it(format_inst(&mut module));
+        let errors = verify_messages(&module);
+        assert!(
+            errors.iter().any(|error| error.contains(expected)),
+            "{expected}: {errors:?}"
+        );
+    }
+}
+
+/// The template is the C struct `{ uintptr_t holes; struct { struct {
+/// uintptr_t len; const uint8_t *data; } text; void (*format)(void); }
+/// parts[holes + 1]; }`, at 64 and 32 bits.
+#[test]
+fn template_layout_is_the_c_struct() {
+    for (triple, word) in [("x86_64-unknown-none", 8), ("i686-unknown-linux-gnu", 4)] {
+        let target = lilac_target::Target::parse(triple).expect("triple");
+        let part = builtin_layout(&LirTy::format_part(), &target).expect("a part");
+        assert_eq!(part.size, 3 * word, "{triple}");
+        assert_eq!(part.fields[1].offset, 2 * word, "{triple}");
+        let template = format_template_layout(2, &target).expect("a template");
+        assert_eq!(template.fields[1].offset, word, "{triple}");
+        assert_eq!(template.size, word + 3 * part.size, "{triple}");
+        assert_eq!(template.align, word, "{triple}");
+        let view = builtin_layout(&LirTy::format_view(), &target).expect("a view");
+        assert_eq!((view.size, view.fields[1].offset), (2 * word, word));
+    }
+}
+
+#[test]
+fn dce_keeps_a_live_template_and_its_formatters() {
+    let mut module = format_module();
+    module.funcs[0].name = "main".into();
+    module.formats.push(LirFormat {
+        name: "unused".into(),
+        pieces: vec![Vec::new(), Vec::new()],
+        formats: vec!["fmt_c".into()],
+        span: test_span(),
+    });
+    module.funcs.push(formatter("fmt_c", "ref #bit8"));
+    prune_unreachable(&mut module, &std::collections::HashSet::<String>::new());
+    let funcs: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(funcs, ["main", "fmt_a", "fmt_b"]);
+    let formats: Vec<&str> = module.formats.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(formats, ["fmt0"]);
+    let graph = CallGraph::new(&module);
+    assert_eq!(graph.callers("fmt_a")[0].kind, EdgeKind::Address);
+    assert_eq!(verify_messages(&module), Vec::<String>::new());
 }
