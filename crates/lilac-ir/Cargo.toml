@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 lilac-error = { path = "../lilac-error" }
+lilac-float = { path = "../lilac-float" }
 lilac-layout = { path = "../lilac-layout" }
 lilac-span = { path = "../lilac-span" }
 lilac-target = { path = "../lilac-target" }

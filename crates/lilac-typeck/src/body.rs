@@ -135,7 +135,7 @@ pub(crate) fn set_flag(flag: LocalId, set: bool, span: Span) -> HirStmt {
         value: HirExpr {
             ty,
             span,
-            kind: HirExprKind::Number(if set { "0x1" } else { "0x0" }.to_owned()),
+            kind: HirExprKind::Int(u64::from(set)),
         },
         old: HirOld::Full,
     }
@@ -776,7 +776,7 @@ impl Checker<'_> {
             .filter(|other| !std::ptr::eq(*other, arm))
             .filter_map(|other| match &other.pattern {
                 MatchPattern::Tag { name, .. } => Some(name.as_str()),
-                MatchPattern::Const(_) => None,
+                MatchPattern::Literal { .. } => None,
             })
             .collect();
         self.record_tag(span, Some(scrutinee), &taken);
@@ -865,29 +865,8 @@ impl Checker<'_> {
                 let local = self.declare(fcx, &capture.name, declared, capture.span);
                 (HirPattern::Variant(index), Some(local))
             }
-            MatchPattern::Const(bytes) => {
-                if scrutinee != TypeId::ERROR && !self.is_bit(scrutinee) {
-                    self.diags.emit(
-                        Diagnostic::error(
-                            codes::E010,
-                            format!(
-                                "byte patterns need a bit container scrutinee, found {}",
-                                self.show_id(scrutinee)
-                            ),
-                        )
-                        .label(arm.span, true, "not a bit container"),
-                    );
-                }
-                if arm.capture.is_some() {
-                    self.diags.emit(
-                        Diagnostic::error(codes::E022, "byte patterns capture nothing").label(
-                            arm.span,
-                            true,
-                            "captures need `.Tag` patterns",
-                        ),
-                    );
-                }
-                (HirPattern::Const(bytes.clone()), None)
+            MatchPattern::Literal { literal, span } => {
+                (self.literal_pattern(arm, literal, *span, scrutinee), None)
             }
         }
     }

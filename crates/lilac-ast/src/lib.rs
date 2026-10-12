@@ -469,7 +469,7 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-/// A match arm pattern: `.Tag`, `Enum.Tag`, or a byte literal.
+/// A match arm pattern: `.Tag`, `Enum.Tag`, or a literal.
 #[derive(Clone, Debug)]
 pub enum MatchPattern {
     /// `.Some` / `Optional.Some` / `Optional[T].Some` tag (the enum comes
@@ -483,8 +483,25 @@ pub enum MatchPattern {
         /// name.
         span: Span,
     },
-    /// `0x0` byte pattern (source bytes).
-    Const(String),
+    /// `0x0` / `'a'`: a literal the scrutinee's bits are compared with.
+    Literal {
+        /// The literal as written.
+        literal: PatternLiteral,
+        /// The literal's span.
+        span: Span,
+    },
+}
+
+/// The literal of a literal match pattern. The parser takes any literal
+/// token; typeck accepts integers and characters.
+#[derive(Clone, Debug)]
+pub enum PatternLiteral {
+    /// A number's source text (`0x0`, `42`, `1.5`).
+    Number(String),
+    /// A character's scalar value.
+    Char(char),
+    /// A string's bytes.
+    Str(Vec<u8>),
 }
 
 /// Match arm bodies: block or inline `=>` single statement.

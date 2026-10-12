@@ -1,5 +1,5 @@
 use super::*;
-use lilac_ast::{BinOp, FuncBody, MatchPattern, Stmt, TypeShape};
+use lilac_ast::{BinOp, FuncBody, MatchPattern, PatternLiteral, Stmt, TypeShape};
 use lilac_error::Diags;
 use lilac_lex::Lexer;
 use lilac_span::SourceMap;
@@ -300,7 +300,11 @@ fn match_byte_arms_parse() {
         panic!("expected match, got {:?}", block.stmts[0]);
     };
     assert_eq!(arms.len(), 2);
-    let MatchPattern::Const(first) = &arms[0].pattern else {
+    let MatchPattern::Literal {
+        literal: PatternLiteral::Number(first),
+        ..
+    } = &arms[0].pattern
+    else {
         panic!("expected const pattern, got {:?}", arms[0].pattern);
     };
     assert_eq!(first, "0x0");
@@ -1528,7 +1532,7 @@ fn a_bare_dot_is_an_empty_tag() {
         .iter()
         .map(|arm| match &arm.pattern {
             MatchPattern::Tag { name, .. } => name.as_str(),
-            MatchPattern::Const(_) => "?",
+            MatchPattern::Literal { .. } => "?",
         })
         .collect();
     assert_eq!(names, ["Red", "", "Blue"]);

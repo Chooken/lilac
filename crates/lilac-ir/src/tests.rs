@@ -659,7 +659,9 @@ fn verify_accepts_constants_that_fit() {
         (LirConst::Int(0xff), "#bit8"),
         (LirConst::Int(u64::MAX), "#bit64"),
         (LirConst::Int(u64::MAX), "#bit_native"),
-        (LirConst::Float(1.5), "#fbit32"),
+        (LirConst::Float(FloatBits::F32(1.5f32.to_bits())), "#fbit32"),
+        (LirConst::Float(FloatBits::F16(0x3C00)), "#fbit16"),
+        (LirConst::Float(FloatBits::F128(0x3FFF << 112)), "#fbit128"),
         (LirConst::Int(0), "ref #bit8"),
     ] {
         let errors = const_errors(value.clone(), ty);
@@ -676,9 +678,19 @@ fn verify_rejects_constants_of_the_wrong_type() {
             "`const 0x100` cannot be a `#bit8`",
         ),
         (
-            LirConst::Float(1.5),
+            LirConst::Float(FloatBits::F32(1.5f32.to_bits())),
             "#bit32",
             "`const 1.5` cannot be a `#bit32`",
+        ),
+        (
+            LirConst::Float(FloatBits::F32(1.5f32.to_bits())),
+            "#fbit64",
+            "`const 1.5` cannot be a `#fbit64`",
+        ),
+        (
+            LirConst::Float(FloatBits::F16(0x3C00)),
+            "#fbit128",
+            "`const 0xH3C00` cannot be a `#fbit128`",
         ),
         (
             LirConst::Int(1),

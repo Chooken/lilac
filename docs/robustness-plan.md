@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–7 done).
+> Status: in progress (Phases 0–8 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -996,6 +996,68 @@ OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
 **Tests:** run tests printing the bits of `@fbit16`/`@fbit128` literals;
 unit tests for the converter; snapshots byte-identical except `@fbit16`
 and `@fbit128` constants.
+
+- **Delivered notes.**
+  - 8.1: typeck (`literals.rs`) stores what it read: `HirExprKind::Int`
+    (the value at its type's width, a negative literal in two's
+    complement) and `HirExprKind::Float(FloatBits)`; the literals typeck
+    makes itself (drop flags, `@needs_drop`, `@array_len`, characters)
+    are `Int`s too. `parse_int`, `number_const` and their `bug!`s are
+    gone, `Lower::choose` compares values, and the E037 template check
+    (`indices.rs`) reads the value. Nothing after typeck parses literal
+    text.
+  - Literal patterns were only source text before, so lowering choked on
+    anything but an integer: a character pattern (`'a'`) or a float one
+    was an ICE in `number_const`, a string one too, and one wider than
+    the scrutinee (`300` against an `@bit8`) a verifier ICE. The AST now
+    keeps the literal's kind (`MatchPattern::Literal`, a `PatternLiteral`)
+    and typeck checks it (`Checker::literal_pattern`): an integer or a
+    character (its scalar value) that fits the scrutinee becomes
+    `HirPattern::Int`; a wider one is `E060`, a float or string one
+    `E010`.
+  - 8.2: the new std-only crate `lilac-float` holds `FloatBits` (the
+    exact pattern of a binary16/32/64/128 value) and `FloatBits::parse`:
+    Rust's parser at 32 and 64 bits, and at 16 and 128 an exact
+    converter (`Big`, a minimal big integer, and one `round` of a
+    rational to nearest, ties to even). Its work is bounded by the
+    literal's length: an exponent far outside the format is decided from
+    the digit count before any big number is built (`1e999999` is
+    overflow, `1e-999999` zero). Tests: known patterns, every binary16
+    value and every midpoint between neighbours (and one ulp of `f64` to
+    either side of each midpoint), the subnormal and overflow edges at 16
+    and 128 bits, and agreement with Rust's parser at 32 and 64 bits on
+    3,000 random literals. `@fbit128` literals, which typeck refused
+    (`E010` "not supported yet"), now work, with all 113 bits.
+  - Folding was the other place a float went through `f64`: `1.0 + 2.0`
+    folded in `f64` and was then narrowed, so an `@fbit16`/`@fbit32` fold
+    rounded twice and an `@fbit128` one kept 53 bits. Folding now runs at
+    the type the expression takes (`Checker::float_target`, decided
+    before folding): each literal is rounded to it, and
+    `FloatBits::apply` is IEEE arithmetic at that width (the exact
+    result of `+ - * /` rounded once, `%` as `fmod`, a zero sum of
+    opposite signs `+0`, a zero divisor `E060` "division by zero"). So a
+    folded expression has the bits the run-time operation gives. Tests:
+    `apply` agrees bit for bit with native `f32` and `f64` arithmetic on
+    random and edge operands; at 16 bits it agrees with `f64` arithmetic
+    rounded once (exact, since 53 >= 2 * 11 + 2); known `@fbit128`
+    results (`0.1 + 0.2`, `1/3`, overflow, ties at the subnormals,
+    `fmod` across the whole exponent range).
+  - The backend builds a float constant by bitcasting an integer of its
+    width (`const_value`; LLVM folds it), so `half 0xH2E66` and
+    `fp128 0xL…` carry the exact pattern. The LIR prints `#fbit16`/
+    `#fbit128` constants as `0xH…`/`0xQ…`; the verifier checks a
+    constant's width against its type.
+  - Float negation lowered as `0.0 - x`, so `-(0.0)` was `+0.0`. It is
+    now `-0.0 - x`, the IEEE sign flip (`FloatBits::negative_zero`).
+  - Run test `float_literal_bits` checks bit patterns at all four
+    widths, folds included, and negating a zero. No `.lir` or `.ll`
+    snapshot changed: none holds an `@fbit16`, an `@fbit128` or a float
+    negation.
+  - Not done here: `@fbit16` and `@fbit128` arithmetic at run time needs
+    compiler-rt's soft-float routines (`__extendhfsf2`, `__addtf3`, …),
+    which native mode does not link, so it fails to link today. A float
+    global's initializer is still not a constant (`E038`); the constant
+    evaluator has no floats.
 
 ---
 

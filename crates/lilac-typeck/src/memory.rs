@@ -37,7 +37,7 @@ impl Checker<'_> {
                 Ok(Called::Value(HirExpr {
                     ty: Builtin::Bit8.value(),
                     span,
-                    kind: HirExprKind::Number(if needs { "0x1" } else { "0x0" }.to_owned()),
+                    kind: HirExprKind::Int(u64::from(needs)),
                 }))
             }
             Intrinsic::Write => {

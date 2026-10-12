@@ -7,6 +7,7 @@ edition.workspace = true
 lilac-span = { path = "../lilac-span" }
 lilac-resolve = { path = "../lilac-resolve" }
 lilac-ty = { path = "../lilac-ty" }
+lilac-float = { path = "../lilac-float" }
 
 [lints]
 workspace = true

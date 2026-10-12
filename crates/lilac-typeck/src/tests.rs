@@ -78,9 +78,9 @@ fn render_all(diags: &Diags, sm: &SourceMap) -> String {
         .collect()
 }
 
-/// The checked type and source bytes of the literal in `main`'s first
-/// statement: a bare literal statement takes no expected type, while
-/// `x: T = lit` takes `T`.
+/// The checked type and value of the literal in `main`'s first statement
+/// (an integer in hex, a float as `FloatBits` displays it): a bare literal
+/// statement takes no expected type, while `x: T = lit` takes `T`.
 fn literal_type_and_bytes(src: &str) -> (String, String) {
     let (diags, hir, types, _, res) = run_native(src, 64);
     assert!(!diags.has_errors(), "{diags:?}");
@@ -95,7 +95,8 @@ fn literal_type_and_bytes(src: &str) -> (String, String) {
         other => panic!("expected a value statement, got {other:?}"),
     };
     let bytes = match &value.kind {
-        HirExprKind::Number(bytes) => bytes.clone(),
+        HirExprKind::Int(value) => format!("0x{value:X}"),
+        HirExprKind::Float(bits) => bits.to_string(),
         other => panic!("expected a number literal, got {other:?}"),
     };
     (types.display(value.ty.id), bytes)
@@ -461,9 +462,104 @@ fn integer_literal_into_float_object_is_not_a_bitcast() {
 }
 
 #[test]
-fn fbit128_literal_is_out_of_scope() {
-    let diags = check_src("main: function () nothing {\n    x: @fbit128 = 3.14\n}\n");
-    assert!(has_code(&diags, "E010"), "{diags:?}");
+fn float_literals_round_once_to_their_type() {
+    for (src, want_ty, want_bits) in [
+        ("x: @fbit16 = 0.1", "@fbit16", "0xH2E66"),
+        ("x: @fbit16 = 65504.0", "@fbit16", "0xH7BFF"),
+        ("x: @fbit32 = 0.1", "@fbit32", "0.1"),
+        ("x: @fbit64 = 0.1", "@fbit64", "0.1"),
+        // 113 bits of `0.1`, not 53 widened.
+        (
+            "x: @fbit128 = 0.1",
+            "@fbit128",
+            "0xQ3FFB999999999999999999999999999A",
+        ),
+        (
+            "x: @fbit128 = 1.18973149535723176508575932662800702e4932",
+            "@fbit128",
+            "0xQ7FFEFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+        ),
+    ] {
+        let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+        let (ty, bits) = literal_type_and_bytes(&source);
+        assert_eq!(ty, want_ty, "{src}");
+        assert_eq!(bits, want_bits, "{src}");
+    }
+}
+
+#[test]
+fn float_literal_past_its_type_is_e060() {
+    for src in [
+        "x: @fbit16 = 65520.0",
+        "x: @fbit32 = 3.5e38",
+        "x: @fbit64 = 1.8e308",
+        "x: @fbit128 = 1.2e4932",
+        "x: @fbit16 = 70000.0 - 60000.0",
+    ] {
+        let diags = check_src(&format!("main: function () nothing {{\n    {src}\n}}\n"));
+        assert!(has_code(&diags, "E060"), "{src}: {diags:?}");
+    }
+}
+
+#[test]
+fn float_folds_at_its_type() {
+    for (src, want) in [
+        // At `@fbit64`, `0.1 + 0.2` is not `0.3`.
+        ("x: @fbit64 = 0.1 + 0.2", "0.30000000000000004"),
+        ("x: @fbit32 = 0.1 + 0.2", "0.3"),
+        // `1 + 0.4 ulp` rounds to `1.0` at 24 bits before `0.2 ulp` is
+        // added; at 53 bits the sum would be `1 + 0.6 ulp`, then `1.0000001`.
+        (
+            "x: @fbit32 = 1.0000000476837158 + 0.00000002384185791015625",
+            "1.0",
+        ),
+        ("x: @fbit32 = 16777216.0 + 1.0", "16777216.0"),
+        ("x: @fbit16 = 2048.0 + 1.0", "0xH6800"),
+        ("x: @fbit16 = 1.0 / 3.0", "0xH3555"),
+        (
+            "x: @fbit128 = 0.1 + 0.2",
+            "0xQ3FFD3333333333333333333333333334",
+        ),
+        ("x: @fbit64 = 5.5 % 2.0", "1.5"),
+    ] {
+        let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+        let (_, bits) = literal_type_and_bytes(&source);
+        assert_eq!(bits, want, "{src}");
+    }
+    for src in ["1.0 / 0.0", "0.0 / 0.0", "1.0 % 0.0"] {
+        let diags = check_src(&format!("main: function () nothing {{\n    {src}\n}}\n"));
+        assert!(has_code(&diags, "E060"), "{src}: {diags:?}");
+    }
+    let diags = check_src("main: function () nothing {\n    x: @fbit16 = 60000.0 + 60000.0\n}\n");
+    assert!(has_code(&diags, "E060"), "{diags:?}");
+}
+
+#[test]
+fn literal_patterns_check_against_the_scrutinee() {
+    let body = |scrutinee: &str, pattern: &str| {
+        format!(
+            "main: function () nothing {{\n    x: {scrutinee} = 0x0\n    match x {{\n        {pattern} => {{}}\n    }} else {{}}\n}}\n"
+        )
+    };
+    for (scrutinee, pattern) in [
+        ("@bit8", "0xFF"),
+        ("@bit8", "'a'"),
+        ("@bit32", "'\u{1F600}'"),
+        ("@bit64", "0xFFFF_FFFF_FFFF_FFFF"),
+    ] {
+        let diags = check_src(&body(scrutinee, pattern));
+        assert!(!diags.has_errors(), "{scrutinee} {pattern}: {diags:?}");
+    }
+    for (scrutinee, pattern, code) in [
+        ("@bit8", "0x100", "E060"),
+        ("@bit8", "'\u{100}'", "E060"),
+        ("@bit16", "'\u{1F600}'", "E060"),
+        ("@bit32", "1.5", "E010"),
+        ("@bit32", "\"a\"", "E010"),
+    ] {
+        let diags = check_src(&body(scrutinee, pattern));
+        assert!(has_code(&diags, code), "{scrutinee} {pattern}: {diags:?}");
+    }
 }
 
 #[test]

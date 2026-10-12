@@ -547,9 +547,23 @@ Where things live:
   `verify.rs` the verifier and the post-DCE `check_live_*` checks.
 - LIR names are typed (`names.rs`): `Reg` (`&`), `PlaceName` (`%`),
   `Label` (`$`) and `Symbol` (`@`, data `!`); each displays with its sigil.
-  A `const` holds a `LirConst` (`Int(u64)`, `Float(f64)`, `Data(Symbol)`)
-  built once in lowering (`number_const`); the verifier checks it fits its
-  type (`check_const`) and the backend never parses text.
+  A `const` holds a `LirConst` (`Int(u64)`, `Float(FloatBits)`,
+  `Data(Symbol)`); the verifier checks it fits its type (`check_const`)
+  and the backend never parses text.
+- Literals are read once, in typeck (`literals.rs`): the HIR holds the
+  value (`HirExprKind::Int(u64)` at its type's width, a negative one in
+  two's complement; `HirExprKind::Float(FloatBits)`; `HirPattern::Int`),
+  and nothing after typeck parses literal text. `lilac-float` (std-only)
+  is the float model: `FloatBits` is a value's exact IEEE pattern at one of
+  the four widths, `FloatBits::parse` rounds a decimal literal once to its
+  type (Rust's parser at 32/64 bits, an exact big-integer converter at
+  16/128), and `FloatBits::apply` is IEEE arithmetic at a width (the exact
+  result rounded once; `%` is `fmod`), so a literal fold
+  (`Checker::fold_binop`) runs at the type the expression takes and gives
+  the bits the run-time operation would. The LLVM backend bitcasts an
+  integer of the pattern's width. A literal match pattern is an integer or
+  a character that fits the scrutinee (`E060`); a float or string one is
+  `E010` (`Checker::literal_pattern`).
 - AST type syntax is a `lilac_ast::TypeShape` (`Named`, `Function`,
   `Array`, `SelfType`, `Error`): a type the parser could not read is
   `Error`, never a name. Builtin types are `lilac_ty::Builtin`, whose

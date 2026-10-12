@@ -10,7 +10,7 @@ use lilac_ir::{ArithOp, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy
 use lilac_span::Span;
 use lilac_ty::TypeRef;
 
-use crate::constant::{arith_op, is_division, number_const};
+use crate::constant::{arith_op, is_division};
 use crate::{end_of, stmt_span, FnState, Lower, Place, Scope};
 
 impl Lower<'_> {
@@ -464,13 +464,13 @@ impl Lower<'_> {
             });
             (value, LirConst::Int(u64::from(*index)), tag)
         } else {
-            let HirPattern::Const(bytes) = pattern else {
+            let HirPattern::Int(bits) = pattern else {
                 lilac_error::bug!(span, "tag pattern on a bit scrutinee");
             };
             let lir = self.lir_ty(ty);
             let value = state.read_place(subject, &lir, span);
             let value = state.reg_of(value, &lir, span);
-            (value, number_const(bytes, &lir, span), lir)
+            (value, LirConst::Int(*bits), lir)
         };
         let constant_reg = state.reg();
         state.emit(LirInst::Const {

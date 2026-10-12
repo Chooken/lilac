@@ -903,7 +903,8 @@ impl Pass<'_, '_> {
             | HirExprKind::Deref(_)
             | HirExprKind::Global(_)
             | HirExprKind::Field { .. }
-            | HirExprKind::Number(_)
+            | HirExprKind::Int(_)
+            | HirExprKind::Float(_)
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)

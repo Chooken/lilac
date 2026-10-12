@@ -19,9 +19,8 @@ use lilac_hir::intrinsics::{Intrinsic, NumOp};
 use lilac_hir::{
     FuncKey, HirCallee, HirExpr, HirExprKind, HirFunc, HirPattern, HirStmt, HirValueArm, LocalId,
 };
-use lilac_ir::{ArithOp, LirConst, LirTy};
+use lilac_ir::{ArithOp, LirTy};
 use lilac_resolve::DefId;
-use lilac_span::Span;
 use lilac_ty::TypeRef;
 
 use crate::{DivisionPanic, Lower};
@@ -83,42 +82,6 @@ pub(crate) fn arith_op(op: NumOp, float: bool) -> Option<ArithOp> {
         (NumOp::Ge, true) => ArithOp::FGe,
         _ => return None,
     })
-}
-
-/// Number literal text as a constant of `lir`: a float for a float type,
-/// else an integer.
-pub(crate) fn number_const(text: &str, lir: &LirTy, span: Span) -> LirConst {
-    if lir.is_float() {
-        match text.replace('_', "").parse::<f64>() {
-            Ok(value) => LirConst::Float(value),
-            Err(_) => lilac_error::bug!(span, "invalid float literal `{text}`"),
-        }
-    } else {
-        match parse_int(text) {
-            Some(value) => LirConst::Int(value),
-            None => lilac_error::bug!(span, "invalid integer literal `{text}`"),
-        }
-    }
-}
-
-/// Parses integer literal text (`0x`, `0b`, decimal, `_` separators).
-pub(crate) fn parse_int(text: &str) -> Option<u64> {
-    let digits = text.trim().replace('_', "");
-    if let Some(hex) = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-    {
-        u64::from_str_radix(hex, 16).ok()
-    } else if let Some(bin) = digits
-        .strip_prefix("0b")
-        .or_else(|| digits.strip_prefix("0B"))
-    {
-        u64::from_str_radix(bin, 2).ok()
-    } else if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        digits.parse::<u64>().ok()
-    } else {
-        None
-    }
 }
 
 /// All-ones mask of `width` bits.
@@ -317,9 +280,7 @@ impl<'a> Lower<'a> {
         for (index, pattern) in patterns.enumerate() {
             let hit = match (pattern, value) {
                 (HirPattern::Variant(want), Value::Variant(have, _)) => want == have,
-                (HirPattern::Const(lit), Value::Int(bits, width)) => {
-                    parse_int(lit)? & mask_of(*width) == *bits
-                }
+                (HirPattern::Int(want), Value::Int(bits, _)) => want == bits,
                 _ => return None,
             };
             if hit {
@@ -345,9 +306,9 @@ impl<'a> Lower<'a> {
             return None;
         }
         match &expr.kind {
-            HirExprKind::Number(text) => {
+            HirExprKind::Int(bits) => {
                 let width = self.int_width(expr.ty)?;
-                Some(Value::Int(parse_int(text)? & mask_of(width), width))
+                Some(Value::Int(bits & mask_of(width), width))
             }
             HirExprKind::SizeOf(ty) | HirExprKind::AlignOf(ty) => {
                 let lir = self.lir_ty(*ty);
@@ -425,6 +386,7 @@ impl<'a> Lower<'a> {
             HirExprKind::Call { .. }
             | HirExprKind::Global(_)
             | HirExprKind::Deref(_)
+            | HirExprKind::Float(_)
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::RefOf(_)

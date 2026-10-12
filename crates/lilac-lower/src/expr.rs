@@ -7,7 +7,6 @@ use lilac_ir::{
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeRef};
 
-use crate::constant::number_const;
 use crate::{is_fresh, FnState, Lower, Place};
 
 impl Lower<'_> {
@@ -227,7 +226,8 @@ impl Lower<'_> {
                 Self::mark_expr(state, func, inner, false);
                 LirOperand::Place(moved)
             }
-            HirExprKind::Number(text) => state.constant(number_const(text, &lir, span), lir, span),
+            HirExprKind::Int(bits) => state.constant(LirConst::Int(*bits), lir, span),
+            HirExprKind::Float(bits) => state.constant(LirConst::Float(*bits), lir, span),
             HirExprKind::Str(bytes) => {
                 LirOperand::Place(self.byte_buffer_place(state, bytes, span))
             }

@@ -14,7 +14,6 @@ use lilac_hir::{HirBlock, HirCallee, HirExpr, HirExprKind, HirFunc, HirStmt};
 use lilac_span::Span;
 use lilac_ty::TypeKind;
 
-use crate::literals::integer_magnitude;
 use crate::Checker;
 
 impl Checker<'_> {
@@ -134,7 +133,8 @@ impl Checker<'_> {
             }
             HirExprKind::Variant { payload: None, .. }
             | HirExprKind::Local(_)
-            | HirExprKind::Number(_)
+            | HirExprKind::Int(_)
+            | HirExprKind::Float(_)
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)
@@ -154,13 +154,10 @@ impl Checker<'_> {
             HirExprKind::Const(def) => self.out.consts.get(def),
             _ => Some(index),
         };
-        let Some(HirExprKind::Number(text)) = literal.map(|expr| &expr.kind) else {
+        let Some(HirExprKind::Int(value)) = literal.map(|expr| &expr.kind) else {
             return;
         };
-        let Some(value) = integer_magnitude(text).and_then(|value| u64::try_from(value).ok())
-        else {
-            return;
-        };
+        let value = *value;
         if value >= len {
             bad.push((index.span, value, len));
         }

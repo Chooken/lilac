@@ -25,6 +25,7 @@ mod ty;
 mod verify;
 
 pub use dce::{prune_unreachable, reach, CallGraph, Edge, EdgeKind, Reach};
+pub use lilac_float::{FloatBits, FloatWidth};
 pub use names::{Label, PlaceName, Reg, Symbol};
 pub use runtime::{build_runtime, entry_point, hook_externs, panic_runtime, Entry};
 pub use ty::LirTy;
@@ -735,8 +736,11 @@ pub enum LirConst {
     /// An integer of an integer type, or `0` as the null reference; prints
     /// in hex (`0x2a`).
     Int(u64),
-    /// A float of a float type; prints so it reads back exactly (`5.25`).
-    Float(f64),
+    /// A float's exact bit pattern, of its type's width. `#fbit32` and
+    /// `#fbit64` print as the shortest decimal that reads back exactly
+    /// (`5.25`), `#fbit16` and `#fbit128` as their bits (`0xH3C00`,
+    /// `0xQ3FFF0000000000000000000000000000`).
+    Float(FloatBits),
     /// A data constant's address, as a `ref #bit8` (`!c0`). A
     /// `#byte_buffer` over it is built in a place from the address and the
     /// length ([`runtime::fill_byte_buffer`]).
@@ -747,7 +751,7 @@ impl fmt::Display for LirConst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Int(value) => write!(f, "{value:#x}"),
-            Self::Float(value) => write!(f, "{value:?}"),
+            Self::Float(bits) => write!(f, "{bits}"),
             Self::Data(name) => write!(f, "!{}", name.as_str()),
         }
     }

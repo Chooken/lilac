@@ -28,9 +28,9 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst,
-    LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg,
-    RmwOp, Symbol,
+    builtin_layout, builtin_sig, ArithOp, AtomicOrdering, ConvertOp, FloatWidth, LirCallee,
+    LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm, LirTy,
+    PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
@@ -47,6 +47,15 @@ fn checked_at<T>(result: Result<T, BuilderError>, span: Span, what: &str) -> T {
         Ok(value) => value,
         Err(err) => bug!(span, "failed to build {what}: {err}"),
     }
+}
+
+/// The low 64 bits of `value` (an integer constant's words are 64-bit).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "dropping the high half is the point"
+)]
+fn low_word(value: u128) -> u64 {
+    value as u64
 }
 
 /// Per-function lowering state: every place's pointer and declared LIR type,
@@ -788,7 +797,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 }
             }
             LirInst::Const { dst, value, ty, .. } => {
-                let value = self.const_value(value, ty);
+                let value = self.const_value(value, ty, builder);
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Load { src, dst, ty, .. } => {
@@ -1550,8 +1559,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Materializes a `const`: a data-symbol address, a float immediate, or
     /// an integer/pointer immediate. The verifier has checked the value
-    /// against its type.
-    fn const_value(&self, value: &LirConst, ty: &LirTy) -> BasicValueEnum<'ctx> {
+    /// against its type. A float is its exact bit pattern as an integer of
+    /// its width, bitcast (the builder folds the cast into a constant), so
+    /// no value passes through an `f64`.
+    fn const_value(
+        &self,
+        value: &LirConst,
+        ty: &LirTy,
+        builder: &Builder<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         match (value, self.lir_type(ty)) {
             (LirConst::Data(name), BasicTypeEnum::PointerType(_)) => {
                 let Some(global) = self.module.get_global(name.as_str()) else {
@@ -1559,8 +1575,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 };
                 global.as_pointer_value().into()
             }
-            (LirConst::Float(value), BasicTypeEnum::FloatType(float_ty)) => {
-                float_ty.const_float(*value).into()
+            (LirConst::Float(bits), BasicTypeEnum::FloatType(float_ty)) => {
+                let pattern = bits.to_bits();
+                let int_ty = match bits.width() {
+                    FloatWidth::W16 => self.context.i16_type(),
+                    FloatWidth::W32 => self.context.i32_type(),
+                    FloatWidth::W64 => self.context.i64_type(),
+                    FloatWidth::W128 => self.context.i128_type(),
+                };
+                let words = [low_word(pattern), low_word(pattern >> 64)];
+                let int = int_ty.const_int_arbitrary_precision(&words);
+                self.checked(builder.build_bit_cast(int, float_ty, ""), "float constant")
             }
             (LirConst::Int(value), BasicTypeEnum::IntType(int_ty)) => {
                 int_ty.const_int(*value, false).into()

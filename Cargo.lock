@@ -282,9 +282,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lilac-float"
+version = "0.2.0"
+
+[[package]]
 name = "lilac-hir"
 version = "0.2.0"
 dependencies = [
+ "lilac-float",
  "lilac-resolve",
  "lilac-span",
  "lilac-ty",
@@ -295,6 +300,7 @@ name = "lilac-ir"
 version = "0.2.0"
 dependencies = [
  "lilac-error",
+ "lilac-float",
  "lilac-layout",
  "lilac-span",
  "lilac-target",
@@ -405,6 +411,7 @@ version = "0.2.0"
 dependencies = [
  "lilac-ast",
  "lilac-error",
+ "lilac-float",
  "lilac-hir",
  "lilac-layout",
  "lilac-lex",

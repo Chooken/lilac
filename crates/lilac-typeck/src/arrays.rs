@@ -150,7 +150,7 @@ impl Checker<'_> {
         Ok(Called::Value(HirExpr {
             ty: Builtin::BitNative.value(),
             span,
-            kind: HirExprKind::Number(format!("{len:#x}")),
+            kind: HirExprKind::Int(*len),
         }))
     }
 

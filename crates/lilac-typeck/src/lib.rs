@@ -935,13 +935,14 @@ impl Checker<'_> {
         }
     }
 
-    pub(crate) fn float_width(&self, id: TypeId) -> u32 {
+    /// The IEEE format of float type `id`.
+    pub(crate) fn float_format(&self, id: TypeId) -> lilac_float::FloatWidth {
         match self.types.kind(id) {
-            TypeKind::FBit16 => 16,
-            TypeKind::FBit32 => 32,
-            TypeKind::FBit64 => 64,
-            TypeKind::FBit128 => 128,
-            _ => lilac_error::bug!(Span::dummy(), "float width of a non-float type"),
+            TypeKind::FBit16 => lilac_float::FloatWidth::W16,
+            TypeKind::FBit32 => lilac_float::FloatWidth::W32,
+            TypeKind::FBit64 => lilac_float::FloatWidth::W64,
+            TypeKind::FBit128 => lilac_float::FloatWidth::W128,
+            _ => lilac_error::bug!(Span::dummy(), "float format of a non-float type"),
         }
     }
 

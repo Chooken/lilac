@@ -742,7 +742,8 @@ impl Verifier<'_> {
     }
 
     /// Checks a `const` against its type: an integer must fit its bit
-    /// container (or be the null reference), a float needs a float type,
+    /// container (or be the null reference), a float needs the float type of
+    /// its width,
     /// and data must be declared and taken as a buffer or a byte address.
     fn check_const(&mut self, value: &LirConst, ty: &LirTy, span: Span) {
         let fits = match (value, ty) {
@@ -750,7 +751,8 @@ impl Verifier<'_> {
                 *bits >= 64 || *value >> u32::from(*bits) == 0
             }
             // `#bit_native`'s width is the target's; lowering sizes it.
-            (LirConst::Int(_), LirTy::BitNative) | (LirConst::Float(_), LirTy::FBit(_)) => true,
+            (LirConst::Int(_), LirTy::BitNative) => true,
+            (LirConst::Float(bits), LirTy::FBit(width)) => bits.width().bits() == u32::from(*width),
             (LirConst::Int(value), LirTy::Ref(_)) => *value == 0,
             (LirConst::Data(name), _) => {
                 self.check_data_const(name, ty, span);

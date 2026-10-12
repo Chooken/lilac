@@ -1,7 +1,8 @@
 //! Blocks and statements.
 
 use lilac_ast::{
-    Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, Stmt, Type, TypeShape,
+    Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, PatternLiteral, Stmt,
+    Type, TypeShape,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::TokenKind;
@@ -388,7 +389,18 @@ impl Parser {
             }
             TokenKind::Number | TokenKind::StringLit | TokenKind::CharLit => {
                 let lit = self.bump();
-                (MatchPattern::Const(lit.text), lit.span)
+                let literal = match lit.kind {
+                    TokenKind::Number => PatternLiteral::Number(lit.text),
+                    TokenKind::StringLit => PatternLiteral::Str(lit.bytes),
+                    _ => PatternLiteral::Char(lit.text.chars().next().unwrap_or('\u{FFFD}')),
+                };
+                (
+                    MatchPattern::Literal {
+                        literal,
+                        span: lit.span,
+                    },
+                    lit.span,
+                )
             }
             _ => {
                 return Err(Self::expected(

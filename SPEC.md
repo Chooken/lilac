@@ -140,17 +140,23 @@ grows to `@bit16` for its conversion), while `x: @bit8 = 0x1FF` and
 `x: Int8 = 300` are `E060`.
 
 A float literal is a `.` or exponent form (`3.14`, `1e3`, `1.5e-4`, `2E10`). It
-defaults to `@fbit64`; an expected `@fbit16/32/64` (or a numeric object's
-`@conversion(from: @fbitN)`) pins it, and the value rounds to nearest-even at
-codegen. A value past the target's maximum finite value is `E060`. A float
-literal in a bit or integer slot is `E010` (no implicit float→int), and
-`@fbit128` literals are out of scope. Unary `-` is an operator, not part of the
+defaults to `@fbit64`; an expected `@fbit16/32/64/128` (or a numeric object's
+`@conversion(from: @fbitN)`) pins it. Its exact decimal value is rounded
+once, to nearest with ties to even, to that type (IEEE 754 binary16, 32, 64
+or 128), so `0.1` as an `@fbit128` has all 113 bits of `0.1`; a value too
+small for the smallest subnormal is zero. A value that rounds past the type's
+largest finite value is `E060`. A float literal in a bit or integer slot is
+`E010` (no implicit float→int). Unary `-` is an operator, not part of the
 literal; reading digits from a runtime `@byte_buffer` is standard-library work,
 not a compiler intrinsic.
 
 Arithmetic between two literals of the same kind is folded at compile time: a
 binary `+ - * / %` whose **both** operands are integer literals folds at 64-bit,
-and whose both operands are float literals folds at `f64`. The result is a
+and whose both operands are float literals folds at the float type the
+expression takes (by the rules above), as IEEE 754 computes it at run time:
+each literal is rounded to that type, each result is the exact one rounded
+once, and `%` is C's `fmod`. So `x: @fbit32 = 0.1 + 0.2` has the bits the
+same `@fbit32` addition would give. The result is a
 single literal typed by the rules above, so `2 * 3 + 4` is the literal `10` and
 nothing is evaluated at run time; an integer result that does not fit the
 consumed width is `E060`, and so is a division or modulo by zero (or any
@@ -704,7 +710,11 @@ through a `ref` cannot move a payload out (`E064`). A `match` that names
 every variant has no fall-through path, so an out set in every arm is set.
 
 Arm patterns are tags (`.Some` or `Enum.Some`); a payload binds with
-`-> name: Type`, and a single statement arm shortens to `=>`. Match is a
+`-> name: Type`, and a single statement arm shortens to `=>`. A match on a
+bit container (`@bitN`) takes literal patterns instead: integers (`0x1`,
+`42`) and characters (`'a'`, its Unicode scalar value), each compared with
+the scrutinee's bits. A literal that needs more bits than the scrutinee
+holds is `E060`, and a float or string literal is not a pattern (`E010`). Match is a
 statement: using a `match` as a value is rejected with `E001`. Because an arm
 starts with `.`, a `.` at the start of a line never continues the previous
 line's expression as a member access. The name after a `.` (a member's, a

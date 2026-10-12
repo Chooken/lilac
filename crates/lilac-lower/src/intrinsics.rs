@@ -4,8 +4,8 @@
 use lilac_hir::intrinsics::{AtomicOp, Intrinsic, NumOp, Ordering};
 use lilac_hir::{HirExpr, HirExprKind, HirFunc, HirOld};
 use lilac_ir::{
-    ArithOp, AtomicOrdering, ConvertOp, LirCallee, LirConst, LirInst, LirOperand, LirTerm, LirTy,
-    PlaceName, Reg, RmwOp,
+    ArithOp, AtomicOrdering, ConvertOp, FloatBits, FloatWidth, LirCallee, LirConst, LirInst,
+    LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp,
 };
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeKind, TypeRef};
@@ -27,16 +27,24 @@ impl Lower<'_> {
         let lir = self.lir_ty(ty);
         match intrinsic {
             Intrinsic::Int(NumOp::Negate, _) | Intrinsic::Float(NumOp::Negate, _) => {
+                // `0 - x`, and for a float `-0.0 - x`: the sign flip IEEE
+                // negation is (`0.0 - 0.0` would be `+0.0`).
                 let float = matches!(intrinsic, Intrinsic::Float(..));
                 let operand = self.value_reg(state, func, &args[0]);
+                let value = match &lir {
+                    LirTy::FBit(bits) if float => {
+                        let Some(width) = FloatWidth::from_bits(u32::from(*bits)) else {
+                            lilac_error::bug!(span, "no float format of {bits} bits");
+                        };
+                        LirConst::Float(FloatBits::negative_zero(width))
+                    }
+                    _ if float => lilac_error::bug!(span, "float negation of a `{lir}`"),
+                    _ => LirConst::Int(0),
+                };
                 let zero = state.reg();
                 state.emit(LirInst::Const {
                     dst: zero.clone(),
-                    value: if float {
-                        LirConst::Float(0.0)
-                    } else {
-                        LirConst::Int(0)
-                    },
+                    value,
                     ty: lir.clone(),
                     span,
                 });

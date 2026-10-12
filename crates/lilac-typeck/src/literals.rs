@@ -1,9 +1,13 @@
-//! Number literals: typing (smallest fit, grown to the expected width) and
-//! compile-time folding of all-literal arithmetic (SPEC §2).
+//! Number literals: typing (smallest fit, grown to the expected width),
+//! reading each one once into the value the HIR holds
+//! (`HirExprKind::Int`, `HirExprKind::Float`), and compile-time folding of
+//! all-literal arithmetic (SPEC §2). A float is rounded once, to the type it
+//! takes, and folds at that type's precision.
 
-use lilac_ast::{BinOp, Expr};
+use lilac_ast::{BinOp, Expr, MatchArm, PatternLiteral};
 use lilac_error::{codes, Diagnostic};
-use lilac_hir::{HirExpr, HirExprKind};
+use lilac_float::{FloatBits, FloatError, FloatOp};
+use lilac_hir::{HirExpr, HirExprKind, HirPattern};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeRef};
 
@@ -45,6 +49,12 @@ fn significant_bits(magnitude: u128) -> u32 {
     u128::BITS - magnitude.leading_zeros()
 }
 
+/// `value`, which a width check has already bounded to 64 bits.
+fn word(value: u128, span: Span) -> u64 {
+    u64::try_from(value)
+        .unwrap_or_else(|_| lilac_error::bug!(span, "literal value {value:#x} past 64 bits"))
+}
+
 /// The smallest of 8/16/32/64 holding `bits` unsigned bits.
 fn smallest_width(bits: u32) -> Option<u32> {
     match bits {
@@ -61,20 +71,6 @@ fn signed_smallest_width(magnitude: u128) -> Option<u32> {
     [8u32, 16, 32, 64]
         .into_iter()
         .find(|width| magnitude <= 1u128 << (width - 1))
-}
-
-/// Largest finite value of an `@fbitN` (16/32/64).
-fn max_finite_float(width: u32) -> f64 {
-    match width {
-        16 => 65504.0,
-        32 => f64::from(f32::MAX),
-        _ => f64::MAX,
-    }
-}
-
-fn parse_float(bytes: &str) -> f64 {
-    let cleaned: String = bytes.chars().filter(|c| *c != '_').collect();
-    cleaned.parse::<f64>().unwrap_or(f64::NAN)
 }
 
 /// Whether `op` is literal-foldable arithmetic.
@@ -99,8 +95,12 @@ pub(crate) fn is_foldable_literal(expr: &Expr) -> bool {
 /// A folded literal value.
 #[derive(Clone, Copy)]
 enum Value {
-    Int { negative: bool, magnitude: u128 },
-    Float(f64),
+    Int {
+        negative: bool,
+        magnitude: u128,
+    },
+    /// Rounded to the fold's float type ([`Checker::float_target`]).
+    Float(FloatBits),
 }
 
 /// The result of folding a subtree.
@@ -111,14 +111,25 @@ enum Folded {
 }
 
 impl Checker<'_> {
-    fn number(ty: TypeId, bytes: String, span: Span) -> HirExpr {
+    fn int(ty: TypeId, value: u64, span: Span) -> HirExpr {
         HirExpr {
             ty: TypeRef {
                 id: ty,
                 is_ref: false,
             },
             span,
-            kind: HirExprKind::Number(bytes),
+            kind: HirExprKind::Int(value),
+        }
+    }
+
+    fn float(ty: TypeId, bits: FloatBits, span: Span) -> HirExpr {
+        HirExpr {
+            ty: TypeRef {
+                id: ty,
+                is_ref: false,
+            },
+            span,
+            kind: HirExprKind::Float(bits),
         }
     }
 
@@ -146,6 +157,64 @@ impl Checker<'_> {
         found
     }
 
+    /// The float type a float literal takes under `expected`: an expected
+    /// `@fbitN`, else a numeric object's single `@conversion(from: @fbitN)`,
+    /// else `@fbit64`.
+    fn float_target(&self, expected: Option<TypeId>) -> TypeId {
+        let fbit64 = Builtin::FBit64.id();
+        match expected {
+            Some(ty) if self.is_float(ty) => ty,
+            Some(ty) => self.conversion_source(ty, true).unwrap_or(fbit64),
+            None => fbit64,
+        }
+    }
+
+    /// `E010` when `expected` is a bit type: there is no implicit float to
+    /// integer conversion. `what` names the float ("literal").
+    fn float_in_bit_slot(&mut self, expected: Option<TypeId>, span: Span, what: &str) -> bool {
+        if !expected.is_some_and(|ty| self.is_bit(ty)) {
+            return false;
+        }
+        self.diags.emit(
+            Diagnostic::error(
+                codes::E010,
+                "mismatched types: expected an integer, found a float",
+            )
+            .label(span, true, format!("float {what} here")),
+        );
+        true
+    }
+
+    /// Float literal text rounded once to `target` (`E060` past its largest
+    /// finite value).
+    fn float_literal(&mut self, bytes: &str, target: TypeId, span: Span) -> Option<FloatBits> {
+        match FloatBits::parse(bytes, self.float_format(target)) {
+            Ok(bits) => Some(bits),
+            Err(FloatError::Invalid) => {
+                // The lexer keeps a malformed number's well-formed part, so
+                // this is only reachable through a lexer bug; still an error.
+                self.diags.emit(
+                    Diagnostic::error(codes::E060, "invalid float literal").label(
+                        span,
+                        true,
+                        "not a valid float literal",
+                    ),
+                );
+                None
+            }
+            Err(FloatError::Overflow | FloatError::DivisionByZero) => {
+                self.diags.emit(
+                    Diagnostic::error(
+                        codes::E060,
+                        format!("float literal does not fit in {}", self.show_id(target)),
+                    )
+                    .label(span, true, "literal out of range"),
+                );
+                None
+            }
+        }
+    }
+
     /// Types a number literal under `expected`.
     pub(crate) fn check_number(
         &mut self,
@@ -154,7 +223,14 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> HirExpr {
         if is_float_literal(bytes) {
-            return self.type_float(parse_float(bytes), Some(bytes), span, expected);
+            if self.float_in_bit_slot(expected, span, "literal") {
+                return HirExpr::poison(span);
+            }
+            let target = self.float_target(expected);
+            return match self.float_literal(bytes, target, span) {
+                Some(bits) => Self::float(target, bits, span),
+                None => HirExpr::poison(span),
+            };
         }
         let Some(magnitude) = integer_magnitude(bytes) else {
             self.diags.emit(
@@ -166,19 +242,21 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         };
-        let Some(ty) = self.int_literal_ty(significant_bits(magnitude), span, expected) else {
-            return HirExpr::poison(span);
-        };
-        Self::number(ty, bytes.to_owned(), span)
+        match self.int_literal(magnitude, span, expected) {
+            Some((ty, value)) => Self::int(ty, value, span),
+            None => HirExpr::poison(span),
+        }
     }
 
-    /// The bit type an unsigned integer of `bits` bits takes under `expected`.
-    fn int_literal_ty(
+    /// The bit type and value an unsigned integer `magnitude` takes under
+    /// `expected`.
+    fn int_literal(
         &mut self,
-        bits: u32,
+        magnitude: u128,
         span: Span,
         expected: Option<TypeId>,
-    ) -> Option<TypeId> {
+    ) -> Option<(TypeId, u64)> {
+        let bits = significant_bits(magnitude);
         let constrained = expected
             .filter(|id| self.is_bit(*id))
             .or_else(|| expected.and_then(|id| self.conversion_source(id, false)));
@@ -197,7 +275,7 @@ impl Checker<'_> {
                 );
                 return None;
             }
-            return Some(ty);
+            return Some((ty, word(magnitude, span)));
         }
         let Some(width) = smallest_width(bits) else {
             self.diags.emit(
@@ -209,7 +287,107 @@ impl Checker<'_> {
             );
             return None;
         };
-        Some(Self::bit_of_width(width))
+        Some((Self::bit_of_width(width), word(magnitude, span)))
+    }
+
+    /// Checks `arm`'s literal pattern against `scrutinee`, which must be a
+    /// bit container (`E010`); a literal pattern captures nothing (`E022`).
+    pub(crate) fn literal_pattern(
+        &mut self,
+        arm: &MatchArm,
+        literal: &PatternLiteral,
+        span: Span,
+        scrutinee: TypeId,
+    ) -> HirPattern {
+        let bit = scrutinee != TypeId::ERROR && self.is_bit(scrutinee);
+        if scrutinee != TypeId::ERROR && !bit {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E010,
+                    format!(
+                        "literal patterns need a bit container scrutinee, found {}",
+                        self.show_id(scrutinee)
+                    ),
+                )
+                .label(arm.span, true, "not a bit container"),
+            );
+        }
+        if arm.capture.is_some() {
+            self.diags.emit(
+                Diagnostic::error(codes::E022, "literal patterns capture nothing").label(
+                    arm.span,
+                    true,
+                    "captures need `.Tag` patterns",
+                ),
+            );
+        }
+        // A pattern that is not a value of the scrutinee has its error
+        // (above, or from `pattern_value`), so the body is never lowered
+        // and `0` stands in.
+        let value = if bit {
+            self.pattern_value(literal, span, scrutinee)
+        } else {
+            None
+        };
+        HirPattern::Int(value.unwrap_or(0))
+    }
+
+    /// The value of a literal pattern matched against bit type `scrutinee`:
+    /// an integer or a character, `E060` when it needs more bits than the
+    /// scrutinee holds. A float or a string is `E010`: a match compares bits,
+    /// and neither is the bits of a bit container. `None` only after an
+    /// error.
+    fn pattern_value(
+        &mut self,
+        literal: &PatternLiteral,
+        span: Span,
+        scrutinee: TypeId,
+    ) -> Option<u64> {
+        let not_a_pattern = |what: &str| {
+            Diagnostic::error(codes::E010, format!("a {what} is not a pattern"))
+                .label(span, true, format!("a {what}"))
+                .help("match a bit container against integers and characters")
+        };
+        let magnitude = match literal {
+            PatternLiteral::Number(text) if is_float_literal(text) => {
+                self.diags.emit(not_a_pattern("float literal"));
+                return None;
+            }
+            PatternLiteral::Number(text) => {
+                let Some(magnitude) = integer_magnitude(text) else {
+                    self.diags.emit(
+                        Diagnostic::error(codes::E060, "invalid integer literal").label(
+                            span,
+                            true,
+                            "not a valid integer literal",
+                        ),
+                    );
+                    return None;
+                };
+                magnitude
+            }
+            PatternLiteral::Char(scalar) => u128::from(u32::from(*scalar)),
+            PatternLiteral::Str(_) => {
+                self.diags.emit(not_a_pattern("string literal"));
+                return None;
+            }
+        };
+        let width = self.bit_width(scrutinee);
+        let bits = significant_bits(magnitude);
+        if bits > width {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E060,
+                    format!(
+                        "value needs {bits} bits but {} holds {width}",
+                        self.show_id(scrutinee)
+                    ),
+                )
+                .label(span, true, "pattern overflows"),
+            );
+            return None;
+        }
+        Some(word(magnitude, span))
     }
 
     /// Folds `-<integer literal>` into a two's-complement constant. `None` when
@@ -248,7 +426,7 @@ impl Checker<'_> {
         };
         Some(
             match self.signed_value(magnitude, fit, *lit_span, expected) {
-                Some((ty, bytes)) => Self::number(ty, bytes, span),
+                Some((ty, value)) => Self::int(ty, value, span),
                 None => HirExpr::poison(span),
             },
         )
@@ -262,7 +440,7 @@ impl Checker<'_> {
         fit: u32,
         span: Span,
         expected: Option<TypeId>,
-    ) -> Option<(TypeId, String)> {
+    ) -> Option<(TypeId, u64)> {
         let constrained = expected
             .filter(|id| self.is_bit(*id))
             .or_else(|| expected.and_then(|id| self.conversion_source(id, false)));
@@ -287,7 +465,7 @@ impl Checker<'_> {
         };
         let mask = (1u128 << width) - 1;
         let value = ((1u128 << width) - magnitude) & mask;
-        Some((ty, format!("0x{value:X}")))
+        Some((ty, word(value, span)))
     }
 
     /// Folds an all-literal `+ - * / %`; `None` when an operand is not a
@@ -303,25 +481,31 @@ impl Checker<'_> {
         if !is_arithmetic(op) {
             return None;
         }
-        let left = self.fold(lhs);
-        let right = self.fold(rhs);
+        let float = self.float_target(expected);
+        let left = self.fold(lhs, float);
+        let right = self.fold(rhs, float);
         if matches!(left, Folded::Error) || matches!(right, Folded::Error) {
             return Some(HirExpr::poison(span));
         }
         let (Folded::Value(left), Folded::Value(right)) = (left, right) else {
             return None;
         };
-        Some(match self.combine(left, op, right, span) {
+        Some(match self.combine(left, op, right, span, float) {
             Some(value) => self.type_value(value, span, expected),
             None => HirExpr::poison(span),
         })
     }
 
-    fn fold(&mut self, expr: &Expr) -> Folded {
+    /// Folds a subtree; float literals round to `float`, the type the whole
+    /// expression takes.
+    fn fold(&mut self, expr: &Expr, float: TypeId) -> Folded {
         match expr {
             Expr::Number(bytes, span) => {
                 if is_float_literal(bytes) {
-                    return Folded::Value(Value::Float(parse_float(bytes)));
+                    return match self.float_literal(bytes, float, *span) {
+                        Some(bits) => Folded::Value(Value::Float(bits)),
+                        None => Folded::Error,
+                    };
                 }
                 match integer_magnitude(bytes) {
                     Some(magnitude) if magnitude <= u128::from(u64::MAX) => {
@@ -353,12 +537,12 @@ impl Checker<'_> {
                 }
             }
             Expr::BinOp { lhs, op, rhs, span } if is_arithmetic(*op) => {
-                let left = self.fold(lhs);
-                let right = self.fold(rhs);
+                let left = self.fold(lhs, float);
+                let right = self.fold(rhs, float);
                 match (left, right) {
                     (Folded::Error, _) | (_, Folded::Error) => Folded::Error,
                     (Folded::Value(left), Folded::Value(right)) => {
-                        match self.combine(left, *op, right, *span) {
+                        match self.combine(left, *op, right, *span, float) {
                             Some(value) => Folded::Value(value),
                             None => Folded::Error,
                         }
@@ -370,25 +554,60 @@ impl Checker<'_> {
         }
     }
 
-    /// Combines two literal values at 64 bits.
-    fn combine(&mut self, left: Value, op: BinOp, right: Value, span: Span) -> Option<Value> {
-        match (left, right) {
-            (Value::Float(left), Value::Float(right)) => {
-                let value = match op {
-                    BinOp::Add => left + right,
-                    BinOp::Sub => left - right,
-                    BinOp::Mul => left * right,
-                    BinOp::Div => left / right,
-                    _ => left % right,
-                };
-                if value.is_finite() {
-                    return Some(Value::Float(value));
-                }
+    /// Two float literal values combined as IEEE 754 does at `float`'s
+    /// precision: the exact result rounded once.
+    fn combine_floats(
+        &mut self,
+        left: FloatBits,
+        op: BinOp,
+        right: FloatBits,
+        span: Span,
+        float: TypeId,
+    ) -> Option<Value> {
+        let op = match op {
+            BinOp::Add => FloatOp::Add,
+            BinOp::Sub => FloatOp::Sub,
+            BinOp::Mul => FloatOp::Mul,
+            BinOp::Div => FloatOp::Div,
+            _ => FloatOp::Rem,
+        };
+        match left.apply(op, right) {
+            Ok(bits) => Some(Value::Float(bits)),
+            Err(FloatError::DivisionByZero) => {
+                self.diags
+                    .emit(Diagnostic::error(codes::E060, "division by zero").label(
+                        span,
+                        true,
+                        "the divisor is zero",
+                    ));
+                None
+            }
+            Err(FloatError::Overflow | FloatError::Invalid) => {
                 self.diags.emit(
-                    Diagnostic::error(codes::E060, "float expression does not fit in @fbit64")
-                        .label(span, true, "expression out of range"),
+                    Diagnostic::error(
+                        codes::E060,
+                        format!("float expression does not fit in {}", self.show_id(float)),
+                    )
+                    .label(span, true, "expression out of range"),
                 );
                 None
+            }
+        }
+    }
+
+    /// Combines two literal values: integers at 64 bits, floats as IEEE 754
+    /// does at `float`'s precision (each result rounded once).
+    fn combine(
+        &mut self,
+        left: Value,
+        op: BinOp,
+        right: Value,
+        span: Span,
+        float: TypeId,
+    ) -> Option<Value> {
+        match (left, right) {
+            (Value::Float(left), Value::Float(right)) => {
+                self.combine_floats(left, op, right, span, float)
             }
             (
                 Value::Int {
@@ -483,82 +702,24 @@ impl Checker<'_> {
                     return HirExpr::poison(span);
                 };
                 match self.signed_value(magnitude, fit, span, expected) {
-                    Some((ty, bytes)) => Self::number(ty, bytes, span),
+                    Some((ty, value)) => Self::int(ty, value, span),
                     None => HirExpr::poison(span),
                 }
             }
             Value::Int {
                 negative: false,
                 magnitude,
-            } => match self.int_literal_ty(significant_bits(magnitude), span, expected) {
-                Some(ty) => Self::number(ty, format!("0x{magnitude:X}"), span),
+            } => match self.int_literal(magnitude, span, expected) {
+                Some((ty, value)) => Self::int(ty, value, span),
                 None => HirExpr::poison(span),
             },
-            Value::Float(value) => self.type_float(value, None, span, expected),
-        }
-    }
-
-    /// Types a float value: `@fbit64` by default, pinned by an expected
-    /// `@fbitN` (or a conversion source); `E010` in a bit slot or `@fbit128`;
-    /// `E060` past the target's largest finite value. `source` is the literal
-    /// text (kept verbatim) or `None` for a folded value.
-    fn type_float(
-        &mut self,
-        value: f64,
-        source: Option<&str>,
-        span: Span,
-        expected: Option<TypeId>,
-    ) -> HirExpr {
-        let what = if source.is_some() {
-            "literal"
-        } else {
-            "expression"
-        };
-        if let Some(ty) = expected {
-            if self.is_bit(ty) {
-                self.diags.emit(
-                    Diagnostic::error(
-                        codes::E010,
-                        "mismatched types: expected an integer, found a float",
-                    )
-                    .label(span, true, format!("float {what} here")),
-                );
-                return HirExpr::poison(span);
-            }
-            if self.is_float(ty) && self.float_width(ty) == 128 {
-                self.diags.emit(
-                    Diagnostic::error(codes::E010, "`@fbit128` literals are not supported yet")
-                        .label(span, true, "only 16/32/64-bit float literals can be typed"),
-                );
-                return HirExpr::poison(span);
+            Value::Float(bits) => {
+                if self.float_in_bit_slot(expected, span, "expression") {
+                    return HirExpr::poison(span);
+                }
+                // `fold_binop` folded at this type.
+                Self::float(self.float_target(expected), bits, span)
             }
         }
-        let fbit64 = Builtin::FBit64.id();
-        let target = match expected {
-            Some(ty) if self.is_float(ty) => ty,
-            Some(ty) => self.conversion_source(ty, true).unwrap_or(fbit64),
-            None => fbit64,
-        };
-        let width = self.float_width(target);
-        if !value.is_finite() || value.abs() > max_finite_float(width) {
-            let label = if source.is_some() {
-                "literal out of range"
-            } else {
-                "expression out of range"
-            };
-            self.diags.emit(
-                Diagnostic::error(
-                    codes::E060,
-                    format!("float {what} does not fit in {}", self.show_id(target)),
-                )
-                .label(span, true, label),
-            );
-            return HirExpr::poison(span);
-        }
-        let bytes = match source {
-            Some(text) => text.chars().filter(|c| *c != '_').collect(),
-            None => format!("{value:?}"),
-        };
-        Self::number(target, bytes, span)
     }
 }

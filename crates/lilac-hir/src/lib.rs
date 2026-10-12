@@ -19,6 +19,7 @@ pub mod intrinsics;
 
 use std::collections::HashMap;
 
+use lilac_float::FloatBits;
 use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::{TypeId, TypeRef};
@@ -541,8 +542,9 @@ pub struct HirValueArm {
 pub enum HirPattern {
     /// An enum variant, by declaration index.
     Variant(u32),
-    /// A literal compared bit-for-bit (source bytes).
-    Const(String),
+    /// An integer or character literal, compared with the scrutinee's
+    /// bits (the value typeck read, at the scrutinee's width).
+    Int(u64),
 }
 
 /// One checked expression.
@@ -585,8 +587,11 @@ pub enum HirExprKind {
     /// is empty after). `@move(a)` writes one; typeck's ownership pass adds
     /// the rest.
     Move(Box<HirExpr>),
-    /// Integer or float literal bits (source bytes, typed by `ty`).
-    Number(String),
+    /// An integer literal's bits, at the width of `ty` (a negative one in
+    /// two's complement).
+    Int(u64),
+    /// A float literal's exact bit pattern, of the width of `ty`.
+    Float(FloatBits),
     /// String literal bytes (`@byte_buffer`).
     Str(Vec<u8>),
     /// Object literal: one value per field, in layout order.
@@ -732,7 +737,8 @@ impl HirExpr {
                 els.walk(f);
             }
             HirExprKind::Local(_)
-            | HirExprKind::Number(_)
+            | HirExprKind::Int(_)
+            | HirExprKind::Float(_)
             | HirExprKind::Str(_)
             | HirExprKind::FuncRef(_)
             | HirExprKind::Const(_)

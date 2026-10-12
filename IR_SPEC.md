@@ -282,11 +282,19 @@ copy ref %self -> %tmp.1
   it carries padding bytes too and costs LLVM nothing however large.
 * `const` defines a typed register from a literal: an integer, a float or a
   data symbol (`LirConst`; a data symbol's register is `ref #bit8`). The
-  verifier checks it against the register type.
+  verifier checks it against the register type. A float is its exact IEEE
+  bit pattern (`lilac_float::FloatBits`), of its type's width: `#fbit32`
+  and `#fbit64` print as the shortest decimal that reads back to the same
+  bits (`0.1`, `-0.0`), `#fbit16` and `#fbit128` as the pattern in hex after
+  `0xH` and `0xQ` (LLVM's spelling). The backend builds it from those bits,
+  so no float constant passes through another width.
 ```lilac-ir
 copy %a -> %b
 copy &1 -> %b
 &1: #bit32 = const 0x1
+&2: #fbit64 = const 0.1
+&3: #fbit16 = const 0xH2E66
+&4: #fbit128 = const 0xQ3FFB999999999999999999999999999A
 ```
 
 ### field / field stores / deref stores

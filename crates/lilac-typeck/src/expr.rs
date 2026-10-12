@@ -61,7 +61,7 @@ impl Checker<'_> {
             Expr::Char(scalar, span) => HirExpr {
                 ty: Builtin::Bit32.value(),
                 span: *span,
-                kind: HirExprKind::Number(format!("0x{:X}", u32::from(*scalar))),
+                kind: HirExprKind::Int(u64::from(u32::from(*scalar))),
             },
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
