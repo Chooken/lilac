@@ -276,7 +276,7 @@ fn drops_and_zero_init_visible() {
     // Aggregate places are zeroed with `memset`.
     assert!(text.contains("call void @llvm.memset."), "{text}");
     assert!(
-        text.contains("call void @\"GenBox.1..bit32.@on_drop:ref_GenBox[bit32]\""),
+        text.contains("call void @\"GenBox[m].@on_drop(RI6GenBoxmEE)\""),
         "{text}"
     );
 }

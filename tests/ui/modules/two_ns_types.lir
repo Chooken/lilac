@@ -6,7 +6,7 @@ type #a.Thing size 4 align 4 {
 type #b.Thing size 4 align 4 {
     b_field: #bit32,
 }
-function @b.Thing.@on_drop:ref_b.Thing
+function @b.Thing.@on_drop(RN1b5ThingE)
   in ref #b.Thing %from
 {
   $entry:
@@ -17,7 +17,7 @@ function @b.Thing.@on_drop:ref_b.Thing
     copy &1 -> ref %tmp.1
     return
 }
-function @a.Thing.@on_drop:ref_a.Thing
+function @a.Thing.@on_drop(RN1a5ThingE)
   in ref #a.Thing %from
 {
   $entry:
@@ -43,7 +43,7 @@ function @.root.b_use
     copy &2 -> %y
     &3: ref #b.Thing = addr %x
     copy &3 -> %tmp.2
-    call @b.Thing.@on_drop:ref_b.Thing (in %tmp.2) (out)
+    call @b.Thing.@on_drop(RN1b5ThingE) (in %tmp.2) (out)
     drop %x
     return
 }
@@ -63,7 +63,7 @@ function @main
     call @.root.b_use (in) (out)
     &3: ref #a.Thing = addr %x
     copy &3 -> %tmp.2
-    call @a.Thing.@on_drop:ref_a.Thing (in %tmp.2) (out)
+    call @a.Thing.@on_drop(RN1a5ThingE) (in %tmp.2) (out)
     drop %x
     return
 }

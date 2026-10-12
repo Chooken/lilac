@@ -1,6 +1,6 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-function @@conversion:bit32:bit8
+function @@conversion(mEh)
   in #bit32 %from
   out #bit8 %to
 {
@@ -35,7 +35,7 @@ function @main
     alloca #bit32 %return_val : zeroed
     call @.root.get_multi (in) (out %l.0, %l.1)
     copy %l.0 -> %tmp.2
-    call @@conversion:bit32:bit8 (in %tmp.2) (out %tmp.1)
+    call @@conversion(mEh) (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %condition
     copy %l.1 -> %return_val
     return

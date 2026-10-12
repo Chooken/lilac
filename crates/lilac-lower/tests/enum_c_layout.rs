@@ -24,7 +24,7 @@ use lilac_hir::Layout;
 use lilac_ir::{LirLayout, LirModule, LirTy};
 use lilac_span::SourceMap;
 use lilac_target::Target;
-use lilac_ty::{TypeKind, Types};
+use lilac_ty::Types;
 
 /// The toolchain Clang, when it is installed.
 fn clang() -> Option<PathBuf> {
@@ -105,19 +105,12 @@ fn lower_on(src: &str, target: Target) -> (LirModule, HashMap<String, bool>) {
     };
     let checked = lilac_typeck::check(&res, &mut types, &mut diags, options);
     assert!(!diags.has_errors(), "{target}: {diags:?}");
-    // Lowering names a generic instance's layout by its mangled name and
-    // any other type's by its display name.
+    // Lowering names each layout by its type's mangled name.
     let enums = checked
         .hir
         .layouts
         .iter()
-        .map(|(id, layout)| {
-            let name = match types.kind(*id) {
-                TypeKind::Instance { .. } => types.mangle(*id),
-                _ => types.display(*id),
-            };
-            (name, matches!(layout, Layout::Enum { .. }))
-        })
+        .map(|(id, layout)| (types.mangle(*id), matches!(layout, Layout::Enum { .. })))
         .collect();
     let module = lilac_lower::lower(&checked.hir, &res, &types, &sources, target, None).module;
     (module, enums)

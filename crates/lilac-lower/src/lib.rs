@@ -261,6 +261,7 @@ impl<'a> Lower<'a> {
             copy_glue: HashMap::new(),
             needs_drop: HashMap::new(),
             needs_copy: HashMap::new(),
+            type_names: HashMap::new(),
             funcs: hir
                 .funcs
                 .iter()
@@ -279,6 +280,7 @@ impl<'a> Lower<'a> {
         }
         let mut ids: Vec<TypeId> = hir.layouts.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
+        lower.type_names = ids.iter().map(|id| (*id, types.mangle(*id))).collect();
         for id in ids {
             lower.lay_out(id);
         }
@@ -361,6 +363,9 @@ struct Lower<'a> {
     copy_glue: HashMap<TypeId, Symbol>,
     needs_drop: HashMap<TypeId, bool>,
     needs_copy: HashMap<TypeId, bool>,
+    /// The LIR name of each laid-out object and enum type, encoded once
+    /// ([`Lower::type_name`]).
+    type_names: HashMap<TypeId, String>,
     /// Every function instance by key (constant `=>` calls).
     funcs: HashMap<FuncKey, &'a HirFunc>,
 }

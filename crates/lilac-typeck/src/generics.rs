@@ -13,14 +13,10 @@ use lilac_error::{codes, Diagnostic, ErrorGuaranteed, TraceFrame};
 use lilac_hir::FuncKey;
 use lilac_resolve::DefId;
 use lilac_span::Span;
-use lilac_ty::{TypeId, TypeKind, TypeRef};
+use lilac_ty::{TypeId, TypeKind, TypeRef, DISPLAY_LIMIT};
 
 use crate::sink::{has_error, Pending};
 use crate::{Checker, Requirement, MAX_INSTANCES, MAX_RECURSION};
-
-/// How much of one type diagnostics show (`...` past it): a type nested `n`
-/// deep can take `2^n` characters to write out.
-pub(crate) const DISPLAY_LIMIT: usize = 200;
 
 impl Checker<'_> {
     /// Source name of a function for diagnostics: `name`, or `Owner.name`.

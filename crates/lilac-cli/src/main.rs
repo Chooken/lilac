@@ -1,4 +1,5 @@
-//! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` / `build`.
+//! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` / `build` /
+//! `explain` / `demangle`.
 
 mod build;
 mod link;
@@ -15,7 +16,15 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 /// The commands, for did-you-mean.
-const COMMANDS: [&str; 6] = ["check", "emit-ir", "emit-llvm", "build", "explain", "help"];
+const COMMANDS: [&str; 7] = [
+    "check",
+    "emit-ir",
+    "emit-llvm",
+    "build",
+    "explain",
+    "demangle",
+    "help",
+];
 
 /// Every flag any command takes (without its `=value`), for did-you-mean.
 const FLAGS: [&str; 20] = [
@@ -68,7 +77,8 @@ fn unknown_flag(arg: &str) -> String {
 fn usage() -> &'static str {
     "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]
   lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
-  lilac explain <code>"
+  lilac explain <code>
+  lilac demangle [<symbol>...]"
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -105,6 +115,7 @@ fn run() -> ExitCode {
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
+        "demangle" => cmd_demangle(&args[1..]),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             ExitCode::SUCCESS
@@ -449,6 +460,58 @@ fn cmd_explain(args: &[String]) -> ExitCode {
     };
     print!("{}", code.doc());
     ExitCode::SUCCESS
+}
+
+/// `lilac demangle Holder[m].make`: each symbol with its types written as
+/// Lilac types (`Holder[@bit32].make`), one per line, or as it is when it
+/// has none. With no symbol, a filter: it copies standard input to
+/// standard output with every symbol in it demangled, so
+/// `lilac emit-ir … | lilac demangle` reads like source.
+fn cmd_demangle(args: &[String]) -> ExitCode {
+    use std::io::{BufRead as _, Write as _};
+
+    if let Some(flag) = args.iter().find(|arg| arg.starts_with('-')) {
+        eprintln!("{}", unknown_flag(flag));
+        return ExitCode::from(2);
+    }
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let written = if args.is_empty() {
+        let mut input = std::io::stdin().lock();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match input.read_until(b'\n', &mut line) {
+                Ok(0) => break Ok(()),
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("error: reading standard input: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            // A line that is not UTF-8 holds no symbol of ours.
+            let written = match std::str::from_utf8(&line) {
+                Ok(text) => out.write_all(lilac_ty::demangle_text(text).as_bytes()),
+                Err(_) => out.write_all(&line),
+            };
+            if written.is_err() {
+                break written;
+            }
+        }
+    } else {
+        args.iter().try_for_each(|symbol| {
+            let shown = lilac_ty::demangle(symbol).unwrap_or_else(|| symbol.clone());
+            writeln!(out, "{shown}")
+        })
+    };
+    // A closed output (`| head`) ends the filter quietly.
+    match written.and_then(|()| out.flush()) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+            eprintln!("error: writing standard output: {error}");
+            ExitCode::FAILURE
+        }
+        _ => ExitCode::SUCCESS,
+    }
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {

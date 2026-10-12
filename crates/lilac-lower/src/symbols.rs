@@ -46,6 +46,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         copy_glue: HashMap::new(),
         needs_drop: HashMap::new(),
         needs_copy: HashMap::new(),
+        type_names: HashMap::new(),
         funcs: HashMap::new(),
     };
     check_link_names(&lower, diags);
@@ -260,25 +261,18 @@ pub(crate) fn extern_sig_text(func: &HirFunc, types: &Types, variadic: bool) -> 
 }
 
 impl Lower<'_> {
-    /// The LIR name of a concrete object/enum type (without `#`).
+    /// The LIR name of a concrete object/enum type (without `#`):
+    /// `A.Holder`, or `A.Holder[m]` for an instance ([`Types::mangle`]).
     pub(crate) fn type_name(&self, id: TypeId) -> String {
-        match self.types.kind(id) {
-            TypeKind::Instance { .. } => self.types.mangle(id),
-            _ => self.types.display(id),
-        }
-    }
-
-    pub(crate) fn mangle_ref(&self, ty: TypeRef) -> String {
-        if ty.is_ref {
-            format!("ref.{}", self.types.mangle(ty.id))
-        } else {
-            self.types.mangle(ty.id)
+        match self.type_names.get(&id) {
+            Some(name) => name.clone(),
+            None => self.types.mangle(id),
         }
     }
 
     /// A function's name as written in source, with generic arguments:
-    /// `Holder[@bit32].make` for the symbol `Holder.1..bit32.make`. Stack
-    /// traces print it.
+    /// `Holder[@bit32].make` for the symbol `Holder[m].make`. Stack
+    /// traces print it. Each argument is cut at [`lilac_ty::DISPLAY_LIMIT`].
     pub(crate) fn display_of(&self, func: &HirFunc) -> String {
         let def = self.res.def(func.key.def);
         let generics = |args: &[TypeRef]| {
@@ -315,8 +309,11 @@ impl Lower<'_> {
         format!("{name}{}", generics(own))
     }
 
-    /// The LIR symbol of a function instance: namespace or owning type, name,
-    /// own generic arguments (arity-tagged), and for hooks the signature.
+    /// The LIR symbol of a function instance: namespace or owning type
+    /// (with its generic arguments), name, own generic arguments, and for
+    /// a hook its signature, the types in regions ([`Types::mangle_args`],
+    /// [`Types::mangle_signature`]): `Holder[m].make`,
+    /// `Box[m].@on_drop(RI3BoxmEE)`.
     pub(crate) fn symbol_of(&self, func: &HirFunc) -> String {
         let def = self.res.def(func.key.def);
         if func.body.is_none() {
@@ -333,17 +330,10 @@ impl Lower<'_> {
         let (prefix, own) = match def.parent {
             Some(parent) => {
                 let count = self.res.def(parent).generic_params.len();
-                let owner = self.res.qualified_name(parent);
-                let owner = if count == 0 {
-                    owner
-                } else {
-                    let mut name = format!("{owner}.{count}");
-                    for arg in &func.key.args[..count] {
-                        name.push('.');
-                        name.push_str(&self.mangle_ref(*arg));
-                    }
-                    name
-                };
+                let mut owner = self.res.qualified_name(parent);
+                if count > 0 {
+                    owner.push_str(&self.types.mangle_args(&func.key.args[..count]));
+                }
                 (owner, &func.key.args[count..])
             }
             None if is_hook => (String::new(), &func.key.args[..]),
@@ -358,19 +348,17 @@ impl Lower<'_> {
             format!("{prefix}.{}", def.name)
         };
         if !own.is_empty() {
-            name.push('.');
-            name.push_str(&own.len().to_string());
-            for arg in own {
-                name.push('.');
-                name.push_str(&self.mangle_ref(*arg));
-            }
+            name.push_str(&self.types.mangle_args(own));
         }
         if is_hook {
-            for id in func.params.iter().chain(&func.returns) {
-                let display = self.types.display_ref(func.local(*id).ty);
-                name.push(':');
-                name.push_str(&display.replace('@', "").replace(' ', "_"));
-            }
+            let slots = |ids: &[LocalId]| -> Vec<TypeRef> {
+                ids.iter().map(|id| func.local(*id).ty).collect()
+            };
+            name.push_str(
+                &self
+                    .types
+                    .mangle_signature(&slots(&func.params), &slots(&func.returns)),
+            );
         }
         name
     }

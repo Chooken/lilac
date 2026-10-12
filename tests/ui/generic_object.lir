@@ -1,13 +1,13 @@
 lilac_ir = "0.4"
 target = "x86_64-unknown-none"
-type #GenObject.1..bit32 size 4 align 4 {
+type #GenObject[m] size 4 align 4 {
     value: #bit32,
 }
 function @main
 {
   $entry:
-    alloca #GenObject.1..bit32 %variable : zeroed
-    alloca #GenObject.1..bit32 %tmp.1 : zeroed
+    alloca #GenObject[m] %variable : zeroed
+    alloca #GenObject[m] %tmp.1 : zeroed
     zero %tmp.1
     &1: #bit32 = const 0x0
     copy &1 -> %tmp.1.value  // idx 0

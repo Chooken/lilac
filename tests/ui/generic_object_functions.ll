@@ -19,13 +19,13 @@ entry:
   store i32 0, ptr %tmp.1, align 4
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %variable, ptr align 4 %tmp.1, i64 4, i1 false)
   store ptr %variable, ptr %tmp.3, align 8
-  call void @GenObject.1..bit32.get(ptr %tmp.3, ptr %tmp.2)
+  call void @"GenObject[m].get"(ptr %tmp.3, ptr %tmp.2)
   %0 = load i32, ptr %tmp.2, align 4
   store i32 %0, ptr %value, align 4
   ret void
 }
 
-define void @GenObject.1..bit32.get(ptr %in0, ptr %out0) {
+define void @"GenObject[m].get"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 4 %out0, i8 0, i64 4, i1 false)
   %0 = load ptr, ptr %in0, align 8

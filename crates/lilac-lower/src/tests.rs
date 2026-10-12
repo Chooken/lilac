@@ -81,8 +81,8 @@ fn generic_object_instance_names() {
     let (text, _) = lower_src(
         "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
     );
-    assert!(text.contains("#GenObject.1..bit32"), "{text}");
-    assert!(text.contains("call @GenObject.1..bit32.get"), "{text}");
+    assert!(text.contains("#GenObject[m]"), "{text}");
+    assert!(text.contains("call @GenObject[m].get"), "{text}");
 }
 
 #[test]
@@ -90,14 +90,8 @@ fn method_own_generics_are_distinct() {
     let (text, _) = lower_src(
         "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
     );
-    assert!(
-        text.contains("call @GenObject.1..bit32.get.1..bit32"),
-        "{text}"
-    );
-    assert!(
-        text.contains("call @GenObject.1..bit32.get.1..bit64"),
-        "{text}"
-    );
+    assert!(text.contains("call @GenObject[m].get[m]"), "{text}");
+    assert!(text.contains("call @GenObject[m].get[y]"), "{text}");
 }
 
 #[test]

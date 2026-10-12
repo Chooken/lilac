@@ -276,6 +276,19 @@
   their methods stay unprefixed (`Object.Method` already has a `.`).
   `extern` and `export` symbols stay unmangled, and a file argument on the CLI
   is single-file mode (its parent is not a project root).
+- Types in symbols (`lilac-ty/src/mangle.rs`, after Rust's v0): the
+  readable path stays, and types go in regions, `[…]` for generic
+  arguments (`GenObject[m].get[y]`) and `(params E returns)` for a hook's
+  signature (`GenBox[m].@on_drop(RI6GenBoxmEE)`), with every repeated type
+  or path a backreference, so a symbol is linear in the distinct types it
+  names (`IR_SPEC.md`, "Symbol names", has the grammar). `Types::mangle`
+  names a type (layouts, glue), `mangle_args`/`mangle_signature` write
+  regions, and lowering caches each type's name (`Lower::type_names`).
+  `lilac_ty::demangle` (bounded, `None` for a malformed region) and
+  `demangle_text` read them back; `lilac demangle` is the CLI filter.
+  There is no type length limit: every walk over a type memoizes by
+  `TypeId` (`substitute`, `ensure_type`, `has_hooks`, …), and
+  `Types::display`/`display_ref` are bounded (`DISPLAY_LIMIT`).
 
 ## Extern C ABI (M6b)
 

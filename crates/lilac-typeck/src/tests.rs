@@ -1312,7 +1312,7 @@ fn generic_missing_member_shows_required_signature() {
         "single-frame chain duplicated: {rendered}"
     );
     assert!(
-        !rendered.contains(".1.."),
+        lilac_ty::demangle_text(&rendered) == rendered,
         "mangled symbol leaked: {rendered}"
     );
 }
@@ -1445,7 +1445,7 @@ fn failing_object_method_reported_at_use_site() {
         "{rendered}"
     );
     assert!(rendered.contains("missing method `other`"), "{rendered}");
-    assert!(!rendered.contains(".1.."), "{rendered}");
+    assert_eq!(lilac_ty::demangle_text(&rendered), rendered);
 }
 
 #[test]
@@ -1501,7 +1501,11 @@ fn cyclic_growing_args_is_e051() {
         note.contains("grow[Box[@bit32]]"),
         "readable nested arg: {note}"
     );
-    assert!(!note.contains(".1.."), "mangled symbol leaked: {note}");
+    assert_eq!(
+        lilac_ty::demangle_text(&note),
+        note,
+        "mangled symbol leaked"
+    );
 }
 
 #[test]
@@ -1527,7 +1531,11 @@ fn cyclic_growing_object_layout_is_e051() {
         note.contains("GenObj[GenObj[@bit32]]"),
         "readable nested arg: {note}"
     );
-    assert!(!note.contains(".1.."), "mangled symbol leaked: {note}");
+    assert_eq!(
+        lilac_ty::demangle_text(&note),
+        note,
+        "mangled symbol leaked"
+    );
 }
 
 /// The `E051` notes of `src`'s one `E051`.

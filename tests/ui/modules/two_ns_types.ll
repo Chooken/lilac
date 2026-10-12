@@ -3,7 +3,7 @@ source_filename = "lilac"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-none"
 
-define void @"b.Thing.@on_drop:ref_b.Thing"(ptr %in0) {
+define void @"b.Thing.@on_drop(RN1b5ThingE)"(ptr %in0) {
 entry:
   %tmp.1 = alloca ptr, align 8
   store ptr null, ptr %tmp.1, align 8
@@ -14,7 +14,7 @@ entry:
   ret void
 }
 
-define void @"a.Thing.@on_drop:ref_a.Thing"(ptr %in0) {
+define void @"a.Thing.@on_drop(RN1a5ThingE)"(ptr %in0) {
 entry:
   %tmp.1 = alloca ptr, align 8
   store ptr null, ptr %tmp.1, align 8
@@ -41,7 +41,7 @@ entry:
   %0 = load i32, ptr %x, align 4
   store i32 %0, ptr %y, align 4
   store ptr %x, ptr %tmp.2, align 8
-  call void @"b.Thing.@on_drop:ref_b.Thing"(ptr %tmp.2)
+  call void @"b.Thing.@on_drop(RN1b5ThingE)"(ptr %tmp.2)
   ret void
 }
 
@@ -62,7 +62,7 @@ entry:
   store i32 %0, ptr %y, align 4
   call void @.root.b_use()
   store ptr %x, ptr %tmp.2, align 8
-  call void @"a.Thing.@on_drop:ref_a.Thing"(ptr %tmp.2)
+  call void @"a.Thing.@on_drop(RN1a5ThingE)"(ptr %tmp.2)
   ret void
 }
 

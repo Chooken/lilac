@@ -954,7 +954,10 @@ namespace.
 
 **Qualification.** Namespaces are compile-time scopes only. For code generation
 every top-level item takes a symbol prefixed by its namespace path (`A.B.foo`,
-`A.Object.Method`, `A.GenBox.1..bit32.@on_drop`). A root-namespace free
+`A.Object.Method`, `A.GenBox[m].get`): generic arguments and hook
+signatures are written in a compact encoding of their types
+(`GenBox[m]` is `GenBox[@bit32]`; `IR_SPEC.md`, "Symbol names"), which
+`lilac demangle` reads back. A root-namespace free
 function is prefixed `.root` (`.root.foo`), which no user name or C symbol
 can spell, so it never takes a symbol an `extern` links against; root `main`
 stays `main` (`Standard`'s `@entry` calls it). Root types and their methods take no prefix
@@ -1129,6 +1132,12 @@ type. Duck-typed requirements are proven at instantiation in both receiver
 forms: **value-based** `value.method()` (a method with `self`, where
 `value: T`) and **static** `T.method()` (an associated function with no
 `self`), each resolved against the concrete argument type.
+
+A generic definition may appear at most 64 times in a chain of instances
+that request one another (`E051`), and a compile builds at most 50,000
+generic instances (`E068`). A type's size has no limit: `P[T, T]` applied
+to itself 20 times is a tree of a million leaves, and it compiles in time,
+and to symbols, linear in the number of distinct types it names.
 
 A hook declared inside a generic body (for example an object's `@on_drop`)
 monomorphizes with its parent and registers once per concrete instantiation,

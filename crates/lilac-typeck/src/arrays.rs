@@ -1,7 +1,7 @@
 //! `@array(T, N)`: the type syntax, the zeroed literal `@array(T, N) {}`,
 //! `@array_at`/`@array_len`, and the rule that elements have no RAII hooks.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use lilac_ast::{Expr, StructField, Type as AstType};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
@@ -156,7 +156,7 @@ impl Checker<'_> {
 
     /// Remembers a concrete array type for [`Self::check_array_hooks`].
     pub(crate) fn note_array(&mut self, id: TypeId, span: Span) {
-        if !self.arrays.iter().any(|(seen, _)| *seen == id) {
+        if self.noted_arrays.insert(id) {
             self.arrays.push((id, span));
         }
     }
@@ -165,11 +165,12 @@ impl Checker<'_> {
     /// inside: arrays copy and drop as plain bytes. Runs once hooks are
     /// bound.
     pub(crate) fn check_array_hooks(&mut self) {
+        let mut known = HashMap::new();
         for (id, span) in std::mem::take(&mut self.arrays) {
             let TypeKind::Array { elem, .. } = *self.types.kind(id) else {
                 continue;
             };
-            if self.has_hooks(elem, &mut HashSet::new()) {
+            if self.has_hooks(elem, &mut known) {
                 let elem = self.show_id(elem);
                 self.diags.emit(
                     Diagnostic::error(
@@ -183,26 +184,31 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether `id` or anything it holds by value has an RAII hook.
-    fn has_hooks(&self, id: TypeId, seen: &mut HashSet<TypeId>) -> bool {
-        if !seen.insert(id) {
-            return false;
+    /// Whether `id` or anything it holds by value has an RAII hook. Each
+    /// type is walked once across every array (`known`). By-value cycles
+    /// have no layout (`E053`), so a type met again while it is walked
+    /// (only possible through one) counts as hook-free.
+    fn has_hooks(&self, id: TypeId, known: &mut HashMap<TypeId, bool>) -> bool {
+        if let Some(&hooks) = known.get(&id) {
+            return hooks;
         }
-        if self.out.hooks.contains_key(&id) {
-            return true;
-        }
-        if let TypeKind::Array { elem, .. } = self.types.kind(id) {
-            return self.has_hooks(*elem, seen);
-        }
-        let slots: Vec<TypeRef> = match self.out.layouts.get(&id) {
-            Some(Layout::Object { fields }) => fields.iter().map(|(_, ty)| *ty).collect(),
-            Some(Layout::Enum { variants, .. }) => {
-                variants.iter().filter_map(|(_, ty)| *ty).collect()
-            }
-            None => Vec::new(),
-        };
-        slots
-            .into_iter()
-            .any(|slot| !slot.is_ref && self.has_hooks(slot.id, seen))
+        known.insert(id, false);
+        let hooks = self.out.hooks.contains_key(&id)
+            || if let TypeKind::Array { elem, .. } = self.types.kind(id) {
+                self.has_hooks(*elem, known)
+            } else {
+                let slots: Vec<TypeRef> = match self.out.layouts.get(&id) {
+                    Some(Layout::Object { fields }) => fields.iter().map(|(_, ty)| *ty).collect(),
+                    Some(Layout::Enum { variants, .. }) => {
+                        variants.iter().filter_map(|(_, ty)| *ty).collect()
+                    }
+                    None => Vec::new(),
+                };
+                slots
+                    .into_iter()
+                    .any(|slot| !slot.is_ref && self.has_hooks(slot.id, known))
+            };
+        known.insert(id, hooks);
+        hooks
     }
 }

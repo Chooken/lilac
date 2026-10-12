@@ -31,7 +31,7 @@ fn unused_generic_object_members_do_not_lower() {
 #[test]
 fn e051_chain_notes_stay_human_readable() {
     // The E051 instantiation chain must never leak mangled IR symbols
-    // (`grow.1..bit32`); it reads as the source form (`grow[@bit32]`).
+    // (`grow[m]`); it reads as the source form (`grow[@bit32]`).
     for fixture in [
         "FAILS_generic_cyclic.lilac",
         "FAILS_generic_object_cycle.lilac",
@@ -47,7 +47,7 @@ fn e051_chain_notes_stay_human_readable() {
             "{fixture}:\n{stderr}"
         );
         assert!(
-            !stderr.contains(".1.."),
+            lilac_ty::demangle_text(&stderr) == stderr,
             "mangled symbol leaked into {fixture} diagnostics:\n{stderr}"
         );
     }

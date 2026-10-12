@@ -15,11 +15,11 @@ entry:
   store i32 0, ptr %tmp.1, align 4
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %box, ptr align 4 %tmp.1, i64 4, i1 false)
   store ptr %box, ptr %tmp.2, align 8
-  call void @"GenBox.1..bit32.@on_drop:ref_GenBox[bit32]"(ptr %tmp.2)
+  call void @"GenBox[m].@on_drop(RI6GenBoxmEE)"(ptr %tmp.2)
   ret void
 }
 
-define void @"GenBox.1..bit32.@on_drop:ref_GenBox[bit32]"(ptr %in0) {
+define void @"GenBox[m].@on_drop(RI6GenBoxmEE)"(ptr %in0) {
 entry:
   %tmp.1 = alloca ptr, align 8
   store ptr null, ptr %tmp.1, align 8

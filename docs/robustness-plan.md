@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–9 done).
+> Status: done (Phases 0–10).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -1216,6 +1216,95 @@ Decisions made with the owner (2026-10-12): follow Rust.
 - A `lilac demangle` CLI test.
 - The snapshots are re-blessed once; only generic instance symbols and
   type-derived names may change.
+
+- **Delivered notes.**
+  - 10.1: the encoder is `crates/lilac-ty/src/mangle.rs`.
+    - **Joining the readable part.** Types go in bracketed regions:
+      `[…]` after a generic name, and `(params E returns)` after a hook
+      name. Readable parts never contain a bracket, so a symbol splits
+      one way.
+    - **Hooks.** The old `:ref_X` suffix wrote each type's display text,
+      so it was both exponential and lossy. A hook's signature is now a
+      region like any other: `GenBox[m].@on_drop(RI6GenBoxmEE)`.
+    - **Letters.** `unknown` is `g` and the error type is `r`. Template
+      parameters are `p<index><name>`, which verified IR never holds.
+    - **Backreferences** are offsets from the byte after the region's
+      opening bracket. One is written only where it is shorter than the
+      element, and basic types are never memoized.
+    - **Lowering** names each type once (`Lower::type_names`, filled in
+      `Lower::new` from the sorted layout ids); `symbol_of` writes the
+      owner's and the function's own arguments with `mangle_args` and a
+      hook's slots with `mangle_signature`.
+  - 10.2: the demangler (`demangle`, `demangle_bounded`, `demangle_text`)
+    checks a whole symbol with an explicit stack before printing any of
+    it.
+    - Each element's kind, end and backreference target are recorded,
+      so a backreference must land on the start of a complete earlier
+      element of the right kind, a type or a path.
+    - Printing uses a task stack, cut past `DEMANGLE_LIMIT` (4,096
+      bytes).
+    - The cut is ASCII `...`, not `…`, to match
+      `Types::display_bounded`, so a symbol filter's output stays
+      ASCII.
+    - `lilac demangle` demangles its arguments, or filters standard
+      input line by line (non-UTF-8 lines pass through as bytes).
+      `demangle_text` rewrites a region only after a symbol character,
+      so prose brackets pass through.
+  - 10.3, the audit of walks over types:
+    - **Fixed.**
+      - `Types::substitute` memoizes per call and returns a type with no
+        parameter untouched.
+      - `ensure_type` remembers each function and array type it has
+        built (`Checker::ensured`; an array whose layout failed is not
+        remembered).
+      - `note_array` keeps a set (`noted_arrays`).
+      - `check_array_hooks`' `has_hooks` memoizes across every array.
+      - Lowering's `type_name` reads its cache.
+    - **Already linear, unchanged.**
+      - `Types::mentions`, `contains_param` (decided at interning) and
+        `display_bounded`.
+      - Typeck's `is_copyable`/`needs_drop` and `height` (memoized by
+        `TypeId`).
+      - Lowering's `needs_drop`/`needs_copy` and the drop and copy glue
+        caches.
+      - `prune_layouts`, the verifier's layout recomputation and
+        `size_align`, all per layout.
+      - Typeck has no structural unification to audit.
+  - 10.4: `Types::display`/`display_ref` are now bounded
+    (`lilac_ty::DISPLAY_LIMIT`, 200, which typeck's diagnostics also use).
+    So `Lowered::names`, trace names and every language server hover or
+    completion detail are bounded without a call-site change.
+  - 10.5: `IR_SPEC.md` "Symbol names" replaces "Monomorphized names". It
+    has the grammar, the letters, identifiers, base 62, backreferences
+    with examples, the collision argument, size and demangling. `SPEC.md`
+    gets the generic limits and "a type's size has no limit", and
+    `AGENTS.md` gets a symbols bullet.
+  - Tests:
+    - `lilac-ty`:
+      - 3,000 fixed-seed random types demangle to their display, and
+        their regions are injective and use the symbol alphabet;
+      - golden encodings for every kind, including escaped
+        identifiers, arrays, function types and backreferences;
+      - a 1,000-deep doubling type mangles in under 16 bytes per level;
+      - malformed regions (forward, self and mid-element
+        backreferences, overflowing numbers, unknown tags) read raw;
+      - the demangler never panics on every string up to length 4 over
+        its alphabet, plus 20,000 random ones.
+    - `robustness.rs`:
+      - the 4^n program for n = 10 and n = 20 emits IR and LLVM in
+        under 2 s, with no line over 1,000 bytes and a longest symbol
+        growing linearly;
+      - `lilac demangle` in both modes.
+    - `tests/run/wide_generic_types` builds and runs the n = 20
+      program.
+    - The snapshots changed only in generic instance and hook names.
+  - Measured (release, with `Standard` and stack traces): `emit-ir` of
+    the 4^n program takes 134 ms at n = 10 and 163 ms at n = 20.
+    - The longest symbol is 135 bytes at n = 10 and 265 bytes at
+      n = 20, 13 bytes per level.
+    - The longest IR line is 370 bytes.
+    - Before, n = 11 took 2.2 s and printed 82 MB, and n = 20 did not
+      finish.
 
 ---
 

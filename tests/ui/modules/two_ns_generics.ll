@@ -19,7 +19,7 @@ entry:
   store i64 2, ptr %tmp.1, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %x, ptr align 8 %tmp.1, i64 8, i1 false)
   store ptr %x, ptr %tmp.3, align 8
-  call void @b.GenBox.1..bit64.get(ptr %tmp.3, ptr %tmp.2)
+  call void @"b.GenBox[y].get"(ptr %tmp.3, ptr %tmp.2)
   %0 = load i64, ptr %tmp.2, align 8
   store i64 %0, ptr %y, align 8
   ret void
@@ -41,14 +41,14 @@ entry:
   store i32 1, ptr %tmp.1, align 4
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %x, ptr align 4 %tmp.1, i64 4, i1 false)
   store ptr %x, ptr %tmp.3, align 8
-  call void @a.GenBox.1..bit32.get(ptr %tmp.3, ptr %tmp.2)
+  call void @"a.GenBox[m].get"(ptr %tmp.3, ptr %tmp.2)
   %0 = load i32, ptr %tmp.2, align 4
   store i32 %0, ptr %y, align 4
   call void @.root.b_use()
   ret void
 }
 
-define void @b.GenBox.1..bit64.get(ptr %in0, ptr %out0) {
+define void @"b.GenBox[y].get"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 8 %out0, i8 0, i64 8, i1 false)
   %0 = load ptr, ptr %in0, align 8
@@ -57,7 +57,7 @@ entry:
   ret void
 }
 
-define void @a.GenBox.1..bit32.get(ptr %in0, ptr %out0) {
+define void @"a.GenBox[m].get"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 4 %out0, i8 0, i64 4, i1 false)
   %0 = load ptr, ptr %in0, align 8

@@ -179,29 +179,113 @@ Labels can be defined inside function blocks:
 ```
 Block parameters are not supported; values flow through `%places` and `&regs`.
 
-# Monomorphized names
+# Symbol names
 
 Verified IR is **concrete-only**: generic declarations and their type
 parameters never appear. Each reached `(declaration, type arguments)`
-instantiation is monomorphized to ordinary concrete items, and its symbols
-carry a deterministic, collision-free, arity-tagged mangle:
+instantiation is monomorphized to ordinary concrete items. Their symbols
+are mangled after Rust's v0 scheme (the `rustc` book, "v0 Symbol
+Format"): a symbol keeps its readable path, and the types in it are
+written in *regions*, compactly, with every repeat a backreference.
 
-`<Name>.<arity>.<arg1>.…`
+**The readable part** is a function's namespace path or owning type, then
+its name: `A.B.foo`, `.root.foo` (a root free function), `Object.Method`,
+`Box.@on_drop`. An object or enum type's name is its qualified name
+(`A.Holder`). Readable parts use `[A-Za-z0-9_.@]` and never a bracket.
 
-Each argument is mangled recursively; builtins gain a leading `.`, `ref X`
-becomes `ref..X`, and a nested instance is its own mangled form. Examples:
-`gen_function.1..bit32`, `GenObject.1..bit32` (with methods such as
-`GenObject.1..bit32.get`), and `GenObj.1.GenObj.1..bit32`. A function's
-own generic arguments follow its name the same way
-(`CAllocator.create.1..bit32`), and a hook's symbol always ends in its
-signature (`GenBox.1..bit32.@on_drop:ref_GenBox[bit32]`) so overloads stay
-distinct. The arity tag
-keeps `GenObj[GenObj[@bit32]]` distinct from a multi-argument application.
-`.` is reserved: Lilac identifiers are `[A-Za-z_][A-Za-z0-9_]*`, so no user
-name contains it and every generated segment is unambiguous. Builtin type
-mangles gain a leading `.` (`.bit8`, `.byte_buffer`).
-Object `type` layouts and RAII `drop` targets are keyed by the same mangled
-name; no instruction carries a generic parameter type.
+**Regions** hold the types:
+
+- `[<types>]` after a generic type's or function's name holds its generic
+  arguments: `GenObject[m]` is `GenObject[@bit32]`, with methods such as
+  `GenObject[m].get` and `GenObject[m].get[y]` (a method's own arguments),
+  and `.root.id[m]` is `id[@bit32]`.
+- `(<params>E<returns>)` after a hook's name holds its signature, so
+  overloads stay distinct: `GenBox[m].@on_drop(RI6GenBoxmEE)` (`(ref
+  GenBox[@bit32])`), `@conversion(mEh)` (`(@bit32) -> @bit8`).
+- A type that is not an object, enum or instance is named by a region of
+  its own (`[Am3_]` is `@array(@bit32, 4)`).
+
+A type's name keys its `type` layout (`#GenObject[m]`) and its glue
+(`.lilac.drop.GenBox[m]`, `.lilac.copy.GenBox[m]`); no instruction carries
+a generic parameter type.
+
+Inside a region only `[A-Za-z0-9_]` appears:
+
+```
+type    = basic | path | "R" type | "I" path {type} "E"
+        | "A" type number | "F" ["KC"] {type} "E" {type} "E"
+        | "p" number ident | backref
+path    = ident | "N" path ident | backref
+ident   = decimal ["_"] bytes | "u" decimal ["_"] escaped
+number  = "_" | base62-digits "_"
+backref = "B" number
+```
+
+| Basic | Type | Basic | Type | Basic | Type |
+|---|---|---|---|---|---|
+| `h` | `@bit8` | `k` | `@fbit16` | `e` | `@byte_buffer` |
+| `t` | `@bit16` | `f` | `@fbit32` | `w` | `@format_args` |
+| `m` | `@bit32` | `d` | `@fbit64` | `g` | `unknown` |
+| `y` | `@bit64` | `q` | `@fbit128` | `r` | error (never in verified IR) |
+| `j` | `@bit_native` | | | | |
+
+- An object or enum is its path: `N <parent> <name>` from the root, so
+  `A.B.Holder` is `NN1A1B6Holder`. `R` is `ref`; `I` an instance (its
+  generic type, its arguments, `E`); `A` an array (its element, its
+  length); `F` a function type (parameters, `E`, results, `E`), `FKC` an
+  `export function`; `p` a generic parameter (index and name: templates
+  only, never in verified IR).
+- An identifier is its length in decimal, a `_` when its bytes start with
+  a digit or `_`, then its bytes (`6Holder`, `4__Gen`). One with a byte
+  outside `[A-Za-z0-9_]` (the `@` of `@builtin`) is `u`, then the same of
+  its escaped form, where each such byte, and `_`, is `_` and two
+  lowercase hex digits: `@builtin` is `u10__40builtin`.
+- Numbers are v0's base 62: `_` is 0, and `n` is `n - 1` in the digits
+  `0-9a-zA-Z` followed by `_` (`3_` is 4, `Z_` is 62, `10_` is 63).
+- A backreference `B<number>` stands for the type or path that starts at
+  that byte offset of its region (counted from the byte after the
+  opening bracket), which must be written in full and end before the
+  backreference. The encoder memoizes each type and path it writes and
+  uses a backreference wherever it is shorter, so a backreference never
+  points at another one. `Q[Holder[@bit32], Holder[@bit32]]`, with
+  `Holder` in `A`, is `Q[IN1A6HoldermEB_]`; four repeats of four repeats,
+  `f3[P[P[Empty, …], P[Empty, …], …]]`, is
+  `.root.f3[I1PI1P5EmptyB5_B5_B5_EB2_B2_B2_E]`.
+
+**Size.** A region's length is linear in the number of distinct types it
+names, however long their written form: `P[T, T]` applied `n` times is a
+tree of `2^n` leaves, and its region is `O(n)` bytes. Types may be
+arbitrarily large; there is no type length limit (`SPEC.md` §3).
+
+**No two symbols collide.**
+
+- A readable part has no bracket, and a region ends at its matching
+  bracket, so a symbol splits into readable parts and regions one way.
+- A region decodes to exactly one list of types: each element starts with
+  its tag and has a fixed shape, an identifier carries its length, and a
+  backreference names a whole earlier element. So two instances share a
+  symbol only if they share a definition (whose qualified name is
+  unique) and every type argument: then they are the same instance.
+- Every Lilac symbol has a `.`, an `@` or a bracket: a root free function
+  is `.root.`-prefixed, a namespaced item or method has its `.`, a hook
+  its `@`. Root `main` is the exception, and LLVM renames it `.lilac.main`.
+  A C identifier has none of them, so no Lilac symbol is a C symbol, and
+  `extern` and `export` symbols, which are C identifiers, never collide
+  with one (two externs that share a link name are one declaration).
+- Compiler-generated names are in `.lilac.` (below), which no user name
+  can start; glue is named by its type (`.lilac.drop.<type name>`).
+
+**Demangling.** `lilac_ty::demangle` writes a symbol's regions as Lilac
+types (`GenObject[@bit32].get[@bit64]`, `GenBox[@bit32].@on_drop(ref
+GenBox[@bit32])`, `@conversion(@bit32) -> @bit8`), cut past 4,096 bytes
+with `...`. It checks a whole symbol before printing any of it and gives
+nothing for a malformed one (an unknown tag, a number that overflows, a
+backreference that does not point back at a whole element), which then
+reads raw. It keeps its own stacks rather than recursing, never panics,
+and takes time linear in the symbol plus the output. `lilac demangle
+[<symbol>...]` prints each symbol demangled; with none it filters standard
+input like `rustfilt`, rewriting each region that follows a symbol
+character, so `lilac emit-ir x.lilac | lilac demangle` reads like source.
 
 ## Reserved names and compiler symbols
 
@@ -217,9 +301,12 @@ program's `@entry`, `@exit` and `@compiler_print`), the renamed Lilac
 `main` in LLVM (`.lilac.main`), and the backend's three leaf intrinsics
 (`.lilac.ptr_add`, `.lilac.memcpy`, `.lilac.abort`). An `extern` whose name
 starts `.lilac.` declares a hook defined elsewhere and keeps the place ABI
-(`LirFunc::uses_c_abi`); every other `extern` uses the C ABI. LLVM 18 prints `.`-leading and dotted names unquoted. The
-verifier rejects two functions with the same name (`E070`), so a residual
-mangle collision or a user/prelude clash cannot reach a backend.
+(`LirFunc::uses_c_abi`); every other `extern` uses the C ABI. LLVM 18 prints `.`-leading and dotted names unquoted,
+and quotes one with a bracket, a parenthesis or an `@`
+(`@"GenObject[m].get"`). The
+verifier rejects two functions with the same name (`E070`), so a
+user/prelude clash cannot reach a backend; mangled names never collide
+(see "Symbol names").
 
 A function that can fail (`SPEC.md` §4) has no LIR form of its own: its
 out slots are its success outs, then its failure outs, then a hidden

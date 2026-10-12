@@ -27,11 +27,11 @@ function @main
     copy &1 -> %tmp.1.value  // idx 0
     copy %tmp.1 -> %source
     copy %source -> %tmp.3
-    call @.root.gen.1.Object (in %tmp.3) (out %tmp.2)
+    call @.root.gen[6Object] (in %tmp.3) (out %tmp.2)
     copy %tmp.2 -> %result
     return
 }
-function @.root.gen.1.Object
+function @.root.gen[6Object]
   in #Object %value
   out #Object %out
 {

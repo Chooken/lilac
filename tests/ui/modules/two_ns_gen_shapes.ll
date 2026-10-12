@@ -25,7 +25,7 @@ entry:
   %1 = load i64, ptr %x, align 8
   store i64 %1, ptr %y, align 8
   store i64 0, ptr %tmp.3, align 8
-  call void @b.tag.1..bit64(ptr %tmp.3, ptr %tmp.2)
+  call void @"b.tag[y]"(ptr %tmp.3, ptr %tmp.2)
   %2 = load i32, ptr %tmp.2, align 4
   store i32 %2, ptr %m, align 4
   ret void
@@ -51,21 +51,21 @@ entry:
   %0 = load i32, ptr %x, align 4
   store i32 %0, ptr %y, align 4
   store i32 0, ptr %tmp.3, align 4
-  call void @a.tag.1..bit32(ptr %tmp.3, ptr %tmp.2)
+  call void @"a.tag[m]"(ptr %tmp.3, ptr %tmp.2)
   %1 = load i32, ptr %tmp.2, align 4
   store i32 %1, ptr %n, align 4
   call void @.root.b_use()
   ret void
 }
 
-define void @b.tag.1..bit64(ptr %in0, ptr %out0) {
+define void @"b.tag[y]"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 4 %out0, i8 0, i64 4, i1 false)
   store i32 2, ptr %out0, align 4
   ret void
 }
 
-define void @a.tag.1..bit32(ptr %in0, ptr %out0) {
+define void @"a.tag[m]"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 4 %out0, i8 0, i64 4, i1 false)
   store i32 1, ptr %out0, align 4

@@ -3,7 +3,7 @@ source_filename = "lilac"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-none"
 
-define void @"@conversion:bit32:bit16"(ptr %in0, ptr %out0) {
+define void @"@conversion(mEt)"(ptr %in0, ptr %out0) {
 entry:
   call void @llvm.memset.p0.i64(ptr align 2 %out0, i8 0, i64 2, i1 false)
   %0 = load i32, ptr %in0, align 4
@@ -32,7 +32,7 @@ entry:
   store ptr null, ptr %round_trip, align 8
   %0 = load i32, ptr %in0, align 4
   store i32 %0, ptr %tmp.2, align 4
-  call void @"@conversion:bit32:bit16"(ptr %tmp.2, ptr %tmp.1)
+  call void @"@conversion(mEt)"(ptr %tmp.2, ptr %tmp.1)
   %1 = load i16, ptr %tmp.1, align 2
   store i16 %1, ptr %truncated, align 2
   store i16 1, ptr %pinned, align 2

@@ -1,9 +1,17 @@
 //! Types: the interner, `TypeRef`, and function signatures.
 
+mod mangle;
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use lilac_resolve::DefId;
+
+pub use mangle::{demangle, demangle_bounded, demangle_text, DEMANGLE_LIMIT};
+
+/// Types in diagnostics and editor text are cut past this many bytes
+/// ([`Types::display_bounded`]): a type nested `n` deep can be `2^n` long.
+pub const DISPLAY_LIMIT: usize = 200;
 
 /// Interned type identity.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -333,58 +341,69 @@ impl Types {
 
     /// Rewrites `Param(i)` to `args[i]` throughout `ty`, recursively
     /// re-interning nested `Instance`/`Func` types. The outer `ref` flag is
-    /// preserved (and never doubled).
+    /// preserved (and never doubled). Each distinct type inside `ty` is
+    /// rewritten once, and one without a parameter is kept as it is, so the
+    /// cost is linear in the types `ty` names, however large its text.
     pub fn substitute(&mut self, ty: TypeRef, args: &[TypeRef]) -> TypeRef {
-        match self.kind(ty.id).clone() {
-            TypeKind::Param { index, .. } => match args.get(index as usize) {
-                Some(&arg) => TypeRef {
-                    id: arg.id,
-                    is_ref: ty.is_ref || arg.is_ref,
-                },
-                None => ty,
-            },
-            TypeKind::Instance {
-                base,
-                args: inst_args,
-            } => {
-                let args = inst_args
-                    .iter()
-                    .map(|arg| self.substitute(*arg, args))
-                    .collect();
-                let id = self.intern_instance(base, args);
-                TypeRef {
-                    id,
-                    is_ref: ty.is_ref,
+        self.substitute_in(ty, args, &mut HashMap::new())
+    }
+
+    /// [`Types::substitute`], with `done` holding each by-value type
+    /// already rewritten. Recursion follows the type's nesting, which
+    /// typeck bounds (`MAX_TYPE_NESTING`).
+    fn substitute_in(
+        &mut self,
+        ty: TypeRef,
+        args: &[TypeRef],
+        done: &mut HashMap<TypeId, TypeRef>,
+    ) -> TypeRef {
+        if !self.contains_param(ty.id) {
+            return ty;
+        }
+        let value = if let Some(&value) = done.get(&ty.id) {
+            value
+        } else {
+            let value = match self.kind(ty.id).clone() {
+                TypeKind::Param { index, .. } => {
+                    args.get(index as usize).copied().unwrap_or(ty.deref())
                 }
-            }
-            TypeKind::Array { elem, len } => {
-                let elem = self.substitute(TypeRef::value(elem), args);
-                let id = self.intern_array(elem.id, len);
-                TypeRef {
-                    id,
-                    is_ref: ty.is_ref,
+                TypeKind::Instance {
+                    base,
+                    args: inst_args,
+                } => {
+                    let inst_args = inst_args
+                        .iter()
+                        .map(|arg| self.substitute_in(*arg, args, done))
+                        .collect();
+                    TypeRef::value(self.intern_instance(base, inst_args))
                 }
-            }
-            TypeKind::Func {
-                params,
-                returns,
-                c_abi,
-            } => {
-                let params = params
-                    .iter()
-                    .map(|param| self.substitute(*param, args))
-                    .collect();
-                let returns = returns
-                    .iter()
-                    .map(|ret| self.substitute(*ret, args))
-                    .collect();
-                let id = self.intern_func_abi(params, returns, c_abi);
-                TypeRef {
-                    id,
-                    is_ref: ty.is_ref,
+                TypeKind::Array { elem, len } => {
+                    let elem = self.substitute_in(TypeRef::value(elem), args, done);
+                    TypeRef::value(self.intern_array(elem.id, len))
                 }
-            }
-            _ => ty,
+                TypeKind::Func {
+                    params,
+                    returns,
+                    c_abi,
+                } => {
+                    let params = params
+                        .iter()
+                        .map(|param| self.substitute_in(*param, args, done))
+                        .collect();
+                    let returns = returns
+                        .iter()
+                        .map(|ret| self.substitute_in(*ret, args, done))
+                        .collect();
+                    TypeRef::value(self.intern_func_abi(params, returns, c_abi))
+                }
+                _ => ty.deref(),
+            };
+            done.insert(ty.id, value);
+            value
+        };
+        TypeRef {
+            id: value.id,
+            is_ref: ty.is_ref || value.is_ref,
         }
     }
 
@@ -392,67 +411,6 @@ impl Types {
     /// (`false` for poison).
     pub fn contains_param(&self, id: TypeId) -> bool {
         self.has_param.get(id.0 as usize).copied().unwrap_or(false)
-    }
-
-    /// Deterministic, collision-free, arity-tagged symbol name for IR.
-    /// User identifiers cannot contain `.`, so it is the reserved separator:
-    /// builtins gain a leading `.`; `ref X` becomes `ref..X`; an `Instance` is
-    /// `<Name>.<arity>.<arg>…`. A builtin argument already starts with `.`, so
-    /// a builtin argument such as `@bit32` reads as `..bit32`.
-    pub fn mangle(&self, id: TypeId) -> String {
-        match self.kind(id) {
-            TypeKind::Bit8 => ".bit8".to_owned(),
-            TypeKind::Bit16 => ".bit16".to_owned(),
-            TypeKind::Bit32 => ".bit32".to_owned(),
-            TypeKind::Bit64 => ".bit64".to_owned(),
-            TypeKind::BitNative => ".bit_native".to_owned(),
-            TypeKind::FBit16 => ".fbit16".to_owned(),
-            TypeKind::FBit32 => ".fbit32".to_owned(),
-            TypeKind::FBit64 => ".fbit64".to_owned(),
-            TypeKind::FBit128 => ".fbit128".to_owned(),
-            TypeKind::ByteBuffer => ".byte_buffer".to_owned(),
-            TypeKind::FormatArgs => ".format_args".to_owned(),
-            TypeKind::Unknown => ".unknown".to_owned(),
-            TypeKind::Object(def) => self.object_name(*def),
-            TypeKind::Param { index, .. } => format!("param.{index}"),
-            TypeKind::Instance { base, args } => {
-                let mut out = format!("{}.{}", self.object_name(*base), args.len());
-                for arg in args {
-                    out.push('.');
-                    out.push_str(&self.mangle_ref(*arg));
-                }
-                out
-            }
-            TypeKind::Array { elem, len } => format!("array.{len}.{}", self.mangle(*elem)),
-            TypeKind::Func {
-                params,
-                returns,
-                c_abi,
-            } => {
-                let abi = if *c_abi { "export." } else { "" };
-                let mut out = format!("{abi}function.{}", params.len());
-                for param in params {
-                    out.push('.');
-                    out.push_str(&self.mangle_ref(*param));
-                }
-                out.push_str(".returns.");
-                out.push_str(&returns.len().to_string());
-                for ret in returns {
-                    out.push('.');
-                    out.push_str(&self.mangle_ref(*ret));
-                }
-                out
-            }
-            TypeKind::Error => ".error".to_owned(),
-        }
-    }
-
-    fn mangle_ref(&self, ty: TypeRef) -> String {
-        if ty.is_ref {
-            format!("ref.{}", self.mangle(ty.id))
-        } else {
-            self.mangle(ty.id)
-        }
     }
 
     fn object_name(&self, def: DefId) -> String {
@@ -502,23 +460,22 @@ impl Types {
         &self.kinds[id.0 as usize]
     }
 
-    /// Pretty-prints a type in Lilac syntax (`@bit32`, `Number`).
+    /// Pretty-prints a type in Lilac syntax (`@bit32`, `Number`), cut at
+    /// [`DISPLAY_LIMIT`].
     pub fn display(&self, id: TypeId) -> String {
-        let mut out = String::new();
-        self.write_type(TypeRef::value(id), &mut out, usize::MAX);
-        out
+        self.display_bounded(TypeRef::value(id), DISPLAY_LIMIT)
     }
 
-    /// Pretty-prints a possibly-`ref` type (`ref @bit8`).
+    /// Pretty-prints a possibly-`ref` type (`ref @bit8`), cut at
+    /// [`DISPLAY_LIMIT`].
     pub fn display_ref(&self, ty: TypeRef) -> String {
-        let mut out = String::new();
-        self.write_type(ty, &mut out, usize::MAX);
-        out
+        self.display_bounded(ty, DISPLAY_LIMIT)
     }
 
-    /// [`Types::display_ref`] cut to about `limit` bytes, ending in `...`
-    /// when cut. It stops walking there, so it is cheap for a type whose
-    /// full text would be huge (each level of `P[T, T]` doubles it).
+    /// The text of `ty` cut to `limit` bytes, ending in `...` when cut. It
+    /// stops walking there, so it is cheap for a type whose full text would
+    /// be huge (each level of `P[T, T]` doubles it): every display is
+    /// bounded, and a type's identity in symbols is [`Types::mangle`].
     pub fn display_bounded(&self, ty: TypeRef, limit: usize) -> String {
         let mut out = String::new();
         self.write_type(ty, &mut out, limit);
@@ -618,10 +575,10 @@ mod tests {
     fn float_builtins_intern_parse_mangle_and_display() {
         let types = Types::new();
         for (name, mangle, display) in [
-            ("@fbit16", ".fbit16", "@fbit16"),
-            ("@fbit32", ".fbit32", "@fbit32"),
-            ("@fbit64", ".fbit64", "@fbit64"),
-            ("@fbit128", ".fbit128", "@fbit128"),
+            ("@fbit16", "[k]", "@fbit16"),
+            ("@fbit32", "[f]", "@fbit32"),
+            ("@fbit64", "[d]", "@fbit64"),
+            ("@fbit128", "[q]", "@fbit128"),
         ] {
             let id = types.builtin(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(types.mangle(id), mangle);
@@ -705,7 +662,7 @@ mod tests {
         assert_eq!(types.intern_array(bit32, 4), array);
         assert_ne!(types.intern_array(bit32, 5), array);
         assert_eq!(types.display(array), "@array(@bit32, 4)");
-        assert_eq!(types.mangle(array), "array.4..bit32");
+        assert_eq!(types.mangle(array), "[Am3_]");
         let param = types.intern_param(0, "T");
         let template = types.intern_array(param, 4);
         assert!(types.contains_param(template));
@@ -747,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_mangle_is_arity_tagged() {
+    fn instance_mangle_nests_regions() {
         let mut types = Types::new();
         types.set_object_name(DefId(1), "GenObj");
         let bit32 = types.builtin("@bit32").expect("has @bit32");
@@ -756,7 +713,7 @@ mod tests {
             is_ref: false,
         };
         let outer = types.intern_instance(DefId(1), vec![arg]);
-        assert_eq!(types.mangle(outer), "GenObj.1..bit32");
+        assert_eq!(types.mangle(outer), "GenObj[m]");
         let nested = types.intern_instance(
             DefId(1),
             vec![TypeRef {
@@ -764,9 +721,9 @@ mod tests {
                 is_ref: false,
             }],
         );
-        // `{base}.{argc}` then `.` + `mangle_ref(arg)`; a non-ref instance arg
-        // carries no leading dot of its own, so the separator is a single dot.
-        assert_eq!(types.mangle(nested), "GenObj.1.GenObj.1..bit32");
+        // An argument is written inside the region: `I`, its path, its
+        // arguments, `E`.
+        assert_eq!(types.mangle(nested), "GenObj[I6GenObjmE]");
     }
 
     #[test]
@@ -779,13 +736,13 @@ mod tests {
             is_ref: false,
         };
         let outer = types.intern_instance(DefId(1), vec![arg]);
-        assert_eq!(types.mangle(outer), "GenObj.1..bit_native");
+        assert_eq!(types.mangle(outer), "GenObj[j]");
     }
 
     #[test]
     fn underscore_in_base_name_is_not_a_separator() {
-        // A user object may contain `_`; only the reserved `.` separates the
-        // base name from the arity tag and arguments.
+        // A user object may contain `_`; the readable part keeps it, and
+        // inside a region an identifier is length-prefixed.
         let mut types = Types::new();
         types.set_object_name(DefId(1), "Gen_Obj");
         let bit32 = types.builtin("@bit32").expect("has @bit32");
@@ -794,7 +751,10 @@ mod tests {
             is_ref: false,
         };
         let instance = types.intern_instance(DefId(1), vec![arg]);
-        assert_eq!(types.mangle(instance), "Gen_Obj.1..bit32");
+        assert_eq!(types.mangle(instance), "Gen_Obj[m]");
+        let inside = types.intern_instance(DefId(2), vec![TypeRef::value(instance)]);
+        types.set_object_name(DefId(2), "_Wrap");
+        assert_eq!(types.mangle(inside), "_Wrap[I7Gen_ObjmE]");
     }
 
     #[test]
@@ -891,6 +851,15 @@ mod tests {
         assert!(!types.contains_param(concrete.id));
         assert!(types.contains_param(template.id));
         assert!(!types.contains_param(TypeId::ERROR));
+        // Each distinct type is rewritten once: 200 steps, not 2^200.
+        assert_eq!(
+            types.substitute(template, &[Builtin::Bit32.value()]),
+            concrete
+        );
+        assert_eq!(
+            types.substitute(TypeRef::reference(template.id), &[param]),
+            TypeRef::reference(template.id)
+        );
 
         let shown = types.display_bounded(concrete, 40);
         assert_eq!(shown, format!("{}...", "P[".repeat(20)));

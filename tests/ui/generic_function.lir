@@ -8,11 +8,11 @@ function @main
     alloca #bit32 %tmp.2 : zeroed
     &1: #bit32 = const 0x1
     copy &1 -> %tmp.2
-    call @.root.gen_function.1..bit32 (in %tmp.2) (out %tmp.1)
+    call @.root.gen_function[m] (in %tmp.2) (out %tmp.1)
     copy %tmp.1 -> %result
     return
 }
-function @.root.gen_function.1..bit32
+function @.root.gen_function[m]
   in #bit32 %value
   out #bit32 %out
 {

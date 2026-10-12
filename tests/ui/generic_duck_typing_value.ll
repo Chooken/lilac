@@ -30,12 +30,12 @@ entry:
   store i32 2, ptr %tmp.1, align 4
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %source, ptr align 4 %tmp.1, i64 4, i1 false)
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %tmp.3, ptr align 4 %source, i64 4, i1 false)
-  call void @.root.gen.1.Object(ptr %tmp.3, ptr %tmp.2)
+  call void @".root.gen[6Object]"(ptr %tmp.3, ptr %tmp.2)
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %result, ptr align 4 %tmp.2, i64 4, i1 false)
   ret void
 }
 
-define void @.root.gen.1.Object(ptr %in0, ptr %out0) {
+define void @".root.gen[6Object]"(ptr %in0, ptr %out0) {
 entry:
   %tmp.1 = alloca [4 x i8], align 4
   call void @llvm.memset.p0.i64(ptr align 4 %tmp.1, i8 0, i64 4, i1 false)

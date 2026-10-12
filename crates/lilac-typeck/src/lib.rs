@@ -322,6 +322,11 @@ pub(crate) struct Checker<'a> {
     /// Concrete array types met so far, with a span that names each, for
     /// the element hook check.
     pub arrays: Vec<(TypeId, Span)>,
+    /// The types in [`Checker::arrays`].
+    pub noted_arrays: HashSet<TypeId>,
+    /// Function and array types `ensure_type` has made sure of (objects and
+    /// enums are in [`Checker::type_states`]).
+    pub ensured: HashSet<TypeId>,
     /// Declared types of module constants.
     pub const_types: HashMap<DefId, TypeRef>,
     /// Output being built.
@@ -419,6 +424,8 @@ impl<'a> Checker<'a> {
             type_stack: Vec::new(),
             type_counts: HashMap::new(),
             arrays: Vec::new(),
+            noted_arrays: HashSet::new(),
+            ensured: HashSet::new(),
             const_types: HashMap::new(),
             out: HirProgram::default(),
             env: Env::default(),

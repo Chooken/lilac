@@ -418,3 +418,133 @@ fn vendored_library_checks_clean() {
     assert!(out.success, "{}", out.stderr);
     assert!(error_codes(&out.stderr).is_empty(), "{}", out.stderr);
 }
+
+/// The program of `tests/run/wide_generic_types` with `n` distinct generic
+/// functions, each wrapping its argument in `P[T, T, T, T]`: the type
+/// `f{n}` takes, written out, is `4^(n-1)` `Empty`s. The last one panics,
+/// so with stack traces on, every call site and the panic name the types.
+fn wide_generics(n: usize) -> String {
+    let mut text = String::from(
+        "Empty: object {\n}\n\n\
+         P[A, B, C, D]: object {\n    a: A\n    b: B\n    c: C\n    d: D\n}\n\n",
+    );
+    for index in 1..n {
+        let _ = writeln!(
+            text,
+            "f{index}[T]: function (x: T) nothing {{\n    \
+             y: P[T, T, T, T] = P {{\n        a = x\n        b = x\n        c = x\n        d = x\n    }}\n    \
+             f{}[P[T, T, T, T]](y)\n}}\n",
+            index + 1
+        );
+    }
+    let _ = writeln!(
+        text,
+        "f{n}[T]: function (x: T) nothing {{\n    @panic(\"too deep\")\n}}\n"
+    );
+    text + "main: function () nothing {\n    f1[Empty](Empty {})\n}\n"
+}
+
+/// Phase 10: types whose written form grows 4^n through `n` distinct
+/// generics (no recursion, so no limit applies) compile in linear time and
+/// space. At n = 20 the program emits IR within 2 s, process start
+/// included; before, n = 11 took 2.2 s and wrote 82 MB. Its longest symbol
+/// grows linearly from n = 10 to n = 20, and the names it stores for
+/// traces are bounded, so no line of the IR is long.
+#[test]
+fn wide_generic_types_stay_linear() {
+    let dir = scratch("wide_generic_types_stay_linear");
+    write(&dir, "ten.lilac", wide_generics(10));
+    write(&dir, "twenty.lilac", wide_generics(20));
+    let limit = Duration::from_secs(2);
+    let longest_symbol = |file: &str| {
+        let out = lilac_within(&dir, &["emit-ir", file, "--stack-traces=on"], limit)
+            .unwrap_or_else(|| panic!("`lilac emit-ir {file}` ran past {limit:?}"));
+        assert!(out.success, "{file}: {}", out.stderr);
+        let longest_line = out.stdout.lines().map(str::len).max().unwrap_or(0);
+        assert!(
+            longest_line < 1_000,
+            "{file}: a line of {longest_line} bytes"
+        );
+        out.stdout
+            .split_whitespace()
+            .filter(|word| word.starts_with("@.root.f"))
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+    };
+    let ten = longest_symbol("ten.lilac");
+    let twenty = longest_symbol("twenty.lilac");
+    assert!(
+        ten < twenty && twenty < 5 * ten / 2,
+        "longest symbol: {ten} bytes at n = 10, {twenty} at n = 20"
+    );
+    let out = lilac_within(&dir, &["emit-llvm", "twenty.lilac"], limit)
+        .unwrap_or_else(|| panic!("`lilac emit-llvm twenty.lilac` ran past {limit:?}"));
+    assert!(out.success, "{}", out.stderr);
+}
+
+/// Phase 10: `lilac demangle` writes the types in each symbol as Lilac
+/// types, and leaves one with no types, or a malformed one, as it is.
+/// With no symbol it filters its input, so `lilac emit-ir … | lilac
+/// demangle` reads like source.
+#[test]
+fn demangle_reads_symbols() {
+    let dir = scratch("demangle_reads_symbols");
+    let out = lilac_within(
+        &dir,
+        &[
+            "demangle",
+            "GenBox[m].@on_drop(RI6GenBoxmEE)",
+            ".root.id[I1PNN1A1B6HolderB2_E]",
+            "@conversion(mEh)",
+            "plain.name",
+            "bad[Q]",
+        ],
+        Duration::from_secs(30),
+    )
+    .expect("finishes");
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(
+        out.stdout.lines().collect::<Vec<_>>(),
+        [
+            "GenBox[@bit32].@on_drop(ref GenBox[@bit32])",
+            ".root.id[P[A.B.Holder, A.B.Holder]]",
+            "@conversion(@bit32) -> @bit8",
+            "plain.name",
+            "bad[Q]",
+        ]
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lilac"))
+        .arg("demangle")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("runs lilac");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || {
+        use std::io::Write as _;
+        stdin
+            .write_all(
+                b"    call @Box[m].get (in %a) (out)\n  alloca [4 x #bit32] %b\nno symbols\n",
+            )
+            .expect("writes input");
+    });
+    let output = child.wait_with_output().expect("waits for lilac");
+    writer.join().expect("input written");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "    call @Box[@bit32].get (in %a) (out)\n  alloca [4 x #bit32] %b\nno symbols\n"
+    );
+
+    let out =
+        lilac_within(&dir, &["demangle", "--nope"], Duration::from_secs(30)).expect("finishes");
+    assert!(!out.success);
+    assert!(
+        out.stderr.contains("unknown flag: --nope"),
+        "{}",
+        out.stderr
+    );
+}

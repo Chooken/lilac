@@ -14,11 +14,11 @@ function @main
   $entry:
     alloca #bit32 %result : zeroed
     alloca #bit32 %tmp.1 : zeroed
-    call @.root.gen.1.Object (in) (out %tmp.1)
+    call @.root.gen[6Object] (in) (out %tmp.1)
     copy %tmp.1 -> %result
     return
 }
-function @.root.gen.1.Object
+function @.root.gen[6Object]
   out #bit32 %out
 {
   $entry:

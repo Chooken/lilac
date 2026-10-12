@@ -284,10 +284,10 @@ fn two_namespaces_same_named_types_do_not_collide() {
 fn two_namespaces_same_named_generics_do_not_collide() {
     let ir = emit_ir("two_ns_generics");
     for needle in [
-        "#a.GenBox.1..bit32",
-        "#b.GenBox.1..bit64",
-        "@a.GenBox.1..bit32.get",
-        "@b.GenBox.1..bit64.get",
+        "#a.GenBox[m]",
+        "#b.GenBox[y]",
+        "@a.GenBox[m].get",
+        "@b.GenBox[y].get",
     ] {
         assert!(ir.contains(needle), "missing `{needle}` in:\n{ir}");
     }
@@ -314,14 +314,14 @@ fn block_after<'a>(ir: &'a str, header: &str) -> &'a str {
 fn two_namespaces_same_named_generics_keep_their_own_shapes() {
     let ir = emit_ir("two_ns_gen_shapes");
 
-    let a_layout = block_after(&ir, "type #a.GenBox.1..bit32");
+    let a_layout = block_after(&ir, "type #a.GenBox[m]");
     assert!(a_layout.contains("a_value: #bit32"), "{a_layout}");
     assert!(
         !a_layout.contains("b_value"),
         "a reused b's shape:\n{a_layout}"
     );
 
-    let b_layout = block_after(&ir, "type #b.GenBox.1..bit64");
+    let b_layout = block_after(&ir, "type #b.GenBox[y]");
     assert!(b_layout.contains("b_value: #bit64"), "{b_layout}");
     assert!(b_layout.contains("b_extra: #bit64"), "{b_layout}");
     assert!(

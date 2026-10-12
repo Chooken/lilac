@@ -236,20 +236,36 @@ impl Checker<'_> {
     /// or types nested past [`MAX_TYPE_NESTING`], is `E051`; once a definition
     /// recursed too deep, a later layout of it inside itself fails with that
     /// error, so a type that grows in two fields stops in linear time.
+    ///
+    /// A function or array type is walked once, like an object
+    /// ([`Checker::ensured`]), so one nested `n` deep whose text doubles at
+    /// each level (`function (T, T)` again and again) costs `n` steps, not
+    /// `2^n`.
     pub(crate) fn ensure_type(&mut self, ty: TypeRef, span: Span) -> Result<(), ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
             TypeKind::Func {
                 params, returns, ..
             } => {
+                if self.ensured.contains(&ty.id) {
+                    return Ok(());
+                }
                 for slot in params.iter().chain(returns.iter()) {
                     self.ensure_type(*slot, span)?;
                 }
+                self.ensured.insert(ty.id);
                 return Ok(());
             }
             TypeKind::Array { elem, .. } => {
+                if self.ensured.contains(&ty.id) {
+                    return Ok(());
+                }
                 self.ensure_type(TypeRef::value(elem), span)?;
                 self.note_array(ty.id, span);
-                return self.lay_out_array(ty.id, span);
+                // Not remembered when too large: each place that names it
+                // is an error (`lay_out_array`).
+                self.lay_out_array(ty.id, span)?;
+                self.ensured.insert(ty.id);
+                return Ok(());
             }
             TypeKind::Object(_) | TypeKind::Instance { .. } => {}
             _ => return Ok(()),
