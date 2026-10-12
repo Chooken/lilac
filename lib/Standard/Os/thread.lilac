@@ -149,7 +149,7 @@ private {
     clone_tls_size: @bit_native => 0x3FC0
 
     clone_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
-        mapping: ref unknown = map_pages(clone_mapping)
+        mapping: ref unknown = map_pages(clone_mapping).get() else { @panic("Out of memory.") }
         if @ptr_to_address(mapping) == 0x0 {
             result = .Error(.OutOfMemory)
             return

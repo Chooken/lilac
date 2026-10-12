@@ -25,7 +25,7 @@ allocate: function (size: @bit_native) memory: ref unknown {
                 // One mapping per allocation, its length in a header in
                 // front.
                 total: @bit_native = @i_add_native(size, alloc_header)
-                mapped: ref unknown = map_pages(total)
+                mapped: ref unknown = map_pages(total).get() else { @panic("Out of memory.") }
                 if @ptr_to_address(mapped) == 0x0 {
                     memory = mapped
                 } else {
@@ -119,28 +119,25 @@ reallocate: function (memory: ref unknown, size: @bit_native) moved: ref unknown
 
 // `size` bytes of fresh zeroed pages (`size` is rounded up to whole pages),
 // or null when out of memory. Release them with `unmap_pages`.
-map_pages: function (size: @bit_native) memory: ref unknown {
+map_pages: function (size: @bit_native) memory: Optional[ref unknown] {
     match @builtin.Target.os {
         .Windows => {
-            memory = Windows.VirtualAlloc(@address_to_ptr(0x0), size, @bit_or_32(Windows.MEM_COMMIT, Windows.MEM_RESERVE), Windows.PAGE_READWRITE)
+            ptr: ref unknown = Windows.VirtualAlloc(@address_to_ptr(0x0), size, @bit_or_32(Windows.MEM_COMMIT, Windows.MEM_RESERVE), Windows.PAGE_READWRITE)
+            memory = if ptr == null() then .None else .Some(ptr)
         }
         .Linux => {
             result: @bit_native = Linux.mmap(@address_to_ptr(0x0), size, @bit_or_32(Linux.PROT_READ, Linux.PROT_WRITE), @bit_or_32(Linux.MAP_PRIVATE, Linux.MAP_ANONYMOUS), 0xFFFFFFFF, 0x0)
-            if Linux.is_error(result) {
-                result = 0x0
-            }
-            memory = @address_to_ptr(result)
+            memory = if Linux.is_error(result) then .None else .Some(@address_to_ptr(result))
         }
         .MacOs => {
-            memory = MacOs.mmap(@address_to_ptr(0x0), size, @bit_or_32(MacOs.PROT_READ, MacOs.PROT_WRITE), @bit_or_32(MacOs.MAP_PRIVATE, MacOs.MAP_ANON), 0xFFFFFFFF, 0x0)
-            if @ptr_to_address(memory) == MacOs.MAP_FAILED {
-                memory = @address_to_ptr(0x0)
-            }
+            ptr: ref unknown = MacOs.mmap(@address_to_ptr(0x0), size, @bit_or_32(MacOs.PROT_READ, MacOs.PROT_WRITE), @bit_or_32(MacOs.MAP_PRIVATE, MacOs.MAP_ANON), 0xFFFFFFFF, 0x0)
+            memory = if @ptr_to_address(ptr) == MacOs.MAP_FAILED then .None else .Some(ptr)
         }
     } else {
         // No virtual memory: plain zeroed memory from the C library.
         needs_libc()
-        memory = C.calloc(0x1, size)
+        ptr: ref unknown = C.calloc(0x1, size)
+        memory = if ptr == null() then .None else .Some(ptr)
     }
 }
 

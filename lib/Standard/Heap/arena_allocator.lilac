@@ -1,0 +1,89 @@
+
+using Standard.Os as Os
+
+ArenaAllocator: object {
+
+    private {
+        base: ref unknown
+        size: Int
+        offset: Int
+    }
+
+    init: function (capacity: Int) allocator: ArenaAllocator {
+
+        if @builtin.Build.mode == @builtin.Mode.Debug {
+            if capacity <= 0 {
+                @panic("Can't allocate a negative capacity.")
+            }
+        }
+
+        result: Optional[ref unknown] = Os.map_pages(capacity)
+
+        ptr: ref unknown = result.get() else {
+            @panic("Out of memory.")
+        }
+
+        allocator = ArenaAllocator {
+            base = ptr
+            size = capacity
+            offset = 0
+        }
+    }
+
+    create[T]: function (self) allocation: ref T {
+        allocation = self.alloc_raw(@size_of(T)) as ref T
+    }
+
+    destroy[T]: function (self, allocation: ref T) nothing {
+        @drop(allocation)
+    }
+
+    alloc[T]: function (self, count: Int) allocation: ref T {
+        allocation = self.alloc_raw(@size_of(T) * count) as ref T
+    }
+
+    realloc[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
+        allocation = self.realloc_raw(ptr, @size_of(T) * count, @size_of(T) * new_count) as ref T
+    }
+
+    free[T]: function (self, ptr: ref T) nothing {
+        // no-op
+    }
+
+    alloc_raw: function (self, size: Int) allocation: ref unknown {
+        
+        // How should I actually be aligning this. Currently hardcoded 16 byte alignment.
+        aligned_size: Int = @bit_and_native((size + 15) as @bit_native, @bit_not_native(15))
+
+        if @builtin.Build.mode == @builtin.Mode.Debug {
+            if size < 0 {
+                @panic("Can't allocate a negative size.")
+            }
+        }
+
+        if self.offset + aligned_size >= self.size {
+            // Possibly expand the arena in the future.
+            @panic("The allocator is out of memory (full).")
+        }
+
+        allocation = @ptr_add(self.base, self.offset as @bit_native)
+        self.offset = self.offset + aligned_size
+    }
+
+    realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int) allocation: ref unknown {
+        allocation = self.alloc_raw(new_size)
+        @memcpy(ptr as ref @bit8, allocation as ref @bit8, old_size)
+    }
+
+    free_raw: function (self, allocation: ref unknown) nothing {
+        // no op. here incase someone wants to use allocators as interfaces.
+    }
+
+    reset: function (self) nothing {
+        self.offset = 0
+    }
+
+    @on_drop: function (self) nothing {
+        Os.unmap_pages(self.base, self.size)
+    }
+}
