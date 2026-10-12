@@ -1,0 +1,17 @@
+// expect-error: E072
+// A format cannot be an enum payload.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+Maybe: enum {
+    Text: @format_args(Out)
+    Nothing
+}
+
+main: function () nothing {}

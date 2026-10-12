@@ -19,7 +19,7 @@ pub const DEMANGLE_LIMIT: usize = 4096;
 /// The basic types: each is one letter in a region (the letters Rust's v0
 /// gives `u8`, `u16`, `u32`, `u64`, `usize`, `f32`, `f64` and `str`, and
 /// letters v0 leaves unused for the rest).
-const BASIC: [(u8, &str); 13] = [
+const BASIC: [(u8, &str); 12] = [
     (b'h', "@bit8"),
     (b't', "@bit16"),
     (b'm', "@bit32"),
@@ -30,7 +30,6 @@ const BASIC: [(u8, &str); 13] = [
     (b'd', "@fbit64"),
     (b'q', "@fbit128"),
     (b'e', "@byte_buffer"),
-    (b'w', "@format_args"),
     (b'g', "unknown"),
     (b'r', "<error>"),
 ];
@@ -138,6 +137,10 @@ impl<'t> Region<'t> {
                     self.ty(TypeRef::value(*elem));
                     push_base62(&mut self.out, *len);
                 }
+                TypeKind::FormatArgs { writer } => {
+                    self.out.push('w');
+                    self.ty(TypeRef::value(*writer));
+                }
                 TypeKind::Func {
                     params,
                     returns,
@@ -220,7 +223,6 @@ fn basic_letter(kind: &TypeKind) -> Option<u8> {
         TypeKind::FBit64 => "@fbit64",
         TypeKind::FBit128 => "@fbit128",
         TypeKind::ByteBuffer => "@byte_buffer",
-        TypeKind::FormatArgs => "@format_args",
         TypeKind::Unknown => "unknown",
         TypeKind::Error => "<error>",
         _ => return None,
@@ -585,6 +587,11 @@ impl<'s> Parsed<'s> {
                 tasks.push(Task::Text(", "));
                 tasks.push(Task::Type(at + 1));
             }
+            b'w' => {
+                out.push("@format_args(");
+                tasks.push(Task::Text(")"));
+                tasks.push(Task::Type(at + 1));
+            }
             b'F' => {
                 let mut params = at + 1;
                 if self.src.get(params) == Some(&b'K') {
@@ -684,7 +691,8 @@ impl Parser<'_> {
         match tag {
             b'0'..=b'9' | b'u' | b'N' => steps.push(Step::Path),
             b'B' => self.backref(&[What::Type, What::Path])?,
-            b'R' => {
+            // A `ref` or a format: one type follows.
+            b'R' | b'w' => {
                 self.pos += 1;
                 steps.push(Step::EndType(at));
                 steps.push(Step::Type);
@@ -906,6 +914,7 @@ mod tests {
                 types.intern_instance(DefId(3), vec![TypeRef::reference(ty.id)]),
             ));
             out.push(TypeRef::value(types.intern_array(ty.id, index as u64 + 1)));
+            out.push(TypeRef::value(types.intern_format_args(ty.id)));
             out.push(TypeRef::value(types.intern_func(vec![*ty], vec![other])));
             out.push(TypeRef::value(types.intern_func_abi(
                 vec![*ty, other],
@@ -947,12 +956,13 @@ mod tests {
         for _ in 0..count {
             let mut pick = || pool[next(pool.len())];
             let (a, b) = (pick(), pick());
-            let ty = match next(6) {
+            let ty = match next(7) {
                 0 => TypeRef::reference(a.id),
                 1 => TypeRef::value(types.intern_instance(DefId(3), vec![a])),
                 2 => TypeRef::value(types.intern_instance(DefId(4), vec![a, b])),
                 3 => TypeRef::value(types.intern_array(a.id, next(200) as u64 + 1)),
                 4 => TypeRef::value(types.intern_func(vec![a, b], vec![b])),
+                5 => TypeRef::value(types.intern_format_args(a.id)),
                 _ => TypeRef::value(types.intern_func_abi(vec![a], Vec::new(), true)),
             };
             pool.push(ty);
@@ -1062,6 +1072,12 @@ mod tests {
         assert_eq!(
             demangle("Q[ANN1A1B6Holder10_B0_]").as_deref(),
             Some("Q[@array(A.B.Holder, 63), A.B.Holder]")
+        );
+        let format = types.intern_format_args(holder.id);
+        assert_eq!(types.mangle(format), "[wNN1A1B6Holder]");
+        assert_eq!(
+            demangle(&types.mangle(format)).as_deref(),
+            Some("[@format_args(A.B.Holder)]")
         );
     }
 

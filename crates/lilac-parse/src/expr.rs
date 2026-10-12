@@ -1,7 +1,7 @@
 //! Expressions: operators by precedence, postfix chains and primaries.
 
 use lilac_ast::{BinOp, Expr, FStrPart, StructField, Type, TypeShape};
-use lilac_error::ErrorGuaranteed;
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::{Token, TokenKind};
 use lilac_span::Span;
 
@@ -407,13 +407,19 @@ impl Parser {
             match self.peek().kind {
                 TokenKind::FStrMid => {
                     let chunk = self.bump();
-                    parts.push(FStrPart::Lit(chunk.bytes));
+                    parts.push(FStrPart::Lit {
+                        bytes: chunk.bytes,
+                        span: chunk.span,
+                    });
                 }
                 TokenKind::LBrace => {
                     self.bump();
                     parts.push(FStrPart::Hole(
                         self.with_struct_lit(true, |p| p.parse_expr(diags))?,
                     ));
+                    if matches!(self.peek().kind, TokenKind::Colon | TokenKind::Comma) {
+                        self.format_spec(diags);
+                    }
                     self.expect(diags, TokenKind::RBrace, "`}` to close f-string hole")?;
                 }
                 TokenKind::FStrEnd => {
@@ -516,4 +522,33 @@ pub(crate) fn starts_expression(kind: TokenKind) -> bool {
             | TokenKind::KwSelf
             | TokenKind::Dot
     )
+}
+
+impl Parser {
+    /// A `:` or `,` after a hole's value: format specs are not syntax, so
+    /// it is `E001`, and the rest of the hole is skipped up to its `}`.
+    fn format_spec(&mut self, diags: &mut lilac_error::Diags) {
+        let start = self.peek().span;
+        let mut open = 0usize;
+        loop {
+            match self.peek().kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => open += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace if open > 0 => {
+                    open -= 1;
+                }
+                TokenKind::RBrace | TokenKind::FStrEnd | TokenKind::Eof => break,
+                _ => {}
+            }
+            self.bump();
+        }
+        let span = join_spans(start, self.prev_span());
+        diags.emit(
+            Diagnostic::error(codes::E001, "an f-string hole takes no format spec")
+                .label(span, true, "not part of the hole")
+                .help(
+                    "format a variation through a value with its own `@format`: \
+                     `{count.hex()}`, `{pad_left($\"{name}\", 10)}`",
+                ),
+        );
+    }
 }

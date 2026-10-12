@@ -18,6 +18,7 @@ mod body;
 mod calls;
 mod expr;
 mod failure;
+mod formats;
 mod generics;
 mod indices;
 mod layout;
@@ -261,6 +262,10 @@ pub(crate) enum Requirement {
     /// A type the instance lays out is larger than the target allows
     /// (`E067`).
     Size,
+    /// A hole has no `@format` for its type and the format's `W` (`E071`).
+    Format,
+    /// A format where only locals and parameters may hold one (`E072`).
+    FormatPlace,
 }
 
 pub(crate) struct Checker<'a> {

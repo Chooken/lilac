@@ -1,0 +1,15 @@
+// expect-error: E072
+// An arm of a value `if` cannot keep a temporary hole alive.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+main: function () nothing {
+    n: @bit32 = 0x1
+    text: @format_args(Out) = if n == 0x1 then $"{number()}" else "none"
+}

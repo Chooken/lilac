@@ -422,7 +422,8 @@ impl Checker<'_> {
                 // type, so a tag or literal does not ask for one.
                 let expected = Some(declared.id);
                 let value_hir = self.check_expr(fcx, value, expected);
-                let value_hir = self.coerce(value_hir, declared, ty.span);
+                let mut value_hir = self.coerce(value_hir, declared, ty.span);
+                self.extend_holes(fcx, &mut value_hir, out);
                 let local = self.declare(fcx, name, declared, *span);
                 out.push(HirStmt::Let {
                     local,
@@ -574,7 +575,10 @@ impl Checker<'_> {
             (place, ty)
         };
         let value_hir = self.coerce(value_hir, want, target.span());
-        let _ = span;
+        let through_ref = matches!(place.kind, HirExprKind::Deref(_));
+        if self.format_store(&value_hir, through_ref, span).is_err() {
+            return;
+        }
         out.push(HirStmt::Assign {
             place,
             value: value_hir,

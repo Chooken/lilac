@@ -28,11 +28,12 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
   byte. It is the type of string literal payloads (`"hi"`) and `data` consts — a
   shared currency for "known bytes". Meaning always comes from use (left-to-right):
   `String` construction reads text. A `@byte_buffer` borrows; it never owns.
-* **`@format_args`**: A builtin fixed-capacity table of `@byte_buffer` pieces
-  (at most 16; more is a compile error suggesting a split). It is the value of
-  an f-string *before* consumption: static chunks reference `data` consts
-  directly, holes hold converted bytes. Stack-only, no allocation, no hidden
-  behavior — storage and flattening are whoever consumes it.
+* **`@format_args(W)`**: The value of an f-string (§2): two pointers, one
+  to a static template (the literal pieces and, per hole, the `@format`
+  hook that writes it into a `W`) and one to the holes' addresses on the
+  stack. Nothing is formatted until a consumer walks it. `W` is any type;
+  the compiler never looks inside it. A format borrows, so only locals and
+  parameters hold one (`E072`).
 
 ### Special Keywords
 
@@ -213,42 +214,84 @@ Fixed-size storage is the builtin `@array(T, N)` (§1), reached through
 
 ### Formatted strings
 
-Formatted strings (`$"Hello {name}"`) lower to a `@format_args` value: one
-`@byte_buffer` piece per literal chunk and per hole. Holes mirror C# `$"{...}"`
-(full expressions, e.g. `{x.toHex()}`); alignment and format clauses do not
-exist in v1. `{{` escapes to `{` and `}}` to `}`. Each piece keeps its own span.
-At most 16 pieces; more is a compile error suggesting a split.
+An f-string (`$"Hello {name}!"`) is data, not text: an `@format_args(W)`,
+two pointers.
+
+- **The template** (static, read-only, one per distinct f-string): the
+  literal pieces and, for each hole, its formatter, the `@format` hook of
+  the hole's type for `W` (§8), found at compile time.
+- **The holes** (on the stack): one pointer per hole, to the value it
+  borrows.
+
+Nothing is formatted when the f-string is evaluated: its holes are
+evaluated, once each and left to right, and their addresses stored. A
+consumer formats it, as often as it likes (zero times when a log level
+is off). Holes are full expressions (`{count.hex()}`), checked with no
+expected type; `{{` escapes to `{` and `}}` to `}`. There is no spec
+syntax: a hole's top-level `:` or `,` is `E001`, and a variation is a
+value with its own `@format` (`{count.hex()}`, or a function over a
+nested format: `{pad_left($"{name}", 10)}`).
+
+`W` is the type every formatter in the template writes into, and it comes
+from where the f-string goes, the way a number literal's width does:
+
+1. An expected `@format_args(W)` (or an alias of one) gives `W`.
+2. Any other expected type takes the `W` of its one `@conversion` from an
+   `@format_args(W)`, and the f-string converts through it (`text: String
+   = $"..."`). With none it is `E043`; with two (from two writer types)
+   it is `E073`.
+3. With nothing expected (a statement, an operand) it is `E073`.
+
+A hole of type `T` (or `ref T`) uses the `@format(ref T, ref W)` hook,
+found by its exact signature like every hook; a type with none is `E071`
+at the hole. The compiler formats nothing itself: a `@byte_buffer` or
+nested-format hole works because a library defines that hook.
+
+In an `@format_args(W)` slot, and only there (never in a type that merely
+converts from a format), two more forms are formats: a string literal is
+a format with no holes, and any other value is the one-hole format
+`$"{value}"`. So `out.write("hi")`, `out.write(count)` and
+`out.write($"{count} items")` all work. The slot rules apply where
+conversions do (typed contexts and call arguments), never to an
+operator's or a direct hook call's arguments.
+
+Three intrinsics read a format (§3); a library walks it with them:
 
 ```lilac
-msg: String = $"Hello {name}!"
-// lowers to (names simplified):
-__f: @format_args = @format_args_new()
-@format_args_push(ref __f, !const "Hello ")   // static chunk, borrowed
-@format_args_push(ref __f, @convert(name))    // hole: @conversion(T -> @byte_buffer)
-@format_args_push(ref __f, !const "!")
-msg: String = @convert(__f)                   // @conversion(@format_args -> String)
+Out: object {
+    write: function (self, text: @format_args(Out)) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            write_bytes(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
 ```
 
-Holes convert through the ordinary `@conversion(from: T) to: @byte_buffer`
-search — a missing conversion is the usual `E043` naming `T` and the hole span,
-with no method-name coupling of any kind. A `@format_args` is storable
-(`f: @format_args = $"..."`) since it is a declared builtin type, but its pieces
-borrow (static consts plus conversion temps): storing one past its statement
-carries the same caveat as storing a `ref`, while immediate consumption is
-always sound.
+A format borrows twice (its holes point at values, and its hole pointers
+sit in the frame that built it), so it stays in that frame, with no
+borrow checker (`E072`):
 
-Consumption is driven by the expected type (left-to-right, no inference, no
-special result-type rule):
+- Only locals and parameters hold one, never a field, enum payload, array
+  element, out, global or constant. A `ref` to one may be anywhere a
+  `ref` may.
+- It is never stored through a `ref` or with `@write`.
+- Holes are borrowed, never moved or copied: `$"{s}"` leaves `s` full. A
+  place hole must not be outlived by the format, as for any `ref`.
+- A temporary hole (a call result, a literal) lives until the end of its
+  statement, except in the initializer of a new local: each hole is then
+  evaluated into a hidden local declared just before it, so its
+  temporaries live, and drop, with the local's block. A format with a
+  temporary hole assigned to an existing local, or as an arm of a value
+  `if` or `match`, is `E072`; declare a local for it.
 
-1. A type with `@conversion(from: @format_args)` (e.g. `String`) converts —
-   allocation, if any, happens inside that user-land conversion. Streaming
-   sinks are ordinary library code over `@format_args_count`/`_piece`.
-2. Expected `@format_args` keeps the value itself.
-3. No expected type checks the value as `@format_args` and drops it.
-
-The compiler names zero standard library entities anywhere in this path — only
-builtins and conversions. Whether an f-string allocates is
-therefore the caller's explicit choice of sink, never hidden sugar behavior.
+The compiler names no library entity anywhere in this: `W`, its hooks and
+every consumer are library code, so whether an f-string allocates is the
+consumer's choice, never hidden sugar.
 
 ### Constant conditions and `@compile_error`
 
@@ -420,10 +463,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@byte_buffer_ptr`** | `(buffer)` | Returns the `ref @bit8` pointer to the first byte of a `@byte_buffer`. |
 | **`@byte_buffer_len`** | `(buffer)` | Returns a `@byte_buffer` length as `@bit_native`. |
 | **`@byte_buffer_from`** | `(ptr, len)` | Builds a borrowing `@byte_buffer` view over `ref @bit8` plus `@bit_native` length. Same lifetime caveat as any `ref`. |
-| **`@format_args_new`** | `()` | Empty `@format_args` table (zero pieces). |
-| **`@format_args_push`** | `(args, piece)` | Appends a `@byte_buffer` piece to `ref @format_args`. Panics past 16 pieces. |
-| **`@format_args_count`** | `(args)` | Piece count of a `@format_args` as `@bit_native`. |
-| **`@format_args_piece`** | `(args, index)` | The `index`-th piece as a borrowing `@byte_buffer` view. Out of bounds panics. |
+| **`@format_args_holes`** | `(args)` | The hole count of an `@format_args(W)` as `@bit_native`; there is one more piece. |
+| **`@format_args_piece`** | `(args, index)` | The `index`-th literal piece (`0..=holes`) as a borrowing `@byte_buffer`. Out of bounds panics. |
+| **`@format_args_hole`** | `(args, index, out)` | Writes hole `index` (`0..holes`) into `out: ref W` through its `@format` hook. Out of bounds panics. |
 | **`@compile_error`** | `(message)` | Creates a compile-time error if the compiler hits it logging the message. |
 | **`@move`** | `(place)` | Moves an owned place out, whatever its type, without its copy hook (§1). |
 | **`@write`** | `(ref T, value: T)` | Moves `value` into the slot at the address, which must be empty: nothing there is dropped. |
@@ -1292,7 +1334,7 @@ Resolution order (normative):
    parameter type is `E010`. Numeric literals and tags (`.None`, `.Some(x)`)
    still take the parameter/operand type (literal typing, not conversion), so
    `os == .Windows` types the tag from `os`. Typed contexts
-   (let/assign/return, f-string holes) and ordinary function-call arguments
+   (let/assign/return) and ordinary function-call arguments
    still convert as in step 2.
 
 `==` never converts: equality is always direct bit-equality.
@@ -1338,6 +1380,18 @@ main: function (v: @bit32) nothing {
 
 `as` and the implicit path share one conversion mechanism; neither chains, both are exact-match, and a change to conversion rules applies
 to both.
+
+### The `@format` hook
+
+`@format(value: ref T, out: ref W) nothing` says how a `T` is written into a
+writer `W` (§2, "Formatted strings"). Both parameters are `ref`s and it has
+no outs; any other shape is `E022`. It is indexed by its exact signature
+like every hook, so one type may have a hook per writer, and a writer is
+any type: the compiler never looks inside `W`. A top-level hook may name a
+type the library does not own (`@format(value: ref @bit32, out: ref
+String)`). A generic type's hook is checked for an instance when an
+f-string first uses it, so `@format` of a `Box(T)` that fails for some `T`
+is `E042` only where it is used with that `T`.
 
 ### Resource Management (RAII)
 
@@ -1536,7 +1590,7 @@ executors accept any type with a structural `poll` via duck-typed generics, and
 thing Lilac cannot express in itself — is sourced through `extern` (platform
 context-switch helpers or a tiny C shim via the build script), never through a
 compiler intrinsic. `await` syntax is explicitly deferred: if ever added, it
-desugars to existing constructs the way f-strings do.
+desugars to existing constructs.
 
 ## Lilac to IR (informative; `IR_SPEC.md` is normative)
 
@@ -1556,7 +1610,17 @@ data { !c7: str = "hi" }
 &1: #byte_buffer = const !c7
 ```
 `String` construction from there is ordinary user-land conversion (`@conversion`
-search); f-strings additionally use `@format_args_*` per §2.
+search).
+F-string (`msg: @format_args(Out) = $"a{part}b"`): a static template naming
+each hole's `@format` hook, and a `format` instruction that fills the
+`#format_args` from the holes' addresses:
+```lilac-ir
+!fmt0: format "a" {@@format(ReR3OutE)} "b"
+...
+&3: ref #byte_buffer = addr %part
+format !fmt0 (&3) -> %tmp.2
+copy %tmp.2 -> %msg
+```
 Function call with multi-return (`val1, val2 = multi_func()`):
 ```lilac-ir
 $entry:

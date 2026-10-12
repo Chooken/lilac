@@ -271,8 +271,8 @@ Result[Float64, ParseError]`; `format_int(value, radix) String`,
 
 **Conversions & hooks:** `@conversion(from: @byte_buffer) to: String`,
 `@conversion(from: String) to: @byte_buffer`,
-`@conversion(from: @format_args) to: String`, `@conversion(from: Char) to:
-String`, `@conversion(from: String) to: @format_args` (via builder).
+`@conversion(from: @format_args(String)) to: String`, `@conversion(from:
+Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 `ToString` for all scalars (int/float/bool/char).
 
 ---

@@ -86,8 +86,12 @@ pub enum TypeKind {
     FBit128,
     /// `@byte_buffer` borrowed byte view.
     ByteBuffer,
-    /// `@format_args` fixed-capacity piece table.
-    FormatArgs,
+    /// `@format_args(W)`: an f-string, formatted into a `W` (two
+    /// pointers: its template and its holes).
+    FormatArgs {
+        /// The type every formatter in it writes into.
+        writer: TypeId,
+    },
     /// `unknown` opaque type (only behind `ref`).
     Unknown,
     /// User-declared `object`.
@@ -151,15 +155,13 @@ pub enum Builtin {
     FBit128,
     /// `@byte_buffer`.
     ByteBuffer,
-    /// `@format_args`.
-    FormatArgs,
     /// `unknown`.
     Unknown,
 }
 
 impl Builtin {
     /// Every builtin, in `TypeId` order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::Bit8,
         Self::Bit16,
         Self::Bit32,
@@ -170,7 +172,6 @@ impl Builtin {
         Self::FBit64,
         Self::FBit128,
         Self::ByteBuffer,
-        Self::FormatArgs,
         Self::Unknown,
     ];
 
@@ -188,7 +189,6 @@ impl Builtin {
             Self::FBit64 => "@fbit64",
             Self::FBit128 => "@fbit128",
             Self::ByteBuffer => "@byte_buffer",
-            Self::FormatArgs => "@format_args",
             Self::Unknown => "unknown",
         }
     }
@@ -223,7 +223,6 @@ impl Builtin {
             Self::FBit64 => TypeKind::FBit64,
             Self::FBit128 => TypeKind::FBit128,
             Self::ByteBuffer => TypeKind::ByteBuffer,
-            Self::FormatArgs => TypeKind::FormatArgs,
             Self::Unknown => TypeKind::Unknown,
         }
     }
@@ -258,10 +257,11 @@ pub struct Types {
     params: HashMap<(u32, String), TypeId>,
     instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
     arrays: HashMap<(TypeId, u64), TypeId>,
+    format_args: HashMap<TypeId, TypeId>,
 }
 
 impl Types {
-    /// Table with the 12 builtin types pre-interned.
+    /// Table with the 11 builtin types pre-interned.
     pub fn new() -> Self {
         let mut table = Self::default();
         for builtin in Builtin::ALL {
@@ -277,6 +277,7 @@ impl Types {
             TypeKind::Param { .. } => true,
             TypeKind::Instance { args, .. } => args.iter().any(|arg| self.contains_param(arg.id)),
             TypeKind::Array { elem, .. } => self.contains_param(*elem),
+            TypeKind::FormatArgs { writer } => self.contains_param(*writer),
             TypeKind::Func {
                 params, returns, ..
             } => params
@@ -344,6 +345,16 @@ impl Types {
         id
     }
 
+    /// Interns (or finds) `@format_args(writer)`.
+    pub fn intern_format_args(&mut self, writer: TypeId) -> TypeId {
+        if let Some(&id) = self.format_args.get(&writer) {
+            return id;
+        }
+        let id = self.push(TypeKind::FormatArgs { writer });
+        self.format_args.insert(writer, id);
+        id
+    }
+
     /// Rewrites `Param(i)` to `args[i]` throughout `ty`, recursively
     /// re-interning nested `Instance`/`Func` types. The outer `ref` flag is
     /// preserved (and never doubled). Each distinct type inside `ty` is
@@ -385,6 +396,10 @@ impl Types {
                 TypeKind::Array { elem, len } => {
                     let elem = self.substitute_in(TypeRef::value(elem), args, done);
                     TypeRef::value(self.intern_array(elem.id, len))
+                }
+                TypeKind::FormatArgs { writer } => {
+                    let writer = self.substitute_in(TypeRef::value(writer), args, done);
+                    TypeRef::value(self.intern_format_args(writer.id))
                 }
                 TypeKind::Func {
                     params,
@@ -462,7 +477,10 @@ impl Types {
         }
         let spelled_with_arguments = matches!(
             self.kind(id),
-            TypeKind::Instance { .. } | TypeKind::Array { .. } | TypeKind::Func { .. }
+            TypeKind::Instance { .. }
+                | TypeKind::Array { .. }
+                | TypeKind::Func { .. }
+                | TypeKind::FormatArgs { .. }
         );
         if !spelled_with_arguments {
             return;
@@ -588,7 +606,11 @@ impl Types {
             TypeKind::FBit64 => out.push_str("@fbit64"),
             TypeKind::FBit128 => out.push_str("@fbit128"),
             TypeKind::ByteBuffer => out.push_str("@byte_buffer"),
-            TypeKind::FormatArgs => out.push_str("@format_args"),
+            TypeKind::FormatArgs { writer } => {
+                out.push_str("@format_args(");
+                self.write_type(TypeRef::value(*writer), out, limit);
+                out.push(')');
+            }
             TypeKind::Unknown => out.push_str("unknown"),
         }
     }

@@ -1,5 +1,5 @@
 //! M3 UI tests: string/const ports check clean, `.lir` snapshots
-//! byte-stable, and `E043`/`E060`/`E061` FAILS pins hold.
+//! byte-stable, and `E043`/`E060` FAILS pins hold.
 
 use std::process::Command;
 
@@ -69,9 +69,4 @@ fn fails_with(name: &str, code: &str) {
 #[test]
 fn fstring_missing_conversion_is_e043() {
     fails_with("FAILS_fstring_missing_conversion.lilac", "E043");
-}
-
-#[test]
-fn fstring_piece_cap_is_e061() {
-    fails_with("FAILS_fstring_piece_cap.lilac", "E061");
 }

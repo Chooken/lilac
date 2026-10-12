@@ -1,4 +1,8 @@
+Out: object {}
+
+@format: function (value: ref @byte_buffer, out: ref Out) nothing {}
+
 main: function () nothing {
     part: @byte_buffer = "x"
-    msg: @format_args = $"a{part}b"
+    msg: @format_args(Out) = $"a{part}b"
 }

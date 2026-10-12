@@ -752,7 +752,7 @@ pub enum LirInst {
         /// Instruction span.
         span: Span,
     },
-    /// `format !fmt0 (&1, &2) -> %d`: points the `#.lilac.format_args`
+    /// `format !fmt0 (&1, &2) -> %d`: points the `#format_args`
     /// place `%d` at the template `!fmt0` and at the hole addresses, which
     /// it stores in an array that lives as long as the function's frame.
     /// Register `i` is a `ref` to hole `i`, of the type its formatter takes.
@@ -1067,8 +1067,8 @@ pub fn is_variadic_arg_type(ty: &LirTy) -> bool {
 }
 
 /// Fixed fields of the builtin aggregate types (`#byte_buffer`,
-/// `#format_args`: a count plus sixteen pieces, `#.lilac.format_args`: an
-/// f-string, its template and its hole addresses, `#.lilac.format_part`:
+/// `#format_args`: an f-string, its template and its hole addresses,
+/// `#.lilac.format_part`:
 /// one part of a template, see [`format_template_layout`], and
 /// `#.lilac.frame`: a shadow-stack record, see [`trace`]), laid out as C
 /// structs like any other ([`builtin_layout`]).
@@ -1081,12 +1081,7 @@ pub fn builtin_fields(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
             ("len".to_owned(), LirTy::BitNative),
             ("data".to_owned(), LirTy::byte_ref()),
         ]),
-        "format_args" => Some(
-            std::iter::once(("count".to_owned(), LirTy::BitNative))
-                .chain((0..16).map(|index| (format!("p{index}"), LirTy::byte_buffer())))
-                .collect(),
-        ),
-        ".lilac.format_args" => Some(vec![
+        "format_args" => Some(vec![
             ("template".to_owned(), LirTy::opaque_ref()),
             ("holes".to_owned(), LirTy::opaque_ref()),
         ]),

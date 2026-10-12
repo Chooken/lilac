@@ -1,0 +1,14 @@
+// expect-error: E022
+// `@format` takes the value by `ref` and the writer by `ref`.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+@format: function (value: @bit8, out: ref Out) nothing {}
+
+main: function () nothing {}

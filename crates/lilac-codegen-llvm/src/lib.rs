@@ -262,7 +262,7 @@ mod tests {
         for needle in [
             "%ppair = alloca [8 x i8], align 4",
             "%pbb = alloca [16 x i8], align 8",
-            "%pfa = alloca [264 x i8], align 8",
+            "%pfa = alloca [16 x i8], align 8",
             "store i8 0, ptr %p8, align 1",
             "store i16 0, ptr %p16, align 2",
             "store i32 0, ptr %p32, align 4",
@@ -270,7 +270,7 @@ mod tests {
             "store ptr null, ptr %pr, align 8",
             "call void @llvm.memset.p0.i64(ptr align 4 %ppair, i8 0, i64 8, i1 false)",
             "call void @llvm.memset.p0.i64(ptr align 8 %pbb, i8 0, i64 16, i1 false)",
-            "call void @llvm.memset.p0.i64(ptr align 8 %pfa, i8 0, i64 264, i1 false)",
+            "call void @llvm.memset.p0.i64(ptr align 8 %pfa, i8 0, i64 16, i1 false)",
         ] {
             assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
         }
@@ -605,8 +605,8 @@ mod tests {
         });
         let mut entry = Vec::new();
         alloca(&mut entry, "x", "#bit32");
-        alloca(&mut entry, "f", "#.lilac.format_args");
-        alloca(&mut entry, "g", "#.lilac.format_args");
+        alloca(&mut entry, "f", "#format_args");
+        alloca(&mut entry, "g", "#format_args");
         let next = vec![
             LirInst::Addr {
                 place: "x".into(),
@@ -1276,10 +1276,9 @@ mod tests {
             "byte_buffer_len",
             "load_u8",
             "store_u8",
-            "format_args_new",
-            "format_args_push",
-            "format_args_count",
+            "format_args_holes",
             "format_args_piece",
+            "format_args_hole",
         ] {
             assert!(
                 !text.contains(moved),
@@ -1448,7 +1447,7 @@ mod tests {
     fn panic_handler_lowers() {
         let mut module =
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
-        module.funcs = lilac_ir::build_runtime(8);
+        module.funcs = lilac_ir::build_runtime(&module.target);
         module.funcs.extend(lilac_ir::hook_externs());
         let (handler, data) = lilac_ir::panic_runtime();
         module.funcs.push(handler);
@@ -1460,12 +1459,12 @@ mod tests {
 
     /// The builtin aggregates are their `builtin_layout` bytes on each
     /// target: `#byte_buffer` is a pointer-sized count and a pointer,
-    /// `#format_args` a count plus sixteen of them.
+    /// `#format_args` two pointers.
     #[test]
     fn builtin_aggregates_follow_builtin_layout() {
         let text = emit(&type_module());
         assert!(text.contains("%pbb = alloca [16 x i8], align 8"), "{text}");
-        assert!(text.contains("%pfa = alloca [264 x i8], align 8"), "{text}");
+        assert!(text.contains("%pfa = alloca [16 x i8], align 8"), "{text}");
         let triple = "i686-unknown-linux-gnu";
         let mut module = LirModule::new(lilac_target::Target::parse(triple).expect("triple"));
         let mut insts = Vec::new();
@@ -1478,7 +1477,7 @@ mod tests {
             .emit_llvm(&module)
             .expect("emits");
         assert!(text.contains("%bb = alloca [8 x i8], align 4"), "{text}");
-        assert!(text.contains("%fa = alloca [132 x i8], align 4"), "{text}");
+        assert!(text.contains("%fa = alloca [8 x i8], align 4"), "{text}");
     }
 
     /// The backend still declares and defines the `llvm.trap`-backed abort
@@ -1504,22 +1503,19 @@ mod tests {
         assert!(text.contains("define void @.lilac.abort()"), "{text}");
     }
 
-    /// The LIR prelude's `format_args` bounds checks are unsigned: an index
-    /// with the high bit set must trap, not read out of bounds.
+    /// The f-string readers lower: a hole calls its formatter through the
+    /// template's pointer.
     #[test]
-    fn format_args_bounds_checks_are_unsigned() {
-        let mut module =
-            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
-        module.funcs = lilac_ir::runtime::build_runtime(8);
+    fn format_readers_lower() {
+        let target = lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple");
+        let mut module = LirModule::new(target);
+        module.funcs = lilac_ir::runtime::build_runtime(&target);
         let text = emit(&module);
-        for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
-            let body = text
-                .split("\ndefine ")
-                .find(|segment| segment.starts_with(&format!("void @{name}")))
-                .expect("format_args definition");
-            assert!(body.contains("icmp ult i64"), "{name} body:\n{body}");
-            assert!(!body.contains("icmp slt"), "{name} body:\n{body}");
-        }
+        let body = text
+            .split("\ndefine ")
+            .find(|segment| segment.starts_with("void @.lilac.format_args_hole("))
+            .expect("the hole reader");
+        assert!(body.contains("call void %"), "{body}");
     }
 
     /// `branch` is an unconditional `br`; `branch.if` is a conditional `br`

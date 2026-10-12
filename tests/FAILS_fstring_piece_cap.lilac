@@ -1,4 +1,0 @@
-main: function () nothing {
-    name: @byte_buffer = "x"
-    msg: @format_args = $"{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}{name}"
-}

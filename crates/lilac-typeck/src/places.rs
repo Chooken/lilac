@@ -818,9 +818,15 @@ impl Pass<'_, '_> {
                     self.cannot_move(inner, span);
                 }
             }
-            HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
+            HirExprKind::Struct(values) => {
                 for value in values {
                     self.expr(value, true);
+                }
+            }
+            // A hole borrows its value: it is read, never moved.
+            HirExprKind::Format(format) => {
+                for hole in &mut format.holes {
+                    self.expr(&mut hole.value, false);
                 }
             }
             HirExprKind::Variant { payload, .. } => {

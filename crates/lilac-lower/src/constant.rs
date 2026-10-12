@@ -391,7 +391,7 @@ impl<'a> Lower<'a> {
             | HirExprKind::FuncRef(_)
             | HirExprKind::RefOf(_)
             | HirExprKind::Retype(_)
-            | HirExprKind::FormatArgs(_)
+            | HirExprKind::Format(_)
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => None,
         }

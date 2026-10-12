@@ -1,0 +1,14 @@
+// expect-error: E072
+// A format cannot be an array element.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+main: function () nothing {
+    texts: @array(@format_args(Out), 2) = @array(@format_args(Out), 2) {}
+}

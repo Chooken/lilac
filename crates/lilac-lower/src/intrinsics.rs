@@ -171,6 +171,9 @@ impl Lower<'_> {
                 LirOperand::Reg(Reg::default())
             }
             Intrinsic::ArrayAt => self.lower_array_at(state, func, args, span),
+            Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
+                self.lower_format_consumer(state, func, intrinsic, args, ty, span)
+            }
             Intrinsic::ArrayLen | Intrinsic::Move | Intrinsic::NeedsDrop => {
                 lilac_error::bug!(span, "`{intrinsic:?}` is rewritten in typeck")
             }
@@ -472,6 +475,80 @@ impl Lower<'_> {
             span,
         });
         LirOperand::Reg(addr)
+    }
+
+    /// Lowers `@format_args_piece(args, index)` and `@format_args_hole(args,
+    /// index, out)`: the index is checked against the hole count (a piece
+    /// may be the last, `index == holes`; a hole may not), panicking with
+    /// a message at the call, then the runtime function reads the piece or
+    /// formats the hole.
+    fn lower_format_consumer(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        intrinsic: Intrinsic,
+        args: &[HirExpr],
+        ty: TypeRef,
+        span: Span,
+    ) -> LirOperand {
+        let ins: Vec<PlaceName> = args.iter().map(|arg| self.arg(state, func, arg)).collect();
+        let holes = state.tmp_lir(LirTy::BitNative, span);
+        state.emit(LirInst::Call {
+            func: LirCallee::Func(".lilac.format_args_holes".into()),
+            ins: vec![ins[0].clone()],
+            outs: vec![holes.clone()],
+            span,
+        });
+        let holes = state.reg_of(LirOperand::Place(holes), &LirTy::BitNative, span);
+        let index = state.reg_of(LirOperand::Place(ins[1].clone()), &LirTy::BitNative, span);
+        let piece = intrinsic == Intrinsic::FormatArgsPiece;
+        // A piece is out of bounds past the hole count, a hole at it.
+        let (lhs, rhs) = if piece {
+            (holes, index)
+        } else {
+            (index, holes)
+        };
+        let test = state.reg();
+        state.emit(LirInst::Arith {
+            op: ArithOp::ILtU,
+            lhs,
+            rhs,
+            dst: test.clone(),
+            ty: LirTy::Bit(8),
+            span,
+        });
+        let (ok, fail) = (state.label(), state.label());
+        let (then, els) = if piece {
+            (fail.clone(), ok.clone())
+        } else {
+            (ok.clone(), fail.clone())
+        };
+        state.end(LirTerm::BranchIf {
+            cond: test,
+            then,
+            els: Some(els),
+            span,
+        });
+        state.at(fail);
+        let message: &[u8] = if piece {
+            b"format piece index out of bounds"
+        } else {
+            b"format hole index out of bounds"
+        };
+        let msg = self.byte_buffer_place(state, message, span);
+        self.panic_with(state, func, msg, span);
+        state.at(ok);
+        let Some(symbol) = intrinsic.runtime_symbol() else {
+            lilac_error::bug!(span, "`{intrinsic:?}` has no runtime function");
+        };
+        let out = piece.then(|| self.tmp(state, ty, span));
+        state.emit(LirInst::Call {
+            func: LirCallee::Func(symbol.into()),
+            ins,
+            outs: out.iter().cloned().collect(),
+            span,
+        });
+        out.map_or(LirOperand::Reg(Reg::default()), LirOperand::Place)
     }
 
     /// Lowers `@atomic_<op>_W(ref place, operands…)`: the operands become

@@ -44,22 +44,26 @@ fn string_uses_byte_buffer_runtime() {
     assert!(text.contains(".lilac.byte_buffer_ptr"), "{text}");
 }
 
-/// `fstring.lilac` builds a `@format_args`, so its `new`/`push` runtime
-/// functions survive.
+/// `fstring.lilac` only builds an f-string: a `format` instruction and a
+/// template, with no runtime call.
 #[test]
-fn fstring_uses_format_args_runtime() {
+fn fstring_builds_with_no_runtime() {
     let text = emit_ir("fstring.lilac");
-    assert!(text.contains(".lilac.format_args_new"), "{text}");
-    assert!(text.contains(".lilac.format_args_push"), "{text}");
+    assert!(text.contains("format !fmt0"), "{text}");
+    assert!(!text.contains(".lilac.format_args"), "{text}");
 }
 
-/// A program that reads a piece table reaches `@format_args_piece` (and
-/// `@format_args_count`), so those bodies survive too.
+/// A program that reads an f-string back reaches the readers it uses.
 #[test]
-fn format_args_use_reaches_piece_runtime() {
+fn format_args_use_reaches_the_readers() {
     let text = emit_ir("format_args_use.lilac");
-    assert!(text.contains(".lilac.format_args_count"), "{text}");
-    assert!(text.contains(".lilac.format_args_piece"), "{text}");
+    for name in [
+        ".lilac.format_args_holes",
+        ".lilac.format_args_piece",
+        ".lilac.format_args_hole",
+    ] {
+        assert!(text.contains(name), "{name}: {text}");
+    }
 }
 
 /// A non-const `@load_u8`/`@store_u8` reaches the corresponding `.lilac.`

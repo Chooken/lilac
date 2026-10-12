@@ -87,6 +87,7 @@ impl Checker<'_> {
         let TypeKind::Array { elem, len } = *self.types.kind(id) else {
             return Ok(());
         };
+        self.format_place(TypeRef::value(elem), len_span, "an array element")?;
         let elem = self.size_of_laid_out(TypeRef::value(elem));
         match lilac_layout::array_layout(&self.target, elem, len) {
             Ok(sized) => {
@@ -145,11 +146,10 @@ impl Checker<'_> {
             // `@bit_native` is `uintptr_t`; a function value is a pointer.
             TypeKind::BitNative | TypeKind::Func { .. } => scalar(Scalar::Pointer),
             TypeKind::ByteBuffer => self.byte_buffer(),
-            TypeKind::FormatArgs => {
-                // A count, then sixteen byte buffers (`lilac_ir::builtin_fields`).
-                let mut parts = vec![scalar(Scalar::Pointer)];
-                parts.extend(std::iter::repeat_n(self.byte_buffer(), 16));
-                self.builtin_struct(&parts)
+            TypeKind::FormatArgs { .. } => {
+                // Its template and its holes (`lilac_ir::builtin_fields`).
+                let pointer = scalar(Scalar::Pointer);
+                self.builtin_struct(&[pointer, pointer])
             }
             TypeKind::Object(_) | TypeKind::Instance { .. } | TypeKind::Array { .. } => {
                 match self.sizes.get(&ty.id) {

@@ -1,0 +1,15 @@
+// expect-error: E001
+// A hole takes no format spec: formatting is a function call.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+main: function () nothing {
+    n: @bit32 = 0x1
+    text: @format_args(Out) = $"{n:x}"
+}

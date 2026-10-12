@@ -691,7 +691,7 @@ impl Lower<'_> {
             TypeKind::FBit64 => LirTy::FBit(64),
             TypeKind::FBit128 => LirTy::FBit(128),
             TypeKind::ByteBuffer => LirTy::byte_buffer(),
-            TypeKind::FormatArgs => LirTy::format_args(),
+            TypeKind::FormatArgs { .. } => LirTy::format_args(),
             TypeKind::Unknown => LirTy::Named("unknown".to_owned()),
             TypeKind::Object(_) | TypeKind::Instance { .. } => LirTy::Named(self.type_name(ty.id)),
             TypeKind::Array { elem, len } => {

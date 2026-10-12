@@ -371,7 +371,7 @@ impl Verifier<'_> {
 
     /// Checks `format !t (holes) -> %dst`: a declared template, one
     /// register per hole, each the `ref #T` its formatter takes, and a
-    /// `#.lilac.format_args` destination.
+    /// `#format_args` destination.
     fn verify_format(
         &mut self,
         template: &Symbol,
@@ -384,10 +384,10 @@ impl Verifier<'_> {
         let module = self.module;
         match places.get(dst.as_str()) {
             None => self.error(format!("format into undeclared place `{dst}`"), span),
-            Some(ty) if **ty != LirTy::format_view() => self.error(
+            Some(ty) if **ty != LirTy::format_args() => self.error(
                 format!(
                     "format into `{dst}` of type `{ty}`, expected `{}`",
-                    LirTy::format_view()
+                    LirTy::format_args()
                 ),
                 span,
             ),

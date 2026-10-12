@@ -25,9 +25,8 @@ Data sections hold constant declarations: the bytes of string literals
 (`&1: ref #bit8 = const !c`); a string literal is a `#byte_buffer` place
 filled field by field with it and its length, never a call to the
 `.lilac.byte_buffer_from` runtime function. Number literals are `const`
-registers typed directly, not data. f-strings still lower to
-`@format_args` construction plus conversions and calls (see `SPEC.md`);
-the template form below is what they move to.
+registers typed directly, not data. An f-string is a template (below) and a
+`format` instruction.
 ```lilac-ir
 data {
     !c0: str = "String",
@@ -118,29 +117,25 @@ offset, so the layout here is the only one. No layout, and no array, may
 be larger than the target's `isize::MAX` bytes (typeck reports one as `E067`).
 
 Builtin aggregates usable in `#` positions are `#byte_buffer`,
-`#format_args`, `#.lilac.format_args`, `#.lilac.format_part` and
+`#format_args`, `#.lilac.format_part` and
 `#.lilac.frame`. All are plain values with no hidden behavior, and their
 field layouts are fixed by the IR rather than declared in a `type` section:
 
 ```lilac-ir
 #byte_buffer { len: #bit_native, data: ref #bit8 }
-#format_args { count: #bit_native, p0: #byte_buffer, …, p15: #byte_buffer }
-#.lilac.format_args { template: ref #unknown, holes: ref #unknown }
+#format_args { template: ref #unknown, holes: ref #unknown }
 #.lilac.format_part { text: #byte_buffer, format: ref #unknown }
 #.lilac.frame { prev: ref #.lilac.frame, site: #byte_buffer }
 ```
 
-`#.lilac.format_args` is an f-string built by `format`: its template and
-its array of hole addresses (null with no holes). `#.lilac.format_part` is
-one part of a template. When f-strings move to templates, the first takes
-the name `#format_args` and the 16-piece table goes.
+`#format_args` is an f-string built by `format`: its template and its array
+of hole addresses (null with no holes). `#.lilac.format_part` is one part
+of a template.
 
 `#.lilac.frame` is one shadow-stack record for panic stack traces (see
 *Panics and stack traces* below); the leading `.` keeps it apart from user
 types.
 
-`#format_args` is a fixed-capacity inline piece table of exactly 16 pieces.
-The table is spelled out as sixteen named fields rather than an array.
 The verifier resolves `field`/`field.addr` against these layouts
 (`lilac_ir::builtin_fields`), laid out as C structs like any other
 (`lilac_ir::builtin_layout`); the backend sizes them from that layout.
@@ -246,7 +241,7 @@ Inside a region only `[A-Za-z0-9_]` appears:
 
 ```
 type    = basic | path | "R" type | "I" path {type} "E"
-        | "A" type number | "F" ["KC"] {type} "E" {type} "E"
+        | "A" type number | "w" type | "F" ["KC"] {type} "E" {type} "E"
         | "p" number ident | backref
 path    = ident | "N" path ident | backref
 ident   = decimal ["_"] bytes | "u" decimal ["_"] escaped
@@ -257,7 +252,7 @@ backref = "B" number
 | Basic | Type | Basic | Type | Basic | Type |
 |---|---|---|---|---|---|
 | `h` | `@bit8` | `k` | `@fbit16` | `e` | `@byte_buffer` |
-| `t` | `@bit16` | `f` | `@fbit32` | `w` | `@format_args` |
+| `t` | `@bit16` | `f` | `@fbit32` | | |
 | `m` | `@bit32` | `d` | `@fbit64` | `g` | `unknown` |
 | `y` | `@bit64` | `q` | `@fbit128` | `r` | error (never in verified IR) |
 | `j` | `@bit_native` | | | | |
@@ -265,7 +260,8 @@ backref = "B" number
 - An object or enum is its path: `N <parent> <name>` from the root, so
   `A.B.Holder` is `NN1A1B6Holder`. `R` is `ref`; `I` an instance (its
   generic type, its arguments, `E`); `A` an array (its element, its
-  length); `F` a function type (parameters, `E`, results, `E`), `FKC` an
+  length); `w` an `@format_args` (its writer); `F` a function type
+  (parameters, `E`, results, `E`), `FKC` an
   `export function`; `p` a generic parameter (index and name: templates
   only, never in verified IR).
 - An identifier is its length in decimal, a `_` when its bytes start with
@@ -324,7 +320,7 @@ character, so `lilac emit-ir x.lilac | lilac demangle` reads like source.
 
 Every compiler-generated function or runtime symbol lives in the `.lilac.`
 namespace: the LIR runtime (`.lilac.byte_buffer_from`, `.lilac.load_u8`,
-`.lilac.format_args_push`, …), the entry stub
+`.lilac.format_args_piece`, …), the entry stub
 `.lilac.start(#bit_native %count, ref #unknown %arguments, ref #unknown
 %environment)` (calls `.lilac.entry` with them, then `.lilac.exit` with 0,
 then `@lilac_abort`; the backend's entry wrapper, `main` or
@@ -474,7 +470,7 @@ as produced by `tests/ui/arrays.lir`.
 ### format
 * `format !t (&h0, …) -> %d` builds an f-string from the template `!t`:
   register `i` is the address of hole `i`, of the type its formatter takes
-  first, and `%d` is a `#.lilac.format_args` place. It stores the hole
+  first, and `%d` is a `#format_args` place. It stores the hole
   addresses in an array that lives as long as the function's frame (one
   per instruction, so a `format` in a loop reuses it), then sets
   `%d.template` to the template and `%d.holes` to the array (null when
@@ -542,10 +538,13 @@ ordinary LIR functions in the `.lilac.` namespace, built once by
 | `.lilac.byte_buffer_len` | `#byte_buffer` | `#bit_native` |
 | `.lilac.load_u8` | `ref #bit8`, `#bit_native` | `#bit8` |
 | `.lilac.store_u8` | `ref #bit8`, `#bit_native`, `#bit8` | — |
-| `.lilac.format_args_new` | — | `#format_args` |
-| `.lilac.format_args_push` | `ref #format_args`, `#byte_buffer` | — |
-| `.lilac.format_args_count` | `#format_args` | `#bit_native` |
+| `.lilac.format_args_holes` | `#format_args` | `#bit_native` |
 | `.lilac.format_args_piece` | `#format_args`, `#bit_native` | `#byte_buffer` |
+| `.lilac.format_args_hole` | `#format_args`, `#bit_native`, `ref #unknown` | — |
+
+The three `format_args` readers are always-inline and read the template
+at the target's layout (the part size and offsets of `format_template_layout`);
+lowering checks the index against the hole count first, so they never panic.
 
 These functions call back into the `@ptr_add` and `@lilac_abort` leaves. The
 driver's pass order is lower → inject the prelude → `prune_unreachable`, so
@@ -738,4 +737,4 @@ Same width rule as integer arithmetic.
     ref #W` and no outs, with one `#W` for the whole template. A `format`
     names a declared template, passes one register per hole, register `i`
     of exactly the type hole `i`'s formatter takes first, and writes a
-    `#.lilac.format_args` place.
+    `#format_args` place.

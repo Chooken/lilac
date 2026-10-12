@@ -1,0 +1,16 @@
+// expect-error: E072
+// `@write` stores through a `ref` too.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+keep: function (into: ref @format_args(Out), text: @format_args(Out)) nothing {
+    @write(into, text)
+}
+
+main: function () nothing {}

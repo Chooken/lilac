@@ -224,6 +224,11 @@ pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
         Intrinsic::Drop => Some("(ref T) nothing"),
         Intrinsic::NeedsDrop => Some("(Type) @bit8"),
         Intrinsic::Discard => Some("(place) nothing"),
+        Intrinsic::FormatArgsHoles => Some("(@format_args(W)) @bit_native"),
+        Intrinsic::FormatArgsPiece => Some("(@format_args(W), index: @bit_native) @byte_buffer"),
+        Intrinsic::FormatArgsHole => {
+            Some("(@format_args(W), index: @bit_native, out: ref W) nothing")
+        }
         _ => None,
     };
     if let Some(special) = special {

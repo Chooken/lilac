@@ -1,0 +1,14 @@
+// expect-error: E073
+// An f-string where nothing is expected has no writer type.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+main: function () nothing {
+    $"{number()}"
+}

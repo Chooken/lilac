@@ -1,0 +1,16 @@
+// expect-error: E072
+// A format borrows its holes, so it cannot be a field.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+Message: object {
+    text: @format_args(Out)
+}
+
+main: function () nothing {}

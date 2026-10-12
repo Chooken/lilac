@@ -1,4 +1,3 @@
-// pending: f-string rework (docs/fstring-plan.md, Phase 4)
 // expect-stdout: 7 + 35 = 42
 // expect-stdout: 0 and 4294967295
 // Holes of a builtin integer type format through a top-level `@format`

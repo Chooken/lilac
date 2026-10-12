@@ -1,0 +1,62 @@
+// expect-stdout: [a1 b2] [a1 b2]
+// expect-stdout: first second
+// A format can be read any number of times: it holds addresses, not
+// text. A format never read still evaluates its holes, once each and in
+// order, where it is written.
+
+using Standard.Os as Os
+
+// Writes formatted text straight to standard output.
+Out: object {
+    write: function (self, text: @format_args(Out)) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            write_bytes(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
+
+// A `@bit32` in unsigned decimal.
+@format: function (value: ref @bit32, out: ref Out) nothing {
+    write_decimal(value)
+}
+
+write_decimal: function (value: @bit32) nothing {
+    if @i_greater_than_or_equal_u_32(value, 0xA) {
+        write_decimal(@i_div_u_32(value, 0xA))
+    }
+    write_digit(@i_mod_u_32(value, 0xA))
+}
+
+write_digit: function (digit: @bit32) nothing {
+    digits: ref unknown = @byte_buffer_ptr("0123456789abcdef") as ref unknown
+    at: @bit_native = @extend_zero(digit)
+    write_bytes(@byte_buffer_from(@ptr_add(digits, at) as ref @bit8, 0x1))
+}
+
+write_bytes: function (bytes: @byte_buffer) nothing {
+    Os.write_all(Os.standard_output(), @byte_buffer_ptr(bytes) as ref unknown, @byte_buffer_len(bytes))
+}
+
+
+tick: function (label: @byte_buffer) value: @bit32 {
+    write_bytes(label)
+    value = 0x1
+}
+
+main: function () nothing {
+    out: Out = Out {}
+    a: @bit32 = 0x1
+    b: @bit32 = 0x2
+    text: @format_args(Out) = $"[a{a} b{b}]"
+    out.write(text)
+    write_bytes(" ")
+    out.write(text)
+    write_bytes("\n")
+    unused: @format_args(Out) = $"{tick("first ")}{tick("second")}"
+    write_bytes("\n")
+}

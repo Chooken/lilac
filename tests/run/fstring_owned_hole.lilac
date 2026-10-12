@@ -1,4 +1,3 @@
-// pending: f-string rework (docs/fstring-plan.md, Phase 4)
 // expect-stdout: [noisy] [noisy]
 // expect-stdout: drop
 // A hole borrows its value: an owned object used in a hole is still owned

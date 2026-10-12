@@ -32,8 +32,7 @@ fn lowered_on(src: &str, target: lilac_target::Target) -> (Lowered, Diags) {
     let lowered = lower(&checked.hir, &res, &types, &sources, target, None);
     let text = lowered.module.to_text();
     let mut lir = lowered.module.clone();
-    lir.funcs
-        .extend(lilac_ir::build_runtime(target.bit_native_width() / 8));
+    lir.funcs.extend(lilac_ir::build_runtime(&target));
     lir.funcs.extend(lilac_ir::hook_externs());
     let (panic, data) = lilac_ir::panic_runtime();
     lir.funcs.push(panic);

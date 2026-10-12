@@ -1211,30 +1211,172 @@ fn loop_break_checks() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+/// A writer type with a `@format` for `@bit32`, before each f-string test.
+const FORMAT_PRELUDE: &str = "Out: object {}\n\n@format: function (value: ref @bit32, out: ref Out) nothing {}\n\nnumber: function () value: @bit32 {\n    value = 0x1\n}\n\n";
+
+fn check_format(body: &str) -> Diags {
+    check_src(&format!("{FORMAT_PRELUDE}{body}"))
+}
+
 #[test]
-fn fstring_desugars_to_format_args() {
-    let diags = check_src("main: function () nothing {\n    x: @format_args = $\"a\"\n}\n");
+fn fstring_takes_its_writer_from_the_destination() {
+    let diags = check_format(
+        "main: function () nothing {\n    n: @bit32 = 0x1\n    x: @format_args(Out) = $\"a{n}b{number()}\"\n}\n",
+    );
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
 #[test]
-fn fstring_hole_missing_conversion_is_e043() {
-    let diags =
-        check_src("main: function () nothing {\n    name: @bit32 = 0x1\n    x: @format_args = $\"{name}\"\n}\n");
+fn fstring_with_nothing_expected_is_e073() {
+    let diags = check_format("main: function () nothing {\n    $\"a\"\n}\n");
+    assert!(has_code(&diags, "E073"), "{diags:?}");
+}
+
+#[test]
+fn fstring_into_a_type_with_no_format_conversion_is_e043() {
+    let diags = check_format("main: function () nothing {\n    x: @bit32 = $\"a\"\n}\n");
     assert!(has_code(&diags, "E043"), "{diags:?}");
 }
 
 #[test]
-fn fstring_piece_cap_is_e061() {
-    let mut holes = String::new();
-    for _ in 0..17 {
-        holes.push_str("{name}");
-    }
-    let src = format!(
-        "main: function () nothing {{\n    name: @byte_buffer = \"x\"\n    x: @format_args = $\"{holes}\"\n}}\n"
+fn fstring_converts_through_the_one_format_conversion() {
+    let diags = check_format(
+        "Text: object {\n    @conversion: function (from: @format_args(Out)) to: Text {\n        to = Text {}\n    }\n}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    x: Text = $\"{n}\"\n}\n",
     );
-    let diags = check_src(&src);
-    assert!(has_code(&diags, "E061"), "{diags:?}");
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn hole_with_no_format_hook_is_e071() {
+    let diags = check_format(
+        "main: function () nothing {\n    b: @bit8 = 0x1\n    x: @format_args(Out) = $\"{b}\"\n}\n",
+    );
+    assert!(has_code(&diags, "E071"), "{diags:?}");
+}
+
+#[test]
+fn format_slot_takes_a_literal_or_one_value() {
+    let diags = check_format(
+        "show: function (text: @format_args(Out)) nothing {}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    show(\"plain\")\n    show(n)\n    show($\"{n}\")\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+    let diags = check_format(
+        "show: function (text: @format_args(Out)) nothing {}\n\nmain: function () nothing {\n    b: @bit8 = 0x1\n    show(b)\n}\n",
+    );
+    assert!(has_code(&diags, "E071"), "{diags:?}");
+}
+
+#[test]
+fn a_nested_fstring_hole_formats_through_the_same_writer() {
+    let diags = check_format(
+        "@format: function (value: ref @format_args(Out), out: ref Out) nothing {}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    x: @format_args(Out) = $\"<{$\"{n}\"}>\"\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn forty_holes_check() {
+    let holes = "{n}".repeat(40);
+    let diags = check_format(&format!(
+        "main: function () nothing {{\n    n: @bit32 = 0x1\n    x: @format_args(Out) = $\"{holes}\"\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn bad_format_hook_shape_is_e022() {
+    for hook in [
+        "@format: function (value: ref @bit32) nothing {}",
+        "@format: function (value: @bit32, out: ref Out) nothing {}",
+        "@format: function (value: ref unknown, out: ref Out) nothing {}",
+        "@format: function (value: ref @bit8, out: ref Out) done: @bit8 {\n    done = 0x1\n}",
+    ] {
+        let diags = check_format(&format!("{hook}\n\nmain: function () nothing {{}}\n"));
+        assert!(has_code(&diags, "E022"), "{hook}: {diags:?}");
+    }
+}
+
+#[test]
+fn a_format_where_it_cannot_live_is_e072() {
+    for (what, src) in [
+        ("field", "Holder: object {\n    text: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
+        ("payload", "Choice: enum {\n    Full: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
+        ("array", "main: function () nothing {\n    x: @array(@format_args(Out), 2) = @array(@format_args(Out), 2) {}\n}\n"),
+        ("out", "make: function () text: @format_args(Out) {\n    text = \"\"\n}\n\nmain: function () nothing {}\n"),
+        ("global", "text: @format_args(Out)\n\nmain: function () nothing {}\n"),
+        ("store through ref", "put: function (to: ref @format_args(Out), from: @format_args(Out)) nothing {\n    to = from\n}\n\nmain: function () nothing {}\n"),
+        ("@write", "put: function (to: ref @format_args(Out), from: @format_args(Out)) nothing {\n    @write(to, from)\n}\n\nmain: function () nothing {}\n"),
+        ("temporary assigned", "main: function () nothing {\n    x: @format_args(Out) = \"\"\n    x = $\"{number()}\"\n}\n"),
+        ("temporary in an arm", "main: function () nothing {\n    n: @bit32 = 0x1\n    x: @format_args(Out) = if n == 0x1 then $\"{number()}\" else \"\"\n}\n"),
+    ] {
+        let diags = check_format(src);
+        assert!(has_code(&diags, "E072"), "{what}: {diags:?}");
+    }
+}
+
+#[test]
+fn a_lasting_hole_may_be_assigned() {
+    let diags = check_format(
+        "main: function () nothing {\n    n: @bit32 = 0x1\n    x: @format_args(Out) = \"\"\n    x = $\"{n}\"\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn format_consumers_check_their_operands() {
+    let ok = check_format(
+        "main: function () nothing {\n    n: @bit32 = 0x1\n    out: Out = Out {}\n    x: @format_args(Out) = $\"{n}\"\n    count: @bit_native = @format_args_holes(x)\n    piece: @byte_buffer = @format_args_piece(x, 0x0)\n    @format_args_hole(x, 0x0, ref out)\n}\n",
+    );
+    assert!(!ok.has_errors(), "{ok:?}");
+    let not_format =
+        check_format("main: function () nothing {\n    n: @bit32 = 0x1\n    count: @bit_native = @format_args_holes(n)\n}\n");
+    assert!(has_code(&not_format, "E010"), "{not_format:?}");
+    let wrong_writer = check_format(
+        "main: function () nothing {\n    n: @bit32 = 0x1\n    x: @format_args(Out) = $\"{n}\"\n    @format_args_hole(x, 0x0, ref n)\n}\n",
+    );
+    assert!(has_code(&wrong_writer, "E010"), "{wrong_writer:?}");
+}
+
+#[test]
+fn a_template_hole_of_a_parameter_is_no_error() {
+    let diags = check_format(
+        "show[T]: function (value: T) nothing {\n    text: @format_args(Out) = $\"{value}\"\n}\n\nmain: function () nothing {}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn an_instance_whose_hole_has_no_format_is_e042() {
+    let src = "show[T]: function (value: T) nothing {\n    text: @format_args(Out) = $\"{value}\"\n}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    show[@bit32](n)\n    b: @bit8 = 0x1\n    show[@bit8](b)\n}\n";
+    let diags = check_format(src);
+    assert!(has_code(&diags, "E042"), "{diags:?}");
+    assert!(!has_code(&diags, "E071"), "{diags:?}");
+    assert_eq!(
+        diags
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == "E042")
+            .count(),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn removed_format_intrinsics_are_e021_with_a_note() {
+    let diags = check_format(
+        "main: function () nothing {\n    x: @format_args(Out) = \"\"\n    count: @bit_native = @format_args_count(x)\n}\n",
+    );
+    assert!(has_code(&diags, "E021"), "{diags:?}");
+    let notes: Vec<&String> = diags
+        .diagnostics()
+        .iter()
+        .flat_map(|diag| &diag.notes)
+        .collect();
+    assert!(
+        notes.iter().any(|note| note.contains("@format_args_holes")),
+        "{notes:?}"
+    );
 }
 
 #[test]

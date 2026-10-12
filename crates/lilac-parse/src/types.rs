@@ -104,6 +104,19 @@ impl Parser {
             ty.span = join_spans(start, ty.span);
             return Ok(ty);
         }
+        if name_token.text == "@format_args" && self.peek().kind == TokenKind::LParen {
+            self.bump();
+            let writer = self.parse_type_inner(diags)?;
+            let close = self.expect(diags, TokenKind::RParen, "`)` to close `@format_args`")?;
+            return Ok(Type {
+                shape: TypeShape::FormatArgs {
+                    writer: Box::new(writer),
+                },
+                name_span: name_token.span,
+                is_ref,
+                span: join_spans(start, close.span),
+            });
+        }
         let mut end = name_token.span;
         let mut generic_args = Vec::new();
         if self.peek().kind == TokenKind::LBracket {

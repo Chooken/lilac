@@ -735,8 +735,7 @@ impl Session {
     /// allowed outside an executable) is declared `extern` under its fixed
     /// symbol, so the panic handler links against whatever defines it.
     fn inject_runtime(&self, lir: &mut LirModule) {
-        lir.funcs
-            .extend(lilac_ir::build_runtime(self.target.bit_native_width() / 8));
+        lir.funcs.extend(lilac_ir::build_runtime(&self.target));
         for hook in lilac_ir::hook_externs() {
             if !lir.funcs.iter().any(|func| func.name == hook.name) {
                 lir.funcs.push(hook);
@@ -1345,7 +1344,7 @@ main: function () nothing {}
             .expect("string should compile");
         let names: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&".lilac.byte_buffer_ptr"), "{names:?}");
-        assert!(!names.contains(&".lilac.format_args_new"), "{names:?}");
+        assert!(!names.contains(&".lilac.format_args_piece"), "{names:?}");
     }
 
     /// A non-const `@load_u8`/`@store_u8` keeps its `.lilac.` body through DCE,
@@ -1463,9 +1462,8 @@ main: function () nothing {}
         );
     }
 
-    /// Returns the `stride` constant literal baked into a `format_args` runtime
-    /// function by [`lilac_ir::runtime::build_runtime`] (via the driver).
-    fn stride_lit(module: &LirModule, name: &str) -> String {
+    /// The integer constants of the runtime function `name` in `module`.
+    fn runtime_constants(module: &LirModule, name: &str) -> Vec<u64> {
         let func = module
             .funcs
             .iter()
@@ -1474,38 +1472,38 @@ main: function () nothing {}
         func.blocks
             .iter()
             .flat_map(|block| &block.insts)
-            .find_map(|inst| match inst {
-                lilac_ir::LirInst::Const { dst, value, ty, .. }
-                    if *dst == "stride" && *ty == lilac_ir::LirTy::BitNative =>
-                {
-                    Some(value.to_string())
-                }
+            .filter_map(|inst| match inst {
+                lilac_ir::LirInst::Const {
+                    value: lilac_ir::LirConst::Int(value),
+                    ..
+                } => Some(*value),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing stride const in `{name}`"))
+            .collect()
     }
 
-    /// The stride the driver bakes is `#byte_buffer`'s size, so it must track
-    /// the target's pointer width for every 64-bit arch, not just
-    /// `x86_64`/`aarch64`. Regression: `riscv64` previously baked `0x8` while
-    /// the backend laid `#byte_buffer` out as 16 bytes.
+    /// The driver builds the f-string readers for the session's target, so
+    /// a part's stride is the target's. Regression (of the stride the old
+    /// runtime baked): `riscv64` once got 32-bit offsets.
     #[test]
-    fn format_args_stride_follows_target_width() {
+    fn format_readers_follow_the_target() {
         for (triple, want) in [
-            ("riscv64-unknown-none", "0x10"),
-            ("riscv32-unknown-none", "0x8"),
+            ("riscv64-unknown-none", vec![24, 8]),
+            ("riscv32-unknown-none", vec![12, 4]),
         ] {
             let mut session = Session::new();
             session.target = Target::parse(triple).expect("valid triple");
             let module = session
                 .compile_lir(
                     "fs.lilac",
-                    "main: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args = $\"a{part}b\"\n    n: @bit_native = @format_args_count(msg)\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
+                    "Out: object {}\n\n@format: function (value: ref @byte_buffer, out: ref Out) nothing {}\n\nmain: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args(Out) = $\"a{part}b\"\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
                 )
                 .unwrap_or_else(|_| panic!("{triple}: {}", session.render_diagnostics()));
-            for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
-                assert_eq!(stride_lit(&module, name), want, "{triple} in {name}");
-            }
+            assert_eq!(
+                runtime_constants(&module, ".lilac.format_args_piece"),
+                want,
+                "{triple}"
+            );
         }
     }
 

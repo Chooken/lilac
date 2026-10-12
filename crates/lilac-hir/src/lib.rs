@@ -522,6 +522,29 @@ pub struct HirArm {
     pub body: HirBlock,
 }
 
+/// A checked f-string: its template (the pieces and each hole's
+/// formatter) and the values its holes borrow.
+#[derive(Clone, Debug)]
+pub struct HirFormat {
+    /// `W`: the type every formatter writes into.
+    pub writer: TypeId,
+    /// The literal pieces, one more than the holes: piece `i` comes before
+    /// hole `i`.
+    pub pieces: Vec<Vec<u8>>,
+    /// The holes, in order.
+    pub holes: Vec<HirHole>,
+}
+
+/// One f-string hole.
+#[derive(Clone, Debug)]
+pub struct HirHole {
+    /// A `ref T` to the value it formats (evaluated where the f-string
+    /// is).
+    pub value: HirExpr,
+    /// The `@format(ref T, ref W)` hook that formats it.
+    pub format: FuncKey,
+}
+
 /// One value `match` arm.
 #[derive(Clone, Debug)]
 pub struct HirValueArm {
@@ -648,8 +671,8 @@ pub enum HirExprKind {
         /// Right operand.
         rhs: Box<HirExpr>,
     },
-    /// `$"..."`: pieces pushed into a fresh `@format_args`.
-    FormatArgs(Vec<HirExpr>),
+    /// `$"..."`: an `@format_args(W)` of static pieces and borrowed holes.
+    Format(HirFormat),
     /// A module constant (inlined by lowering).
     Const(DefId),
     /// A global variable (place).
@@ -701,7 +724,12 @@ impl HirExpr {
             | HirExprKind::Move(base)
             | HirExprKind::RefOf(base)
             | HirExprKind::Retype(base) => base.walk(f),
-            HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
+            HirExprKind::Format(format) => {
+                for hole in &format.holes {
+                    hole.value.walk(f);
+                }
+            }
+            HirExprKind::Struct(values) => {
                 for value in values {
                     value.walk(f);
                 }

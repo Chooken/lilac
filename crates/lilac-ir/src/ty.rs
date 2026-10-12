@@ -31,17 +31,11 @@ impl LirTy {
         Self::Named("byte_buffer".to_owned())
     }
 
-    /// `#format_args`.
+    /// `#format_args`: an f-string, the template it was built from and the
+    /// addresses of its holes (see [`crate::LirInst::Format`]).
     #[must_use]
     pub fn format_args() -> Self {
         Self::Named("format_args".to_owned())
-    }
-
-    /// `#.lilac.format_args`: an f-string, the template it was built from
-    /// and the addresses of its holes (see [`crate::LirInst::Format`]).
-    #[must_use]
-    pub fn format_view() -> Self {
-        Self::Named(".lilac.format_args".to_owned())
     }
 
     /// `#.lilac.format_part`: one part of an f-string template, a piece's

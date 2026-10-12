@@ -126,7 +126,7 @@ fn size_align_follows_the_target() {
     assert_eq!(size("ref #Pair"), Some((4, 4)));
     assert_eq!(size("#bit_native"), Some((4, 4)));
     assert_eq!(size("#byte_buffer"), Some((8, 4)));
-    assert_eq!(size("#format_args"), Some((132, 4)));
+    assert_eq!(size("#format_args"), Some((8, 4)));
     assert_eq!(size("#unknown"), None);
     assert_eq!(size("#Missing"), None);
     // Past the target's limit is no size, never a wrapped one.
@@ -1308,12 +1308,12 @@ fn builtin_layout_has_expected_fields() {
     let byte_buffer = builtin_fields(&t("#byte_buffer")).expect("#byte_buffer has fields");
     assert_eq!(byte_buffer[0], ("len".to_owned(), t("#bit_native")));
     let format_args = builtin_fields(&t("#format_args")).expect("#format_args has fields");
-    assert_eq!(format_args.len(), 17);
-    assert_eq!(format_args[1], ("p0".to_owned(), t("#byte_buffer")));
+    assert_eq!(format_args.len(), 2);
+    assert_eq!(format_args[1], ("holes".to_owned(), t("ref #unknown")));
     let target = lilac_target::Target::default();
     let format_args = builtin_layout(&t("#format_args"), &target).expect("a layout");
-    assert_eq!((format_args.size, format_args.align), (264, 8));
-    assert_eq!(format_args.fields[2].offset, 24);
+    assert_eq!((format_args.size, format_args.align), (16, 8));
+    assert_eq!(format_args.fields[1].offset, 8);
     let frame = builtin_layout(&LirTy::trace_frame(), &target).expect("a layout");
     assert_eq!((frame.size, frame.fields[1].offset), (24, 8));
 }
@@ -1580,7 +1580,7 @@ fn format_module() -> LirModule {
         alloca("#bit8", "y"),
         addr("x", "2", "ref #bit32"),
         addr("y", "3", "ref #bit8"),
-        alloca("#.lilac.format_args", "f"),
+        alloca("#format_args", "f"),
         LirInst::Format {
             template: "fmt0".into(),
             holes: vec!["2".into(), "3".into()],
@@ -1681,7 +1681,7 @@ fn verify_rejects_bad_format_instructions() {
                 *template = "fmt9".into();
             }
         }),
-        ("expected `#.lilac.format_args`", |inst| {
+        ("expected `#format_args`", |inst| {
             if let LirInst::Format { dst, .. } = inst {
                 *dst = "x".into();
             }
@@ -1712,8 +1712,8 @@ fn template_layout_is_the_c_struct() {
         assert_eq!(template.fields[1].offset, word, "{triple}");
         assert_eq!(template.size, word + 3 * part.size, "{triple}");
         assert_eq!(template.align, word, "{triple}");
-        let view = builtin_layout(&LirTy::format_view(), &target).expect("a view");
-        assert_eq!((view.size, view.fields[1].offset), (2 * word, word));
+        let args = builtin_layout(&LirTy::format_args(), &target).expect("an f-string");
+        assert_eq!((args.size, args.fields[1].offset), (2 * word, word));
     }
 }
 

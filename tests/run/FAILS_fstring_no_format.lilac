@@ -1,0 +1,15 @@
+// expect-error: E071
+// A hole whose type has no `@format` for the writer cannot be formatted.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+main: function () nothing {
+    flag: @bit8 = 0x1
+    text: @format_args(Out) = $"flag {flag}"
+}

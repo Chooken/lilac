@@ -118,9 +118,14 @@ impl Checker<'_> {
             | HirExprKind::RefOf(base)
             | HirExprKind::Move(base)
             | HirExprKind::Retype(base) => self.expr_indices(base, guarded, bad),
-            HirExprKind::Struct(values) | HirExprKind::FormatArgs(values) => {
+            HirExprKind::Struct(values) => {
                 for value in values {
                     self.expr_indices(value, guarded, bad);
+                }
+            }
+            HirExprKind::Format(format) => {
+                for hole in &format.holes {
+                    self.expr_indices(&hole.value, guarded, bad);
                 }
             }
             HirExprKind::Variant {

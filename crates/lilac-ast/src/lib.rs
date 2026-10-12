@@ -259,6 +259,11 @@ pub enum TypeShape {
         /// The length literal's span.
         len_span: Span,
     },
+    /// `@format_args(W)`: an f-string formatted into a `W`.
+    FormatArgs {
+        /// The type its formatters write into.
+        writer: Box<Type>,
+    },
     /// `self`: the enclosing type.
     SelfType,
     /// A type the parser could not read; it already reported why.
@@ -292,6 +297,7 @@ impl Type {
             TypeShape::Named { name, .. } => name,
             TypeShape::Function(_) => "function",
             TypeShape::Array { .. } => "@array",
+            TypeShape::FormatArgs { .. } => "@format_args",
             TypeShape::SelfType => "self",
             TypeShape::Error => "",
         }
@@ -595,7 +601,7 @@ pub enum Expr {
         /// Whole-literal span.
         span: Span,
     },
-    /// `$"Hello {name}!"` (lowers to `@format_args` construction).
+    /// `$"Hello {name}!"`: an `@format_args(W)` of its pieces and holes.
     FString {
         /// Literal chunks and holes in order.
         parts: Vec<FStrPart>,
@@ -681,9 +687,14 @@ pub struct StructField {
 /// One f-string piece: literal bytes or an interpolated hole.
 #[derive(Clone, Debug)]
 pub enum FStrPart {
-    /// Static chunk (borrows a `data` const after lowering).
-    Lit(Vec<u8>),
-    /// `{expr}` hole (converts via `@conversion(T -> @byte_buffer)`).
+    /// Static text (a data constant after lowering).
+    Lit {
+        /// The text, escapes resolved.
+        bytes: Vec<u8>,
+        /// Where it is written.
+        span: Span,
+    },
+    /// `{expr}` hole: borrowed, and formatted by its type's `@format`.
     Hole(Expr),
 }
 

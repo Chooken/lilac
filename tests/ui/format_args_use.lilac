@@ -1,6 +1,16 @@
+Out: object {
+    count: @bit_native
+}
+
+@format: function (value: ref @byte_buffer, out: ref Out) nothing {
+    out.count = @i_add_native(out.count, @byte_buffer_len(value))
+}
+
 main: function () nothing {
-    part: @byte_buffer = "x"
-    msg: @format_args = $"a{part}b"
-    n: @bit_native = @format_args_count(msg)
+    part: @byte_buffer = "xy"
+    out: Out = Out { count = 0x0 }
+    msg: @format_args(Out) = $"a{part}b"
+    holes: @bit_native = @format_args_holes(msg)
     first: @byte_buffer = @format_args_piece(msg, 0x0)
+    @format_args_hole(msg, 0x0, ref out)
 }

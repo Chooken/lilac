@@ -364,14 +364,14 @@ pub enum Intrinsic {
     ByteBufferLen,
     /// `@byte_buffer_from(ptr, len)`.
     ByteBufferFrom,
-    /// `@format_args_new()`.
-    FormatArgsNew,
-    /// `@format_args_push(ref args, piece)`.
-    FormatArgsPush,
-    /// `@format_args_count(args)`.
-    FormatArgsCount,
-    /// `@format_args_piece(args, index)`.
+    /// `@format_args_holes(args)`: how many holes a format has.
+    FormatArgsHoles,
+    /// `@format_args_piece(args, index)`: literal piece `index` (from 0
+    /// to the hole count), bounds checked.
     FormatArgsPiece,
+    /// `@format_args_hole(args, index, out)`: formats hole `index` into
+    /// `out`, a `ref W` for the format's own `W`, bounds checked.
+    FormatArgsHole,
     /// `@compile_error("message")`.
     CompileError,
     /// `@panic(message)`: ends the program with a message and a stack trace
@@ -430,7 +430,7 @@ pub struct Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 33] = [
+    const PLAIN: [(&'static str, Self); 32] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -450,10 +450,9 @@ impl Intrinsic {
         ("@byte_buffer_ptr", Self::ByteBufferPtr),
         ("@byte_buffer_len", Self::ByteBufferLen),
         ("@byte_buffer_from", Self::ByteBufferFrom),
-        ("@format_args_new", Self::FormatArgsNew),
-        ("@format_args_push", Self::FormatArgsPush),
-        ("@format_args_count", Self::FormatArgsCount),
+        ("@format_args_holes", Self::FormatArgsHoles),
         ("@format_args_piece", Self::FormatArgsPiece),
+        ("@format_args_hole", Self::FormatArgsHole),
         ("@compile_error", Self::CompileError),
         ("@panic", Self::Panic),
         ("@array_at", Self::ArrayAt),
@@ -522,6 +521,20 @@ impl Intrinsic {
             .iter()
             .find(|(plain, _)| *plain == name)
             .map(|(_, intrinsic)| *intrinsic)
+    }
+
+    /// What replaced a removed intrinsic, for the `E021` on its old name.
+    #[must_use]
+    pub fn replaced(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "@format_args_new" | "@format_args_push" => {
+                "f-strings build formats now: write `$\"...\"` where an `@format_args(W)` is expected"
+            }
+            "@format_args_count" => {
+                "`@format_args_count` is now `@format_args_holes`, the number of holes (one less than the pieces)"
+            }
+            _ => return None,
+        })
     }
 
     /// Every intrinsic name, for editor completion.
@@ -660,7 +673,8 @@ impl Intrinsic {
             | Self::Write
             | Self::Read
             | Self::Drop
-            | Self::Discard => sig(Vec::new(), None),
+            | Self::Discard
+            | Self::FormatArgsHole => sig(Vec::new(), None),
             Self::Atomic(op, _, width) => {
                 let ty = width.builtin();
                 let params = match op {
@@ -699,15 +713,8 @@ impl Intrinsic {
                 vec![Ref(Ty::Bit8), Builtin(Ty::BitNative)],
                 Some(Builtin(Ty::ByteBuffer)),
             ),
-            Self::FormatArgsNew => sig(Vec::new(), Some(Builtin(Ty::FormatArgs))),
-            Self::FormatArgsPush => sig(vec![Ref(Ty::FormatArgs), Builtin(Ty::ByteBuffer)], None),
-            Self::FormatArgsCount => {
-                sig(vec![Builtin(Ty::FormatArgs)], Some(Builtin(Ty::BitNative)))
-            }
-            Self::FormatArgsPiece => sig(
-                vec![Builtin(Ty::FormatArgs), Builtin(Ty::BitNative)],
-                Some(Builtin(Ty::ByteBuffer)),
-            ),
+            Self::FormatArgsHoles => sig(Vec::new(), Some(Builtin(Ty::BitNative))),
+            Self::FormatArgsPiece => sig(Vec::new(), Some(Builtin(Ty::ByteBuffer))),
             Self::Panic => sig(vec![Builtin(Ty::ByteBuffer)], None),
         }
     }
@@ -757,10 +764,9 @@ impl Intrinsic {
             Self::ByteBufferPtr => ".lilac.byte_buffer_ptr",
             Self::ByteBufferLen => ".lilac.byte_buffer_len",
             Self::ByteBufferFrom => ".lilac.byte_buffer_from",
-            Self::FormatArgsNew => ".lilac.format_args_new",
-            Self::FormatArgsPush => ".lilac.format_args_push",
-            Self::FormatArgsCount => ".lilac.format_args_count",
+            Self::FormatArgsHoles => ".lilac.format_args_holes",
             Self::FormatArgsPiece => ".lilac.format_args_piece",
+            Self::FormatArgsHole => ".lilac.format_args_hole",
             _ => return None,
         })
     }

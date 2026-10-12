@@ -162,7 +162,7 @@ fn no_runtime_fixture_emits_no_runtime_text() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("utf8 IR");
-    // The nine-function LIR runtime is culled entirely when unreached.
+    // The LIR runtime is culled entirely when unreached.
     for needle in [
         ".lilac.byte_buffer",
         ".lilac.format_args",
@@ -191,43 +191,44 @@ fn no_runtime_fixture_emits_no_runtime_text() {
     }
 }
 
-/// `fstring.lilac` reaches the format-args runtime; it builds with the
-/// toolchain clang and runs to exit 0 on the host.
+/// `format_args_use.lilac` reads an f-string back through the runtime
+/// (`.lilac.format_args_hole` calls the formatter through its pointer); it
+/// builds with the toolchain clang and runs to exit 0 on the host.
 #[test]
 fn fstring_runtime_compiles_and_runs_on_host() {
     let clang = clang();
     let scratch = std::env::temp_dir().join(format!("lilac-task6-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
 
-    let source = Path::new(&ui("fstring.lilac")).to_path_buf();
-    let ll = scratch.join("fstring.ll");
+    let source = Path::new(&ui("format_args_use.lilac")).to_path_buf();
+    let ll = scratch.join("format_args_use.ll");
     emit_host_ir(&source, "--mode=debug", &ll);
     let text = std::fs::read_to_string(&ll).expect("reads IR");
-    assert!(text.contains(".lilac.format_args_push"), "{text}");
+    assert!(text.contains(".lilac.format_args_hole"), "{text}");
 
-    let exe = scratch.join("fstring.exe");
+    let exe = scratch.join("format_args_use.exe");
     let run = support::build_and_run(&clang, &source, &exe, &["--mode=debug"]);
     assert!(
         run.status.success(),
-        "fstring exited with {:?}",
+        "format_args_use exited with {:?}",
         run.status.code()
     );
 
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// On a 64-bit target that is neither `x86_64` nor `aarch64`, the driver bakes
-/// a `0x10` `format_args` piece stride and codegen lays `#byte_buffer` out as
-/// 16 bytes, so the two agree end to end. If this LLVM build lacks the target
-/// the assertion reports the skip and returns; the driver-level stride test
-/// still covers the shared width rule.
+/// On a 64-bit target that is neither `x86_64` nor `aarch64`, a template
+/// part is 24 bytes (a 16-byte `#byte_buffer` and a pointer), in the
+/// runtime and in the template constant alike. If this LLVM build lacks the
+/// target the assertion reports the skip and returns; the driver-level test
+/// still covers the runtime's offsets.
 #[test]
-fn riscv64_format_args_stride_matches_byte_buffer() {
+fn riscv64_template_parts_match_the_layout() {
     let output = lilac()
         .args([
             "emit-llvm",
             "--target=riscv64-unknown-none",
-            &ui("fstring.lilac"),
+            &ui("format_args_use.lilac"),
         ])
         .output()
         .expect("runs lilac");
@@ -244,10 +245,14 @@ fn riscv64_format_args_stride_matches_byte_buffer() {
     // `#byte_buffer` is 16 bytes aligned to 8: an 8-byte length plus an
     // 8-byte pointer.
     assert!(text.contains("alloca [16 x i8], align 8"), "{text}");
-    // `fstring.lilac` reaches `format_args_push` (not `piece`, which DCE culls);
-    // its piece stride must equal `#byte_buffer`'s 16-byte size. The driver
-    // unit test covers both push and piece at the LIR level.
-    let name = ".lilac.format_args_push";
+    // The template: the hole count, then each part's text and formatter.
+    assert!(
+        text.contains(
+            "@fmt0 = private unnamed_addr constant <{ i64, i64, ptr, ptr, i64, ptr, ptr }>"
+        ),
+        "{text}"
+    );
+    let name = ".lilac.format_args_piece";
     let body = text
         .split("\ndefine ")
         .find(|segment| segment.starts_with(&format!("void @{name}")))
@@ -256,7 +261,7 @@ fn riscv64_format_args_stride_matches_byte_buffer() {
         .lines()
         .find(|line| line.contains("mul i64"))
         .unwrap_or_else(|| panic!("no stride multiply in `{name}`:\n{body}"));
-    assert!(mul.trim_end().ends_with(", 16"), "{name}: {mul}\n{body}");
+    assert!(mul.trim_end().ends_with(", 24"), "{name}: {mul}\n{body}");
 }
 
 /// `generic_hook_drop.ll` shows both zero-initialization and the RAII

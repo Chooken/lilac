@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use lilac_ast::{
-    BinOp, Expr, FStrPart, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType, TypeShape,
+    BinOp, Expr, MatchArm, MatchArmBody, Stmt, StructField, Type as AstType, TypeShape,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::{
@@ -135,7 +135,7 @@ impl Checker<'_> {
             Expr::StructLit { ty, fields, span } => {
                 self.check_struct_lit(fcx, ty, fields, *span, expected)
             }
-            Expr::FString { parts, span } => self.check_fstring(fcx, parts, *span),
+            Expr::FString { parts, span } => self.check_fstring(fcx, parts, *span, expected),
             Expr::TypeApp(ty) => {
                 self.diags.emit(
                     Diagnostic::error(
@@ -162,6 +162,12 @@ impl Checker<'_> {
             let span = expr.span;
             self.mismatch(want, expr.ty, want_span, span);
             return HirExpr::poison(span);
+        }
+        // A format slot: a literal is a format, and so is any one value.
+        if let Some(writer) = self.format_writer(want.id) {
+            if expr.ty.id != want.id {
+                return self.format_slot(expr, writer);
+            }
         }
         if expr.ty.is_ref && expr.ty.id != want.id {
             let span = expr.span;
@@ -1328,40 +1334,6 @@ impl Checker<'_> {
         HirExpr::poison(span)
     }
 
-    /// `$"..."`: each piece is a `@byte_buffer` (holes convert).
-    fn check_fstring(&mut self, fcx: &mut FnCx, parts: &[FStrPart], span: Span) -> HirExpr {
-        if parts.len() > 16 {
-            self.diags.emit(
-                Diagnostic::error(codes::E061, "too many format pieces (max 16)").label(
-                    span,
-                    true,
-                    "too many pieces here",
-                ),
-            );
-            return HirExpr::poison(span);
-        }
-        let buffer = Builtin::ByteBuffer.value();
-        let pieces = parts
-            .iter()
-            .map(|part| match part {
-                FStrPart::Lit(bytes) => HirExpr {
-                    ty: buffer,
-                    span,
-                    kind: HirExprKind::Str(bytes.clone()),
-                },
-                FStrPart::Hole(expr) => {
-                    let value = self.check_expr(fcx, expr, None);
-                    self.coerce(value, buffer, expr.span())
-                }
-            })
-            .collect();
-        HirExpr {
-            ty: Builtin::FormatArgs.value(),
-            span,
-            kind: HirExprKind::FormatArgs(pieces),
-        }
-    }
-
     // ---- module constants ---------------------------------------------------
 
     /// The declared type of a constant or global.
@@ -1378,7 +1350,15 @@ impl Checker<'_> {
             file: Some(self.res.def(def).file),
             ..Env::default()
         };
-        let resolved = self.with_env(env, |c| c.resolve_type(&ty));
+        let mut resolved = self.with_env(env, |c| c.resolve_type(&ty));
+        let what = if matches!(self.res.def(def).kind, DefKind::Global { .. }) {
+            "a global"
+        } else {
+            "a constant"
+        };
+        if self.format_place(resolved, ty.span, what).is_err() {
+            resolved = TypeRef::ERROR;
+        }
         self.const_types.insert(def, resolved);
         resolved
     }

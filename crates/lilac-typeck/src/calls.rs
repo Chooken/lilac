@@ -206,13 +206,15 @@ impl Checker<'_> {
             }
             let overloads = self.overloads(name);
             if overloads.is_empty() {
-                let error = self.diags.emit(
-                    Diagnostic::error(codes::E021, format!("unresolved name `{name}`")).label(
-                        name_span,
-                        true,
-                        "no hook or intrinsic with this name",
-                    ),
-                );
+                let mut diagnostic = Diagnostic::error(
+                    codes::E021,
+                    format!("unresolved name `{name}`"),
+                )
+                .label(name_span, true, "no hook or intrinsic with this name");
+                if let Some(note) = Intrinsic::replaced(name) {
+                    diagnostic = diagnostic.note(note);
+                }
+                let error = self.diags.emit(diagnostic);
                 return Err(self.callee_failed(fcx, args, error));
             }
             return self.hook_call(fcx, name, &overloads, args, span);
@@ -1024,6 +1026,9 @@ impl Checker<'_> {
             }
             Intrinsic::ArrayAt => return self.check_array_at(fcx, args, span),
             Intrinsic::ArrayLen => return self.check_array_len(fcx, args, span),
+            Intrinsic::FormatArgsHoles | Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
+                return self.check_format_consumer(fcx, intrinsic, name, args, span);
+            }
             _ if intrinsic.is_memory() => {
                 return self.check_memory(fcx, intrinsic, name, args, span, expected);
             }

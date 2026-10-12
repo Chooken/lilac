@@ -1019,7 +1019,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let view = self.place_ptr(dst, state);
         let fields = [global.as_pointer_value(), array];
         for (index, value) in (0u32..).zip(fields) {
-            let offset = self.field_offset(&LirTy::format_view(), index);
+            let offset = self.field_offset(&LirTy::format_args(), index);
             let field = if offset == 0 {
                 view
             } else {

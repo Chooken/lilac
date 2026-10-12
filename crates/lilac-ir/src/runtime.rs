@@ -18,10 +18,11 @@
 //! uses.
 
 use lilac_span::Span;
+use lilac_target::{Scalar, Target};
 
 use crate::{
-    ArithOp, ConvertOp, LirBlock, LirCallee, LirConst, LirData, LirFunc, LirInst, LirOperand,
-    LirTerm, LirTy, PlaceName, Reg, Symbol,
+    builtin_layout, format_template_layout, ArithOp, ConvertOp, LirBlock, LirCallee, LirConst,
+    LirData, LirFunc, LirInst, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol,
 };
 
 /// How a program enters: which symbol calls the entry stub `.lilac.start`.
@@ -36,26 +37,26 @@ pub enum Entry {
     Native,
 }
 
-/// Builds the runtime prelude for a target with `ptr_size`-byte pointers.
+/// Builds the runtime prelude for `target`.
 ///
 /// The functions are returned in call-dependency order: `byte_buffer_from`,
-/// `byte_buffer_ptr`, `byte_buffer_len`, `load_u8`, `store_u8`,
-/// `format_args_new`, `format_args_push`, `format_args_count`,
-/// `format_args_piece`. The piece stride is `#byte_buffer`'s size,
-/// `2 * ptr_size` bytes.
+/// `byte_buffer_ptr`, `byte_buffer_len`, `load_u8`, `store_u8`, then the
+/// f-string readers `format_args_holes`, `format_args_piece` and
+/// `format_args_hole`, which find a template's parts at the target's
+/// offsets ([`format_template_layout`]).
 #[must_use]
-pub fn build_runtime(ptr_size: u32) -> Vec<LirFunc> {
-    let stride = 2 * u64::from(ptr_size);
+pub fn build_runtime(target: &Target) -> Vec<LirFunc> {
+    let shape = TemplateShape::of(*target);
+    let (pointer, _) = target.scalar_layout(Scalar::Pointer);
     vec![
         byte_buffer_from(),
         byte_buffer_ptr(),
         byte_buffer_len(),
         load_u8(),
         store_u8(),
-        format_args_new(),
-        format_args_push(stride),
-        format_args_count(),
-        format_args_piece(stride),
+        format_args_holes(),
+        format_args_piece(shape),
+        format_args_hole(shape, pointer),
     ]
 }
 
@@ -622,139 +623,160 @@ fn store_u8() -> LirFunc {
     )
 }
 
-/// `.lilac.format_args_new() -> #format_args` (a zeroed piece table).
-fn format_args_new() -> LirFunc {
-    lir_func(
-        ".lilac.format_args_new",
-        &[],
-        &[("out", LirTy::format_args())],
-        vec![block(
-            "entry",
-            vec![
-                alloca(LirTy::format_args(), "tmp"),
-                copy_place(LirOperand::Place("tmp".into()), "out"),
-            ],
-            ret(),
-        )],
-    )
+/// Where a template's parts are on a target: the offset of `parts`
+/// ([`format_template_layout`]), one part's size, and the offset of a
+/// part's `format` (its `text` is at 0).
+#[derive(Debug, Clone, Copy)]
+struct TemplateShape {
+    parts: u64,
+    part_size: u64,
+    format: u64,
 }
 
-/// `.lilac.format_args_push(ref #format_args %table, #byte_buffer %piece)`.
-///
-/// Appends `piece` while `count < 16`, then increments `count`.
-fn format_args_push(stride: u64) -> LirFunc {
-    lir_func(
-        ".lilac.format_args_push",
-        &[
-            ("table", LirTy::format_args().to_ref()),
-            ("piece", LirTy::byte_buffer()),
-        ],
-        &[],
-        vec![
-            block(
-                "entry",
-                vec![
-                    field("table", "count", 0, "c", LirTy::BitNative),
-                    constant("cap", LirConst::Int(16), LirTy::BitNative),
-                    arith(ArithOp::ILtU, "c", "cap", "ok", LirTy::Bit(8)),
-                ],
-                branch_if("ok", "append", "done"),
-            ),
-            block(
-                "append",
-                vec![
-                    field("table", "count", 0, "c", LirTy::BitNative),
-                    field_addr("table", "p0", 1, "p0", LirTy::byte_buffer().to_ref()),
-                    alloca(LirTy::byte_ref(), "base"),
-                    copy_place(LirOperand::Reg("p0".into()), "base"),
-                    constant("stride", LirConst::Int(stride), LirTy::BitNative),
-                    arith(ArithOp::IMul, "c", "stride", "off", LirTy::BitNative),
-                    alloca(LirTy::BitNative, "offp"),
-                    copy_place(LirOperand::Reg("off".into()), "offp"),
-                    alloca(LirTy::byte_ref(), "slot"),
-                    call_builtin("@ptr_add", &["base", "offp"], &["slot"]),
-                    alloca(LirTy::byte_buffer().to_ref(), "s"),
-                    copy_place(LirOperand::Place("slot".into()), "s"),
-                    store(LirOperand::Place("piece".into()), "s"),
-                    constant("one", LirConst::Int(1), LirTy::BitNative),
-                    arith(ArithOp::IAdd, "c", "one", "n", LirTy::BitNative),
-                    store_field(LirOperand::Reg("n".into()), "table", "count", 0),
-                ],
-                branch("done"),
-            ),
-            block("done", Vec::new(), ret()),
-        ],
-    )
+impl TemplateShape {
+    fn of(target: Target) -> Self {
+        let (Some(template), Some(part)) = (
+            format_template_layout(0, &target),
+            builtin_layout(&LirTy::format_part(), &target),
+        ) else {
+            lilac_error::bug!(span(), "no template layout on `{}`", target.to_triple());
+        };
+        Self {
+            parts: template.fields[1].offset,
+            part_size: part.size,
+            format: part.fields[1].offset,
+        }
+    }
 }
 
-/// `.lilac.format_args_count(#format_args %table) -> #bit_native`.
-fn format_args_count() -> LirFunc {
-    lir_func(
-        ".lilac.format_args_count",
-        &[("table", LirTy::format_args())],
+/// `.lilac.format_args_holes(#format_args %args) -> #bit_native`: the
+/// hole count, the first word of the template.
+fn format_args_holes() -> LirFunc {
+    always_inline(lir_func(
+        ".lilac.format_args_holes",
+        &[("args", LirTy::format_args())],
         &[("out", LirTy::BitNative)],
         vec![block(
             "entry",
             vec![
-                field("table", "count", 0, "r", LirTy::BitNative),
-                copy_place(LirOperand::Reg("r".into()), "out"),
+                alloca(LirTy::opaque_ref(), "template"),
+                field("args", "template", 0, "t", LirTy::opaque_ref()),
+                copy_place(LirOperand::Reg("t".into()), "template"),
+                copy_deref("template", "out"),
             ],
             ret(),
         )],
-    )
+    ))
 }
 
-/// `.lilac.format_args_piece(#format_args %table, #bit_native %index) ->
-/// #byte_buffer`.
-///
-/// Reads `p0[index]`, trapping through `@lilac_abort` when `index >= count`.
-fn format_args_piece(stride: u64) -> LirFunc {
-    lir_func(
+/// Points the `ref #unknown` place `slot` `offset + index * stride` bytes
+/// past the pointer in `args`'s field `name` (`idx`).
+fn index_into(name: &str, idx: u32, offset: u64, stride: u64, slot: &str) -> Vec<LirInst> {
+    let base = format!("{slot}.base");
+    let (index, at) = (format!("{slot}.index"), format!("{slot}.at"));
+    vec![
+        alloca(LirTy::byte_ref(), &base),
+        field(
+            "args",
+            name,
+            idx,
+            &format!("{slot}.ptr"),
+            LirTy::opaque_ref(),
+        ),
+        copy_place(LirOperand::Reg(format!("{slot}.ptr").into()), &base),
+        copy_reg(LirOperand::Place("index".into()), &index, LirTy::BitNative),
+        constant(
+            &format!("{slot}.stride"),
+            LirConst::Int(stride),
+            LirTy::BitNative,
+        ),
+        arith(
+            ArithOp::IMul,
+            &index,
+            &format!("{slot}.stride"),
+            &format!("{slot}.scaled"),
+            LirTy::BitNative,
+        ),
+        constant(
+            &format!("{slot}.offset"),
+            LirConst::Int(offset),
+            LirTy::BitNative,
+        ),
+        arith(
+            ArithOp::IAdd,
+            &format!("{slot}.scaled"),
+            &format!("{slot}.offset"),
+            &format!("{slot}.sum"),
+            LirTy::BitNative,
+        ),
+        alloca(LirTy::BitNative, &at),
+        copy_place(LirOperand::Reg(format!("{slot}.sum").into()), &at),
+        alloca(LirTy::opaque_ref(), slot),
+        call_builtin("@ptr_add", &[&base, &at], &[slot]),
+    ]
+}
+
+/// `.lilac.format_args_piece(#format_args %args, #bit_native %index) ->
+/// #byte_buffer`: the text of part `index`. The caller checked
+/// `index <= holes`.
+fn format_args_piece(shape: TemplateShape) -> LirFunc {
+    let mut insts = index_into("template", 0, shape.parts, shape.part_size, "part");
+    insts.push(copy_deref("part", "out"));
+    always_inline(lir_func(
         ".lilac.format_args_piece",
-        &[("table", LirTy::format_args()), ("index", LirTy::BitNative)],
+        &[("args", LirTy::format_args()), ("index", LirTy::BitNative)],
         &[("out", LirTy::byte_buffer())],
-        vec![
-            block(
-                "entry",
-                vec![
-                    field("table", "count", 0, "c", LirTy::BitNative),
-                    copy_reg(LirOperand::Place("index".into()), "idx", LirTy::BitNative),
-                    arith(ArithOp::ILtU, "idx", "c", "ok", LirTy::Bit(8)),
-                ],
-                branch_if("ok", "load", "trap"),
-            ),
-            block(
-                "trap",
-                vec![call_builtin("@lilac_abort", &[], &[])],
-                unreachable(),
-            ),
-            block(
-                "load",
-                vec![
-                    copy_reg(LirOperand::Place("index".into()), "idx", LirTy::BitNative),
-                    field_addr("table", "p0", 1, "p0", LirTy::byte_buffer().to_ref()),
-                    alloca(LirTy::byte_ref(), "base"),
-                    copy_place(LirOperand::Reg("p0".into()), "base"),
-                    constant("stride", LirConst::Int(stride), LirTy::BitNative),
-                    arith(ArithOp::IMul, "idx", "stride", "off", LirTy::BitNative),
-                    alloca(LirTy::BitNative, "offp"),
-                    copy_place(LirOperand::Reg("off".into()), "offp"),
-                    alloca(LirTy::byte_ref(), "slot"),
-                    call_builtin("@ptr_add", &["base", "offp"], &["slot"]),
-                    alloca(LirTy::byte_buffer().to_ref(), "s"),
-                    copy_place(LirOperand::Place("slot".into()), "s"),
-                    copy_deref("s", "out"),
-                ],
-                ret(),
-            ),
+        vec![block("entry", insts, ret())],
+    ))
+}
+
+/// `.lilac.format_args_hole(#format_args %args, #bit_native %index, ref
+/// #unknown %out)`: calls hole `index`'s formatter with the hole's address
+/// and `out`. The caller checked `index < holes`.
+fn format_args_hole(shape: TemplateShape, pointer: u64) -> LirFunc {
+    let mut insts = index_into(
+        "template",
+        0,
+        shape.parts + shape.format,
+        shape.part_size,
+        "part",
+    );
+    insts.extend(index_into("holes", 1, 0, pointer, "hole"));
+    insts.extend([
+        alloca(LirTy::opaque_ref(), "format"),
+        copy_deref("part", "format"),
+        alloca(LirTy::opaque_ref(), "value"),
+        copy_deref("hole", "value"),
+        copy_reg(LirOperand::Place("format".into()), "f", LirTy::opaque_ref()),
+        LirInst::Call {
+            func: LirCallee::Reg("f".into()),
+            ins: vec!["value".into(), "out".into()],
+            outs: Vec::new(),
+            span: span(),
+        },
+    ]);
+    always_inline(lir_func(
+        ".lilac.format_args_hole",
+        &[
+            ("args", LirTy::format_args()),
+            ("index", LirTy::BitNative),
+            ("out", LirTy::opaque_ref()),
         ],
-    )
+        &[],
+        vec![block("entry", insts, ret())],
+    ))
+}
+
+/// `func`, marked always-inline: a reader is a few loads at its call site.
+fn always_inline(mut func: LirFunc) -> LirFunc {
+    func.inline = true;
+    func
 }
 
 #[cfg(test)]
 mod tests {
     use super::{build_runtime, entry_point, hook_externs};
-    use crate::{verify, ArithOp, LirConst, LirFunc, LirInst, LirModule};
+    use crate::{verify, LirConst, LirFunc, LirInst, LirModule};
 
     /// The panic handler and the entry stub verify against the hooks'
     /// declarations.
@@ -762,7 +784,7 @@ mod tests {
     fn panic_handler_and_entry_verify() {
         let mut module =
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
-        module.funcs = runtime(8);
+        module.funcs = runtime("x86_64-pc-windows-msvc");
         module.funcs.extend(hook_externs());
         module.funcs.push(LirFunc {
             is_extern: true,
@@ -799,21 +821,13 @@ mod tests {
         assert!(calls[2].contains("@lilac_abort"), "{calls:?}");
     }
 
-    fn runtime(ptr_size: u32) -> Vec<LirFunc> {
-        build_runtime(ptr_size)
-    }
-
-    fn e070_count(diags: &lilac_error::Diags) -> usize {
-        diags
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == "E070")
-            .count()
+    fn runtime(triple: &str) -> Vec<LirFunc> {
+        build_runtime(&lilac_target::Target::parse(triple).expect("triple"))
     }
 
     #[test]
-    fn runtime_has_nine_functions_in_order() {
-        let funcs = runtime(8);
+    fn runtime_has_eight_functions_in_order() {
+        let funcs = runtime("x86_64-unknown-none");
         let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
@@ -823,62 +837,31 @@ mod tests {
                 ".lilac.byte_buffer_len",
                 ".lilac.load_u8",
                 ".lilac.store_u8",
-                ".lilac.format_args_new",
-                ".lilac.format_args_push",
-                ".lilac.format_args_count",
+                ".lilac.format_args_holes",
                 ".lilac.format_args_piece",
+                ".lilac.format_args_hole",
             ]
         );
-        // The two byte-access bodies the backend no longer defines.
-        assert!(names.contains(&".lilac.load_u8"));
-        assert!(names.contains(&".lilac.store_u8"));
     }
 
-    /// Both `format_args` bounds checks use unsigned less-than, so a negative
-    /// (high-bit-set) index cannot slip past `index < count`.
+    /// The runtime verifies on every supported target.
     #[test]
-    fn runtime_bounds_checks_are_unsigned() {
-        let funcs = runtime(8);
-        for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
-            let func = funcs
-                .iter()
-                .find(|f| f.name == name)
-                .expect("runtime function");
-            let ops: Vec<&ArithOp> = func
-                .blocks
-                .iter()
-                .flat_map(|b| &b.insts)
-                .filter_map(|inst| match inst {
-                    LirInst::Arith { op, .. } => Some(op),
-                    _ => None,
-                })
-                .collect();
+    fn runtime_module_verifies() {
+        for target in lilac_target::Target::supported() {
+            let mut module = LirModule::new(target);
+            module.funcs = build_runtime(&target);
+            let mut diags = lilac_error::Diags::new();
             assert!(
-                ops.iter().any(|op| matches!(op, ArithOp::ILtU)),
-                "{name} must bounds-check with ILtU"
-            );
-            assert!(
-                !ops.iter().any(|op| matches!(op, ArithOp::ILt)),
-                "{name} must not use signed ILt"
+                verify(&module, &mut diags).is_ok(),
+                "{}: {:?}",
+                target.to_triple(),
+                diags.diagnostics()
             );
         }
     }
 
-    #[test]
-    fn runtime_module_verifies() {
-        let mut module =
-            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
-        module.funcs = runtime(8);
-        let mut diags = lilac_error::Diags::new();
-        assert!(
-            verify(&module, &mut diags).is_ok(),
-            "{:?}",
-            diags.diagnostics()
-        );
-        assert_eq!(e070_count(&diags), 0);
-    }
-
-    fn stride_lits(funcs: &[LirFunc], name: &str) -> Vec<LirConst> {
+    /// The integer constants `name` holds.
+    fn constants(funcs: &[LirFunc], name: &str) -> Vec<u64> {
         funcs
             .iter()
             .find(|f| f.name == name)
@@ -887,11 +870,10 @@ mod tests {
                     .iter()
                     .flat_map(|b| &b.insts)
                     .filter_map(|inst| match inst {
-                        LirInst::Const { dst, value, ty, .. }
-                            if *dst == "stride" && *ty == crate::LirTy::BitNative =>
-                        {
-                            Some(value.clone())
-                        }
+                        LirInst::Const {
+                            value: LirConst::Int(value),
+                            ..
+                        } => Some(*value),
                         _ => None,
                     })
                     .collect()
@@ -899,17 +881,25 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// A part is a buffer and a pointer after the count: 24 bytes from 8
+    /// on a 64-bit target, 12 from 4 on a 32-bit one.
     #[test]
-    fn runtime_embeds_pointer_stride() {
-        for (ptr_size, expected) in [(8u32, 16), (4, 8)] {
-            let funcs = runtime(ptr_size);
-            for name in [".lilac.format_args_push", ".lilac.format_args_piece"] {
-                assert_eq!(
-                    stride_lits(&funcs, name),
-                    vec![LirConst::Int(expected)],
-                    "{name} at ptr_size {ptr_size}"
-                );
-            }
+    fn readers_follow_the_target_layout() {
+        for (triple, piece, hole) in [
+            ("x86_64-unknown-none", vec![24, 8], vec![24, 24, 8, 0]),
+            ("i686-pc-windows-msvc", vec![12, 4], vec![12, 12, 4, 0]),
+        ] {
+            let funcs = runtime(triple);
+            assert_eq!(
+                constants(&funcs, ".lilac.format_args_piece"),
+                piece,
+                "{triple}"
+            );
+            assert_eq!(
+                constants(&funcs, ".lilac.format_args_hole"),
+                hole,
+                "{triple}"
+            );
         }
     }
 }

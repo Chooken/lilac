@@ -1,0 +1,16 @@
+// expect-error: E072
+// A format cannot be an out: its holes would outlive the call.
+Out: object {}
+
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+
+number: function () value: @bit32 {
+    value = 0x1
+}
+
+
+make: function () text: @format_args(Out) {
+    text = "made"
+}
+
+main: function () nothing {}

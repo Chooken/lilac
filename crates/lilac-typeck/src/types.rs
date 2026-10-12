@@ -89,6 +89,7 @@ impl Checker<'_> {
                 len,
                 len_span,
             } => self.resolve_array(ty, element, len, *len_span),
+            TypeShape::FormatArgs { writer } => self.resolve_format_args(ty, writer),
             // Outside a method's receiver, `self` names no type.
             TypeShape::SelfType => self.resolve_named(ty, "self", &[]),
             TypeShape::Named { name, args } => self.resolve_named(ty, name, args),
@@ -159,7 +160,12 @@ impl Checker<'_> {
         let Some(def) = found.filter(|def| self.res.def(*def).is_type()) else {
             let diagnostic = Diagnostic::error(codes::E023, format!("unknown type `{name}`"))
                 .label(ty.span, true, "no such type in scope");
-            let diagnostic = self.suggest_type(diagnostic, name, ty.name_span);
+            let diagnostic = if name == "@format_args" {
+                diagnostic
+                    .help("a format names the type its holes are written into: `@format_args(W)`")
+            } else {
+                self.suggest_type(diagnostic, name, ty.name_span)
+            };
             self.diags.emit(diagnostic);
             return TypeRef::ERROR;
         };
@@ -284,6 +290,9 @@ impl Checker<'_> {
                 self.ensured.insert(ty.id);
                 return Ok(());
             }
+            TypeKind::FormatArgs { writer } => {
+                return self.ensure_type(TypeRef::value(writer), span);
+            }
             TypeKind::Object(_) | TypeKind::Instance { .. } => {}
             _ => return Ok(()),
         }
@@ -344,6 +353,10 @@ impl Checker<'_> {
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(self.diags.already_reported());
         };
+        if let Err(error) = self.no_format_slots(&layout, &spans) {
+            self.type_states.insert(ty.id, TypeState::Failed);
+            return Err(error);
+        }
         if let Err(error) = self.lay_out_type(ty.id, &layout, &spans) {
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(error);

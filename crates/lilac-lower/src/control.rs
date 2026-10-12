@@ -543,7 +543,10 @@ impl Lower<'_> {
             | HirExprKind::Match { .. }
             | HirExprKind::Logic { .. }
             | HirExprKind::Call {
-                callee: HirCallee::Intrinsic(Intrinsic::ArrayAt),
+                callee:
+                    HirCallee::Intrinsic(
+                        Intrinsic::ArrayAt | Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole,
+                    ),
                 ..
             } => {
                 found = true;

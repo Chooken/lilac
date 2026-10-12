@@ -61,16 +61,27 @@
   (`lilac-layout`) is the only one and LLVM has no struct types. A data
   `const` is a `ref #bit8`; string literals fill a `#byte_buffer` place
   (`lilac_ir::runtime::fill_byte_buffer`).
-- f-string templates (`LirModule::formats`, `LirFormat`: pieces and one
-  formatter per hole, printed `!fmt0: format "a" {@f} "b"`) and the
-  `format !fmt0 (&h) -> %d` instruction (`LirInst::Format`) are in the IR
-  and the LLVM backend, but lowering does not emit them yet (f-string plan
-  phase 4). A template is a constant in `format_template_layout` (the hole
-  count, then `#.lilac.format_part`s); `format` fills a
-  `#.lilac.format_args` place (template, hole-address array). The
-  verifier checks each formatter is place-ABI `ref #T, ref #W` with no
-  outs and each hole register is its `ref #T`; DCE keeps a template a
-  live `format` names and treats its formatters as taken addresses.
+- F-strings (`lilac-typeck/src/formats.rs`): `@format_args(W)` is
+  `TypeKind::FormatArgs { writer }`; `W` comes from the expected type
+  (`fstring_writer`: an `@format_args(W)`, else the `W` of its one
+  `@conversion` from a format, `E043`/`E073` otherwise), and each hole
+  binds the exact `@format(ref T, ref W)` hook (`E071`, `E022` for a bad
+  shape). In an `@format_args(W)` slot a string literal or one value is a
+  format (`format_slot`). A format lives only in locals and parameters
+  (`E072`: `format_place`, `format_store`), and a new local's temporary
+  holes are extended into hidden locals (`extend_holes`). Typeck emits
+  `HirExprKind::Format`; lowering emits a template (`LirModule::formats`,
+  `LirFormat`, printed `!fmt0: format "a" {@f} "b"`) and `format !fmt0
+  (&h) -> %d` (`LirInst::Format`), which fills a `#format_args` place
+  (template, hole-address array). A template is a constant in
+  `format_template_layout` (the hole count, then `#.lilac.format_part`s).
+  The consumers `@format_args_holes`/`_piece`/`_hole` call the
+  always-inline runtime readers, built per target by
+  `build_runtime(&Target)`, after lowering's bounds check
+  (`lower_format_consumer`). The verifier checks each formatter is
+  place-ABI `ref #T, ref #W` with no outs and each hole register is its
+  `ref #T`; DCE keeps a template a live `format` names and treats its
+  formatters as taken addresses.
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/
@@ -139,9 +150,9 @@
 - `inkwell` is still confined to `lilac-codegen-llvm` (see above); the runtime
   move does not add LLVM dependencies elsewhere.
 - The single pointer-width rule lives in `lilac-target` and funnels through
-  `Arch::is_64_bit`. The driver reads `Target::bit_native_width()` (which calls
-  `Arch::is_64_bit`) to bake the `format_args` piece stride into the injected
-  runtime; `lilac-codegen-llvm` calls `is_64_bit_triple` (which also delegates
+  `Arch::is_64_bit`. Typeck and lowering read
+  `Target::bit_native_width()` (which calls `Arch::is_64_bit`), and
+  `lilac-codegen-llvm` calls `is_64_bit_triple` (which also delegates
   to `Arch::is_64_bit`) to pick `@bit_native`'s LLVM width. Because both funnel
   through `Arch::is_64_bit`, their widths cannot drift. Typeck takes the whole
   `Target` (`Options::target`), lowering takes it as a `lower` argument, and

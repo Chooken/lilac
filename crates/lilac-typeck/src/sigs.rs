@@ -89,6 +89,14 @@ impl Checker<'_> {
                 .chain(decl.failures.iter().flatten())
                 .map(|p| slot(c, p))
                 .collect();
+            for (out, ty) in decl
+                .returns
+                .iter()
+                .chain(decl.failures.iter().flatten())
+                .zip(&returns)
+            {
+                ok &= c.format_place(*ty, out.ty.span, "an out").is_ok();
+            }
             if decl.failures.is_some() {
                 returns.push(Builtin::Bit8.value());
             }
@@ -194,6 +202,19 @@ impl Checker<'_> {
                         self,
                         "`@conversion` needs exactly one by-value parameter and one by-value return",
                         "bad conversion shape",
+                    );
+                }
+            }
+            "@format" => {
+                let shaped = sig.params.len() == 2
+                    && sig.returns.is_empty()
+                    && sig.params.iter().all(|param| param.is_ref)
+                    && sig.params[0].id != Builtin::Unknown.id();
+                if !shaped {
+                    return fail(
+                        self,
+                        "`@format` needs exactly two parameters, `ref T` (not `unknown`) and `ref W`, and no returns",
+                        "bad `@format` shape",
                     );
                 }
             }

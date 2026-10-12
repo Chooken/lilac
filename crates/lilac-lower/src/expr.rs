@@ -1,8 +1,9 @@
 //! Expressions: places and the values they read.
 
-use lilac_hir::{HirCallee, HirExpr, HirExprKind, HirFunc, Layout};
+use lilac_hir::{HirCallee, HirExpr, HirExprKind, HirFormat, HirFunc, Layout};
 use lilac_ir::{
-    ArithOp, LirCallee, LirConst, LirData, LirInst, LirOperand, LirTy, PlaceName, Reg, Symbol,
+    ArithOp, LirCallee, LirConst, LirData, LirFormat, LirInst, LirOperand, LirTy, PlaceName, Reg,
+    Symbol,
 };
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeRef};
@@ -287,7 +288,7 @@ impl Lower<'_> {
             HirExprKind::Logic { and, lhs, rhs } => {
                 self.logic_value(state, func, expr, *and, lhs, rhs)
             }
-            HirExprKind::FormatArgs(pieces) => self.format_args_value(state, func, expr, pieces),
+            HirExprKind::Format(format) => self.format_value(state, func, expr, format),
             HirExprKind::Const(def) => match self.hir.consts.get(def) {
                 Some(value) => self.value(state, func, value),
                 None => lilac_error::bug!(span, "use of an unchecked constant"),
@@ -545,33 +546,53 @@ impl Lower<'_> {
         LirOperand::Reg(reg)
     }
 
-    /// A `format_args` table: created, then each piece pushed.
-    fn format_args_value(
+    /// An f-string: each hole's `ref` evaluated in order, then one
+    /// `format` of its template (shared by every identical f-string).
+    fn format_value(
         &mut self,
         state: &mut FnState,
         func: &HirFunc,
         expr: &HirExpr,
-        pieces: &[HirExpr],
+        format: &HirFormat,
     ) -> LirOperand {
         let span = expr.span;
+        let values: Vec<HirExpr> = format.holes.iter().map(|hole| hole.value.clone()).collect();
+        let holes = self.regs(state, func, &values);
+        let template = self.intern_format(format, span);
         let place = self.tmp(state, expr.ty, span);
-        state.emit(LirInst::Call {
-            func: LirCallee::Func(".lilac.format_args_new".into()),
-            ins: Vec::new(),
-            outs: vec![place.clone()],
+        state.emit(LirInst::Format {
+            template,
+            holes,
+            dst: place.clone(),
             span,
         });
-        for piece in pieces {
-            let piece_place = self.arg(state, func, piece);
-            let table = self.ref_place(state, &Place::Direct(place.clone()), expr.ty, span);
-            state.emit(LirInst::Call {
-                func: LirCallee::Func(".lilac.format_args_push".into()),
-                ins: vec![table, piece_place],
-                outs: Vec::new(),
-                span: piece.span,
-            });
-        }
         LirOperand::Place(place)
+    }
+
+    /// The template of `format`: its pieces and each hole's formatter,
+    /// named `fmtN` in first-use order, so snapshots are stable.
+    fn intern_format(&mut self, format: &HirFormat, span: Span) -> Symbol {
+        let formats: Vec<Symbol> = format
+            .holes
+            .iter()
+            .map(|hole| self.symbol(&hole.format))
+            .collect();
+        if let Some(existing) = self
+            .module
+            .formats
+            .iter()
+            .find(|template| template.pieces == format.pieces && template.formats == formats)
+        {
+            return existing.name.clone();
+        }
+        let name = Symbol::new(format!("fmt{}", self.module.formats.len()));
+        self.module.formats.push(LirFormat {
+            name: name.clone(),
+            pieces: format.pieces.clone(),
+            formats,
+            span,
+        });
+        name
     }
 
     pub(crate) fn intern_data(&mut self, bytes: &[u8]) -> Symbol {
