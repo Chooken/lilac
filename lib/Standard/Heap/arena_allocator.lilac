@@ -130,7 +130,7 @@ ArenaAllocator: object {
 
             // Bytes it gives back go back to zero.
             if new_size < old_size {
-                @memset(@ptr_add(ptr, new_size as @bit_native) as ref @bit8, 0x0, old_size - new_size)
+                @memset(@ptr_add(ptr, new_size as @bit_native), 0x0, old_size - new_size)
             }
 
             allocation = ptr
@@ -144,7 +144,7 @@ ArenaAllocator: object {
         }
 
         allocation = self.alloc_raw(new_size, alignment)
-        @memcpy(allocation as ref @bit8, ptr as ref @bit8, old_size)
+        @memcpy(allocation, ptr, old_size)
     }
 
     free_raw: function (self, allocation: ref unknown) nothing {
@@ -153,7 +153,7 @@ ArenaAllocator: object {
 
     // Frees every allocation at once. Only the bytes used need zeroing.
     reset: function (self) nothing {
-        @memset(self.base as ref @bit8, 0x0, self.used)
+        @memset(self.base, 0x0, self.used)
         self.used = 0
     }
 

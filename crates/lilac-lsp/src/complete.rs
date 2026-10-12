@@ -23,7 +23,7 @@ use lsp_types::{
 };
 
 use crate::convert::{byte_offset, position};
-use crate::handlers::{file_for, intrinsic_signature, signature};
+use crate::handlers::{file_for, intrinsic_label, intrinsic_signature, signature};
 use crate::index::Retained;
 
 /// What a name or path names.
@@ -618,12 +618,7 @@ pub fn signature_help(
         .then(|| Intrinsic::lookup(callee))
         .flatten()
     {
-        let label = intrinsic_signature(callee, intrinsic);
-        let params = label
-            .find('(')
-            .and_then(|open| Some((open, open + label[open..].find(')')?)))
-            .map(|(open, close)| split_params(&label, open + 1, close))
-            .unwrap_or_default();
+        let (label, params) = intrinsic_label(callee, intrinsic);
         return Some(help(label, params, argument));
     }
 
@@ -688,26 +683,6 @@ pub fn signature_help(
     Some(help(label, params, argument))
 }
 
-/// The UTF-16 offsets of the comma-separated parameters of `label` between
-/// `open` and `close` (byte offsets of an ASCII label).
-fn split_params(label: &str, open: usize, close: usize) -> Vec<(u32, u32)> {
-    let mut params = Vec::new();
-    let mut start = open;
-    for (index, ch) in label[open..close].char_indices() {
-        if ch == ',' {
-            params.push((start, open + index));
-            start = open + index + 2;
-        }
-    }
-    if close > open {
-        params.push((start, close));
-    }
-    params
-        .into_iter()
-        .map(|(start, end)| (utf16_len(&label[..start]), utf16_len(&label[..end])))
-        .collect()
-}
-
 fn utf16_len(text: &str) -> u32 {
     u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
 }
@@ -754,11 +729,5 @@ mod tests {
         assert_eq!(call_at("p.sum(", 6), Some(("p.sum", 0)));
         assert_eq!(call_at("f(\"a,(\", ", 9), Some(("f", 1)));
         assert_eq!(call_at("{ x }", 3), None);
-    }
-
-    #[test]
-    fn intrinsic_parameters_split() {
-        let label = "@i_add_8(@bit8, @bit8) @bit8";
-        assert_eq!(split_params(label, 9, 21), vec![(9, 14), (16, 21)]);
     }
 }

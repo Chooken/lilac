@@ -31,7 +31,7 @@ expect_filled: function (address: @bit_native, byte: @bit8, len: @bit_native, co
 }
 
 fill: function (address: @bit_native, byte: @bit8, len: @bit_native) nothing {
-    @memset(@address_to_ptr(address) as ref @bit8, byte, len)
+    @memset(@address_to_ptr(address), byte, len)
 }
 
 main: function () nothing {

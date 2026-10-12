@@ -10,16 +10,14 @@ function @main
     alloca #Pair %pair : zeroed
     alloca #Pair %tmp.1 : zeroed
     alloca ref #unknown %base : zeroed
-    alloca ref #bit8 %bytes : zeroed
     alloca ref #unknown %tmp.2 : zeroed
     alloca #bit_native %tmp.3 : zeroed
     alloca ref #unknown %tmp.4 : zeroed
-    alloca ref #bit8 %tmp.5 : zeroed
-    alloca ref #bit8 %tmp.6 : zeroed
-    alloca #bit_native %tmp.7 : zeroed
-    alloca ref #bit8 %tmp.8 : zeroed
-    alloca #bit8 %tmp.9 : zeroed
-    alloca #bit_native %tmp.10 : zeroed
+    alloca ref #unknown %tmp.5 : zeroed
+    alloca #bit_native %tmp.6 : zeroed
+    alloca ref #unknown %tmp.7 : zeroed
+    alloca #bit8 %tmp.8 : zeroed
+    alloca #bit_native %tmp.9 : zeroed
     alloca #bit_native %address : zeroed
     alloca ref #unknown %again : zeroed
     zero %tmp.1
@@ -31,35 +29,31 @@ function @main
     &3: ref #Pair = addr %pair
     &4: ref #unknown = copy &3
     copy &4 -> %base
-    &5: ref #bit8 = copy %base
-    copy &5 -> %bytes
     copy %base -> %tmp.2
-    &6: #bit_native = const 0x2
-    copy &6 -> %tmp.3
+    &5: #bit_native = const 0x2
+    copy &5 -> %tmp.3
     call @ptr_add (in %tmp.2, %tmp.3) (out %tmp.4)
-    &7: ref #bit8 = copy %tmp.4
-    copy &7 -> %tmp.5
-    copy %bytes -> %tmp.6
+    copy %base -> %tmp.5
+    &6: #bit_native = const 0x8
+    copy &6 -> %tmp.6
+    call @memmove (in %tmp.4, %tmp.5, %tmp.6) (out)
+    copy %base -> %tmp.7
+    &7: #bit8 = const 0x0
+    copy &7 -> %tmp.8
     &8: #bit_native = const 0x8
-    copy &8 -> %tmp.7
-    call @memmove (in %tmp.5, %tmp.6, %tmp.7) (out)
-    copy %bytes -> %tmp.8
-    &9: #bit8 = const 0x0
-    copy &9 -> %tmp.9
-    &10: #bit_native = const 0x8
-    copy &10 -> %tmp.10
-    call @memset (in %tmp.8, %tmp.9, %tmp.10) (out)
-    &11: ref #unknown = copy %base
-    &12: #bit_native = bitcast &11
-    copy &12 -> %address
-    &13: #bit_native = copy %address
-    &14: ref #unknown = bitcast &13
-    copy &14 -> %again
-    &15: ref #unknown = copy %again
-    &16: #bit_native = bitcast &15
-    &17: #bit_native = copy %address
-    &18: #bit8 = i.cmp.lt.u &16, &17
-    branch.if &18, $l.1, $l.2
+    copy &8 -> %tmp.9
+    call @memset (in %tmp.7, %tmp.8, %tmp.9) (out)
+    &9: ref #unknown = copy %base
+    &10: #bit_native = bitcast &9
+    copy &10 -> %address
+    &11: #bit_native = copy %address
+    &12: ref #unknown = bitcast &11
+    copy &12 -> %again
+    &13: ref #unknown = copy %again
+    &14: #bit_native = bitcast &13
+    &15: #bit_native = copy %address
+    &16: #bit8 = i.cmp.lt.u &14, &15
+    branch.if &16, $l.1, $l.2
   $l.1:
     call @lilac_abort (in) (out)
     unreachable

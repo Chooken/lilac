@@ -45,8 +45,6 @@ entry:
   call void @llvm.memset.p0.i64(ptr align 8 %tmp.1, i8 0, i64 16, i1 false)
   %base = alloca ptr, align 8
   store ptr null, ptr %base, align 8
-  %bytes = alloca ptr, align 8
-  store ptr null, ptr %bytes, align 8
   %tmp.2 = alloca ptr, align 8
   store ptr null, ptr %tmp.2, align 8
   %tmp.3 = alloca i64, align 8
@@ -55,16 +53,14 @@ entry:
   store ptr null, ptr %tmp.4, align 8
   %tmp.5 = alloca ptr, align 8
   store ptr null, ptr %tmp.5, align 8
-  %tmp.6 = alloca ptr, align 8
-  store ptr null, ptr %tmp.6, align 8
-  %tmp.7 = alloca i64, align 8
-  store i64 0, ptr %tmp.7, align 8
-  %tmp.8 = alloca ptr, align 8
-  store ptr null, ptr %tmp.8, align 8
-  %tmp.9 = alloca i8, align 1
-  store i8 0, ptr %tmp.9, align 1
-  %tmp.10 = alloca i64, align 8
-  store i64 0, ptr %tmp.10, align 8
+  %tmp.6 = alloca i64, align 8
+  store i64 0, ptr %tmp.6, align 8
+  %tmp.7 = alloca ptr, align 8
+  store ptr null, ptr %tmp.7, align 8
+  %tmp.8 = alloca i8, align 1
+  store i8 0, ptr %tmp.8, align 1
+  %tmp.9 = alloca i64, align 8
+  store i64 0, ptr %tmp.9, align 8
   %address = alloca i64, align 8
   store i64 0, ptr %address, align 8
   %again = alloca ptr, align 8
@@ -76,44 +72,40 @@ entry:
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pair, ptr align 8 %tmp.1, i64 16, i1 false)
   store ptr %pair, ptr %base, align 8
   %1 = load ptr, ptr %base, align 8
-  store ptr %1, ptr %bytes, align 8
-  %2 = load ptr, ptr %base, align 8
-  store ptr %2, ptr %tmp.2, align 8
+  store ptr %1, ptr %tmp.2, align 8
   store i64 2, ptr %tmp.3, align 8
-  %3 = load ptr, ptr %tmp.2, align 8
-  %4 = load i64, ptr %tmp.3, align 8
-  %5 = call ptr @.lilac.ptr_add(ptr %3, i64 %4)
-  store ptr %5, ptr %tmp.4, align 8
+  %2 = load ptr, ptr %tmp.2, align 8
+  %3 = load i64, ptr %tmp.3, align 8
+  %4 = call ptr @.lilac.ptr_add(ptr %2, i64 %3)
+  store ptr %4, ptr %tmp.4, align 8
+  %5 = load ptr, ptr %base, align 8
+  store ptr %5, ptr %tmp.5, align 8
+  store i64 8, ptr %tmp.6, align 8
   %6 = load ptr, ptr %tmp.4, align 8
-  store ptr %6, ptr %tmp.5, align 8
-  %7 = load ptr, ptr %bytes, align 8
-  store ptr %7, ptr %tmp.6, align 8
-  store i64 8, ptr %tmp.7, align 8
-  %8 = load ptr, ptr %tmp.5, align 8
-  %9 = load ptr, ptr %tmp.6, align 8
-  %10 = load i64, ptr %tmp.7, align 8
-  call void @.lilac.memmove(ptr %8, ptr %9, i64 %10)
-  %11 = load ptr, ptr %bytes, align 8
-  store ptr %11, ptr %tmp.8, align 8
-  store i8 0, ptr %tmp.9, align 1
-  store i64 8, ptr %tmp.10, align 8
-  %12 = load ptr, ptr %tmp.8, align 8
-  %13 = load i8, ptr %tmp.9, align 1
-  %14 = load i64, ptr %tmp.10, align 8
-  call void @.lilac.memset(ptr %12, i8 %13, i64 %14)
-  %15 = load ptr, ptr %base, align 8
-  %16 = ptrtoint ptr %15 to i64
-  store i64 %16, ptr %address, align 8
-  %17 = load i64, ptr %address, align 8
-  %18 = inttoptr i64 %17 to ptr
-  store ptr %18, ptr %again, align 8
-  %19 = load ptr, ptr %again, align 8
-  %20 = ptrtoint ptr %19 to i64
-  %21 = load i64, ptr %address, align 8
-  %22 = icmp ult i64 %20, %21
-  %23 = zext i1 %22 to i8
-  %24 = icmp ne i8 %23, 0
-  br i1 %24, label %l.1, label %l.2
+  %7 = load ptr, ptr %tmp.5, align 8
+  %8 = load i64, ptr %tmp.6, align 8
+  call void @.lilac.memmove(ptr %6, ptr %7, i64 %8)
+  %9 = load ptr, ptr %base, align 8
+  store ptr %9, ptr %tmp.7, align 8
+  store i8 0, ptr %tmp.8, align 1
+  store i64 8, ptr %tmp.9, align 8
+  %10 = load ptr, ptr %tmp.7, align 8
+  %11 = load i8, ptr %tmp.8, align 1
+  %12 = load i64, ptr %tmp.9, align 8
+  call void @.lilac.memset(ptr %10, i8 %11, i64 %12)
+  %13 = load ptr, ptr %base, align 8
+  %14 = ptrtoint ptr %13 to i64
+  store i64 %14, ptr %address, align 8
+  %15 = load i64, ptr %address, align 8
+  %16 = inttoptr i64 %15 to ptr
+  store ptr %16, ptr %again, align 8
+  %17 = load ptr, ptr %again, align 8
+  %18 = ptrtoint ptr %17 to i64
+  %19 = load i64, ptr %address, align 8
+  %20 = icmp ult i64 %18, %19
+  %21 = zext i1 %20 to i8
+  %22 = icmp ne i8 %21, 0
+  br i1 %22, label %l.1, label %l.2
 
 l.1:                                              ; preds = %entry
   call void @.lilac.abort()

@@ -193,6 +193,24 @@ impl Builtin {
         }
     }
 
+    /// What the type is, as Markdown for an editor's hover.
+    #[must_use]
+    pub fn doc(self) -> &'static str {
+        match self {
+            Self::Bit8 => "8 bits, with no sign or meaning of their own: the operation says how to read them. A `@bit8` truth value is `0x1` or `0x0`.",
+            Self::Bit16 => "16 bits, with no sign or meaning of their own: the operation says how to read them.",
+            Self::Bit32 => "32 bits, with no sign or meaning of their own: the operation says how to read them.",
+            Self::Bit64 => "64 bits, with no sign or meaning of their own: the operation says how to read them.",
+            Self::BitNative => "A pointer's width of bits (32 or 64, by target): sizes, lengths, indices and addresses.",
+            Self::FBit16 => "An IEEE 754 half-precision (16-bit) float.",
+            Self::FBit32 => "An IEEE 754 single-precision (32-bit) float.",
+            Self::FBit64 => "An IEEE 754 double-precision (64-bit) float.",
+            Self::FBit128 => "An IEEE 754 quadruple-precision (128-bit) float.",
+            Self::ByteBuffer => "A borrowed run of bytes: a pointer and a length (`@byte_buffer_ptr`, `@byte_buffer_len`). A string literal is one.",
+            Self::Unknown => "A type nothing is known of: only `ref unknown` exists, an address of anything (C's `void *`). Convert a `ref T` to and from it with `as`.",
+        }
+    }
+
     /// The builtin spelled `name`.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {

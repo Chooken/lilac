@@ -405,8 +405,8 @@ private {
             result = .Error(why)
             return
         }
+        @memcpy(memory, @byte_buffer_ptr(path) as ref unknown, length)
         c: ref @bit8 = memory as ref @bit8
-        @memcpy(c, @byte_buffer_ptr(path), length)
         result = .Ok(c)
     }
 

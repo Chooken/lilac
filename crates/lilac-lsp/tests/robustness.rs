@@ -70,7 +70,6 @@ fn active(help: &SignatureHelp) -> String {
 }
 
 #[test]
-#[ignore = "editor plan phase 3"]
 fn intrinsic_signature_help_highlights_the_parameter() {
     let retained = retained();
     let help = signature(&retained, "    @format_args_hole(args, 0x0, ");

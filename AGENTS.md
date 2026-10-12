@@ -494,7 +494,8 @@
   and the hover shows each type with its hook; a hover of the whole value
   shows the formatted type and adds `formatted by`. Hovers show a
   function's signature, a field, variant or constant's declaration, an
-  intrinsic's signature, and the shape of
+  intrinsic's signature and doc (`Intrinsic::signature`, `doc`), a
+  builtin type's doc (`Builtin::doc`), and the shape of
   `@array` and `@format_args` (`handlers::TYPE_CONSTRUCTORS`, which
   completion lists after `@` too).
 - Editing (`complete.rs`, `actions.rs`): completion and signature help
@@ -640,7 +641,11 @@ Where things live:
   `Error`, never a name. Builtin types are `lilac_ty::Builtin`, whose
   `id()` is its fixed `TypeId` in every table; look one up by spelling
   (`Types::builtin`) only for source names. Intrinsic slots carry a
-  `Builtin`.
+  `Builtin`. Every intrinsic parameter is named (`Signature::params`, a
+  `Param`); the intrinsics typeck checks specially (`Intrinsic::is_special`,
+  `check_special_intrinsic`) have signatures of descriptive slots
+  (`Slot::is_checked` is false: `Type`, `Param`, `RefArray`, ...), so the
+  table describes every intrinsic and a unit test keeps the two in step.
 - Functions that can fail (`outs else outs`, `fail`): typeck
   (`lilac-typeck/src/failure.rs`) lays out the outs as success, failure,
   then a hidden `@bit8` flag (`HirFunc::failure`, a `HirFailure`), set at

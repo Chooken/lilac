@@ -407,6 +407,11 @@ pub enum Intrinsic {
 }
 
 /// A parameter or result type in an intrinsic signature.
+///
+/// The first four are what typeck's common path checks a call against;
+/// the rest only describe the operands of the intrinsics it checks
+/// specially ([`Intrinsic::is_special`]), so an editor can show every
+/// signature from this one table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
     /// A builtin container (`@bit8`, `@byte_buffer`, ...).
@@ -417,15 +422,75 @@ pub enum Slot {
     AnyBit,
     /// The expected bit type (`@truncate`/`@extend_zero` result).
     ExpectedBit,
+    /// A type, or a value standing for its type (`@size_of`).
+    Type,
+    /// A value, or a place, of any type `name` (`@move`'s `T`).
+    Param(&'static str),
+    /// `ref` of any type `name` (`@read`'s `ref T`).
+    RefParam(&'static str),
+    /// `ref` of an array (`@array_at`).
+    RefArray,
+    /// A format of any writer `W` (`@format_args(W)`).
+    FormatArgs,
+    /// A string literal (`@compile_error`).
+    StringLiteral,
+    /// What the `@compiler_print` hook takes (`@panic`).
+    Message,
 }
 
-/// A checked intrinsic signature.
+impl Slot {
+    /// Whether typeck's common path checks a call against this slot (the
+    /// others describe a specially checked operand).
+    #[must_use]
+    pub fn is_checked(self) -> bool {
+        matches!(
+            self,
+            Self::Builtin(_) | Self::Ref(_) | Self::AnyBit | Self::ExpectedBit
+        )
+    }
+}
+
+impl std::fmt::Display for Slot {
+    /// The slot as a Lilac signature spells it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builtin(ty) => f.write_str(ty.name()),
+            Self::Ref(ty) => write!(f, "ref {}", ty.name()),
+            Self::AnyBit | Self::ExpectedBit => f.write_str("@bitN"),
+            Self::Type => f.write_str("Type"),
+            Self::Param(name) => f.write_str(name),
+            Self::RefParam(name) => write!(f, "ref {name}"),
+            Self::RefArray => f.write_str("ref @array(T, N)"),
+            Self::FormatArgs => f.write_str("@format_args(W)"),
+            Self::StringLiteral => f.write_str("\"string literal\""),
+            Self::Message => f.write_str("Message"),
+        }
+    }
+}
+
+/// One named intrinsic parameter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Param {
+    /// Its name, as a signature shows it.
+    pub name: &'static str,
+    /// What it takes.
+    pub slot: Slot,
+}
+
+/// An intrinsic signature.
 #[derive(Clone, Debug)]
 pub struct Signature {
-    /// Parameter slots.
-    pub params: Vec<Slot>,
+    /// The parameters, in order.
+    pub params: Vec<Param>,
     /// Result slot (`None` for statements).
     pub result: Option<Slot>,
+}
+
+impl Signature {
+    /// The parameter slots, in order.
+    pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
+        self.params.iter().map(|param| param.slot)
+    }
 }
 
 impl Intrinsic {
@@ -605,137 +670,371 @@ impl Intrinsic {
         names
     }
 
-    /// The signature every call is checked against. `@size_of`, `@align_of`,
-    /// `@array_len`, `@needs_drop` and `@compile_error` take a type/literal
-    /// operand, `@array_at` any array, and `@move`, `@write`, `@read`,
-    /// `@drop` and `@discard` a place or a `ref` of any type, so they are
-    /// checked specially and their parameter list is empty here.
+    /// Whether typeck checks a call specially, not against the signature:
+    /// a type or literal operand (`@size_of`, `@align_of`, `@array_len`,
+    /// `@needs_drop`, `@compile_error`), any array (`@array_at`), any format
+    /// (the `@format_args_*` consumers), a place or `ref` of any type (the
+    /// memory builtins), or the panic hook's message (`@panic`). Their
+    /// signatures only describe the operands, with slots that are not
+    /// [`Slot::is_checked`].
+    #[must_use]
+    pub fn is_special(self) -> bool {
+        self.is_memory()
+            || matches!(
+                self,
+                Self::SizeOf
+                    | Self::AlignOf
+                    | Self::ArrayLen
+                    | Self::ArrayAt
+                    | Self::CompileError
+                    | Self::Panic
+                    | Self::FormatArgsHoles
+                    | Self::FormatArgsPiece
+                    | Self::FormatArgsHole
+            )
+    }
+
+    /// The signature: what a call is checked against, or, for
+    /// [`Intrinsic::is_special`] ones, what typeck checks it against
+    /// spelled out. Every parameter is named.
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn signature(self) -> Signature {
-        use Slot::{AnyBit, Builtin, ExpectedBit, Ref};
-        let sig = |params: Vec<Slot>, result: Option<Slot>| Signature { params, result };
-        if self.is_memory() {
-            return sig(
-                Vec::new(),
-                (self == Self::NeedsDrop).then_some(Builtin(Ty::Bit8)),
-            );
-        }
+        use Slot::{
+            AnyBit, Builtin, ExpectedBit, FormatArgs, Message, Ref, RefArray, RefParam,
+            StringLiteral, Type,
+        };
+        let native = Builtin(Ty::BitNative);
+        let sig = |params: &[(&'static str, Slot)], result: Option<Slot>| Signature {
+            params: params
+                .iter()
+                .map(|&(name, slot)| Param { name, slot })
+                .collect(),
+            result,
+        };
         match self {
             Self::Int(op, width) => {
                 let ty = Builtin(width.builtin());
-                let result = if op.is_comparison() {
-                    Builtin(Ty::Bit8)
-                } else {
-                    ty
-                };
-                let params = if op.is_unary() {
-                    vec![ty]
-                } else {
-                    vec![ty, ty]
-                };
-                sig(params, Some(result))
+                Self::numeric(op, ty)
             }
             Self::Float(op, width) => {
                 let ty = Builtin(width.builtin());
-                let result = if op.is_comparison() {
-                    Builtin(Ty::Bit8)
-                } else {
-                    ty
-                };
-                let params = if op == NumOp::Negate {
-                    vec![ty]
-                } else {
-                    vec![ty, ty]
-                };
-                sig(params, Some(result))
+                Self::numeric(op, ty)
             }
             Self::FbitToBits(width) => sig(
-                vec![Builtin(width.builtin())],
+                &[("value", Builtin(width.builtin()))],
                 Some(Builtin(width.bits().unwrap_or(Ty::Bit64))),
             ),
             Self::BitsToFbit(width) => sig(
-                vec![Builtin(width.bits().unwrap_or(Ty::Bit64))],
+                &[("value", Builtin(width.bits().unwrap_or(Ty::Bit64)))],
                 Some(Builtin(width.builtin())),
             ),
             Self::Truncate | Self::ExtendZero | Self::ExtendSign => {
-                sig(vec![AnyBit], Some(ExpectedBit))
+                sig(&[("value", AnyBit)], Some(ExpectedBit))
             }
-            Self::SizeOf | Self::AlignOf | Self::ArrayLen => {
-                sig(Vec::new(), Some(Builtin(Ty::BitNative)))
-            }
-            Self::NeedsDrop => sig(Vec::new(), Some(Builtin(Ty::Bit8))),
-            Self::CompileError
-            | Self::Trap
-            | Self::Fence(_)
-            | Self::ArrayAt
-            | Self::Move
-            | Self::Write
-            | Self::Read
-            | Self::Drop
-            | Self::Discard
-            | Self::FormatArgsHole => sig(Vec::new(), None),
+            Self::SizeOf | Self::AlignOf => sig(&[("type", Type)], Some(native)),
+            Self::ArrayLen => sig(&[("array", Type)], Some(native)),
+            Self::ArrayAt => sig(
+                &[("array", RefArray), ("index", native)],
+                Some(RefParam("T")),
+            ),
+            Self::NeedsDrop => sig(&[("type", Type)], Some(Builtin(Ty::Bit8))),
+            Self::CompileError => sig(&[("message", StringLiteral)], None),
+            Self::Panic => sig(&[("message", Message)], None),
+            Self::Move => sig(&[("place", Slot::Param("T"))], Some(Slot::Param("T"))),
+            Self::Discard => sig(&[("place", Slot::Param("T"))], None),
+            Self::Write => sig(
+                &[("address", RefParam("T")), ("value", Slot::Param("T"))],
+                None,
+            ),
+            Self::Read => sig(&[("address", RefParam("T"))], Some(Slot::Param("T"))),
+            Self::Drop => sig(&[("address", RefParam("T"))], None),
+            Self::Trap | Self::Fence(_) => sig(&[], None),
             Self::Atomic(op, _, width) => {
                 let ty = width.builtin();
-                let params = match op {
-                    AtomicOp::Load => vec![Ref(ty)],
-                    AtomicOp::CompareSwap => vec![Ref(ty), Builtin(ty), Builtin(ty)],
-                    _ => vec![Ref(ty), Builtin(ty)],
+                let address = ("address", Ref(ty));
+                let params: &[(&'static str, Slot)] = match op {
+                    AtomicOp::Load => &[address],
+                    AtomicOp::Store => &[address, ("value", Builtin(ty))],
+                    AtomicOp::CompareSwap => {
+                        &[address, ("expected", Builtin(ty)), ("desired", Builtin(ty))]
+                    }
+                    _ => &[address, ("operand", Builtin(ty))],
                 };
                 sig(params, (op != AtomicOp::Store).then_some(Builtin(ty)))
             }
             Self::LoadU8 => sig(
-                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative)],
+                &[("base", Ref(Ty::Bit8)), ("offset", native)],
                 Some(Builtin(Ty::Bit8)),
             ),
             Self::StoreU8 => sig(
-                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative), Builtin(Ty::Bit8)],
+                &[
+                    ("base", Ref(Ty::Bit8)),
+                    ("offset", native),
+                    ("value", Builtin(Ty::Bit8)),
+                ],
                 None,
             ),
             Self::Memcpy | Self::Memmove => sig(
-                vec![Ref(Ty::Bit8), Ref(Ty::Bit8), Builtin(Ty::BitNative)],
+                &[
+                    ("destination", Ref(Ty::Unknown)),
+                    ("source", Ref(Ty::Unknown)),
+                    ("length", native),
+                ],
                 None,
             ),
             Self::Memset => sig(
-                vec![Ref(Ty::Bit8), Builtin(Ty::Bit8), Builtin(Ty::BitNative)],
+                &[
+                    ("destination", Ref(Ty::Unknown)),
+                    ("byte", Builtin(Ty::Bit8)),
+                    ("length", native),
+                ],
                 None,
             ),
             Self::PtrAdd => sig(
-                vec![Ref(Ty::Unknown), Builtin(Ty::BitNative)],
+                &[("pointer", Ref(Ty::Unknown)), ("offset", native)],
                 Some(Ref(Ty::Unknown)),
             ),
-            Self::PtrToAddress => sig(vec![Ref(Ty::Unknown)], Some(Builtin(Ty::BitNative))),
-            Self::AddressToPtr => sig(vec![Builtin(Ty::BitNative)], Some(Ref(Ty::Unknown))),
-            Self::LinuxSyscall | Self::LinuxThreadClone => self.system_signature(),
-            Self::ByteBufferPtr => sig(vec![Builtin(Ty::ByteBuffer)], Some(Ref(Ty::Bit8))),
-            Self::ByteBufferLen => sig(vec![Builtin(Ty::ByteBuffer)], Some(Builtin(Ty::BitNative))),
+            Self::PtrToAddress => sig(&[("pointer", Ref(Ty::Unknown))], Some(native)),
+            Self::AddressToPtr => sig(&[("address", native)], Some(Ref(Ty::Unknown))),
+            Self::LinuxSyscall => sig(
+                &[
+                    ("number", native),
+                    ("a0", native),
+                    ("a1", native),
+                    ("a2", native),
+                    ("a3", native),
+                    ("a4", native),
+                    ("a5", native),
+                ],
+                Some(native),
+            ),
+            Self::LinuxThreadClone => {
+                let opaque = Ref(Ty::Unknown);
+                sig(
+                    &[
+                        ("flags", native),
+                        ("stack", opaque),
+                        ("parent_tid", opaque),
+                        ("child_tid", opaque),
+                        ("tls_area", opaque),
+                        ("tls_size", native),
+                        ("entry", opaque),
+                        ("argument", opaque),
+                    ],
+                    Some(native),
+                )
+            }
+            Self::ByteBufferPtr => sig(&[("buffer", Builtin(Ty::ByteBuffer))], Some(Ref(Ty::Bit8))),
+            Self::ByteBufferLen => sig(&[("buffer", Builtin(Ty::ByteBuffer))], Some(native)),
             Self::ByteBufferFrom => sig(
-                vec![Ref(Ty::Bit8), Builtin(Ty::BitNative)],
+                &[("pointer", Ref(Ty::Bit8)), ("length", native)],
                 Some(Builtin(Ty::ByteBuffer)),
             ),
-            Self::FormatArgsHoles => sig(Vec::new(), Some(Builtin(Ty::BitNative))),
-            Self::FormatArgsPiece => sig(Vec::new(), Some(Builtin(Ty::ByteBuffer))),
-            Self::Panic => sig(vec![Builtin(Ty::ByteBuffer)], None),
+            Self::FormatArgsHoles => sig(&[("format", FormatArgs)], Some(native)),
+            Self::FormatArgsPiece => sig(
+                &[("format", FormatArgs), ("index", native)],
+                Some(Builtin(Ty::ByteBuffer)),
+            ),
+            Self::FormatArgsHole => sig(
+                &[
+                    ("format", FormatArgs),
+                    ("index", native),
+                    ("out", RefParam("W")),
+                ],
+                None,
+            ),
         }
     }
 
-    /// The signatures of the system intrinsics: `@linux_syscall` and the threads.
-    fn system_signature(self) -> Signature {
-        let native = Slot::Builtin(Ty::BitNative);
-        let opaque = Slot::Ref(Ty::Unknown);
-        let (params, result) = match self {
-            Self::LinuxSyscall => (vec![native; 7], native),
-            _ => (
-                vec![
-                    native, opaque, opaque, opaque, opaque, native, opaque, opaque,
-                ],
-                native,
-            ),
+    /// An integer or float operation's signature over its container `ty`.
+    fn numeric(op: NumOp, ty: Slot) -> Signature {
+        let param = |name| Param { name, slot: ty };
+        let params = match op {
+            NumOp::Negate | NumOp::Not => vec![param("value")],
+            NumOp::Shl | NumOp::Shr | NumOp::ShrU => vec![param("value"), param("amount")],
+            _ => vec![param("left"), param("right")],
+        };
+        let result = if op.is_comparison() {
+            Slot::Builtin(Ty::Bit8)
+        } else {
+            ty
         };
         Signature {
             params,
             result: Some(result),
         }
+    }
+
+    /// What the intrinsic does, as Markdown for an editor's hover.
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub fn doc(self) -> String {
+        let text = match self {
+            Self::Int(op, _) => return Self::numeric_doc(op, false),
+            Self::Float(op, _) => return Self::numeric_doc(op, true),
+            Self::FbitToBits(_) => "The float's bits as an integer of the same width.",
+            Self::BitsToFbit(_) => "The integer's bits as a float of the same width.",
+            Self::Truncate => {
+                "Keeps the low bits of `value` that fit the expected bit type, which must not be wider."
+            }
+            Self::ExtendZero => {
+                "Widens `value` to the expected bit type, filling the new high bits with zeros."
+            }
+            Self::ExtendSign => {
+                "Widens `value` to the expected bit type, filling the new high bits with its sign bit."
+            }
+            Self::SizeOf => {
+                "The size in bytes of a type, or of a value's type: the C `sizeof` on the target."
+            }
+            Self::AlignOf => {
+                "The alignment in bytes of a type, or of a value's type: the C `_Alignof` on the target."
+            }
+            Self::LoadU8 => "Reads the byte `offset` bytes past `base`.",
+            Self::StoreU8 => "Writes `value` to the byte `offset` bytes past `base`.",
+            Self::Memcpy => {
+                "Copies `length` bytes from `source` to `destination`. The ranges must not overlap; use `@memmove` when they can."
+            }
+            Self::Memmove => {
+                "Copies `length` bytes from `source` to `destination`, which may overlap."
+            }
+            Self::Memset => "Sets `length` bytes at `destination` to `byte`.",
+            Self::PtrAdd => "The address `offset` bytes past `pointer`.",
+            Self::PtrToAddress => "A reference's address as an integer.",
+            Self::AddressToPtr => "An integer address as a reference.",
+            Self::LinuxSyscall => {
+                "The Linux system-call instruction: system call `number` with six arguments, returning its raw result (a negative errno on failure). Only on Linux x86-64 and aarch64 (`E035` elsewhere)."
+            }
+            Self::LinuxThreadClone => {
+                "Linux `clone` of a thread that calls the C function `entry(argument)` on `stack`, then exits. With `CLONE_SETTLS`, its thread-local storage is built in the zeroed `tls_area` of `tls_size` bytes. Only on Linux x86-64 and aarch64 (`E035` elsewhere)."
+            }
+            Self::Trap => "Stops the program at once with a trap instruction.",
+            Self::ByteBufferPtr => "Where the buffer's bytes start.",
+            Self::ByteBufferLen => "How many bytes the buffer holds.",
+            Self::ByteBufferFrom => "A buffer over the `length` bytes at `pointer`.",
+            Self::FormatArgsHoles => {
+                "How many holes the format has (it has one more literal piece)."
+            }
+            Self::FormatArgsPiece => {
+                "Literal piece `index` of the format, from 0 to the hole count; panics out of bounds."
+            }
+            Self::FormatArgsHole => {
+                "Formats hole `index` into `out`, a `ref W` for the format's own writer `W`; panics out of bounds."
+            }
+            Self::CompileError => {
+                "Reports `message` as a compile error when a live path reaches it (after constant conditions and dead code are removed)."
+            }
+            Self::Panic => {
+                "Ends the program: writes `panic: message` and a stack trace through `@compiler_print`, then exits with 101. No drops run. `Message` is what `@compiler_print` takes."
+            }
+            Self::Atomic(op, _, _) => return Self::atomic_doc(op),
+            Self::Fence(_) => {
+                "A memory fence: orders the memory operations around it (sequentially consistent when the name has no ordering)."
+            }
+            Self::ArrayAt => "A `ref` to element `index` of the array; panics out of bounds.",
+            Self::ArrayLen => "The length of an array type, or of a value's array type.",
+            Self::Move => {
+                "Moves `place` out, whatever its type: no copy hook runs, and the place is empty after."
+            }
+            Self::Write => {
+                "Moves `value` into the empty slot at `address`; nothing there is dropped."
+            }
+            Self::Read => {
+                "Moves the `T` at `address` out, leaving the slot empty; no copy hook runs."
+            }
+            Self::Drop => "Drops the `T` at `address`, leaving the slot empty.",
+            Self::NeedsDrop => "Whether dropping a `type` does anything: a constant `@bit8`.",
+            Self::Discard => {
+                "Inside a function of `T`, ends `place`'s whole life without its `@on_drop`; its fields become places of their own."
+            }
+        };
+        text.to_owned()
+    }
+
+    /// The doc of an `@i_`, `@bit_` or `@f_` operation.
+    fn numeric_doc(op: NumOp, float: bool) -> String {
+        let signed = if float { "" } else { " (signed)" };
+        match op {
+            NumOp::Add => "`left + right`, wrapping.".to_owned(),
+            NumOp::Sub => "`left - right`, wrapping.".to_owned(),
+            NumOp::Mul => "`left * right`, wrapping.".to_owned(),
+            NumOp::Div if float => "`left / right`.".to_owned(),
+            NumOp::Div => {
+                "`left / right` (signed, rounding toward zero); panics on a zero divisor or `MIN / -1`."
+                    .to_owned()
+            }
+            NumOp::DivU => {
+                "`left / right` (unsigned); panics on a zero divisor.".to_owned()
+            }
+            NumOp::Mod if float => "The remainder of `left / right`, as C's `fmod`.".to_owned(),
+            NumOp::Mod => {
+                "The remainder of `left / right` (signed, the sign of `left`); panics on a zero divisor or `MIN / -1`."
+                    .to_owned()
+            }
+            NumOp::ModU => {
+                "The remainder of `left / right` (unsigned); panics on a zero divisor.".to_owned()
+            }
+            NumOp::Negate => "`-value`.".to_owned(),
+            NumOp::Lt => format!("Whether `left < right`{signed}: `0x1` or `0x0`."),
+            NumOp::Gt => format!("Whether `left > right`{signed}: `0x1` or `0x0`."),
+            NumOp::Le => format!("Whether `left <= right`{signed}: `0x1` or `0x0`."),
+            NumOp::Ge => format!("Whether `left >= right`{signed}: `0x1` or `0x0`."),
+            NumOp::LtU => "Whether `left < right` (unsigned): `0x1` or `0x0`.".to_owned(),
+            NumOp::GtU => "Whether `left > right` (unsigned): `0x1` or `0x0`.".to_owned(),
+            NumOp::LeU => "Whether `left <= right` (unsigned): `0x1` or `0x0`.".to_owned(),
+            NumOp::GeU => "Whether `left >= right` (unsigned): `0x1` or `0x0`.".to_owned(),
+            NumOp::And => "Bitwise `left & right`.".to_owned(),
+            NumOp::Or => "Bitwise `left | right`.".to_owned(),
+            NumOp::Xor => "Bitwise `left ^ right`.".to_owned(),
+            NumOp::Not => "Bitwise `~value`.".to_owned(),
+            NumOp::Shl => {
+                "`value << amount`, the amount taken modulo the width.".to_owned()
+            }
+            NumOp::Shr => {
+                "`value >> amount`, copying the sign bit in (arithmetic); the amount is taken modulo the width."
+                    .to_owned()
+            }
+            NumOp::ShrU => {
+                "`value >> amount`, shifting zeros in (logical); the amount is taken modulo the width."
+                    .to_owned()
+            }
+        }
+    }
+
+    /// The doc of an `@atomic_` operation.
+    fn atomic_doc(op: AtomicOp) -> String {
+        let text = match op {
+            AtomicOp::Load => "Atomically reads the value at `address`.",
+            AtomicOp::Store => "Atomically writes `value` to `address`.",
+            AtomicOp::Swap => {
+                "Atomically writes `operand` to `address`, returning the old value."
+            }
+            AtomicOp::CompareSwap => {
+                "Atomically writes `desired` to `address` if it holds `expected`, returning the old value (equal to `expected` exactly when it wrote)."
+            }
+            AtomicOp::Add => "Atomically adds `operand` at `address` (wrapping), returning the old value.",
+            AtomicOp::Sub => {
+                "Atomically subtracts `operand` at `address` (wrapping), returning the old value."
+            }
+            AtomicOp::And => "Atomically ands `operand` into `address`, returning the old value.",
+            AtomicOp::Or => "Atomically ors `operand` into `address`, returning the old value.",
+            AtomicOp::Xor => "Atomically xors `operand` into `address`, returning the old value.",
+            AtomicOp::Max => {
+                "Atomically keeps the greater (signed) of `operand` and the value at `address`, returning the old value."
+            }
+            AtomicOp::Min => {
+                "Atomically keeps the lesser (signed) of `operand` and the value at `address`, returning the old value."
+            }
+            AtomicOp::MaxU => {
+                "Atomically keeps the greater (unsigned) of `operand` and the value at `address`, returning the old value."
+            }
+            AtomicOp::MinU => {
+                "Atomically keeps the lesser (unsigned) of `operand` and the value at `address`, returning the old value."
+            }
+        };
+        format!(
+            "{text} Naturally aligned; sequentially consistent unless the name gives an ordering."
+        )
     }
 
     /// The backend leaf builtin (`lilac_ir::builtin_sig`) this intrinsic
@@ -894,40 +1193,44 @@ mod tests {
         }
     }
 
+    fn slots(intrinsic: &str) -> Vec<Slot> {
+        Intrinsic::lookup(intrinsic)
+            .expect("known")
+            .signature()
+            .slots()
+            .collect()
+    }
+
     #[test]
     fn atomic_signatures() {
-        let sig = Intrinsic::lookup("@atomic_compare_swap_32")
-            .expect("known")
-            .signature();
         assert_eq!(
-            sig.params,
+            slots("@atomic_compare_swap_32"),
             vec![
                 Slot::Ref(Ty::Bit32),
                 Slot::Builtin(Ty::Bit32),
                 Slot::Builtin(Ty::Bit32)
             ]
         );
+        let sig = Intrinsic::lookup("@atomic_compare_swap_32")
+            .expect("known")
+            .signature();
         assert_eq!(sig.result, Some(Slot::Builtin(Ty::Bit32)));
+        assert_eq!(
+            slots("@atomic_store_8"),
+            vec![Slot::Ref(Ty::Bit8), Slot::Builtin(Ty::Bit8)]
+        );
         let sig = Intrinsic::lookup("@atomic_store_8")
             .expect("known")
             .signature();
-        assert_eq!(
-            sig.params,
-            vec![Slot::Ref(Ty::Bit8), Slot::Builtin(Ty::Bit8)]
-        );
         assert_eq!(sig.result, None);
-        let sig = Intrinsic::lookup("@atomic_load_native")
-            .expect("known")
-            .signature();
-        assert_eq!(sig.params, vec![Slot::Ref(Ty::BitNative)]);
-        assert_eq!(sig.result, Some(Slot::Builtin(Ty::BitNative)));
+        assert_eq!(slots("@atomic_load_native"), vec![Slot::Ref(Ty::BitNative)]);
     }
 
     #[test]
     fn instruction_builtin_signatures() {
         let sig = Intrinsic::PtrAdd.signature();
         assert_eq!(
-            sig.params,
+            sig.slots().collect::<Vec<_>>(),
             vec![Slot::Ref(Ty::Unknown), Slot::Builtin(Ty::BitNative)]
         );
         assert_eq!(sig.result, Some(Slot::Ref(Ty::Unknown)));
@@ -936,12 +1239,20 @@ mod tests {
             Some(Slot::Ref(Ty::Unknown))
         );
         let sig = Intrinsic::LinuxSyscall.signature();
-        assert_eq!(sig.params, vec![Slot::Builtin(Ty::BitNative); 7]);
+        assert_eq!(
+            sig.slots().collect::<Vec<_>>(),
+            vec![Slot::Builtin(Ty::BitNative); 7]
+        );
         assert_eq!(sig.result, Some(Slot::Builtin(Ty::BitNative)));
         assert_eq!(
-            Intrinsic::Memset.signature().params[1],
-            Slot::Builtin(Ty::Bit8)
+            slots("@memset"),
+            vec![
+                Slot::Ref(Ty::Unknown),
+                Slot::Builtin(Ty::Bit8),
+                Slot::Builtin(Ty::BitNative)
+            ]
         );
+        assert_eq!(slots("@memcpy")[..2], [Slot::Ref(Ty::Unknown); 2]);
         assert_eq!(Intrinsic::Trap.leaf_builtin(), Some("@lilac_abort"));
         assert_eq!(Intrinsic::Memmove.leaf_builtin(), Some("@memmove"));
     }
@@ -953,9 +1264,67 @@ mod tests {
             .signature();
         assert_eq!(sig.result, Some(Slot::Builtin(Ty::Bit8)));
         assert_eq!(sig.params.len(), 2);
-        let sig = Intrinsic::lookup("@f_negate_64")
-            .expect("known")
-            .signature();
-        assert_eq!(sig.params, vec![Slot::Builtin(Ty::FBit64)]);
+        assert_eq!(slots("@f_negate_64"), vec![Slot::Builtin(Ty::FBit64)]);
+    }
+
+    /// Every intrinsic has a signature with named parameters (distinct
+    /// within it) and a doc, and the specially checked ones are exactly
+    /// those whose signature describes an operand typeck's common path
+    /// cannot check.
+    #[test]
+    fn every_signature_is_named_and_documented() {
+        for name in Intrinsic::names() {
+            let intrinsic = Intrinsic::lookup(&name).expect("known");
+            let sig = intrinsic.signature();
+            let names: Vec<&str> = sig.params.iter().map(|param| param.name).collect();
+            for (at, param) in names.iter().enumerate() {
+                assert!(
+                    !param.is_empty() && !names[..at].contains(param),
+                    "{name}: parameter `{param}`"
+                );
+            }
+            assert!(!intrinsic.doc().is_empty(), "{name} has no doc");
+            let described = sig.slots().chain(sig.result).any(|slot| !slot.is_checked());
+            if intrinsic.is_special() {
+                assert!(
+                    described || sig.params.is_empty(),
+                    "{name} is checked specially, so its signature must describe its operands"
+                );
+            } else {
+                assert!(
+                    !described,
+                    "{name} is checked against its signature, so every slot must be checkable"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slots_spell_as_source_does() {
+        let spell = |intrinsic: Intrinsic| {
+            let sig = intrinsic.signature();
+            let params: Vec<String> = sig
+                .params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, param.slot))
+                .collect();
+            let result = sig
+                .result
+                .map_or_else(|| "nothing".to_owned(), |slot| slot.to_string());
+            format!("({}) {result}", params.join(", "))
+        };
+        assert_eq!(
+            spell(Intrinsic::Memcpy),
+            "(destination: ref unknown, source: ref unknown, length: @bit_native) nothing"
+        );
+        assert_eq!(
+            spell(Intrinsic::FormatArgsHole),
+            "(format: @format_args(W), index: @bit_native, out: ref W) nothing"
+        );
+        assert_eq!(
+            spell(Intrinsic::ArrayAt),
+            "(array: ref @array(T, N), index: @bit_native) ref T"
+        );
+        assert_eq!(spell(Intrinsic::Read), "(address: ref T) T");
     }
 }

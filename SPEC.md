@@ -460,9 +460,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@load_u8`**
  | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
 | **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
-| **`@memcpy`** | `(dst, src, len)` | Copies `len` bytes (`@bit_native`) from `ref @bit8` to `ref @bit8`. |
-| **`@memmove`** | `(dst, src, len)` | `@memcpy` for ranges that may overlap. |
-| **`@memset`** | `(dst, byte, len)` | Fills `len` bytes (`@bit_native`) at `ref @bit8` with `byte` (`@bit8`). |
+| **`@memcpy`** | `(destination: ref unknown, source: ref unknown, length: @bit_native)` | Copies `length` bytes from `source` to `destination`; the ranges must not overlap. Pass a `ref T` as `ref unknown` with `as`. |
+| **`@memmove`** | `(destination: ref unknown, source: ref unknown, length: @bit_native)` | `@memcpy` for ranges that may overlap. |
+| **`@memset`** | `(destination: ref unknown, byte: @bit8, length: @bit_native)` | Sets `length` bytes at `destination` to `byte`. |
 | **`@ptr_add`** | `(ptr, offset)` | The `ref unknown` that is `offset` bytes (`@bit_native`) past `ptr` (`ref unknown`). |
 | **`@ptr_to_address`** | `(ptr)` | The address of `ptr` (`ref unknown`) as a `@bit_native`. |
 | **`@address_to_ptr`** | `(address)` | The `ref unknown` at `address` (`@bit_native`); `@address_to_ptr(0x0)` is null. |

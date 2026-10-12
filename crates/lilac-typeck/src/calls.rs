@@ -1009,51 +1009,8 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
-        match intrinsic {
-            Intrinsic::SizeOf | Intrinsic::AlignOf => {
-                self.intrinsic_arity(name, 1, args.len(), span)?;
-                let ty = self.size_of_operand(fcx, &args[0])?;
-                let kind = if intrinsic == Intrinsic::SizeOf {
-                    HirExprKind::SizeOf(ty)
-                } else {
-                    HirExprKind::AlignOf(ty)
-                };
-                return Ok(Called::Value(HirExpr {
-                    ty: Builtin::BitNative.value(),
-                    span,
-                    kind,
-                }));
-            }
-            Intrinsic::ArrayAt => return self.check_array_at(fcx, args, span),
-            Intrinsic::ArrayLen => return self.check_array_len(fcx, args, span),
-            Intrinsic::FormatArgsHoles | Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
-                return self.check_format_consumer(fcx, intrinsic, name, args, span);
-            }
-            _ if intrinsic.is_memory() => {
-                return self.check_memory(fcx, intrinsic, name, args, span, expected);
-            }
-            Intrinsic::Panic => return self.check_panic(fcx, name, args, span),
-            Intrinsic::CompileError => {
-                self.intrinsic_arity(name, 1, args.len(), span)?;
-                let Expr::Str(msg, msg_span) = &args[0] else {
-                    return Err(self.diags.emit(
-                        Diagnostic::error(
-                            codes::E010,
-                            "`@compile_error` needs a string literal message",
-                        )
-                        .label(args[0].span(), true, "message goes here"),
-                    ));
-                };
-                return Ok(Called::Value(HirExpr {
-                    ty: expected.map_or(TypeRef::ERROR, TypeRef::value),
-                    span,
-                    kind: HirExprKind::CompileError {
-                        msg: String::from_utf8_lossy(msg).into_owned(),
-                        msg_span: *msg_span,
-                    },
-                }));
-            }
-            _ => {}
+        if intrinsic.is_special() {
+            return self.check_special_intrinsic(fcx, intrinsic, name, args, span, expected);
         }
         let signature = intrinsic.signature();
         let arity = self.intrinsic_arity(name, signature.params.len(), args.len(), span);
@@ -1068,8 +1025,8 @@ impl Checker<'_> {
         );
         let mut checked = Vec::with_capacity(args.len());
         let mut failed = false;
-        for (arg, slot) in args.iter().zip(&signature.params) {
-            match self.intrinsic_arg(fcx, arg, *slot, exact, span) {
+        for (arg, slot) in args.iter().zip(signature.slots()) {
+            match self.intrinsic_arg(fcx, arg, slot, exact, span) {
                 Some(value) => checked.push(value),
                 None => failed = true,
             }
@@ -1094,12 +1051,77 @@ impl Checker<'_> {
                     ));
                 }
             },
+            Some(slot) => {
+                lilac_error::bug!(
+                    span,
+                    "`{name}` returns `{slot}`, which is checked specially"
+                );
+            }
         };
         Ok(Called::Call {
             callee: HirCallee::Intrinsic(intrinsic),
             args: checked,
             outs,
         })
+    }
+
+    /// An intrinsic typeck checks specially (`Intrinsic::is_special`):
+    /// its signature only describes its operands.
+    fn check_special_intrinsic(
+        &mut self,
+        fcx: &mut FnCx,
+        intrinsic: Intrinsic,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        match intrinsic {
+            Intrinsic::SizeOf | Intrinsic::AlignOf => {
+                self.intrinsic_arity(name, 1, args.len(), span)?;
+                let ty = self.size_of_operand(fcx, &args[0])?;
+                let kind = if intrinsic == Intrinsic::SizeOf {
+                    HirExprKind::SizeOf(ty)
+                } else {
+                    HirExprKind::AlignOf(ty)
+                };
+                Ok(Called::Value(HirExpr {
+                    ty: Builtin::BitNative.value(),
+                    span,
+                    kind,
+                }))
+            }
+            Intrinsic::ArrayAt => self.check_array_at(fcx, args, span),
+            Intrinsic::ArrayLen => self.check_array_len(fcx, args, span),
+            Intrinsic::FormatArgsHoles | Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
+                self.check_format_consumer(fcx, intrinsic, name, args, span)
+            }
+            _ if intrinsic.is_memory() => {
+                self.check_memory(fcx, intrinsic, name, args, span, expected)
+            }
+            Intrinsic::Panic => self.check_panic(fcx, name, args, span),
+            Intrinsic::CompileError => {
+                self.intrinsic_arity(name, 1, args.len(), span)?;
+                let Expr::Str(msg, msg_span) = &args[0] else {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            codes::E010,
+                            "`@compile_error` needs a string literal message",
+                        )
+                        .label(args[0].span(), true, "message goes here"),
+                    ));
+                };
+                Ok(Called::Value(HirExpr {
+                    ty: expected.map_or(TypeRef::ERROR, TypeRef::value),
+                    span,
+                    kind: HirExprKind::CompileError {
+                        msg: String::from_utf8_lossy(msg).into_owned(),
+                        msg_span: *msg_span,
+                    },
+                }))
+            }
+            _ => lilac_error::bug!(span, "`{name}` is not checked specially"),
+        }
     }
 
     /// `@panic(message)`: the message is what `@compiler_print` takes
@@ -1231,6 +1253,7 @@ impl Checker<'_> {
                 self.emit_requirement(diagnostic, requirement, &[value.ty.id]);
                 None
             }
+            _ => lilac_error::bug!(span, "slot `{slot}` is checked specially"),
         }
     }
 

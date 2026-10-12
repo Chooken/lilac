@@ -582,8 +582,10 @@ fn hovers_show_fields_variants_globals_and_intrinsics() {
         (at(PROGRAM, "limit)", 0, 1), "global limit: @bit8 = 0x10"),
         (
             at(PROGRAM, "@i_add_8", 1, 2),
-            "@i_add_8(@bit8, @bit8) @bit8",
+            "@i_add_8(left: @bit8, right: @bit8) @bit8",
         ),
+        (at(PROGRAM, "@i_add_8", 1, 2), "`left + right`, wrapping."),
+        (at(PROGRAM, "@bit8", 0, 2), "8 bits, with no sign"),
     ] {
         let text = hover_text(&client, &uri, from);
         assert!(text.contains(expected), "{text}");

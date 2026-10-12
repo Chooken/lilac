@@ -369,7 +369,7 @@ fn format_args_completes_and_hovers() {
     assert!(detail("@array").contains("@array(T, N)"));
     assert_eq!(
         detail("@format_args_hole"),
-        "@format_args_hole(@format_args(W), index: @bit_native, out: ref W) nothing"
+        "@format_args_hole(format: @format_args(W), index: @bit_native, out: ref W) nothing"
     );
 
     // The last compile is of `PROGRAM`, whose `consume` names the type.

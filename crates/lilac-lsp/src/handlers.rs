@@ -1,7 +1,7 @@
 //! Editor request handlers: hover, go-to-definition, and semantic tokens.
 //! Navigation (references, rename, symbols) is in [`crate::navigate`].
 
-use lilac_hir::intrinsics::{Intrinsic, Slot};
+use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{HoleSite, SemanticKind};
 use lilac_resolve::DefId;
 use lilac_span::{FileId, Span};
@@ -42,7 +42,7 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
         Some((span_range(sources, span)?, item_hover(retained, def)?))
     };
     let (range, value) = intrinsic_hover(retained, file, byte)
-        .or_else(|| type_constructor_hover(retained, file, byte))
+        .or_else(|| builtin_type_hover(retained, file, byte))
         .or_else(|| alias_hover(retained, file, byte))
         .or_else(item)
         .or_else(|| hole_hover(retained, file, byte))
@@ -268,13 +268,9 @@ pub(crate) const TYPE_CONSTRUCTORS: [(&str, &str); 2] = [
     ),
 ];
 
-/// Renders a hover for a builtin type that takes operands (`@array`,
-/// `@format_args`): its shape.
-fn type_constructor_hover(
-    retained: &Retained,
-    file: FileId,
-    byte: usize,
-) -> Option<(Range, String)> {
+/// Renders a hover for a builtin type: its name and what it is, or for one
+/// that takes operands (`@array`, `@format_args`) its shape.
+fn builtin_type_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
     let site = retained.index.semantics.iter().find(|site| {
         site.kind == SemanticKind::BuiltinType
             && site.span.file == file
@@ -284,8 +280,11 @@ fn type_constructor_hover(
     let name = source
         .src
         .get(site.span.lo.0 as usize..site.span.hi.0 as usize)?;
-    let (_, shape) = TYPE_CONSTRUCTORS.iter().find(|(known, _)| *known == name)?;
     let range = span_range(&retained.session.source_map, site.span)?;
+    if let Some(builtin) = lilac_ty::Builtin::named(name) {
+        return Some((range, format!("```lilac\n{name}\n```\n{}", builtin.doc())));
+    }
+    let (_, shape) = TYPE_CONSTRUCTORS.iter().find(|(known, _)| *known == name)?;
     let (head, prose) = shape.split_once(": ")?;
     Some((range, format!("```lilac\n{head}\n```\n{prose}")))
 }
@@ -305,54 +304,42 @@ fn intrinsic_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Ra
     let range = span_range(&retained.session.source_map, site.span)?;
     Some((
         range,
-        format!("```lilac\n{}\n```", intrinsic_signature(name, intrinsic)),
+        format!(
+            "```lilac\n{}\n```\n{}",
+            intrinsic_signature(name, intrinsic),
+            intrinsic.doc()
+        ),
     ))
 }
 
-/// `@name(params) result` for an intrinsic; the ones checked specially
-/// spell their operands out.
+/// `@name(param: slot, ...) result` for an intrinsic, from its table.
 pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
-    let special = match intrinsic {
-        Intrinsic::SizeOf | Intrinsic::AlignOf => Some("(Type) @bit_native"),
-        Intrinsic::ArrayLen => Some("(ref array) @bit_native"),
-        Intrinsic::ArrayAt => Some("(ref array, index: @bit_native) ref element"),
-        Intrinsic::CompileError => Some("(message) nothing"),
-        Intrinsic::Move => Some("(place) value"),
-        Intrinsic::Write => Some("(ref T, value: T) nothing"),
-        Intrinsic::Read => Some("(ref T) T"),
-        Intrinsic::Drop => Some("(ref T) nothing"),
-        Intrinsic::NeedsDrop => Some("(Type) @bit8"),
-        Intrinsic::Discard => Some("(place) nothing"),
-        Intrinsic::FormatArgsHoles => Some("(@format_args(W)) @bit_native"),
-        Intrinsic::FormatArgsPiece => Some("(@format_args(W), index: @bit_native) @byte_buffer"),
-        Intrinsic::FormatArgsHole => {
-            Some("(@format_args(W), index: @bit_native, out: ref W) nothing")
-        }
-        _ => None,
-    };
-    if let Some(special) = special {
-        return format!("{name}{special}");
-    }
-    let sig = intrinsic.signature();
-    let params = sig
-        .params
-        .iter()
-        .copied()
-        .map(slot)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let result = sig.result.map_or_else(|| "nothing".to_owned(), slot);
-    format!("{name}({params}) {result}")
+    intrinsic_label(name, intrinsic).0
 }
 
-/// One intrinsic slot as source spells it.
-fn slot(slot: Slot) -> String {
-    match slot {
-        Slot::Builtin(ty) => ty.name().to_owned(),
-        Slot::Ref(ty) => format!("ref {}", ty.name()),
-        Slot::AnyBit => "@bitN".to_owned(),
-        Slot::ExpectedBit => "@bitN (the expected type)".to_owned(),
+/// [`intrinsic_signature`] with each parameter's UTF-16 range in it, for
+/// signature help.
+pub(crate) fn intrinsic_label(name: &str, intrinsic: Intrinsic) -> (String, Vec<(u32, u32)>) {
+    let utf16 = |text: &str| u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX);
+    let sig = intrinsic.signature();
+    let mut label = format!("{name}(");
+    let mut params = Vec::new();
+    for (index, param) in sig.params.iter().enumerate() {
+        if index > 0 {
+            label.push_str(", ");
+        }
+        let start = utf16(&label);
+        label.push_str(param.name);
+        label.push_str(": ");
+        label.push_str(&param.slot.to_string());
+        params.push((start, utf16(&label)));
     }
+    let result = sig
+        .result
+        .map_or_else(|| "nothing".to_owned(), |slot| slot.to_string());
+    label.push_str(") ");
+    label.push_str(&result);
+    (label, params)
 }
 
 /// Joins rendered type refs with `, `.

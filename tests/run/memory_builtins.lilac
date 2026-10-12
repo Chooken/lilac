@@ -27,14 +27,14 @@ expect: function (actual: @bit64, want: @bit64, code: @bit32) nothing {
 
 main: function () nothing {
     bytes: Bytes = Bytes { low = 0x0706050403020100, high = 0x0 }
-    base: ref @bit8 = ref bytes as ref unknown as ref @bit8
+    base: ref unknown = ref bytes as ref unknown
     // Shift bytes 0..8 up by two: the ranges overlap.
-    @memmove(@ptr_add(base as ref unknown, 0x2) as ref @bit8, base, 0x8)
+    @memmove(@ptr_add(base, 0x2), base, 0x8)
     expect(bytes.low, 0x0504030201000100, 0x1)
     expect(bytes.high, 0x0706, 0x2)
     @memset(base, 0xab, 0x3)
     expect(bytes.low, 0x0504030201ababab, 0x3)
-    address: @bit_native = @ptr_to_address(base as ref unknown)
+    address: @bit_native = @ptr_to_address(base)
     third: ref @bit8 = @address_to_ptr(@i_add_native(address, 0x3)) as ref @bit8
     expect(@extend_zero(@load_u8(third, 0x0)), 0x01, 0x4)
     null: ref unknown = @address_to_ptr(0x0)

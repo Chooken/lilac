@@ -146,7 +146,7 @@ realloc: function (list: ref FreeList, payload: @bit_native, size: @bit_native, 
     }
     moved = alloc(list, size, align)
     if @i_greater_than_u_native(moved, 0x0) {
-        @memcpy(@address_to_ptr(moved) as ref @bit8, @address_to_ptr(payload) as ref @bit8, @i_sub_native(old_size, header_size))
+        @memcpy(@address_to_ptr(moved), @address_to_ptr(payload), @i_sub_native(old_size, header_size))
         free(list, payload)
     }
 }

@@ -22,7 +22,7 @@ fill_random: function (buffer: ref unknown, length: @bit_native) nothing {
                         count = 0x4
                     }
                     source: ref @bit32 = ref value
-                    @memcpy(@ptr_add(buffer, done) as ref @bit8, source as ref unknown as ref @bit8, count)
+                    @memcpy(@ptr_add(buffer, done), source as ref unknown, count)
                     done = @i_add_native(done, count)
                 }
             } else {

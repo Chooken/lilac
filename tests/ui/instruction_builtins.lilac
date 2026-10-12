@@ -11,9 +11,8 @@ Pair: object {
 main: function () nothing {
     pair: Pair = Pair { low = 0x0706050403020100, high = 0x0 }
     base: ref unknown = ref pair as ref unknown
-    bytes: ref @bit8 = base as ref @bit8
-    @memmove(@ptr_add(base, 0x2) as ref @bit8, bytes, 0x8)
-    @memset(bytes, 0x0, @align_of(Pair))
+    @memmove(@ptr_add(base, 0x2), base, 0x8)
+    @memset(base, 0x0, @align_of(Pair))
     address: @bit_native = @ptr_to_address(base)
     again: ref unknown = @address_to_ptr(address)
     if @i_less_than_u_native(@ptr_to_address(again), address) {
