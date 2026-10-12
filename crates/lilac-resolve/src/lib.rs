@@ -579,7 +579,7 @@ impl Collector<'_> {
             ItemKind::Using { .. }
             | ItemKind::Private { .. }
             | ItemKind::Conditional(_)
-            | ItemKind::Error => return None,
+            | ItemKind::Error { .. } => return None,
         };
         let mut def = self.new_def(&item.name, kind, item.span, vis);
         def.parent = parent;

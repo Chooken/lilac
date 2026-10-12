@@ -22,6 +22,7 @@ use lsp_types::{
     TextEdit,
 };
 
+use crate::context::{After, Completing, Context};
 use crate::convert::{byte_offset, position};
 use crate::handlers::{file_for, intrinsic_label, intrinsic_signature, signature};
 use crate::index::Retained;
@@ -476,44 +477,13 @@ pub fn map_offset(old: &str, new: &str, byte: usize) -> usize {
     }
 }
 
-fn is_ident(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// The dotted path ending just before `end` (`a.b`, `@builtin.Target`).
-fn path_before(text: &str, end: usize) -> &str {
-    let bytes = text.as_bytes();
-    let mut start = end;
-    while start > 0 && (is_ident(bytes[start - 1]) || matches!(bytes[start - 1], b'.' | b'@')) {
-        start -= 1;
-    }
-    &text[start..end]
-}
-
-/// Whether `cursor` is after a `//` on its line.
-fn in_comment(text: &str, cursor: usize) -> bool {
-    let line_start = text[..cursor].rfind('\n').map_or(0, |newline| newline + 1);
-    text[line_start..cursor].contains("//")
-}
-
 /// Whether a completion at `position` of `text` is after a `.` (a tag or
 /// a member, maybe with part of a name): the compiler must check the text
 /// as it is now to know the enum the tag expects or what the member is
 /// looked up in, so it waits for that compile.
 #[must_use]
 pub fn needs_current_compile(text: &str, position_at: Position) -> bool {
-    let Some(cursor) = byte_offset(text, position_at) else {
-        return false;
-    };
-    if in_comment(text, cursor) {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let mut start = cursor;
-    while start > 0 && is_ident(bytes[start - 1]) {
-        start -= 1;
-    }
-    start > 0 && bytes[start - 1] == b'.'
+    byte_offset(text, position_at).is_some_and(|cursor| Context::new(text, cursor).after_dot())
 }
 
 /// `textDocument/completion` at `position` of the document `text`.
@@ -525,17 +495,9 @@ pub fn completion(
     position_at: Position,
 ) -> Option<CompletionResponse> {
     let cursor = byte_offset(text, position_at)?;
-    if in_comment(text, cursor) {
-        return None;
-    }
+    let Completing { start, after } = Context::new(text, cursor).completing()?;
     let scope = Scope::new(retained, uri, text, cursor)?;
-    let bytes = text.as_bytes();
-    let mut start = cursor;
-    while start > 0 && is_ident(bytes[start - 1]) {
-        start -= 1;
-    }
-    let entries = if start > 0 && bytes[start - 1] == b'@' {
-        start -= 1;
+    let entries = if after == After::At {
         let mut entries: Vec<Entry> = Intrinsic::names()
             .into_iter()
             .map(|name| Entry {
@@ -552,7 +514,7 @@ pub fn completion(
             detail: Some("namespace @builtin".to_owned()),
         });
         entries
-    } else if start > 0 && bytes[start - 1] == b'.' {
+    } else if after == After::Dot {
         scope.dot_entries()
     } else {
         scope.names()
@@ -577,33 +539,6 @@ pub fn completion(
     Some(CompletionResponse::Array(items))
 }
 
-/// The call the cursor is in: the callee path and the argument index, read
-/// back from the cursor to the unmatched `(`.
-fn call_at(text: &str, cursor: usize) -> Option<(&str, u32)> {
-    let bytes = text.as_bytes();
-    let mut depth = 0u32;
-    let mut commas = 0u32;
-    let mut in_string = false;
-    let mut at = cursor;
-    while at > 0 {
-        at -= 1;
-        match bytes[at] {
-            b'"' => in_string = !in_string,
-            _ if in_string => {}
-            b')' | b']' => depth += 1,
-            b'(' | b'[' if depth > 0 => depth -= 1,
-            b'(' => {
-                let callee = path_before(text, at);
-                return (!callee.is_empty()).then_some((callee, commas));
-            }
-            b',' if depth == 0 => commas += 1,
-            b'{' | b'}' | b'[' => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
 /// `textDocument/signatureHelp` at `position` of the document `text`.
 #[must_use]
 pub fn signature_help(
@@ -613,12 +548,12 @@ pub fn signature_help(
     position_at: Position,
 ) -> Option<SignatureHelp> {
     let cursor = byte_offset(text, position_at)?;
-    let (callee, argument) = call_at(text, cursor)?;
+    let (callee, argument) = Context::new(text, cursor).call()?;
     if let Some(intrinsic) = (!callee.contains('.'))
-        .then(|| Intrinsic::lookup(callee))
+        .then(|| Intrinsic::lookup(&callee))
         .flatten()
     {
-        let (label, params) = intrinsic_label(callee, intrinsic);
+        let (label, params) = intrinsic_label(&callee, intrinsic);
         return Some(help(label, params, argument));
     }
 
@@ -721,13 +656,5 @@ mod tests {
         assert_eq!(map_offset(old, new, 7), 5); // the `\n` after the edit
         assert_eq!(map_offset(old, new, 6), 5); // inside the edit: its start
         assert_eq!(map_offset(old, old, 4), 4);
-    }
-
-    #[test]
-    fn calls_are_found_back_to_their_paren() {
-        assert_eq!(call_at("x = add(1, f(2), ", 17), Some(("add", 2)));
-        assert_eq!(call_at("p.sum(", 6), Some(("p.sum", 0)));
-        assert_eq!(call_at("f(\"a,(\", ", 9), Some(("f", 1)));
-        assert_eq!(call_at("{ x }", 3), None);
     }
 }

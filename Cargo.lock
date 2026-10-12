@@ -343,12 +343,14 @@ name = "lilac-lsp"
 version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
+ "lilac-ast",
  "lilac-driver",
  "lilac-error",
  "lilac-hir",
  "lilac-ir",
  "lilac-lex",
  "lilac-module",
+ "lilac-parse",
  "lilac-resolve",
  "lilac-span",
  "lilac-ty",

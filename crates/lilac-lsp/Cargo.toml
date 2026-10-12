@@ -8,11 +8,13 @@ name = "lilac-lsp"
 path = "src/main.rs"
 
 [dependencies]
+lilac-ast = { path = "../lilac-ast" }
 lilac-driver = { path = "../lilac-driver" }
 lilac-error = { path = "../lilac-error" }
 lilac-hir = { path = "../lilac-hir" }
 lilac-ir = { path = "../lilac-ir" }
 lilac-lex = { path = "../lilac-lex" }
+lilac-parse = { path = "../lilac-parse" }
 lilac-resolve = { path = "../lilac-resolve" }
 lilac-span = { path = "../lilac-span" }
 lilac-module = { path = "../lilac-module" }

@@ -195,6 +195,10 @@ pub struct Token {
     /// first token after one (the parser gives it to the declaration the
     /// token starts, and drops it anywhere else).
     pub doc: Option<Box<Doc>>,
+    /// Whether a string or char literal ends at its line or the file
+    /// instead of its closing quote (an error the lexer reports), so the
+    /// editor knows a cursor at its end is still inside it.
+    pub unclosed: bool,
 }
 
 /// What a comment is.
@@ -226,6 +230,7 @@ impl Token {
             bytes: Vec::new(),
             newline_before: false,
             doc: None,
+            unclosed: false,
         }
     }
 
@@ -665,6 +670,7 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         self.pos += 1; // opening `"`
         let mut value = Vec::new();
+        let mut closed = true;
         loop {
             if self.at_eof() || self.peek() == b'\n' {
                 self.report(
@@ -672,6 +678,7 @@ impl<'a> Lexer<'a> {
                     self.pos,
                     "unterminated string literal; add a closing `\"`",
                 );
+                closed = false;
                 break;
             }
             match self.peek() {
@@ -686,7 +693,9 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        Token::with_bytes(TokenKind::StringLit, value, start, self.pos, self.file)
+        let mut token = Token::with_bytes(TokenKind::StringLit, value, start, self.pos, self.file);
+        token.unclosed = !closed;
+        token
     }
 
     /// A char literal: scanned to its closing `'` on the same line, and
@@ -738,13 +747,15 @@ impl<'a> Lexer<'a> {
             );
         }
         let value = first.unwrap_or(char::REPLACEMENT_CHARACTER);
-        Token::new(
+        let mut token = Token::new(
             TokenKind::CharLit,
             &value.to_string(),
             start,
             self.pos,
             self.file,
-        )
+        );
+        token.unclosed = !closed;
+        token
     }
 
     /// Consumes the escape at the current position (a `\`) and returns the

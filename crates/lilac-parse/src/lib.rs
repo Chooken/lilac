@@ -48,6 +48,10 @@ pub struct Parser {
     /// Whether this item already reported passing [`MAX_NESTING`]; one
     /// `E001` covers every place it nests too deeply.
     too_deep_reported: bool,
+    /// The header (`name: kind`) of the item that just failed after
+    /// reading it: the name, and whether it declared a function. The
+    /// recovered [`ItemKind::Error`] keeps both.
+    failed_header: Option<(String, bool)>,
 }
 
 /// A chain being built left to right in a loop (`a + b + c`, `a.b().c`,
@@ -79,6 +83,7 @@ impl Parser {
             allow_struct_lit: true,
             depth: 0,
             too_deep_reported: false,
+            failed_header: None,
         }
     }
 
@@ -130,11 +135,12 @@ impl Parser {
 
     /// An [`ItemKind::Error`] item spanning the tokens consumed for a failed
     /// item, from `start` through the current position.
-    fn error_item(&self, start: usize) -> Item {
+    fn error_item(&mut self, start: usize) -> Item {
+        let (name, function) = self.failed_header.take().unwrap_or_default();
         Item {
             doc: None,
-            name: String::new(),
-            kind: ItemKind::Error,
+            name,
+            kind: ItemKind::Error { function },
             span: self.error_span(start),
         }
     }

@@ -78,7 +78,6 @@ fn intrinsic_signature_help_highlights_the_parameter() {
 }
 
 #[test]
-#[ignore = "editor plan phase 4"]
 fn signature_help_reads_past_struct_literals_and_strings() {
     let retained = retained();
     let help = signature(&retained, "    f(P { x = 0x1 }, ");
@@ -91,7 +90,6 @@ fn signature_help_reads_past_struct_literals_and_strings() {
 }
 
 #[test]
-#[ignore = "editor plan phase 4"]
 fn a_dot_in_a_string_is_not_a_member() {
     let (text, at) = edited("    f(point, \"a//b\") point.");
     assert!(complete::needs_current_compile(&text, at));

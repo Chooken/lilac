@@ -123,9 +123,14 @@ fn item_error_recovery() {
         program.items[0].kind
     );
     assert!(
-        matches!(program.items[1].kind, ItemKind::Error),
+        matches!(program.items[1].kind, ItemKind::Error { .. }),
         "the broken item recovers into `ItemKind::Error`: {:?}",
         program.items[1].kind
+    );
+    assert!(
+        matches!(program.items[1].kind, ItemKind::Error { function: true })
+            && program.items[1].name == "bad",
+        "it keeps the header it read"
     );
     assert!(parser.had_errors(), "a failed construct is recorded");
     let parse_diag = diags
@@ -1837,4 +1842,30 @@ main: function () nothing {
         panic!("private block");
     };
     assert!(items[0].doc.is_none());
+}
+
+#[test]
+fn a_failed_item_keeps_its_own_header() {
+    let header = |src: &str| {
+        let (program, _, _) = parse(src);
+        program.items.last().map(|item| match item.kind {
+            ItemKind::Error { function } => (item.name.clone(), function),
+            _ => (String::new(), false),
+        })
+    };
+    assert_eq!(
+        header("main: function ( {\n}\n"),
+        Some(("main".to_owned(), true))
+    );
+    assert_eq!(
+        header("f: extern \"\" function ()\n"),
+        Some(("f".to_owned(), true))
+    );
+    // A member that failed inside it is not the object's header.
+    assert_eq!(
+        header("Holder: object {\n    main: function (\n"),
+        Some(("Holder".to_owned(), false))
+    );
+    // `}` where a name belongs: no header was read.
+    assert_eq!(header("}\n"), Some((String::new(), false)));
 }

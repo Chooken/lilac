@@ -33,6 +33,7 @@ impl Parser {
             }
             return self.parse_conditional_item(diags);
         }
+        self.failed_header = None;
         let doc = self.peek().doc.as_deref().cloned();
         let mut item = self.parse_declaration(diags, in_object)?;
         item.doc = doc;
@@ -49,6 +50,34 @@ impl Parser {
         let generic_params = self.parse_generic_params(diags)?;
         self.expect(diags, TokenKind::Colon, "`:` after declaration name")?;
         let kind_token = self.bump();
+        let function = matches!(
+            kind_token.kind,
+            TokenKind::KwFunction | TokenKind::KwExtern | TokenKind::KwExport
+        );
+        let item = self.parse_declaration_body(
+            diags,
+            in_object,
+            name.clone(),
+            name_span,
+            generic_params,
+            kind_token,
+        );
+        if item.is_err() {
+            self.failed_header = Some((name, function));
+        }
+        item
+    }
+
+    /// What follows a declaration's `name: kind`.
+    fn parse_declaration_body(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        in_object: bool,
+        name: String,
+        name_span: Span,
+        generic_params: Vec<String>,
+        kind_token: Token,
+    ) -> Result<Item, ErrorGuaranteed> {
         let kind = match kind_token.kind {
             TokenKind::KwFunction => {
                 ItemKind::Func(self.parse_func_rest(diags, false, generic_params)?)
@@ -399,7 +428,7 @@ impl Parser {
             |span| Item {
                 doc: None,
                 name: String::new(),
-                kind: ItemKind::Error,
+                kind: ItemKind::Error { function: false },
                 span,
             },
             |p, diags| {

@@ -32,6 +32,7 @@ pub(crate) const TOKEN_MODIFIERS: [SemanticTokenModifier; 1] =
 pub mod actions;
 pub mod compile;
 pub mod complete;
+pub mod context;
 pub mod convert;
 pub mod documents;
 pub mod fs;

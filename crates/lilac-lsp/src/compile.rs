@@ -10,9 +10,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
+use lilac_ast::{Item, ItemKind};
 use lilac_driver::{Keep, Session};
-use lilac_error::{Diagnostic, ErrorGuaranteed};
+use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_ir::LirModule;
+use lilac_lex::Lexer;
+use lilac_parse::Parser;
 use lilac_span::FileId;
 use lsp_types::{Diagnostic as LspDiagnostic, Url};
 
@@ -382,11 +385,31 @@ fn unit_of(path: &Path, text: &str, libraries: &[(String, PathBuf)]) -> Unit {
             return Unit::Namespace(namespace);
         }
     }
-    let declares_main = text.lines().any(|line| line.starts_with("main:"));
-    if dir.join("main.lilac").is_file() || !declares_main {
+    if dir.join("main.lilac").is_file() || !declares_main(text) {
         return Unit::Folder(dir.to_path_buf());
     }
     Unit::File(path.to_path_buf())
+}
+
+/// Whether `text` declares a top-level `main` function, as the parser
+/// reads it (in a `private` block or an arm of a conditional too).
+fn declares_main(text: &str) -> bool {
+    fn any_main(items: &[Item]) -> bool {
+        items.iter().any(|item| match &item.kind {
+            ItemKind::Func(_) | ItemKind::Error { function: true } => item.name == "main",
+            ItemKind::Private { items } => any_main(items),
+            ItemKind::Conditional(conditional) => {
+                conditional.arms.iter().any(|arm| any_main(&arm.items))
+                    || conditional.els.as_deref().is_some_and(any_main)
+            }
+            _ => false,
+        })
+    }
+    let (tokens, _) = Lexer::lex_all(text, FileId(0));
+    let mut ignore = Diags::new();
+    Parser::new(tokens, FileId(0))
+        .parse_program(&mut ignore)
+        .is_ok_and(|program| any_main(&program.items))
 }
 
 /// Publishes a finished multi-file compile's diagnostics into `by_uri` and
@@ -508,10 +531,24 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "editor plan phase 4"]
     fn a_file_declaring_main_compiles_alone() {
         let text = "main : function () nothing {\n}\n";
         assert!(matches!(unit_of(&lone(), text, &[]), Unit::File(_)));
+    }
+
+    #[test]
+    fn main_is_a_top_level_function_as_parsed() {
+        assert!(declares_main(
+            "private {\n    main: function () nothing {\n    }\n}\n"
+        ));
+        assert!(!declares_main("// main: function () nothing {}\n"));
+        assert!(!declares_main(
+            "s: @byte_buffer => \"main: function () nothing {}\"\n"
+        ));
+        assert!(!declares_main("main: object {\n}\n"));
+        assert!(!declares_main(
+            "Holder: object {\n    main: function () nothing {\n    }\n}\n"
+        ));
     }
 
     #[test]

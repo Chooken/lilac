@@ -434,7 +434,10 @@
 - Compile units: the project (`lilac.json` `root`, else the workspace
   folder); an open file it does not reach is compiled as its library
   namespace (`Session::compile_namespace_with_stages`), else its folder, else
-  alone (`server::unit_of`). Sessions run tolerant and keep their
+  alone (`compile::unit_of`: alone when the parser finds a top-level `main`
+  function, `declares_main`, counting a failed declaration whose header
+  read `main: function`: `ItemKind::Error` keeps the name and
+  `function`). Sessions run tolerant and keep their
   analysis (`Session::keep_analysis` is `Keep::Partial`; the CLI's is
   `Keep::Nothing`). `Analysis` owns the resolver output, the type table
   and the HIR, which lowering borrowed before they moved in, so keeping it
@@ -500,7 +503,12 @@
   completion lists after `@` too).
 - Editing (`complete.rs`, `actions.rs`): completion and signature help
   run before the edit is compiled, so the context is read from the
-  document's current text and names come from the last compile, the cursor
+  document's current tokens (`context.rs`: `Context` lexes it, and answers
+  in a comment, in literal text (`Token::unclosed` marks a string or char
+  its line ends inside; an f-string's holes are code), the name being
+  typed and the `@` or `.` before it, and the call and argument index by
+  matching brackets over tokens; rename's `is_identifier` is one `Ident`
+  token; nothing scans characters) and names come from the last compile, the cursor
   mapped into its text (`complete::map_offset`). Locals in scope come from
   `LocalSite::scope` and `ty` (typeck's `FnCx::open`/`close` track block
   spans); `@` lists `Intrinsic::names()` and the builtin types.

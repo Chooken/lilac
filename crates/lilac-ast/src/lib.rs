@@ -100,8 +100,15 @@ pub enum ItemKind {
     /// program is resolved.
     Conditional(Conditional),
     /// An item that failed to parse; its `span` covers the consumed tokens.
-    /// Carries no name and defines nothing downstream.
-    Error,
+    /// Its `name` is the declared name when the parser read the header
+    /// (`name: kind`) before failing, else empty. It defines nothing
+    /// downstream; tools read the header (a half-typed `main: function (`
+    /// still makes its file a program's `main`).
+    Error {
+        /// Whether the header declared a function (`function`, `extern`,
+        /// `export`).
+        function: bool,
+    },
 }
 
 /// `if a { items } else if b { items } else { items }` or

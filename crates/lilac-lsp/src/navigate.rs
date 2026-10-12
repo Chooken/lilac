@@ -355,7 +355,7 @@ pub fn rename(
     let Some((span, target)) = target_at(retained, uri, position) else {
         return Ok(None);
     };
-    if !is_identifier(new_name) {
+    if !crate::context::is_identifier(new_name) {
         return Err(format!("`{new_name}` is not an identifier"));
     }
     let spans = renamable(retained, uri, target, libraries)?;
@@ -418,16 +418,6 @@ fn library_of(path: &Path, libraries: &[(String, PathBuf)]) -> Option<String> {
         .iter()
         .find(|(_, dir)| path.starts_with(canonical(dir)))
         .map(|(name, _)| name.clone())
-}
-
-/// Whether `name` is a plain identifier (not a keyword).
-fn is_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && lilac_lex::keyword(name).is_none()
 }
 
 /// `textDocument/documentSymbol`: `uri`'s items, members nested under their
@@ -533,16 +523,6 @@ fn matches_query(name: &str, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn identifiers_exclude_keywords() {
-        assert!(is_identifier("total_2"));
-        assert!(is_identifier("_x"));
-        assert!(!is_identifier("2x"));
-        assert!(!is_identifier("match"));
-        assert!(!is_identifier("a.b"));
-        assert!(!is_identifier(""));
-    }
 
     #[test]
     fn query_is_a_subsequence() {
