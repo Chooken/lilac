@@ -452,6 +452,7 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@linux_thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, entry, argument)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child calls `entry` (a C function's address, `ref unknown`: an `export` converted with `as`) with `argument`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@linux_syscall` (`E035`). |
 | **`@trap()`** | `()` |
  Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
+| **`@panic`** | `(message: M)` | Writes `panic: <message>` and the stack trace through `@compiler_print`, then exits with code 101. `M` is the type `@compiler_print` takes (`@byte_buffer` without one), with the slot rules of §2: when it is an `@format_args(W)`, a literal, an f-string or one value is a message. Does not return (see §8, "Platform hooks"). |
 | **`@atomic_load_W`** | `(ref @bitW): @bitW` | Atomic load. |
 | **`@atomic_store_W`** | `(ref @bitW, @bitW)` | Atomic store. |
 | **`@atomic_swap_W`** | `(ref @bitW, @bitW): @bitW` | Atomically replaces the value; returns the old one. |
@@ -1440,7 +1441,7 @@ defines them:
 | --- | --- | --- |
 | **`@entry`** | `function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing` | By the process entry stub, with the process's argument count and argument and environment vectors (C's `argc`, `argv` and `envp`; zero and null on native Windows, whose command line comes from `GetCommandLineW`). It runs the program. |
 | **`@exit`** | `function (code: @bit32) nothing` | After `@entry` returns (code 0), and by the panic handler (code 101). It must end the process. |
-| **`@compiler_print`** | `function (text: @byte_buffer) nothing` | By the panic handler, for the message and each stack-trace line. |
+| **`@compiler_print`** | `function (text: M) nothing`, where `M` is `@byte_buffer` or an `@format_args(W)` | By the panic handler, for the message and each stack-trace line, each as an `M`. `@panic` takes an `M` too. |
 
 - **The entry stub** (`.lilac.start`, called from the C `main` under
   `--libc` and from the native entry otherwise) makes no OS call: it calls
@@ -1448,12 +1449,25 @@ defines them:
   then traps. The panic handler writes through `@compiler_print`, calls
   `@exit(0x65)`, then traps. So an `@exit` that returns stops at a trap
   rather than running on.
+- **A panic message is what `@compiler_print` takes.** The runtime library
+  decides, and the compiler names no formatter: `Standard`'s takes a
+  `Format`, so `@panic("x")`, `@panic($"index {i} past {n}")` and
+  `@panic(name)` all work (the slot rules of §2, "Formatted strings"); a
+  runtime whose hook takes a `@byte_buffer` takes byte buffers. With no
+  `@compiler_print` in the compile, a message is a `@byte_buffer`. The
+  handler's own text (`panic: `, the trace lines, and the messages the
+  compiler generates, such as `division by zero`) is written as the same
+  type.
+- **A panic while a panic message is written** (a `@format` hook that
+  panics) does not recurse: the second panic on the thread writes `panic
+  while writing a panic message` through `@compiler_print` and exits with
+  101, and a third (the hook itself panics) traps at once.
 - **`@entry` calls `main` itself.** Inside an `@entry` body, a name not
   found in the hook's own scope is looked up in the program's root
   namespace, so `Standard`'s `@entry` calls the program's `main`. Another
   runtime library may enter the program under any name.
-- **Each hook is defined at most once** in the program (`E034`), at the top
-  level, with exactly its signature (`E022`). Hooks are unit-global and carry
+- **Each hook is defined at most once** in the program (`E034`, whatever
+  the signatures), at the top level, with exactly its signature (`E022`). Hooks are unit-global and carry
   no namespace prefix; they are emitted as `.lilac.entry`, `.lilac.exit` and
   `.lilac.compiler_print`, and user code may call them (`@exit(0x1)`).
 - **An executable** (`lilac build`) needs all three: a missing one is

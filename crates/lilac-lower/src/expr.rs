@@ -577,18 +577,29 @@ impl Lower<'_> {
             .iter()
             .map(|hole| self.symbol(&hole.format))
             .collect();
+        self.intern_template(&format.pieces, formats, span)
+    }
+
+    /// The template of `pieces` and `formats`, shared by every identical
+    /// one.
+    pub(crate) fn intern_template(
+        &mut self,
+        pieces: &[Vec<u8>],
+        formats: Vec<Symbol>,
+        span: Span,
+    ) -> Symbol {
         if let Some(existing) = self
             .module
             .formats
             .iter()
-            .find(|template| template.pieces == format.pieces && template.formats == formats)
+            .find(|template| template.pieces == pieces && template.formats == formats)
         {
             return existing.name.clone();
         }
         let name = Symbol::new(format!("fmt{}", self.module.formats.len()));
         self.module.formats.push(LirFormat {
             name: name.clone(),
-            pieces: format.pieces.clone(),
+            pieces: pieces.to_vec(),
             formats,
             span,
         });

@@ -27,7 +27,9 @@ mod verify;
 pub use dce::{prune_unreachable, reach, CallGraph, Edge, EdgeKind, Reach};
 pub use lilac_float::{FloatBits, FloatWidth};
 pub use names::{Label, PlaceName, Reg, Symbol};
-pub use runtime::{build_runtime, entry_point, hook_externs, panic_runtime, Entry};
+pub use runtime::{
+    build_runtime, entry_point, hook_externs, panic_runtime, Entry, PanicMessage, PanicRuntime,
+};
 pub use ty::LirTy;
 pub use verify::{check_live_compile_errors, check_live_syscalls, verify};
 
@@ -1038,6 +1040,7 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
             vec![LirTy::BitNative],
         ),
         "@trace_head" => (vec![], vec![LirTy::trace_frame().to_ref().to_ref()]),
+        "@panic_depth" => (vec![], vec![LirTy::BitNative.to_ref()]),
         _ => return None,
     };
     Some(BuiltinSig { ins, outs })
@@ -1069,7 +1072,9 @@ pub fn is_variadic_arg_type(ty: &LirTy) -> bool {
 /// Fixed fields of the builtin aggregate types (`#byte_buffer`,
 /// `#format_args`: an f-string, its template and its hole addresses,
 /// `#.lilac.format_part`:
-/// one part of a template, see [`format_template_layout`], and
+/// one part of a template, see [`format_template_layout`],
+/// `#.lilac.format_line`: a one-piece template, see [`LirTy::format_line`],
+/// and
 /// `#.lilac.frame`: a shadow-stack record, see [`trace`]), laid out as C
 /// structs like any other ([`builtin_layout`]).
 /// These never appear in `module.layouts`, so the verifier and the backend
@@ -1087,6 +1092,12 @@ pub fn builtin_fields(ty: &LirTy) -> Option<Vec<(String, LirTy)>> {
         ]),
         ".lilac.format_part" => Some(vec![
             ("text".to_owned(), LirTy::byte_buffer()),
+            ("format".to_owned(), LirTy::opaque_ref()),
+        ]),
+        ".lilac.format_line" => Some(vec![
+            ("holes".to_owned(), LirTy::BitNative),
+            ("len".to_owned(), LirTy::BitNative),
+            ("data".to_owned(), LirTy::byte_ref()),
             ("format".to_owned(), LirTy::opaque_ref()),
         ]),
         ".lilac.frame" => Some(vec![

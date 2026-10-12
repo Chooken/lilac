@@ -433,6 +433,7 @@ impl Checker<'_> {
     fn run(&mut self) {
         self.resolve_aliases();
         self.collect_hooks();
+        self.out.panic_message = self.panic_hook_message();
         self.check_types();
         self.check_consts();
         for id in self.res.ids() {

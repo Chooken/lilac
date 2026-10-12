@@ -14,6 +14,9 @@ target = "x86_64-unknown-none"
 "
 !.lilac.panic.no_trace: str = "  (stack trace disabled; build with --stack-traces=on)
 "
+!.lilac.panic.nested: str = "
+panic while writing a panic message
+"
 !fmt0: format "a" {@@format(ReR3OutE)} "b"
 type #Out size 8 align 8 {
     count: #bit_native,
@@ -216,6 +219,31 @@ function @.lilac.panic
     alloca ref #.lilac.frame %frame : zeroed
     alloca #bit_native %count : zeroed
     alloca ref #byte_buffer %frame.site : zeroed
+    alloca ref #bit_native %depth : zeroed
+    call @panic_depth (in) (out %depth)
+    &d: #bit_native = load %depth
+    &one: #bit_native = const 0x1
+    &deeper: #bit_native = i.add &d, &one
+    copy &deeper -> ref %depth
+    &zero: #bit_native = const 0x0
+    &first: #bit8 = cmp.eql &d, &zero
+    branch.if &first, $start, $again
+  $again:
+    &d: #bit_native = load %depth
+    &two: #bit_native = const 0x2
+    &second: #bit8 = cmp.eql &d, &two
+    branch.if &second, $nested, $broken
+  $nested:
+    &a.text: ref #bit8 = const !.lilac.panic.nested
+    copy &a.text -> %text.data  // idx 1
+    &a.len: #bit_native = const 0x25
+    copy &a.len -> %text.len  // idx 0
+    call @.lilac.compiler_print (in %text) (out)
+    branch $exit
+  $broken:
+    call @lilac_abort (in) (out)
+    unreachable
+  $start:
     &a.text: ref #bit8 = const !.lilac.panic.head
     copy &a.text -> %text.data  // idx 1
     &a.len: #bit_native = const 0x7

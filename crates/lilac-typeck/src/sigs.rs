@@ -9,7 +9,7 @@ use lilac_error::{codes, Diagnostic};
 use lilac_hir::{FuncKey, SemanticKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{Builtin, FuncSig, TypeRef};
+use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 
 use crate::{Checker, Hook};
 
@@ -143,12 +143,13 @@ impl Checker<'_> {
             return;
         }
         let overloads = self.hooks.entry(name.clone()).or_default();
-        if let Some(previous) = overloads
-            .iter()
-            .find(|hook| hook.sig.params == sig.params && hook.sig.returns == sig.returns)
-        {
+        // A platform hook has one definition, whatever its signature.
+        let platform = is_platform_hook(&name);
+        if let Some(previous) = overloads.iter().find(|hook| {
+            platform || (hook.sig.params == sig.params && hook.sig.returns == sig.returns)
+        }) {
             let previous = previous.span;
-            let diagnostic = if is_platform_hook(&name) {
+            let diagnostic = if platform {
                 Diagnostic::error(
                     codes::E034,
                     format!("`{name}` is defined more than once in the program"),
@@ -273,8 +274,8 @@ impl Checker<'_> {
     }
 
     /// Checks a platform hook: top-level, with its fixed signature
-    /// (`@entry()`, `@exit(@bit32)`, `@compiler_print(@byte_buffer)`, no
-    /// returns), else `E022`.
+    /// (`@entry()`, `@exit(@bit32)`, `@compiler_print(M)`, where `M` is
+    /// `@byte_buffer` or an `@format_args(W)`, no returns), else `E022`.
     fn platform_hook_shape_ok(&mut self, name: &str, key: &FuncKey, sig: &FuncSig) -> bool {
         let def = self.res.def(key.def);
         let span = def.span;
@@ -301,8 +302,13 @@ impl Checker<'_> {
                 ),
                 _ => (
                     &[(Builtin::ByteBuffer, false)],
-                    "`@compiler_print: function(text: @byte_buffer) nothing`",
+                    "`@compiler_print: function(text: M) nothing`, where `M` is \
+                     `@byte_buffer` or an `@format_args(W)`",
                 ),
+            };
+            // `@compiler_print`'s message may be a format instead.
+            let format_message = |param: &TypeRef| {
+                name == "@compiler_print" && self.format_writer(param.id).is_some()
             };
             let shaped = sig.returns.is_empty()
                 && sig.params.len() == expected.len()
@@ -310,7 +316,9 @@ impl Checker<'_> {
                     .params
                     .iter()
                     .zip(expected)
-                    .all(|(param, (ty, is_ref))| param.is_ref == *is_ref && param.id == ty.id());
+                    .all(|(param, (ty, is_ref))| {
+                        param.is_ref == *is_ref && (param.id == ty.id() || format_message(param))
+                    });
             if shaped {
                 return true;
             }
@@ -322,6 +330,14 @@ impl Checker<'_> {
         self.diags
             .emit(Diagnostic::error(codes::E022, message).label(span, true, label));
         false
+    }
+
+    /// The `@compiler_print` hook's parameter type, which `@panic` takes
+    /// (`HirProgram::panic_message`); `None` when the program defines none,
+    /// and `@panic` takes a `@byte_buffer`.
+    pub(crate) fn panic_hook_message(&self) -> Option<TypeId> {
+        let hook = self.hooks.get("@compiler_print")?.first()?;
+        hook.sig.params.first().map(|param| param.id)
     }
 
     /// The overloads of hook `name` (empty when none exist).

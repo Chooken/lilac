@@ -1,0 +1,18 @@
+// no-standard
+// lib: FormatRuntime=tests/libs/FormatRuntime
+// expect-exit: 101
+// expect-stderr: panic: bad
+// expect-stderr: panic while writing a panic message
+// A formatter that panics while a panic message is written: the second
+// panic writes a fixed message and exits, rather than recursing.
+
+Boom: object {}
+
+@format: function (value: ref Boom, out: ref FormatRuntime.Err) nothing {
+    @panic("boom")
+}
+
+main: function () nothing {
+    boom: Boom = Boom {}
+    @panic($"bad{boom}")
+}

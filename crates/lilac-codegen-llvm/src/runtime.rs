@@ -7,13 +7,14 @@
 //! (`llvm.memcpy`), `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
 //! `@memcmp` (C's `memcmp`),
 //! `@lilac_abort` (`llvm.trap` + `unreachable`), `@linux_syscall` (the Linux
-//! system-call instruction, as inline assembly), and `@trace_head` (the
-//! address of the shadow-stack head global). Each uses the value ABI from
+//! system-call instruction, as inline assembly), `@trace_head` (the
+//! address of the shadow-stack head global) and `@panic_depth` (the address
+//! of the panic depth). Each uses the value ABI from
 //! `lilac_ir::builtin_sig`.
 
 use inkwell::builder::Builder;
 use inkwell::module::Linkage;
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, ValueKind};
 use inkwell::ThreadLocalMode;
 
@@ -55,6 +56,9 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     if used.contains("@trace_head") {
         trace_head(lower);
     }
+    if used.contains("@panic_depth") {
+        panic_depth(lower);
+    }
     if used.contains("@linux_thread_clone") {
         crate::threads::thread_clone(lower);
     }
@@ -67,11 +71,23 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
 /// supports ([`crate::threads::main_tls`]).
 fn trace_head(lower: &Lower<'_, '_>) {
     let ptr = lower.ptr_type();
-    let slot = lower
-        .module()
-        .add_global(ptr, None, ".lilac.trace_head.slot");
+    thread_slot(lower, ".lilac.trace_head", ptr.into());
+}
+
+/// `@panic_depth() -> ref #bit_native`: the address of the thread's panic
+/// depth (`lilac_ir::panic_runtime`), a zeroed native integer kept like
+/// the trace head.
+fn panic_depth(lower: &Lower<'_, '_>) {
+    thread_slot(lower, ".lilac.panic_depth", lower.native_int().into());
+}
+
+/// Defines `name`, returning the address of `name.slot`, a zeroed internal
+/// global of `ty`, one per thread on an operating system.
+fn thread_slot<'ctx>(lower: &Lower<'ctx, '_>, name: &str, ty: BasicTypeEnum<'ctx>) {
+    let ptr = lower.ptr_type();
+    let slot = lower.module().add_global(ty, None, &format!("{name}.slot"));
     slot.set_linkage(Linkage::Internal);
-    slot.set_initializer(&ptr.const_null());
+    slot.set_initializer(&ty.const_zero());
     match lower.os() {
         Some(Os::Linux) => {
             slot.set_thread_local_mode(Some(ThreadLocalMode::LocalExecTLSModel));
@@ -80,11 +96,11 @@ fn trace_head(lower: &Lower<'_, '_>) {
         _ => {}
     }
 
-    let function = lower.runtime_fn(".lilac.trace_head", ptr.fn_type(&[], false));
+    let function = lower.runtime_fn(name, ptr.fn_type(&[], false));
     let builder = entry(lower, function);
     checked(
         builder.build_return(Some(&slot.as_pointer_value())),
-        "return trace head",
+        "return thread slot",
     );
 }
 

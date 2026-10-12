@@ -104,6 +104,10 @@ pub struct HirProgram {
     /// `Ns.item`, a `.` mid-edit) with what it is looked up in (editor
     /// completion).
     pub members: Vec<MemberSite>,
+    /// What `@panic` takes: the `@compiler_print` hook's parameter type
+    /// (`@byte_buffer` or an `@format_args(W)`), `None` (a `@byte_buffer`)
+    /// when the program defines no hook.
+    pub panic_message: Option<TypeId>,
 }
 
 impl HirExpr {

@@ -34,9 +34,7 @@ fn lowered_on(src: &str, target: lilac_target::Target) -> (Lowered, Diags) {
     let mut lir = lowered.module.clone();
     lir.funcs.extend(lilac_ir::build_runtime(&target));
     lir.funcs.extend(lilac_ir::hook_externs());
-    let (panic, data) = lilac_ir::panic_runtime();
-    lir.funcs.push(panic);
-    lir.data.extend(data);
+    lilac_ir::panic_runtime(lilac_ir::PanicMessage::of(&lowered.module)).add_to(&mut lir);
     let mut verify_diags = Diags::new();
     assert!(
         lilac_ir::verify(&lir, &mut verify_diags).is_ok() || text.contains("@compile_error"),

@@ -1,0 +1,21 @@
+// no-standard
+// expect-exit: trap
+// A `@compiler_print` that panics: the panic writing the first panic's
+// message tries the fixed message through the same hook, which panics
+// again, and the third panic traps at once.
+
+@entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
+    main()
+}
+
+@exit: function (code: @bit32) nothing {
+    @trap()
+}
+
+@compiler_print: function (text: @byte_buffer) nothing {
+    @panic("again")
+}
+
+main: function () nothing {
+    @panic("first")
+}

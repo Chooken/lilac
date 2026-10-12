@@ -46,6 +46,15 @@ impl LirTy {
         Self::Named(".lilac.format_part".to_owned())
     }
 
+    /// `#.lilac.format_line`: a template with no holes and one piece, its
+    /// fields flattened (`holes`, the text's `len` and `data`, `format`);
+    /// the panic handler builds one on its stack for a run-time line. It is
+    /// laid out as [`crate::format_template_layout`]`(0)`.
+    #[must_use]
+    pub fn format_line() -> Self {
+        Self::Named(".lilac.format_line".to_owned())
+    }
+
     /// `#.lilac.frame`: one shadow-stack record (`prev`, `site`; see
     /// [`crate::trace`]). The leading `.` keeps it apart from user types.
     #[must_use]

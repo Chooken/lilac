@@ -1449,9 +1449,37 @@ mod tests {
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs = lilac_ir::build_runtime(&module.target);
         module.funcs.extend(lilac_ir::hook_externs());
-        let (handler, data) = lilac_ir::panic_runtime();
-        module.funcs.push(handler);
-        module.data = data;
+        lilac_ir::panic_runtime(lilac_ir::PanicMessage::Bytes).add_to(&mut module);
+        let text = emit(&module);
+        assert!(text.contains("define void @.lilac.panic("), "{text}");
+        assert!(text.contains("@.lilac.panic.head = private"), "{text}");
+        assert!(
+            text.contains("@.lilac.panic_depth.slot = internal thread_local global i64 0"),
+            "{text}"
+        );
+    }
+
+    /// A handler whose `@compiler_print` takes a format writes templates,
+    /// and a trace site through a template on its stack.
+    #[test]
+    fn format_panic_handler_lowers() {
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
+        module.funcs = lilac_ir::build_runtime(&module.target);
+        let [exit, mut print] = lilac_ir::hook_externs();
+        print.ins[0].1 = lilac_ir::LirTy::format_args();
+        module.funcs.extend([exit, print]);
+        assert_eq!(
+            lilac_ir::PanicMessage::of(&module),
+            lilac_ir::PanicMessage::Format
+        );
+        lilac_ir::panic_runtime(lilac_ir::PanicMessage::Format).add_to(&mut module);
+        let mut diags = lilac_error::Diags::new();
+        assert!(
+            lilac_ir::verify(&module, &mut diags).is_ok(),
+            "{:?}",
+            diags.diagnostics()
+        );
         let text = emit(&module);
         assert!(text.contains("define void @.lilac.panic("), "{text}");
         assert!(text.contains("@.lilac.panic.head = private"), "{text}");

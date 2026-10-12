@@ -227,8 +227,8 @@ impl Lower<'_> {
     }
 
     /// Ends the block with `.lilac.panic(msg, site)` and `unreachable`,
-    /// where `msg` is a `#byte_buffer` place and `site` is this call's
-    /// stack-trace line.
+    /// where `msg` is a panic message place ([`Self::panic_text`]) and
+    /// `site` is this call's stack-trace line.
     pub(crate) fn panic_with(
         &mut self,
         state: &mut FnState,
@@ -355,9 +355,31 @@ impl Lower<'_> {
             span,
         });
         state.at(fail);
-        let msg = self.byte_buffer_place(state, panic.message().as_bytes(), span);
+        let msg = self.panic_text(state, panic.message().as_bytes(), span);
         self.panic_with(state, func, msg, span);
         state.at(ok);
+    }
+
+    /// A fresh panic message (`HirProgram::panic_message`) of the text
+    /// `bytes`: a `#byte_buffer` over a data constant, or a format of a
+    /// template with no holes.
+    fn panic_text(&mut self, state: &mut FnState, bytes: &[u8], span: Span) -> PlaceName {
+        let Some(message) = self
+            .hir
+            .panic_message
+            .filter(|&id| matches!(self.types.kind(id), TypeKind::FormatArgs { .. }))
+        else {
+            return self.byte_buffer_place(state, bytes, span);
+        };
+        let template = self.intern_template(&[bytes.to_vec()], Vec::new(), span);
+        let place = self.tmp(state, TypeRef::value(message), span);
+        state.emit(LirInst::Format {
+            template,
+            holes: Vec::new(),
+            dst: place.clone(),
+            span,
+        });
+        place
     }
 
     /// A fresh `#byte_buffer` place over the data constant `bytes`.
@@ -455,7 +477,7 @@ impl Lower<'_> {
             span,
         });
         state.at(fail);
-        let msg = self.byte_buffer_place(state, b"index out of bounds", span);
+        let msg = self.panic_text(state, b"index out of bounds", span);
         self.panic_with(state, func, msg, span);
         state.at(ok);
         let (array_reg, index_reg) = (state.reg(), state.reg());
@@ -535,7 +557,7 @@ impl Lower<'_> {
         } else {
             b"format hole index out of bounds"
         };
-        let msg = self.byte_buffer_place(state, message, span);
+        let msg = self.panic_text(state, message, span);
         self.panic_with(state, func, msg, span);
         state.at(ok);
         let Some(symbol) = intrinsic.runtime_symbol() else {

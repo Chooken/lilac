@@ -12,7 +12,9 @@ target triple = "x86_64-unknown-none"
 @.lilac.panic.newline = private unnamed_addr constant [1 x i8] c"\0A"
 @.lilac.panic.elided = private unnamed_addr constant [6 x i8] c"  ...\0A"
 @.lilac.panic.no_trace = private unnamed_addr constant [55 x i8] c"  (stack trace disabled; build with --stack-traces=on)\0A"
+@.lilac.panic.nested = private unnamed_addr constant [37 x i8] c"\0Apanic while writing a panic message\0A"
 @.lilac.trace_head.slot = internal global ptr null
+@.lilac.panic_depth.slot = internal global i64 0
 
 ; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
 declare void @llvm.trap() #0
@@ -26,6 +28,11 @@ entry:
 define ptr @.lilac.trace_head() {
 entry:
   ret ptr @.lilac.trace_head.slot
+}
+
+define ptr @.lilac.panic_depth() {
+entry:
+  ret ptr @.lilac.panic_depth.slot
 }
 
 define void @.root.run(ptr %in0, ptr %in1, ptr %in2) {
@@ -248,72 +255,106 @@ entry:
   store i64 0, ptr %count, align 8
   %frame.site = alloca ptr, align 8
   store ptr null, ptr %frame.site, align 8
-  %0 = call ptr @.lilac.offset(ptr %text, i64 8)
-  store ptr @.lilac.panic.head, ptr %0, align 8
+  %depth = alloca ptr, align 8
+  store ptr null, ptr %depth, align 8
+  %0 = call ptr @.lilac.panic_depth()
+  store ptr %0, ptr %depth, align 8
+  %1 = load ptr, ptr %depth, align 8
+  %2 = load i64, ptr %1, align 8
+  %3 = add i64 %2, 1
+  %4 = load ptr, ptr %depth, align 8
+  store i64 %3, ptr %4, align 8
+  %5 = icmp eq i64 %2, 0
+  %6 = zext i1 %5 to i8
+  %7 = icmp ne i8 %6, 0
+  br i1 %7, label %start, label %again
+
+again:                                            ; preds = %entry
+  %8 = load ptr, ptr %depth, align 8
+  %9 = load i64, ptr %8, align 8
+  %10 = icmp eq i64 %9, 2
+  %11 = zext i1 %10 to i8
+  %12 = icmp ne i8 %11, 0
+  br i1 %12, label %nested, label %broken
+
+nested:                                           ; preds = %again
+  %13 = call ptr @.lilac.offset(ptr %text, i64 8)
+  store ptr @.lilac.panic.nested, ptr %13, align 8
+  store i64 37, ptr %text, align 8
+  call void @.lilac.compiler_print(ptr %text)
+  br label %exit
+
+broken:                                           ; preds = %again
+  call void @.lilac.abort()
+  unreachable
+
+start:                                            ; preds = %entry
+  %14 = call ptr @.lilac.offset(ptr %text, i64 8)
+  store ptr @.lilac.panic.head, ptr %14, align 8
   store i64 7, ptr %text, align 8
   call void @.lilac.compiler_print(ptr %text)
   call void @.lilac.compiler_print(ptr %in0)
-  %1 = call ptr @.lilac.offset(ptr %text, i64 8)
-  store ptr @.lilac.panic.newline, ptr %1, align 8
+  %15 = call ptr @.lilac.offset(ptr %text, i64 8)
+  store ptr @.lilac.panic.newline, ptr %15, align 8
   store i64 1, ptr %text, align 8
   call void @.lilac.compiler_print(ptr %text)
-  %2 = call ptr @.lilac.trace_head()
-  store ptr %2, ptr %head, align 8
-  %3 = load ptr, ptr %head, align 8
-  %4 = load ptr, ptr %3, align 8
-  store ptr %4, ptr %frame, align 8
-  %5 = ptrtoint ptr %4 to i64
-  %6 = icmp eq i64 %5, 0
-  %7 = zext i1 %6 to i8
-  %8 = icmp ne i8 %7, 0
-  br i1 %8, label %untraced, label %walk
+  %16 = call ptr @.lilac.trace_head()
+  store ptr %16, ptr %head, align 8
+  %17 = load ptr, ptr %head, align 8
+  %18 = load ptr, ptr %17, align 8
+  store ptr %18, ptr %frame, align 8
+  %19 = ptrtoint ptr %18 to i64
+  %20 = icmp eq i64 %19, 0
+  %21 = zext i1 %20 to i8
+  %22 = icmp ne i8 %21, 0
+  br i1 %22, label %untraced, label %walk
 
-untraced:                                         ; preds = %entry
+untraced:                                         ; preds = %start
   call void @.lilac.compiler_print(ptr %in1)
-  %9 = call ptr @.lilac.offset(ptr %text, i64 8)
-  store ptr @.lilac.panic.no_trace, ptr %9, align 8
+  %23 = call ptr @.lilac.offset(ptr %text, i64 8)
+  store ptr @.lilac.panic.no_trace, ptr %23, align 8
   store i64 55, ptr %text, align 8
   call void @.lilac.compiler_print(ptr %text)
   br label %exit
 
-walk:                                             ; preds = %print, %entry
-  %10 = load ptr, ptr %frame, align 8
-  %11 = ptrtoint ptr %10 to i64
-  %12 = icmp eq i64 %11, 0
-  %13 = zext i1 %12 to i8
-  %14 = icmp ne i8 %13, 0
-  br i1 %14, label %exit, label %check
+walk:                                             ; preds = %print, %start
+  %24 = load ptr, ptr %frame, align 8
+  %25 = ptrtoint ptr %24 to i64
+  %26 = icmp eq i64 %25, 0
+  %27 = zext i1 %26 to i8
+  %28 = icmp ne i8 %27, 0
+  br i1 %28, label %exit, label %check
 
 check:                                            ; preds = %walk
-  %15 = load i64, ptr %count, align 8
-  %16 = icmp eq i64 %15, 128
-  %17 = zext i1 %16 to i8
-  %18 = icmp ne i8 %17, 0
-  br i1 %18, label %elided, label %print
+  %29 = load i64, ptr %count, align 8
+  %30 = icmp eq i64 %29, 128
+  %31 = zext i1 %30 to i8
+  %32 = icmp ne i8 %31, 0
+  br i1 %32, label %elided, label %print
 
 print:                                            ; preds = %check
-  %19 = load ptr, ptr %frame, align 8
-  %20 = call ptr @.lilac.offset(ptr %19, i64 8)
-  store ptr %20, ptr %frame.site, align 8
-  %21 = load ptr, ptr %frame.site, align 8
-  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %text, ptr align 8 %21, i64 16, i1 false)
+  %33 = load ptr, ptr %frame, align 8
+  %34 = call ptr @.lilac.offset(ptr %33, i64 8)
+  store ptr %34, ptr %frame.site, align 8
+  %35 = load ptr, ptr %frame.site, align 8
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %text, ptr align 8 %35, i64 16, i1 false)
   call void @.lilac.compiler_print(ptr %text)
-  %22 = load ptr, ptr %frame, align 8
-  %23 = load ptr, ptr %22, align 8
-  store ptr %23, ptr %frame, align 8
-  %24 = load i64, ptr %count, align 8
-  %25 = add i64 %24, 1
-  store i64 %25, ptr %count, align 8
+  %36 = load ptr, ptr %frame, align 8
+  %37 = load ptr, ptr %36, align 8
+  store ptr %37, ptr %frame, align 8
+  %38 = load i64, ptr %count, align 8
+  %39 = add i64 %38, 1
+  store i64 %39, ptr %count, align 8
   br label %walk
 
 elided:                                           ; preds = %check
-  %26 = call ptr @.lilac.offset(ptr %text, i64 8)
-  store ptr @.lilac.panic.elided, ptr %26, align 8
+  %40 = call ptr @.lilac.offset(ptr %text, i64 8)
+  store ptr @.lilac.panic.elided, ptr %40, align 8
   store i64 6, ptr %text, align 8
   call void @.lilac.compiler_print(ptr %text)
   br label %exit
 
-exit:                                             ; preds = %elided, %walk, %untraced
+exit:                                             ; preds = %elided, %walk, %untraced, %nested
   %code = alloca i32, align 4
   store i32 0, ptr %code, align 4
   store i32 101, ptr %code, align 4

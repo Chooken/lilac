@@ -23,7 +23,8 @@
   makes no OS call: the compiler has no OS layer. Backends hand-write only
   the leaf intrinsics (`@ptr_add`, `@memcpy`, `@memmove`, `@memset`,
   `@memcmp`, `@lilac_abort`, `@linux_syscall`: the Linux system-call
-  instruction, and the thread leaves below).
+  instruction, `@trace_head` and `@panic_depth`: thread-local slots, and
+  the thread leaves below).
 - Instruction builtins (`Intrinsic::leaf_builtin`): `@ptr_add`/`@memcpy`/
   `@memmove`/`@memset`/`@linux_syscall` call their leaf (`.lilac.ptr_add`
   is an always-inline wrapping `getelementptr i8`), `@trap` calls
@@ -684,6 +685,20 @@ bug fix that changes generated code.
   unused). It writes `panic: <msg>` and the trace through `@compiler_print`
   (stderr in `Standard`), then calls `@exit(101)` and traps. A panic is an
   abort: no drops run.
+- A panic message is what `@compiler_print` takes (`M`: `@byte_buffer` or
+  an `@format_args(W)`, `sigs::platform_hook_shape_ok`; one definition
+  whatever its type, `E034`). Typeck checks `@panic`'s argument against
+  it with the slot rules (`Checker::check_panic`, `panic_hook_message`;
+  `@byte_buffer` with no hook) and records it as
+  `HirProgram::panic_message`; lowering builds its generated messages as
+  `M` (`Lower::panic_text`: a data constant, or a hole-free template), and
+  the driver builds the handler for the hook it finds
+  (`lilac_ir::PanicMessage::of`, `panic_runtime(message)`). A format
+  handler writes its text as templates and each trace site through a
+  `#.lilac.format_line` on its stack. The handler first bumps the
+  thread's panic depth (`@panic_depth`, a thread-local slot like the
+  trace head's): a second panic writes `panic while writing a panic
+  message` and exits 101, a third traps.
 - Stack traces are a shadow stack, not native unwinding:
   `lilac_ir::trace::instrument` runs after DCE when `Session.stack_traces` is
   set and links a `#.lilac.frame` record per user function call (the head

@@ -117,7 +117,7 @@ offset, so the layout here is the only one. No layout, and no array, may
 be larger than the target's `isize::MAX` bytes (typeck reports one as `E067`).
 
 Builtin aggregates usable in `#` positions are `#byte_buffer`,
-`#format_args`, `#.lilac.format_part` and
+`#format_args`, `#.lilac.format_part`, `#.lilac.format_line` and
 `#.lilac.frame`. All are plain values with no hidden behavior, and their
 field layouts are fixed by the IR rather than declared in a `type` section:
 
@@ -125,12 +125,15 @@ field layouts are fixed by the IR rather than declared in a `type` section:
 #byte_buffer { len: #bit_native, data: ref #bit8 }
 #format_args { template: ref #unknown, holes: ref #unknown }
 #.lilac.format_part { text: #byte_buffer, format: ref #unknown }
+#.lilac.format_line { holes: #bit_native, len: #bit_native, data: ref #bit8, format: ref #unknown }
 #.lilac.frame { prev: ref #.lilac.frame, site: #byte_buffer }
 ```
 
 `#format_args` is an f-string built by `format`: its template and its array
 of hole addresses (null with no holes). `#.lilac.format_part` is one part
-of a template.
+of a template. `#.lilac.format_line` is a template with no holes and one
+piece, its fields flattened, laid out as such a template is: the panic
+handler builds one on its stack to write a trace line as a format.
 
 `#.lilac.frame` is one shadow-stack record for panic stack traces (see
 *Panics and stack traces* below); the leading `.` keeps it apart from user
@@ -520,6 +523,7 @@ call c &f (in %a) (out %b)
 | `@linux_syscall` | `#bit_native` × 7 | `#bit_native` | the Linux system-call instruction, as inline assembly (as `.lilac.linux_syscall`; x86-64 and aarch64 Linux only, `E035` from user code elsewhere) |
 | `@lilac_abort` | — | — | `llvm.trap` + `unreachable` (as `.lilac.abort`); `@trap()` lowers to it, then `unreachable` |
 | `@trace_head` | — | `ref ref #.lilac.frame` | address of a zeroed internal pointer global (as `.lilac.trace_head`), `thread_local` on Windows, Linux (local-exec) and macOS |
+| `@panic_depth` | — | `ref #bit_native` | address of the thread's panic depth, a zeroed internal integer global (as `.lilac.panic_depth`), thread-local like `@trace_head`'s |
 | `@linux_thread_clone` | `#bit_native`, `ref #unknown` × 4, `#bit_native`, `ref #unknown` × 2 | `#bit_native` | `.lilac.tls_init` lays out the TLS block from `PT_TLS`, then the `clone` system call in module assembly (`.lilac.clone_raw`), the child calling the C function `entry(argument)` (as `.lilac.linux_thread_clone`; x86-64 and aarch64 Linux only, `E035`) |
 
 A native Linux executable with thread-locals calls `.lilac.main_tls` first
@@ -592,6 +596,22 @@ such as `"  at main (main.lilac:3:5)\n"`) followed by `unreachable`.
 `.lilac.panic` (`lilac_ir::panic_runtime`) writes `panic: <msg>`, then the
 stack trace, through `.lilac.compiler_print`, then calls `.lilac.exit` with
 code 101 and traps (`@lilac_abort`).
+
+`msg` has the type `.lilac.compiler_print` takes, `M`: `#byte_buffer`, or
+`#format_args` (the hook takes an `@format_args(W)`; a missing hook is
+declared with `#byte_buffer`). The handler writes each line as an `M`: its
+own text as `!const` data or as hole-free templates
+(`!.lilac.panic.head: format "panic: "`), and each trace site through a
+`#.lilac.format_line` on its stack. The messages lowering generates
+(`division by zero`, `index out of bounds`, the format bounds checks) are
+built the same way: a `#byte_buffer` over a `!const`, or `format !fmtN ()`
+of a template with one piece.
+
+A panic while the message is written must not recurse forever. The
+handler first adds one to the thread's panic depth (`@panic_depth`): a
+handler entered at depth 1 writes `panic while writing a panic message`
+and exits with 101, and one entered deeper (the hook itself panics) traps
+at once.
 
 The trace is a shadow stack. When stack traces are on, the driver runs
 `lilac_ir::trace::instrument` after `prune_unreachable`. It gives every

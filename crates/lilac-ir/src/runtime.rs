@@ -22,7 +22,8 @@ use lilac_target::{Scalar, Target};
 
 use crate::{
     builtin_layout, format_template_layout, ArithOp, ConvertOp, LirBlock, LirCallee, LirConst,
-    LirData, LirFunc, LirInst, LirOperand, LirTerm, LirTy, PlaceName, Reg, Symbol,
+    LirData, LirFormat, LirFunc, LirInst, LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg,
+    Symbol,
 };
 
 /// How a program enters: which symbol calls the entry stub `.lilac.start`.
@@ -117,13 +118,48 @@ pub fn hook_externs() -> [LirFunc; 2] {
     ]
 }
 
-/// Data written around a panic message.
+/// What a panic message is: the type the `@compiler_print` hook takes,
+/// which `@panic` takes too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanicMessage {
+    /// A `#byte_buffer`, also when the program defines no hook
+    /// ([`hook_externs`] declares it so).
+    #[default]
+    Bytes,
+    /// A `#format_args`: the handler writes each line as a format.
+    Format,
+}
+
+impl PanicMessage {
+    /// The message type of `module`'s `@compiler_print` hook: `Format` when
+    /// it takes a `#format_args`, else (no hook too) `Bytes`.
+    #[must_use]
+    pub fn of(module: &LirModule) -> Self {
+        let hook = module.funcs.iter().find(|func| func.name == PRINT_HOOK);
+        match hook.and_then(|func| func.ins.first()) {
+            Some((_, ty)) if *ty == LirTy::format_args() => Self::Format,
+            _ => Self::Bytes,
+        }
+    }
+
+    /// The message's LIR type.
+    #[must_use]
+    pub fn ty(self) -> LirTy {
+        match self {
+            Self::Bytes => LirTy::byte_buffer(),
+            Self::Format => LirTy::format_args(),
+        }
+    }
+}
+
+/// Text written around a panic message.
 const PANIC_HEAD: &str = ".lilac.panic.head";
 const PANIC_NEWLINE: &str = ".lilac.panic.newline";
 const PANIC_ELIDED: &str = ".lilac.panic.elided";
 const PANIC_NO_TRACE: &str = ".lilac.panic.no_trace";
-/// Each panic data constant and its text.
-const PANIC_DATA: [(&str, &str); 4] = [
+const PANIC_NESTED: &str = ".lilac.panic.nested";
+/// Each panic text and its bytes.
+const PANIC_TEXT: [(&str, &str); 5] = [
     (PANIC_HEAD, "panic: "),
     (PANIC_NEWLINE, "\n"),
     (PANIC_ELIDED, "  ...\n"),
@@ -131,16 +167,42 @@ const PANIC_DATA: [(&str, &str); 4] = [
         PANIC_NO_TRACE,
         "  (stack trace disabled; build with --stack-traces=on)\n",
     ),
+    (PANIC_NESTED, "\npanic while writing a panic message\n"),
 ];
 /// Frames written before a trace is cut short (deep recursion).
 const PANIC_MAX_FRAMES: u64 = 128;
 /// A panicking process's exit code (101, Rust's convention).
 const PANIC_EXIT_CODE: u64 = 101;
 
-/// The panic handler `.lilac.panic(#byte_buffer %msg, #byte_buffer %site)`
-/// and the data it writes through the `@compiler_print` hook: `panic:
-/// <msg>`, then the stack trace. It then calls `@exit(101)` and traps, so it
-/// never returns.
+/// The panic handler and the constants it writes: data for a
+/// [`PanicMessage::Bytes`] handler, hole-free templates for a
+/// [`PanicMessage::Format`] one.
+#[derive(Debug, Clone)]
+pub struct PanicRuntime {
+    /// `.lilac.panic`.
+    pub handler: LirFunc,
+    /// Its text as data constants.
+    pub data: Vec<LirData>,
+    /// Its text as templates.
+    pub formats: Vec<LirFormat>,
+}
+
+impl PanicRuntime {
+    /// Appends the handler and its constants to `module`.
+    pub fn add_to(self, module: &mut LirModule) {
+        module.funcs.push(self.handler);
+        module.data.extend(self.data);
+        module.formats.extend(self.formats);
+    }
+}
+
+/// The panic handler `.lilac.panic(M %msg, #byte_buffer %site)`, where `M`
+/// is `message`'s type, and the text it writes through the
+/// `@compiler_print` hook: `panic: <msg>`, then the stack trace. It then
+/// calls `@exit(101)` and traps, so it never returns. Each line is written
+/// as an `M`: a data constant, or a template with no holes; a trace site,
+/// a `#byte_buffer` known only at run time, as the one piece of a template
+/// on the handler's stack (`#.lilac.format_line`).
 ///
 /// The trace walks the shadow stack `@trace_head` points at (see
 /// [`crate::trace`]), writing each frame's `site` line, innermost first, and
@@ -148,22 +210,39 @@ const PANIC_EXIT_CODE: u64 = 101;
 /// traces) it writes the panic's own `site` and a hint instead. Every line
 /// already ends in a newline.
 ///
-/// It is kept apart from [`build_runtime`] because it carries data; DCE drops
-/// both from a program that never panics.
+/// A panic while the message is written (a formatter, or the hook, that
+/// panics) must not recurse forever: the thread's panic depth
+/// (`@panic_depth`) makes a second panic write the fixed `panic while
+/// writing a panic message` and exit 101, and a third trap at once.
+///
+/// It is kept apart from [`build_runtime`] because it carries constants;
+/// DCE drops them from a program that never panics.
 #[must_use]
-pub fn panic_runtime() -> (LirFunc, Vec<LirData>) {
-    let data = PANIC_DATA
-        .into_iter()
-        .map(|(name, text)| LirData {
-            name: name.into(),
-            bytes: text.as_bytes().to_vec(),
-            span: span(),
-        })
-        .collect();
-    (panic_handler(), data)
+pub fn panic_runtime(message: PanicMessage) -> PanicRuntime {
+    let (mut data, mut formats) = (Vec::new(), Vec::new());
+    for (name, text) in PANIC_TEXT {
+        match message {
+            PanicMessage::Bytes => data.push(LirData {
+                name: name.into(),
+                bytes: text.as_bytes().to_vec(),
+                span: span(),
+            }),
+            PanicMessage::Format => formats.push(LirFormat {
+                name: name.into(),
+                pieces: vec![text.as_bytes().to_vec()],
+                formats: Vec::new(),
+                span: span(),
+            }),
+        }
+    }
+    PanicRuntime {
+        handler: panic_handler(message),
+        data,
+        formats,
+    }
 }
 
-fn panic_handler() -> LirFunc {
+fn panic_handler(message: PanicMessage) -> LirFunc {
     let frame_ref = LirTy::trace_frame().to_ref();
     let mut entry = vec![
         alloca(LirTy::byte_buffer(), "text"),
@@ -171,19 +250,45 @@ fn panic_handler() -> LirFunc {
         alloca(frame_ref.clone(), "frame"),
         alloca(LirTy::BitNative, "count"),
         alloca(LirTy::byte_buffer().to_ref(), "frame.site"),
+        alloca(LirTy::BitNative.to_ref(), "depth"),
     ];
-    entry.extend(write_data(PANIC_HEAD, "a"));
-    entry.push(write_buffer("msg"));
-    entry.extend(write_data(PANIC_NEWLINE, "c"));
+    if message == PanicMessage::Format {
+        entry.extend([
+            alloca(LirTy::format_args(), "line"),
+            alloca(LirTy::format_line(), "site.template"),
+            alloca(LirTy::format_args(), "site.line"),
+        ]);
+    }
     entry.extend([
+        call_builtin("@panic_depth", &[], &["depth"]),
+        load("depth", "d", LirTy::BitNative),
+        constant("one", LirConst::Int(1), LirTy::BitNative),
+        arith(ArithOp::IAdd, "d", "one", "deeper", LirTy::BitNative),
+        store(LirOperand::Reg("deeper".into()), "depth"),
+        constant("zero", LirConst::Int(0), LirTy::BitNative),
+        arith(ArithOp::Eq, "d", "zero", "first", LirTy::Bit(8)),
+    ]);
+
+    // The depth already counts this panic: 2 is the second.
+    let again = vec![
+        load("depth", "d", LirTy::BitNative),
+        constant("two", LirConst::Int(2), LirTy::BitNative),
+        arith(ArithOp::Eq, "d", "two", "second", LirTy::Bit(8)),
+    ];
+    let broken = vec![call_builtin("@lilac_abort", &[], &[])];
+
+    let mut start = write_text(message, PANIC_HEAD, "a");
+    start.push(call(PRINT_HOOK, &["msg"], &[]));
+    start.extend(write_text(message, PANIC_NEWLINE, "c"));
+    start.extend([
         call_builtin("@trace_head", &[], &["head"]),
         load("head", "top", frame_ref.clone()),
         copy_place(LirOperand::Reg("top".into()), "frame"),
     ]);
-    entry.extend(is_null("top", "untraced"));
+    start.extend(is_null("top", "untraced"));
 
-    let mut untraced = vec![write_buffer("site")];
-    untraced.extend(write_data(PANIC_NO_TRACE, "b"));
+    let mut untraced = write_site(message, "site");
+    untraced.extend(write_text(message, PANIC_NO_TRACE, "b"));
 
     let mut walk = vec![copy_reg(
         LirOperand::Place("frame".into()),
@@ -203,7 +308,7 @@ fn panic_handler() -> LirFunc {
         copy_place(LirOperand::Reg("site.at".into()), "frame.site"),
         copy_deref("frame.site", "text"),
     ];
-    print.push(write_buffer("text"));
+    print.extend(write_site(message, "text"));
     print.extend([
         field("frame", "prev", 0, "prev", frame_ref),
         copy_place(LirOperand::Reg("prev".into()), "frame"),
@@ -219,43 +324,99 @@ fn panic_handler() -> LirFunc {
 
     lir_func(
         ".lilac.panic",
-        &[
-            ("msg", LirTy::byte_buffer()),
-            ("site", LirTy::byte_buffer()),
-        ],
+        &[("msg", message.ty()), ("site", LirTy::byte_buffer())],
         &[],
         vec![
-            block("entry", entry, branch_if("untraced", "untraced", "walk")),
+            block("entry", entry, branch_if("first", "start", "again")),
+            block("again", again, branch_if("second", "nested", "broken")),
+            block(
+                "nested",
+                write_text(message, PANIC_NESTED, "a"),
+                branch("exit"),
+            ),
+            block("broken", broken, unreachable()),
+            block("start", start, branch_if("untraced", "untraced", "walk")),
             block("untraced", untraced, branch("exit")),
             block("walk", walk, branch_if("done", "exit", "check")),
             block("check", check, branch_if("full", "elided", "print")),
             block("print", print, branch("walk")),
-            block("elided", write_data(PANIC_ELIDED, "a"), branch("exit")),
+            block(
+                "elided",
+                write_text(message, PANIC_ELIDED, "a"),
+                branch("exit"),
+            ),
             block("exit", exit, unreachable()),
         ],
     )
 }
 
-/// Writes the `#byte_buffer` place `buffer` through `@compiler_print`.
-fn write_buffer(buffer: &str) -> LirInst {
-    call(PRINT_HOOK, &[buffer], &[])
+/// Writes the panic text `name` through `@compiler_print`: the data
+/// constant through `%text`, or the template through `%line`.
+fn write_text(message: PanicMessage, name: &str, tag: &str) -> Vec<LirInst> {
+    let Some((_, text)) = PANIC_TEXT.iter().find(|(data, _)| *data == name) else {
+        lilac_error::bug!(span(), "`{name}` is not panic text");
+    };
+    match message {
+        PanicMessage::Bytes => {
+            let mut insts = fill_byte_buffer(
+                &"text".into(),
+                name.into(),
+                u64::try_from(text.len()).unwrap_or(u64::MAX),
+                (format!("{tag}.text").into(), format!("{tag}.len").into()),
+                span(),
+            )
+            .to_vec();
+            insts.push(call(PRINT_HOOK, &["text"], &[]));
+            insts
+        }
+        PanicMessage::Format => vec![
+            LirInst::Format {
+                template: name.into(),
+                holes: Vec::new(),
+                dst: "line".into(),
+                span: span(),
+            },
+            call(PRINT_HOOK, &["line"], &[]),
+        ],
+    }
 }
 
-/// Writes the panic data constant `name` through `%text`.
-fn write_data(name: &str, tag: &str) -> Vec<LirInst> {
-    let Some((_, text)) = PANIC_DATA.iter().find(|(data, _)| *data == name) else {
-        lilac_error::bug!(span(), "`{name}` is not panic data");
-    };
-    let mut insts = fill_byte_buffer(
-        &"text".into(),
-        name.into(),
-        u64::try_from(text.len()).unwrap_or(u64::MAX),
-        (format!("{tag}.text").into(), format!("{tag}.len").into()),
-        span(),
-    )
-    .to_vec();
-    insts.push(write_buffer("text"));
-    insts
+/// Writes the `#byte_buffer` place `buffer` through `@compiler_print`: as
+/// it is, or as the one piece of the template `%site.template` (zeroed, so
+/// it has no holes and no formatter), which `%site.line` points at.
+fn write_site(message: PanicMessage, buffer: &str) -> Vec<LirInst> {
+    match message {
+        PanicMessage::Bytes => vec![call(PRINT_HOOK, &[buffer], &[])],
+        PanicMessage::Format => vec![
+            field(buffer, "len", 0, "site.len", LirTy::BitNative),
+            store_field(
+                LirOperand::Reg("site.len".into()),
+                "site.template",
+                "len",
+                1,
+            ),
+            field(buffer, "data", 1, "site.data", LirTy::byte_ref()),
+            store_field(
+                LirOperand::Reg("site.data".into()),
+                "site.template",
+                "data",
+                2,
+            ),
+            LirInst::Addr {
+                place: "site.template".into(),
+                dst: "site.address".into(),
+                ty: LirTy::opaque_ref(),
+                span: span(),
+            },
+            store_field(
+                LirOperand::Reg("site.address".into()),
+                "site.line",
+                "template",
+                0,
+            ),
+            call(PRINT_HOOK, &["site.line"], &[]),
+        ],
+    }
 }
 
 /// Makes the `#byte_buffer` place `buffer` (or the one the `ref
@@ -792,15 +953,36 @@ mod tests {
             ..super::lir_func(".lilac.entry", &super::entry_params(), &[], Vec::new())
         });
         module.funcs.push(entry_point());
-        let (handler, data) = super::panic_runtime();
-        module.funcs.push(handler);
-        module.data = data;
+        super::panic_runtime(super::PanicMessage::Bytes).add_to(&mut module);
         let mut diags = lilac_error::Diags::new();
         assert!(
             verify(&module, &mut diags).is_ok(),
             "{:?}",
             diags.diagnostics()
         );
+    }
+
+    /// A one-piece stack template (`#.lilac.format_line`) is laid out as
+    /// a template with no holes, on every target.
+    #[test]
+    fn format_line_is_a_hole_free_template() {
+        for target in lilac_target::Target::supported() {
+            let line =
+                crate::builtin_layout(&crate::LirTy::format_line(), &target).expect("a line");
+            let template = crate::format_template_layout(0, &target).expect("a template");
+            let part =
+                crate::builtin_layout(&crate::LirTy::format_part(), &target).expect("a part");
+            let parts = template.fields[1].offset;
+            let offsets: Vec<u64> = line.fields.iter().map(|field| field.offset).collect();
+            let pointer = target.scalar_layout(lilac_target::Scalar::Pointer).0;
+            assert_eq!(
+                offsets,
+                [0, parts, parts + pointer, parts + part.fields[1].offset],
+                "{}",
+                target.to_triple()
+            );
+            assert_eq!((line.size, line.align), (template.size, template.align));
+        }
     }
 
     /// The entry stub calls `@entry`, then `@exit(0)`, then traps.

@@ -1032,6 +1032,7 @@ impl Checker<'_> {
             _ if intrinsic.is_memory() => {
                 return self.check_memory(fcx, intrinsic, name, args, span, expected);
             }
+            Intrinsic::Panic => return self.check_panic(fcx, name, args, span),
             Intrinsic::CompileError => {
                 self.intrinsic_arity(name, 1, args.len(), span)?;
                 let Expr::Str(msg, msg_span) = &args[0] else {
@@ -1098,6 +1099,35 @@ impl Checker<'_> {
             callee: HirCallee::Intrinsic(intrinsic),
             args: checked,
             outs,
+        })
+    }
+
+    /// `@panic(message)`: the message is what `@compiler_print` takes
+    /// (`@byte_buffer` without a hook), slot rules included, so with a
+    /// format hook a literal, an f-string or one value is a message.
+    fn check_panic(
+        &mut self,
+        fcx: &mut FnCx,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        let arity = self.intrinsic_arity(name, 1, args.len(), span);
+        self.callee(fcx, args, arity)?;
+        let want = TypeRef::value(
+            self.panic_hook_message()
+                .unwrap_or_else(|| Builtin::ByteBuffer.id()),
+        );
+        let value = self.check_expr(fcx, &args[0], Some(want.id));
+        let value = self.coerce(value, want, args[0].span());
+        if value.ty.is_error() {
+            // `check_expr` or `coerce` reported it.
+            return Err(self.diags.already_reported());
+        }
+        Ok(Called::Call {
+            callee: HirCallee::Intrinsic(Intrinsic::Panic),
+            args: vec![value],
+            outs: Vec::new(),
         })
     }
 

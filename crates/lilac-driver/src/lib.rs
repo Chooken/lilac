@@ -730,20 +730,19 @@ impl Session {
     }
 
     /// Appends the runtime helpers, the panic handler `.lilac.panic` and its
-    /// data, and, for an executable, the entry stub `.lilac.start`. An
+    /// text (data, or templates when `@compiler_print` takes a format), and, for an executable, the entry stub `.lilac.start`. An
     /// `@exit` or `@compiler_print` hook the program does not define (only
     /// allowed outside an executable) is declared `extern` under its fixed
     /// symbol, so the panic handler links against whatever defines it.
     fn inject_runtime(&self, lir: &mut LirModule) {
+        let message = lilac_ir::PanicMessage::of(lir);
         lir.funcs.extend(lilac_ir::build_runtime(&self.target));
         for hook in lilac_ir::hook_externs() {
             if !lir.funcs.iter().any(|func| func.name == hook.name) {
                 lir.funcs.push(hook);
             }
         }
-        let (panic, data) = lilac_ir::panic_runtime();
-        lir.funcs.push(panic);
-        lir.data.extend(data);
+        lilac_ir::panic_runtime(message).add_to(lir);
         if self.require_entry {
             lir.funcs.push(lilac_ir::entry_point());
         }
@@ -1738,6 +1737,13 @@ helper: function () nothing {{
             "@compiler_print: function (text: ref @byte_buffer) nothing {
 }
 ",
+            "@compiler_print: function (text: @bit32) nothing {
+}
+",
+            "Out: object {}
+@compiler_print: function (text: ref @format_args(Out)) nothing {
+}
+",
             "Thing: object {
     @entry: function () nothing {
     }
@@ -1748,6 +1754,61 @@ helper: function () nothing {{
             assert!(session.compile_lir("shape.lilac", src).is_err(), "{src}");
             assert_eq!(codes(&session), ["E022"], "{src}");
         }
+    }
+
+    /// With a `@compiler_print` that takes a format, `@panic` takes one too
+    /// (a literal, an f-string, or one value), the handler takes it, and a
+    /// generated message (a division by zero) is a template with no holes.
+    #[test]
+    fn panics_take_what_compiler_print_takes() {
+        let hooks = "Out: object {}
+@format: function (value: ref @bit32, out: ref Out) nothing {}
+@compiler_print: function (text: @format_args(Out)) nothing {
+}
+";
+        let mut session = Session::new();
+        let module = session
+            .compile_lir(
+                "p.lilac",
+                &format!(
+                    "{hooks}
+main: function () nothing {{
+    n: @bit32 = 0x7
+    if n == 0x1 {{ @panic(\"literal\") }}
+    if n == 0x2 {{ @panic($\"bad {{n}}\") }}
+    if n == 0x3 {{ @panic(n) }}
+    m: @bit32 = @i_div_u_32(0x1, n)
+}}
+"
+                ),
+            )
+            .unwrap_or_else(|_| panic!("{}", session.render_diagnostics()));
+        let text = module.to_text();
+        assert!(
+            text.contains("in #format_args %msg"),
+            "the handler takes a format: {text}"
+        );
+        assert!(text.contains("format \"division by zero\""), "{text}");
+        assert!(text.contains("format \"panic: \""), "{text}");
+        assert!(!text.contains("str = \"panic: \""), "{text}");
+
+        // One `@compiler_print`, whatever its type.
+        let mut session = Session::new();
+        let src = format!("{hooks}@compiler_print: function (text: @byte_buffer) nothing {{\n}}\n");
+        assert!(session.compile_lir("dup.lilac", &src).is_err());
+        assert_eq!(codes(&session), ["E034"]);
+
+        // A bytes hook keeps `@panic` a `@byte_buffer`.
+        let mut session = Session::new();
+        let src = "@compiler_print: function (text: @byte_buffer) nothing {
+}
+main: function () nothing {
+    n: @bit32 = 0x7
+    @panic(n)
+}
+";
+        assert!(session.compile_lir("bytes.lilac", src).is_err());
+        assert_eq!(codes(&session), ["E043"]);
     }
 
     /// Without `@exit` or `@compiler_print`, outside an executable, the panic

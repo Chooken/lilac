@@ -2169,6 +2169,7 @@ fn builtin_symbol(name: &str) -> &str {
         "@lilac_abort" => ".lilac.abort",
         "@linux_syscall" => ".lilac.linux_syscall",
         "@trace_head" => ".lilac.trace_head",
+        "@panic_depth" => ".lilac.panic_depth",
         "@linux_thread_clone" => ".lilac.linux_thread_clone",
         other => other.strip_prefix('@').unwrap_or(other),
     }
