@@ -1,7 +1,8 @@
 // libc
 // expect-stdout: OK
-// Uses every `Standard` type so the whole library is instantiated, checked
-// and emitted. Prints `OK` and exits 0 when every computed check matched.
+// Uses every `Standard` type, and formats each, so the whole library is
+// instantiated, checked and emitted. Prints `OK` and exits 0 when every
+// computed check matched.
 
 using Standard
 using Standard.C
@@ -129,6 +130,76 @@ c_library: function () nothing {
     free(block)
 }
 
+
+// Formatted text collected in a buffer, to compare with what it should be.
+Capture: object {
+    used: @bit_native
+    bytes: @array(@bit8, 0x100)
+}
+
+capture_push: function (target: ref unknown, text: @byte_buffer) nothing {
+    capture: ref Capture = target as ref Capture
+    @memcpy(@ptr_add(@array_at(ref capture.bytes, 0x0) as ref unknown, capture.used) as ref @bit8, @byte_buffer_ptr(text), @byte_buffer_len(text))
+    capture.used = @i_add_native(capture.used, @byte_buffer_len(text))
+}
+
+// Exits with `code` unless `text` formats as exactly `want`.
+expect_format: function (text: Format, want: @byte_buffer, code: @bit32) nothing {
+    capture: Capture = Capture { used = 0x0, bytes = @array(@bit8, 0x100) {} }
+    out: Formatter = Formatter.over(ref capture as ref unknown, capture_push)
+    out.write(text)
+    if capture.used == @byte_buffer_len(want) {
+    } else {
+        exit(code)
+    }
+    got: ref @bit8 = @array_at(ref capture.bytes, 0x0)
+    index: @bit_native = 0x0
+    loop {
+        if index == capture.used { break }
+        if @load_u8(got, index) == @load_u8(@byte_buffer_ptr(want), index) {
+        } else {
+            exit(code)
+        }
+        index = @i_add_native(index, 0x1)
+    }
+}
+
+formatting: function () nothing {
+    b8: @bit8 = 0xFF
+    b16: @bit16 = 0x0
+    b32: @bit32 = 0xFFFFFFFF
+    b64: @bit64 = 0xFFFFFFFFFFFFFFFF
+    native: @bit_native = 0x2A
+    expect_format($"{b8} {b16} {b32} {b64} {native}", "255 0 4294967295 18446744073709551615 42", 0x60)
+
+    i8: Int8 = -0x80 as Int8
+    i16: Int16 = -0x1 as Int16
+    i32: Int32 = 0x7FFFFFFF as Int32
+    i64: Int64 = -0x8000000000000000 as Int64
+    nat: Int = -0x7 as Int
+    expect_format($"{i8} {i16} {i32} {i64} {nat}", "-128 -1 2147483647 -9223372036854775808 -7", 0x61)
+
+    expect_format($"{i8.hex()} {i16.hex()} {(0xBEEF as Int32).hex()} {(0x0 as Int64).hex()}", "80 ffff beef 0", 0x62)
+    expect_format($"{(0x5 as Int8).binary()} {(-0x1 as Int8).binary()} {(0x0 as Int).binary()}", "101 11111111 0", 0x63)
+
+    expect_format($"{true} {false}", "true false", 0x64)
+    bytes: @byte_buffer = "bytes"
+    expect_format(bytes, "bytes", 0x65)
+    expect_format($"<{$"{b8}"}> {{}}", "<255> {}", 0x66)
+
+    some: Optional[Int32] = .Some(0x9 as Int32)
+    none: Optional[Int32] = .None
+    ok: Result[Int, Bool] = .Ok(0x3 as Int)
+    failed: Result[Int, Bool] = .Error(false)
+    expect_format($"{some} {none} {ok} {failed}", "Some(9) None Ok(3) Error(false)", 0x67)
+
+    word: Format = $"é{b8}"
+    expect_format($"[{pad_left(ref word, 0x6)}]", "[  é255]", 0x68)
+    expect_format($"[{pad_right(ref word, 0x6)}]", "[é255  ]", 0x69)
+    expect_format($"[{pad_center(ref word, 0x7)}]", "[ é255  ]", 0x6A)
+    expect_format($"[{pad_left(ref word, 0x2)}]", "[é255]", 0x6B)
+}
+
 main: function () nothing {
     c_library()
     ints()
@@ -137,6 +208,7 @@ main: function () nothing {
     optionals()
     boxes()
     consts()
+    formatting()
     r: CInt = putchar(0x4F)
     r = putchar(0x4B)
     r = putchar(0xA)

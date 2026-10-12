@@ -1,0 +1,192 @@
+// Formatting. A `Format` is an f-string (or a literal, or one formattable
+// value) waiting to be written; a `Formatter` is where it goes. A type is
+// formattable when it has a `@format` hook for `Formatter`:
+//
+//     @format: function (self, out: ref Formatter) nothing {
+//         out.write($"({self.x}, {self.y})")
+//     }
+//
+// Every consumer (`Io.print`, a string, a log) makes a `Formatter` over its
+// own storage, so each type needs one hook and each consumer one sink.
+
+// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
+Formatter: object {
+    private {
+        target: ref unknown
+        sink: FormatSink
+    }
+
+    // A formatter that hands every byte to `sink(target, bytes)`.
+    over: function (target: ref unknown, sink: FormatSink) out: Formatter {
+        out = Formatter { target = target, sink = sink }
+    }
+
+    // Writes an f-string, a literal, or one formattable value
+    // (`out.write(self.x)`).
+    write: function (self, text: Format) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            self.write_bytes(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+
+    // Writes `bytes` as they are.
+    write_bytes: function (self, bytes: @byte_buffer) nothing {
+        sink: FormatSink = self.sink
+        sink(self.target, bytes)
+    }
+}
+
+Format: alias @format_args(Formatter)
+
+// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
+FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
+
+// The bit containers format as unsigned decimal.
+@format: function (value: ref @bit8, out: ref Formatter) nothing {
+    write_unsigned(out, @extend_zero(value), 0xA)
+}
+
+@format: function (value: ref @bit16, out: ref Formatter) nothing {
+    write_unsigned(out, @extend_zero(value), 0xA)
+}
+
+@format: function (value: ref @bit32, out: ref Formatter) nothing {
+    write_unsigned(out, @extend_zero(value), 0xA)
+}
+
+@format: function (value: ref @bit64, out: ref Formatter) nothing {
+    write_unsigned(out, value, 0xA)
+}
+
+@format: function (value: ref @bit_native, out: ref Formatter) nothing {
+    write_unsigned(out, @extend_zero(value), 0xA)
+}
+
+// A byte buffer is written as it is.
+@format: function (value: ref @byte_buffer, out: ref Formatter) nothing {
+    out.write_bytes(value)
+}
+
+// A format in a hole is written into the same formatter.
+@format: function (value: ref Format, out: ref Formatter) nothing {
+    out.write(value)
+}
+
+// An integer's bits in hexadecimal (lowercase, no prefix): `{n.hex()}`.
+// A negative integer shows its two's complement at its own width.
+Hex: object {
+    value: @bit64
+
+    @format: function (self, out: ref Formatter) nothing {
+        write_unsigned(out, self.value, 0x10)
+    }
+}
+
+// An integer's bits in binary (no prefix): `{n.binary()}`.
+Binary: object {
+    value: @bit64
+
+    @format: function (self, out: ref Formatter) nothing {
+        write_unsigned(out, self.value, 0x2)
+    }
+}
+
+// A format padded with spaces to at least `width` characters (code
+// points), from `pad_left`, `pad_right` or `pad_center`.
+Padded: object {
+    text: ref Format
+    width: @bit_native
+    // How much of the padding goes before the text: 0x0 none, 0x1 half
+    // (rounded down), 0x2 all.
+    side: @bit8
+
+    @format: function (self, out: ref Formatter) nothing {
+        length: @bit_native = 0x0
+        counter: Formatter = Formatter.over(ref length as ref unknown, count_characters)
+        counter.write(self.text)
+        padding: @bit_native = 0x0
+        if @i_greater_than_u_native(self.width, length) {
+            padding = @i_sub_native(self.width, length)
+        }
+        before: @bit_native = 0x0
+        if self.side == 0x1 {
+            before = @i_div_u_native(padding, 0x2)
+        } else if self.side == 0x2 {
+            before = padding
+        }
+        write_spaces(out, before)
+        out.write(self.text)
+        write_spaces(out, @i_sub_native(padding, before))
+    }
+}
+
+// `text` with spaces before it, to `width` characters: `{pad_left(ref f, 0x8)}`.
+pad_left: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x2 }
+
+// `text` with spaces after it, to `width` characters.
+pad_right: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x0 }
+
+// `text` centered in `width` characters; an odd space goes after it.
+pad_center: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x1 }
+
+private {
+    // `value` in `base` (2 to 16), most significant digit first.
+    write_unsigned: function (out: ref Formatter, value: @bit64, base: @bit64) nothing {
+        digits: @array(@bit8, 64) {}
+        first: ref @bit8 = @array_at(ref digits, 0x0)
+        table: ref @bit8 = @byte_buffer_ptr("0123456789abcdef")
+        start: @bit_native = 0x40
+        rest: @bit64 = value
+        loop {
+            start = @i_sub_native(start, 0x1)
+            digit: @bit_native = @truncate(@i_mod_u_64(rest, base))
+            @store_u8(first, start, @load_u8(table, digit))
+            rest = @i_div_u_64(rest, base)
+            if rest == 0x0 { break }
+        }
+        at: ref @bit8 = @ptr_add(first as ref unknown, start) as ref @bit8
+        out.write_bytes(@byte_buffer_from(at, @i_sub_native(0x40, start)))
+    }
+
+    // `value` in signed decimal.
+    write_signed: function (out: ref Formatter, value: @bit64) nothing {
+        if @i_less_than_64(value, 0x0) {
+            out.write_bytes("-")
+            write_unsigned(out, @i_negate_64(value), 0xA)
+        } else {
+            write_unsigned(out, value, 0xA)
+        }
+    }
+
+    write_spaces: function (out: ref Formatter, count: @bit_native) nothing {
+        left: @bit_native = count
+        loop {
+            if left == 0x0 { break }
+            out.write_bytes(" ")
+            left = @i_sub_native(left, 0x1)
+        }
+    }
+
+    // A sink that counts the code points it is given into the
+    // `@bit_native` at `target`: every byte but a UTF-8 continuation byte.
+    count_characters: function (target: ref unknown, bytes: @byte_buffer) nothing {
+        count: ref @bit_native = target as ref @bit_native
+        data: ref @bit8 = @byte_buffer_ptr(bytes)
+        length: @bit_native = @byte_buffer_len(bytes)
+        index: @bit_native = 0x0
+        loop {
+            if index == length { break }
+            byte: @bit8 = @load_u8(data, index)
+            if @bit_and_8(byte, 0xC0) == 0x80 {
+            } else {
+                count = @i_add_native(count, 0x1)
+            }
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}

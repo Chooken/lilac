@@ -1,15 +1,38 @@
 // Writing text to the standard output and error streams, through the OS
-// (`Standard.Os`).
+// (`Standard.Os`). Text is a `Format`: an f-string, a literal or one
+// formattable value. It is formatted into a buffer on the stack and written
+// a line at a time.
 
 using Standard.Os as Os
 
-print: function (text: @byte_buffer) nothing {
-    write_text(Os.standard_output(), text)
+print: function (text: Format) nothing {
+    line: Line = Line.over(Os.standard_output())
+    out: Formatter = line.formatter()
+    out.write(text)
+    line.flush()
 }
 
-print_line: function (text: @byte_buffer) nothing {
-    print(text)
-    print("\n")
+print_line: function (text: Format) nothing {
+    line: Line = Line.over(Os.standard_output())
+    out: Formatter = line.formatter()
+    out.write(text)
+    out.write_bytes("\n")
+    line.flush()
+}
+
+print_error: function (text: Format) nothing {
+    line: Line = Line.over(Os.standard_error())
+    out: Formatter = line.formatter()
+    out.write(text)
+    line.flush()
+}
+
+print_error_line: function (text: Format) nothing {
+    line: Line = Line.over(Os.standard_error())
+    out: Formatter = line.formatter()
+    out.write(text)
+    out.write_bytes("\n")
+    line.flush()
 }
 
 print_byte: function (byte: @bit8) nothing {
@@ -38,24 +61,52 @@ print_char: function (c: @bit32) nothing {
 }
 
 private {
-    // Writes all of `text`; a failure is dropped, as C's `printf` does.
-    write_text: function (handle: Os.Handle, text: @byte_buffer) nothing {
+    // Formatted bytes on their way to a stream: written when a line ends,
+    // when the buffer fills, and at `flush`.
+    Line: object {
+        handle: Os.Handle
+        used: @bit_native
+        bytes: @array(@bit8, 0x100)
+
+        over: function (handle: Os.Handle) line: Line {
+            line = Line { handle = handle, used = 0x0, bytes = @array(@bit8, 0x100) {} }
+        }
+
+        // A formatter that writes into this line. It holds the line's
+        // address, so it is used only while the line is in place.
+        formatter: function (self) out: Formatter {
+            out = Formatter.over(self as ref unknown, push)
+        }
+
+        // Writes what is buffered; a failure is dropped, as C's `printf`
+        // does.
+        flush: function (self) nothing {
+            if self.used == 0x0 { return }
+            Os.write_all(self.handle, @array_at(ref self.bytes, 0x0) as ref unknown, self.used)
+            self.used = 0x0
+        }
+    }
+
+    // `Line`'s sink: buffers `text`, writing at each newline and when full.
+    push: function (target: ref unknown, text: @byte_buffer) nothing {
+        line: ref Line = target as ref Line
         data: ref @bit8 = @byte_buffer_ptr(text)
-        Os.write_all(handle, data as ref unknown, @byte_buffer_len(text))
+        length: @bit_native = @byte_buffer_len(text)
+        index: @bit_native = 0x0
+        loop {
+            if index == length { break }
+            byte: @bit8 = @load_u8(data, index)
+            @store_u8(@array_at(ref line.bytes, 0x0), line.used, byte)
+            line.used = @i_add_native(line.used, 0x1)
+            if byte == 0xA or line.used == @array_len(line.bytes) {
+                line.flush()
+            }
+            index = @i_add_native(index, 0x1)
+        }
     }
 
     // One UTF-8 continuation byte: six bits of `c / scale`.
     print_continuation: function (c: @bit32, scale: @bit32) nothing {
         print_byte(@truncate(@i_add_32(0x80, @i_mod_u_32(@i_div_u_32(c, scale), 0x40))))
     }
-}
-
-print_error: function (text: @byte_buffer) nothing {
-    write_text(Os.standard_error(), text)
-
-}
-
-print_error_line: function (text: @byte_buffer) nothing {
-    print_error(text)
-    print_error("\n")
 }

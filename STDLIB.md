@@ -133,7 +133,7 @@ shapes are the contract.
 | `Equatable` | `equals(self, other: ref T) @bit8` (or static `equals(a, b) @bit8`) | `Set`, `Map`, `List.contains`, `index_of` |
 | `Comparable` | `compare(self, other: ref T) Ordering` | `sort`, `binary_search`, `PriorityQueue`, `min`/`max` |
 | `Hashable` | `hash(self) @bit64` **and** `Equatable` | `HashMap`, `HashSet` |
-| `ToString` | `to_string(self) String` | formatting, `Diagnostics`, `join` |
+| Formattable | a `@format: function (self, out: ref Formatter) nothing` hook (§3.1a; a hook, not a method) | f-strings, `Io.print`, panics, `Diagnostics`, `join` |
 | `Iterator` | `next(self) Option[T]` (advances, returns `None` at end) | all adapters and `for`-style `loop` |
 | `Sequence` | `iter(self) I` where `I` is `Iterator`-shaped | `map`/`filter`/`fold`/`collect` |
 | `Allocator` | `alloc(self, size, align) ref @bit8`, `free(self, ptr, size, align)`, `realloc(...)` | every allocating container |
@@ -213,6 +213,52 @@ unsigned variants; float variants. Unsigned comparisons bind
 
 ---
 
+### 3.1a Formatting (in `Standard`)
+
+> **Today:** this section is implemented (`lib/Standard/format.lilac`).
+
+An f-string is an `@format_args(W)` (`SPEC.md` §2, "Formatted strings"):
+its literal pieces and, per hole, a borrow of the value and its `@format`
+hook. `Standard` supplies the one `W`, so every formattable type and every
+consumer meet in it:
+
+| Item | What it is |
+|---|---|
+| `Formatter` | Where formatted text goes: an object holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
+| `Format` | `alias @format_args(Formatter)`: the type of an f-string written into a `Formatter`. |
+| `FormatSink` | `alias function (target: ref unknown, bytes: @byte_buffer) nothing`: what a consumer hands a `Formatter`. |
+| `Hex`, `Binary` | An integer's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}` on `Int`, `Int8`…`Int64`. |
+| `Padded` | `pad_left(ref f, width)`, `pad_right` and `pad_center` (an odd space goes after) pad a `Format` with spaces to `width` code points; a counting `Formatter` measures it first. |
+
+A type is formattable when it has a `@format` hook for `Formatter`, found
+by exact signature (`SPEC.md` §8):
+
+```lilac
+Point: object {
+    x: Int
+    y: Int
+
+    @format: function (self, out: ref Formatter) nothing {
+        out.write($"({self.x}, {self.y})")
+    }
+}
+```
+
+`Standard` defines `@format` for `@bit8`…`@bit64` and `@bit_native`
+(unsigned decimal), `Int` and `Int8`…`Int64` (signed decimal), `Bool`
+(`true`/`false`), `@byte_buffer` (its bytes), `Format` (a nested format)
+and `Optional[T]` / `Result[T, E]` (`Some(v)`, `None`, `Ok(v)`,
+`Error(e)`: their hooks capture the payload through `self`, so they work
+when the payload types copy and have a `@format`, checked where they are
+used). Floats have none yet: shortest round-trip printing is its own work
+item, so a float hole is `E071`, never wrong digits. A character literal
+is a `@bit32`, so `{'A'}` prints `65` until `Standard` has a `Char` type.
+
+A consumer makes a `Formatter` over its own storage: `Io.print` over a
+line buffer on the stack, `Runtime`'s `@compiler_print` over standard
+error (so `@panic($"index {i} past {n}")` formats), and the counting
+formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
+
 ### 3.2 `Standard.Memory`
 
 > **Today:** `Standard.Heap.Allocator` over `Standard.Os`:
@@ -273,7 +319,7 @@ Result[Float64, ParseError]`; `format_int(value, radix) String`,
 `@conversion(from: String) to: @byte_buffer`,
 `@conversion(from: @format_args(String)) to: String`, `@conversion(from:
 Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
-`ToString` for all scalars (int/float/bool/char).
+`@format` for `Char`, and for floats once shortest round-trip printing lands (§3.1a).
 
 ---
 
@@ -318,12 +364,16 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 
 ### 3.5 `Standard.Io`
 
-> **Today:** `print`, `print_line`, `print_char` (a code point, as UTF-8),
-> `print_byte`, `print_error` and `print_error_line`, over
-> `Standard.Os.write_all`. `Standard.Process.exit` and
-> `Standard.Heap.Allocator` likewise sit on `Standard.Os` (`exit`,
-> `allocate`/`deallocate`), and `Standard.Runtime` defines the platform
-> hooks (SPEC §8) over it. The inventory below is the target design.
+> **Today:** `print`, `print_line`, `print_error` and `print_error_line`
+> take a `Format` (an f-string, a literal or one formattable value, §3.1a)
+> and write it through a line buffer on the stack: one `Standard.Os.write_all`
+> per line (and per full buffer), not per piece. `print_char` (a code point,
+> as UTF-8) and `print_byte` stay until `Standard` has a `Char` type.
+> `Standard.Process.exit` and `Standard.Heap.Allocator` likewise sit on
+> `Standard.Os` (`exit`, `allocate`/`deallocate`), and `Standard.Runtime`
+> defines the platform hooks (SPEC §8) over it; its `@compiler_print`
+> takes a `Format` and writes it to standard error through `print_error`.
+> The inventory below is the target design.
 
 ### 3.5a `Standard.Os` (the OS layer)
 
@@ -510,7 +560,7 @@ becomes fully thread-safe through them.
 | `EmitMode` | `enum { Human; Json }` | |
 
 **Functions:** `format(spec, args)` (format specifiers beyond f-strings),
-`pretty_print(value)` (over `ToString`), `write_diagnostic(w, d)`,
+`pretty_print(value)` (over `@format`), `write_diagnostic(w, d)`,
 `trace`/`debug`/`info` logging to stderr with levels.
 
 ---

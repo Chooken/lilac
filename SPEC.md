@@ -230,7 +230,8 @@ is off). Holes are full expressions (`{count.hex()}`), checked with no
 expected type; `{{` escapes to `{` and `}}` to `}`. There is no spec
 syntax: a hole's top-level `:` or `,` is `E001`, and a variation is a
 value with its own `@format` (`{count.hex()}`, or a function over a
-nested format: `{pad_left($"{name}", 10)}`).
+named format: `{pad_left(ref label, 0xA)}` after `label: Format =
+$"{name}"`).
 
 `W` is the type every formatter in the template writes into, and it comes
 from where the f-string goes, the way a number literal's width does:

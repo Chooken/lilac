@@ -49,4 +49,17 @@ Result[T, E]: enum {
         }
         fail
     }
+
+    // `Ok(value)` or `Error(error)`; usable when `T` and `E` copy and have
+    // a `@format` (checked where it is used).
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Ok -> ok_value: T {
+                out.write($"Ok({ok_value})")
+            }
+            .Error -> why: E {
+                out.write($"Error({why})")
+            }
+        }
+    }
 }

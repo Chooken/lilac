@@ -82,7 +82,10 @@
   (`lower_format_consumer`). The verifier checks each formatter is
   place-ABI `ref #T, ref #W` with no outs and each hole register is its
   `ref #T`; DCE keeps a template a live `format` names and treats its
-  formatters as taken addresses.
+  formatters as taken addresses. `Standard`'s writer is the library
+  object `Formatter` (`lib/Standard/format.lilac`; `Format` is its
+  alias): `Io.print*` and `Runtime`'s `@compiler_print` take a `Format`,
+  so the compiler still names no formatter.
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/

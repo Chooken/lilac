@@ -1,0 +1,11 @@
+// expect-exit: 101
+// expect-stderr: panic: index 7 past 3
+// expect-stderr:   at main (standard_format_panic.lilac:10:5)
+// `Standard`'s `@compiler_print` takes a `Format`, so a panic message is an
+// f-string formatted by `Standard`'s hooks.
+
+main: function () nothing {
+    index: @bit32 = 0x7
+    length: @bit32 = 0x3
+    @panic($"index {index} past {length}")
+}

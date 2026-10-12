@@ -1,0 +1,28 @@
+// expect-stdout: 3 + 4 = 7
+// expect-stdout: two
+// expect-stdout: lines
+// expect-stdout: 42 bytes true
+// expect-stdout: x = Some(5), long: 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+// expect-stderr: to stderr 9
+// `Standard.Io` prints formats: an f-string, a literal or one value, through
+// a line buffer that writes at each newline, when full, and at the end.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    a: Int = 0x3 as Int
+    b: Int = 0x4 as Int
+    print_line($"{a} + {b} = {a + b}")
+    print("two\nlines\n")
+    n: @bit32 = 0x2A
+    print(n)
+    print(" ")
+    bytes: @byte_buffer = "bytes"
+    print(bytes)
+    print_line($" {true}")
+    x: Optional[Int] = .Some(0x5 as Int)
+    long: @byte_buffer = "0123456789"
+    print_line($"x = {x}, long: {long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}{long}")
+    print_error_line($"to stderr {0x9 as Int}")
+}

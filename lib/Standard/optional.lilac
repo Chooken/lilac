@@ -33,4 +33,15 @@ Optional[T]: enum {
             value = T.default()
         }
     }
+
+    // `Some(value)` or `None`; usable when `T` copies and has a `@format`
+    // (checked where it is used).
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Some -> some_value: T {
+                out.write($"Some({some_value})")
+            }
+            .None => out.write_bytes("None")
+        }
+    }
 }

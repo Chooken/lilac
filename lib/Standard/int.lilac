@@ -41,4 +41,15 @@ Int: object {
 
     @conversion: function(from: @bit_native) Int => Int { data = from }
     @conversion: function(from: Int) @bit_native => from.data
+
+    // Signed decimal.
+    @format: function (self, out: ref Formatter) nothing {
+        write_signed(out, @extend_sign(self.data))
+    }
+
+    // The bits in hexadecimal, at this type's width: `{n.hex()}`.
+    hex: function (self) Hex => Hex { value = @extend_zero(self.data) }
+
+    // The bits in binary, at this type's width: `{n.binary()}`.
+    binary: function (self) Binary => Binary { value = @extend_zero(self.data) }
 }

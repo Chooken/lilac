@@ -1,0 +1,11 @@
+// expect-error: E071
+// `Standard` has no `@format` for floats yet (shortest round-trip printing
+// is its own work item), so a float hole is an error, never wrong digits.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    x: Float64 = 1.5
+    print_line($"{x}")
+}
