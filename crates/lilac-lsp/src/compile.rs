@@ -495,3 +495,28 @@ fn primary_file(diagnostic: &Diagnostic) -> Option<FileId> {
         .or_else(|| diagnostic.labels.first())
         .map(|label| label.span.file)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lone file outside any project, in a folder with no `main.lilac`.
+    fn lone() -> PathBuf {
+        std::env::temp_dir()
+            .join("lilac-unit-of")
+            .join("loose.lilac")
+    }
+
+    #[test]
+    #[ignore = "editor plan phase 4"]
+    fn a_file_declaring_main_compiles_alone() {
+        let text = "main : function () nothing {\n}\n";
+        assert!(matches!(unit_of(&lone(), text, &[]), Unit::File(_)));
+    }
+
+    #[test]
+    fn a_file_without_main_compiles_with_its_folder() {
+        let text = "helper: function () nothing {\n}\n";
+        assert!(matches!(unit_of(&lone(), text, &[]), Unit::Folder(_)));
+    }
+}

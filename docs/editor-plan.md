@@ -53,8 +53,9 @@ Read from the code on 2026-10-13:
    `needs_current_compile` and `path_before` know nothing of strings, so a
    `.` typed in a string parks a member completion.
 7. **The compile unit is chosen by text** (`compile::unit_of`): a file
-   outside the project is a program when a line starts with `main:`. A
-   line of a multi-line string matches; `main :` does not.
+   outside the project is a program when a line starts with `main:`.
+   `main : function` (a space before the colon) does not, and a global
+   named `main` does.
 8. **Positions rescan the file.** `convert::position`, `byte_offset` and
    `line_len_utf16` walk from the top for every call; the compiler already
    keeps each file's line starts (`SourceFile::line_starts`).
@@ -89,9 +90,9 @@ with the phase that fixes it, and un-ignored there:
   (problem 1);
 - signature help after `f(P { x = 0x1 }, |` and after `f("a)", |`
   (problem 5);
-- completion inside `"http://x.|"` is empty and not parked (problem 6);
-- a lone file whose multi-line string holds a line `main: …` compiles as
-  its folder (problem 7);
+- after `f("a//b", point.|` a member completion is due (the `//` is in
+  a string), and after `s = "x.|` none is (problem 6);
+- a lone file declaring `main : function` compiles alone (problem 7);
 - a field hover with a comment inside its declaration (problem 4);
 - two separate edits before a compile, then completion inside the
   second (problem 9).
