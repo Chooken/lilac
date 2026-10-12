@@ -154,6 +154,39 @@ fn did_change(client: &Connection, uri: &Url, version: i32, text: &str) {
     );
 }
 
+/// A change: the range's start and end `(line, character)`s, and its text.
+type RangedChange<'a> = ((u32, u32, u32, u32), &'a str);
+
+/// Sends one change per `(range, text)` pair, each a ranged edit of the
+/// text the ones before it left.
+fn did_change_ranges(client: &Connection, uri: &Url, version: i32, changes: &[RangedChange]) {
+    let content_changes = changes
+        .iter()
+        .map(
+            |&((line, character, end_line, end_character), text)| TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(
+                    lsp_types::Position::new(line, character),
+                    lsp_types::Position::new(end_line, end_character),
+                )),
+                range_length: None,
+                text: text.to_owned(),
+            },
+        )
+        .collect();
+    let params = DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier {
+            uri: uri.clone(),
+            version,
+        },
+        content_changes,
+    };
+    notify(
+        client,
+        "textDocument/didChange",
+        serde_json::to_value(params).expect("serialize"),
+    );
+}
+
 fn publish_for(client: &Connection, uri: &Url) -> PublishDiagnosticsParams {
     loop {
         match client.receiver.recv_timeout(Duration::from_secs(5)) {
@@ -291,6 +324,36 @@ fn names_in_scope_complete_mid_edit() {
         .find(|item| item.label == "first")
         .expect("first");
     assert_eq!(first.detail.as_deref(), Some("@bit8"));
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn ranged_edits_map_the_cursor_to_the_compiled_text() {
+    let (client, handle, uri) = open_program();
+    // Two notifications, the second with two changes: the `// EDIT` line
+    // (32) becomes `    fi`, then lines are added above it, so the
+    // cursor sits on line 34 of a text the last compile never saw.
+    did_change_ranges(&client, &uri, 2, &[((32, 4, 32, 11), "fi")]);
+    did_change_ranges(
+        &client,
+        &uri,
+        3,
+        &[((0, 0, 0, 0), "// one\n"), ((1, 0, 1, 0), "// two\n")],
+    );
+    let result =
+        request(&client, "textDocument/completion", position(&uri, (34, 6))).expect("completion");
+    let items =
+        match serde_json::from_value::<Option<CompletionResponse>>(result).expect("completions") {
+            Some(CompletionResponse::Array(items)) => items,
+            Some(CompletionResponse::List(list)) => list.items,
+            None => Vec::new(),
+        };
+    let labels = labels(&items);
+    assert!(labels.contains(&"first"), "{labels:?}");
+    assert!(labels.contains(&"point"), "{labels:?}");
+    assert!(!labels.contains(&"inner"), "{labels:?}");
+    assert!(!labels.contains(&"later"), "{labels:?}");
     shutdown(&client);
     handle.join().expect("server thread");
 }

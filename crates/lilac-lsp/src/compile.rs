@@ -62,6 +62,8 @@ pub struct Compiled {
     /// with the document version they were computed from. Every open
     /// document has an entry, so clean ones are cleared.
     pub diagnostics: HashMap<Url, (Vec<LspDiagnostic>, Option<i32>)>,
+    /// The version of each open document it compiled.
+    pub versions: HashMap<Url, i32>,
 }
 
 /// How a compile ended.
@@ -179,6 +181,11 @@ impl Job {
             project,
             per_file,
             diagnostics,
+            versions: self
+                .documents
+                .iter()
+                .map(|(uri, document)| (uri.clone(), document.version))
+                .collect(),
         })
     }
 

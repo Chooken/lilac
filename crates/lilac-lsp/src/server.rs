@@ -16,7 +16,7 @@ use lsp_types::{
 };
 
 use crate::compile::{self, Job, Outcome};
-use crate::documents::Documents;
+use crate::documents::{Document, Documents, Edit};
 use crate::index::Retained;
 use crate::roots::{self, canonical_file_uri};
 
@@ -106,6 +106,9 @@ pub struct Server {
     /// The generation of the analysis the server holds (`None` before the
     /// first compile finishes).
     compiled: Option<u64>,
+    /// The version of each open document the installed compile saw (a
+    /// document opened since is missing: the compile read its file).
+    compiled_versions: HashMap<Url, i32>,
     /// Requests waiting for a compile, oldest first: completions after a
     /// `.` wait for one of the current text
     /// ([`crate::complete::needs_current_compile`]), and `lilac/lir`
@@ -161,6 +164,7 @@ impl Server {
             project: None,
             per_file: HashMap::new(),
             compiled: None,
+            compiled_versions: HashMap::new(),
             parked: Vec::new(),
             ir_view: IrView::Unused,
         };
@@ -292,7 +296,7 @@ impl Server {
             serde_json::from_value::<lsp_types::CompletionParams>(request.params.clone()).ok()?;
         let position = &params.text_document_position;
         let document = self.documents.get(&position.text_document.uri)?;
-        if !crate::complete::needs_current_compile(&document.text, position.position) {
+        if !crate::complete::needs_current_compile(&document.lines(), position.position) {
             return None;
         }
         Some(if self.running.is_some() || self.deadline.is_some() {
@@ -506,17 +510,33 @@ impl Server {
                 let params = params!(request, lsp_types::CompletionParams);
                 let position = &params.text_document_position;
                 let uri = &position.text_document.uri;
-                value!(self.document_and_compile(uri).and_then(|(text, retained)| {
-                    crate::complete::completion(retained, uri, text, position.position)
-                }))
+                value!(self
+                    .document_and_compile(uri)
+                    .and_then(|(document, edits, retained)| {
+                        crate::complete::completion(
+                            retained,
+                            uri,
+                            &document.lines(),
+                            edits,
+                            position.position,
+                        )
+                    }))
             }
             "textDocument/signatureHelp" => {
                 let params = params!(request, lsp_types::SignatureHelpParams);
                 let position = &params.text_document_position_params;
                 let uri = &position.text_document.uri;
-                value!(self.document_and_compile(uri).and_then(|(text, retained)| {
-                    crate::complete::signature_help(retained, uri, text, position.position)
-                }))
+                value!(self
+                    .document_and_compile(uri)
+                    .and_then(|(document, edits, retained)| {
+                        crate::complete::signature_help(
+                            retained,
+                            uri,
+                            &document.lines(),
+                            edits,
+                            position.position,
+                        )
+                    }))
             }
             "textDocument/codeAction" => {
                 let params = params!(request, lsp_types::CodeActionParams);
@@ -527,10 +547,12 @@ impl Server {
         Some(Ok(result))
     }
 
-    /// An open document's current text and the compile covering it.
-    fn document_and_compile(&self, uri: &Url) -> Option<(&str, &Retained)> {
-        let text = self.documents.get(uri)?.text.as_str();
-        Some((text, self.retained_for(uri)?))
+    /// An open document, the edits made since the compile covering it
+    /// saw it, and that compile.
+    fn document_and_compile(&self, uri: &Url) -> Option<(&Document, &[Edit], &Retained)> {
+        let document = self.documents.get(uri)?;
+        let edits = document.edits_after(self.compiled_versions.get(uri).copied());
+        Some((document, edits, self.retained_for(uri)?))
     }
 
     /// Symbols matching `query` from every retained compile, each once.
@@ -596,6 +618,8 @@ impl Server {
                     notification.extract::<DidOpenTextDocumentParams>("textDocument/didOpen")
                 {
                     self.documents.open(&params.text_document);
+                    // The analysis held read the file before it opened.
+                    self.compiled_versions.remove(&params.text_document.uri);
                     self.touch();
                 }
             }
@@ -758,6 +782,11 @@ impl Server {
         self.compiled = Some(generation);
         self.project = compiled.project;
         self.per_file = compiled.per_file;
+        // Compiles finish in order, so no older one answers again.
+        for (uri, version) in &compiled.versions {
+            self.documents.forget_edits(uri, *version);
+        }
+        self.compiled_versions = compiled.versions;
         if self.ir_view != IrView::Unused {
             self.ir_view = if compiled.captured_lir {
                 IrView::Held

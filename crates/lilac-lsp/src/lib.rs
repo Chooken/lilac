@@ -53,7 +53,9 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     let params: InitializeParams = serde_json::from_value(params)?;
 
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), "@".to_owned()]),

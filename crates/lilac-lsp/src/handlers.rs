@@ -11,7 +11,7 @@ use lsp_types::{
     Range, SemanticToken, SemanticTokens, Url,
 };
 
-use crate::convert::{byte_offset, line_len_utf16, span_range};
+use crate::convert::{span_range, LineIndex};
 use crate::index::{AnalysisIndex, DefInfo, Retained};
 use crate::navigate::{holes_at, smallest_use, target_in, Target};
 use crate::roots::canonical_file_uri;
@@ -34,7 +34,7 @@ const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 0;
 pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover> {
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
-    let byte = byte_offset(&source.src, position)?;
+    let byte = LineIndex::of(source).offset(position)?;
     let sources = &retained.session.source_map;
 
     let item = || {
@@ -70,7 +70,7 @@ pub fn definition(
     }
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
-    let byte = byte_offset(&source.src, position)?;
+    let byte = LineIndex::of(source).offset(position)?;
     if let Some((_, def)) = smallest_use(retained, file, byte) {
         return declaration(retained, def).map(GotoDefinitionResponse::Scalar);
     }
@@ -408,14 +408,16 @@ pub fn semantic_tokens(retained: &Retained, uri: &Url) -> SemanticTokens {
         }
     }
 
-    let source = sources.file(file).map_or("", |known| known.src.as_str());
-    encode(raw, source)
+    let lines = sources
+        .file(file)
+        .map_or_else(|| LineIndex::new(""), LineIndex::of);
+    encode(raw, &lines)
 }
 
 /// Sorts `raw` by start, drops overlaps, and delta-encodes it as LSP
 /// `SemanticTokens`. Multi-line spans are clamped to their first line (a
 /// semantic token may not cross a newline); lengths are UTF-16 code units.
-fn encode(mut raw: Vec<(Range, u32, u32)>, src: &str) -> SemanticTokens {
+fn encode(mut raw: Vec<(Range, u32, u32)>, lines: &LineIndex) -> SemanticTokens {
     raw.sort_by_key(|(range, token_type, modifiers)| {
         (
             range.start.line,
@@ -433,7 +435,7 @@ fn encode(mut raw: Vec<(Range, u32, u32)>, src: &str) -> SemanticTokens {
     let mut last_start = 0u32;
     for (mut range, token_type, modifiers) in raw {
         if range.end.line != range.start.line {
-            range.end = Position::new(range.start.line, line_len_utf16(src, range.start.line));
+            range.end = Position::new(range.start.line, lines.line_len_utf16(range.start.line));
         }
         let start = (range.start.line, range.start.character);
         let end = (range.end.line, range.end.character);
@@ -505,7 +507,7 @@ mod tests {
         let file = sources.add_file("main.lilac", src);
         let (range, token_type) =
             colored(&sources, Span::new(0, 7, file), "object").expect("range");
-        let tokens = encode(vec![(range, token_type, 0)], src);
+        let tokens = encode(vec![(range, token_type, 0)], &LineIndex::new(src));
         assert_eq!(tokens.data.len(), 1);
         assert_eq!(tokens.data[0].length, 3); // "abc", not the part past the newline
         assert_eq!(tokens.data[0].delta_line, 0);
@@ -521,7 +523,7 @@ mod tests {
             colored(&sources, Span::new(2, 5, file), "object").expect("range");
         assert_eq!(range.start, Position::new(0, 1));
         assert_eq!(range.end, Position::new(0, 4));
-        let tokens = encode(vec![(range, token_type, 0)], src);
+        let tokens = encode(vec![(range, token_type, 0)], &LineIndex::new(src));
         assert_eq!(tokens.data.len(), 1);
         assert_eq!(tokens.data[0].length, 3); // "foo"
     }

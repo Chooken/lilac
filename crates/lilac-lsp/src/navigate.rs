@@ -16,7 +16,7 @@ use lsp_types::{
     SymbolKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbol,
 };
 
-use crate::convert::{byte_offset, span_range};
+use crate::convert::{span_range, LineIndex};
 use crate::handlers::{contains, file_for, smallest_expr};
 use crate::index::{DefInfo, Retained};
 use crate::roots::url_to_path;
@@ -37,7 +37,7 @@ pub enum Target {
 pub fn target_at(retained: &Retained, uri: &Url, position: Position) -> Option<(Span, Target)> {
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
-    let byte = byte_offset(&source.src, position)?;
+    let byte = LineIndex::of(source).offset(position)?;
     target_in(retained, file, byte)
 }
 
@@ -255,7 +255,7 @@ pub fn local_definition(retained: &Retained, uri: &Url, position: Position) -> O
 pub fn type_definition(retained: &Retained, uri: &Url, position: Position) -> Option<Location> {
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
-    let byte = byte_offset(&source.src, position)?;
+    let byte = LineIndex::of(source).offset(position)?;
     let index = &retained.index;
     let target = target_in(retained, file, byte);
     if let Some((_, Target::Alias(_))) = target {

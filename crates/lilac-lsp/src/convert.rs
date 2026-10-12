@@ -1,89 +1,127 @@
 //! Diagnostic and position conversion.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use lilac_error::{Diagnostic, Level, TraceFrame};
-use lilac_span::{FileId, SourceMap, Span};
+use lilac_span::{FileId, SourceFile, SourceMap, Span};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
     NumberOrString, Position, Range, TextEdit, Url,
 };
 
-/// Where line 0's text starts: after a byte-order mark, which editors do
-/// not show as a column (as `lilac_span::SourceFile` counts lines).
-fn text_start(src: &str) -> usize {
-    if src.starts_with(lilac_span::BYTE_ORDER_MARK) {
-        lilac_span::BYTE_ORDER_MARK.len_utf8()
-    } else {
-        0
-    }
+/// Positions in one text: its line starts, built once per text (a
+/// compiled file's are its `SourceFile`'s, an open document's are rebuilt
+/// on each change), so a conversion finds its line by binary search. A
+/// column is a subtraction when the line's text before it is ASCII, else
+/// a count of UTF-16 units over that much of the line.
+#[derive(Clone, Debug)]
+pub struct LineIndex<'a> {
+    text: &'a str,
+    starts: Cow<'a, [usize]>,
 }
 
-/// 0-based line and UTF-16-code-unit column for a byte offset.
-#[must_use]
-pub fn position(src: &str, byte: usize) -> Position {
-    let byte = byte.min(src.len());
-    let Some(before) = src.get(..byte) else {
-        return Position::new(0, 0);
-    };
-    let line_start = before
-        .rfind('\n')
-        .map_or(text_start(src), |index| index + 1);
-    let line = before.matches('\n').count();
-    // An offset inside a byte-order mark is the start of line 0.
-    let character = src
-        .get(line_start..byte)
-        .map_or(0, |text| text.chars().map(char::len_utf16).sum::<usize>());
-    Position::new(
-        u32::try_from(line).unwrap_or(u32::MAX),
-        u32::try_from(character).unwrap_or(u32::MAX),
-    )
-}
-
-/// Byte offset for a 0-based line and UTF-16-code-unit column.
-///
-/// Returns `None` when the line does not exist; a column past the line end
-/// clamps to the line end.
-#[must_use]
-pub fn byte_offset(src: &str, position: Position) -> Option<usize> {
-    let mut line_start = text_start(src);
-    let mut line = 0u32;
-    while line < position.line {
-        let newline = src[line_start..].find('\n')?;
-        line_start += newline + 1;
-        line += 1;
-    }
-    let line_end = src[line_start..]
-        .find('\n')
-        .map_or(src.len(), |offset| line_start + offset);
-    let mut units = 0u32;
-    for (offset, ch) in src[line_start..line_end].char_indices() {
-        if units >= position.character {
-            return Some(line_start + offset);
+impl<'a> LineIndex<'a> {
+    /// Indexes `text` (see [`lilac_span::line_starts`]).
+    #[must_use]
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            starts: Cow::Owned(lilac_span::line_starts(text)),
         }
-        units += u32::try_from(ch.len_utf16()).unwrap_or(1);
     }
-    Some(line_end)
+
+    /// `text` with its line starts already built (`starts` must be
+    /// [`lilac_span::line_starts`] of it).
+    #[must_use]
+    pub fn with_starts(text: &'a str, starts: &'a [usize]) -> Self {
+        debug_assert_eq!(
+            starts.first().copied(),
+            lilac_span::line_starts(text).first().copied()
+        );
+        Self {
+            text,
+            starts: Cow::Borrowed(starts),
+        }
+    }
+
+    /// A compiled file's index.
+    #[must_use]
+    pub fn of(file: &'a SourceFile) -> Self {
+        Self::with_starts(&file.src, file.line_starts())
+    }
+
+    /// The text indexed.
+    #[must_use]
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
+
+    /// 0-based line and UTF-16-code-unit column for a byte offset (clamped
+    /// to the text, and back to a character boundary). An offset inside a
+    /// byte-order mark is the start of line 0.
+    #[must_use]
+    pub fn position(&self, byte: usize) -> Position {
+        let mut byte = byte.min(self.text.len());
+        while !self.text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        let line = self.starts.partition_point(|&start| start <= byte).max(1) - 1;
+        let start = self.starts[line].min(byte);
+        Position::new(
+            u32::try_from(line).unwrap_or(u32::MAX),
+            utf16_len(&self.text[start..byte]),
+        )
+    }
+
+    /// Byte offset for a 0-based line and UTF-16-code-unit column.
+    ///
+    /// Returns `None` when the line does not exist; a column past the line
+    /// end clamps to the line end.
+    #[must_use]
+    pub fn offset(&self, position: Position) -> Option<usize> {
+        let (start, line) = self.line(position.line)?;
+        let column = position.character as usize;
+        if line.is_ascii() {
+            return Some(start + column.min(line.len()));
+        }
+        let mut units = 0;
+        for (offset, ch) in line.char_indices() {
+            if units >= column {
+                return Some(start + offset);
+            }
+            units += ch.len_utf16();
+        }
+        Some(start + line.len())
+    }
+
+    /// UTF-16 code-unit length of `line`, excluding the newline; `0` when
+    /// the line does not exist.
+    #[must_use]
+    pub fn line_len_utf16(&self, line: u32) -> u32 {
+        self.line(line).map_or(0, |(_, text)| utf16_len(text))
+    }
+
+    /// Where 0-based `line` starts and its text without the `\n`.
+    fn line(&self, line: u32) -> Option<(usize, &'a str)> {
+        let index = line as usize;
+        let start = *self.starts.get(index)?;
+        let end = self
+            .starts
+            .get(index + 1)
+            .map_or(self.text.len(), |next| next - 1);
+        Some((start, &self.text[start..end]))
+    }
 }
 
-/// UTF-16 code-unit length of `line` in `src`, excluding the newline.
-///
-/// Returns `0` when the line does not exist.
-#[must_use]
-pub(crate) fn line_len_utf16(src: &str, line: u32) -> u32 {
-    let mut start = text_start(src);
-    let mut current = 0u32;
-    while current < line {
-        let Some(newline) = src[start..].find('\n') else {
-            return 0;
-        };
-        start += newline + 1;
-        current += 1;
-    }
-    let end = src[start..]
-        .find('\n')
-        .map_or(src.len(), |offset| start + offset);
-    u32::try_from(src[start..end].chars().map(char::len_utf16).sum::<usize>()).unwrap_or(u32::MAX)
+/// UTF-16 code units in `text` (its length when it is ASCII).
+fn utf16_len(text: &str) -> u32 {
+    let units = if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().map(char::len_utf16).sum()
+    };
+    u32::try_from(units).unwrap_or(u32::MAX)
 }
 
 /// LSP range for a span, or `None` when it is dummy or its file is unknown.
@@ -91,10 +129,10 @@ pub(crate) fn span_range(sources: &SourceMap, span: Span) -> Option<Range> {
     if span.is_dummy() {
         return None;
     }
-    let file = sources.file(span.file)?;
+    let lines = LineIndex::of(sources.file(span.file)?);
     Some(Range::new(
-        position(&file.src, span.lo.0 as usize),
-        position(&file.src, span.hi.0 as usize),
+        lines.position(span.lo.0 as usize),
+        lines.position(span.hi.0 as usize),
     ))
 }
 
@@ -262,6 +300,31 @@ mod tests {
     use lilac_error::{codes, Diagnostic};
     use lilac_span::{SourceMap, Span};
     use lsp_types::{DiagnosticSeverity, NumberOrString, Position, Range, Url};
+
+    fn position(src: &str, byte: usize) -> Position {
+        LineIndex::new(src).position(byte)
+    }
+
+    fn byte_offset(src: &str, at: Position) -> Option<usize> {
+        LineIndex::new(src).offset(at)
+    }
+
+    fn line_len_utf16(src: &str, line: u32) -> u32 {
+        LineIndex::new(src).line_len_utf16(line)
+    }
+
+    #[test]
+    fn non_ascii_lines_count_utf16_and_ascii_ones_subtract() {
+        let src = "ab\né😀z\ncd";
+        assert_eq!(position(src, 4), Position::new(1, 0));
+        assert_eq!(position(src, 6), Position::new(1, 1));
+        assert_eq!(position(src, 9), Position::new(1, 3));
+        assert_eq!(position(src, 7), Position::new(1, 1)); // inside the emoji
+        assert_eq!(byte_offset(src, Position::new(1, 3)), Some(9));
+        assert_eq!(byte_offset(src, Position::new(2, 1)), Some(12));
+        assert_eq!(line_len_utf16(src, 1), 4);
+        assert_eq!(line_len_utf16(src, 3), 0);
+    }
 
     #[test]
     fn position_is_utf16_on_multibyte_lines() {

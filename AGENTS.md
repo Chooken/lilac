@@ -509,7 +509,16 @@
   typed and the `@` or `.` before it, and the call and argument index by
   matching brackets over tokens; rename's `is_identifier` is one `Ident`
   token; nothing scans characters) and names come from the last compile, the cursor
-  mapped into its text (`complete::map_offset`). Locals in scope come from
+  mapped back into its text through the edits made since
+  (`documents::map_offset`). Sync is incremental: each `Document` keeps
+  its line starts (`lilac_span::line_starts`, read through
+  `convert::LineIndex`, which converts UTF-16 positions and is a
+  subtraction on an ASCII line) and a log of its edits by version
+  (`Edit`; a change with no range is its smallest edit,
+  `Edit::between`), pruned once a compile of that version is installed
+  (`Server::compiled_versions`, `Documents::forget_edits`). A log that
+  does not account for the text's length falls back to one
+  `Edit::between` of the two texts. Locals in scope come from
   `LocalSite::scope` and `ty` (typeck's `FnCx::open`/`close` track block
   spans); `@` lists `Intrinsic::names()` and the builtin types.
   After a `.` (`complete::needs_current_compile`) the request instead

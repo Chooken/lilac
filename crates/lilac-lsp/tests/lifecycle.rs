@@ -40,7 +40,9 @@ fn initializes_shuts_down_and_exits() {
             .expect("decode");
     assert_eq!(
         result.capabilities.text_document_sync,
-        Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL))
+        Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL
+        ))
     );
     assert_eq!(
         result.capabilities.hover_provider,

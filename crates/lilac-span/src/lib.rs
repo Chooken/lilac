@@ -89,26 +89,41 @@ pub struct SourceFile {
     line_starts: Vec<usize>,
 }
 
+/// The byte offset where each line of `src` starts: the first after a
+/// byte-order mark (which is not part of line 1: the lexer skips it, and
+/// editors do not show it, so columns match what the user sees), then one
+/// after each `\n`.
+#[must_use]
+pub fn line_starts(src: &str) -> Vec<usize> {
+    let first = if src.starts_with(BYTE_ORDER_MARK) {
+        BYTE_ORDER_MARK.len_utf8()
+    } else {
+        0
+    };
+    let mut starts = vec![first];
+    starts.extend(
+        src.bytes()
+            .enumerate()
+            .filter(|&(_, byte)| byte == b'\n')
+            .map(|(index, _)| index + 1),
+    );
+    starts
+}
+
 impl SourceFile {
     fn new(name: String, src: String) -> Self {
-        // A byte-order mark is not part of line 1 (the lexer skips it, and
-        // editors do not show it), so columns match what the user sees.
-        let first = if src.starts_with(BYTE_ORDER_MARK) {
-            BYTE_ORDER_MARK.len_utf8()
-        } else {
-            0
-        };
-        let mut line_starts = vec![first];
-        for (i, b) in src.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(i + 1);
-            }
-        }
+        let line_starts = line_starts(&src);
         Self {
             name,
             src,
             line_starts,
         }
+    }
+
+    /// Where each line starts (see [`line_starts`]).
+    #[must_use]
+    pub fn line_starts(&self) -> &[usize] {
+        &self.line_starts
     }
 
     /// 1-based `(line, column)` for a byte offset. Columns count `char`s,

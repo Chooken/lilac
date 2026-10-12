@@ -3,10 +3,15 @@
 
 use std::collections::HashMap;
 
+use lilac_lsp::convert::LineIndex;
+use lilac_lsp::documents::{map_offset, Documents, Edit};
 use lilac_lsp::index::Retained;
 use lilac_lsp::{complete, handlers};
 use lilac_span::FileId;
-use lsp_types::{HoverContents, ParameterLabel, Position, SignatureHelp, Url};
+use lsp_types::{
+    DidChangeTextDocumentParams, HoverContents, ParameterLabel, Position, Range, SignatureHelp,
+    TextDocumentContentChangeEvent, TextDocumentItem, Url, VersionedTextDocumentIdentifier,
+};
 
 const PROGRAM: &str = "\
 P: object {
@@ -52,7 +57,9 @@ fn edited(edit: &str) -> (String, Position) {
 
 fn signature(retained: &Retained, edit: &str) -> SignatureHelp {
     let (text, at) = edited(edit);
-    complete::signature_help(retained, &uri(), &text, at).expect("a signature")
+    let edits = [Edit::between(PROGRAM, &text, 2)];
+    complete::signature_help(retained, &uri(), &LineIndex::new(&text), &edits, at)
+        .expect("a signature")
 }
 
 /// The text of the parameter signature help highlights.
@@ -92,9 +99,9 @@ fn signature_help_reads_past_struct_literals_and_strings() {
 #[test]
 fn a_dot_in_a_string_is_not_a_member() {
     let (text, at) = edited("    f(point, \"a//b\") point.");
-    assert!(complete::needs_current_compile(&text, at));
+    assert!(complete::needs_current_compile(&LineIndex::new(&text), at));
     let (text, at) = edited("    s: @byte_buffer = \"x.");
-    assert!(!complete::needs_current_compile(&text, at));
+    assert!(!complete::needs_current_compile(&LineIndex::new(&text), at));
 }
 
 #[test]
@@ -114,8 +121,31 @@ fn a_hover_never_shows_source_comments() {
 }
 
 #[test]
-#[ignore = "editor plan phase 5"]
 fn separate_edits_map_offsets_between_them() {
     // Two edits; the cursor is in the unchanged text between them.
-    assert_eq!(complete::map_offset("one two three", "ONE two THREE", 4), 4);
+    let mut documents = Documents::new();
+    documents.open(&TextDocumentItem {
+        uri: uri(),
+        language_id: "lilac".to_owned(),
+        version: 1,
+        text: "one two three".to_owned(),
+    });
+    for (version, (start, end, text)) in [(0, 3, "ONE"), (8, 13, "THREE")].into_iter().enumerate() {
+        documents.change(&DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri(),
+                version: i32::try_from(version).expect("version") + 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: Some(Range::new(Position::new(0, start), Position::new(0, end))),
+                range_length: None,
+                text: text.to_owned(),
+            }],
+        });
+    }
+    let document = documents.get(&uri()).expect("open");
+    assert_eq!(document.text, "ONE two THREE");
+    assert_eq!(map_offset(document.edits_after(Some(1)), 4), 4);
+    // Inside the second edit: its start.
+    assert_eq!(map_offset(document.edits_after(Some(2)), 10), 8);
 }

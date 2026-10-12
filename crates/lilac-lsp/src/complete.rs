@@ -3,7 +3,7 @@
 //! Requests arrive mid-edit, before the next compile, so the context (what
 //! precedes the cursor) is read from the document's current text and the
 //! names come from the last compile. The cursor is mapped into that
-//! compile's text by the edit between the two ([`map_offset`]). After a
+//! compile's text through the edits made since it ([`map_offset`]). After a
 //! `.` (a tag or a member) the request waits for a compile of the current
 //! text instead ([`needs_current_compile`]): only the compiler knows the
 //! enum a tag expects and what a member is looked up in.
@@ -23,7 +23,8 @@ use lsp_types::{
 };
 
 use crate::context::{After, Completing, Context};
-use crate::convert::{byte_offset, position};
+use crate::convert::LineIndex;
+use crate::documents::{map_offset, Edit};
 use crate::handlers::{file_for, intrinsic_label, intrinsic_signature, signature};
 use crate::index::Retained;
 
@@ -59,12 +60,26 @@ impl<'a> Scope<'a> {
         retained: &'a Retained,
         uri: &lsp_types::Url,
         text: &str,
+        edits: &[Edit],
         cursor: usize,
     ) -> Option<Self> {
         let analysis = retained.session.analysis()?;
         let file = file_for(retained, uri)?;
         let old = &retained.session.source_map.file(file)?.src;
-        let at = u32::try_from(map_offset(old, text, cursor)).ok()?;
+        // The edits connect the compiled text to this one when their
+        // lengths add up; when they do not (the compile read the file
+        // before the document opened with other text), the whole
+        // difference is one edit.
+        let grown: isize = edits
+            .iter()
+            .map(|edit| edit.len.cast_signed() - (edit.end - edit.start).cast_signed())
+            .sum();
+        let at = if old.len().cast_signed() + grown == text.len().cast_signed() {
+            map_offset(edits, cursor)
+        } else {
+            map_offset(&[Edit::between(old, text, 0)], cursor)
+        };
+        let at = u32::try_from(at.min(old.len())).ok()?;
         let ns = analysis.resolved.files.get(&file)?.ns;
         Some(Self {
             retained,
@@ -453,50 +468,31 @@ fn builtin_types() -> impl Iterator<Item = Entry> {
     fixed.chain(applied)
 }
 
-/// Maps `byte` in `new` to the matching offset in `old`, the same text
-/// before an edit: unchanged before the edit, shifted after it, and the
-/// edit's start inside it.
-#[must_use]
-pub fn map_offset(old: &str, new: &str, byte: usize) -> usize {
-    let (old, new) = (old.as_bytes(), new.as_bytes());
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let room = old.len().min(new.len()) - prefix;
-    let suffix = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(room)
-        .take_while(|(a, b)| a == b)
-        .count();
-    if byte <= prefix {
-        byte
-    } else if byte >= new.len() - suffix {
-        old.len() - (new.len() - byte)
-    } else {
-        prefix
-    }
-}
-
 /// Whether a completion at `position` of `text` is after a `.` (a tag or
 /// a member, maybe with part of a name): the compiler must check the text
 /// as it is now to know the enum the tag expects or what the member is
 /// looked up in, so it waits for that compile.
 #[must_use]
-pub fn needs_current_compile(text: &str, position_at: Position) -> bool {
-    byte_offset(text, position_at).is_some_and(|cursor| Context::new(text, cursor).after_dot())
+pub fn needs_current_compile(lines: &LineIndex, position_at: Position) -> bool {
+    lines
+        .offset(position_at)
+        .is_some_and(|cursor| Context::new(lines.text(), cursor).after_dot())
 }
 
-/// `textDocument/completion` at `position` of the document `text`.
+/// `textDocument/completion` at `position` of the document `lines`, the
+/// text `edits` made from the one `retained` compiled.
 #[must_use]
 pub fn completion(
     retained: &Retained,
     uri: &lsp_types::Url,
-    text: &str,
+    lines: &LineIndex,
+    edits: &[Edit],
     position_at: Position,
 ) -> Option<CompletionResponse> {
-    let cursor = byte_offset(text, position_at)?;
+    let text = lines.text();
+    let cursor = lines.offset(position_at)?;
     let Completing { start, after } = Context::new(text, cursor).completing()?;
-    let scope = Scope::new(retained, uri, text, cursor)?;
+    let scope = Scope::new(retained, uri, text, edits, cursor)?;
     let entries = if after == After::At {
         let mut entries: Vec<Entry> = Intrinsic::names()
             .into_iter()
@@ -520,7 +516,7 @@ pub fn completion(
         scope.names()
     };
 
-    let range = Range::new(position(text, start), position(text, cursor));
+    let range = Range::new(lines.position(start), lines.position(cursor));
     let mut seen = HashSet::new();
     let items = entries
         .into_iter()
@@ -539,15 +535,18 @@ pub fn completion(
     Some(CompletionResponse::Array(items))
 }
 
-/// `textDocument/signatureHelp` at `position` of the document `text`.
+/// `textDocument/signatureHelp` at `position` of the document `lines`,
+/// the text `edits` made from the one `retained` compiled.
 #[must_use]
 pub fn signature_help(
     retained: &Retained,
     uri: &lsp_types::Url,
-    text: &str,
+    lines: &LineIndex,
+    edits: &[Edit],
     position_at: Position,
 ) -> Option<SignatureHelp> {
-    let cursor = byte_offset(text, position_at)?;
+    let text = lines.text();
+    let cursor = lines.offset(position_at)?;
     let (callee, argument) = Context::new(text, cursor).call()?;
     if let Some(intrinsic) = (!callee.contains('.'))
         .then(|| Intrinsic::lookup(&callee))
@@ -557,7 +556,7 @@ pub fn signature_help(
         return Some(help(label, params, argument));
     }
 
-    let scope = Scope::new(retained, uri, text, cursor)?;
+    let scope = Scope::new(retained, uri, text, edits, cursor)?;
     let segments: Vec<&str> = callee.split('.').collect();
     let (receiver, method) = match segments.split_last()? {
         (name, []) => (None, *name),
@@ -641,20 +640,5 @@ fn help(label: String, params: Vec<(u32, u32)>, argument: u32) -> SignatureHelp 
         }],
         active_signature: Some(0),
         active_parameter: Some(argument.min(count.saturating_sub(1))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn offsets_map_across_an_edit() {
-        let old = "ab\ncd\nef";
-        let new = "ab\ncdXY\nef";
-        assert_eq!(map_offset(old, new, 1), 1);
-        assert_eq!(map_offset(old, new, 7), 5); // the `\n` after the edit
-        assert_eq!(map_offset(old, new, 6), 5); // inside the edit: its start
-        assert_eq!(map_offset(old, old, 4), 4);
     }
 }
