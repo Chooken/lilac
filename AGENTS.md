@@ -246,8 +246,8 @@
   (`lilac-driver/src/conditional.rs`), in rounds: resolve with scratch
   diagnostics (the resolver skips conditionals), build each outermost
   one's selector (an `if`/`match` value of the arm index), check just the
-  selectors (`lilac_typeck::check_selectors`: hook bodies are parked and
-  queued only when a checked body calls them), fold them
+  selectors (`lilac_typeck::check_selectors`: every hook body is parked,
+  `Checker::park_hooks`, and queued when checked code uses it), fold them
   (`lilac_lower::evaluate_selectors`), splice the arm in. A selector that
   fails to check waits while others progress, then reports its in-condition
   errors (or `E039`); one that checks but is not constant is `E039`. The
@@ -747,6 +747,14 @@ bug fix that changes generated code.
   `E042`s are held in `Checker::failures` until the worklist drains
   (`drain_queue`), so origins requested later are included. `E051` keeps its
   first-origin `instantiation chain:` note.
+- A generic instance's member hooks register with the type
+  (`register_instance_hooks`) but their bodies are `State::Parked`
+  (`Checker::park`) until a use (`Checker::use_hook`: a hook call, an
+  operator, a conversion) queues them and becomes their origin, so a hook
+  that fails for some `T` is `E042` only where it is used with that `T`.
+  `@on_drop`/`@on_copy`/`@on_override` stay eager (glue uses them).
+  A parked instance does not count as instantiated, so a member hook no
+  instance used is checked as a template.
 - Every compile checks each uninstantiated generic as a template
   (`Checker::check_templates`: its own parameters as abstract `T`s, never
   lowered). Diagnostics emitted through `emit_requirement`/`emit_involving`

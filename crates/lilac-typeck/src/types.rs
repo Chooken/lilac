@@ -492,14 +492,27 @@ impl Checker<'_> {
         .id()
     }
 
-    /// Instantiates and registers every member hook of `def[args]`.
+    /// Instantiates and registers every member hook of `def[args]`. Glue
+    /// calls the RAII hooks wherever the type drops or copies, so their
+    /// bodies are queued now; every other hook is parked until used
+    /// ([`Checker::use_hook`]), so one that fails for these arguments is an
+    /// error only where it is used with them.
     fn register_instance_hooks(&mut self, def: DefId, args: &[TypeRef], span: Span) {
         for hook in self.res.def(def).hooks.clone() {
             let key = FuncKey {
                 def: hook,
                 args: args.to_vec(),
             };
-            if let Ok(sig) = self.request(key.clone(), span) {
+            let raii = matches!(
+                self.res.def(hook).name.as_str(),
+                "@on_drop" | "@on_copy" | "@on_override"
+            );
+            let registered = if raii && !self.park_hooks {
+                self.request(key.clone(), span)
+            } else {
+                self.park(key.clone(), span)
+            };
+            if let Ok(sig) = registered {
                 self.add_hook(&key, sig);
             }
         }

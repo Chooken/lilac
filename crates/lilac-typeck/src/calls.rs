@@ -822,6 +822,7 @@ impl Checker<'_> {
             );
             return Err(self.callee_failed(fcx, args, error));
         };
+        self.use_hook(&hook.key, span);
         let args = self.check_exact_args(fcx, &hook.sig.params, args, span)?;
         Ok(Called::Call {
             callee: HirCallee::Func(hook.key),

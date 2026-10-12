@@ -1180,6 +1180,14 @@ and to symbols, linear in the number of distinct types it names.
 A hook declared inside a generic body (for example an object's `@on_drop`)
 monomorphizes with its parent and registers once per concrete instantiation,
 so `GenBox[T]` can define `@on_drop` for each `GenBox[@bit32]`-style instance.
+Its signature registers with the instance, so lookups find it, but its
+body is checked for an instance only when something uses it with those
+arguments (an operator, a conversion, a direct `@hook(...)` call): a
+`Pair[T]` whose `@add` adds two `T`s is fine as `Pair[@bit8]` until two
+`Pair[@bit8]`s are added, and then the failure is `E042` at that `+`.
+`@on_drop`, `@on_copy` and `@on_override` are checked with the instance,
+since every drop or copy of the type uses them. A hook no instance uses is
+checked like an unused generic, with `T` left abstract.
 A top-level hook may not be generic: a blanket `@add[T](T, T)` stays `E052`.
 
 ### Inline Declarations

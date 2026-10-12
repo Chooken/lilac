@@ -2575,3 +2575,59 @@ fn an_alias_is_not_a_value() {
         check_src("Byte: alias @bit8\nmain: function () nothing {\n    x: @bit8 = Byte\n}\n");
     assert_eq!(codes_of(&diags), ["E021"]);
 }
+
+/// `Pair[T]` whose `@add` checks only for a `T` with an `@add` of its own.
+const PAIR: &str = "@add: function (lhs: @bit32, rhs: @bit32) out: @bit32 {\n    \
+    out = @i_add_32(lhs, rhs)\n}\n\
+    Pair[T]: object {\n    value: T\n    \
+    @add: function (lhs: Pair[T], rhs: Pair[T]) out: Pair[T] {\n        \
+    out = Pair[T] { value = lhs.value + rhs.value }\n    }\n}\n";
+
+#[test]
+fn a_generic_hook_is_checked_only_for_the_arguments_it_is_used_with() {
+    // `Pair[@bit8].@add` would fail (no `@add` for `@bit8`), but nothing
+    // adds two `Pair[@bit8]`s.
+    let diags = check_src(&format!(
+        "{PAIR}main: function () nothing {{\n    \
+         a: Pair[@bit32] = Pair {{ value = 0x1 }}\n    b: Pair[@bit32] = a + a\n    \
+         c: Pair[@bit8] = Pair {{ value = 0x1 }}\n}}\n"
+    ));
+    assert_eq!(
+        codes_of(&diags),
+        Vec::<&str>::new(),
+        "{:?}",
+        messages(&diags)
+    );
+}
+
+#[test]
+fn a_generic_hook_that_fails_is_e042_where_it_is_used() {
+    for use_ in ["c + c", "@add(c, c)"] {
+        let src = format!(
+            "{PAIR}main: function () nothing {{\n    \
+             c: Pair[@bit8] = Pair {{ value = 0x1 }}\n    d: Pair[@bit8] = {use_}\n}}\n"
+        );
+        let diags = check_src(&src);
+        assert_eq!(codes_of(&diags), ["E042"], "{:?}", messages(&diags));
+        let shown = diags.diagnostics()[0]
+            .labels
+            .iter()
+            .filter(|label| label.primary)
+            .map(|label| &src[label.span.lo.0 as usize..label.span.hi.0 as usize])
+            .collect::<Vec<_>>();
+        assert_eq!(shown, [use_], "{use_}");
+    }
+}
+
+#[test]
+fn an_unused_generic_hook_still_reports_what_no_argument_fixes() {
+    // `Pair[@bit8]` parks its `@add`; the template check still finds the
+    // unresolved name, once.
+    let diags = check_src(
+        "Pair[T]: object {\n    value: T\n    \
+         @add: function (lhs: Pair[T], rhs: Pair[T]) out: Pair[T] {\n        \
+         missing()\n        out = lhs\n    }\n}\n\
+         main: function () nothing {\n    c: Pair[@bit8] = Pair { value = 0x1 }\n}\n",
+    );
+    assert_eq!(messages(&diags), ["unresolved name `missing`"]);
+}

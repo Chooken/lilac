@@ -201,6 +201,7 @@ impl Checker<'_> {
                 .is_some_and(|p| p.id == expr.ty.id && !p.is_ref)
                 && hook.sig.returns.first().is_some_and(|r| r.id == to)
         })?;
+        self.use_hook(&hook.key, expr.span);
         Some(HirExpr {
             ty: TypeRef::value(to),
             span: expr.span,
@@ -928,6 +929,7 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         };
+        self.use_hook(&found.key, span);
         HirExpr {
             ty: found.sig.returns[0],
             span,

@@ -97,7 +97,7 @@ impl Checker<'_> {
     }
 
     /// Collects every hook of a non-generic owner (or top level) into the
-    /// table and queues its body.
+    /// table and queues its body (parks it under [`Checker::park_hooks`]).
     pub(crate) fn collect_hooks(&mut self) {
         for def in self.res.hooks.clone() {
             let d = self.res.def(def);
@@ -114,7 +114,12 @@ impl Checker<'_> {
             }
             let span = d.span;
             let key = FuncKey::plain(def);
-            if let Ok(sig) = self.request(key.clone(), span) {
+            let registered = if self.park_hooks {
+                self.park(key.clone(), span)
+            } else {
+                self.request(key.clone(), span)
+            };
+            if let Ok(sig) = registered {
                 self.add_hook(&key, sig);
             }
         }

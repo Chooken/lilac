@@ -114,20 +114,13 @@ pub fn check_selectors(
     selectors: &[(FileId, Expr)],
 ) -> Selectors {
     let mut checker = Checker::new(res, types, diags, options);
+    // Only what a selector reaches is checked: every hook is parked
+    // (`@entry` reaches the whole program) and queued when something checked
+    // uses it.
+    checker.park_hooks = true;
     checker.collect_hooks();
-    // Only what a selector reaches is checked. The hook bodies queued so far
-    // (`@entry` reaches the whole program) are parked, and a hook is queued
-    // when something checked calls it (hook calls are not requests).
-    let mut parked: HashSet<FuncKey> = std::mem::take(&mut checker.queue).into_iter().collect();
     checker.check_consts();
     checker.drain_queue();
-    // What checked code calls, waiting to be unparked; bodies before
-    // `scanned` were walked for it.
-    let mut called = Vec::new();
-    for value in checker.out.consts.values() {
-        value.walk(&mut |expr| callee_of(expr, &mut called));
-    }
-    let mut scanned = 0;
     let ty = TypeRef::value(Builtin::Bit32.id());
     let mut values = Vec::with_capacity(selectors.len());
     for (file, expr) in selectors {
@@ -142,24 +135,7 @@ pub fn check_selectors(
             let hir = c.check_expr(&mut fcx, expr, Some(ty.id));
             c.coerce(hir, ty, expr.span())
         });
-        hir.walk(&mut |expr| callee_of(expr, &mut called));
-        loop {
-            for func in &checker.out.funcs[scanned..] {
-                if let Some(body) = &func.body {
-                    body.walk_exprs(&mut |expr| callee_of(expr, &mut called));
-                }
-            }
-            scanned = checker.out.funcs.len();
-            for key in called.drain(..) {
-                if parked.remove(&key) {
-                    checker.queue.push_back(key);
-                }
-            }
-            if checker.queue.is_empty() {
-                break;
-            }
-            checker.drain_queue();
-        }
+        checker.drain_queue();
         // A tag or member still being typed leaves the selector undecided
         // (the parser reported it).
         let decided = checker.diags.error_count() == before && checker.empty_names == empty_before;
@@ -168,18 +144,6 @@ pub fn check_selectors(
     Selectors {
         hir: std::mem::take(&mut checker.out),
         values,
-    }
-}
-
-/// Records the function `expr` calls or names, if any.
-fn callee_of(expr: &HirExpr, out: &mut Vec<FuncKey>) {
-    match &expr.kind {
-        lilac_hir::HirExprKind::Call {
-            callee: lilac_hir::HirCallee::Func(key),
-            ..
-        }
-        | lilac_hir::HirExprKind::FuncRef(key) => out.push(key.clone()),
-        _ => {}
     }
 }
 
@@ -199,6 +163,9 @@ pub(crate) struct Hook {
 pub(crate) enum State {
     /// Queued; body not checked yet.
     Queued,
+    /// Signature registered; the body waits for its first use
+    /// ([`Checker::use_hook`]), which queues it.
+    Parked,
     /// Body checked successfully.
     Done,
     /// Body has an error. Callers are still checked against the signature,
@@ -311,6 +278,9 @@ pub(crate) struct Checker<'a> {
     pub instances: HashMap<FuncKey, Instance>,
     /// Instances whose bodies are still to be checked.
     pub queue: VecDeque<FuncKey>,
+    /// Whether every hook is parked until something checked uses it, not
+    /// only the non-RAII hooks of generic instances ([`check_selectors`]).
+    pub park_hooks: bool,
     /// Concrete object/enum types seen so far.
     pub type_states: HashMap<TypeId, TypeState>,
     /// The size and alignment of each concrete object, enum and array type
@@ -424,6 +394,7 @@ impl<'a> Checker<'a> {
             hooks: HashMap::new(),
             instances: HashMap::new(),
             queue: VecDeque::new(),
+            park_hooks: false,
             type_states: HashMap::new(),
             sizes: HashMap::new(),
             type_stack: Vec::new(),
@@ -513,7 +484,14 @@ impl Checker<'_> {
     fn check_templates(&mut self) -> Vec<HirFunc> {
         let funcs = self.out.funcs.len();
         let layouts: HashSet<TypeId> = self.out.layouts.keys().copied().collect();
-        self.instantiated = self.instances.keys().map(|key| key.def).collect();
+        // A parked hook's body was never checked, so it leaves its template
+        // to be.
+        self.instantiated = self
+            .instances
+            .iter()
+            .filter(|(_, instance)| instance.state != State::Parked)
+            .map(|(key, _)| key.def)
+            .collect();
         // A budget of its own: what the program leaves unused never takes
         // instances from what it uses, and the reverse.
         self.generic_instances = 0;
@@ -523,7 +501,16 @@ impl Checker<'_> {
                 break;
             }
             let def = self.res.def(id);
-            if !matches!(def.kind, DefKind::Func(_)) || self.instantiated.contains(&id) {
+            // A member hook of a generic type too: its instances are parked
+            // until used, so one no instance used is checked here.
+            let member_hook = matches!(def.kind, DefKind::Hook(_))
+                && def.generic_params.is_empty()
+                && def
+                    .parent
+                    .is_some_and(|parent| !self.res.def(parent).generic_params.is_empty());
+            if !(matches!(def.kind, DefKind::Func(_)) || member_hook)
+                || self.instantiated.contains(&id)
+            {
                 continue;
             }
             let args = self.template_args(id);
@@ -625,16 +612,47 @@ impl Checker<'_> {
         key: FuncKey,
         use_span: Span,
     ) -> Result<FuncSig, ErrorGuaranteed> {
-        let origin = (self.env.key.clone(), use_span);
-        let origins = self.origins.entry(key.clone()).or_default();
-        if !origins.contains(&origin) {
-            origins.push(origin);
+        self.instantiate(key, use_span, false)
+    }
+
+    /// Registers hook instance `key` (met at `span`) with its body
+    /// [`State::Parked`]: the signature is known, so lookups find it, and
+    /// the body is checked on its first use ([`Self::use_hook`]). That use,
+    /// not `span`, is the instance's origin, so a body that fails is
+    /// `E042` there.
+    pub(crate) fn park(&mut self, key: FuncKey, span: Span) -> Result<FuncSig, ErrorGuaranteed> {
+        self.instantiate(key, span, true)
+    }
+
+    /// A use of hook instance `key` at `span` (a hook call, an operator, a
+    /// conversion): queues its body if it was parked, and records the use
+    /// as an origin of a generic instance.
+    pub(crate) fn use_hook(&mut self, key: &FuncKey, span: Span) {
+        let parked = self
+            .instances
+            .get(key)
+            .is_some_and(|instance| instance.state == State::Parked);
+        if parked || !key.args.is_empty() {
+            let _ = self.request(key.clone(), span);
         }
-        if let Some(instance) = self.instances.get(&key) {
-            return match instance.state {
-                State::Unusable(error) => Err(error),
-                _ => Ok(instance.sig.clone()),
-            };
+    }
+
+    /// [`Self::request`], or [`Self::park`] when `park` is set.
+    fn instantiate(
+        &mut self,
+        key: FuncKey,
+        use_span: Span,
+        park: bool,
+    ) -> Result<FuncSig, ErrorGuaranteed> {
+        if !park {
+            let origin = (self.env.key.clone(), use_span);
+            let origins = self.origins.entry(key.clone()).or_default();
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        if let Some(found) = self.existing(&key, use_span, park) {
+            return found;
         }
         let template = self.sig_of(key.def)?;
         let sig = FuncSig {
@@ -709,14 +727,54 @@ impl Checker<'_> {
                 return Err(error);
             }
         }
+        if park {
+            instance.state = State::Parked;
+            self.instances.insert(key, instance);
+            return Ok(sig);
+        }
         self.instances.insert(key.clone(), instance);
+        self.enqueue(key, count);
+        Ok(sig)
+    }
+
+    /// What [`Self::instantiate`] gives for an instance already built
+    /// (`None` when there is none): its signature, after queuing it when
+    /// it was parked and this is a use.
+    fn existing(
+        &mut self,
+        key: &FuncKey,
+        use_span: Span,
+        park: bool,
+    ) -> Option<Result<FuncSig, ErrorGuaranteed>> {
+        let origin = self.env.key.clone();
+        let instance = self.instances.get_mut(key)?;
+        Some(match instance.state {
+            State::Unusable(error) => Err(error),
+            State::Parked if !park => {
+                instance.state = State::Queued;
+                instance.origin = Some((origin, use_span));
+                let sig = instance.sig.clone();
+                let count = instance
+                    .recursion
+                    .iter()
+                    .find(|(def, _)| *def == key.def)
+                    .map_or(0, |(_, count)| *count);
+                self.enqueue(key.clone(), count);
+                Ok(sig)
+            }
+            _ => Ok(instance.sig.clone()),
+        })
+    }
+
+    /// Queues `key`'s body: next when its definition is already on its
+    /// chain (`count > 1`), so recursion runs depth first, else last.
+    fn enqueue(&mut self, key: FuncKey, count: u32) {
         if count > 1 {
             self.queue.insert(self.front.min(self.queue.len()), key);
             self.front += 1;
         } else {
             self.queue.push_back(key);
         }
-        Ok(sig)
     }
 
     /// The declared signature of a function or hook (a template when generic).
