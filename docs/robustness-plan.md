@@ -64,9 +64,10 @@
 - `SPEC.md`, `IR_SPEC.md` and `AGENTS.md` are updated in the phase that
   changes what they describe.
 
-Order: 0 → 1 → 2 → 3 → 4, then 5, 6, 7, 8 and 9 in any order. Phase 1 is
-the most urgent (the language server can hang). Phase 4 needs 3, and 3
-needs 2.
+Order: 0 → 1 → 2 → 3 → 4, then 5, 6, 7, 8, 9 and 10 in any order. Phase 1
+is the most urgent (the language server can hang). Phase 4 needs 3, and 3
+needs 2. Phase 10 was added on 2026-10-12, after Phase 6 found the
+exponential symbol names.
 
 ## Problems this fixes
 
@@ -1012,6 +1013,102 @@ and `@fbit128` constants.
 
 **Tests:** the existing driver and LSP tests; an LSP test that the IR view
 still works after its first request.
+
+---
+
+## Phase 10: Symbols and types stay linear
+
+**Why:** a valid program can build types whose written form grows
+exponentially while the interned type graph stays small. Wrapping an
+argument in `P[T, T, T, T]` through 20 distinct generic functions is 4^20
+when written out. There is no recursion, so Phase 6's limits do not
+apply. `Types::mangle` (`crates/lilac-ty/src/lib.rs`) writes every repeat
+in full, and so does every name derived from it: instance symbols, glue
+names such as `.lilac.copy.…`, layout names, and trace names. Lowering
+hangs and runs out of memory. Phase 6 bounded the type text in
+diagnostics only.
+
+Decisions made with the owner (2026-10-12): follow Rust.
+- **Symbols are mangled after Rust's v0 scheme** (the `rustc` book,
+  "v0 Symbol Format"). Every encoded element is self-delimiting, and a
+  repeat is a backreference to the offset of its first encoding, so a
+  symbol's length is linear in the number of distinct sub-types.
+- **No type length limit.** `rustc` still has `type_length_limit`
+  (default 1,048,576), but it enforces it only under the nightly
+  `-Zenforce-type-length-limit` (rust-lang/rust#127670), because real
+  code relies on very large types. Lilac instead keeps every operation on
+  types linear in the interned graph, so no limit is needed. Large types
+  are legal.
+
+- **10.1 The grammar**, documented in `IR_SPEC.md` "Symbol names":
+  - **Scope.** Generic instance symbols, and every compiler-generated
+    name derived from a type (glue, layout and data names). Non-generic
+    symbols keep today's readable form (`A.B.foo`, `.root.foo`,
+    `Object.Method`). `extern`/`export` symbols stay unmangled and `main`
+    stays `main`. The `.lilac.` namespace rule is unchanged. The document
+    argues why mangled names cannot collide with each other, with C
+    symbols, or with the runtime's `.lilac.` names.
+  - **Encoding, after v0.**
+    - Identifiers are length-prefixed (`<decimal len>[_]<bytes>`, with
+      the `_` when the bytes start with a digit or `_`).
+    - Each type kind has a tag: builtins as single letters, objects as
+      paths, `I … E` for an instance's arguments, `A` for an array plus
+      its length, `R` for `ref`, and `F … E` for function types with
+      their `export` flag.
+    - Numbers are base-62 as in v0.
+    - A backreference is `B<base-62>`: the byte offset, from the start
+      of the encoded region, of an earlier self-delimiting element.
+    - The encoded part uses only `[A-Za-z0-9_]`. Decide and document
+      how it joins the readable path prefix, and keep that join
+      unambiguous.
+  - **The encoder** memoizes each type's offset within the symbol being
+    built, so the work is linear in the number of distinct sub-types.
+- **10.2 Demangling.**
+  - `lilac_ty::demangle(&str) -> Option<String>` gives the display form
+    (`Holder[@bit32].make`).
+  - It follows v0's demangler guidance:
+    - recursion is iterative or depth-bounded;
+    - output is bounded, eliding past a fixed size with `…`;
+    - a backreference must point backwards;
+    - an unknown tag degrades to the raw symbol;
+    - it never panics on any input.
+  - `lilac demangle [<symbol>…]` demangles its arguments. With none, it
+    filters standard input and replaces every symbol it recognises, like
+    `rustfilt`.
+- **10.3 Linear type operations.** Audit every recursive walk over types
+  in `lilac-ty`, typeck, lowering and the language server. Any walk that
+  can revisit a shared sub-type memoizes by `TypeId`:
+  - `substitute` (memoized per call);
+  - `needs_drop`/`is_copyable` and the drop and copy glue;
+  - layout (already cached per type) and display (already bounded);
+  - anything else the audit finds.
+  
+  List each walk and its fix in the Delivered notes.
+- **10.4 Readable names stay bounded.** `Lowered::names`/`display_of`
+  (panic traces) and IR dump comments use the bounded display, cut with
+  `…`. Nothing the compiler prints or stores grows with a type's written
+  form.
+- **10.5 Docs.**
+  - `IR_SPEC.md`: the grammar, with examples including backreferences.
+  - `AGENTS.md`: the symbols section.
+  - `SPEC.md`: types may be arbitrarily large, and there is no type
+    length limit.
+
+**Tests:**
+- The 4^n program with n = 20 distinct generics builds and runs in under
+  2 s in a debug build. Its longest symbol grows linearly in n: compare
+  n = 10 with n = 20.
+- Golden encodings for every type kind, and backreference examples.
+- Round trip: `demangle(mangle(t)) == display(t)` for fixed-seed random
+  types whose display fits the bound.
+- Distinct instances never share a symbol (random types, checked with a
+  set).
+- The demangler survives random and mutated input without panicking.
+  Output stays within its bound, and forward and self backreferences are
+  rejected.
+- A `lilac demangle` CLI test.
+- The snapshots are re-blessed once; only generic instance symbols and
+  type-derived names may change.
 
 ---
 
