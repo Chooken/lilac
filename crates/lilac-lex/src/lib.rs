@@ -5,13 +5,16 @@
 //! chars, and `$"..."` f-strings whose `{hole}` expressions are lexed with the
 //! ordinary expression lexer (brace-depth tracked, so errors point inside the
 //! braces). A string's or f-string's text ends at its line. A UTF-8
-//! byte-order mark at the start of the file is trivia.
+//! byte-order mark at the start of the file is trivia. Comments are trivia
+//! too, kept as side output ([`Lexer::take_comments`]); a run of `///` doc
+//! comments ending on the line before a token is that token's
+//! [`Token::doc`].
 //!
 //! Errors never stop lexing, and every item consumes input (see
 //! [`Lexer`]): a bad literal is reported and still yields its token.
 
 use lilac_error::{codes, Diagnostic};
-use lilac_span::{FileId, Span, BYTE_ORDER_MARK};
+use lilac_span::{Doc, FileId, Span, BYTE_ORDER_MARK};
 
 /// Every keyword, for editor completion.
 pub const KEYWORDS: [&str; 24] = [
@@ -188,6 +191,28 @@ pub struct Token {
     /// Lilac has no statement terminator, so the parser uses this to tell
     /// `return x` (an error) from a `return` that ends its line.
     pub newline_before: bool,
+    /// The doc comment on the lines just above this token, when it is the
+    /// first token after one (the parser gives it to the declaration the
+    /// token starts, and drops it anywhere else).
+    pub doc: Option<Box<Doc>>,
+}
+
+/// What a comment is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommentKind {
+    /// `// text` (also `////`, and a `///` after code on its line).
+    Line,
+    /// `/// text` starting its line.
+    Doc,
+}
+
+/// One comment: from its `//` to the end of its line (no line break).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Comment {
+    /// What it is.
+    pub kind: CommentKind,
+    /// Where it is.
+    pub span: Span,
 }
 
 impl Token {
@@ -200,6 +225,7 @@ impl Token {
             text: text.to_owned(),
             bytes: Vec::new(),
             newline_before: false,
+            doc: None,
         }
     }
 
@@ -293,6 +319,14 @@ pub struct Lexer<'a> {
     eof_done: bool,
     /// Errors inside tokens, in source order, not yet taken.
     diagnostics: Vec<Diagnostic>,
+    /// Comments, in source order, not yet taken.
+    comments: Vec<Comment>,
+    /// The doc comment lines (from `///` to the line's end, before any
+    /// carriage return) of the run since the last token.
+    doc_lines: Vec<(usize, usize)>,
+    /// Line breaks since the run's last line: one keeps it, two (a blank
+    /// line) end it.
+    doc_breaks: u32,
 }
 
 impl<'a> Lexer<'a> {
@@ -316,6 +350,9 @@ impl<'a> Lexer<'a> {
             fstrings: Vec::new(),
             eof_done: false,
             diagnostics: Vec::new(),
+            comments: Vec::new(),
+            doc_lines: Vec::new(),
+            doc_breaks: 0,
         }
     }
 
@@ -341,6 +378,11 @@ impl<'a> Lexer<'a> {
     /// (side output: the tokens themselves were still yielded).
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    /// The comments skipped since the last call, in source order.
+    pub fn take_comments(&mut self) -> Vec<Comment> {
+        std::mem::take(&mut self.comments)
     }
 
     fn at_eof(&self) -> bool {
@@ -374,7 +416,8 @@ impl<'a> Lexer<'a> {
         self.diagnostics.push(diagnostic);
     }
 
-    /// Skips whitespace and comments; returns whether a line break was skipped.
+    /// Skips whitespace and comments, recording each comment and the doc
+    /// comment run; returns whether a line break was skipped.
     fn skip_trivia(&mut self) -> bool {
         let mut newline = false;
         while !self.at_eof() {
@@ -382,17 +425,81 @@ impl<'a> Lexer<'a> {
                 b'\n' => {
                     newline = true;
                     self.pos += 1;
-                }
-                b' ' | b'\t' | b'\r' => self.pos += 1,
-                b'/' if self.peek_at(1) == b'/' => {
-                    while !self.at_eof() && self.peek() != b'\n' {
-                        self.pos += 1;
+                    if !self.doc_lines.is_empty() {
+                        self.doc_breaks += 1;
+                        if self.doc_breaks > 1 {
+                            self.doc_lines.clear();
+                        }
                     }
                 }
+                b' ' | b'\t' | b'\r' => self.pos += 1,
+                b'/' if self.peek_at(1) == b'/' => self.skip_comment(),
                 _ => break,
             }
         }
         newline
+    }
+
+    /// Skips one comment, to the end of its line. A `///` (not `////`)
+    /// that starts its line continues the doc comment run or starts one;
+    /// any other comment ends the run.
+    fn skip_comment(&mut self) {
+        let start = self.pos;
+        while !self.at_eof() && self.peek() != b'\n' {
+            self.pos += 1;
+        }
+        let mut end = self.pos;
+        if end > start && self.bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        let doc = self.bytes.get(start + 2) == Some(&b'/')
+            && self.bytes.get(start + 3) != Some(&b'/')
+            && self.starts_line(start);
+        let kind = if doc {
+            self.doc_lines.push((start, end));
+            self.doc_breaks = 0;
+            CommentKind::Doc
+        } else {
+            self.doc_lines.clear();
+            CommentKind::Line
+        };
+        let span = Span::new(offset_u32(start), offset_u32(end), self.file);
+        self.comments.push(Comment { kind, span });
+    }
+
+    /// Whether only spaces and tabs come before `at` on its line.
+    fn starts_line(&self, at: usize) -> bool {
+        let first = if self.src.starts_with(BYTE_ORDER_MARK) {
+            BYTE_ORDER_MARK.len_utf8()
+        } else {
+            0
+        };
+        self.bytes[first.min(at)..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte != b'\n')
+            .all(|byte| matches!(byte, b' ' | b'\t'))
+    }
+
+    /// The doc comment run, if it ends on the line before the token about
+    /// to be lexed; the run is over either way.
+    fn take_doc(&mut self) -> Option<Box<Doc>> {
+        let lines = std::mem::take(&mut self.doc_lines);
+        let breaks = std::mem::replace(&mut self.doc_breaks, 0);
+        let (&(first, _), &(_, last)) = (lines.first()?, lines.last()?);
+        if breaks != 1 {
+            return None;
+        }
+        let text = lines
+            .iter()
+            .map(|&(start, end)| {
+                let line = &self.src[start + 3..end];
+                line.strip_prefix(' ').unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let span = Span::new(offset_u32(first), offset_u32(last), self.file);
+        Some(Box::new(Doc { text, span }))
     }
 
     /// Consumes letters, digits and `_`.
@@ -888,6 +995,7 @@ impl<'a> Lexer<'a> {
             LexMode::Normal => {}
         }
         let newline = self.skip_trivia();
+        let doc = self.take_doc();
         if self.at_eof() {
             self.eof_done = true;
             let pos = self.pos;
@@ -897,6 +1005,7 @@ impl<'a> Lexer<'a> {
         }
         self.lex_normal().map(|mut token| {
             token.newline_before = newline;
+            token.doc = doc;
             token
         })
     }
@@ -1399,6 +1508,78 @@ mod tests {
                 TokenKind::Eof,
             ],
             "`as` must no longer lex as `Ident`"
+        );
+    }
+
+    /// Each token's doc comment text (`-` for none), Eof included.
+    fn docs_of(src: &str) -> Vec<String> {
+        tokens_of(src)
+            .into_iter()
+            .map(|token| token.doc.map_or_else(|| "-".to_owned(), |doc| doc.text))
+            .collect()
+    }
+
+    #[test]
+    fn a_doc_comment_run_documents_the_next_token() {
+        let docs = docs_of("/// One.\n///   Two.\n///\nx y\n");
+        assert_eq!(docs, vec!["One.\n  Two.\n", "-", "-"]);
+    }
+
+    #[test]
+    fn a_doc_comment_spans_its_lines_without_line_breaks() {
+        let src = "/// A.\r\n/// B.\r\nx\r\n";
+        let tokens = tokens_of(src);
+        let doc = tokens[0].doc.as_ref().expect("doc");
+        assert_eq!(doc.text, "A.\nB.");
+        assert_eq!(
+            &src[doc.span.lo.0 as usize..doc.span.hi.0 as usize],
+            "/// A.\r\n/// B."
+        );
+    }
+
+    #[test]
+    fn breaks_end_a_doc_comment_run() {
+        // A blank line, a plain comment and `////` each end the run.
+        assert_eq!(docs_of("/// A.\n\nx\n"), vec!["-", "-"]);
+        assert_eq!(docs_of("/// A.\n// B.\nx\n"), vec!["-", "-"]);
+        assert_eq!(docs_of("/// A.\n//// B.\nx\n"), vec!["-", "-"]);
+        // Only the run after the break documents `x`.
+        assert_eq!(docs_of("/// A.\n\n/// B.\nx\n"), vec!["B.", "-"]);
+    }
+
+    #[test]
+    fn a_doc_comment_after_code_is_a_plain_comment() {
+        let src = "a /// A.\nb\n";
+        assert_eq!(docs_of(src), vec!["-", "-", "-"]);
+        let mut lexer = Lexer::new(src, FileId(0));
+        let _ = lexer.by_ref().count();
+        let kinds: Vec<CommentKind> = lexer.take_comments().iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, vec![CommentKind::Line]);
+    }
+
+    #[test]
+    fn a_doc_comment_at_the_end_of_the_file_documents_nothing() {
+        assert_eq!(docs_of("x\n/// A."), vec!["-", "-"]);
+        assert_eq!(docs_of("\u{FEFF}/// A.\nx"), vec!["A.", "-"]);
+    }
+
+    #[test]
+    fn comments_are_side_output_in_source_order() {
+        let src = "// a\nx /// b\n    /// c\ny\n";
+        let mut lexer = Lexer::new(src, FileId(0));
+        let _ = lexer.by_ref().count();
+        let comments: Vec<(CommentKind, &str)> = lexer
+            .take_comments()
+            .iter()
+            .map(|c| (c.kind, &src[c.span.lo.0 as usize..c.span.hi.0 as usize]))
+            .collect();
+        assert_eq!(
+            comments,
+            vec![
+                (CommentKind::Line, "// a"),
+                (CommentKind::Line, "/// b"),
+                (CommentKind::Doc, "/// c"),
+            ]
         );
     }
 }

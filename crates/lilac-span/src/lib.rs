@@ -66,6 +66,15 @@ impl Span {
     }
 }
 
+/// A doc comment: the `///` lines just above a declaration, as Markdown.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Doc {
+    /// Each line after its `///` and at most one space, joined with `\n`.
+    pub text: String,
+    /// From the first `///` to the end of the last line.
+    pub span: Span,
+}
+
 /// U+FEFF, the UTF-8 byte-order mark. At the start of a file it is trivia:
 /// the lexer skips it, and line 1 starts after it.
 pub const BYTE_ORDER_MARK: char = '\u{FEFF}';

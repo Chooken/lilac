@@ -197,6 +197,23 @@ values of length greater than one.
   inside is a lex error. (An f-string hole is code, and may span lines.)
 * A UTF-8 byte-order mark (U+FEFF) at the start of a file is whitespace;
   anywhere else it is an unexpected character.
+* Comments: `//` to the end of the line. A `///` comment that starts its
+  line (only spaces and tabs before it) is a **doc comment**; `////` is a
+  plain one. A run of doc comments on consecutive lines documents the
+  declaration on the next line: an item, a member, a field or an enum
+  variant. Its text is each line after `///` and at most one space, read
+  as Markdown, and the editor shows it with the declaration. A blank line
+  or a plain comment ends a run; a run followed by anything else (a
+  `using`, a `private` block, a statement, the end of the file) is a plain
+  comment.
+
+```lilac
+/// A point on the screen, in pixels.
+Point: object {
+    /// Pixels from the left edge.
+    x: @bit32
+}
+```
 
 ### Bracket reservation
 

@@ -33,6 +33,18 @@ impl Parser {
             }
             return self.parse_conditional_item(diags);
         }
+        let doc = self.peek().doc.as_deref().cloned();
+        let mut item = self.parse_declaration(diags, in_object)?;
+        item.doc = doc;
+        Ok(item)
+    }
+
+    /// `name: …`, an item, member or field (the doc comment is the caller's).
+    fn parse_declaration(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        in_object: bool,
+    ) -> Result<Item, ErrorGuaranteed> {
         let (name, name_span) = self.parse_item_name(diags)?;
         let generic_params = self.parse_generic_params(diags)?;
         self.expect(diags, TokenKind::Colon, "`:` after declaration name")?;
@@ -74,6 +86,7 @@ impl Parser {
             TokenKind::KwObject => {
                 let members = self.parse_object_members(diags)?;
                 return Ok(Item {
+                    doc: None,
                     span: join_spans(name_span, self.prev_span()),
                     name,
                     kind: ItemKind::Object {
@@ -94,6 +107,7 @@ impl Parser {
             }
         };
         Ok(Item {
+            doc: None,
             span: join_spans(name_span, self.prev_span()),
             name,
             kind,
@@ -148,6 +162,7 @@ impl Parser {
         if kind_token.kind == TokenKind::KwEnum {
             let (variants, members) = self.parse_enum_body(diags)?;
             Ok(Item {
+                doc: None,
                 span: join_spans(name_span, self.prev_span()),
                 name,
                 kind: ItemKind::Enum {
@@ -182,6 +197,7 @@ impl Parser {
                     ));
                 }
                 return Ok(Item {
+                    doc: None,
                     span: join_spans(name_span, ty.span),
                     name,
                     kind: ItemKind::Global { ty, value: None },
@@ -195,6 +211,7 @@ impl Parser {
                 ));
             }
             Ok(Item {
+                doc: None,
                 span: join_spans(name_span, ty.span),
                 name,
                 kind: ItemKind::Field { ty },
@@ -227,7 +244,12 @@ impl Parser {
                 value: Some(value),
             }
         };
-        Ok(Item { span, name, kind })
+        Ok(Item {
+            span,
+            name,
+            kind,
+            doc: None,
+        })
     }
 
     pub(crate) fn parse_item_name(
@@ -308,6 +330,7 @@ impl Parser {
             None
         };
         Ok(Item {
+            doc: None,
             span: join_spans(using.span, end),
             name: path.clone(),
             kind: ItemKind::Using {
@@ -327,6 +350,7 @@ impl Parser {
         let keyword = self.bump();
         let items = self.parse_item_block(diags, in_object, "`private` block")?;
         Ok(Item {
+            doc: None,
             span: join_spans(keyword.span, self.prev_span()),
             name: String::new(),
             kind: ItemKind::Private { items },
@@ -373,6 +397,7 @@ impl Parser {
             diags,
             Self::skip_stmt,
             |span| Item {
+                doc: None,
                 name: String::new(),
                 kind: ItemKind::Error,
                 span,
@@ -384,6 +409,7 @@ impl Parser {
                     p.parse_item_match(diags)?
                 };
                 Ok(Item {
+                    doc: None,
                     name: String::new(),
                     kind: ItemKind::Conditional(conditional),
                     span: join_spans(start, p.prev_span()),
@@ -551,6 +577,7 @@ impl Parser {
                 }
                 continue;
             }
+            let doc = self.peek().doc.as_deref().cloned();
             let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
             let payload = if self.peek().kind == TokenKind::Colon {
                 self.bump();
@@ -568,6 +595,7 @@ impl Parser {
                     let func = func.clone();
                     let body = self.parse_func_body(diags, false)?;
                     members.push(Item {
+                        doc: doc.clone(),
                         name: ident.text,
                         kind: ItemKind::Func(FuncDecl {
                             generic_params: Vec::new(),
@@ -587,6 +615,7 @@ impl Parser {
             }
             let end = payload.as_ref().map_or(name_span, |ty| ty.span);
             variants.push(EnumVariant {
+                doc,
                 name: ident.text,
                 payload,
                 span: join_spans(name_span, end),

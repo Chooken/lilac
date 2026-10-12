@@ -5,7 +5,7 @@
 //! statement/expression forms (`if` values lower later; `match` arms keep
 //! their `=>`-or-block bodies).
 
-use lilac_span::Span;
+use lilac_span::{Doc, Span};
 
 /// A whole file: one namespace unit (folders share namespaces, see `SPEC.md` §6).
 #[derive(Clone, Debug)]
@@ -25,6 +25,8 @@ pub struct Item {
     pub kind: ItemKind,
     /// Whole-item span.
     pub span: Span,
+    /// The doc comment just above it (a declaration only).
+    pub doc: Option<Doc>,
 }
 
 /// Declaration bodies.
@@ -159,6 +161,8 @@ pub struct EnumVariant {
     pub span: Span,
     /// Span of the variant name token alone, for semantic tokens.
     pub name_span: Span,
+    /// The doc comment just above it.
+    pub doc: Option<Doc>,
 }
 
 /// `function (params) returns body`: named multi-return slots, bare `return`.

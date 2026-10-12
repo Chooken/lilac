@@ -878,6 +878,13 @@ bug fix that changes generated code.
   checks the property on random input. A byte-order mark at offset 0 is
   trivia, and `SourceFile` starts line 1 after it, so columns match the
   editor's.
+- Comments are trivia kept as side output (`Lexer::take_comments`: each
+  `Comment`'s span and `CommentKind`). A run of `///` lines starting their
+  lines, ending on the line before a token, is that token's `Token::doc`
+  (a `lilac_span::Doc`: the Markdown text and its span); the parser gives
+  it to the declaration the token starts (`Item::doc`,
+  `EnumVariant::doc`) and drops it anywhere else, and the resolver keeps
+  it as `Def::doc`.
 - The CLI never dumps the usage on a usage error: it prints the problem,
   a did-you-mean when one is close, and "run `lilac help` for all
   options". `lilac explain <code>` prints the code's page

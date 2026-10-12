@@ -18,7 +18,7 @@ use std::sync::Arc;
 use lilac_ast::{Expr, FuncDecl, Item, ItemKind, Program, Type as AstType};
 use lilac_error::{codes, Diagnostic, Diags};
 use lilac_module::{FileUnit, Project};
-use lilac_span::{FileId, Span};
+use lilac_span::{Doc, FileId, Span};
 
 /// Identity of one namespace (`NsId(0)` is the root).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -103,6 +103,8 @@ pub struct Def {
     pub hooks: Vec<DefId>,
     /// Object fields, or enum variants, in declaration order.
     pub slots: Vec<DefId>,
+    /// The doc comment on its declaration.
+    pub doc: Option<Doc>,
 }
 
 impl Def {
@@ -522,6 +524,7 @@ impl Collector<'_> {
             members: HashMap::new(),
             hooks: Vec::new(),
             slots: Vec::new(),
+            doc: None,
         }
     }
 
@@ -580,6 +583,7 @@ impl Collector<'_> {
         };
         let mut def = self.new_def(&item.name, kind, item.span, vis);
         def.parent = parent;
+        def.doc.clone_from(&item.doc);
         def.generic_params = match &item.kind {
             ItemKind::Func(decl) => decl.generic_params.clone(),
             ItemKind::Object { generic_params, .. } | ItemKind::Enum { generic_params, .. } => {
@@ -601,6 +605,7 @@ impl Collector<'_> {
                         Visibility::Public,
                     );
                     def.name_span = variant.name_span;
+                    def.doc.clone_from(&variant.doc);
                     def.parent = Some(id);
                     let variant_id = self.push(def);
                     self.add_member(id, &variant.name, variant_id, variant.span);
@@ -1333,5 +1338,25 @@ shown: function () nothing {}
         assert_eq!(codes, ["E036", "E036"]);
         let thing = one(&resolved, file, "Thing");
         assert!(resolved.member(thing, "Inner").is_none());
+    }
+
+    #[test]
+    fn definitions_carry_their_doc_comments() {
+        let (resolved, file, diags) = resolve_one(
+            "/// A point.\nPoint: object {\n    /// Across.\n    x: @bit8\n}\n\
+             Shape: enum {\n    /// A dot.\n    Dot\n    Line: @bit8\n}\n",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let doc = |id: DefId| resolved.def(id).doc.as_ref().map(|doc| doc.text.clone());
+        let point = one(&resolved, file, "Point");
+        assert_eq!(doc(point).as_deref(), Some("A point."));
+        let x = resolved.member(point, "x").expect("x");
+        assert_eq!(doc(x).as_deref(), Some("Across."));
+        let shape = one(&resolved, file, "Shape");
+        assert_eq!(doc(shape), None);
+        let dot = resolved.member(shape, "Dot").expect("Dot");
+        assert_eq!(doc(dot).as_deref(), Some("A dot."));
+        let line = resolved.member(shape, "Line").expect("Line");
+        assert_eq!(doc(line), None);
     }
 }

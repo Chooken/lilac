@@ -1738,3 +1738,103 @@ fn an_fstring_hole_spans_its_braces() {
         .collect();
     assert_eq!(holes, vec![("{ n }", "n"), ("{m}", "m")]);
 }
+
+/// The doc text of an item (`-` for none).
+fn doc_of(item: &Item) -> &str {
+    item.doc.as_ref().map_or("-", |doc| doc.text.as_str())
+}
+
+#[test]
+fn doc_comments_document_declarations() {
+    let src = "\
+/// A point.
+Point: object {
+    /// Across.
+    x: @bit8
+    /// Its length.
+    length: function (self) @bit8 => self.x
+    /// Formats it.
+    @format: function (self, out: ref @bit8) nothing {
+    }
+    private {
+        /// Hidden.
+        y: @bit8
+    }
+}
+/// A shape.
+Shape: enum {
+    /// A dot.
+    Dot
+    Line: @bit8
+}
+/// The limit.
+limit: @bit8 => 0x10
+/// The count.
+count: @bit8 = 0x0
+/// Bytes.
+Bytes: alias @byte_buffer
+/// The entry.
+main: function () nothing {
+    /// Nothing: a local takes no doc.
+    x: @bit8 = 0x1
+}
+";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors());
+    let docs: Vec<&str> = program.items.iter().map(doc_of).collect();
+    assert_eq!(
+        docs,
+        vec![
+            "A point.",
+            "A shape.",
+            "The limit.",
+            "The count.",
+            "Bytes.",
+            "The entry."
+        ]
+    );
+    let ItemKind::Object { members, .. } = &program.items[0].kind else {
+        panic!("object");
+    };
+    let ItemKind::Private { items } = &members[3].kind else {
+        panic!("private block");
+    };
+    assert_eq!(
+        members[..3].iter().map(doc_of).collect::<Vec<_>>(),
+        vec!["Across.", "Its length.", "Formats it."]
+    );
+    assert_eq!(doc_of(&items[0]), "Hidden.");
+    let ItemKind::Enum { variants, .. } = &program.items[1].kind else {
+        panic!("enum");
+    };
+    let variant_docs: Vec<Option<&str>> = variants
+        .iter()
+        .map(|variant| variant.doc.as_ref().map(|doc| doc.text.as_str()))
+        .collect();
+    assert_eq!(variant_docs, vec![Some("A dot."), None]);
+}
+
+#[test]
+fn stray_doc_comments_are_plain_comments() {
+    let src = "\
+/// Before a `using`.
+using Standard
+/// Before a `private` block.
+private {
+    helper: function () nothing {
+    }
+}
+/// Split by a blank line.
+
+main: function () nothing {
+}
+/// At the end.
+";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors());
+    assert!(program.items.iter().all(|item| item.doc.is_none()));
+    let ItemKind::Private { items } = &program.items[1].kind else {
+        panic!("private block");
+    };
+    assert!(items[0].doc.is_none());
+}

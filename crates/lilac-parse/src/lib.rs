@@ -132,6 +132,7 @@ impl Parser {
     /// item, from `start` through the current position.
     fn error_item(&self, start: usize) -> Item {
         Item {
+            doc: None,
             name: String::new(),
             kind: ItemKind::Error,
             span: self.error_span(start),
