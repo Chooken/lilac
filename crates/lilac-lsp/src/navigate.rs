@@ -411,7 +411,7 @@ fn renamable(
 }
 
 /// The mounted library holding `path`, by name.
-pub(crate) fn library_of(path: &Path, libraries: &[(String, PathBuf)]) -> Option<String> {
+fn library_of(path: &Path, libraries: &[(String, PathBuf)]) -> Option<String> {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let path = canonical(path);
     libraries

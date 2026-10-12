@@ -297,7 +297,7 @@ fn a_hole_navigates_to_its_hook() {
 }
 
 #[test]
-fn a_missing_format_is_a_quick_fix() {
+fn a_missing_format_names_the_hook_without_a_fix() {
     let (client, handle, uri) = open_program();
     let text = PROGRAM.replace(
         "    // EDIT",
@@ -317,7 +317,14 @@ fn a_missing_format_is_a_quick_fix() {
         .cloned()
         .collect();
     assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0]
+            .message
+            .contains("add `@format: function (self, out: ref Out) nothing` to `Bare`"),
+        "{errors:?}"
+    );
 
+    // Inserting a hook needs layout the compiler does not keep, so no fix.
     let result = request(
         &client,
         "textDocument/codeAction",
@@ -329,28 +336,7 @@ fn a_missing_format_is_a_quick_fix() {
     )
     .expect("code actions");
     let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).expect("actions");
-    let [CodeActionOrCommand::CodeAction(action)] = actions.as_slice() else {
-        panic!("one quick fix: {actions:?}");
-    };
-    assert_eq!(
-        action.title,
-        "add `@format: function (self, out: ref Out) nothing` to `Bare`"
-    );
-    let edits = &action
-        .edit
-        .as_ref()
-        .expect("edit")
-        .changes
-        .as_ref()
-        .expect("changes")[&uri];
-    // Inserted before `Bare`'s closing brace.
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].range.start, lsp_types::Position::new(10, 0));
-    assert_eq!(edits[0].range.end, edits[0].range.start);
-    assert_eq!(
-        edits[0].new_text,
-        "\n    @format: function (self, out: ref Out) nothing {\n    }\n"
-    );
+    assert!(actions.is_empty(), "{actions:?}");
     shutdown(&client);
     handle.join().expect("server thread");
 }

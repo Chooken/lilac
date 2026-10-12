@@ -198,15 +198,14 @@ impl Checker<'_> {
                 format!("`{shown}` cannot be formatted into `{into}`"),
             )
             .label(span, true, format!("no `@format` for `{shown}`"));
-            let diagnostic = match self.format_skeleton(target, &into) {
-                Some((at, skeleton)) => diagnostic.help_fix(
-                    format!("add `@format: function (self, out: ref {into}) nothing` to `{shown}`"),
-                    at,
-                    skeleton,
-                ),
-                None => diagnostic.help(format!(
+            let diagnostic = if self.is_declared_type(target) {
+                diagnostic.help(format!(
+                    "add `@format: function (self, out: ref {into}) nothing` to `{shown}`"
+                ))
+            } else {
+                diagnostic.help(format!(
                     "define one: `@format: function (value: ref {shown}, out: ref {into}) nothing`"
-                )),
+                ))
             };
             self.emit_requirement(diagnostic, Requirement::Format, &[target, writer]);
             return None;
@@ -227,23 +226,15 @@ impl Checker<'_> {
         })
     }
 
-    /// For an object or enum declared in source, where a member `@format`
-    /// into `into` goes (an empty span before the body's closing `}`) and
-    /// its skeleton.
-    fn format_skeleton(&self, ty: TypeId, into: &str) -> Option<(Span, String)> {
+    /// Whether `ty` is an object or enum declared in source, which can take
+    /// a member `@format`.
+    fn is_declared_type(&self, ty: TypeId) -> bool {
         let def = match self.types.kind(ty) {
             TypeKind::Object(def) => *def,
             TypeKind::Instance { base, .. } => *base,
-            _ => return None,
+            _ => return false,
         };
-        let span = self.res.def(def).span;
-        if span.is_dummy() || span.hi.0 <= span.lo.0 {
-            return None;
-        }
-        let at = Span::new(span.hi.0 - 1, span.hi.0 - 1, span.file);
-        let skeleton =
-            format!("\n    @format: function (self, out: ref {into}) nothing {{\n    }}\n");
-        Some((at, skeleton))
+        !self.res.def(def).span.is_dummy()
     }
 
     /// A value in an `@format_args(writer)` slot that is not one already:

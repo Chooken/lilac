@@ -520,7 +520,7 @@ impl Server {
             }
             "textDocument/codeAction" => {
                 let params = params!(request, lsp_types::CodeActionParams);
-                value!(Some(crate::actions::code_actions(&params, &self.libraries)))
+                value!(Some(crate::actions::code_actions(&params)))
             }
             _ => return None,
         };

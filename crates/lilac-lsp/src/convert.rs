@@ -165,7 +165,7 @@ pub fn to_lsp_diagnostic(
     })
 }
 
-/// The diagnostic's fixes as `{ "fixes": [{ uri, edit, title? }] }`, the
+/// The diagnostic's fixes as `{ "fixes": [{ uri, range, newText }] }`, the
 /// data `textDocument/codeAction` turns into quick fixes
 /// ([`crate::actions`]); `None` without any.
 fn fixes(
@@ -180,14 +180,10 @@ fn fixes(
                 range: span_range(sources, suggestion.span)?,
                 new_text: suggestion.replacement.clone(),
             };
-            let mut fix = serde_json::json!({
+            Some(serde_json::json!({
                 "uri": uri_of(suggestion.span.file)?,
                 "edit": edit,
-            });
-            if let Some(title) = &suggestion.title {
-                fix["title"] = serde_json::Value::from(title.as_str());
-            }
-            Some(fix)
+            }))
         })
         .collect();
     (!fixes.is_empty()).then(|| serde_json::json!({ "fixes": fixes }))

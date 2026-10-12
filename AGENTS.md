@@ -524,11 +524,9 @@
   holding one stays undecided (`Checker::empty_names`).
   A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
   `textDocument/codeAction` turns them into quick fixes without a compile.
-  A fix from `Diagnostic::help_fix` carries its own title
-  (`Suggestion::title`; a did-you-mean is "Change to ..."), and one that
-  edits a mounted library other than the document's is not offered.
-  `E071` on an object or enum fixes it with an empty member `@format`
-  before the type's closing `}` (`Checker::format_skeleton`).
+  A fix only replaces a span the compiler knows; one that would insert
+  new code (a missing `@format`) waits for a formatter, since the
+  compiler keeps no layout to place it by.
 - Semantic tokens (`handlers::semantic_tokens`) merge item declarations
   and uses with `Analysis::semantics`: typeck's `SemanticSite`s, the
   driver's top-level-condition checks (`conditional::select` returns
