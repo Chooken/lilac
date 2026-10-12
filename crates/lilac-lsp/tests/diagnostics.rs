@@ -704,3 +704,64 @@ fn an_edit_cancels_a_slow_compile() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A library vendored inside the workspace and mounted by `lilac.json`
+/// (`"Util": "vendor/Util"`) loads once, under its mount name: no file,
+/// `lilac.json` included, gets an `E025` or any other diagnostic.
+#[test]
+fn a_vendored_library_from_lilac_json_checks_clean() {
+    let dir = temp_project("vendored");
+    std::fs::write(
+        dir.join("lilac.json"),
+        r#"{ "libraries": { "Util": "vendor/Util" } }"#,
+    )
+    .expect("write");
+    let util = dir.join("vendor").join("Util");
+    std::fs::create_dir_all(&util).expect("mkdir");
+    std::fs::write(
+        util.join("util.lilac"),
+        "helper: function () nothing {\n}\n",
+    )
+    .expect("write");
+    let main = dir.join("main.lilac");
+    let text = "using Util\n\nmain: function () nothing {\n    helper()\n}\n";
+    std::fs::write(&main, text).expect("write");
+
+    let (client, handle) = start_server();
+    initialize(
+        &client,
+        Some(&Url::from_directory_path(&dir).expect("root")),
+    );
+    let main_uri = Url::from_file_path(&main).expect("uri");
+    did_open(&client, &main_uri, text);
+    // Every publish of this compile is empty (a spanless error would go to
+    // `lilac.json`), up to `main.lilac`'s and for a second after it.
+    let mut seen_main = false;
+    loop {
+        let message = match client
+            .receiver
+            .recv_timeout(Duration::from_secs(if seen_main { 1 } else { 5 }))
+        {
+            Ok(message) => message,
+            Err(_) if seen_main => break,
+            Err(err) => panic!("no diagnostics for {main_uri}: {err}"),
+        };
+        if let Message::Notification(notification) = message {
+            if notification.method == "textDocument/publishDiagnostics" {
+                let params: PublishDiagnosticsParams =
+                    serde_json::from_value(notification.params).expect("decode");
+                assert!(
+                    params.diagnostics.is_empty(),
+                    "{}: {:?}",
+                    params.uri,
+                    params.diagnostics
+                );
+                seen_main |= params.uri == main_uri;
+            }
+        }
+    }
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+    let _ = std::fs::remove_dir_all(&dir);
+}

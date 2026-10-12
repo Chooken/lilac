@@ -202,9 +202,15 @@
   below its nearest folder on disk), and `Loader::reach` keeps each loaded
   namespace's canonical folder (`Loader::folders`): a second path to one,
   such as a link `A/B -> A`, is `E025` "folder `A.B` is `A` again (through
-  a link)", once per path, and is neither loaded nor walked. The root
-  folder counts only when the root namespace loads it (not for a file
-  argument or a lone library namespace).
+  a link)", once per path, and is neither loaded nor walked ("through a
+  link" only when `Loader::through_link` finds one on either path). The
+  root folder counts only when the root namespace loads it (not for a
+  file argument or a lone library namespace). A library mounted inside
+  the tree being walked (a vendored library, `Loader::mounted_at`) loads
+  once, under its mount name: the walk skips its folder silently, unless
+  it reaches it through a link, and a `using` naming it by its path in
+  the project is `E025` "folder `vendor.Util` is mounted as library
+  `Util`" with the `using` to write.
 - `lilac-resolve::resolve` builds one definition table (`Resolved`): every
   item, member, field and variant is a `Def` addressed by `DefId`, namespaces
   are `NsId`s, and each file has a `FileScope` (its visible-name map, already

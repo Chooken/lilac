@@ -394,3 +394,27 @@ fn link_folder(target: &Path, link: &Path) -> std::io::Result<()> {
 fn link_folder(_target: &Path, _link: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
+
+/// A library vendored inside the project (`--lib=Util=proj/vendor/Util`)
+/// loads once, under its mount name: the project's own walk skips its
+/// folder, so the project checks clean.
+#[test]
+fn vendored_library_checks_clean() {
+    let dir = scratch("vendored_library_checks_clean");
+    let util = dir.join("proj").join("vendor").join("Util");
+    std::fs::create_dir_all(&util).expect("creates vendor/Util");
+    write(
+        &dir.join("proj"),
+        "main.lilac",
+        "using Util\n\nmain: function () nothing {\n    helper()\n}\n",
+    );
+    write(&util, "util.lilac", "helper: function () nothing {\n}\n");
+    let out = lilac_within(
+        &dir,
+        &["check", "proj", "--lib=Util=proj/vendor/Util"],
+        Duration::from_secs(30),
+    )
+    .expect("finishes");
+    assert!(out.success, "{}", out.stderr);
+    assert!(error_codes(&out.stderr).is_empty(), "{}", out.stderr);
+}

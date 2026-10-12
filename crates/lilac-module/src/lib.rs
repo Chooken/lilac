@@ -18,12 +18,14 @@
 //! even where nothing `using`s it. `using` itself is visibility only. Below
 //! the root, `build` (the build folder), a folder holding its own
 //! `lilac.json` (another project) and a library's mount name are skipped,
-//! and a root with no `*.lilac` file of its own (a repository holding
+//! and in any tree the folder of a library mounted inside it (a vendored
+//! library loads once, under its mount name); a root with no `*.lilac` file of its own (a repository holding
 //! several projects) loads only what its `using`s reach.
 //!
 //! `E025` is the module-load error: a `using` whose target is missing or is not
 //! a directory, an unreadable root or library folder, an unreadable file, or a
-//! folder reached again by a second path. Each is reported at the most
+//! folder reached again by a second path (through a link, or a `using`
+//! naming a vendored library by its path in the project). Each is reported at the most
 //! specific span available (the `using` span where there is one, a dummy
 //! span otherwise, with the path named in the headline) and fails the load.
 
@@ -252,13 +254,20 @@ fn load_from(
     // The root namespace holds the root folder only when it is loaded as a
     // folder: a root file (`load_file`) or a lone namespace (`load_namespace`)
     // leaves it empty, so a library mounted there is no second path to it.
+    let root_folder = canonical_folder(fs, root);
     let mut folders = HashMap::new();
     if root_file.is_none() && seed.is_none() {
-        folders.insert(canonical_folder(fs, root), 0);
+        folders.insert(root_folder.clone(), 0);
     }
+    let library_folders = libraries
+        .iter()
+        .map(|(_, dir)| canonical_folder(fs, dir))
+        .collect();
     let mut loader = Loader {
         root,
         libraries,
+        root_folder,
+        library_folders,
         namespaces: vec![Namespace {
             path: String::new(),
             dir: root.to_path_buf(),
@@ -318,6 +327,10 @@ fn load_from(
 struct Loader<'a> {
     root: &'a Path,
     libraries: &'a [(String, PathBuf)],
+    /// The root folder, canonical ([`Fs::canonicalize`]).
+    root_folder: PathBuf,
+    /// Each library's folder, canonical, in `libraries` order.
+    library_folders: Vec<PathBuf>,
     namespaces: Vec<Namespace>,
     /// Directory listing per namespace.
     listings: Vec<Vec<PathBuf>>,
@@ -382,10 +395,12 @@ impl Loader<'_> {
     }
 
     /// Queues the namespace at dotted `path` and its ancestors (each once).
-    /// A missing ancestor folder (a library's parent) is skipped. A folder
-    /// another namespace already loaded (reached again through a link) is
-    /// `E025`, reported here at `at` (the `using` that reached it, if one
-    /// did), and is not loaded twice.
+    /// A missing ancestor folder (a library's parent) is skipped. Two cases
+    /// are `E025`, reported here at `at` (the `using` that reached it, if
+    /// one did), and load nothing: a folder of a library mounted inside
+    /// the project, named by its path in the project ([`Self::mounted_at`]),
+    /// and a folder another namespace already loaded (a second path to it,
+    /// as through a link).
     fn reach(&mut self, path: &str, at: Option<Span>, fs: &mut dyn Fs, diags: &mut Diags) -> Reach {
         if self.ns_by_path.contains_key(path) {
             return Reach::Loaded;
@@ -397,12 +412,17 @@ impl Loader<'_> {
         let Ok(entries) = fs.list_dir(&dir) else {
             return Reach::Missing;
         };
+        let folder = canonical_folder(fs, &dir);
+        if let Some((library, rest)) = self.mounted_at(path, &folder) {
+            let link = self.through_link(path, fs);
+            self.report_mounted(path, library, &rest, link, at, diags);
+            return Reach::Again;
+        }
         if let Some((parent, _)) = path.rsplit_once('.') {
             let _ = self.reach(parent, at, fs, diags);
         }
-        let folder = canonical_folder(fs, &dir);
         if let Some(&first) = self.folders.get(&folder) {
-            self.report_again(path, first, at, diags);
+            self.report_again(path, first, at, fs, diags);
             return Reach::Again;
         }
         self.folders.insert(folder, self.namespaces.len());
@@ -419,14 +439,26 @@ impl Loader<'_> {
     }
 
     /// `E025` for `path`, whose folder namespace `first` already loaded.
-    fn report_again(&mut self, path: &str, first: usize, at: Option<Span>, diags: &mut Diags) {
-        let first = match self.namespaces[first].path.as_str() {
+    /// The headline says "through a link" only when one of the two paths
+    /// passes through one ([`Self::through_link`]).
+    fn report_again(
+        &mut self,
+        path: &str,
+        first: usize,
+        at: Option<Span>,
+        fs: &mut dyn Fs,
+        diags: &mut Diags,
+    ) {
+        let first_path = self.namespaces[first].path.clone();
+        let link = self.through_link(path, fs) || self.through_link(&first_path, fs);
+        let first = match first_path.as_str() {
             "" => "the project root".to_owned(),
             name => format!("`{name}`"),
         };
+        let how = if link { " (through a link)" } else { "" };
         let mut diagnostic = Diagnostic::error(
             codes::E025,
-            format!("folder `{path}` is {first} again (through a link)"),
+            format!("folder `{path}` is {first} again{how}"),
         )
         .note(format!(
             "both paths lead to one folder, which loads once, as {first}"
@@ -436,6 +468,102 @@ impl Loader<'_> {
         }
         diags.emit(diagnostic);
         self.again.insert(path.to_owned());
+    }
+
+    /// `E025` for `path`, a folder (`rest` below its root) of library
+    /// `library`, which is mounted inside the project: reached through a
+    /// `link`, or named by its path in the project.
+    fn report_mounted(
+        &mut self,
+        path: &str,
+        library: usize,
+        rest: &[String],
+        link: bool,
+        at: Option<Span>,
+        diags: &mut Diags,
+    ) {
+        let name = &self.libraries[library].0;
+        let mut mounted = name.clone();
+        for segment in rest {
+            mounted.push('.');
+            mounted.push_str(segment);
+        }
+        let mut diagnostic = if link {
+            Diagnostic::error(
+                codes::E025,
+                format!("folder `{path}` is `{mounted}` again (through a link)"),
+            )
+            .note(format!(
+                "both paths lead to one folder, which loads once, as `{mounted}`"
+            ))
+        } else {
+            let headline = if rest.is_empty() {
+                format!("folder `{path}` is mounted as library `{name}`")
+            } else {
+                format!("folder `{path}` is `{mounted}`, in the library mounted as `{name}`")
+            };
+            Diagnostic::error(codes::E025, headline)
+                .note(format!(
+                    "a library loads once, under its mount name `{name}`"
+                ))
+                .help(format!("write `using {mounted}`"))
+        };
+        if let Some(at) = at {
+            diagnostic = diagnostic.label(at, true, "imported here");
+        }
+        diags.emit(diagnostic);
+        self.again.insert(path.to_owned());
+    }
+
+    /// The library whose folder holds `folder` (the canonical folder of
+    /// dotted `path`), with the segments below that library's folder, when
+    /// it is not `path`'s own library and is mounted inside `path`'s tree
+    /// (the project root, or `path`'s own library): a vendored library. A
+    /// library whose folder holds the project is not one.
+    fn mounted_at(&self, path: &str, folder: &Path) -> Option<(usize, Vec<String>)> {
+        let own = self.library_of(path);
+        let base = own.map_or(&self.root_folder, |own| &self.library_folders[own]);
+        self.library_folders
+            .iter()
+            .enumerate()
+            .filter(|(index, library)| {
+                Some(*index) != own && *library != base && library.starts_with(base)
+            })
+            .find_map(|(index, library)| {
+                let rest = folder.strip_prefix(library).ok()?;
+                let segments = rest
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                Some((index, segments))
+            })
+    }
+
+    /// The index of the library dotted `path` starts at, if any.
+    fn library_of(&self, path: &str) -> Option<usize> {
+        let first = path.split('.').next().unwrap_or_default();
+        self.libraries.iter().position(|(name, _)| name == first)
+    }
+
+    /// Whether the folder of dotted `path` is reached through a link: a
+    /// segment below its base (the root, or its library's folder) whose
+    /// canonical folder is not its canonical parent's entry of that name.
+    fn through_link(&self, path: &str, fs: &mut dyn Fs) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        let segments = path.split('.').count() - usize::from(self.library_of(path).is_some());
+        let mut dir = resolve_dir(self.root, self.libraries, path);
+        for _ in 0..segments {
+            let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+                return false;
+            };
+            if canonical_folder(fs, parent).join(name) != canonical_folder(fs, &dir) {
+                return true;
+            }
+            dir = parent.to_path_buf();
+        }
+        false
     }
 
     /// Reads the files of every queued namespace (reaching their `using`s).
@@ -487,7 +615,8 @@ impl Loader<'_> {
     /// Reaches every identifier-named folder below the (reached) namespace
     /// at `path`, `""` being the project root. In the project's own tree,
     /// `build`, a folder with its own `lilac.json` and a library's mount
-    /// name are skipped.
+    /// name are skipped, and in any tree a folder of a library mounted
+    /// inside it ([`Self::mounted_at`]).
     fn reach_children(&mut self, path: &str, fs: &mut dyn Fs, diags: &mut Diags) {
         let ns = self.ns_by_path[path];
         let in_project = path.is_empty() || !self.is_library(path);
@@ -508,6 +637,17 @@ impl Loader<'_> {
                 continue;
             }
             if in_project && self.is_other_project(&child_path, fs) {
+                continue;
+            }
+            // A library mounted inside this tree loads under its mount
+            // name, not again here. (Reached through a link, it is the
+            // link's `E025`.)
+            let dir = resolve_dir(self.root, self.libraries, &child_path);
+            if self
+                .mounted_at(&child_path, &canonical_folder(fs, &dir))
+                .is_some()
+                && !self.through_link(&child_path, fs)
+            {
                 continue;
             }
             // A non-folder entry (a stray file) simply fails to list.
@@ -1587,5 +1727,110 @@ mod tests {
         );
         assert!(!failed, "{diags:?}");
         assert_eq!(project.namespaces.len(), 3);
+    }
+
+    /// The vendored-library project of the tests below: `proj/main.lilac`
+    /// with `uses`, and `proj/vendor/Util` mounted as library `Util`.
+    fn vendored(uses: &str) -> (PathBuf, MemFs, [(String, PathBuf); 1]) {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", uses);
+        fs.add(
+            &root,
+            "vendor/Util/util.lilac",
+            "helper: function () nothing {}\n",
+        );
+        fs.add(
+            &root,
+            "vendor/Util/Deep/deep.lilac",
+            "deep: function () nothing {}\n",
+        );
+        let libraries = [("Util".to_owned(), root.join("vendor").join("Util"))];
+        (root, fs, libraries)
+    }
+
+    /// A library vendored inside the project loads once, under its mount
+    /// name: the project's own walk skips its folder, with no `E025`.
+    #[test]
+    fn a_vendored_library_loads_once() {
+        let (root, mut fs, libraries) = vendored("using Util\n");
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(!failed, "{diags:?}");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "Util", "vendor", "Util.Deep"]);
+        let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main.lilac", "util.lilac", "deep.lilac"]);
+    }
+
+    /// A `using` naming a vendored library's folder by its path in the
+    /// project is `E025`, which names the mount and the `using` to write.
+    #[test]
+    fn using_a_vendored_library_by_its_folder_is_e025() {
+        let (root, mut fs, libraries) = vendored("using vendor.Util\nusing vendor.Util.Deep\n");
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(
+            e025_messages(&diags),
+            [
+                "folder `vendor.Util` is mounted as library `Util`",
+                "folder `vendor.Util.Deep` is `Util.Deep`, in the library mounted as `Util`",
+            ]
+        );
+        let helps: Vec<String> = diags
+            .diagnostics()
+            .iter()
+            .flat_map(|diag| diag.helps.iter().map(|help| help.text.clone()))
+            .collect();
+        assert_eq!(helps, ["write `using Util`", "write `using Util.Deep`"]);
+        let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main.lilac", "util.lilac", "deep.lilac"]);
+    }
+
+    /// A link to a vendored library is still a second path to it.
+    #[test]
+    fn a_link_to_a_vendored_library_is_e025() {
+        let (root, mut fs, libraries) = vendored("main: function () nothing {}\n");
+        fs.link(&root, "Shortcut", "vendor/Util");
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (_, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(
+            e025_messages(&diags),
+            ["folder `Shortcut` is `Util` again (through a link)"]
+        );
+    }
+
+    /// Two libraries mounted at one folder: a second path with no link, so
+    /// the headline says none.
+    #[test]
+    fn a_folder_mounted_twice_is_e025_without_a_link() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "main: function () nothing {}\n");
+        let lib = PathBuf::from("lib");
+        fs.add(&lib, "io.lilac", "print: function () nothing {}\n");
+        let libraries = [
+            ("First".to_owned(), lib.clone()),
+            ("Second".to_owned(), lib.clone()),
+        ];
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (_, failed) =
+            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(e025_messages(&diags), ["folder `Second` is `First` again"]);
     }
 }

@@ -932,9 +932,31 @@ OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
     `A.B` is `A` again (through a link)" (the root reads "the project
     root"), reported once per path, neither loaded nor walked. The root
     folder counts only when the root namespace loads it, so a file
-    argument inside a mounted library still builds. A library mounted at
-    a folder the project's own walk also reaches is now the same `E025`;
-    before, it loaded every file twice under two namespaces.
+    argument inside a mounted library still builds. The headline says
+    "through a link" only when one of the two paths passes through one
+    (`Loader::through_link`: a segment whose canonical folder is not its
+    canonical parent's entry of that name); two libraries mounted at one
+    folder read "folder `B` is `A` again".
+  - Vendored libraries (a follow-up commit fixed a regression of the
+    first: a library mounted inside the project, such as
+    `--lib=Util=proj/vendor/Util` or `"Util": "vendor/Util"` in
+    `lilac.json`, was `E025` "folder `vendor.Util` is `Util` again
+    (through a link)", with no link at all). A library mounted inside the
+    tree being walked (`Loader::mounted_at`: its folder strictly inside
+    the walk's base, the project root or the walk's own library; a
+    library holding the project is not one) loads once, under its mount
+    name, and every walk skips its folder silently, as it skips `build`.
+    Only genuine duplicates stay `E025`: a link reaching the library (the
+    link's message), and a `using` naming it by its path in the project,
+    "folder `vendor.Util` is mounted as library `Util`" with the help
+    "write `using Util`" (below it: "folder `vendor.Util.Deep` is
+    `Util.Deep`, in the library mounted as `Util`"). Before Phase 7, such
+    a library loaded every file twice, under two namespaces. Tests: the
+    module tests for a vendored library, a `using` by its folder, a link
+    to it and a folder mounted twice; the CLI's
+    `vendored_library_checks_clean`; and the language server's
+    `a_vendored_library_from_lilac_json_checks_clean` (no publish holds a
+    diagnostic).
   - 7.4: `Lower::at` holds the span of the instruction or terminator
     being lowered (`lower_func` sets it, `LirInst::span` is new); every
     `bug!` in `lower.rs` uses it, through `Lower::checked` for builder
