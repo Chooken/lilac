@@ -485,8 +485,18 @@
   edit in the builtins or in a library other than the requesting file's),
   document and workspace symbols are all built from those. A `.Variant` tag
   is a use of its enum and of the variant; the variant wins (its name is
-  the span's text). Hovers show a function's signature, a field, variant or
-  constant's declaration, and an intrinsic's signature.
+  the span's text). An f-string hole is a use of its `@format` hook
+  from its braces and the space inside them (`navigate::holes_at`):
+  `HirProgram::holes` has a `HoleSite` per hole and instance (the `{…}`
+  span, which `FStrPart::Hole` keeps, the value's span, the formatted
+  type and the hook; `Checker::record_hole`), so definition lists a hook
+  per instance of a generic body, the hook's references list its holes,
+  and the hover shows each type with its hook; a hover of the whole value
+  shows the formatted type and adds `formatted by`. Hovers show a
+  function's signature, a field, variant or constant's declaration, an
+  intrinsic's signature, and the shape of
+  `@array` and `@format_args` (`handlers::TYPE_CONSTRUCTORS`, which
+  completion lists after `@` too).
 - Editing (`complete.rs`, `actions.rs`): completion and signature help
   run before the edit is compiled, so the context is read from the
   document's current text and names come from the last compile, the cursor
@@ -514,6 +524,11 @@
   holding one stays undecided (`Checker::empty_names`).
   A diagnostic's fixes ride in its published `data` (`convert::fixes`) and
   `textDocument/codeAction` turns them into quick fixes without a compile.
+  A fix from `Diagnostic::help_fix` carries its own title
+  (`Suggestion::title`; a did-you-mean is "Change to ..."), and one that
+  edits a mounted library other than the document's is not offered.
+  `E071` on an object or enum fixes it with an empty member `@format`
+  before the type's closing `}` (`Checker::format_skeleton`).
 - Semantic tokens (`handlers::semantic_tokens`) merge item declarations
   and uses with `Analysis::semantics`: typeck's `SemanticSite`s, the
   driver's top-level-condition checks (`conditional::select` returns

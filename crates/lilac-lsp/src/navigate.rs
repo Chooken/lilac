@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use lilac_hir::HoleSite;
 use lilac_resolve::DefId;
 use lilac_span::{FileId, Span};
 use lilac_ty::TypeKind;
@@ -40,8 +41,9 @@ pub fn target_at(retained: &Retained, uri: &Url, position: Position) -> Option<(
     target_in(retained, file, byte)
 }
 
-/// The name at `byte` of `file`: a local, an alias, an item use, else an
-/// item's declared name.
+/// The name at `byte` of `file`: a local, an alias, an item use, an
+/// f-string hole's braces (its `@format` hook), else an item's declared
+/// name.
 #[must_use]
 pub fn target_in(retained: &Retained, file: FileId, byte: usize) -> Option<(Span, Target)> {
     let index = &retained.index;
@@ -62,6 +64,9 @@ pub fn target_in(retained: &Retained, file: FileId, byte: usize) -> Option<(Span
     }
     if let Some(site) = smallest_use(retained, file, byte) {
         return Some((site.0, Target::Item(site.1)));
+    }
+    if let Some(site) = holes_at(retained, file, byte).first() {
+        return Some((site.span, Target::Item(site.hook)));
     }
     index
         .defs
@@ -91,6 +96,26 @@ pub fn smallest_use(retained: &Retained, file: FileId, byte: usize) -> Option<(S
         .map(|site| (site.span, site.def))
 }
 
+/// The f-string holes whose braces (or the space inside them, but not
+/// their value) hold `byte`: the innermost hole, once per instance of a
+/// generic body that formats it differently.
+#[must_use]
+pub fn holes_at(retained: &Retained, file: FileId, byte: usize) -> Vec<&HoleSite> {
+    let on_hole = |site: &&HoleSite| {
+        site.span.file == file && contains(site.span, byte) && !contains(site.value, byte)
+    };
+    let holes = &retained.index.holes;
+    let Some(innermost) = holes
+        .iter()
+        .filter(on_hole)
+        .map(|site| site.span)
+        .min_by_key(|span| span.hi.0 - span.lo.0)
+    else {
+        return Vec::new();
+    };
+    holes.iter().filter(|site| site.span == innermost).collect()
+}
+
 /// The source text of `span`.
 fn text(retained: &Retained, span: Span) -> Option<&str> {
     let source = retained.session.source_map.file(span.file)?;
@@ -115,6 +140,13 @@ pub fn reference_spans(retained: &Retained, target: Target) -> Vec<Span> {
                     .uses
                     .iter()
                     .filter(|site| site.def == def)
+                    .map(|site| site.span),
+            );
+            spans.extend(
+                index
+                    .holes
+                    .iter()
+                    .filter(|site| site.hook == def)
                     .map(|site| site.span),
             );
             spans
@@ -241,8 +273,12 @@ pub fn type_definition(retained: &Retained, uri: &Url, position: Position) -> Op
         },
         _ => None,
     };
+    let hole = holes_at(retained, file, byte).first().map(|site| site.ty);
     let def = if let Some(def) = named {
         def
+    } else if let Some(ty) = hole {
+        // On a hole's braces: the type it formats.
+        type_def(retained, ty)?
     } else {
         let at_cursor = || smallest_expr(index, file, byte).map(|(_, ty)| ty);
         let ty = if let Some((_, Target::Local(decl))) = target {
@@ -375,7 +411,7 @@ fn renamable(
 }
 
 /// The mounted library holding `path`, by name.
-fn library_of(path: &Path, libraries: &[(String, PathBuf)]) -> Option<String> {
+pub(crate) fn library_of(path: &Path, libraries: &[(String, PathBuf)]) -> Option<String> {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let path = canonical(path);
     libraries

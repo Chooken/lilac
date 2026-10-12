@@ -904,6 +904,19 @@ impl Checker<'_> {
         }
     }
 
+    /// Records an f-string hole (`span`, braces included) and the hook that
+    /// formats it, for the editor.
+    pub(crate) fn record_hole(&mut self, span: Span, hole: &lilac_hir::HirHole) {
+        if !span.is_dummy() {
+            self.out.holes.push(lilac_hir::HoleSite {
+                span,
+                value: hole.value.span,
+                ty: hole.value.ty.id,
+                hook: hole.format.def,
+            });
+        }
+    }
+
     /// Records a use of a `using … as` alias for the editor: the path head at
     /// `span`, declared at `decl`.
     pub(crate) fn record_alias_use(&mut self, span: Span, decl: Span) {

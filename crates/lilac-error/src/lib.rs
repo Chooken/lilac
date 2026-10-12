@@ -57,6 +57,8 @@ pub struct Suggestion {
     pub span: Span,
     /// The text to put there.
     pub replacement: String,
+    /// What an editor calls the fix; `None` is "Change to `replacement`".
+    pub title: Option<String>,
 }
 
 /// One `help: ...` line, with the fix it describes when it has one.
@@ -186,7 +188,32 @@ impl Diagnostic {
         let replacement = replacement.into();
         self.helps.push(Help {
             text: format!("did you mean `{replacement}`?"),
-            fix: Some(Suggestion { span, replacement }),
+            fix: Some(Suggestion {
+                span,
+                replacement,
+                title: None,
+            }),
+        });
+        self
+    }
+
+    /// Adds `help: {text}` with a fix replacing `span` (empty to insert)
+    /// with `replacement`, which an editor offers as `text` (builder style).
+    #[must_use]
+    pub fn help_fix(
+        mut self,
+        text: impl Into<String>,
+        span: Span,
+        replacement: impl Into<String>,
+    ) -> Self {
+        let text = text.into();
+        self.helps.push(Help {
+            fix: Some(Suggestion {
+                span,
+                replacement: replacement.into(),
+                title: Some(text.clone()),
+            }),
+            text,
         });
         self
     }

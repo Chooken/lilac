@@ -90,6 +90,10 @@ pub struct HirProgram {
     /// Every path head that names a `using … as` alias, linked to the
     /// alias's declaration (editor definition, references and rename).
     pub alias_uses: Vec<AliasSite>,
+    /// Every f-string hole with its `@format` hook (editor hover,
+    /// definition and references). A hole in a generic body is listed
+    /// once per instance.
+    pub holes: Vec<HoleSite>,
     /// Statements no path reaches: the rest of a block after a `return`,
     /// `break`, `continue`, `@panic` or `@trap`, one span per block (an
     /// editor hint; they are still checked and lowered).
@@ -292,6 +296,19 @@ pub struct AliasSite {
     pub span: Span,
     /// The alias's name token in its `using` directive.
     pub decl: Span,
+}
+
+/// One f-string hole and the `@format` hook that formats it.
+#[derive(Clone, Copy, Debug)]
+pub struct HoleSite {
+    /// The hole, from its `{` to its `}`.
+    pub span: Span,
+    /// The value inside it.
+    pub value: Span,
+    /// The type it formats (a `ref T` hole formats `T`).
+    pub ty: TypeId,
+    /// The hook (for a generic one, its definition).
+    pub hook: DefId,
 }
 
 /// One resolved item use.

@@ -1,5 +1,5 @@
 use super::*;
-use lilac_ast::{BinOp, FuncBody, MatchPattern, PatternLiteral, Stmt, TypeShape};
+use lilac_ast::{BinOp, FStrPart, FuncBody, MatchPattern, PatternLiteral, Stmt, TypeShape};
 use lilac_error::Diags;
 use lilac_lex::Lexer;
 use lilac_span::SourceMap;
@@ -1707,4 +1707,34 @@ fn aliases_in_type_bodies_parse_for_the_resolver() {
         panic!("expected an enum");
     };
     assert!(matches!(members[0].kind, ItemKind::Alias { .. }));
+}
+
+#[test]
+fn an_fstring_hole_spans_its_braces() {
+    let src = "main: function () nothing {\n    x: F = $\"a { n } b {m}\"\n}\n";
+    let (program, diags, sm) = parse(src);
+    assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
+    let ItemKind::Func(decl) = &program.items[0].kind else {
+        panic!("a function");
+    };
+    let Some(FuncBody::Block(block)) = &decl.body else {
+        panic!("a block body");
+    };
+    let Stmt::Let {
+        value: Expr::FString { parts, .. },
+        ..
+    } = &block.stmts[0]
+    else {
+        panic!("an f-string let: {:?}", block.stmts[0]);
+    };
+    let holes: Vec<(&str, &str)> = parts
+        .iter()
+        .filter_map(|part| match part {
+            FStrPart::Hole { expr, span } => {
+                Some((sm.span_text(*span)?, sm.span_text(expr.span())?))
+            }
+            FStrPart::Lit { .. } => None,
+        })
+        .collect();
+    assert_eq!(holes, vec![("{ n }", "n"), ("{m}", "m")]);
 }

@@ -2,7 +2,7 @@
 //! Navigation (references, rename, symbols) is in [`crate::navigate`].
 
 use lilac_hir::intrinsics::{Intrinsic, Slot};
-use lilac_hir::SemanticKind;
+use lilac_hir::{HoleSite, SemanticKind};
 use lilac_resolve::DefId;
 use lilac_span::{FileId, Span};
 use lilac_ty::{TypeRef, Types};
@@ -13,7 +13,7 @@ use lsp_types::{
 
 use crate::convert::{byte_offset, line_len_utf16, span_range};
 use crate::index::{AnalysisIndex, DefInfo, Retained};
-use crate::navigate::{smallest_use, target_in, Target};
+use crate::navigate::{holes_at, smallest_use, target_in, Target};
 use crate::roots::canonical_file_uri;
 
 /// Legend token-type indices, in the order advertised by `initialize`.
@@ -42,8 +42,10 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
         Some((span_range(sources, span)?, item_hover(retained, def)?))
     };
     let (range, value) = intrinsic_hover(retained, file, byte)
+        .or_else(|| type_constructor_hover(retained, file, byte))
         .or_else(|| alias_hover(retained, file, byte))
         .or_else(item)
+        .or_else(|| hole_hover(retained, file, byte))
         .or_else(|| expr_hover(retained, file, byte))?;
 
     Some(Hover {
@@ -55,7 +57,8 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
     })
 }
 
-/// Go-to-definition for the item use or local at `position`, if any.
+/// Go-to-definition for the item use or local at `position`, if any; on an
+/// f-string hole's braces, its `@format` hooks.
 #[must_use]
 pub fn definition(
     retained: &Retained,
@@ -68,14 +71,35 @@ pub fn definition(
     let file = file_for(retained, uri)?;
     let source = retained.session.source_map.file(file)?;
     let byte = byte_offset(&source.src, position)?;
-    let (_, def) = smallest_use(retained, file, byte)?;
+    if let Some((_, def)) = smallest_use(retained, file, byte) {
+        return declaration(retained, def).map(GotoDefinitionResponse::Scalar);
+    }
+    let mut hooks: Vec<DefId> = holes_at(retained, file, byte)
+        .iter()
+        .map(|site| site.hook)
+        .collect();
+    hooks.sort_by_key(|def| def.0);
+    hooks.dedup();
+    let mut locations: Vec<Location> = hooks
+        .into_iter()
+        .filter_map(|def| declaration(retained, def))
+        .collect();
+    match locations.len() {
+        0 => None,
+        1 => locations.pop().map(GotoDefinitionResponse::Scalar),
+        _ => Some(GotoDefinitionResponse::Array(locations)),
+    }
+}
+
+/// Where `def` is declared (its whole declaration).
+fn declaration(retained: &Retained, def: DefId) -> Option<Location> {
     let info = retained.index.defs.get(&def)?;
-    let target = retained.file_uris.get(&info.span.file)?;
+    let uri = retained.file_uris.get(&info.span.file)?;
     let range = span_range(&retained.session.source_map, info.span)?;
-    Some(GotoDefinitionResponse::Scalar(Location {
-        uri: target.clone(),
+    Some(Location {
+        uri: uri.clone(),
         range,
-    }))
+    })
 }
 
 /// Resolves a client document URI to its `FileId`, tolerating the client's
@@ -162,15 +186,58 @@ pub(crate) fn signature(retained: &Retained, def: DefId, info: &DefInfo) -> Opti
 /// How much of a declaration a hover shows, in characters.
 const MAX_DECLARATION: usize = 160;
 
-/// Renders a hover for a bare expression (its type).
+/// Renders a hover for a bare expression (its type). A hole's whole value
+/// shows the type it is formatted as (the hole borrows it) and its hook.
 fn expr_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
     let (span, ty) = smallest_expr(&retained.index, file, byte)?;
     let range = span_range(&retained.session.source_map, span)?;
     let analysis = retained.session.analysis()?;
-    Some((
-        range,
-        format!("```lilac\n{}\n```", analysis.types.display_ref(ty)),
-    ))
+    let holes: Vec<&HoleSite> = retained
+        .index
+        .holes
+        .iter()
+        .filter(|site| site.value == span)
+        .collect();
+    let shown = match holes.first() {
+        Some(site) => analysis.types.display(site.ty),
+        None => analysis.types.display_ref(ty),
+    };
+    let mut text = format!("```lilac\n{shown}\n```");
+    let mut hooks: Vec<DefId> = holes.iter().map(|site| site.hook).collect();
+    hooks.sort_by_key(|def| def.0);
+    hooks.dedup();
+    for hook in hooks {
+        if let Some(info) = retained.index.defs.get(&hook) {
+            text.push_str("\n\nformatted by `");
+            text.push_str(&info.qualified);
+            text.push('`');
+        }
+    }
+    Some((range, text))
+}
+
+/// Renders a hover for an f-string hole's braces: each type it formats
+/// (one per instance of a generic body that formats it differently) and
+/// the hook that formats it.
+fn hole_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, String)> {
+    let sites = holes_at(retained, file, byte);
+    let range = span_range(&retained.session.source_map, sites.first()?.span)?;
+    let analysis = retained.session.analysis()?;
+    let parts: Vec<String> = sites
+        .iter()
+        .filter_map(|site| {
+            let info = retained.index.defs.get(&site.hook)?;
+            let hook = signature(retained, site.hook, info)?;
+            let shown = analysis.types.display(site.ty);
+            Some(format!(
+                "```lilac\n{shown}\n```\nformatted by\n```lilac\n{hook}\n```"
+            ))
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some((range, parts.join("\n\n---\n\n")))
 }
 
 /// Renders a hover for a `using … as` alias (a use or its declaration): the
@@ -189,6 +256,38 @@ fn alias_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range,
     let range = span_range(&retained.session.source_map, span)?;
     let path = resolved.namespace_path(*ns);
     Some((range, format!("```lilac\nnamespace {path}\n```")))
+}
+
+/// The builtin types that take operands, with their shapes (completion and
+/// hover).
+pub(crate) const TYPE_CONSTRUCTORS: [(&str, &str); 2] = [
+    ("@array", "@array(T, N): `N` values of `T`, in place"),
+    (
+        "@format_args",
+        "@format_args(W): an f-string waiting to be written into a `W`",
+    ),
+];
+
+/// Renders a hover for a builtin type that takes operands (`@array`,
+/// `@format_args`): its shape.
+fn type_constructor_hover(
+    retained: &Retained,
+    file: FileId,
+    byte: usize,
+) -> Option<(Range, String)> {
+    let site = retained.index.semantics.iter().find(|site| {
+        site.kind == SemanticKind::BuiltinType
+            && site.span.file == file
+            && contains(site.span, byte)
+    })?;
+    let source = retained.session.source_map.file(file)?;
+    let name = source
+        .src
+        .get(site.span.lo.0 as usize..site.span.hi.0 as usize)?;
+    let (_, shape) = TYPE_CONSTRUCTORS.iter().find(|(known, _)| *known == name)?;
+    let range = span_range(&retained.session.source_map, site.span)?;
+    let (head, prose) = shape.split_once(": ")?;
+    Some((range, format!("```lilac\n{head}\n```\n{prose}")))
 }
 
 /// Renders a hover for an intrinsic's name: its signature.

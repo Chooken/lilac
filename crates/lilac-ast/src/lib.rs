@@ -695,7 +695,12 @@ pub enum FStrPart {
         span: Span,
     },
     /// `{expr}` hole: borrowed, and formatted by its type's `@format`.
-    Hole(Expr),
+    Hole {
+        /// The value.
+        expr: Expr,
+        /// The hole from its `{` to its `}`.
+        span: Span,
+    },
 }
 
 impl Expr {

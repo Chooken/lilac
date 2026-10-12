@@ -413,14 +413,17 @@ impl Parser {
                     });
                 }
                 TokenKind::LBrace => {
-                    self.bump();
-                    parts.push(FStrPart::Hole(
-                        self.with_struct_lit(true, |p| p.parse_expr(diags))?,
-                    ));
+                    let open = self.bump();
+                    let expr = self.with_struct_lit(true, |p| p.parse_expr(diags))?;
                     if matches!(self.peek().kind, TokenKind::Colon | TokenKind::Comma) {
                         self.format_spec(diags);
                     }
-                    self.expect(diags, TokenKind::RBrace, "`}` to close f-string hole")?;
+                    let close =
+                        self.expect(diags, TokenKind::RBrace, "`}` to close f-string hole")?;
+                    parts.push(FStrPart::Hole {
+                        expr,
+                        span: join_spans(open.span, close.span),
+                    });
                 }
                 TokenKind::FStrEnd => {
                     let end = self.bump();

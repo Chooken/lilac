@@ -71,7 +71,7 @@ impl Checker<'_> {
         let writer = self.fstring_writer(expected, span);
         let mut holes = Vec::with_capacity(hole_exprs.len());
         let mut failed = writer.is_err();
-        for expr in hole_exprs {
+        for (expr, hole_span) in hole_exprs {
             // A nested f-string formats into the same `W`; with no `W`, it
             // is checked against the error type, which reports nothing.
             let nested = matches!(expr, Expr::FString { .. }).then(|| match writer {
@@ -83,7 +83,10 @@ impl Checker<'_> {
                 continue;
             };
             match self.hole(value, writer, expr.span()) {
-                Some(hole) => holes.push(hole),
+                Some(hole) => {
+                    self.record_hole(hole_span, &hole);
+                    holes.push(hole);
+                }
                 None => failed = true,
             }
         }
@@ -194,10 +197,17 @@ impl Checker<'_> {
                 codes::E071,
                 format!("`{shown}` cannot be formatted into `{into}`"),
             )
-            .label(span, true, format!("no `@format` for `{shown}`"))
-            .help(format!(
-                "define one: `@format: function (value: ref {shown}, out: ref {into}) nothing`"
-            ));
+            .label(span, true, format!("no `@format` for `{shown}`"));
+            let diagnostic = match self.format_skeleton(target, &into) {
+                Some((at, skeleton)) => diagnostic.help_fix(
+                    format!("add `@format: function (self, out: ref {into}) nothing` to `{shown}`"),
+                    at,
+                    skeleton,
+                ),
+                None => diagnostic.help(format!(
+                    "define one: `@format: function (value: ref {shown}, out: ref {into}) nothing`"
+                )),
+            };
             self.emit_requirement(diagnostic, Requirement::Format, &[target, writer]);
             return None;
         };
@@ -215,6 +225,25 @@ impl Checker<'_> {
             value,
             format: hook.key,
         })
+    }
+
+    /// For an object or enum declared in source, where a member `@format`
+    /// into `into` goes (an empty span before the body's closing `}`) and
+    /// its skeleton.
+    fn format_skeleton(&self, ty: TypeId, into: &str) -> Option<(Span, String)> {
+        let def = match self.types.kind(ty) {
+            TypeKind::Object(def) => *def,
+            TypeKind::Instance { base, .. } => *base,
+            _ => return None,
+        };
+        let span = self.res.def(def).span;
+        if span.is_dummy() || span.hi.0 <= span.lo.0 {
+            return None;
+        }
+        let at = Span::new(span.hi.0 - 1, span.hi.0 - 1, span.file);
+        let skeleton =
+            format!("\n    @format: function (self, out: ref {into}) nothing {{\n    }}\n");
+        Some((at, skeleton))
     }
 
     /// A value in an `@format_args(writer)` slot that is not one already:
@@ -445,8 +474,8 @@ impl Checker<'_> {
 }
 
 /// An f-string's pieces (one more than its holes: adjacent text joins, and
-/// a missing piece is empty) and its hole expressions.
-fn split_parts(parts: &[FStrPart]) -> (Vec<Vec<u8>>, Vec<&Expr>) {
+/// a missing piece is empty) and its hole expressions with their spans.
+fn split_parts(parts: &[FStrPart]) -> (Vec<Vec<u8>>, Vec<(&Expr, Span)>) {
     let mut pieces = vec![Vec::new()];
     let mut holes = Vec::new();
     for part in parts {
@@ -456,8 +485,8 @@ fn split_parts(parts: &[FStrPart]) -> (Vec<Vec<u8>>, Vec<&Expr>) {
                     last.extend_from_slice(bytes);
                 }
             }
-            FStrPart::Hole(expr) => {
-                holes.push(expr);
+            FStrPart::Hole { expr, span } => {
+                holes.push((expr, *span));
                 pieces.push(Vec::new());
             }
         }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use lilac_driver::{Analysis, Session};
-use lilac_hir::{AliasSite, LocalSite, NameSite, SemanticSite};
+use lilac_hir::{AliasSite, HoleSite, LocalSite, NameSite, SemanticSite};
 use lilac_ir::LirModule;
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::{FileId, Span};
@@ -46,6 +46,10 @@ pub struct AnalysisIndex {
     /// declaration (as its own site) and every path head naming one;
     /// deduped and sorted by `(file, lo)`.
     pub aliases: Vec<AliasSite>,
+    /// F-string holes with their `@format` hooks, deduped by `(span,
+    /// type, hook)` and sorted by `(file, lo)`; a hole in a generic body
+    /// can have one per instance.
+    pub holes: Vec<HoleSite>,
 }
 
 /// The IR modules captured at each pipeline boundary during a compile.
@@ -150,6 +154,10 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
     aliases.sort_by_key(|site| (site.span.file.0, site.span.lo.0, site.span.hi.0));
     aliases.dedup();
 
+    let mut holes = analysis.hir.holes.clone();
+    holes.sort_by_key(hole_key);
+    holes.dedup_by_key(|site| hole_key(site));
+
     let mut exprs = Vec::new();
     let mut record = |expr: &lilac_hir::HirExpr| exprs.push((expr.span, expr.ty));
     for func in analysis.hir.funcs.iter().chain(&analysis.templates) {
@@ -168,7 +176,14 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
         semantics: analysis.semantics.clone(),
         locals,
         aliases,
+        holes,
     }
+}
+
+/// What orders and dedupes [`HoleSite`]s.
+fn hole_key(site: &HoleSite) -> (u32, u32, u32, u32, u32) {
+    let span = site.span;
+    (span.file.0, span.lo.0, span.hi.0, site.ty.0, site.hook.0)
 }
 
 #[cfg(test)]

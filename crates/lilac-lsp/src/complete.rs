@@ -437,11 +437,19 @@ struct Entry {
 }
 
 fn builtin_types() -> impl Iterator<Item = Entry> {
-    lilac_ty::Builtin::ALL.into_iter().map(|builtin| Entry {
+    let fixed = lilac_ty::Builtin::ALL.into_iter().map(|builtin| Entry {
         label: builtin.name().to_owned(),
         kind: CompletionItemKind::TYPE_PARAMETER,
         detail: Some("builtin type".to_owned()),
-    })
+    });
+    let applied = crate::handlers::TYPE_CONSTRUCTORS
+        .iter()
+        .map(|(name, shape)| Entry {
+            label: (*name).to_owned(),
+            kind: CompletionItemKind::TYPE_PARAMETER,
+            detail: Some(format!("builtin type {shape}")),
+        });
+    fixed.chain(applied)
 }
 
 /// Maps `byte` in `new` to the matching offset in `old`, the same text

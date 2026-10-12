@@ -43,7 +43,7 @@
       ]
     },
     "builtin-types": {
-      "match": "@(bit8|bit16|bit32|bit64|bit_native|byte_buffer|format_args)\\b",
+      "match": "@(bit8|bit16|bit32|bit64|bit_native|byte_buffer|array|format_args)\\b",
       "name": "support.type.builtin.lilac"
     },
     "hooks": {
