@@ -38,14 +38,15 @@ has no `main`), else on its own.
 
 ## Install
 
-Build the extension and install the VSIX:
+From the repository root, build the extension and install the VSIX:
 
 ```sh
-cd editors/vscode
-npm install
-npm run package
-code --install-extension lilac-0.4.0.vsix
+scripts/package-vscode.sh
+code --install-extension package/lilac-0.5.0.vsix
 ```
+
+`scripts/package.sh` builds `lilac-lsp` into `package/bin`; put that folder
+on your `PATH` or point `lilac.serverPath` at the executable.
 
 Or, for development, open this folder in VS Code and press `F5` to launch an
 Extension Development Host.

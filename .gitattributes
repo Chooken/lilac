@@ -5,3 +5,6 @@
 # LF so a Windows checkout (core.autocrlf=true) does not rewrite them to CRLF.
 *.lir text eol=lf
 *.ll text eol=lf
+
+# Shell scripts run under bash, which reads a CR as part of the line.
+*.sh text eol=lf

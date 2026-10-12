@@ -4,3 +4,4 @@ target/
 .idea/
 .cargo/
 build/
+package/

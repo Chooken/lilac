@@ -13,6 +13,7 @@ C compiler, SDK or C library. It links programs with its own copy of `lld`.
 
 ```
 bin/lilac(.exe)        the compiler
+bin/lilac-lsp(.exe)    the language server, for editors
 lib/lilac/             the linker and system stubs it uses
 lib/Standard/          the standard library
 ```
@@ -24,14 +25,27 @@ anywhere as long as it stays together.
 ### Building the install folder from source
 
 You need Rust and an LLVM 18.1.8 development tree, with
-`LLVM_SYS_181_PREFIX` set to that tree. Then run:
+`LLVM_SYS_181_PREFIX` set to that tree (in the environment or
+`.cargo/config.toml`). Then run:
 
 ```bash
-scripts/package.sh <out-dir> <llvm-dir>
+scripts/package.sh
 ```
 
-The script builds `lilac` in release mode and assembles the folder above in
-`<out-dir>`.
+The script builds `lilac` and `lilac-lsp` in release mode and assembles the
+folder above in `package/`.
+
+### The VS Code extension
+
+With Node.js and npm installed, run:
+
+```bash
+scripts/package-vscode.sh
+```
+
+It packages `editors/vscode` as `package/lilac-<version>.vsix`. Install it
+with `code --install-extension package/lilac-<version>.vsix`; it starts
+`lilac-lsp` from your `PATH`.
 
 ## Building a program
 

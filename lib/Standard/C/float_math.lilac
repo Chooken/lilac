@@ -31,7 +31,7 @@ roundf: extern function(in: Float32) result: Float32
 rintf: extern function(in: Float32) result: Float32
 nearbyintf: extern function(in: Float32) result: Float32
 lroundf: extern function(in: Float32) result: CLong
-llroundf: extern function(x: Float32) result: Int64
+llroundf: extern function(x: Float32) result: CLongLong
 
 fmodf: extern function(x: Float32, y: Float32) result: Float32
 remainderf: extern function(x: Float32, y: Float32) result: Float32

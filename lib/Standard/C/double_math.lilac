@@ -31,6 +31,7 @@ trunc: extern function(in: Float64) result: Float64
 round: extern function(in: Float64) result: Float64
 rint: extern function(in: Float64) result: Float64
 nearbyint: extern function(in: Float64) result: Float64
+lround: extern function(x: Float64) result: CLong
 llround: extern function(x: Float64) result: Int64
 
 fmod: extern function(x: Float64, y: Float64) result: Float64
@@ -42,8 +43,8 @@ fma: extern function(x: Float64, y: Float64, z: Float64) result: Float64
 copysign: extern function(x: Float64, y: Float64) result: Float64
 
 
-ldexp: extern function(x: Float64, exp: CInt) result: Float64
-frexp: extern function(x: Float64, exp: ref CInt) result: Float64
+ldexp: extern function(x: Float64, exp: Int) result: Float64
+frexp: extern function(x: Float64, exp: ref Int) result: Float64
 modf: extern function(x: Float64, iptr: ref Float64) result: Float64
 
 erf: extern function(in: Float64) result: Float64

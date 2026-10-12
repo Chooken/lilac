@@ -1,9 +1,0 @@
-CLong: object {
-    data: @bit32
-
-    @conversion: function(from: Int32) CLong => CLong { data = from }
-    @conversion: function(from: @bit32) CLong => CLong { data = from }
-
-    @conversion: function(from: CLong) @bit32 => from.data
-    @conversion: function(from: CLong) Int32 => from.data
-}
