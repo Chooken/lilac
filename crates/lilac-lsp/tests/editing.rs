@@ -562,7 +562,7 @@ fn intrinsics_complete_after_an_at_sign() {
         .expect("@i_add_8");
     assert_eq!(
         add.detail.as_deref(),
-        Some("@i_add_8(left: @bit8, right: @bit8) @bit8")
+        Some("@i_add_8: function (left: @bit8, right: @bit8) @bit8")
     );
     // The edit replaces the `@` too.
     let Some(CompletionTextEdit::Edit(edit)) = &add.text_edit else {
@@ -751,18 +751,21 @@ fn signature_help_tracks_the_argument() {
     let help = signature_after(&client, &uri, 2, "    x: @bit8 = add(first, ");
     assert_eq!(
         help.signatures[0].label,
-        "add(a: @bit8, b: @bit8) total: @bit8"
+        "add: function (a: @bit8, b: @bit8) total: @bit8"
     );
     assert_eq!(help.active_parameter, Some(1));
 
     // A method called on a value takes no `self` argument.
     let help = signature_after(&client, &uri, 3, "    x: @bit8 = point.sum(");
-    assert_eq!(help.signatures[0].label, "Point.sum() total: @bit8");
+    assert_eq!(
+        help.signatures[0].label,
+        "Point.sum: function () total: @bit8"
+    );
 
     let help = signature_after(&client, &uri, 4, "    x: @bit8 = @i_add_8(first, ");
     assert_eq!(
         help.signatures[0].label,
-        "@i_add_8(left: @bit8, right: @bit8) @bit8"
+        "@i_add_8: function (left: @bit8, right: @bit8) @bit8"
     );
     assert_eq!(help.active_parameter, Some(1));
 

@@ -242,7 +242,7 @@ fn a_hole_hovers_with_its_type_and_hook() {
     assert!(text.contains("```lilac\nPoint\n```"), "{text}");
     assert!(text.contains("formatted by"), "{text}");
     assert!(
-        text.contains("function Point.@format(ref Point, ref Out) nothing"),
+        text.contains("Point.@format: function (self, out: ref Out) nothing"),
         "{text}"
     );
     // On the value: its type, then the hook.
@@ -369,7 +369,7 @@ fn format_args_completes_and_hovers() {
     assert!(detail("@array").contains("@array(T, N)"));
     assert_eq!(
         detail("@format_args_hole"),
-        "@format_args_hole(format: @format_args(W), index: @bit_native, out: ref W) nothing"
+        "@format_args_hole: function (format: @format_args(W), index: @bit_native, out: ref W) nothing"
     );
 
     // The last compile is of `PROGRAM`, whose `consume` names the type.

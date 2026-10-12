@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId};
 use lsp_types::{
-    DidOpenTextDocumentParams, Hover, PublishDiagnosticsParams, TextDocumentItem, Url,
+    DidOpenTextDocumentParams, Hover, HoverContents, PublishDiagnosticsParams, TextDocumentItem,
+    Url,
 };
 
 fn start_server() -> (Connection, std::thread::JoinHandle<()>) {
@@ -225,6 +226,85 @@ fn hover_survives_deep_nesting() {
     let character = 17; // inside "foo"
     let hover = hover_at(&client, &uri, line, character).expect("hover present");
     assert!(format!("{:?}", hover.contents).contains("foo"));
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+const DOCUMENTED: &str = "\
+/// Two of a kind.
+Pair[T]: object {
+    first: T
+    /// The other one.
+    second: T
+    /// The first of the two.
+    get: function (self) value: T {
+        // not part of any hover
+        value = self.first
+    }
+}
+/// How far to go.
+limit: @bit8 => @i_add_8(0x10, 0x2)
+magnitude: extern \"abs\" function (value: @bit32) result: @bit32
+main: function () nothing {
+    pair: Pair[@bit8] = Pair[@bit8] {
+        first = limit
+        second = 0x1
+    }
+    x: @bit8 = pair.get()
+    y: @bit32 = magnitude(0x1)
+    z: @bit8 = pair.second
+}
+";
+
+fn hover_markdown(client: &Connection, uri: &Url, needle: &str, into: u32) -> String {
+    let byte = DOCUMENTED.rfind(needle).expect("needle");
+    let before = &DOCUMENTED[..byte];
+    let line = u32::try_from(before.matches('\n').count()).expect("line");
+    let column = byte - before.rfind('\n').map_or(0, |newline| newline + 1);
+    let column = u32::try_from(column).expect("column") + into;
+    let hover = hover_at(client, uri, line, column).expect("hover");
+    let HoverContents::Markup(markup) = hover.contents else {
+        panic!("markup: {hover:?}");
+    };
+    markup.value
+}
+
+/// A hover is the declaration as Lilac writes it, built from the syntax
+/// tree (no comment or layout of the source), then its doc.
+#[test]
+fn hovers_render_declarations_with_their_docs() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    did_open(&client, &uri, DOCUMENTED);
+    let _ = publish_for(&client, &uri);
+
+    let get = hover_markdown(&client, &uri, "get()", 0);
+    assert_eq!(
+        get,
+        "```lilac\nPair[T].get: function (self) value: T\n```\n\n---\n\nThe first of the two."
+    );
+    let pair = hover_markdown(&client, &uri, "Pair[@bit8] {", 0);
+    assert_eq!(
+        pair,
+        "```lilac\nPair[T]: object {\n    first: T\n    second: T\n}\n```\n\n---\n\nTwo of a kind."
+    );
+    let second = hover_markdown(&client, &uri, "second\n", 0);
+    assert_eq!(
+        second,
+        "```lilac\nsecond: T\n```\nin `Pair[T]`\n\n---\n\nThe other one."
+    );
+    let limit = hover_markdown(&client, &uri, "limit\n", 0);
+    assert_eq!(
+        limit,
+        "```lilac\nlimit: @bit8 => @i_add_8(0x10, 0x2)\n```\n\n---\n\nHow far to go."
+    );
+    let magnitude = hover_markdown(&client, &uri, "magnitude(0x1)", 0);
+    assert_eq!(
+        magnitude,
+        "```lilac\nmagnitude: extern \"abs\" function (value: @bit32) result: @bit32\n```"
+    );
 
     shutdown(&client);
     handle.join().expect("server thread");

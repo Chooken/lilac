@@ -495,12 +495,22 @@
   type and the hook; `Checker::record_hole`), so definition lists a hook
   per instance of a generic body, the hook's references list its holes,
   and the hover shows each type with its hook; a hover of the whole value
-  shows the formatted type and adds `formatted by`. Hovers show a
-  function's signature, a field, variant or constant's declaration, an
-  intrinsic's signature and doc (`Intrinsic::signature`, `doc`), a
-  builtin type's doc (`Builtin::doc`), and the shape of
-  `@array` and `@format_args` (`handlers::TYPE_CONSTRUCTORS`, which
-  completion lists after `@` too).
+  shows the formatted type and adds `formatted by`. Declarations are
+  rendered once (`render.rs`), as Lilac writes them, from the definition
+  table and the declaration's syntax tree, never the source text: a
+  function with its owner, generics, `extern`/`export` and failure outs
+  (`Pair[T].get: function (self) value: T`), a type with up to
+  `MAX_SLOTS` fields or variants, a field or variant with its owner as
+  context, an alias, a constant or global with its initializer printed
+  from its expression (elided whole to `…` past a length or depth), and
+  an intrinsic from `Intrinsic::signature`. `Rendered::params` are the
+  parameters' UTF-16 ranges for signature help. A hover is the
+  declaration in a `lilac` block, its context, then its `///` doc
+  (`Def::doc`, `Intrinsic::doc`, `Builtin::doc`); signature help shows
+  the doc, and completion items carry the declaration as `detail` and
+  the doc as `documentation`. `@array` and `@format_args` show their
+  shape (`handlers::TYPE_CONSTRUCTORS`, which completion lists after `@`
+  too).
 - Editing (`complete.rs`, `actions.rs`): completion and signature help
   run before the edit is compiled, so the context is read from the
   document's current tokens (`context.rs`: `Context` lexes it, and answers

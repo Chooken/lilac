@@ -18,15 +18,16 @@ use lilac_span::FileId;
 use lilac_ty::{TypeKind, TypeRef};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Documentation,
-    ParameterInformation, ParameterLabel, Position, Range, SignatureHelp, SignatureInformation,
-    TextEdit,
+    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
+    SignatureHelp, SignatureInformation, TextEdit,
 };
 
 use crate::context::{After, Completing, Context};
 use crate::convert::LineIndex;
 use crate::documents::{map_offset, Edit};
-use crate::handlers::{file_for, intrinsic_label, intrinsic_signature, signature};
+use crate::handlers::file_for;
 use crate::index::Retained;
+use crate::render;
 
 /// What a name or path names.
 #[derive(Clone, Copy, Debug)]
@@ -232,7 +233,8 @@ impl<'a> Scope<'a> {
     /// An item's completion entry.
     fn item_entry(&self, id: DefId) -> Option<Entry> {
         let info = self.retained.index.defs.get(&id)?;
-        let kind = match &self.analysis.resolved.def(id).kind {
+        let resolved = &self.analysis.resolved;
+        let kind = match &resolved.def(id).kind {
             DefKind::Func(_) if info.parent.is_some() => CompletionItemKind::METHOD,
             DefKind::Func(_) => CompletionItemKind::FUNCTION,
             DefKind::Hook(_) => return None,
@@ -247,7 +249,8 @@ impl<'a> Scope<'a> {
         Some(Entry {
             label: info.name.clone(),
             kind,
-            detail: signature(self.retained, id, info),
+            documentation: resolved.def(id).doc.as_ref().map(|doc| doc.text.clone()),
+            detail: Some(render::declaration(resolved, id, 0).text),
         })
     }
 
@@ -303,6 +306,7 @@ impl<'a> Scope<'a> {
                     .map(|(name, field)| Entry {
                         label: name,
                         kind: CompletionItemKind::FIELD,
+                        documentation: None,
                         detail: field.map(|field| types.display_ref(field)),
                     })
                     .collect();
@@ -339,6 +343,7 @@ impl<'a> Scope<'a> {
                 Some(Entry {
                     label: name.split('.').next()?.to_owned(),
                     kind: CompletionItemKind::MODULE,
+                    documentation: None,
                     detail: Some(format!("namespace {}", data.path)),
                 })
             })
@@ -356,6 +361,7 @@ impl<'a> Scope<'a> {
             .map(|(name, site)| Entry {
                 label: name.to_owned(),
                 kind: CompletionItemKind::VARIABLE,
+                documentation: None,
                 detail: Some(types.display_ref(site.ty)),
             })
             .collect();
@@ -368,6 +374,7 @@ impl<'a> Scope<'a> {
             entries.extend(scope.aliases.iter().map(|(name, (ns, _))| Entry {
                 label: name.clone(),
                 kind: CompletionItemKind::MODULE,
+                documentation: None,
                 detail: Some(format!("namespace {}", resolved.namespace_path(*ns))),
             }));
         }
@@ -384,6 +391,7 @@ impl<'a> Scope<'a> {
         entries.extend(lilac_lex::KEYWORDS.iter().map(|word| Entry {
             label: (*word).to_owned(),
             kind: CompletionItemKind::KEYWORD,
+            documentation: None,
             detail: None,
         }));
         entries.extend(builtin_types().filter(|entry| !entry.label.starts_with('@')));
@@ -439,6 +447,7 @@ impl<'a> Scope<'a> {
             .map(|(name, payload)| Entry {
                 label: name.clone(),
                 kind: CompletionItemKind::ENUM_MEMBER,
+                documentation: None,
                 detail: payload.clone(),
             })
             .collect()
@@ -449,13 +458,17 @@ impl<'a> Scope<'a> {
 struct Entry {
     label: String,
     kind: CompletionItemKind,
+    /// The declaration, on one line.
     detail: Option<String>,
+    /// Its doc, in Markdown.
+    documentation: Option<String>,
 }
 
 fn builtin_types() -> impl Iterator<Item = Entry> {
     let fixed = lilac_ty::Builtin::ALL.into_iter().map(|builtin| Entry {
         label: builtin.name().to_owned(),
         kind: CompletionItemKind::TYPE_PARAMETER,
+        documentation: None,
         detail: Some("builtin type".to_owned()),
     });
     let applied = crate::handlers::TYPE_CONSTRUCTORS
@@ -463,6 +476,7 @@ fn builtin_types() -> impl Iterator<Item = Entry> {
         .map(|(name, shape)| Entry {
             label: (*name).to_owned(),
             kind: CompletionItemKind::TYPE_PARAMETER,
+            documentation: None,
             detail: Some(format!("builtin type {shape}")),
         });
     fixed.chain(applied)
@@ -496,17 +510,21 @@ pub fn completion(
     let entries = if after == After::At {
         let mut entries: Vec<Entry> = Intrinsic::names()
             .into_iter()
-            .map(|name| Entry {
-                detail: Intrinsic::lookup(&name)
-                    .map(|intrinsic| intrinsic_signature(&name, intrinsic)),
-                label: name,
-                kind: CompletionItemKind::FUNCTION,
+            .map(|name| {
+                let intrinsic = Intrinsic::lookup(&name);
+                Entry {
+                    documentation: intrinsic.map(Intrinsic::doc),
+                    detail: intrinsic.map(|intrinsic| render::intrinsic(&name, intrinsic).text),
+                    label: name,
+                    kind: CompletionItemKind::FUNCTION,
+                }
             })
             .collect();
         entries.extend(builtin_types().filter(|entry| entry.label.starts_with('@')));
         entries.push(Entry {
             label: "@builtin".to_owned(),
             kind: CompletionItemKind::MODULE,
+            documentation: None,
             detail: Some("namespace @builtin".to_owned()),
         });
         entries
@@ -529,6 +547,7 @@ pub fn completion(
             label: entry.label,
             kind: Some(entry.kind),
             detail: entry.detail,
+            documentation: entry.documentation.map(markdown),
             ..CompletionItem::default()
         })
         .collect();
@@ -552,8 +571,8 @@ pub fn signature_help(
         .then(|| Intrinsic::lookup(&callee))
         .flatten()
     {
-        let (label, params) = intrinsic_label(&callee, intrinsic);
-        return Some(help(label, params, argument));
+        let rendered = render::intrinsic(&callee, intrinsic);
+        return Some(help(rendered, Some(intrinsic.doc()), argument));
     }
 
     let scope = Scope::new(retained, uri, text, edits, cursor)?;
@@ -573,60 +592,30 @@ pub fn signature_help(
         },
     };
     let by_value = matches!(receiver, Some(Named::Value(_)));
-    let decl = scope.analysis.resolved.def(def).func()?.clone();
-    let sig = scope.analysis.sigs.get(&def)?;
-    let types = &scope.analysis.types;
-    let info = scope.retained.index.defs.get(&def)?;
-
-    let mut label = format!("{}(", info.qualified);
-    let mut params = Vec::new();
-    for (index, (param, ty)) in decl.params.iter().zip(&sig.params).enumerate() {
-        if index == 0 && param.is_receiver() && by_value {
-            continue;
-        }
-        if !params.is_empty() {
-            label.push_str(", ");
-        }
-        let text = if param.is_ref_self() {
-            "self".to_owned()
-        } else {
-            format!("{}: {}", param.name, types.display_ref(*ty))
-        };
-        let start = utf16_len(&label);
-        label.push_str(&text);
-        params.push((start, utf16_len(&label)));
-    }
-    let returns: Vec<String> = decl
-        .returns
-        .iter()
-        .zip(&sig.returns)
-        .map(|(slot, ty)| {
-            if slot.name.is_empty() {
-                types.display_ref(*ty)
-            } else {
-                format!("{}: {}", slot.name, types.display_ref(*ty))
-            }
-        })
-        .collect();
-    if returns.is_empty() {
-        label.push_str(") nothing");
-    } else {
-        label.push_str(") ");
-        label.push_str(&returns.join(", "));
-    }
-    Some(help(label, params, argument))
+    let resolved = &scope.analysis.resolved;
+    let rendered = render::call(resolved, def, by_value)?;
+    let doc = resolved.def(def).doc.as_ref().map(|doc| doc.text.clone());
+    Some(help(rendered, doc, argument))
 }
 
-fn utf16_len(text: &str) -> u32 {
-    u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
+/// Markdown for an editor.
+fn markdown(value: String) -> Documentation {
+    Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    })
 }
 
-fn help(label: String, params: Vec<(u32, u32)>, argument: u32) -> SignatureHelp {
+fn help(rendered: render::Rendered, doc: Option<String>, argument: u32) -> SignatureHelp {
+    let render::Rendered {
+        text: label,
+        params,
+    } = rendered;
     let count = u32::try_from(params.len()).unwrap_or(u32::MAX);
     SignatureHelp {
         signatures: vec![SignatureInformation {
             label,
-            documentation: None::<Documentation>,
+            documentation: doc.map(markdown),
             parameters: Some(
                 params
                     .into_iter()

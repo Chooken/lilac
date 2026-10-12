@@ -105,7 +105,6 @@ fn a_dot_in_a_string_is_not_a_member() {
 }
 
 #[test]
-#[ignore = "editor plan phase 3"]
 fn a_hover_never_shows_source_comments() {
     let retained = retained();
     let (text, _) = edited("");

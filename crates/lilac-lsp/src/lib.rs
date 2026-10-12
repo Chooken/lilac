@@ -41,6 +41,7 @@ pub mod hints;
 pub mod index;
 pub mod lir;
 pub mod navigate;
+pub mod render;
 pub mod roots;
 pub mod server;
 

@@ -539,7 +539,7 @@ fn document_symbols_nest_members() {
     );
     assert_eq!(
         symbols[3].detail.as_deref(),
-        Some("function add(@bit8, @bit8) -> @bit8")
+        Some("add: function (a: @bit8, b: @bit8) total: @bit8")
     );
     shutdown(&client);
     handle.join().expect("server thread");
@@ -577,12 +577,21 @@ fn hover_text(client: &Connection, uri: &Url, at: (u32, u32)) -> String {
 fn hovers_show_fields_variants_globals_and_intrinsics() {
     let (client, handle, uri) = open_program();
     for (from, expected) in [
-        (at(PROGRAM, "point.x", 0, 6), "field Point.x: @bit8"),
-        (at(PROGRAM, ".Line(", 0, 2), "variant Shape.Line: @bit8"),
-        (at(PROGRAM, "limit)", 0, 1), "global limit: @bit8 = 0x10"),
+        (
+            at(PROGRAM, "point.x", 0, 6),
+            "```lilac\nx: @bit8\n```\nin `Point`",
+        ),
+        (
+            at(PROGRAM, ".Line(", 0, 2),
+            "```lilac\nLine: @bit8\n```\nin `Shape`",
+        ),
+        (
+            at(PROGRAM, "limit)", 0, 1),
+            "```lilac\nlimit: @bit8 = 0x10\n```",
+        ),
         (
             at(PROGRAM, "@i_add_8", 1, 2),
-            "@i_add_8(left: @bit8, right: @bit8) @bit8",
+            "@i_add_8: function (left: @bit8, right: @bit8) @bit8",
         ),
         (at(PROGRAM, "@i_add_8", 1, 2), "`left + right`, wrapping."),
         (at(PROGRAM, "@bit8", 0, 2), "8 bits, with no sign"),

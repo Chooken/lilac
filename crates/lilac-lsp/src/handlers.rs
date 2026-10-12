@@ -5,15 +5,16 @@ use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{HoleSite, SemanticKind};
 use lilac_resolve::DefId;
 use lilac_span::{FileId, Span};
-use lilac_ty::{TypeRef, Types};
+use lilac_ty::TypeRef;
 use lsp_types::{
     GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
     Range, SemanticToken, SemanticTokens, Url,
 };
 
 use crate::convert::{span_range, LineIndex};
-use crate::index::{AnalysisIndex, DefInfo, Retained};
+use crate::index::{AnalysisIndex, Retained};
 use crate::navigate::{holes_at, smallest_use, target_in, Target};
+use crate::render;
 use crate::roots::canonical_file_uri;
 
 /// Legend token-type indices, in the order advertised by `initialize`.
@@ -138,53 +139,9 @@ pub(crate) fn contains(span: Span, byte: usize) -> bool {
 
 /// Renders a hover for a resolved item use.
 fn item_hover(retained: &Retained, def: DefId) -> Option<String> {
-    let info = retained.index.defs.get(&def)?;
-    let text = signature(retained, def, info)?;
-    Some(format!("```lilac\n{text}\n```"))
-}
-
-/// A one-line description of a definition: a function's signature, else its
-/// kind, qualified name and the rest of its declaration (`: @bit32 = 0x2A`
-/// for a constant, a field's type, a variant's payload).
-#[must_use]
-pub(crate) fn signature(retained: &Retained, def: DefId, info: &DefInfo) -> Option<String> {
     let analysis = retained.session.analysis()?;
-    Some(match info.kind {
-        "function" | "hook" => {
-            let sig = analysis.sigs.get(&def)?;
-            let params = join_types(&analysis.types, &sig.params);
-            let returns = join_types(&analysis.types, &sig.returns);
-            if returns.is_empty() {
-                format!("function {}({}) nothing", info.qualified, params)
-            } else {
-                format!("function {}({}) -> {}", info.qualified, params, returns)
-            }
-        }
-        "object" | "enum" => format!("{} {}", info.kind, info.qualified),
-        _ => {
-            let declared = retained
-                .session
-                .source_map
-                .file(info.span.file)
-                .and_then(|source| {
-                    source
-                        .src
-                        .get(info.span.lo.0 as usize..info.span.hi.0 as usize)
-                })
-                .and_then(|text| text.strip_prefix(info.name.as_str()))
-                .map(|rest| rest.split_whitespace().collect::<Vec<_>>().join(" "))
-                .unwrap_or_default();
-            let declared = match declared.char_indices().nth(MAX_DECLARATION) {
-                Some((cut, _)) => format!("{} ...", &declared[..cut]),
-                None => declared,
-            };
-            format!("{} {}{}", info.kind, info.qualified, declared)
-        }
-    })
+    Some(render::item_markdown(&analysis.resolved, def))
 }
-
-/// How much of a declaration a hover shows, in characters.
-const MAX_DECLARATION: usize = 160;
 
 /// Renders a hover for a bare expression (its type). A hole's whole value
 /// shows the type it is formatted as (the hole borrows it) and its hook.
@@ -225,18 +182,12 @@ fn hole_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Range, 
     let analysis = retained.session.analysis()?;
     let parts: Vec<String> = sites
         .iter()
-        .filter_map(|site| {
-            let info = retained.index.defs.get(&site.hook)?;
-            let hook = signature(retained, site.hook, info)?;
+        .map(|site| {
+            let hook = render::declaration(&analysis.resolved, site.hook, 0).text;
             let shown = analysis.types.display(site.ty);
-            Some(format!(
-                "```lilac\n{shown}\n```\nformatted by\n```lilac\n{hook}\n```"
-            ))
+            format!("```lilac\n{shown}\n```\nformatted by\n```lilac\n{hook}\n```")
         })
         .collect();
-    if parts.is_empty() {
-        return None;
-    }
     Some((range, parts.join("\n\n---\n\n")))
 }
 
@@ -282,11 +233,11 @@ fn builtin_type_hover(retained: &Retained, file: FileId, byte: usize) -> Option<
         .get(site.span.lo.0 as usize..site.span.hi.0 as usize)?;
     let range = span_range(&retained.session.source_map, site.span)?;
     if let Some(builtin) = lilac_ty::Builtin::named(name) {
-        return Some((range, format!("```lilac\n{name}\n```\n{}", builtin.doc())));
+        return Some((range, render::markdown(name, None, Some(builtin.doc()))));
     }
     let (_, shape) = TYPE_CONSTRUCTORS.iter().find(|(known, _)| *known == name)?;
     let (head, prose) = shape.split_once(": ")?;
-    Some((range, format!("```lilac\n{head}\n```\n{prose}")))
+    Some((range, render::markdown(head, None, Some(prose))))
 }
 
 /// Renders a hover for an intrinsic's name: its signature.
@@ -302,52 +253,11 @@ fn intrinsic_hover(retained: &Retained, file: FileId, byte: usize) -> Option<(Ra
         .get(site.span.lo.0 as usize..site.span.hi.0 as usize)?;
     let intrinsic = Intrinsic::lookup(name)?;
     let range = span_range(&retained.session.source_map, site.span)?;
+    let rendered = render::intrinsic(name, intrinsic);
     Some((
         range,
-        format!(
-            "```lilac\n{}\n```\n{}",
-            intrinsic_signature(name, intrinsic),
-            intrinsic.doc()
-        ),
+        render::markdown(&rendered.text, None, Some(&intrinsic.doc())),
     ))
-}
-
-/// `@name(param: slot, ...) result` for an intrinsic, from its table.
-pub(crate) fn intrinsic_signature(name: &str, intrinsic: Intrinsic) -> String {
-    intrinsic_label(name, intrinsic).0
-}
-
-/// [`intrinsic_signature`] with each parameter's UTF-16 range in it, for
-/// signature help.
-pub(crate) fn intrinsic_label(name: &str, intrinsic: Intrinsic) -> (String, Vec<(u32, u32)>) {
-    let utf16 = |text: &str| u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX);
-    let sig = intrinsic.signature();
-    let mut label = format!("{name}(");
-    let mut params = Vec::new();
-    for (index, param) in sig.params.iter().enumerate() {
-        if index > 0 {
-            label.push_str(", ");
-        }
-        let start = utf16(&label);
-        label.push_str(param.name);
-        label.push_str(": ");
-        label.push_str(&param.slot.to_string());
-        params.push((start, utf16(&label)));
-    }
-    let result = sig
-        .result
-        .map_or_else(|| "nothing".to_owned(), |slot| slot.to_string());
-    label.push_str(") ");
-    label.push_str(&result);
-    (label, params)
-}
-
-/// Joins rendered type refs with `, `.
-fn join_types(types: &Types, refs: &[TypeRef]) -> String {
-    refs.iter()
-        .map(|ty| types.display_ref(*ty))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Semantic tokens for `uri`'s document, derived from the retained analysis.

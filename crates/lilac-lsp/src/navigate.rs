@@ -461,7 +461,10 @@ fn symbol(retained: &Retained, id: DefId, info: &DefInfo) -> Option<DocumentSymb
     #[allow(deprecated)]
     Some(DocumentSymbol {
         name: info.name.clone(),
-        detail: crate::handlers::signature(retained, id, info),
+        detail: retained
+            .session
+            .analysis()
+            .map(|analysis| crate::render::declaration(&analysis.resolved, id, 0).text),
         kind: symbol_kind(info),
         tags: None,
         deprecated: None,
