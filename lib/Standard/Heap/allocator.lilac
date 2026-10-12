@@ -4,7 +4,7 @@ using Standard.Os
 
 Allocator: object {
 
-    // A new allocation holding `value`, moved in. Free it with `destroy`.
+    /// A new allocation holding `value`, moved in. Free it with `destroy`.
     create[T]: function(value: T) allocation: ref T {
         memory: ref unknown = allocate(@size_of(T)).get() else {
             @panic("out of memory")
@@ -13,14 +13,14 @@ Allocator: object {
         @write(allocation, value)
     }
 
-    // Drops the value at `allocation` and frees it.
+    /// Drops the value at `allocation` and frees it.
     destroy[T]: function(allocation: ref T) nothing {
         @drop(allocation)
         deallocate(allocation as ref unknown)
     }
 
-    // Frees `allocation` without dropping anything: its value was moved
-    // out (`@read`).
+    /// Frees `allocation` without dropping anything: its value was moved
+    /// out (`@read`).
     free[T]: function(allocation: ref T) nothing {
         deallocate(allocation as ref unknown)
     }

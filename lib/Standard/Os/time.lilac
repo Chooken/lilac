@@ -4,8 +4,8 @@ using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 
-// A clock that only moves forward, from an arbitrary start: for measuring
-// time between two readings.
+/// A clock that only moves forward, from an arbitrary start: for measuring
+/// time between two readings.
 monotonic_nanos: function () nanos: @bit64 {
     match @builtin.Target.os {
         .Windows => {
@@ -29,7 +29,7 @@ monotonic_nanos: function () nanos: @bit64 {
     }
 }
 
-// The time of day: nanoseconds since 1970-01-01 00:00 UTC.
+/// The time of day: nanoseconds since 1970-01-01 00:00 UTC.
 wall_clock_nanos: function () nanos: @bit64 {
     match @builtin.Target.os {
         .Windows => {
@@ -50,7 +50,7 @@ wall_clock_nanos: function () nanos: @bit64 {
     }
 }
 
-// Pauses the calling thread for at least `nanos`.
+/// Pauses the calling thread for at least `nanos`.
 sleep: function (nanos: @bit64) nothing {
     match @builtin.Target.os {
         .Windows => {
@@ -109,7 +109,7 @@ sleep: function (nanos: @bit64) nothing {
 private {
     nanos_per_second: @bit64 => 0x3B9ACA00
 
-    // 1970-01-01 in Windows ticks.
+    /// 1970-01-01 in Windows ticks.
     windows_epoch: @bit64 => 0x19DB1DED53E8000
 
     linux_clock: function (clock: @bit32) nanos: @bit64 {

@@ -20,6 +20,6 @@ SleepConditionVariableSRW: extern function (ConditionVariable: ref unknown, SRWL
 WakeConditionVariable: extern function (ConditionVariable: ref unknown) nothing
 WakeAllConditionVariable: extern function (ConditionVariable: ref unknown) nothing
 
-// Random bytes from the system generator (`bcryptprimitives.dll`, Windows
-// 10 and later); it cannot fail.
+/// Random bytes from the system generator (`bcryptprimitives.dll`, Windows
+/// 10 and later); it cannot fail.
 ProcessPrng: extern function (pbData: ref unknown, cbData: @bit_native) ok: @bit32

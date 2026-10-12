@@ -1,7 +1,9 @@
-// The outcome of an operation that can fail: `Ok` with its value, or
-// `Error` with why. A zeroed `Result` is `Ok` with a zero value.
+/// The outcome of an operation that can fail: `Ok` with its value, or
+/// `Error` with why. A zeroed `Result` is `Ok` with a zero value.
 Result[T, E]: enum {
+    /// It worked, giving this value.
     Ok: T
+    /// It failed, for this reason.
     Error: E
 
     is_ok: function(self) ok: Bool {
@@ -14,8 +16,8 @@ Result[T, E]: enum {
         }
     }
 
-    // The value of an `Ok` (moved out of the result); fails with the
-    // error of an `Error`.
+    /// The value of an `Ok` (moved out of the result); fails with the
+    /// error of an `Error`.
     get: function(self: Result[T, E]) value: T else error: E {
         match self {
             .Ok -> ok_value: T {
@@ -39,7 +41,7 @@ Result[T, E]: enum {
         }
     }
 
-    // The error of an `Error`; fails on an `Ok`.
+    /// The error of an `Error`; fails on an `Ok`.
     error: function(self: Result[T, E]) error: E else nothing {
         match self {
             .Error -> why: E {
@@ -50,8 +52,8 @@ Result[T, E]: enum {
         fail
     }
 
-    // `Ok(value)` or `Error(error)`; usable when `T` and `E` copy and have
-    // a `@format` (checked where it is used).
+    /// `Ok(value)` or `Error(error)`; usable when `T` and `E` copy and have
+    /// a `@format` (checked where it is used).
     @format: function (self, out: ref Formatter) nothing {
         match self {
             .Ok -> ok_value: T {

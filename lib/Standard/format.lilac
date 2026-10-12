@@ -9,20 +9,20 @@
 // Every consumer (`Io.print`, a string, a log) makes a `Formatter` over its
 // own storage, so each type needs one hook and each consumer one sink.
 
-// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
+/// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
 Formatter: object {
     private {
         target: ref unknown
         sink: FormatSink
     }
 
-    // A formatter that hands every byte to `sink(target, bytes)`.
+    /// A formatter that hands every byte to `sink(target, bytes)`.
     over: function (target: ref unknown, sink: FormatSink) out: Formatter {
         out = Formatter { target = target, sink = sink }
     }
 
-    // Writes an f-string, a literal, or one formattable value
-    // (`out.write(self.x)`).
+    /// Writes an f-string, a literal, or one formattable value
+    /// (`out.write(self.x)`).
     write: function (self, text: Format) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0
@@ -34,7 +34,7 @@ Formatter: object {
         }
     }
 
-    // Writes `bytes` as they are.
+    /// Writes `bytes` as they are.
     write_bytes: function (self, bytes: @byte_buffer) nothing {
         sink: FormatSink = self.sink
         sink(self.target, bytes)
@@ -43,7 +43,7 @@ Formatter: object {
 
 Format: alias @format_args(Formatter)
 
-// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
+/// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
 FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
 
 // The bit containers format as unsigned decimal.
@@ -67,18 +67,18 @@ FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
     write_unsigned(out, @extend_zero(value), 0xA)
 }
 
-// A byte buffer is written as it is.
+/// A byte buffer is written as it is.
 @format: function (value: ref @byte_buffer, out: ref Formatter) nothing {
     out.write_bytes(value)
 }
 
-// A format in a hole is written into the same formatter.
+/// A format in a hole is written into the same formatter.
 @format: function (value: ref Format, out: ref Formatter) nothing {
     out.write(value)
 }
 
-// An integer's bits in hexadecimal (lowercase, no prefix): `{n.hex()}`.
-// A negative integer shows its two's complement at its own width.
+/// An integer's bits in hexadecimal (lowercase, no prefix): `{n.hex()}`.
+/// A negative integer shows its two's complement at its own width.
 Hex: object {
     value: @bit64
 
@@ -87,7 +87,7 @@ Hex: object {
     }
 }
 
-// An integer's bits in binary (no prefix): `{n.binary()}`.
+/// An integer's bits in binary (no prefix): `{n.binary()}`.
 Binary: object {
     value: @bit64
 
@@ -96,13 +96,13 @@ Binary: object {
     }
 }
 
-// A format padded with spaces to at least `width` characters (code
-// points), from `pad_left`, `pad_right` or `pad_center`.
+/// A format padded with spaces to at least `width` characters (code
+/// points), from `pad_left`, `pad_right` or `pad_center`.
 Padded: object {
     text: ref Format
     width: @bit_native
-    // How much of the padding goes before the text: 0x0 none, 0x1 half
-    // (rounded down), 0x2 all.
+    /// How much of the padding goes before the text: 0x0 none, 0x1 half
+    /// (rounded down), 0x2 all.
     side: @bit8
 
     @format: function (self, out: ref Formatter) nothing {
@@ -125,17 +125,17 @@ Padded: object {
     }
 }
 
-// `text` with spaces before it, to `width` characters: `{pad_left(ref f, 0x8)}`.
+/// `text` with spaces before it, to `width` characters: `{pad_left(ref f, 0x8)}`.
 pad_left: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x2 }
 
-// `text` with spaces after it, to `width` characters.
+/// `text` with spaces after it, to `width` characters.
 pad_right: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x0 }
 
-// `text` centered in `width` characters; an odd space goes after it.
+/// `text` centered in `width` characters; an odd space goes after it.
 pad_center: function (text: ref Format, width: @bit_native) Padded => Padded { text = text, width = width, side = 0x1 }
 
 private {
-    // `value` in `base` (2 to 16), most significant digit first.
+    /// `value` in `base` (2 to 16), most significant digit first.
     write_unsigned: function (out: ref Formatter, value: @bit64, base: @bit64) nothing {
         digits: @array(@bit8, 64) {}
         first: ref @bit8 = @array_at(ref digits, 0x0)
@@ -153,7 +153,7 @@ private {
         out.write_bytes(@byte_buffer_from(at, @i_sub_native(0x40, start)))
     }
 
-    // `value` in signed decimal.
+    /// `value` in signed decimal.
     write_signed: function (out: ref Formatter, value: @bit64) nothing {
         if @i_less_than_64(value, 0x0) {
             out.write_bytes("-")
@@ -172,8 +172,8 @@ private {
         }
     }
 
-    // A sink that counts the code points it is given into the
-    // `@bit_native` at `target`: every byte but a UTF-8 continuation byte.
+    /// A sink that counts the code points it is given into the
+    /// `@bit_native` at `target`: every byte but a UTF-8 continuation byte.
     count_characters: function (target: ref unknown, bytes: @byte_buffer) nothing {
         count: ref @bit_native = target as ref @bit_native
         data: ref @bit8 = @byte_buffer_ptr(bytes)

@@ -5,8 +5,8 @@ STD_INPUT_HANDLE: @bit32 => 0xFFFFFFF6
 STD_OUTPUT_HANDLE: @bit32 => 0xFFFFFFF5
 STD_ERROR_HANDLE: @bit32 => 0xFFFFFFF4
 
-// What `CreateFileW` and others return on failure, as an address
-// (`@ptr_to_address(handle) == INVALID_HANDLE_VALUE`).
+/// What `CreateFileW` and others return on failure, as an address
+/// (`@ptr_to_address(handle) == INVALID_HANDLE_VALUE`).
 INVALID_HANDLE_VALUE: @bit_native => @i_negate_native(0x1)
 
 TRUE: @bit32 => 0x1

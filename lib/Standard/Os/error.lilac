@@ -12,7 +12,7 @@ match @builtin.Target.os {
 }
 
 Error: enum {
-    // A code with no name here.
+    /// A code with no name here.
     Other: @bit32
     NotFound
     PermissionDenied
@@ -31,7 +31,7 @@ Error: enum {
     BadHandle
 }
 
-// The error an `errno` value names.
+/// The error an `errno` value names.
 error_of_errno: function (code: @bit32) error: Error {
     if code == Posix.ENOENT {
         error = .NotFound
@@ -70,7 +70,7 @@ error_of_errno: function (code: @bit32) error: Error {
     }
 }
 
-// The error a Windows `GetLastError` code names.
+/// The error a Windows `GetLastError` code names.
 error_of_windows: function (code: @bit32) error: Error {
     if code == Windows.ERROR_FILE_NOT_FOUND {
         error = .NotFound
@@ -110,8 +110,8 @@ error_of_windows: function (code: @bit32) error: Error {
 }
 
 private {
-    // The calling thread's `errno` after a failed C call. Linux system
-    // calls return theirs instead (`Linux.errno_of`).
+    /// The calling thread's `errno` after a failed C call. Linux system
+    /// calls return theirs instead (`Linux.errno_of`).
     posix_errno: function () code: @bit32 {
         match @builtin.Target.os {
             .MacOs => {

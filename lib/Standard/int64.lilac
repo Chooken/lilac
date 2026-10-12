@@ -20,14 +20,14 @@ Int64: object {
     @conversion: function(from: @bit64) Int64 => Int64 { data = from }
     @conversion: function(from: Int64) @bit64 => from.data
 
-    // Signed decimal.
+    /// Signed decimal.
     @format: function (self, out: ref Formatter) nothing {
         write_signed(out, @extend_sign(self.data))
     }
 
-    // The bits in hexadecimal, at this type's width: `{n.hex()}`.
+    /// The bits in hexadecimal, at this type's width: `{n.hex()}`.
     hex: function (self) Hex => Hex { value = @extend_zero(self.data) }
 
-    // The bits in binary, at this type's width: `{n.binary()}`.
+    /// The bits in binary, at this type's width: `{n.binary()}`.
     binary: function (self) Binary => Binary { value = @extend_zero(self.data) }
 }

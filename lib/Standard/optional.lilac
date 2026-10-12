@@ -1,8 +1,12 @@
+/// A value that may be missing: `Some` with it, or `None`. A zeroed
+/// `Optional` is `Some` with a zero value, so set `.None` explicitly.
 Optional[T]: enum {
+    /// The value is here.
     Some: T
+    /// There is no value.
     None
 
-    // The value of a `Some` (moved out of the optional); fails on `None`.
+    /// The value of a `Some` (moved out of the optional); fails on `None`.
     get: function(self: Optional[T]) value: T else nothing {
         match self {
             .Some -> some_value: T {
@@ -23,7 +27,7 @@ Optional[T]: enum {
         }
     }
 
-    // Only usable when T has a static `default()`; checked when called.
+    /// Only usable when T has a static `default()`; checked when called.
     unwrap_or_default: function(self: Optional[T]) value: T {
         match self {
             .Some -> some_value: T {
@@ -34,8 +38,8 @@ Optional[T]: enum {
         }
     }
 
-    // `Some(value)` or `None`; usable when `T` copies and has a `@format`
-    // (checked where it is used).
+    /// `Some(value)` or `None`; usable when `T` copies and has a `@format`
+    /// (checked where it is used).
     @format: function (self, out: ref Formatter) nothing {
         match self {
             .Some -> some_value: T {

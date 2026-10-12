@@ -18,7 +18,7 @@ CreateProcessW: extern function (lpApplicationName: ref @bit16, lpCommandLine: r
 TerminateProcess: extern function (hProcess: ref unknown, uExitCode: @bit32) ok: @bit32
 GetExitCodeProcess: extern function (hProcess: ref unknown, lpExitCode: ref @bit32) ok: @bit32
 
-// `lpStartAddress` is a C-ABI `DWORD (*)(void *)`.
+/// `lpStartAddress` is a C-ABI `DWORD (*)(void *)`.
 CreateThread: extern function (lpThreadAttributes: ref unknown, dwStackSize: @bit_native, lpStartAddress: ref unknown, lpParameter: ref unknown, dwCreationFlags: @bit32, lpThreadId: ref @bit32) thread: ref unknown
 ExitThread: extern function (dwExitCode: @bit32) nothing
 GetExitCodeThread: extern function (hThread: ref unknown, lpExitCode: ref @bit32) ok: @bit32

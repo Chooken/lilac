@@ -1,9 +1,9 @@
 
 using Standard.Os as Os
 
-// A bump allocator over one mapping of pages: each allocation takes the
-// next bytes, aligned, and only `reset` (or dropping the arena) gives them
-// back. Every byte past `used` is zero, so allocations start zeroed.
+/// A bump allocator over one mapping of pages: each allocation takes the
+/// next bytes, aligned, and only `reset` (or dropping the arena) gives them
+/// back. Every byte past `used` is zero, so allocations start zeroed.
 ArenaAllocator: object {
 
     private {
@@ -15,7 +15,7 @@ ArenaAllocator: object {
     get_capacity: function (self) Int => self.capacity
     get_used: function (self) Int => self.used
 
-    // An arena of at least `capacity` bytes (rounded up to whole pages).
+    /// An arena of at least `capacity` bytes (rounded up to whole pages).
     init: function (capacity: Int) allocator: ArenaAllocator {
 
         if capacity < 0 {
@@ -43,24 +43,24 @@ ArenaAllocator: object {
         }
     }
 
-    // A new allocation holding `value`, moved in.
+    /// A new allocation holding `value`, moved in.
     create[T]: function (self, value: T) allocation: ref T {
         allocation = self.alloc_raw(@size_of(T), @align_of(T)) as ref T
         @write(allocation, value)
     }
 
-    // Drops the value at `allocation`; its bytes stay used until `reset`.
+    /// Drops the value at `allocation`; its bytes stay used until `reset`.
     destroy[T]: function (self, allocation: ref T) nothing {
         @drop(allocation)
     }
 
-    // Room for `count` zeroed `T`s.
+    /// Room for `count` zeroed `T`s.
     alloc[T]: function (self, count: Int) allocation: ref T {
         allocation = self.alloc_raw(self.array_size(@size_of(T), count), @align_of(T)) as ref T
     }
 
-    // `ptr` (from `alloc`, `count` long) resized to `new_count`, keeping
-    // the first of them; new elements are zeroed.
+    /// `ptr` (from `alloc`, `count` long) resized to `new_count`, keeping
+    /// the first of them; new elements are zeroed.
     realloc[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
         allocation = self.realloc_raw(ptr as ref unknown, self.array_size(@size_of(T), count), self.array_size(@size_of(T), new_count), @align_of(T)) as ref T
     }
@@ -69,7 +69,7 @@ ArenaAllocator: object {
         // no-op
     }
 
-    // `size` zeroed bytes aligned to `alignment` (a power of two).
+    /// `size` zeroed bytes aligned to `alignment` (a power of two).
     alloc_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
 
         if size < 0 {
@@ -105,9 +105,9 @@ ArenaAllocator: object {
         self.used = start + size
     }
 
-    // `ptr` (from `alloc_raw`, `old_size` long) resized to `new_size`
-    // bytes: in place when it is the last allocation or shrinks, else
-    // copied to a new allocation. New bytes are zeroed.
+    /// `ptr` (from `alloc_raw`, `old_size` long) resized to `new_size`
+    /// bytes: in place when it is the last allocation or shrinks, else
+    /// copied to a new allocation. New bytes are zeroed.
     realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
 
         if new_size < 0 {
@@ -151,8 +151,9 @@ ArenaAllocator: object {
         // no op. here incase someone wants to use allocators as interfaces.
     }
 
-    // Frees every allocation at once. Only the bytes used need zeroing.
+    /// Frees every allocation at once.
     reset: function (self) nothing {
+        // Only the bytes used need zeroing.
         @memset(self.base, 0x0, self.used)
         self.used = 0
     }
@@ -162,8 +163,8 @@ ArenaAllocator: object {
     }
 
     private {
-        // `count` elements of `element` bytes, refused before the product
-        // could overflow (it could never fit the arena then).
+        /// `count` elements of `element` bytes, refused before the product
+        /// could overflow (it could never fit the arena then).
         array_size: function (self, element: Int, count: Int) size: Int {
             if count < 0 {
                 @panic("Can't allocate a negative count.")
@@ -179,6 +180,6 @@ ArenaAllocator: object {
 }
 
 private {
-    // `value` rounded up to a multiple of `alignment` (a power of two).
+    /// `value` rounded up to a multiple of `alignment` (a power of two).
     align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
 }

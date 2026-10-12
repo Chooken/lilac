@@ -8,17 +8,17 @@
 using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
 
-// A running thread from `spawn`. `join` it exactly once; nothing frees it
-// otherwise.
+/// A running thread from `spawn`. `join` it exactly once; nothing frees it
+/// otherwise.
 Thread: object {
-    // The Windows thread handle, or the `pthread_t`; native Linux keeps
-    // the thread id.
+    /// The Windows thread handle, or the `pthread_t`; native Linux keeps
+    /// the thread id.
     value: @bit_native
-    // The start block (from `allocate`), or the native Linux mapping.
+    /// The start block (from `allocate`), or the native Linux mapping.
     memory: ref unknown
 }
 
-// Starts a thread running `entry(argument)`.
+/// Starts a thread running `entry(argument)`.
 spawn: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -54,7 +54,7 @@ spawn: function (entry: function (argument: ref unknown) nothing, argument: ref 
     }
 }
 
-// Waits for `thread` to finish, then releases it.
+/// Waits for `thread` to finish, then releases it.
 join: function (thread: Thread) error: Optional[Error] {
     error = .None
     match @builtin.Target.os {
@@ -91,7 +91,7 @@ join: function (thread: Thread) error: Optional[Error] {
     }
 }
 
-// Lets another thread run.
+/// Lets another thread run.
 yield_thread: function () nothing {
     match @builtin.Target.os {
         .Windows => {
@@ -109,15 +109,15 @@ yield_thread: function () nothing {
 }
 
 private {
-    // The block `thread_start` reads: the function, then its argument.
+    /// The block `thread_start` reads: the function, then its argument.
     StartBlock: object {
         entry: @bit_native
         argument: ref unknown
     }
 
-    // Where every thread starts: `CreateThread`, `pthread_create` and the
-    // native Linux `clone` call it with the start block, and it runs
-    // `entry(argument)`.
+    /// Where every thread starts: `CreateThread`, `pthread_create` and the
+    /// native Linux `clone` call it with the start block, and it runs
+    /// `entry(argument)`.
     thread_start: export "lilac_thread_start" function (start: ref unknown) result: ref unknown {
         slot: ref function (argument: ref unknown) nothing = start as ref function (argument: ref unknown) nothing
         entry: function (argument: ref unknown) nothing = slot
@@ -128,7 +128,7 @@ private {
 
     start_size: @bit_native => 0x10
 
-    // Fills the start block at `memory`.
+    /// Fills the start block at `memory`.
     start_block: function (memory: ref unknown, entry: function (argument: ref unknown) nothing, argument: ref unknown) nothing {
         block: ref StartBlock = memory as ref StartBlock
         block.argument = argument
@@ -136,9 +136,9 @@ private {
         slot = entry
     }
 
-    // The native Linux thread mapping: the id word at 0, the start block
-    // at 0x10, the thread-local area from 0x40 to 0x4000, then the stack
-    // up to the end.
+    /// The native Linux thread mapping: the id word at 0, the start block
+    /// at 0x10, the thread-local area from 0x40 to 0x4000, then the stack
+    /// up to the end.
     clone_mapping: @bit_native => 0x100000
     clone_start: @bit_native => 0x10
     clone_tls: @bit_native => 0x40

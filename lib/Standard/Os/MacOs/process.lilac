@@ -1,8 +1,8 @@
 // Processes, threads, the environment and errors.
 
-// Runs `atexit` handlers and flushes C `stdio`, then ends the process.
+/// Runs `atexit` handlers and flushes C `stdio`, then ends the process.
 exit: extern function (status: @bit32) nothing
-// Ends the process at once.
+/// Ends the process at once.
 _exit: extern function (status: @bit32) nothing
 abort: extern function () nothing
 getpid: extern function () pid: @bit32
@@ -10,7 +10,7 @@ kill: extern function (pid: @bit32, sig: @bit32) result: @bit32
 getenv: extern function (name: ref @bit8) value: ref @bit8
 sysconf: extern function (name: @bit32) value: @bit_native
 
-// The calling thread's `errno`: `__error()` is where C's `errno` lives.
+/// The calling thread's `errno`: `__error()` is where C's `errno` lives.
 __error: extern function () errno: ref @bit32
 errno: function () @bit32 => __error()
 

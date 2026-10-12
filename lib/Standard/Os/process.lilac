@@ -5,8 +5,8 @@ using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 using Standard.C as C
 
-// Ends the process with `code`. Does not return. Under `--libc` (and on
-// macOS) this is C's `exit`, which flushes C `stdio` first.
+/// Ends the process with `code`. Does not return. Under `--libc` (and on
+/// macOS) this is C's `exit`, which flushes C `stdio` first.
 exit: function (code: @bit32) nothing {
     match @builtin.Target.os {
         .Windows => {

@@ -455,3 +455,69 @@ fn a_library_generic_failure_marks_the_users_call() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+fn hover_value(client: &Connection, uri: &Url, (line, character): (u32, u32)) -> String {
+    let id = RequestId::from(format!("hover-{line}-{character}"));
+    client
+        .sender
+        .send(Message::Request(Request {
+            id: id.clone(),
+            method: "textDocument/hover".to_owned(),
+            params: serde_json::json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character },
+            }),
+        }))
+        .expect("hover");
+    let value = read_response(client, &id)
+        .response_result
+        .expect("hover result");
+    value["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover at {line}:{character}: {value}"))
+        .to_owned()
+}
+
+/// `Standard`'s docs live in its source as `///` comments, and hovers show
+/// them under the declaration.
+#[test]
+fn standard_items_hover_with_their_docs() {
+    let (client, handle) = start_server();
+    let lib = standard();
+    initialize(
+        &client,
+        &serde_json::json!({ "libraries": { "Standard": lib.to_string_lossy() } }),
+    );
+    for (name, key, declaration, doc) in [
+        (
+            "format.lilac",
+            "pad_left: function",
+            "pad_left: function (text: ref Format, width: @bit_native) Padded",
+            "with spaces before it",
+        ),
+        (
+            "format.lilac",
+            "write: function",
+            "Formatter.write: function (self, text: Format) nothing",
+            "Writes an f-string",
+        ),
+        (
+            "optional.lilac",
+            "Some: T",
+            "Some: T\n```\nin `Optional[T]`",
+            "The value is here.",
+        ),
+    ] {
+        let path = lib.join(name);
+        let text = std::fs::read_to_string(&path).expect("read");
+        let uri = Url::from_file_path(&path).expect("uri");
+        did_open(&client, &uri, &text);
+        let _ = publish_for(&client, &uri);
+        let hover = hover_value(&client, &uri, position(&text, text.find(key).expect("key")));
+        assert!(hover.contains(declaration), "{name}: {hover}");
+        assert!(hover.contains(doc), "{name}: {hover}");
+        assert!(!hover.contains("//"), "{name}: {hover}");
+    }
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

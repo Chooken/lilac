@@ -9,6 +9,13 @@ The standard library is ordinary Lilac code. The compiler names **zero**
 standard-library entities (`SPEC.md` §2); everything here is built from bit
 containers, `object`/`enum`, generics, `ref`, `@` hooks, and `extern`.
 
+What each declaration does is documented in the source, in `///` doc
+comments above it, which the language server shows in hovers, signature
+help and completion; this document is the layout and the plan, not the
+reference. Comments above a group of declarations, and inside bodies,
+stay `//` (`crates/lilac-parse/tests/standard_docs.rs` checks that every
+`///` documents a declaration).
+
 ---
 
 ## 0. Foundations this layout assumes

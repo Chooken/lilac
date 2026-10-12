@@ -68,12 +68,22 @@ pub fn target_in(retained: &Retained, file: FileId, byte: usize) -> Option<(Span
     if let Some(site) = holes_at(retained, file, byte).first() {
         return Some((site.span, Target::Item(site.hook)));
     }
-    index
+    declaration_at(retained, file, byte).map(|(span, def)| (span, Target::Item(def)))
+}
+
+/// The item whose declared name is at `byte`, and that name's span.
+pub(crate) fn declaration_at(
+    retained: &Retained,
+    file: FileId,
+    byte: usize,
+) -> Option<(Span, DefId)> {
+    retained
+        .index
         .defs
         .iter()
         .filter(|(_, info)| info.name_span.file == file && contains(info.name_span, byte))
         .min_by_key(|(id, info)| (info.name_span.hi.0 - info.name_span.lo.0, id.0))
-        .map(|(id, info)| (info.name_span, Target::Item(*id)))
+        .map(|(id, info)| (info.name_span, *id))
 }
 
 /// The smallest resolved use containing `byte`. A span naming two items

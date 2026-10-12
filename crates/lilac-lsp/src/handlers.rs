@@ -13,7 +13,7 @@ use lsp_types::{
 
 use crate::convert::{span_range, LineIndex};
 use crate::index::{AnalysisIndex, Retained};
-use crate::navigate::{holes_at, smallest_use, target_in, Target};
+use crate::navigate::{declaration_at, holes_at, smallest_use, target_in, Target};
 use crate::render;
 use crate::roots::canonical_file_uri;
 
@@ -30,7 +30,8 @@ const TOKEN_NAMESPACE: u32 = 7;
 /// Legend modifier index 0 (`defaultLibrary`) as a bitset.
 const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 0;
 
-/// Hover for the intrinsic, item or expression at `position`, if any.
+/// Hover for the intrinsic, item (a use or its declared name) or
+/// expression at `position`, if any.
 #[must_use]
 pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover> {
     let file = file_for(retained, uri)?;
@@ -39,7 +40,8 @@ pub fn hover(retained: &Retained, uri: &Url, position: Position) -> Option<Hover
     let sources = &retained.session.source_map;
 
     let item = || {
-        let (span, def) = smallest_use(retained, file, byte)?;
+        let (span, def) =
+            smallest_use(retained, file, byte).or_else(|| declaration_at(retained, file, byte))?;
         Some((span_range(sources, span)?, item_hover(retained, def)?))
     };
     let (range, value) = intrinsic_hover(retained, file, byte)

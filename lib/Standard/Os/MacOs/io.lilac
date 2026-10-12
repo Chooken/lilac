@@ -24,7 +24,7 @@ ftruncate: extern function (fildes: @bit32, length: @bit_native) result: @bit32
 fcntl: extern function (fildes: @bit32, cmd: @bit32, ...) result: @bit32
 dup: extern function (fildes: @bit32) result: @bit32
 dup2: extern function (fildes: @bit32, fildes2: @bit32) result: @bit32
-// `fildes` is two `@bit32`s: the read end, then the write end.
+/// `fildes` is two `@bit32`s: the read end, then the write end.
 pipe: extern function (fildes: ref unknown) result: @bit32
 isatty: extern function (fildes: @bit32) result: @bit32
 

@@ -1,21 +1,21 @@
 using *.Heap
 
-// One value on the heap, owned: a `Box` moves (it cannot be copied) and
-// dropping it drops the value and frees its memory.
+/// One value on the heap, owned: a `Box` moves (it cannot be copied) and
+/// dropping it drops the value and frees its memory.
 Box[T]: object {
 
     private {
         value: ref T
     }
 
-    // A box holding `data`, moved onto the heap.
+    /// A box holding `data`, moved onto the heap.
     create: function(data: T) box: Box[T] {
         box = Box[T] {
             value = Allocator.create[T](data)
         }
     }
 
-    // The value, moved out of the box; the box's memory is freed.
+    /// The value, moved out of the box; the box's memory is freed.
     into_inner: function(self: Box[T]) data: T {
         @discard(self)
         data = @read(self.value)

@@ -1,26 +1,26 @@
 // Clocks, sleeping and random bytes.
 
-// `struct timespec`.
+/// `struct timespec`.
 Timespec: object {
     tv_sec: @bit64
     tv_nsec: @bit64
 }
 
-// `mach_timebase_info_data_t`: ticks times `numer / denom` is nanoseconds.
+/// `mach_timebase_info_data_t`: ticks times `numer / denom` is nanoseconds.
 MachTimebaseInfo: object {
     numer: @bit32
     denom: @bit32
 }
 
 clock_gettime: extern function (clock_id: @bit32, tp: ref Timespec) result: @bit32
-// The clock in nanoseconds, or 0 on failure.
+/// The clock in nanoseconds, or 0 on failure.
 clock_gettime_nsec_np: extern function (clock_id: @bit32) nanoseconds: @bit64
 mach_absolute_time: extern function () ticks: @bit64
 mach_timebase_info: extern function (info: ref MachTimebaseInfo) result: @bit32
-// `rmtp` may be null.
+/// `rmtp` may be null.
 nanosleep: extern function (rqtp: ref Timespec, rmtp: ref unknown) result: @bit32
 usleep: extern function (microseconds: @bit32) result: @bit32
 
-// At most 256 bytes per call.
+/// At most 256 bytes per call.
 getentropy: extern function (buffer: ref unknown, size: @bit_native) result: @bit32
 arc4random_buf: extern function (buf: ref unknown, nbytes: @bit_native) nothing

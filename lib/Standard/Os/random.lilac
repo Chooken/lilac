@@ -4,7 +4,7 @@ using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 
-// Fills `length` bytes at `buffer` with secure random bytes.
+/// Fills `length` bytes at `buffer` with secure random bytes.
 fill_random: function (buffer: ref unknown, length: @bit_native) nothing {
     match @builtin.Target.os {
         .Windows => {
@@ -62,6 +62,6 @@ fill_random: function (buffer: ref unknown, length: @bit_native) nothing {
 }
 
 private {
-    // The Universal C Runtime's secure generator.
+    /// The Universal C Runtime's secure generator.
     rand_s: extern function (randomValue: ref @bit32) result: @bit32
 }

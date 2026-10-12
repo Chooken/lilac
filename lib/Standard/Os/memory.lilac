@@ -7,7 +7,7 @@ using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 using Standard.C as C
 
-// `size` zeroed bytes, 16-byte aligned. Free them with `deallocate`.
+/// `size` zeroed bytes, 16-byte aligned. Free them with `deallocate`.
 allocate: function (size: @bit_native) result: Result[ref unknown, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -42,7 +42,7 @@ allocate: function (size: @bit_native) result: Result[ref unknown, Error] {
     }
 }
 
-// Frees memory from `allocate` or `reallocate` (null is ignored).
+/// Frees memory from `allocate` or `reallocate` (null is ignored).
 deallocate: function (memory: ref unknown) nothing {
     if @ptr_to_address(memory) == 0x0 {
         return
@@ -71,10 +71,10 @@ deallocate: function (memory: ref unknown) nothing {
     }
 }
 
-// `memory` (from `allocate`, or null) resized to `size` bytes, keeping
-// its contents up to the smaller size. On an error `memory` is untouched
-// and still the caller's to free. New bytes are zeroed except under the C
-// heap.
+/// `memory` (from `allocate`, or null) resized to `size` bytes, keeping
+/// its contents up to the smaller size. On an error `memory` is untouched
+/// and still the caller's to free. New bytes are zeroed except under the C
+/// heap.
 reallocate: function (memory: ref unknown, size: @bit_native) result: Result[ref unknown, Error] {
     if @ptr_to_address(memory) == 0x0 {
         result = allocate(size)
@@ -118,8 +118,8 @@ reallocate: function (memory: ref unknown, size: @bit_native) result: Result[ref
     }
 }
 
-// `size` bytes of fresh zeroed pages (`size` is rounded up to whole
-// pages). Release them with `unmap_pages`, passing the same `size`.
+/// `size` bytes of fresh zeroed pages (`size` is rounded up to whole
+/// pages). Release them with `unmap_pages`, passing the same `size`.
 map_pages: function (size: @bit_native) result: Result[ref unknown, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -155,7 +155,7 @@ map_pages: function (size: @bit_native) result: Result[ref unknown, Error] {
     }
 }
 
-// Releases the `size` bytes of pages at `memory`, from `map_pages`.
+/// Releases the `size` bytes of pages at `memory`, from `map_pages`.
 unmap_pages: function (memory: ref unknown, size: @bit_native) error: Optional[Error] {
     error = .None
     match @builtin.Target.os {
@@ -182,23 +182,23 @@ unmap_pages: function (memory: ref unknown, size: @bit_native) error: Optional[E
     }
 }
 
-// The size of a page of `map_pages` memory on this target.
+/// The size of a page of `map_pages` memory on this target.
 page_size: function () @bit_native => @builtin.Target.page_size
 
 private {
-    // The bytes in front of each native Linux allocation, holding the
-    // mapping's length (16 keeps the allocation 16-byte aligned).
+    /// The bytes in front of each native Linux allocation, holding the
+    /// mapping's length (16 keeps the allocation 16-byte aligned).
     AllocHeader: object {
         length: @bit_native
     }
 
     alloc_header: @bit_native => 0x10
 
-    // The mapping an allocation lives in.
+    /// The mapping an allocation lives in.
     header_of: function (memory: ref unknown) ref unknown => @address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
 
-    // A heap function's result: the memory, or `OutOfMemory` for null
-    // (no heap sets an error code that says more).
+    /// A heap function's result: the memory, or `OutOfMemory` for null
+    /// (no heap sets an error code that says more).
     heap_result: function (memory: ref unknown) result: Result[ref unknown, Error] {
         if @ptr_to_address(memory) == 0x0 {
             result = .Error(.OutOfMemory)

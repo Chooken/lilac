@@ -9,7 +9,7 @@ Bool: object {
     @conversion: function (from: Bool) to: @bit8 => from.data
     @conversion: function (from: @bit8) to: Bool => Bool { data = from }
 
-    // `true` or `false`.
+    /// `true` or `false`.
     @format: function (self, out: ref Formatter) nothing {
         if self.data == 0x0 {
             out.write_bytes("false")

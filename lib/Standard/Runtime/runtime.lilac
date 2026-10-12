@@ -6,8 +6,8 @@
 using Standard.Os as Os
 using Standard.Io as Io
 
-// Records the process arguments in `Standard.Os`, then runs the program:
-// its root-namespace `main`.
+/// Records the process arguments in `Standard.Os`, then runs the program:
+/// its root-namespace `main`.
 @entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     Os.argument_count = count
     Os.argument_vector = arguments
@@ -19,8 +19,8 @@ using Standard.Io as Io
     Os.exit(code)
 }
 
-// Panic messages and stack traces go to standard error. A message is a
-// `Format`, so `@panic($"index {i} past {n}")` formats.
+/// Panic messages and stack traces go to standard error. A message is a
+/// `Format`, so `@panic($"index {i} past {n}")` formats.
 @compiler_print: function (text: Format) nothing {
     Io.print_error(text)
 }

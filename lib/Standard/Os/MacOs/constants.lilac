@@ -46,7 +46,7 @@ MAP_PRIVATE: @bit32 => 0x2
 MAP_FIXED: @bit32 => 0x10
 MAP_ANON: @bit32 => 0x1000
 MAP_ANONYMOUS: @bit32 => 0x1000
-// `mmap`'s failure value, as an address.
+/// `mmap`'s failure value, as an address.
 MAP_FAILED: @bit_native => @i_negate_native(0x1)
 
 // `madvise` advice.

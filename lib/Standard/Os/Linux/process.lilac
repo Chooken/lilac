@@ -1,9 +1,9 @@
 // Processes and threads (`exit_group(2)`, `clone(2)`, ...).
 
-// Ends the calling thread.
+/// Ends the calling thread.
 exit: function (status: @bit32) @bit_native => @linux_syscall(call_number(60, 93), @extend_sign(status), 0x0, 0x0, 0x0, 0x0, 0x0)
 
-// Ends every thread of the process.
+/// Ends every thread of the process.
 exit_group: function (status: @bit32) @bit_native => @linux_syscall(call_number(231, 94), @extend_sign(status), 0x0, 0x0, 0x0, 0x0, 0x0)
 
 getpid: function () @bit_native => @linux_syscall(call_number(39, 172), 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
@@ -18,13 +18,13 @@ tgkill: function (tgid: @bit32, tid: @bit32, sig: @bit32) @bit_native => @linux_
 
 wait4: function (pid: @bit32, wstatus: ref unknown, options: @bit32, rusage: ref unknown) @bit_native => @linux_syscall(call_number(61, 260), @extend_sign(pid), @ptr_to_address(wstatus), @extend_zero(options), @ptr_to_address(rusage), 0x0, 0x0)
 
-// `argv` and `envp` are null-terminated arrays of NUL-terminated strings.
+/// `argv` and `envp` are null-terminated arrays of NUL-terminated strings.
 execve: function (pathname: ref @bit8, argv: ref unknown, envp: ref unknown) @bit_native => @linux_syscall(call_number(59, 221), @ptr_to_address(pathname as ref unknown), @ptr_to_address(argv), @ptr_to_address(envp), 0x0, 0x0, 0x0)
 
-// The raw `clone`, in x86-64's argument order (64-bit Arm swaps `tls` and
-// `child_tid`; this does it for you). A child on a new `stack` resumes
-// here on that stack with no frame to return to, so starting a thread
-// needs `Standard.Os`'s thread entry; with a null `stack` this is a `fork`.
+/// The raw `clone`, in x86-64's argument order (64-bit Arm swaps `tls` and
+/// `child_tid`; this does it for you). A child on a new `stack` resumes
+/// here on that stack with no frame to return to, so starting a thread
+/// needs `Standard.Os`'s thread entry; with a null `stack` this is a `fork`.
 clone: function (flags: @bit_native, stack: ref unknown, parent_tid: ref unknown, child_tid: ref unknown, tls: @bit_native) result: @bit_native {
     match @builtin.Target.arch {
         .Aarch64 => {
@@ -39,13 +39,13 @@ set_tid_address: function (tidptr: ref unknown) @bit_native => @linux_syscall(ca
 
 sched_yield: function () @bit_native => @linux_syscall(call_number(24, 124), 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
 
-// `sigsetsize` is 8.
+/// `sigsetsize` is 8.
 rt_sigaction: function (signum: @bit32, act: ref unknown, oldact: ref unknown, sigsetsize: @bit_native) @bit_native => @linux_syscall(call_number(13, 134), @extend_sign(signum), @ptr_to_address(act), @ptr_to_address(oldact), sigsetsize, 0x0, 0x0)
 
 rt_sigprocmask: function (how: @bit32, set: ref unknown, oldset: ref unknown, sigsetsize: @bit_native) @bit_native => @linux_syscall(call_number(14, 135), @extend_sign(how), @ptr_to_address(set), @ptr_to_address(oldset), sigsetsize, 0x0, 0x0)
 
-// Sets the thread pointer on x86-64 (`ARCH_SET_FS`: the `%fs` base).
-// 64-bit Arm sets `tpidr_el0` from user code instead, so has no such call.
+/// Sets the thread pointer on x86-64 (`ARCH_SET_FS`: the `%fs` base).
+/// 64-bit Arm sets `tpidr_el0` from user code instead, so has no such call.
 arch_prctl: function (code: @bit32, addr: @bit_native) result: @bit_native {
     match @builtin.Target.arch {
         .X86_64 => {

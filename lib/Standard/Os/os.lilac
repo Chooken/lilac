@@ -12,25 +12,25 @@ using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 
-// An open file, pipe or console: a Windows `HANDLE`, else a file
-// descriptor.
+/// An open file, pipe or console: a Windows `HANDLE`, else a file
+/// descriptor.
 Handle: object {
     value: @bit_native
 }
 
-// How `open` opens a file.
+/// How `open` opens a file.
 OpenMode: enum {
-    // Read an existing file.
+    /// Read an existing file.
     Read
-    // Write a file, created if missing and emptied if not.
+    /// Write a file, created if missing and emptied if not.
     Write
-    // Write at the end of a file, created if missing.
+    /// Write at the end of a file, created if missing.
     Append
-    // Read and write an existing file.
+    /// Read and write an existing file.
     ReadWrite
 }
 
-// Where a `seek` offset counts from.
+/// Where a `seek` offset counts from.
 SeekFrom: enum {
     Start
     Current
@@ -49,8 +49,8 @@ standard_error: function () handle: Handle {
     handle = standard_stream(Windows.STD_ERROR_HANDLE, 0x2)
 }
 
-// Writes up to `length` bytes at `buffer`: how many were written, which
-// may be fewer.
+/// Writes up to `length` bytes at `buffer`: how many were written, which
+/// may be fewer.
 write: function (handle: Handle, buffer: ref unknown, length: @bit_native) result: Result[@bit_native, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -70,7 +70,7 @@ write: function (handle: Handle, buffer: ref unknown, length: @bit_native) resul
     }
 }
 
-// Writes all `length` bytes at `buffer`, or stops at the first error.
+/// Writes all `length` bytes at `buffer`, or stops at the first error.
 write_all: function (handle: Handle, buffer: ref unknown, length: @bit_native) error: Optional[Error] {
     // A zeroed `Optional` is `Some`.
     error = .None
@@ -90,8 +90,8 @@ write_all: function (handle: Handle, buffer: ref unknown, length: @bit_native) e
     }
 }
 
-// Reads up to `length` bytes into `buffer`: how many were read, 0 at the
-// end of the file.
+/// Reads up to `length` bytes into `buffer`: how many were read, 0 at the
+/// end of the file.
 read: function (handle: Handle, buffer: ref unknown, length: @bit_native) result: Result[@bit_native, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -120,7 +120,7 @@ read: function (handle: Handle, buffer: ref unknown, length: @bit_native) result
     }
 }
 
-// Opens the file at `path` (UTF-8).
+/// Opens the file at `path` (UTF-8).
 open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -191,7 +191,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
     }
 }
 
-// Closes `handle`.
+/// Closes `handle`.
 close: function (handle: Handle) error: Optional[Error] {
     error = .None
     match @builtin.Target.os {
@@ -217,8 +217,8 @@ close: function (handle: Handle) error: Optional[Error] {
     }
 }
 
-// Moves `handle`'s position to `offset` bytes from `from`: the new
-// position from the start.
+/// Moves `handle`'s position to `offset` bytes from `from`: the new
+/// position from the start.
 seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@bit64, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -259,7 +259,7 @@ seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@
     }
 }
 
-// The size in bytes of the file open as `handle`.
+/// The size in bytes of the file open as `handle`.
 size: function (handle: Handle) result: Result[@bit64, Error] {
     match @builtin.Target.os {
         .Windows => {
@@ -303,7 +303,7 @@ size: function (handle: Handle) result: Result[@bit64, Error] {
 }
 
 private {
-    // A null pointer.
+    /// A null pointer.
     null: function () ref unknown => @address_to_ptr(0x0)
 
     handle_ptr: function (handle: Handle) ref unknown => @address_to_ptr(handle.value)
@@ -324,7 +324,7 @@ private {
         }
     }
 
-    // A Windows I/O count: at most 1 GiB per call.
+    /// A Windows I/O count: at most 1 GiB per call.
     windows_count: function (length: @bit_native) count: @bit32 {
         if @i_greater_than_u_native(length, 0x40000000) {
             count = 0x40000000
@@ -341,8 +341,8 @@ private {
         }
     }
 
-    // A Linux system call's result: the value, or the error its
-    // `-errno` names.
+    /// A Linux system call's result: the value, or the error its
+    /// `-errno` names.
     linux_result: function (raw: @bit_native) result: Result[@bit_native, Error] {
         if Linux.is_error(raw) {
             result = .Error(error_of_errno(Linux.errno_of(raw)))
@@ -351,7 +351,7 @@ private {
         }
     }
 
-    // A C call's `ssize_t` result: the value, or `errno` when `-1`.
+    /// A C call's `ssize_t` result: the value, or `errno` when `-1`.
     posix_result: function (raw: @bit_native) result: Result[@bit_native, Error] {
         if raw == @i_negate_native(0x1) {
             result = .Error(error_of_errno(posix_errno()))
@@ -360,7 +360,7 @@ private {
         }
     }
 
-    // `open` flags for `mode`, from the platform's values.
+    /// `open` flags for `mode`, from the platform's values.
     posix_open_flags: function (mode: OpenMode, read_only: @bit32, write_only: @bit32, read_write: @bit32, create: @bit32, truncate: @bit32, append: @bit32) flags: @bit32 {
         match mode {
             .Read => {
@@ -378,7 +378,7 @@ private {
         }
     }
 
-    // `lseek`'s whence (`SEEK_*` is 0, 1, 2 on Linux and macOS).
+    /// `lseek`'s whence (`SEEK_*` is 0, 1, 2 on Linux and macOS).
     whence: function (from: SeekFrom) value: @bit32 {
         match from {
             .Current => {
@@ -398,7 +398,7 @@ private {
 
     bit64_of: function (native: @bit_native) @bit64 => @extend_zero(native)
 
-    // `path` as a NUL-terminated byte string from `allocate`.
+    /// `path` as a NUL-terminated byte string from `allocate`.
     c_path: function (path: @byte_buffer) result: Result[ref @bit8, Error] {
         length: @bit_native = @byte_buffer_len(path)
         memory: ref unknown = allocate(@i_add_native(length, 0x1)).get() else -> why: Error {
@@ -410,7 +410,7 @@ private {
         result = .Ok(c)
     }
 
-    // `path` as NUL-terminated UTF-16 from `allocate`.
+    /// `path` as NUL-terminated UTF-16 from `allocate`.
     wide_path: function (path: @byte_buffer) result: Result[ref @bit16, Error] {
         length: @bit_native = @byte_buffer_len(path)
         memory: ref unknown = allocate(@i_mul_native(@i_add_native(length, 0x1), 0x2)).get() else -> why: Error {
@@ -424,10 +424,10 @@ private {
         result = .Ok(wide)
     }
 
-    // A bare target's C library still has POSIX `write` in practice.
+    /// A bare target's C library still has POSIX `write` in practice.
     bare_write: extern "write" function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native
 
-    // A bare target has no OS of its own: Standard needs a C library there.
+    /// A bare target has no OS of its own: Standard needs a C library there.
     needs_libc: function () nothing {
         if @builtin.Target.libc {
         } else {

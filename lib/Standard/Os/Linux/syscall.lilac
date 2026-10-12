@@ -7,7 +7,7 @@
 // (`is_error`, `errno_of`). C `int` is `@bit32`; `long`, `size_t`, `off_t`
 // and addresses are `@bit_native`; `void *` is `ref unknown`.
 
-// The system-call number: `x86` on x86-64, `arm` on 64-bit Arm.
+/// The system-call number: `x86` on x86-64, `arm` on 64-bit Arm.
 call_number: function (x86: @bit_native, arm: @bit_native) number: @bit_native {
     match @builtin.Target.arch {
         .X86_64 => {
@@ -21,8 +21,8 @@ call_number: function (x86: @bit_native, arm: @bit_native) number: @bit_native {
     }
 }
 
-// Whether a system call's `result` is an error: `-4095` to `-1`.
+/// Whether a system call's `result` is an error: `-4095` to `-1`.
 is_error: function (result: @bit_native) Bool => @i_greater_than_u_native(result, @i_negate_native(0x1000))
 
-// The `errno` of a failed call's `result` (the `E*` constants).
+/// The `errno` of a failed call's `result` (the `E*` constants).
 errno_of: function (result: @bit_native) @bit32 => @truncate(@i_negate_native(result))

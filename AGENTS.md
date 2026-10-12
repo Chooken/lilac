@@ -504,7 +504,8 @@
   context, an alias, a constant or global with its initializer printed
   from its expression (elided whole to `…` past a length or depth), and
   an intrinsic from `Intrinsic::signature`. `Rendered::params` are the
-  parameters' UTF-16 ranges for signature help. A hover is the
+  parameters' UTF-16 ranges for signature help. A hover, on a use or on
+  the declared name (`navigate::declaration_at`), is the
   declaration in a `lilac` block, its context, then its `///` doc
   (`Def::doc`, `Intrinsic::doc`, `Builtin::doc`); signature help shows
   the doc, and completion items carry the declaration as `detail` and
@@ -916,7 +917,10 @@ bug fix that changes generated code.
   (a `lilac_span::Doc`: the Markdown text and its span); the parser gives
   it to the declaration the token starts (`Item::doc`,
   `EnumVariant::doc`) and drops it anywhere else, and the resolver keeps
-  it as `Def::doc`.
+  it as `Def::doc`. `Standard` is documented this way; a comment over a
+  group of declarations stays `//`, and
+  `lilac-parse/tests/standard_docs.rs` checks every `///` in it is
+  attached.
 - The CLI never dumps the usage on a usage error: it prints the problem,
   a did-you-mean when one is close, and "run `lilac help` for all
   options". `lilac explain <code>` prints the code's page
