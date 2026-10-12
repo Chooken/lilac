@@ -22,11 +22,11 @@ Thread: object {
 spawn: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
     match @builtin.Target.os {
         .Windows => {
-            start: ref unknown = start_block(allocate(start_size), entry, argument)
-            if @ptr_to_address(start) == 0x0 {
-                result = .Error(.OutOfMemory)
+            start: ref unknown = allocate(start_size).get() else -> why: Error {
+                result = .Error(why)
                 return
             }
+            start_block(start, entry, argument)
             id: @bit32 = 0x0
             handle: ref unknown = Windows.CreateThread(null(), 0x0, thread_start as ref unknown, start, 0x0, ref id)
             if @ptr_to_address(handle) == 0x0 {
@@ -128,12 +128,8 @@ private {
 
     start_size: @bit_native => 0x10
 
-    // Fills the start block at `memory` (null passes through).
-    start_block: function (memory: ref unknown, entry: function (argument: ref unknown) nothing, argument: ref unknown) start: ref unknown {
-        start = memory
-        if @ptr_to_address(memory) == 0x0 {
-            return
-        }
+    // Fills the start block at `memory`.
+    start_block: function (memory: ref unknown, entry: function (argument: ref unknown) nothing, argument: ref unknown) nothing {
         block: ref StartBlock = memory as ref StartBlock
         block.argument = argument
         slot: ref function (argument: ref unknown) nothing = memory as ref function (argument: ref unknown) nothing
@@ -149,12 +145,12 @@ private {
     clone_tls_size: @bit_native => 0x3FC0
 
     clone_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
-        mapping: ref unknown = map_pages(clone_mapping).get() else { @panic("Out of memory.") }
-        if @ptr_to_address(mapping) == 0x0 {
-            result = .Error(.OutOfMemory)
+        mapping: ref unknown = map_pages(clone_mapping).get() else -> why: Error {
+            result = .Error(why)
             return
         }
-        start: ref unknown = start_block(@ptr_add(mapping, clone_start), entry, argument)
+        start: ref unknown = @ptr_add(mapping, clone_start)
+        start_block(start, entry, argument)
         // Shares everything a thread does; the id word is set before
         // `clone` returns and cleared when the thread exits.
         flags: @bit_native = @bit_or_native(@bit_or_native(@bit_or_native(Linux.CLONE_VM, Linux.CLONE_FS), @bit_or_native(Linux.CLONE_FILES, Linux.CLONE_SIGHAND)), @bit_or_native(@bit_or_native(Linux.CLONE_THREAD, Linux.CLONE_SYSVSEM), @bit_or_native(Linux.CLONE_SETTLS, @bit_or_native(Linux.CLONE_PARENT_SETTID, Linux.CLONE_CHILD_CLEARTID))))
@@ -176,11 +172,11 @@ private {
     sched_yield: extern function () result: @bit32
 
     posix_spawn_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
-        start: ref unknown = start_block(allocate(start_size), entry, argument)
-        if @ptr_to_address(start) == 0x0 {
-            result = .Error(.OutOfMemory)
+        start: ref unknown = allocate(start_size).get() else -> why: Error {
+            result = .Error(why)
             return
         }
+        start_block(start, entry, argument)
         handle: @bit_native = 0x0
         code: @bit32 = pthread_create(ref handle, null(), thread_start as ref unknown, start)
         if code == 0x0 {

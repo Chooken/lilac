@@ -23,7 +23,10 @@ Leaf: object {
 }
 
 main: function () nothing {
-    slots: ref Leaf = allocate(@i_mul_native(@size_of(Leaf), 0x2)) as ref Leaf
+    memory: ref unknown = allocate(@i_mul_native(@size_of(Leaf), 0x2)).get() else {
+        @panic("out of memory")
+    }
+    slots: ref Leaf = memory as ref Leaf
     second: ref Leaf = @ptr_add(slots as ref unknown, @size_of(Leaf)) as ref Leaf
     {
         @write(slots, Leaf { c = 'a' })

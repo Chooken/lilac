@@ -1,89 +1,184 @@
 
 using Standard.Os as Os
 
+// A bump allocator over one mapping of pages: each allocation takes the
+// next bytes, aligned, and only `reset` (or dropping the arena) gives them
+// back. Every byte past `used` is zero, so allocations start zeroed.
 ArenaAllocator: object {
 
     private {
         base: ref unknown
-        size: Int
-        offset: Int
+        capacity: Int
+        used: Int
     }
 
+    get_capacity: function (self) Int => self.capacity
+    get_used: function (self) Int => self.used
+
+    // An arena of at least `capacity` bytes (rounded up to whole pages).
     init: function (capacity: Int) allocator: ArenaAllocator {
 
-        if @builtin.Build.mode == @builtin.Mode.Debug {
-            if capacity <= 0 {
-                @panic("Can't allocate a negative capacity.")
-            }
+        if capacity < 0 {
+            @panic("Can't allocate a negative capacity.")
         }
 
-        result: Optional[ref unknown] = Os.map_pages(capacity)
+        if capacity == 0 as Int {
+            @panic("Can't allocate 0 bytes.")
+        }
 
-        ptr: ref unknown = result.get() else {
+        // The mapping is whole pages anyway, so the arena uses them all.
+        real_capacity: Int = align_up(capacity, @builtin.Target.page_size)
+        if real_capacity < capacity {
+            @panic("Out of memory.")
+        }
+
+        ptr: ref unknown = Os.map_pages(real_capacity).get() else {
             @panic("Out of memory.")
         }
 
         allocator = ArenaAllocator {
             base = ptr
-            size = capacity
-            offset = 0
+            capacity = real_capacity
+            used = 0
         }
     }
 
-    create[T]: function (self) allocation: ref T {
-        allocation = self.alloc_raw(@size_of(T)) as ref T
+    // A new allocation holding `value`, moved in.
+    create[T]: function (self, value: T) allocation: ref T {
+        allocation = self.alloc_raw(@size_of(T), @align_of(T)) as ref T
+        @write(allocation, value)
     }
 
+    // Drops the value at `allocation`; its bytes stay used until `reset`.
     destroy[T]: function (self, allocation: ref T) nothing {
         @drop(allocation)
     }
 
+    // Room for `count` zeroed `T`s.
     alloc[T]: function (self, count: Int) allocation: ref T {
-        allocation = self.alloc_raw(@size_of(T) * count) as ref T
+        allocation = self.alloc_raw(self.array_size(@size_of(T), count), @align_of(T)) as ref T
     }
 
+    // `ptr` (from `alloc`, `count` long) resized to `new_count`, keeping
+    // the first of them; new elements are zeroed.
     realloc[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
-        allocation = self.realloc_raw(ptr, @size_of(T) * count, @size_of(T) * new_count) as ref T
+        allocation = self.realloc_raw(ptr as ref unknown, self.array_size(@size_of(T), count), self.array_size(@size_of(T), new_count), @align_of(T)) as ref T
     }
 
     free[T]: function (self, ptr: ref T) nothing {
         // no-op
     }
 
-    alloc_raw: function (self, size: Int) allocation: ref unknown {
-        
-        // How should I actually be aligning this. Currently hardcoded 16 byte alignment.
-        aligned_size: Int = @bit_and_native((size + 15) as @bit_native, @bit_not_native(15))
+    // `size` zeroed bytes aligned to `alignment` (a power of two).
+    alloc_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
 
-        if @builtin.Build.mode == @builtin.Mode.Debug {
-            if size < 0 {
-                @panic("Can't allocate a negative size.")
-            }
+        if size < 0 {
+            @panic("Can't allocate a negative size.")
         }
 
-        if self.offset + aligned_size >= self.size {
+        if size == 0 as Int {
+            @panic("Can't allocate 0 bytes.")
+        }
+
+        if alignment > 0 and @bit_and_native(alignment as @bit_native, (alignment - 1) as @bit_native) == 0x0 {
+        } else {
+            @panic("The alignment must be a power of two.")
+        }
+
+        // No alignment past the whole arena fits, and refusing one keeps
+        // the sums below from overflowing.
+        if alignment > self.capacity {
+            @panic("The allocator is out of memory (full).")
+        }
+
+        // The address is aligned, not the offset: a large alignment may
+        // be more than the mapping's.
+        base_address: Int = @ptr_to_address(self.base)
+        start: Int = align_up(base_address + self.used, alignment) - base_address
+
+        if size > self.capacity - start {
             // Possibly expand the arena in the future.
             @panic("The allocator is out of memory (full).")
         }
 
-        allocation = @ptr_add(self.base, self.offset as @bit_native)
-        self.offset = self.offset + aligned_size
+        allocation = @ptr_add(self.base, start as @bit_native)
+        self.used = start + size
     }
 
-    realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int) allocation: ref unknown {
-        allocation = self.alloc_raw(new_size)
-        @memcpy(ptr as ref @bit8, allocation as ref @bit8, old_size)
+    // `ptr` (from `alloc_raw`, `old_size` long) resized to `new_size`
+    // bytes: in place when it is the last allocation or shrinks, else
+    // copied to a new allocation. New bytes are zeroed.
+    realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+
+        if new_size < 0 {
+            @panic("Can't allocate a negative size.")
+        }
+
+        if new_size == 0 as Int {
+            @panic("Can't allocate 0 bytes.")
+        }
+
+        offset: Int = @i_sub_native(@ptr_to_address(ptr), @ptr_to_address(self.base))
+        if offset < 0 or old_size < 0 or old_size > self.used - offset {
+            @panic("The allocation is not from this allocator.")
+        }
+
+        if offset + old_size == self.used {
+            if new_size > self.capacity - offset {
+                @panic("The allocator is out of memory (full).")
+            }
+
+            // Bytes it gives back go back to zero.
+            if new_size < old_size {
+                @memset(@ptr_add(ptr, new_size as @bit_native) as ref @bit8, 0x0, old_size - new_size)
+            }
+
+            allocation = ptr
+            self.used = offset + new_size
+            return
+        }
+
+        if new_size < old_size {
+            allocation = ptr
+            return
+        }
+
+        allocation = self.alloc_raw(new_size, alignment)
+        @memcpy(allocation as ref @bit8, ptr as ref @bit8, old_size)
     }
 
     free_raw: function (self, allocation: ref unknown) nothing {
         // no op. here incase someone wants to use allocators as interfaces.
     }
 
+    // Frees every allocation at once. Only the bytes used need zeroing.
     reset: function (self) nothing {
-        self.offset = 0
+        @memset(self.base as ref @bit8, 0x0, self.used)
+        self.used = 0
     }
 
     @on_drop: function (self) nothing {
-        Os.unmap_pages(self.base, self.size)
+        Os.unmap_pages(self.base, self.capacity)
     }
+
+    private {
+        // `count` elements of `element` bytes, refused before the product
+        // could overflow (it could never fit the arena then).
+        array_size: function (self, element: Int, count: Int) size: Int {
+            if count < 0 {
+                @panic("Can't allocate a negative count.")
+            }
+
+            if element > 0 and count > self.capacity / element {
+                @panic("The allocator is out of memory (full).")
+            }
+
+            size = element * count
+        }
+    }
+}
+
+private {
+    // `value` rounded up to a multiple of `alignment` (a power of two).
+    align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
 }

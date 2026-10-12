@@ -6,7 +6,9 @@
 using Standard.Os
 
 main: function () nothing {
-    memory: ref unknown = allocate(0x8)
+    memory: ref unknown = allocate(0x8).get() else {
+        @panic("out of memory")
+    }
     value: @bit64 = @read(memory)
     deallocate(memory)
 }

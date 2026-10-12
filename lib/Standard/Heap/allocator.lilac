@@ -6,10 +6,10 @@ Allocator: object {
 
     // A new allocation holding `value`, moved in. Free it with `destroy`.
     create[T]: function(value: T) allocation: ref T {
-        allocation = allocate(@size_of(T)) as ref T
-        if @ptr_to_address(allocation as ref unknown) == 0x0 {
+        memory: ref unknown = allocate(@size_of(T)).get() else {
             @panic("out of memory")
         }
+        allocation = memory as ref T
         @write(allocation, value)
     }
 

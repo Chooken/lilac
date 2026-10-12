@@ -349,8 +349,11 @@ exists, else a compile error):
   `Result[@bit_native, Error]`), `write_all` (`Optional[Error]`),
   `open(path, OpenMode) Result[Handle, Error]`, `close`,
   `seek(handle, offset, SeekFrom) Result[@bit64, Error]`, `size`.
-* **Memory:** `allocate` (zeroed), `deallocate`, `reallocate`; `map_pages`,
-  `unmap_pages` (always the OS), `page_size()`.
+* **Memory:** `allocate(size)` (zeroed) and `reallocate(memory, size)`
+  (both `Result[ref unknown, Error]`; a failed `reallocate` leaves
+  `memory` as it was), `deallocate(memory)`; `map_pages(size)
+  Result[ref unknown, Error]` and `unmap_pages(memory, size)
+  Optional[Error]` (always the OS), `page_size()`.
 * **Process:** `exit(code)`; `argument_count`, `argument_vector`,
   `environment_vector` (stored by `@entry`).
 * **Time:** `monotonic_nanos()`, `wall_clock_nanos()`, `sleep(nanos)`.

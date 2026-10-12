@@ -113,16 +113,35 @@ random: function () nothing {
 }
 
 heap: function () nothing {
-    memory: ref unknown = Os.allocate(0x10)
-    check(nonzero(@extend_zero(@ptr_to_address(memory))), 0x50)
+    memory: ref unknown = Os.allocate(0x10).get() else {
+        exit(0x50)
+        return
+    }
     bytes: ref @bit8 = memory as ref @bit8
     @store_u8(bytes, 0xF, 0x2A)
-    grown: ref unknown = Os.reallocate(memory, 0x10000)
-    check(nonzero(@extend_zero(@ptr_to_address(grown))), 0x51)
+    grown: ref unknown = Os.reallocate(memory, 0x10000).get() else {
+        exit(0x51)
+        return
+    }
 
     check(@load_u8(grown as ref @bit8, 0xF) == 0x2A, 0x52)
     @store_u8(grown as ref @bit8, 0xFFFF, 0x1)
     Os.deallocate(grown)
+
+    // Whole pages, zeroed, and the error for a size no address space has.
+    size: @bit_native = Os.page_size()
+    pages: ref unknown = Os.map_pages(size).get() else {
+        exit(0x53)
+        return
+    }
+    check(@load_u8(pages as ref @bit8, @i_sub_native(size, 0x1)) == 0x0, 0x54)
+    @store_u8(pages as ref @bit8, 0x0, 0x1)
+    match Os.unmap_pages(pages, size) {
+        .Some => exit(0x55)
+    }
+    match Os.map_pages(0x4000000000000000) {
+        .Ok => exit(0x56)
+    }
 }
 
 main: function () nothing {

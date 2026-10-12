@@ -140,9 +140,8 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
                 }
             }
             share: @bit32 = @bit_or_32(@bit_or_32(Windows.FILE_SHARE_READ, Windows.FILE_SHARE_WRITE), Windows.FILE_SHARE_DELETE)
-            wide: ref @bit16 = wide_path(path)
-            if @ptr_to_address(wide as ref unknown) == 0x0 {
-                result = .Error(.OutOfMemory)
+            wide: ref @bit16 = wide_path(path).get() else -> why: Error {
+                result = .Error(why)
                 return
             }
             opened: ref unknown = Windows.CreateFileW(wide, access, share, null(), disposition, Windows.FILE_ATTRIBUTE_NORMAL, null())
@@ -155,9 +154,8 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
         }
         .Linux => {
-            c: ref @bit8 = c_path(path)
-            if @ptr_to_address(c as ref unknown) == 0x0 {
-                result = .Error(.OutOfMemory)
+            c: ref @bit8 = c_path(path).get() else -> why: Error {
+                result = .Error(why)
                 return
             }
             flags: @bit32 = @bit_or_32(posix_open_flags(mode, Linux.O_RDONLY, Linux.O_WRONLY, Linux.O_RDWR, Linux.O_CREAT, Linux.O_TRUNC, Linux.O_APPEND), Linux.O_CLOEXEC)
@@ -173,9 +171,8 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
         }
         .MacOs => {
-            c: ref @bit8 = c_path(path)
-            if @ptr_to_address(c as ref unknown) == 0x0 {
-                result = .Error(.OutOfMemory)
+            c: ref @bit8 = c_path(path).get() else -> why: Error {
+                result = .Error(why)
                 return
             }
             flags: @bit32 = @bit_or_32(posix_open_flags(mode, MacOs.O_RDONLY, MacOs.O_WRONLY, MacOs.O_RDWR, MacOs.O_CREAT, MacOs.O_TRUNC, MacOs.O_APPEND), MacOs.O_CLOEXEC)
@@ -401,28 +398,30 @@ private {
 
     bit64_of: function (native: @bit_native) @bit64 => @extend_zero(native)
 
-    // `path` as a NUL-terminated byte string from `allocate`, or null.
-    c_path: function (path: @byte_buffer) c: ref @bit8 {
+    // `path` as a NUL-terminated byte string from `allocate`.
+    c_path: function (path: @byte_buffer) result: Result[ref @bit8, Error] {
         length: @bit_native = @byte_buffer_len(path)
-        memory: ref unknown = allocate(@i_add_native(length, 0x1))
-        c = memory as ref @bit8
-        if @ptr_to_address(memory) == 0x0 {
+        memory: ref unknown = allocate(@i_add_native(length, 0x1)).get() else -> why: Error {
+            result = .Error(why)
             return
         }
+        c: ref @bit8 = memory as ref @bit8
         @memcpy(c, @byte_buffer_ptr(path), length)
+        result = .Ok(c)
     }
 
-    // `path` as NUL-terminated UTF-16 from `allocate`, or null.
-    wide_path: function (path: @byte_buffer) wide: ref @bit16 {
+    // `path` as NUL-terminated UTF-16 from `allocate`.
+    wide_path: function (path: @byte_buffer) result: Result[ref @bit16, Error] {
         length: @bit_native = @byte_buffer_len(path)
-        memory: ref unknown = allocate(@i_mul_native(@i_add_native(length, 0x1), 0x2))
-        wide = memory as ref @bit16
-        if @ptr_to_address(memory) == 0x0 {
+        memory: ref unknown = allocate(@i_mul_native(@i_add_native(length, 0x1), 0x2)).get() else -> why: Error {
+            result = .Error(why)
             return
         }
+        wide: ref @bit16 = memory as ref @bit16
         if @i_greater_than_u_native(length, 0x0) {
             count: @bit32 = Windows.MultiByteToWideChar(Windows.CP_UTF8, 0x0, @byte_buffer_ptr(path), @truncate(length), wide, @truncate(length))
         }
+        result = .Ok(wide)
     }
 
     // A bare target's C library still has POSIX `write` in practice.

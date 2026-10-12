@@ -47,7 +47,10 @@ shrink: function (address: @bit_native, size: @bit_native) nothing {
 }
 
 create_free_list: function (bytes: @bit_native) list: FreeList {
-    raw: @bit_native = @ptr_to_address(map_pages(bytes))
+    pages: ref unknown = map_pages(bytes).get() else {
+        @panic("out of memory")
+    }
+    raw: @bit_native = @ptr_to_address(pages)
     start: @bit_native = align_up(raw, header_size)
     end: @bit_native = @i_mul_native(@i_div_u_native(@i_add_native(raw, bytes), header_size), header_size)
     first: ref Block = block_at(start)

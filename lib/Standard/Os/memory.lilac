@@ -7,44 +7,42 @@ using Standard.Os.Linux as Linux
 using Standard.Os.MacOs as MacOs
 using Standard.C as C
 
-// `size` zeroed bytes, 16-byte aligned, or null when out of memory. Free
-// them with `deallocate`.
-allocate: function (size: @bit_native) memory: ref unknown {
+// `size` zeroed bytes, 16-byte aligned. Free them with `deallocate`.
+allocate: function (size: @bit_native) result: Result[ref unknown, Error] {
     match @builtin.Target.os {
         .Windows => {
             if @builtin.Target.libc {
-                memory = C.calloc(0x1, size)
+                result = heap_result(C.calloc(0x1, size))
             } else {
-                memory = Windows.HeapAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, size)
+                result = heap_result(Windows.HeapAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, size))
             }
         }
         .Linux => {
             if @builtin.Target.libc {
-                memory = C.calloc(0x1, size)
+                result = heap_result(C.calloc(0x1, size))
             } else {
                 // One mapping per allocation, its length in a header in
                 // front.
                 total: @bit_native = @i_add_native(size, alloc_header)
-                mapped: ref unknown = map_pages(total).get() else { @panic("Out of memory.") }
-                if @ptr_to_address(mapped) == 0x0 {
-                    memory = mapped
-                } else {
-                    header: ref AllocHeader = mapped as ref AllocHeader
-                    header.length = total
-                    memory = @ptr_add(mapped, alloc_header)
+                mapped: ref unknown = map_pages(total).get() else -> why: Error {
+                    result = .Error(why)
+                    return
                 }
+                header: ref AllocHeader = mapped as ref AllocHeader
+                header.length = total
+                result = .Ok(@ptr_add(mapped, alloc_header))
             }
         }
         .MacOs => {
-            memory = MacOs.calloc(0x1, size)
+            result = heap_result(MacOs.calloc(0x1, size))
         }
     } else {
         needs_libc()
-        memory = C.calloc(0x1, size)
+        result = heap_result(C.calloc(0x1, size))
     }
 }
 
-// Frees memory from `allocate` (null is ignored).
+// Frees memory from `allocate` or `reallocate` (null is ignored).
 deallocate: function (memory: ref unknown) nothing {
     if @ptr_to_address(memory) == 0x0 {
         return
@@ -74,84 +72,109 @@ deallocate: function (memory: ref unknown) nothing {
 }
 
 // `memory` (from `allocate`, or null) resized to `size` bytes, keeping
-// its contents up to the smaller size, or null when out of memory (then
-// `memory` is untouched). New bytes are zeroed except under the C heap.
-reallocate: function (memory: ref unknown, size: @bit_native) moved: ref unknown {
+// its contents up to the smaller size. On an error `memory` is untouched
+// and still the caller's to free. New bytes are zeroed except under the C
+// heap.
+reallocate: function (memory: ref unknown, size: @bit_native) result: Result[ref unknown, Error] {
     if @ptr_to_address(memory) == 0x0 {
-        moved = allocate(size)
+        result = allocate(size)
         return
     }
     match @builtin.Target.os {
         .Windows => {
             if @builtin.Target.libc {
-                moved = C.realloc(memory, size)
+                result = heap_result(C.realloc(memory, size))
             } else {
-                moved = Windows.HeapReAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, memory, size)
+                result = heap_result(Windows.HeapReAlloc(Windows.GetProcessHeap(), Windows.HEAP_ZERO_MEMORY, memory, size))
             }
         }
         .Linux => {
             if @builtin.Target.libc {
-                moved = C.realloc(memory, size)
+                result = heap_result(C.realloc(memory, size))
             } else {
                 // `mremap` moves the mapping, zero-filling any growth.
                 mapped: ref unknown = header_of(memory)
                 header: ref AllocHeader = mapped as ref AllocHeader
                 total: @bit_native = @i_add_native(size, alloc_header)
-                result: @bit_native = Linux.mremap(mapped, header.length, total, Linux.MREMAP_MAYMOVE, @address_to_ptr(0x0))
-                if Linux.is_error(result) {
-                    moved = @address_to_ptr(0x0)
-                } else {
-                    remapped: ref unknown = @address_to_ptr(result)
-                    new_header: ref AllocHeader = remapped as ref AllocHeader
-                    new_header.length = total
-                    moved = @ptr_add(remapped, alloc_header)
+                match linux_result(Linux.mremap(mapped, header.length, total, Linux.MREMAP_MAYMOVE, null())) {
+                    .Ok -> address: @bit_native {
+                        remapped: ref unknown = @address_to_ptr(address)
+                        new_header: ref AllocHeader = remapped as ref AllocHeader
+                        new_header.length = total
+                        result = .Ok(@ptr_add(remapped, alloc_header))
+                    }
+                    .Error -> why: Error {
+                        result = .Error(why)
+                    }
                 }
             }
         }
         .MacOs => {
-            moved = MacOs.realloc(memory, size)
+            result = heap_result(MacOs.realloc(memory, size))
         }
     } else {
         needs_libc()
-        moved = C.realloc(memory, size)
+        result = heap_result(C.realloc(memory, size))
     }
 }
 
-// `size` bytes of fresh zeroed pages (`size` is rounded up to whole pages),
-// or null when out of memory. Release them with `unmap_pages`.
-map_pages: function (size: @bit_native) memory: Optional[ref unknown] {
+// `size` bytes of fresh zeroed pages (`size` is rounded up to whole
+// pages). Release them with `unmap_pages`, passing the same `size`.
+map_pages: function (size: @bit_native) result: Result[ref unknown, Error] {
     match @builtin.Target.os {
         .Windows => {
-            ptr: ref unknown = Windows.VirtualAlloc(@address_to_ptr(0x0), size, @bit_or_32(Windows.MEM_COMMIT, Windows.MEM_RESERVE), Windows.PAGE_READWRITE)
-            memory = if ptr == null() then .None else .Some(ptr)
+            memory: ref unknown = Windows.VirtualAlloc(null(), size, @bit_or_32(Windows.MEM_COMMIT, Windows.MEM_RESERVE), Windows.PAGE_READWRITE)
+            if @ptr_to_address(memory) == 0x0 {
+                result = .Error(error_of_windows(Windows.GetLastError()))
+            } else {
+                result = .Ok(memory)
+            }
         }
         .Linux => {
-            result: @bit_native = Linux.mmap(@address_to_ptr(0x0), size, @bit_or_32(Linux.PROT_READ, Linux.PROT_WRITE), @bit_or_32(Linux.MAP_PRIVATE, Linux.MAP_ANONYMOUS), 0xFFFFFFFF, 0x0)
-            memory = if Linux.is_error(result) then .None else .Some(@address_to_ptr(result))
+            match linux_result(Linux.mmap(null(), size, @bit_or_32(Linux.PROT_READ, Linux.PROT_WRITE), @bit_or_32(Linux.MAP_PRIVATE, Linux.MAP_ANONYMOUS), 0xFFFFFFFF, 0x0)) {
+                .Ok -> address: @bit_native {
+                    result = .Ok(@address_to_ptr(address))
+                }
+                .Error -> why: Error {
+                    result = .Error(why)
+                }
+            }
         }
         .MacOs => {
-            ptr: ref unknown = MacOs.mmap(@address_to_ptr(0x0), size, @bit_or_32(MacOs.PROT_READ, MacOs.PROT_WRITE), @bit_or_32(MacOs.MAP_PRIVATE, MacOs.MAP_ANON), 0xFFFFFFFF, 0x0)
-            memory = if @ptr_to_address(ptr) == MacOs.MAP_FAILED then .None else .Some(ptr)
+            memory: ref unknown = MacOs.mmap(null(), size, @bit_or_32(MacOs.PROT_READ, MacOs.PROT_WRITE), @bit_or_32(MacOs.MAP_PRIVATE, MacOs.MAP_ANON), 0xFFFFFFFF, 0x0)
+            if @ptr_to_address(memory) == MacOs.MAP_FAILED {
+                result = .Error(error_of_errno(MacOs.errno()))
+            } else {
+                result = .Ok(memory)
+            }
         }
     } else {
         // No virtual memory: plain zeroed memory from the C library.
         needs_libc()
-        ptr: ref unknown = C.calloc(0x1, size)
-        memory = if ptr == null() then .None else .Some(ptr)
+        result = heap_result(C.calloc(0x1, size))
     }
 }
 
-// Releases `size` bytes of pages from `map_pages`.
-unmap_pages: function (memory: ref unknown, size: @bit_native) nothing {
+// Releases the `size` bytes of pages at `memory`, from `map_pages`.
+unmap_pages: function (memory: ref unknown, size: @bit_native) error: Optional[Error] {
+    error = .None
     match @builtin.Target.os {
         .Windows => {
-            ok: @bit32 = Windows.VirtualFree(memory, 0x0, Windows.MEM_RELEASE)
+            if Windows.VirtualFree(memory, 0x0, Windows.MEM_RELEASE) == Windows.FALSE {
+                error = .Some(error_of_windows(Windows.GetLastError()))
+            }
         }
         .Linux => {
-            result: @bit_native = Linux.munmap(memory, size)
+            match linux_result(Linux.munmap(memory, size)) {
+                .Error -> why: Error {
+                    error = .Some(why)
+                }
+            }
         }
         .MacOs => {
-            result: @bit32 = MacOs.munmap(memory, size)
+            if MacOs.munmap(memory, size) == 0xFFFFFFFF {
+                error = .Some(error_of_errno(MacOs.errno()))
+            }
         }
     } else {
         needs_libc()
@@ -172,5 +195,15 @@ private {
     alloc_header: @bit_native => 0x10
 
     // The mapping an allocation lives in.
-    header_of: function (memory: ref unknown) ref unknown =>@address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
+    header_of: function (memory: ref unknown) ref unknown => @address_to_ptr(@i_sub_native(@ptr_to_address(memory), alloc_header))
+
+    // A heap function's result: the memory, or `OutOfMemory` for null
+    // (no heap sets an error code that says more).
+    heap_result: function (memory: ref unknown) result: Result[ref unknown, Error] {
+        if @ptr_to_address(memory) == 0x0 {
+            result = .Error(.OutOfMemory)
+        } else {
+            result = .Ok(memory)
+        }
+    }
 }
