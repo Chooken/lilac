@@ -132,14 +132,17 @@ impl Checker<'_> {
                 Err(self.type_call(fcx, &name, args, span))
             }
             _ => {
-                let _ = self.check_expr(fcx, callee, None);
-                let error = self.diags.emit(
-                    Diagnostic::error(codes::E022, "this expression is not callable").label(
-                        span,
-                        true,
-                        "only functions can be called",
-                    ),
-                );
+                let checked = self.check_expr(fcx, callee, None);
+                let error =
+                    if checked.ty.is_error() {
+                        // Checking the callee reported it.
+                        self.diags.already_reported()
+                    } else {
+                        self.diags.emit(
+                            Diagnostic::error(codes::E022, "this expression is not callable")
+                                .label(span, true, "only functions can be called"),
+                        )
+                    };
                 Err(self.callee_failed(fcx, args, error))
             }
         }
@@ -168,6 +171,10 @@ impl Checker<'_> {
                 return Err(self.callee_failed(fcx, args, error));
             }
             let ty = fcx.ty(local);
+            if ty.is_error() {
+                // Its declared type reported it.
+                return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+            }
             let TypeKind::Func {
                 params, returns, ..
             } = self.types.kind(ty.id).clone()

@@ -395,7 +395,7 @@ impl Checker<'_> {
                 let payload = match &variant.kind {
                     DefKind::Variant(Some(ty)) => {
                         let ty = ty.clone();
-                        let resolved = self.resolve_type(&ty);
+                        let resolved = self.slot_type(&ty, failed);
                         failed |= resolved.is_error();
                         spans.push(span);
                         Some(resolved)
@@ -422,7 +422,7 @@ impl Checker<'_> {
                 continue;
             };
             let ty = ty.clone();
-            let resolved = self.resolve_type(&ty);
+            let resolved = self.slot_type(&ty, failed);
             failed |= resolved.is_error();
             fields.push((name, resolved));
             spans.push(span);
@@ -433,6 +433,20 @@ impl Checker<'_> {
         } else {
             Ok((Layout::Object { fields }, spans))
         }
+    }
+
+    /// A field or payload type of a layout being computed. Once a slot
+    /// failed, the layout fails, so the later slots are only resolved
+    /// (their names checked and reported), not laid out: laying them out
+    /// could only add errors that follow from the first, such as a growing
+    /// type meeting itself again at every level (`W[T]` holding a
+    /// `W[W[T]]` that holds a `W[T]`).
+    fn slot_type(&mut self, ty: &AstType, failed: bool) -> TypeRef {
+        if failed {
+            let _ = self.resolve_syntax(ty);
+            return TypeRef::ERROR;
+        }
+        self.resolve_type(ty)
     }
 
     /// The smallest bit container holding `count` variant tags.

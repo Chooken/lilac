@@ -2296,3 +2296,71 @@ fn oversized_generic_instance_folds_into_e042() {
         "make[T]: function () nothing {\n    rows: @array(T, 0xFFFFFFFF) = @array(T, 0xFFFFFFFF) {}\n}\n";
     assert!(!check_src(template).has_errors());
 }
+
+/// The codes of every diagnostic, in order.
+fn codes_of(diags: &Diags) -> Vec<&'static str> {
+    diags.diagnostics().iter().map(|d| d.code).collect()
+}
+
+const SELF_CONTAINING: &str = "E: enum {\n    A: E\n    B\n}\n\n";
+
+/// A type that failed (`E053`) is an error type for every later use: a tag
+/// or literal checked against it asks for no type (no `E024`), a value of
+/// it is not "not callable", and an inferred literal stays silent.
+#[test]
+fn failed_type_is_an_error_type_for_later_uses() {
+    let uses = [
+        // A binding, an assignment and a payload.
+        "main: function () nothing {\n    e: E = .B\n    e = .A(.B)\n    f: E = 0x1\n}\n",
+        // A constant and a global, and assigning the global.
+        "C: E => .B\nG: E = .B\nmain: function () nothing {\n    G = .B\n}\n",
+        // A comparison, either way round, and a cast.
+        "make: function () out: E {\n    out = .B\n}\nmain: function () nothing {\n    x: E = make()\n    if x == .B {\n    }\n    if .B == x {\n    }\n    y: E = .B as E\n}\n",
+        // An `if` value whose `then` has the failed type.
+        "make: function () out: E {\n    out = .B\n}\nmain: function () nothing {\n    x: E = make()\n    y: E = if x == .B then x else .B\n}\n",
+        // A struct literal inferred from it, and one of a type holding it.
+        "Box[T]: object {\n    v: T\n}\nHolder: object {\n    e: E\n}\nmain: function () nothing {\n    b: Box[E] = Box { v = .B }\n    h: Holder = Holder { e = .B }\n}\n",
+        // Calling a local whose function type names it.
+        "take: function (e: E) nothing {\n}\nmain: function () nothing {\n    f: function (e: E) nothing = take\n    f(.B)\n}\n",
+    ];
+    for uses in uses {
+        let src = format!("{SELF_CONTAINING}{uses}");
+        assert_eq!(codes_of(&check_src(&src)), ["E053"], "{src}");
+    }
+}
+
+/// Errors that do not follow from the failed type are still reported:
+/// inside a global's initializer, a failed struct literal's values, and
+/// an assignment whose place failed.
+#[test]
+fn failed_type_hides_no_other_error() {
+    let src = format!(
+        "{SELF_CONTAINING}G: E = nope\nmain: function () nothing {{\n    b: E = E {{ v = nope }}\n    missing = .B\n}}\n"
+    );
+    assert_eq!(codes_of(&check_src(&src)), ["E053", "E021", "E021", "E021"]);
+}
+
+/// A slot after one that failed is resolved but not laid out, so a type
+/// that grows and meets itself reports once, not once per level, and a
+/// later field's unknown name is still reported.
+#[test]
+fn failed_layout_stops_at_its_first_slot() {
+    let growing =
+        "W[T]: object {\n    v: T\n    w: W[W[T]]\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
+    assert_eq!(codes_of(&check_src(growing)), ["E053"]);
+    let deeper =
+        "W[T]: object {\n    w: W[W[T]]\n    v: T\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
+    assert_eq!(codes_of(&check_src(deeper)), ["E051"]);
+    let named = "O: object {\n    a: O\n    b: Nope\n}\n";
+    assert_eq!(codes_of(&check_src(named)), ["E053", "E023"]);
+    let two_cycles =
+        "A: object {\n    b: B\n    c: C\n}\nB: object {\n    a: A\n}\nC: object {\n    a: A\n}\n";
+    assert_eq!(codes_of(&check_src(two_cycles)), ["E053"]);
+}
+
+/// An object too large for the target (`E067`) is an error type too.
+#[test]
+fn oversized_type_is_an_error_type_for_later_uses() {
+    let src = "Big: object {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n\nmain: function () nothing {\n    b: Big = .B\n    c: Big = Big { a = .X }\n}\n";
+    assert_eq!(codes_of(&check_src(src)), ["E067"]);
+}

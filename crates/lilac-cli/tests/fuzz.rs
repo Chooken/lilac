@@ -334,6 +334,10 @@ impl Fs for OverlayFs {
             .map(|entry| entry.map(|entry| entry.path()))
             .collect()
     }
+
+    fn canonicalize(&mut self, path: &Path) -> io::Result<PathBuf> {
+        std::fs::canonicalize(path)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

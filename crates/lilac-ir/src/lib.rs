@@ -907,6 +907,14 @@ pub enum LirTerm {
     },
 }
 
+impl LirInst {
+    /// The instruction's source span (a `CompileError`'s call site).
+    #[must_use]
+    pub fn span(&self) -> Span {
+        print::inst_span(self)
+    }
+}
+
 impl LirTerm {
     /// The terminator's source span.
     #[must_use]

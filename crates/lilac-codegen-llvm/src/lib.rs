@@ -2198,6 +2198,62 @@ mod tests {
             .expect("O2 emits");
         assert_ne!(o0, o2, "the -O2 pipeline must change the IR");
     }
+
+    /// The ICE message lowering `module` raises.
+    fn ice_of(module: &LirModule) -> String {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = backend().emit_llvm(module);
+        }))
+        .expect_err("lowering raises an ICE");
+        panic.downcast_ref::<String>().cloned().unwrap_or_default()
+    }
+
+    /// A backend ICE points at the LIR instruction it was lowering.
+    #[test]
+    fn instruction_ice_carries_its_span() {
+        let at = Span::new(7, 9, lilac_span::FileId(3));
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
+        let insts = vec![LirInst::CopyReg {
+            src: LirOperand::Reg("missing".into()),
+            dst: "x".into(),
+            ty: t("#bit32"),
+            span: at,
+        }];
+        module
+            .funcs
+            .push(func("f", &[], &[], vec![ret_block("entry", insts)]));
+        let message = ice_of(&module);
+        assert!(
+            message.starts_with(&format!("ICE at {at:?}: use of undefined register")),
+            "{message}"
+        );
+    }
+
+    /// A backend ICE points at the terminator it was lowering.
+    #[test]
+    fn terminator_ice_carries_its_span() {
+        let at = Span::new(11, 20, lilac_span::FileId(2));
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
+        let block = LirBlock {
+            label: "entry".into(),
+            insts: Vec::new(),
+            term: LirTerm::BranchIf {
+                cond: "missing".into(),
+                then: "entry".into(),
+                els: Some("entry".into()),
+                span: at,
+            },
+            span: at,
+        };
+        module.funcs.push(func("f", &[], &[], vec![block]));
+        let message = ice_of(&module);
+        assert!(
+            message.starts_with(&format!("ICE at {at:?}: branch on undefined register")),
+            "{message}"
+        );
+    }
 }
 
 /// The target table against LLVM: every target `Target::parse` accepts

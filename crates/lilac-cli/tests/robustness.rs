@@ -289,7 +289,6 @@ fn x86_target_emits_i686() {
 /// Problem 13: an enum that contains itself is `E053`, and its type is an
 /// error type afterwards, so a use of `.B` adds no `E024`.
 #[test]
-#[ignore = "robustness plan phase 7"]
 fn self_containing_enum_reports_once() {
     let dir = scratch("self_containing_enum_reports_once");
     write(
@@ -301,13 +300,40 @@ fn self_containing_enum_reports_once() {
     assert_eq!(error_codes(&out.stderr), ["E053"], "{}", out.stderr);
 }
 
+/// Problem 13 at every kind of use (`tests/ui/FAILS_failed_type_cascade`):
+/// bindings, assignments, a constant and a global, a comparison, an `if`
+/// value, a cast, an inferred struct literal and a call through a local.
+#[test]
+fn failed_type_cascade_reports_once() {
+    let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/ui");
+    let out = check(
+        &ui,
+        "FAILS_failed_type_cascade.lilac",
+        Duration::from_secs(30),
+    );
+    assert_eq!(error_codes(&out.stderr), ["E053"], "{}", out.stderr);
+}
+
 /// Problem 14: a folder link back to its parent (`A/B -> A`) loaded the same
 /// file once per level until the path limit. The second path to a loaded
 /// folder is `E025`. Skipped where the OS refuses to create the link.
 #[test]
-#[ignore = "robustness plan phase 7"]
 fn folder_link_cycle_is_e025() {
-    let dir = scratch("folder_link_cycle_is_e025");
+    link_cycle_is_e025("folder_link_cycle_is_e025", link_folder);
+}
+
+/// Problem 14 through a directory junction (Windows), which a user creates
+/// without any privilege.
+#[cfg(windows)]
+#[test]
+fn folder_junction_cycle_is_e025() {
+    link_cycle_is_e025("folder_junction_cycle_is_e025", junction);
+}
+
+/// `A/B` made a link to `A` by `link`, below a project using `A`, checks
+/// with one `E025`.
+fn link_cycle_is_e025(name: &str, link: fn(&Path, &Path) -> std::io::Result<()>) {
+    let dir = scratch(name);
     std::fs::create_dir_all(dir.join("A")).expect("creates A");
     write(
         &dir,
@@ -315,18 +341,48 @@ fn folder_link_cycle_is_e025() {
         "using A\n\nmain: function () nothing {\n    f()\n}\n",
     );
     write(&dir.join("A"), "a.lilac", "f: function () nothing {}\n");
-    if let Err(error) = link_folder(&dir.join("A"), &dir.join("A").join("B")) {
+    if let Err(error) = link(&dir.join("A"), &dir.join("A").join("B")) {
         eprintln!("skipping: cannot create a folder link: {error}");
         return;
     }
     let out = check(&dir, ".", Duration::from_secs(30));
     assert!(!out.success, "{}", out.stderr);
-    assert!(error_codes(&out.stderr).contains(&"E025"), "{}", out.stderr);
+    assert_eq!(error_codes(&out.stderr), ["E025"], "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("error[E025]: folder `A.B` is `A` again (through a link)"),
+        "{}",
+        out.stderr
+    );
 }
 
+/// A directory symbolic link, else (it needs a privilege Windows grants only
+/// in developer mode) a directory junction, which needs none.
 #[cfg(windows)]
 fn link_folder(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return Ok(());
+    }
+    junction(target, link)
+}
+
+/// A directory junction at `link` to `target`.
+#[cfg(windows)]
+fn junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "`mklink /J` failed: {status}"
+        )))
+    }
 }
 
 #[cfg(unix)]

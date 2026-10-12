@@ -418,7 +418,9 @@ impl Checker<'_> {
                     Expr::Construct { function, .. } => self.construct_type(ty, function),
                     _ => self.resolve_type(ty),
                 };
-                let expected = (!declared.is_error()).then_some(declared.id);
+                // A declared type that failed stays the expectation: an error
+                // type, so a tag or literal does not ask for one.
+                let expected = Some(declared.id);
                 let value_hir = self.check_expr(fcx, value, expected);
                 let value_hir = self.coerce(value_hir, declared, ty.span);
                 let local = self.declare(fcx, name, declared, *span);
@@ -549,11 +551,11 @@ impl Checker<'_> {
         out: &mut Vec<HirStmt>,
     ) {
         let Ok(place) = self.check_place(fcx, target) else {
-            let _ = self.check_expr(fcx, value, None);
+            let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
             return;
         };
         if place.ty.is_error() {
-            let _ = self.check_expr(fcx, value, None);
+            let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
             return;
         }
         let value_hir = self.check_expr(fcx, value, Some(place.ty.id));

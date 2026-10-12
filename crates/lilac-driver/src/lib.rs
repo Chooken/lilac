@@ -1732,6 +1732,18 @@ helper: function () nothing {{
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no such directory")
             })
         }
+
+        /// No links: each path is its own canonical form.
+        fn canonicalize(&mut self, path: &Path) -> std::io::Result<PathBuf> {
+            if self.files.contains_key(path) || self.dirs.contains_key(path) {
+                Ok(path.to_path_buf())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such path",
+                ))
+            }
+        }
     }
 
     #[test]

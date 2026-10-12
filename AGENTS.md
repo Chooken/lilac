@@ -70,7 +70,9 @@
   element is by value and hook-free (`E010`, checked after hooks bind,
   `Checker::check_array_hooks`), so arrays copy and drop as bytes and need
   no glue. `@array(T, N) {}` is a zeroed `Struct` with no fields.
-  `@array_at` lowers to an unsigned bounds check that panics, then the
+  `@array_at` lowers to an unsigned bounds check that panics, then, in
+  the in-bounds block only (the array and index cross the check in
+  places, since a register lives in its block), the
   `elem.addr` instruction (LLVM: the index times the element size through
   `.lilac.offset`, since a dynamic GEP is `unsafe` in inkwell);
   `@array_len` folds in typeck.
@@ -191,10 +193,18 @@
 
 - `lilac-module` is the folder loader: it discovers the root folder, reads every
   `*.lilac` file directly in it, and runs a `using` fixpoint over an injected
-  `Fs` trait (the driver stays I/O-free; `lilac-cli` supplies `StdFs`). A folder
-  is one namespace and its files merge. `E025` is the module-load error: a
-  missing/not-a-directory `using` target, an unreadable root folder, or an
-  unreadable file.
+  `Fs` trait (the driver stays I/O-free; `lilac-cli` supplies `StdFs`, the
+  language server `OverlayFs`). A folder is one namespace and its files
+  merge. `E025` is the module-load error: a missing/not-a-directory `using`
+  target, an unreadable root folder, an unreadable file, or a folder
+  reached by a second path. `Fs::canonicalize` names a folder with links
+  resolved (`OverlayFs` canonicalizes a path only open documents give
+  below its nearest folder on disk), and `Loader::reach` keeps each loaded
+  namespace's canonical folder (`Loader::folders`): a second path to one,
+  such as a link `A/B -> A`, is `E025` "folder `A.B` is `A` again (through
+  a link)", once per path, and is neither loaded nor walked. The root
+  folder counts only when the root namespace loads it (not for a file
+  argument or a lone library namespace).
 - `lilac-resolve::resolve` builds one definition table (`Resolved`): every
   item, member, field and variant is a `Def` addressed by `DefId`, namespaces
   are `NsId`s, and each file has a `FileScope` (its visible-name map, already
@@ -556,20 +566,25 @@ Where things live:
   (`Sink::holds_error`). The state is an `Own` per local (full, empty,
   maybe, per field, or `Cond`); branches merge and a loop body is walked
   on copies (`dry`: no diagnostics, no flags) until its head state is
-  stable, then for real. It decides everything lowering does with
-  ownership: a moving read is `HirExprKind::Move` (`@move(a)` writes one
-  too), each block ends in a `HirStmt::Drop` of its full locals (each
-  early exit drops the scopes it leaves, and outs per `E065`'s rule),
-  `HirStmt::Assign::old` says what happens to the old value (an out's
-  first assignment is `HirOld::Empty`), `HirArm::moves` says a capture
-  moves the payload, and `HirFunc::flags` are the drop flags of places
-  that may be empty where they drop. Lowering sets a place's flags (and
-  those inside it) when it is initialized and clears them when it moves
-  (`Lower::mark`), and never decides a drop itself; it only drops
-  statement temporaries. `Checker::is_copyable`/`needs_drop` are the
-  copy and drop rules (`Param` copies, so templates rarely fail).
-  `E063`/`E064` go through `emit_requirement` (`Requirement::Ownership`),
-  so a failing generic instance folds them into `E042`; `E065` is plain.
+  stable, then for real. `merge` is the join of a lattice of finite
+  height (unit-tested: commutative, associative, idempotent, monotone), so
+  the heads only climb, at most `Pass::round_bound` times (the sum over
+  the body's locals of `height` of their type, plus one each, plus one);
+  a loop still changing past it is an ICE, never a guess. It decides
+  everything lowering does with ownership: a moving read is
+  `HirExprKind::Move` (`@move(a)` writes one too), each block ends in a
+  `HirStmt::Drop` of its full locals (each early exit drops the scopes it
+  leaves, and outs per `E065`'s rule), `HirStmt::Assign::old` says what
+  happens to the old value (an out's first assignment is `HirOld::Empty`),
+  `HirArm::moves` says a capture moves the payload, and `HirFunc::flags`
+  are the drop flags of places that may be empty where they drop.
+  Lowering sets a place's flags (and those inside it) when it is
+  initialized and clears them when it moves (`Lower::mark`), and never
+  decides a drop itself; it only drops statement temporaries.
+  `Checker::is_copyable`/`needs_drop` are the copy and drop rules
+  (`Param` copies, so templates rarely fail). `E063`/`E064` go through
+  `emit_requirement` (`Requirement::Ownership`), so a failing generic
+  instance folds them into `E042`; `E065` is plain.
   `@panic`, `@trap` and `@compile_error` end a path, and a `match`
   naming every variant has no `else` path. `@discard(x)` makes `x`
   `Own::Discarded`: per field like `Parts`, but its `@on_drop` does not
@@ -704,6 +719,11 @@ bug fix that changes generated code.
 
 ## Diagnostics
 
+- An ICE is `lilac_error::bug!(span, …)`, at the most specific span in
+  scope. The LLVM backend points each at the LIR instruction or
+  terminator it is lowering (`Lower::at`, set per instruction in
+  `lower_func`); only declarations and the glue it writes itself
+  (`runtime.rs`, `threads.rs`) use `Span::dummy()`.
 - Codes live in one registry, `lilac_error::codes`: each `Code` is listed
   once with its page `docs/errors/<code>.md` (`include_str!`), and
   `Diagnostic::error` takes a `Code`, so a new code needs its page to

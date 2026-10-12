@@ -31,7 +31,7 @@ use lilac_hir::{
     HirStmt, Intrinsic, LocalId,
 };
 use lilac_span::{BytePos, Span};
-use lilac_ty::{Builtin, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::{Checker, Requirement};
 
@@ -219,6 +219,8 @@ impl Checker<'_> {
             loops: Vec::new(),
             dry: false,
             torn: Vec::new(),
+            heights: HashMap::new(),
+            bound: None,
         };
         let mut stmts = Vec::new();
         for stmt in std::mem::take(&mut body.stmts) {
@@ -307,9 +309,21 @@ impl Checker<'_> {
             None => Vec::new(),
         }
     }
+}
 
-    /// The field types of an object type (none for anything else).
+/// How the ownership state splits a place into fields: the checker's
+/// layouts, or a fixed table in the unit tests.
+trait FieldTypes {
+    /// The field types of an object type (none for anything else, and none
+    /// behind a `ref`: an owned path never goes through one).
+    fn field_types(&self, ty: TypeRef) -> Vec<TypeRef>;
+}
+
+impl FieldTypes for Checker<'_> {
     fn field_types(&self, ty: TypeRef) -> Vec<TypeRef> {
+        if ty.is_ref {
+            return Vec::new();
+        }
         self.fields_of(ty.id)
             .map(|fields| fields.into_iter().map(|(_, ty)| ty).collect())
             .unwrap_or_default()
@@ -334,6 +348,10 @@ struct Pass<'p, 'a> {
     dry: bool,
     /// The `@discard`s reported as torn (`E066`), so each is reported once.
     torn: Vec<Span>,
+    /// [`height`] of each type met, so far.
+    heights: HashMap<TypeId, usize>,
+    /// [`Pass::round_bound`], once worked out.
+    bound: Option<usize>,
 }
 
 impl Pass<'_, '_> {
@@ -520,12 +538,28 @@ impl Pass<'_, '_> {
     /// (what enters, merged with what each `continue` and the body's end
     /// carry round) stops changing, then for real. After it, the state is
     /// the merge of its `break`s.
+    ///
+    /// The walk ends: each round's head is the merge of the entry with
+    /// what the body makes of the last head, so the heads only climb
+    /// ([`merge`] is a join and the body monotone), and a state climbs
+    /// at most [`Pass::round_bound`] times. A loop still changing past
+    /// that broke the argument, so it is an internal error, never a
+    /// guess at the drops.
     fn lower_loop(&mut self, body: &mut HirBlock) {
         let entry = self.state.clone();
         let mut head = entry.clone();
         let dry = self.dry;
         self.dry = true;
-        for _ in 0..16 {
+        let bound = self.round_bound();
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            if rounds > bound {
+                lilac_error::bug!(
+                    body.span,
+                    "the ownership state of a loop still changes after {bound} rounds"
+                );
+            }
             let mut copy = body.clone();
             self.state = head.clone();
             let (end, _, continues) = self.loop_body(&mut copy);
@@ -553,6 +587,25 @@ impl Pass<'_, '_> {
         self.block(body, Vec::new());
         let frame = self.loops.pop().expect("pushed above");
         (self.state.take(), frame.breaks, frame.continues)
+    }
+
+    /// How many rounds a loop's head can take: one more than the times a
+    /// state can climb. Each climb adds a tracked local or raises one of
+    /// them, and a local of type `T` rises at most [`height`]`(T)` times,
+    /// so the sum over this body's locals bounds it (locals added later
+    /// are drop flags, never tracked).
+    fn round_bound(&mut self) -> usize {
+        if let Some(bound) = self.bound {
+            return bound;
+        }
+        let mut bound = 1usize;
+        for index in 0..self.locals.len() {
+            let ty = self.locals[index].ty;
+            let rises = height(self.c, &mut self.heights, ty).saturating_add(1);
+            bound = bound.saturating_add(rises);
+        }
+        self.bound = Some(bound);
+        bound
     }
 
     /// Whether `arms` name every variant of the enum `scrutinee` holds.
@@ -1269,7 +1322,7 @@ impl Pass<'_, '_> {
 
 /// Sets the place `fields` inside `node` (of type `ty`) to `value`,
 /// splitting leaves into fields on the way.
-fn set_in(c: &Checker, node: &mut Own, ty: TypeRef, fields: &[u32], value: Own) {
+fn set_in(c: &impl FieldTypes, node: &mut Own, ty: TypeRef, fields: &[u32], value: Own) {
     let Some((first, rest)) = fields.split_first() else {
         *node = value;
         return;
@@ -1290,8 +1343,37 @@ fn set_in(c: &Checker, node: &mut Own, ty: TypeRef, fields: &[u32], value: Own) 
     *node = std::mem::replace(node, Own::Full).normalize();
 }
 
+/// How many times the [`Own`] of a place of type `ty` can rise under
+/// [`merge`] before it can rise no more: once per leaf (full, empty or a
+/// call's out, to maybe), and three times per object node (a whole value,
+/// to parts, to discarded, to torn). `heights` keeps each type's answer.
+fn height(c: &impl FieldTypes, heights: &mut HashMap<TypeId, usize>, ty: TypeRef) -> usize {
+    let fields = c.field_types(ty);
+    if fields.is_empty() {
+        return 1;
+    }
+    if let Some(known) = heights.get(&ty.id) {
+        return *known;
+    }
+    // A type is never inside itself by value (`E053`); the entry only
+    // stops the walk if that broke.
+    heights.insert(ty.id, 1);
+    let mut total = 3usize;
+    for field in fields {
+        total = total.saturating_add(height(c, heights, field));
+    }
+    heights.insert(ty.id, total);
+    total
+}
+
 /// Where two paths join: per local, per field.
-fn merge(c: &Checker, ty: TypeRef, a: &Own, b: &Own) -> Own {
+///
+/// This is the join of a lattice of finite height (a loop's walk relies
+/// on it, [`Pass::lower_loop`]): commutative, associative and idempotent
+/// (spans aside), so `a` is below `b` when `merge(a, b)` is `b`. Full,
+/// empty and a call's out are at the bottom and rise to maybe; a whole
+/// object rises to parts, parts to discarded, and `torn` only turns on.
+fn merge(c: &impl FieldTypes, ty: TypeRef, a: &Own, b: &Own) -> Own {
     match (a, b) {
         (Own::Full, Own::Full) => Own::Full,
         (Own::Empty(at), Own::Empty(other)) => Own::Empty(at.or(*other)),
@@ -1334,7 +1416,7 @@ fn merge(c: &Checker, ty: TypeRef, a: &Own, b: &Own) -> Own {
 }
 
 /// Merges the states of two paths that join.
-fn merge_states(c: &Checker, locals: &[HirLocal], a: State, b: State) -> State {
+fn merge_states(c: &impl FieldTypes, locals: &[HirLocal], a: State, b: State) -> State {
     match (a, b) {
         (None, other) | (other, None) => other,
         (Some(mut a), Some(b)) => {
@@ -1412,5 +1494,246 @@ fn end_of(span: Span) -> Span {
     Span {
         lo: BytePos(span.hi.0 - 1),
         ..span
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The loop walk ends because [`merge`] is the join of a lattice of
+    //! finite height. These tests check that over representative states:
+    //! the join laws, monotonicity, and a rank that every strict rise
+    //! raises and that never passes [`height`].
+
+    use super::*;
+
+    const LEAF: TypeRef = TypeRef {
+        id: TypeId(100),
+        is_ref: false,
+    };
+    /// `object { a: Leaf  b: Leaf }`.
+    const PAIR: TypeRef = TypeRef {
+        id: TypeId(101),
+        is_ref: false,
+    };
+    /// `object { a: Leaf  b: Pair }`.
+    const OUTER: TypeRef = TypeRef {
+        id: TypeId(102),
+        is_ref: false,
+    };
+
+    struct Table;
+
+    impl FieldTypes for Table {
+        fn field_types(&self, ty: TypeRef) -> Vec<TypeRef> {
+            match ty.id {
+                TypeId(101) => vec![LEAF, LEAF],
+                TypeId(102) => vec![LEAF, PAIR],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    fn le(ty: TypeRef, a: &Own, b: &Own) -> bool {
+        merge(&Table, ty, a, b).same(b)
+    }
+
+    /// Each strict rise raises it by at least one ([`height`]'s count).
+    fn rank(ty: TypeRef, own: &Own) -> usize {
+        let fields = Table.field_types(ty);
+        match own {
+            Own::Parts(parts) => {
+                1 + fields
+                    .iter()
+                    .zip(parts)
+                    .map(|(ty, part)| rank(*ty, part))
+                    .sum::<usize>()
+            }
+            Own::Discarded { parts, torn, .. } => {
+                2 + usize::from(*torn)
+                    + fields
+                        .iter()
+                        .zip(parts)
+                        .map(|(ty, part)| rank(*ty, part))
+                        .sum::<usize>()
+            }
+            leaf if fields.is_empty() => usize::from(matches!(leaf, Own::Maybe(_))),
+            leaf => fields.iter().map(|ty| rank(*ty, leaf)).sum(),
+        }
+    }
+
+    fn leaves(spans: bool) -> Vec<Own> {
+        let mut leaves = vec![
+            Own::Full,
+            Own::Empty(None),
+            Own::Maybe(None),
+            Own::Cond {
+                flag: LocalId(0),
+                full_when: true,
+            },
+            Own::Cond {
+                flag: LocalId(0),
+                full_when: false,
+            },
+            Own::Cond {
+                flag: LocalId(1),
+                full_when: true,
+            },
+        ];
+        if spans {
+            leaves.push(Own::Empty(Some(Span::dummy())));
+            leaves.push(Own::Maybe(Some(Span::dummy())));
+        }
+        leaves
+    }
+
+    /// Every state of an object whose fields take `fields` (one list per
+    /// field): the leaves, each split into parts (normalized), and each
+    /// discarded, torn or not.
+    fn objects(fields: &[Vec<Own>]) -> Vec<Own> {
+        let mut splits: Vec<Vec<Own>> = vec![Vec::new()];
+        for options in fields {
+            splits = splits
+                .into_iter()
+                .flat_map(|prefix| {
+                    options.iter().map(move |option| {
+                        let mut next = prefix.clone();
+                        next.push(option.clone());
+                        next
+                    })
+                })
+                .collect();
+        }
+        let mut all = leaves(false);
+        for parts in splits {
+            for torn in [false, true] {
+                all.push(Own::Discarded {
+                    at: Span::dummy(),
+                    parts: parts.clone(),
+                    torn,
+                });
+            }
+            if !parts.iter().all(|part| matches!(part, Own::Full)) {
+                all.push(Own::Parts(parts));
+            }
+        }
+        all
+    }
+
+    fn pair_states(spans: bool) -> Vec<Own> {
+        objects(&[leaves(spans), leaves(spans)])
+    }
+
+    fn outer_states() -> Vec<Own> {
+        let few = vec![
+            Own::Full,
+            Own::Empty(None),
+            Own::Maybe(None),
+            Own::Cond {
+                flag: LocalId(0),
+                full_when: true,
+            },
+        ];
+        let pairs = vec![
+            Own::Full,
+            Own::Empty(None),
+            Own::Maybe(None),
+            Own::Parts(vec![Own::Empty(None), Own::Full]),
+            Own::Parts(vec![Own::Maybe(None), Own::Empty(None)]),
+            Own::Discarded {
+                at: Span::dummy(),
+                parts: vec![Own::Full, Own::Full],
+                torn: false,
+            },
+            Own::Discarded {
+                at: Span::dummy(),
+                parts: vec![Own::Empty(None), Own::Full],
+                torn: true,
+            },
+        ];
+        objects(&[few, pairs])
+    }
+
+    fn check_laws(ty: TypeRef, states: &[Own]) {
+        for a in states {
+            assert!(merge(&Table, ty, a, a).same(a), "idempotent: {a:?}");
+            for b in states {
+                let ab = merge(&Table, ty, a, b);
+                assert!(
+                    ab.same(&merge(&Table, ty, b, a)),
+                    "commutative: {a:?} {b:?}"
+                );
+                assert!(le(ty, a, &ab), "an upper bound: {a:?} {b:?}");
+                if le(ty, a, b) && !a.same(b) {
+                    assert!(rank(ty, a) < rank(ty, b), "a rise: {a:?} {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_is_a_join() {
+        check_laws(LEAF, &leaves(true));
+        check_laws(PAIR, &pair_states(true));
+        check_laws(OUTER, &outer_states());
+    }
+
+    #[test]
+    fn merge_is_associative() {
+        for (ty, states) in [(PAIR, pair_states(false)), (OUTER, outer_states())] {
+            for a in &states {
+                for b in &states {
+                    let ab = merge(&Table, ty, a, b);
+                    for c in &states {
+                        let left = merge(&Table, ty, &ab, c);
+                        let right = merge(&Table, ty, a, &merge(&Table, ty, b, c));
+                        assert!(left.same(&right), "associative: {a:?} {b:?} {c:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_is_monotone() {
+        for (ty, states) in [
+            (LEAF, leaves(true)),
+            (PAIR, pair_states(true)),
+            (OUTER, outer_states()),
+        ] {
+            for a in &states {
+                for higher in states.iter().filter(|higher| le(ty, a, higher)) {
+                    for b in &states {
+                        let low = merge(&Table, ty, a, b);
+                        let high = merge(&Table, ty, higher, b);
+                        assert!(le(ty, &low, &high), "monotone: {a:?} {higher:?} {b:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_never_passes_the_height() {
+        let mut heights = HashMap::new();
+        for (ty, states) in [
+            (LEAF, leaves(true)),
+            (PAIR, pair_states(true)),
+            (OUTER, outer_states()),
+        ] {
+            let height = height(&Table, &mut heights, ty);
+            for state in &states {
+                assert!(rank(ty, state) <= height, "{state:?} under {height}");
+            }
+        }
+        assert_eq!(height(&Table, &mut heights, LEAF), 1);
+        assert_eq!(height(&Table, &mut heights, PAIR), 5);
+        assert_eq!(height(&Table, &mut heights, OUTER), 9);
+        // The top of a pair: torn, both fields maybe.
+        let top = Own::Discarded {
+            at: Span::dummy(),
+            parts: vec![Own::Maybe(None), Own::Maybe(None)],
+            torn: true,
+        };
+        assert_eq!(rank(PAIR, &top), 5);
     }
 }

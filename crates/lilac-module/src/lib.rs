@@ -6,8 +6,11 @@
 //! `using A.B` resolves root-relative to `<root>/A/B`, and `using *.A.B`
 //! resolves relative to the importing file's own namespace; newly-reached folders
 //! are read and scanned, repeating until no new folder appears. Every folder is
-//! visited once, so cycles terminate. A `using` inside a `private { ... }`
-//! block is honored (it still loads the folder).
+//! visited once, so cycles terminate: a namespace path is reached once, and
+//! a folder once by its canonical path ([`Fs::canonicalize`]), so a second
+//! path to a loaded folder (a link back up the tree) is `E025` and is not
+//! followed. A `using` inside a `private { ... }` block is honored (it still
+//! loads the folder).
 //!
 //! Projects and mounted libraries load whole: after the fixpoint, every
 //! folder below the root and each library whose name is an identifier is
@@ -19,12 +22,12 @@
 //! several projects) loads only what its `using`s reach.
 //!
 //! `E025` is the module-load error: a `using` whose target is missing or is not
-//! a directory, an unreadable root or library folder, or an unreadable file. Each is
-//! reported at the most specific span available (the `using` span where there
-//! is one, a dummy span otherwise, with the path named in the headline) and
-//! fails the load.
+//! a directory, an unreadable root or library folder, an unreadable file, or a
+//! folder reached again by a second path. Each is reported at the most
+//! specific span available (the `using` span where there is one, a dummy
+//! span otherwise, with the path named in the headline) and fails the load.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,6 +44,9 @@ pub trait Fs {
     fn read(&mut self, path: &Path) -> io::Result<String>;
     /// Lists a directory's entries (files and subdirectories).
     fn list_dir(&mut self, dir: &Path) -> io::Result<Vec<PathBuf>>;
+    /// The folder or file `path` names, links resolved: two paths to one
+    /// folder canonicalize equal, so the loader loads it once.
+    fn canonicalize(&mut self, path: &Path) -> io::Result<PathBuf>;
 }
 
 /// One loaded source file.
@@ -243,6 +249,13 @@ fn load_from(
     diags: &mut Diags,
 ) -> (Project, bool) {
     let whole_root = whole_root && root_entries.iter().any(|entry| is_lilac_file(entry));
+    // The root namespace holds the root folder only when it is loaded as a
+    // folder: a root file (`load_file`) or a lone namespace (`load_namespace`)
+    // leaves it empty, so a library mounted there is no second path to it.
+    let mut folders = HashMap::new();
+    if root_file.is_none() && seed.is_none() {
+        folders.insert(canonical_folder(fs, root), 0);
+    }
     let mut loader = Loader {
         root,
         libraries,
@@ -253,12 +266,14 @@ fn load_from(
         }],
         listings: vec![root_entries],
         ns_by_path: HashMap::from([(String::new(), 0)]),
+        folders,
         queue: VecDeque::from([0]),
+        again: HashSet::new(),
     };
     let mut files: Vec<FileUnit> = Vec::new();
     let mut failed = false;
     if let Some(seed) = seed {
-        if !loader.reach(seed, fs) {
+        if loader.reach(seed, None, fs, diags) == Reach::Missing {
             diags.emit(Diagnostic::error(
                 codes::E025,
                 format!("cannot find module folder `{seed}`"),
@@ -283,10 +298,10 @@ fn load_from(
 
     failed |= loader.drain(&mut files, fs, sources, diags);
     if whole_root {
-        loader.reach_children("", fs);
+        loader.reach_children("", fs, diags);
     }
     for (name, dir) in libraries {
-        if !loader.reach_tree(name, fs) {
+        if loader.reach_tree(name, fs, diags) == Reach::Missing {
             diags.emit(Diagnostic::error(
                 codes::E025,
                 format!("cannot read library folder `{}`", dir.display()),
@@ -295,6 +310,7 @@ fn load_from(
         }
     }
     failed |= loader.drain(&mut files, fs, sources, diags);
+    failed |= !loader.again.is_empty();
     (loader.project(files), failed)
 }
 
@@ -306,8 +322,13 @@ struct Loader<'a> {
     /// Directory listing per namespace.
     listings: Vec<Vec<PathBuf>>,
     ns_by_path: HashMap<String, usize>,
+    /// The canonical folder of each loaded namespace ([`Fs::canonicalize`]).
+    folders: HashMap<PathBuf, usize>,
     /// Namespaces whose files are still to be read.
     queue: VecDeque<usize>,
+    /// The paths that reached a loaded folder again (`E025`, reported once
+    /// each).
+    again: HashSet<String>,
 }
 
 impl Loader<'_> {
@@ -346,7 +367,7 @@ impl Loader<'_> {
             ..
         } in usings
         {
-            if !self.reach(&target_path, fs) {
+            if self.reach(&target_path, Some(span), fs, diags) == Reach::Missing {
                 diags.emit(
                     Diagnostic::error(
                         codes::E025,
@@ -361,19 +382,30 @@ impl Loader<'_> {
     }
 
     /// Queues the namespace at dotted `path` and its ancestors (each once).
-    /// Returns `false` when `path`'s own folder cannot be listed; a missing
-    /// ancestor folder (a library's parent) is skipped.
-    fn reach(&mut self, path: &str, fs: &mut dyn Fs) -> bool {
+    /// A missing ancestor folder (a library's parent) is skipped. A folder
+    /// another namespace already loaded (reached again through a link) is
+    /// `E025`, reported here at `at` (the `using` that reached it, if one
+    /// did), and is not loaded twice.
+    fn reach(&mut self, path: &str, at: Option<Span>, fs: &mut dyn Fs, diags: &mut Diags) -> Reach {
         if self.ns_by_path.contains_key(path) {
-            return true;
+            return Reach::Loaded;
+        }
+        if self.again.contains(path) {
+            return Reach::Again;
         }
         let dir = resolve_dir(self.root, self.libraries, path);
         let Ok(entries) = fs.list_dir(&dir) else {
-            return false;
+            return Reach::Missing;
         };
         if let Some((parent, _)) = path.rsplit_once('.') {
-            let _ = self.reach(parent, fs);
+            let _ = self.reach(parent, at, fs, diags);
         }
+        let folder = canonical_folder(fs, &dir);
+        if let Some(&first) = self.folders.get(&folder) {
+            self.report_again(path, first, at, diags);
+            return Reach::Again;
+        }
+        self.folders.insert(folder, self.namespaces.len());
         self.ns_by_path
             .insert(path.to_owned(), self.namespaces.len());
         self.queue.push_back(self.namespaces.len());
@@ -383,7 +415,27 @@ impl Loader<'_> {
             files: Vec::new(),
         });
         self.listings.push(entries);
-        true
+        Reach::Loaded
+    }
+
+    /// `E025` for `path`, whose folder namespace `first` already loaded.
+    fn report_again(&mut self, path: &str, first: usize, at: Option<Span>, diags: &mut Diags) {
+        let first = match self.namespaces[first].path.as_str() {
+            "" => "the project root".to_owned(),
+            name => format!("`{name}`"),
+        };
+        let mut diagnostic = Diagnostic::error(
+            codes::E025,
+            format!("folder `{path}` is {first} again (through a link)"),
+        )
+        .note(format!(
+            "both paths lead to one folder, which loads once, as {first}"
+        ));
+        if let Some(at) = at {
+            diagnostic = diagnostic.label(at, true, "imported here");
+        }
+        diags.emit(diagnostic);
+        self.again.insert(path.to_owned());
     }
 
     /// Reads the files of every queued namespace (reaching their `using`s).
@@ -421,21 +473,22 @@ impl Loader<'_> {
     }
 
     /// Reaches the namespace at `path` and every folder below it whose name
-    /// is an identifier, so a mounted library loads whole. Returns `false`
-    /// when `path`'s own folder cannot be listed.
-    fn reach_tree(&mut self, path: &str, fs: &mut dyn Fs) -> bool {
-        if !self.reach(path, fs) {
-            return false;
+    /// is an identifier, so a mounted library loads whole. A folder reached
+    /// again ([`Reach::Again`]) ends the walk there, so a link back up the
+    /// tree is followed once.
+    fn reach_tree(&mut self, path: &str, fs: &mut dyn Fs, diags: &mut Diags) -> Reach {
+        let reached = self.reach(path, None, fs, diags);
+        if reached == Reach::Loaded {
+            self.reach_children(path, fs, diags);
         }
-        self.reach_children(path, fs);
-        true
+        reached
     }
 
     /// Reaches every identifier-named folder below the (reached) namespace
     /// at `path`, `""` being the project root. In the project's own tree,
     /// `build`, a folder with its own `lilac.json` and a library's mount
     /// name are skipped.
-    fn reach_children(&mut self, path: &str, fs: &mut dyn Fs) {
+    fn reach_children(&mut self, path: &str, fs: &mut dyn Fs, diags: &mut Diags) {
         let ns = self.ns_by_path[path];
         let in_project = path.is_empty() || !self.is_library(path);
         let mut children: Vec<String> = self.listings[ns]
@@ -458,7 +511,7 @@ impl Loader<'_> {
                 continue;
             }
             // A non-folder entry (a stray file) simply fails to list.
-            let _ = self.reach_tree(&child_path, fs);
+            let _ = self.reach_tree(&child_path, fs, diags);
         }
     }
 
@@ -485,6 +538,25 @@ impl Loader<'_> {
             files,
         }
     }
+}
+
+/// What [`Loader::reach`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// The namespace is loaded (now or before).
+    Loaded,
+    /// Its folder cannot be listed.
+    Missing,
+    /// Its folder is one another namespace already loaded (`E025`,
+    /// reported).
+    Again,
+}
+
+/// The canonical form of folder `dir` ([`Fs::canonicalize`]), or `dir`
+/// itself when there is none: the folder was just listed, so that is rare,
+/// and it is then told apart by the path that reached it.
+fn canonical_folder(fs: &mut dyn Fs, dir: &Path) -> PathBuf {
+    fs.canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// Lexes and parses every file of `project` (diagnostics into `diags`).
@@ -672,6 +744,8 @@ mod tests {
     struct MemFs {
         files: HashMap<PathBuf, String>,
         dirs: HashMap<PathBuf, Vec<PathBuf>>,
+        /// Folder links: a link's path and the folder it leads to.
+        links: Vec<(PathBuf, PathBuf)>,
     }
 
     impl MemFs {
@@ -679,13 +753,27 @@ mod tests {
             Self {
                 files: HashMap::new(),
                 dirs: HashMap::new(),
+                links: Vec::new(),
             }
         }
 
         fn add(&mut self, root: &Path, rel: &str, src: &str) {
             let path = join_rel(root, rel);
-            // Every ancestor folder lists its child, as a real directory does.
-            let mut child = path.clone();
+            self.add_entry(&path);
+            self.files.insert(path, src.to_owned());
+        }
+
+        /// Makes `root/rel` a folder link to `root/target`.
+        fn link(&mut self, root: &Path, rel: &str, target: &str) {
+            let path = join_rel(root, rel);
+            self.add_entry(&path);
+            self.links.push((path, join_rel(root, target)));
+        }
+
+        /// Every ancestor folder of `path` lists its child, as a real
+        /// directory does.
+        fn add_entry(&mut self, path: &Path) {
+            let mut child = path.to_path_buf();
             while let Some(parent) = child.parent().filter(|p| !p.as_os_str().is_empty()) {
                 let entries = self.dirs.entry(parent.to_path_buf()).or_default();
                 if !entries.contains(&child) {
@@ -693,23 +781,51 @@ mod tests {
                 }
                 child = parent.to_path_buf();
             }
-            self.files.insert(path, src.to_owned());
+        }
+
+        /// `path` with every link on it followed, as the OS resolves one.
+        fn resolve(&self, path: &Path) -> PathBuf {
+            let mut path = path.to_path_buf();
+            loop {
+                let followed = self.links.iter().find_map(|(link, target)| {
+                    path.strip_prefix(link).ok().map(|rest| target.join(rest))
+                });
+                match followed {
+                    Some(next) => path = next,
+                    None => return path,
+                }
+            }
         }
     }
 
     impl Fs for MemFs {
         fn read(&mut self, path: &Path) -> io::Result<String> {
             self.files
-                .get(path)
+                .get(&self.resolve(path))
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
         }
 
         fn list_dir(&mut self, dir: &Path) -> io::Result<Vec<PathBuf>> {
-            self.dirs
-                .get(dir)
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such directory"))
+            let real = self.resolve(dir);
+            let entries = self
+                .dirs
+                .get(&real)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such directory"))?;
+            // Entries are listed under the path asked for, links and all.
+            Ok(entries
+                .iter()
+                .map(|entry| dir.join(entry.strip_prefix(&real).unwrap_or(entry)))
+                .collect())
+        }
+
+        fn canonicalize(&mut self, path: &Path) -> io::Result<PathBuf> {
+            let real = self.resolve(path);
+            if self.dirs.contains_key(&real) || self.files.contains_key(&real) {
+                Ok(real)
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "no such path"))
+            }
         }
     }
 
@@ -1351,5 +1467,125 @@ mod tests {
             names,
             ["Std/Heap/alloc.lilac", "main.lilac", "util/helper.lilac"]
         );
+    }
+
+    /// The headlines of every `E025`.
+    fn e025_messages(diags: &Diags) -> Vec<String> {
+        diags
+            .diagnostics()
+            .iter()
+            .filter(|diag| diag.code == "E025")
+            .map(|diag| diag.msg.to_string())
+            .collect()
+    }
+
+    /// A folder link back to its parent (`A/B -> A`) is walked once: the
+    /// second path to `A` is `E025`, and nothing below it loads.
+    #[test]
+    fn a_folder_link_cycle_is_e025_once() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "using A\n");
+        fs.add(&root, "A/a.lilac", "f: function () nothing {}\n");
+        fs.link(&root, "A/B", "A");
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(
+            e025_messages(&diags),
+            ["folder `A.B` is `A` again (through a link)"]
+        );
+        let paths: Vec<&str> = project
+            .namespaces
+            .iter()
+            .map(|ns| ns.path.as_str())
+            .collect();
+        assert_eq!(paths, ["", "A"]);
+        let names: Vec<&str> = project.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main.lilac", "a.lilac"]);
+    }
+
+    /// A `using` through the link reports at the `using`, and a link to the
+    /// project's own root is the root again.
+    #[test]
+    fn a_using_through_a_link_is_e025_at_the_using() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "using A.B\nusing Up\n");
+        fs.add(&root, "A/a.lilac", "f: function () nothing {}\n");
+        fs.link(&root, "A/B", "A");
+        fs.link(&root, "Up", "");
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(
+            e025_messages(&diags),
+            [
+                "folder `A.B` is `A` again (through a link)",
+                "folder `Up` is the project root again (through a link)",
+            ]
+        );
+        for diag in diags.diagnostics() {
+            assert_eq!(diag.labels.len(), 1, "{diag:?}");
+            let span = diag.labels[0].span;
+            assert_eq!(sources.file(span.file).expect("a file").name, "main.lilac");
+        }
+        assert_eq!(project.files.len(), 2);
+    }
+
+    /// Two links to one folder: the first path loads it, the second is
+    /// `E025`.
+    #[test]
+    fn a_second_link_to_a_folder_is_e025() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        fs.add(&root, "main.lilac", "main: function () nothing {}\n");
+        fs.add(&root, "Shared/s.lilac", "s: function () nothing {}\n");
+        fs.link(&root, "Alias", "Shared");
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let (project, failed) =
+            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+        assert!(failed);
+        assert_eq!(
+            e025_messages(&diags),
+            ["folder `Shared` is `Alias` again (through a link)"]
+        );
+        assert_eq!(project.files.len(), 2);
+    }
+
+    /// A file argument's folder is not loaded as a folder, so a library
+    /// mounted there is no second path to it.
+    #[test]
+    fn a_library_at_a_root_files_folder_loads() {
+        let lib = PathBuf::from("lib");
+        let mut fs = MemFs::new();
+        fs.add(&lib, "io.lilac", "print: function () nothing {}\n");
+        fs.add(
+            &lib,
+            "Heap/heap.lilac",
+            "allocate: function () nothing {}\n",
+        );
+
+        let mut sources = SourceMap::new();
+        let mut diags = Diags::new();
+        let libraries = [("Std".to_owned(), lib.clone())];
+        let (project, failed) = super::load_file(
+            "lib/io.lilac",
+            "print: function () nothing {}\n",
+            &libraries,
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
+        assert!(!failed, "{diags:?}");
+        assert_eq!(project.namespaces.len(), 3);
     }
 }

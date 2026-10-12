@@ -366,9 +366,9 @@ impl Lower<'_> {
         place
     }
 
-    /// Lowers `@array_at(ref array, index)`: the element address, kept in a
-    /// place across an unsigned bounds check that panics with "index out
-    /// of bounds". A constant index in bounds needs no check.
+    /// Lowers `@array_at(ref array, index)`: an unsigned bounds check that
+    /// panics with "index out of bounds", then, on the in-bounds path, the
+    /// element address. A constant index in bounds needs no check.
     pub(crate) fn lower_array_at(
         &mut self,
         state: &mut FnState,
@@ -405,19 +405,21 @@ impl Lower<'_> {
             });
             return LirOperand::Reg(addr);
         }
-        state.emit(LirInst::ElemAddr {
-            array: operands[0].clone(),
-            index: operands[1].clone(),
-            dst: addr.clone(),
-            ty: ty.clone(),
-            span,
-        });
-        let result = state.tmp_lir(ty, span);
-        state.emit(LirInst::CopyPlace {
-            src: LirOperand::Reg(addr),
-            dst: result.clone(),
-            span,
-        });
+        // The address is computed only once the index is known to be in
+        // bounds (an `inbounds` offset past the end is poison), in the block
+        // after the check. A register lives in its block, so the array and
+        // the index cross the check in places.
+        let array_ty = self.lir_ty(args[0].ty);
+        let index_ty = self.lir_ty(args[1].ty);
+        let array = state.tmp_lir(array_ty.clone(), span);
+        let index = state.tmp_lir(index_ty.clone(), span);
+        for (operand, place) in [(&operands[0], &array), (&operands[1], &index)] {
+            state.emit(LirInst::CopyPlace {
+                src: LirOperand::Reg(operand.clone()),
+                dst: place.clone(),
+                span,
+            });
+        }
         let count = state.reg();
         state.emit(LirInst::Const {
             dst: count.clone(),
@@ -445,7 +447,23 @@ impl Lower<'_> {
         let msg = self.byte_buffer_place(state, b"index out of bounds", span);
         self.panic_with(state, func, msg, span);
         state.at(ok);
-        LirOperand::Place(result)
+        let (array_reg, index_reg) = (state.reg(), state.reg());
+        for (place, reg, ty) in [(array, &array_reg, array_ty), (index, &index_reg, index_ty)] {
+            state.emit(LirInst::CopyReg {
+                src: LirOperand::Place(place),
+                dst: reg.clone(),
+                ty,
+                span,
+            });
+        }
+        state.emit(LirInst::ElemAddr {
+            array: array_reg,
+            index: index_reg,
+            dst: addr.clone(),
+            ty,
+            span,
+        });
+        LirOperand::Reg(addr)
     }
 
     /// Lowers `@atomic_<op>_W(ref place, operands…)`: the operands become

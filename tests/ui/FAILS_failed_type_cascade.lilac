@@ -1,0 +1,34 @@
+// `E` contains itself by value (`E053`). Every later use sees an error
+// type, so nothing below adds an error of its own.
+
+E: enum {
+    A: E
+    B
+}
+
+Box[T]: object {
+    v: T
+}
+
+C: E => .B
+G: E = .B
+
+make: function () out: E {
+    out = .B
+}
+
+take: function (e: E) nothing {
+}
+
+main: function () nothing {
+    e: E = .B
+    e = .A(.B)
+    G = .B
+    x: E = make()
+    if x == .B {
+    }
+    y: E = if x == .B then x else .B as E
+    b: Box[E] = Box { v = .B }
+    f: function (e: E) nothing = take
+    f(.B)
+}

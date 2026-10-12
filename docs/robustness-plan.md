@@ -1,6 +1,6 @@
 # Robustness Plan
 
-> Status: in progress (Phases 0–6 done).
+> Status: in progress (Phases 0–7 done).
 > Source: the robustness review of 2026-10-11 (fuzzing, adversarial
 > programs, and a read of the lexer, layout, backend and instantiation
 > code).
@@ -866,9 +866,89 @@ recursion ends with `E051` or `E068` within the time bound.
   the walk (problem 14). `OverlayFs` and the test `Fs` implement it.
 - **7.4 ICEs point at code.** Backend `bug!`s take the LIR instruction's
   or terminator's span instead of `Span::dummy()`.
+- **7.5 Bounds before addresses** (carried over from Phase 3's notes).
+  `@array_at` computes the element address only after its bounds check,
+  on the in-bounds path, so no out-of-bounds `getelementptr inbounds`
+  (`.lilac.offset`) is ever built, even unused.
 
 **Tests:** a junction or symlink test in `lilac-module` (skipped where the
 OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
+
+- **Delivered notes.**
+  - 7.1: `merge` was monotone as written; nothing in it changed. It now
+    takes the field types through a small trait (`FieldTypes`, the
+    checker's layouts or a test table), so `places::tests` checks it
+    exhaustively over representative states of a leaf, a two-field
+    object and a nested object (`Full`, `Empty`/`Maybe` with and without
+    spans, three `Cond`s, every `Parts` split, `Discarded` torn and not):
+    idempotent, commutative and associative (spans aside), an upper
+    bound of both sides, and monotone. A rank (one per leaf at maybe;
+    one per object node split into parts, two discarded, three torn)
+    rises on every strict rise and never passes `height`, which is the
+    bound's per-local term. The bound (`Pass::round_bound`) is one plus
+    the sum over the body's locals of `height(type) + 1` (the `+ 1` is a
+    local first appearing in the head); it is worked out once per body,
+    with `height` memoized per type. Past it `lower_loop` is an ICE at
+    the loop's span. Field types behind a `ref` are now none
+    (`FieldTypes for Checker`): an owned path never goes through one, and
+    this keeps `height` finite on `object { next: ref Self }`.
+  - Rounds seen: across the whole test suite (instrumented once, then
+    removed) no loop took more than 2 rounds, against bounds of 3 to 57.
+    That is the expected maximum for a program that checks: every
+    statement either writes a constant state or must read a full place
+    (else `E063`), so a body maps a head `h` to `W ⊔ h` and the second
+    round is already stable. The old cap of 16 was therefore never hit;
+    what it hid was only the possibility. The new run test
+    `loop_ownership_settles` builds and runs nested loops (three levels)
+    with moves and new values on different branches and on `continue`
+    and `break` paths, checking every drop.
+  - 7.2: the `E053` cascade was not in `types.rs`: the declared type
+    became `TypeRef::ERROR` there correctly, but several checks then
+    dropped the error expectation (`None` instead of `Some(ERROR)`, the
+    convention `callee_failed` already uses), so a tag or literal asked
+    for a type (`E024`). Fixed: a binding with a failed type, an
+    assignment whose place failed or has the error type, a constant's
+    and a global's initializer, a cast to a failed type, a literal
+    compared with a failed side (`check_sides`), an `if` value's `else`
+    after a failed `then`, a struct literal inferred from a failed type
+    (`E023` "cannot infer generic arguments"), and a call through a
+    local of the error type (`E022` "not callable"). A global or struct
+    literal whose type failed now still checks its values against the
+    error type (one error does not hide another). In `types.rs` itself:
+    once a slot of a layout failed, the later slots are only resolved
+    (`slot_type`: names reported), not laid out. Before, `W[T]` holding
+    a `W[W[T]]` that holds a `W[T]` reported `E053` once per level, 64
+    times, and an object reaching itself through two fields reported it
+    twice; each is now one error. An object too large (`E067`) is an
+    error type the same way.
+  - 7.3: `Fs::canonicalize` (`StdFs`: `std::fs::canonicalize`;
+    `OverlayFs`: the same, else, for a path only open documents give,
+    the nearest folder on disk canonical plus the rest taken lexically;
+    test doubles: `MemFs` resolves its folder links, the driver's
+    `TestFs` has none). The check is in `Loader::reach`, not only
+    `reach_tree`, so a `using` through a link is caught too, at the
+    `using`: each loaded namespace's canonical folder is kept
+    (`Loader::folders`), and a second path to one is `E025` "folder
+    `A.B` is `A` again (through a link)" (the root reads "the project
+    root"), reported once per path, neither loaded nor walked. The root
+    folder counts only when the root namespace loads it, so a file
+    argument inside a mounted library still builds. A library mounted at
+    a folder the project's own walk also reaches is now the same `E025`;
+    before, it loaded every file twice under two namespaces.
+  - 7.4: `Lower::at` holds the span of the instruction or terminator
+    being lowered (`lower_func` sets it, `LirInst::span` is new); every
+    `bug!` in `lower.rs` uses it, through `Lower::checked` for builder
+    failures and the register/place helpers, which became methods.
+    Declarations, exports and the glue in `runtime.rs` and `threads.rs`
+    keep `Span::dummy()` (no LIR span exists there).
+  - 7.5: LIR registers live in their block, so the array and index
+    registers cross the check in two temporary places and are read back
+    in the in-bounds block, where `elem.addr` is computed and returned as
+    a register (the result place it used to need is gone). No `tests/ui`
+    snapshot changed: their `@array_at`s have constant in-bounds indices,
+    which need no check.
+  - Generated code is otherwise byte-identical: every `.lir` and `.ll`
+    snapshot checks unchanged.
 
 ---
 

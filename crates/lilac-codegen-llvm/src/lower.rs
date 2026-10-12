@@ -35,11 +35,17 @@ use lilac_ir::{
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
 
-/// Turns a fallible inkwell builder call into an ICE.
+/// Turns a fallible inkwell builder call in generated glue (which has no
+/// span) into an ICE. Lowering LIR uses [`Lower::checked`].
 pub(crate) fn checked<T>(result: Result<T, BuilderError>, what: &str) -> T {
+    checked_at(result, Span::dummy(), what)
+}
+
+/// Turns a fallible inkwell builder call into an ICE at `span`.
+fn checked_at<T>(result: Result<T, BuilderError>, span: Span, what: &str) -> T {
     match result {
         Ok(value) => value,
-        Err(err) => bug!(Span::dummy(), "failed to build {what}: {err}"),
+        Err(err) => bug!(span, "failed to build {what}: {err}"),
     }
 }
 
@@ -62,6 +68,10 @@ pub(crate) struct Lower<'ctx, 'a> {
     /// `.lilac.offset`, once a field or element address has needed it
     /// ([`Self::offset_ptr`]).
     offset: Cell<Option<FunctionValue<'ctx>>>,
+    /// The span of the LIR instruction or terminator being lowered, which
+    /// an ICE points at; `Span::dummy()` outside one (declarations, and
+    /// glue the backend writes itself).
+    at: Cell<Span>,
 }
 
 impl<'ctx, 'a> Lower<'ctx, 'a> {
@@ -86,7 +96,19 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             arch: Target::parse(triple).ok().map(|target| target.arch),
             os: Target::parse(triple).ok().map(|target| target.os),
             offset: Cell::new(None),
+            at: Cell::new(Span::dummy()),
         }
+    }
+
+    /// Where an ICE points: the LIR instruction or terminator being lowered
+    /// ([`Self::at`]).
+    fn at(&self) -> Span {
+        self.at.get()
+    }
+
+    /// [`checked`] while lowering LIR: the ICE points at [`Self::at`].
+    fn checked<T>(&self, result: Result<T, BuilderError>, what: &str) -> T {
+        checked_at(result, self.at(), what)
     }
 
     /// Consumes the context, returning the populated LLVM module.
@@ -193,7 +215,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             && crate::threads::has_thread_locals(&self.module)
         {
             let main_tls = crate::threads::main_tls(&self.module, self.arch);
-            checked(builder.build_call(main_tls, &[], ""), "main thread TLS");
+            self.checked(builder.build_call(main_tls, &[], ""), "main thread TLS");
         }
         let (count, arguments, environment) = match wrapper.get_params().as_slice() {
             [count, arguments, environment] => (
@@ -206,7 +228,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let count = if count.get_type() == self.native {
             count
         } else {
-            checked(
+            self.checked(
                 builder.build_int_z_extend(count, self.native, "count"),
                 "entry count",
             )
@@ -214,12 +236,12 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let mut slots = Vec::new();
         for value in [count.into(), arguments.into(), environment.into()] {
             let value: BasicValueEnum = value;
-            let slot = checked(builder.build_alloca(value.get_type(), ""), "entry slot");
+            let slot = self.checked(builder.build_alloca(value.get_type(), ""), "entry slot");
             self.store(&builder, slot, value, "entry store");
             slots.push(slot.into());
         }
-        checked(builder.build_call(start, &slots, ""), "entry call");
-        checked(builder.build_unreachable(), "entry end");
+        self.checked(builder.build_call(start, &slots, ""), "entry call");
+        self.checked(builder.build_unreachable(), "entry end");
     }
 
     /// The leaf builtins this module references, so the runtime emits only the
@@ -267,10 +289,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirTy::Named(_) | LirTy::Array(..) => {
                 match lilac_ir::size_align(&self.lir.layouts, ty, &self.lir.target) {
                     Some(sized) => self.bytes_type(sized.size),
-                    None => bug!(Span::dummy(), "unknown LIR type `{ty}`"),
+                    None => bug!(self.at(), "unknown LIR type `{ty}`"),
                 }
             }
-            other => bug!(Span::dummy(), "unknown LIR type `{other}`"),
+            other => bug!(self.at(), "unknown LIR type `{other}`"),
         }
     }
 
@@ -282,12 +304,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         if let Ok(size) = u32::try_from(size) {
             return byte.array_type(size).into();
         }
-        let chunks = u32::try_from(size / u64::from(CHUNK)).unwrap_or_else(|_| {
-            bug!(
-                Span::dummy(),
-                "an object of {size} bytes is past LLVM's limit"
-            )
-        });
+        let chunks = u32::try_from(size / u64::from(CHUNK))
+            .unwrap_or_else(|_| bug!(self.at(), "an object of {size} bytes is past LLVM's limit"));
         let rest = u32::try_from(size % u64::from(CHUNK)).unwrap_or(0);
         let chunk = byte.array_type(CHUNK);
         self.context
@@ -305,14 +323,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// (never computed here); the verifier checked every type is sized.
     fn size_align(&self, ty: &LirTy) -> lilac_layout::SizeAlign {
         lilac_ir::size_align(&self.lir.layouts, ty, &self.lir.target)
-            .unwrap_or_else(|| bug!(Span::dummy(), "`{ty}` has no size on `{}`", self.lir.target))
+            .unwrap_or_else(|| bug!(self.at(), "`{ty}` has no size on `{}`", self.lir.target))
     }
 
     /// The alignment of a LIR type, as LLVM takes it.
     fn align_of(&self, ty: &LirTy) -> u32 {
         let align = self.size_align(ty).align;
         u32::try_from(align)
-            .unwrap_or_else(|_| bug!(Span::dummy(), "`{ty}` is aligned to {align} bytes"))
+            .unwrap_or_else(|_| bug!(self.at(), "`{ty}` is aligned to {align} bytes"))
     }
 
     /// The alignment of a scalar LLVM type: its C scalar's on the target
@@ -334,7 +352,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             _ => None,
         };
         let Some(scalar) = scalar else {
-            bug!(Span::dummy(), "`{}` is not a scalar", ty.print_to_string());
+            bug!(self.at(), "`{}` is not a scalar", ty.print_to_string());
         };
         let align = self.lir.target.scalar_layout(scalar).1;
         u32::try_from(align).unwrap_or(1)
@@ -348,8 +366,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         ptr: PointerValue<'ctx>,
         what: &str,
     ) -> BasicValueEnum<'ctx> {
-        let value = checked(builder.build_load(ty, ptr, ""), what);
-        aligned(value.as_instruction_value(), self.scalar_align(ty), what);
+        let value = self.checked(builder.build_load(ty, ptr, ""), what);
+        self.aligned(value.as_instruction_value(), self.scalar_align(ty), what);
         value
     }
 
@@ -361,8 +379,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         value: BasicValueEnum<'ctx>,
         what: &str,
     ) {
-        let store = checked(builder.build_store(ptr, value), what);
-        aligned(Some(store), self.scalar_align(value.get_type()), what);
+        let store = self.checked(builder.build_store(ptr, value), what);
+        self.aligned(Some(store), self.scalar_align(value.get_type()), what);
     }
 
     /// Copies a `ty` from `src` to `dst`: an `llvm.memcpy` of its size, at
@@ -376,7 +394,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) {
         let size = self.native.const_int(self.size_align(ty).size, false);
         let align = self.align_of(ty);
-        checked(builder.build_memcpy(dst, align, src, align, size), "copy");
+        self.checked(builder.build_memcpy(dst, align, src, align, size), "copy");
     }
 
     /// Zeroes the `ty` at `ptr`: a scalar with one store, an aggregate with
@@ -388,7 +406,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
         let size = self.native.const_int(self.size_align(ty).size, false);
         let zero = self.context.i8_type().const_zero();
-        checked(
+        self.checked(
             builder.build_memset(ptr, self.align_of(ty), zero, size),
             "zero",
         );
@@ -410,13 +428,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             self.offset.set(Some(helper));
             helper
         });
-        let call = checked(
+        let call = self.checked(
             builder.build_call(helper, &[base.into(), offset.into()], ""),
             "offset",
         );
         match call.try_as_basic_value() {
             ValueKind::Basic(BasicValueEnum::PointerValue(address)) => address,
-            _ => bug!(Span::dummy(), "`.lilac.offset` returned no pointer"),
+            _ => bug!(self.at(), "`.lilac.offset` returned no pointer"),
         }
     }
 
@@ -589,7 +607,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let c_type = |ty: &LirTy| {
             self.extern_c_type(ty).unwrap_or_else(|| {
                 bug!(
-                    Span::dummy(),
+                    self.at(),
                     "export `{}` has the non-C type `{ty}`",
                     export.symbol
                 )
@@ -611,7 +629,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let c_type = |ty: &LirTy| {
             self.extern_c_type(ty).unwrap_or_else(|| {
                 bug!(
-                    Span::dummy(),
+                    self.at(),
                     "export `{}` has the non-C type `{ty}`",
                     export.symbol
                 )
@@ -619,18 +637,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         };
         let symbol = export.symbol.as_str();
         let Some(entry) = self.module.get_function(symbol) else {
-            bug!(Span::dummy(), "export `{symbol}` was not declared");
+            bug!(self.at(), "export `{symbol}` was not declared");
         };
         let Some(body) = self.module.get_function(self::symbol(func.name.as_str())) else {
-            bug!(Span::dummy(), "export of undeclared `{}`", func.name);
+            bug!(self.at(), "export of undeclared `{}`", func.name);
         };
         let builder = self.context.create_builder();
         builder.position_at_end(self.context.append_basic_block(entry, "entry"));
         let mut slots: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         for (index, ty) in export.ins.iter().enumerate() {
-            let slot = checked(builder.build_alloca(c_type(ty), "arg"), "export argument");
+            let slot = self.checked(builder.build_alloca(c_type(ty), "arg"), "export argument");
             let Some(value) = entry.get_nth_param(u32::try_from(index).unwrap_or(u32::MAX)) else {
-                bug!(Span::dummy(), "export `{symbol}` lost a parameter");
+                bug!(self.at(), "export `{symbol}` lost a parameter");
             };
             self.store(&builder, slot, value, "export argument store");
             slots.push(slot.into());
@@ -641,7 +659,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .map(|ty| {
                 (
                     c_type(ty),
-                    checked(builder.build_alloca(c_type(ty), "out"), "export out"),
+                    self.checked(builder.build_alloca(c_type(ty), "out"), "export out"),
                 )
             })
             .collect();
@@ -649,14 +667,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             outs.iter()
                 .map(|(_, slot)| BasicMetadataValueEnum::from(*slot)),
         );
-        checked(builder.build_call(body, &slots, ""), "export call");
+        self.checked(builder.build_call(body, &slots, ""), "export call");
         match outs.first() {
             Some((ty, slot)) => {
                 let value = self.load(&builder, *ty, *slot, "export result");
-                checked(builder.build_return(Some(&value)), "export return");
+                self.checked(builder.build_return(Some(&value)), "export return");
             }
             None => {
-                checked(builder.build_return(None), "export return");
+                self.checked(builder.build_return(None), "export return");
             }
         }
     }
@@ -680,7 +698,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             symbol(func.name.as_str())
         };
         let Some(function) = self.module.get_function(name) else {
-            bug!(Span::dummy(), "function `{}` was not declared", func.name);
+            bug!(self.at(), "function `{}` was not declared", func.name);
         };
 
         if func.is_extern {
@@ -723,19 +741,23 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
         let builder = self.context.create_builder();
         for (index, block) in func.blocks.iter().enumerate() {
+            self.at.set(block.term.span());
             let Some(basic_block) = blocks.get(block.label.as_str()).copied() else {
-                bug!(Span::dummy(), "missing block `{}`", block.label);
+                bug!(self.at(), "missing block `{}`", block.label);
             };
             builder.position_at_end(basic_block);
             for inst in &block.insts {
+                self.at.set(inst.span());
                 self.lower_inst(inst, &builder, &mut state);
             }
+            self.at.set(block.term.span());
             let next = func
                 .blocks
                 .get(index + 1)
                 .and_then(|next| blocks.get(next.label.as_str()).copied());
-            Self::lower_term(&block.term, &builder, &blocks, &state, next);
+            self.lower_term(&block.term, &builder, &blocks, &state, next);
         }
+        self.at.set(Span::dummy());
     }
 
     /// Lowers one instruction. A `CompileError` marker is reported as `E031`
@@ -750,14 +772,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::CopyPlace { src, dst, .. } => {
-                self.write(src, place_ptr(dst, state), builder, state);
+                self.write(src, self.place_ptr(dst, state), builder, state);
             }
             LirInst::CopyDeref { src, dst, .. } => {
                 let from = self.pointer_in(src, builder, state);
                 let Some(ty) = state.place_types.get(dst) else {
-                    bug!(Span::dummy(), "copy to undeclared place `{dst}`");
+                    bug!(self.at(), "copy to undeclared place `{dst}`");
                 };
-                let to = place_ptr(dst, state);
+                let to = self.place_ptr(dst, state);
                 if ty.is_scalar() {
                     let value = self.load(builder, self.lir_type(ty), from, "copy load");
                     self.store(builder, to, value, "copy store");
@@ -777,7 +799,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Addr { place, dst, .. } => {
-                let ptr = place_ptr(place, state);
+                let ptr = self.place_ptr(place, state);
                 state.regs.insert(dst.clone(), ptr.into());
             }
             LirInst::AddrFunc { func, dst, ty, .. } => {
@@ -833,7 +855,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirInst::Drop { .. } => {}
             LirInst::Zero { place, .. } => self.lower_zero(place, builder, state),
             LirInst::CompileError { .. } => bug!(
-                Span::dummy(),
+                self.at(),
                 "instruction `{inst:?}` is a compile-time marker and must not reach codegen"
             ),
             LirInst::AtomicLoad { .. }
@@ -855,7 +877,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         self.load(
             builder,
             self.ptr_type().into(),
-            place_ptr(place, state),
+            self.place_ptr(place, state),
             "load ref",
         )
         .into_pointer_value()
@@ -864,7 +886,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// The address of global `global` (`addr.global`).
     fn global_addr(&self, global: &Symbol) -> BasicValueEnum<'ctx> {
         let Some(value) = self.module.get_global(global.as_str()) else {
-            bug!(Span::dummy(), "address of undeclared global `!{global}`");
+            bug!(self.at(), "address of undeclared global `!{global}`");
         };
         value.as_pointer_value().into()
     }
@@ -881,11 +903,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         if let LirOperand::Place(name) = src {
             match state.place_types.get(name) {
                 Some(ty) if !ty.is_scalar() => {
-                    self.copy_bytes(builder, dst, place_ptr(name, state), ty);
+                    self.copy_bytes(builder, dst, self.place_ptr(name, state), ty);
                     return;
                 }
                 Some(_) => {}
-                None => bug!(Span::dummy(), "copy of undeclared place `{name}`"),
+                None => bug!(self.at(), "copy of undeclared place `{name}`"),
             }
         }
         let value = self.operand(src, None, builder, state);
@@ -895,13 +917,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// Lowers `zero %place`: an `llvm.memset` of the place's size, at its
     /// alignment.
     fn lower_zero(&self, place: &PlaceName, builder: &Builder<'ctx>, state: &FnState<'ctx>) {
-        let ptr = place_ptr(place, state);
+        let ptr = self.place_ptr(place, state);
         let Some(ty) = state.place_types.get(place) else {
-            bug!(Span::dummy(), "zero of undeclared place `{place}`");
+            bug!(self.at(), "zero of undeclared place `{place}`");
         };
         let size = self.native.const_int(self.size_align(ty).size, false);
         let zero = self.context.i8_type().const_zero();
-        checked(
+        self.checked(
             builder.build_memset(ptr, self.align_of(ty), zero, size),
             "zero place",
         );
@@ -918,8 +940,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 order,
                 ..
             } => {
-                let value = checked(
-                    builder.build_load(self.lir_type(ty), reg_ptr(ptr, state), ""),
+                let value = self.checked(
+                    builder.build_load(self.lir_type(ty), self.reg_ptr(ptr, state), ""),
                     "atomic load",
                 );
                 self.make_atomic(value.as_instruction_value(), ty, *order);
@@ -932,8 +954,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 order,
                 ..
             } => {
-                let store = checked(
-                    builder.build_store(reg_ptr(ptr, state), reg_int(value, state)),
+                let store = self.checked(
+                    builder.build_store(self.reg_ptr(ptr, state), self.reg_int(value, state)),
                     "atomic store",
                 );
                 self.make_atomic(Some(store), ty, *order);
@@ -946,11 +968,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 order,
                 ..
             } => {
-                let old = checked(
+                let old = self.checked(
                     builder.build_atomicrmw(
                         rmw_bin_op(*op),
-                        reg_ptr(ptr, state),
-                        reg_int(value, state),
+                        self.reg_ptr(ptr, state),
+                        self.reg_int(value, state),
                         llvm_ordering(*order),
                     ),
                     "atomicrmw",
@@ -965,41 +987,41 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 order,
                 ..
             } => {
-                let pair = checked(
+                let pair = self.checked(
                     builder.build_cmpxchg(
-                        reg_ptr(ptr, state),
-                        reg_int(expected, state),
-                        reg_int(desired, state),
+                        self.reg_ptr(ptr, state),
+                        self.reg_int(expected, state),
+                        self.reg_int(desired, state),
                         llvm_ordering(*order),
                         llvm_ordering(order.failure()),
                     ),
                     "cmpxchg",
                 );
-                let old = checked(builder.build_extract_value(pair, 0, ""), "cmpxchg old");
+                let old = self.checked(builder.build_extract_value(pair, 0, ""), "cmpxchg old");
                 state.regs.insert(dst.clone(), old);
             }
             LirInst::Fence { order, .. } => {
-                checked(
+                self.checked(
                     builder.build_fence(llvm_ordering(*order), false, ""),
                     "fence",
                 );
             }
-            _ => bug!(Span::dummy(), "non-atomic instruction `{inst:?}`"),
+            _ => bug!(self.at(), "non-atomic instruction `{inst:?}`"),
         }
     }
 
     /// Makes a load or store atomic, aligned to its width.
     fn make_atomic(&self, inst: Option<InstructionValue<'ctx>>, ty: &LirTy, order: AtomicOrdering) {
         let Some(inst) = inst else {
-            bug!(Span::dummy(), "atomic access is not an instruction");
+            bug!(self.at(), "atomic access is not an instruction");
         };
         let BasicTypeEnum::IntType(int_type) = self.lir_type(ty) else {
-            bug!(Span::dummy(), "atomic access of non-integer `{ty}`");
+            bug!(self.at(), "atomic access of non-integer `{ty}`");
         };
         let ordered = inst.set_atomic_ordering(llvm_ordering(order));
         let aligned = inst.set_alignment(int_type.get_bit_width() / 8);
         if let Err(err) = ordered.and(aligned) {
-            bug!(Span::dummy(), "invalid atomic access: {err}");
+            bug!(self.at(), "invalid atomic access: {err}");
         }
     }
 
@@ -1018,31 +1040,33 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) {
         let value = match op {
             ConvertOp::Trunc | ConvertOp::ExtendZero | ConvertOp::ExtendSign => {
-                let source = reg_int(src, state);
+                let source = self.reg_int(src, state);
                 let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
-                    bug!(Span::dummy(), "`convert` to non-integer type `{ty}`");
+                    bug!(self.at(), "`convert` to non-integer type `{ty}`");
                 };
                 match op {
-                    ConvertOp::Trunc => {
-                        checked(builder.build_int_truncate(source, result_ty, ""), "trunc").into()
-                    }
-                    ConvertOp::ExtendSign => {
-                        checked(builder.build_int_s_extend(source, result_ty, ""), "sext").into()
-                    }
-                    _ => checked(builder.build_int_z_extend(source, result_ty, ""), "zext").into(),
+                    ConvertOp::Trunc => self
+                        .checked(builder.build_int_truncate(source, result_ty, ""), "trunc")
+                        .into(),
+                    ConvertOp::ExtendSign => self
+                        .checked(builder.build_int_s_extend(source, result_ty, ""), "sext")
+                        .into(),
+                    _ => self
+                        .checked(builder.build_int_z_extend(source, result_ty, ""), "zext")
+                        .into(),
                 }
             }
             ConvertOp::Bitcast => {
                 let source = self.operand(&LirOperand::Reg(src.to_owned()), None, builder, state);
                 match (source, self.lir_type(ty)) {
-                    (BasicValueEnum::PointerValue(pointer), BasicTypeEnum::IntType(int)) => {
-                        checked(builder.build_ptr_to_int(pointer, int, ""), "ptrtoint").into()
-                    }
-                    (BasicValueEnum::IntValue(int), BasicTypeEnum::PointerType(pointer)) => {
-                        checked(builder.build_int_to_ptr(int, pointer, ""), "inttoptr").into()
-                    }
+                    (BasicValueEnum::PointerValue(pointer), BasicTypeEnum::IntType(int)) => self
+                        .checked(builder.build_ptr_to_int(pointer, int, ""), "ptrtoint")
+                        .into(),
+                    (BasicValueEnum::IntValue(int), BasicTypeEnum::PointerType(pointer)) => self
+                        .checked(builder.build_int_to_ptr(int, pointer, ""), "inttoptr")
+                        .into(),
                     (source, result_ty) => {
-                        checked(builder.build_bit_cast(source, result_ty, ""), "bitcast")
+                        self.checked(builder.build_bit_cast(source, result_ty, ""), "bitcast")
                     }
                 }
             }
@@ -1059,11 +1083,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         builder: &Builder<'ctx>,
         state: &mut FnState<'ctx>,
     ) {
-        let ptr = checked(
+        let ptr = self.checked(
             builder.build_alloca(self.lir_type(ty), place.as_str()),
             "alloca",
         );
-        aligned(ptr.as_instruction(), self.align_of(ty), "alloca");
+        self.aligned(ptr.as_instruction(), self.align_of(ty), "alloca");
         self.zero_bytes(builder, ptr, ty);
         state.places.insert(place.to_owned(), ptr);
         state.place_types.insert(place.to_owned(), ty.clone());
@@ -1087,16 +1111,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .and_then(|func| func.export.as_ref());
         let target = export.map_or_else(|| symbol(name.as_str()), |export| export.symbol.as_str());
         let Some(function) = self.module.get_function(target) else {
-            bug!(Span::dummy(), "address of unknown function `{name}`");
+            bug!(self.at(), "address of unknown function `{name}`");
         };
         let ptr = function.as_global_value().as_pointer_value();
         match self.lir_type(ty) {
-            BasicTypeEnum::IntType(int_ty) => {
-                checked(builder.build_ptr_to_int(ptr, int_ty, ""), "ptrtoint").into()
-            }
+            BasicTypeEnum::IntType(int_ty) => self
+                .checked(builder.build_ptr_to_int(ptr, int_ty, ""), "ptrtoint")
+                .into(),
             BasicTypeEnum::PointerType(_) => ptr.into(),
             other => bug!(
-                Span::dummy(),
+                self.at(),
                 "`addr.func` type `{ty}` is `{}`, not an integer or pointer",
                 other.print_to_string()
             ),
@@ -1133,7 +1157,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) {
         let Some(callee) = self.lir.funcs.iter().find(|func| func.name == *name) else {
-            bug!(Span::dummy(), "call to unknown function `{name}`");
+            bug!(self.at(), "call to unknown function `{name}`");
         };
         let llvm_name = if callee.is_extern {
             name.as_str()
@@ -1141,23 +1165,28 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             symbol(name.as_str())
         };
         let Some(function) = self.module.get_function(llvm_name) else {
-            bug!(Span::dummy(), "call to unknown function `{name}`");
+            bug!(self.at(), "call to unknown function `{name}`");
         };
         if callee.uses_c_abi() {
             let args = self.extern_call_args(callee, ins, builder, state);
-            let result = checked(builder.build_call(function, &args, ""), "extern call");
+            let result = self.checked(builder.build_call(function, &args, ""), "extern call");
             if let Some(out) = outs.first() {
                 let value = match result.try_as_basic_value() {
                     ValueKind::Basic(value) => value,
                     ValueKind::Instruction(_) => {
-                        bug!(Span::dummy(), "extern `{name}` unexpectedly returned void")
+                        bug!(self.at(), "extern `{name}` unexpectedly returned void")
                     }
                 };
-                self.store(builder, place_ptr(out, state), value, "extern result store");
+                self.store(
+                    builder,
+                    self.place_ptr(out, state),
+                    value,
+                    "extern result store",
+                );
             }
         } else {
             let args = self.direct_call_args(callee, ins, outs, builder, state);
-            checked(builder.build_call(function, &args, ""), "direct call");
+            self.checked(builder.build_call(function, &args, ""), "direct call");
         }
     }
 
@@ -1180,7 +1209,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     if arg_is_ref {
                         BasicMetadataValueEnum::from(self.load_place(place, builder, state))
                     } else {
-                        BasicMetadataValueEnum::from(place_ptr(place, state))
+                        BasicMetadataValueEnum::from(self.place_ptr(place, state))
                     }
                 } else {
                     BasicMetadataValueEnum::from(self.load_as(place, param_ty, builder, state))
@@ -1215,10 +1244,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .chain(outs.iter())
             .zip(params)
             .map(|(place, param_ty)| {
-                let ptr = place_ptr(place, state);
+                let ptr = self.place_ptr(place, state);
                 let arg_is_ref = state.place_types.get(place).is_some_and(LirTy::is_ref);
                 if param_ty.is_ref() && !arg_is_ref {
-                    let slot = checked(
+                    let slot = self.checked(
                         builder.build_alloca(self.ptr_type(), "ref.arg"),
                         "ref arg alloca",
                     );
@@ -1243,16 +1272,16 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) {
         let Some(value) = state.regs.get(reg).copied() else {
-            bug!(Span::dummy(), "call through undefined register `{reg}`");
+            bug!(self.at(), "call through undefined register `{reg}`");
         };
         let ptr = match value {
             BasicValueEnum::PointerValue(ptr) => ptr,
-            BasicValueEnum::IntValue(int) => checked(
+            BasicValueEnum::IntValue(int) => self.checked(
                 builder.build_int_to_ptr(int, self.ptr_type(), ""),
                 "inttoptr",
             ),
             other => bug!(
-                Span::dummy(),
+                self.at(),
                 "indirect callee `{reg}` is a `{}`, not a pointer or integer",
                 other.get_type().print_to_string()
             ),
@@ -1260,8 +1289,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         let arity = ins.len() + outs.len();
         let param_types = vec![self.ptr_type().into(); arity];
         let fn_type = self.context.void_type().fn_type(&param_types, false);
-        let args = place_args(ins, outs, state);
-        checked(
+        let args = self.place_args(ins, outs, state);
+        self.checked(
             builder.build_indirect_call(fn_type, ptr, &args, ""),
             "indirect call",
         );
@@ -1278,23 +1307,23 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) {
         let Some(value) = state.regs.get(reg).copied() else {
-            bug!(Span::dummy(), "call through undefined register `{reg}`");
+            bug!(self.at(), "call through undefined register `{reg}`");
         };
         let ptr = match value {
             BasicValueEnum::PointerValue(ptr) => ptr,
-            BasicValueEnum::IntValue(int) => checked(
+            BasicValueEnum::IntValue(int) => self.checked(
                 builder.build_int_to_ptr(int, self.ptr_type(), ""),
                 "inttoptr",
             ),
             other => bug!(
-                Span::dummy(),
+                self.at(),
                 "indirect callee `{reg}` is a `{}`, not a pointer or integer",
                 other.get_type().print_to_string()
             ),
         };
         let place_type = |place: &PlaceName| {
             let Some(ty) = state.place_types.get(place) else {
-                bug!(Span::dummy(), "C call with the undeclared place `{place}`");
+                bug!(self.at(), "C call with the undeclared place `{place}`");
             };
             self.lir_type(ty)
         };
@@ -1308,15 +1337,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .iter()
             .map(|place| self.load_place(place, builder, state).into())
             .collect();
-        let result = checked(
+        let result = self.checked(
             builder.build_indirect_call(fn_type, ptr, &args, ""),
             "C indirect call",
         );
         if let Some(out) = outs.first() {
             let ValueKind::Basic(value) = result.try_as_basic_value() else {
-                bug!(Span::dummy(), "C call through `{reg}` returned void");
+                bug!(self.at(), "C call through `{reg}` returned void");
             };
-            self.store(builder, place_ptr(out, state), value, "C call result store");
+            self.store(
+                builder,
+                self.place_ptr(out, state),
+                value,
+                "C call result store",
+            );
         }
     }
 
@@ -1335,7 +1369,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) {
         let Some(sig) = builtin_sig(name) else {
-            bug!(Span::dummy(), "call to unknown builtin `{name}`");
+            bug!(self.at(), "call to unknown builtin `{name}`");
         };
         let params: Vec<BasicMetadataTypeEnum<'ctx>> = sig
             .ins
@@ -1346,7 +1380,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             (0, _) => self.context.void_type().fn_type(&params, false),
             (1, Some(result)) => self.lir_type(result).fn_type(&params, false),
             _ => bug!(
-                Span::dummy(),
+                self.at(),
                 "builtin `{name}` has {} out places, at most one is supported",
                 outs.len()
             ),
@@ -1357,7 +1391,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         // drift — an ICE, never a quiet external declaration.
         let Some(function) = self.module.get_function(symbol) else {
             bug!(
-                Span::dummy(),
+                self.at(),
                 "builtin `{name}` symbol `{symbol}` was not emitted by the use-scan; expected `{}`",
                 fn_type.print_to_string()
             );
@@ -1366,17 +1400,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             .iter()
             .map(|place| self.load_place(place, builder, state).into())
             .collect();
-        let call = checked(builder.build_call(function, &args, ""), "builtin call");
+        let call = self.checked(builder.build_call(function, &args, ""), "builtin call");
         if let Some(out) = outs.first() {
             let value = match call.try_as_basic_value() {
                 ValueKind::Basic(value) => value,
                 ValueKind::Instruction(_) => {
-                    bug!(Span::dummy(), "builtin `{name}` unexpectedly returned void")
+                    bug!(self.at(), "builtin `{name}` unexpectedly returned void")
                 }
             };
             self.store(
                 builder,
-                place_ptr(out, state),
+                self.place_ptr(out, state),
                 value,
                 "builtin result store",
             );
@@ -1409,7 +1443,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         match operand {
             LirOperand::Reg(name) => match state.regs.get(name).copied() {
                 Some(value) => value,
-                None => bug!(Span::dummy(), "use of undefined register `{name}`"),
+                None => bug!(self.at(), "use of undefined register `{name}`"),
             },
             LirOperand::Place(name) => match ty {
                 Some(ty) => self.load_as(name, ty, builder, state),
@@ -1426,7 +1460,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let Some(ty) = state.place_types.get(name).cloned() else {
-            bug!(Span::dummy(), "load of undeclared place `{name}`");
+            bug!(self.at(), "load of undeclared place `{name}`");
         };
         self.load_as(name, &ty, builder, state)
     }
@@ -1441,7 +1475,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) -> BasicValueEnum<'ctx> {
         // A `ref` place holds a pointer; reading a non-`ref` value out of it
         // follows that pointer to the pointee first.
-        let ptr = place_ptr(name, state);
+        let ptr = self.place_ptr(name, state);
         let ptr = match state.place_types.get(name) {
             Some(place_ty) if place_ty.is_ref() && !ty.is_ref() => self
                 .load(builder, self.ptr_type().into(), ptr, "load ref")
@@ -1462,13 +1496,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &FnState<'ctx>,
     ) -> PointerValue<'ctx> {
         let Some(place_ty) = state.place_types.get(obj) else {
-            bug!(Span::dummy(), "field of undeclared place `{obj}`");
+            bug!(self.at(), "field of undeclared place `{obj}`");
         };
         let offset = self.field_offset(place_ty.strip_ref(), idx);
         let base = if place_ty.is_ref() {
             self.load_place(obj, builder, state).into_pointer_value()
         } else {
-            place_ptr(obj, state)
+            self.place_ptr(obj, state)
         };
         if offset == 0 {
             return base;
@@ -1484,7 +1518,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             Some(layout) => field(layout),
             None => builtin_layout(owner, &self.lir.target).and_then(|layout| field(&layout)),
         };
-        offset.unwrap_or_else(|| bug!(Span::dummy(), "`{owner}` has no field {idx}"))
+        offset.unwrap_or_else(|| bug!(self.at(), "`{owner}` has no field {idx}"))
     }
 
     /// `elem.addr`: the array's base plus `index` times the element size.
@@ -1499,18 +1533,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             ..
         } = inst
         else {
-            bug!(Span::dummy(), "non-`elem.addr` instruction `{inst:?}`");
+            bug!(self.at(), "non-`elem.addr` instruction `{inst:?}`");
         };
         let size = self.size_align(ty.strip_ref()).size;
-        let offset = checked(
+        let offset = self.checked(
             builder.build_int_mul(
-                reg_int(index, state),
+                self.reg_int(index, state),
                 self.native.const_int(size, false),
                 "",
             ),
             "element offset",
         );
-        let elem = self.offset_ptr(builder, reg_ptr(array, state), offset);
+        let elem = self.offset_ptr(builder, self.reg_ptr(array, state), offset);
         state.regs.insert(dst.clone(), elem.into());
     }
 
@@ -1521,11 +1555,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         match (value, self.lir_type(ty)) {
             (LirConst::Data(name), BasicTypeEnum::PointerType(_)) => {
                 let Some(global) = self.module.get_global(name.as_str()) else {
-                    bug!(
-                        Span::dummy(),
-                        "const of undeclared data `!{}`",
-                        name.as_str()
-                    );
+                    bug!(self.at(), "const of undeclared data `!{}`", name.as_str());
                 };
                 global.as_pointer_value().into()
             }
@@ -1537,7 +1567,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             }
             (LirConst::Int(0), BasicTypeEnum::PointerType(ptr_ty)) => ptr_ty.const_null().into(),
             (value, other) => bug!(
-                Span::dummy(),
+                self.at(),
                 "`const {value}` cannot be a `{}` value",
                 other.print_to_string()
             ),
@@ -1564,11 +1594,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             | ArithOp::IDivU
             | ArithOp::IMod
             | ArithOp::IModU => {
-                let left = reg_int(lhs, state);
-                let right = reg_int(rhs, state);
+                let left = self.reg_int(lhs, state);
+                let right = self.reg_int(rhs, state);
                 if !matches!(self.lir_type(ty), BasicTypeEnum::IntType(_)) {
                     bug!(
-                        Span::dummy(),
+                        self.at(),
                         "`{op:?}` needs a bit-container type, found `{ty}`"
                     );
                 }
@@ -1581,21 +1611,21 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ArithOp::IMod => builder.build_int_signed_rem(left, right, ""),
                     _ => builder.build_int_unsigned_rem(left, right, ""),
                 };
-                checked(value, "integer arith").into()
+                self.checked(value, "integer arith").into()
             }
             ArithOp::And
             | ArithOp::Or
             | ArithOp::Xor
             | ArithOp::Shl
             | ArithOp::Shr
-            | ArithOp::ShrU => bitwise(op, lhs, rhs, builder, state),
+            | ArithOp::ShrU => self.bitwise(op, lhs, rhs, builder, state),
             ArithOp::Eq => {
                 // `==` is strict bit-equality (SPEC §8) even for floats, so a
                 // float operand is reinterpreted to the same-width integer and
                 // compared with `icmp eq`; `fcmp` would compare values.
                 let left = self.eq_operand(lhs, builder, state);
                 let right = self.eq_operand(rhs, builder, state);
-                let cmp = checked(
+                let cmp = self.checked(
                     builder.build_int_compare(IntPredicate::EQ, left, right, ""),
                     "icmp",
                 );
@@ -1609,8 +1639,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             | ArithOp::ILeU
             | ArithOp::IGe
             | ArithOp::IGeU => {
-                let left = reg_int(lhs, state);
-                let right = reg_int(rhs, state);
+                let left = self.reg_int(lhs, state);
+                let right = self.reg_int(rhs, state);
                 let predicate = match op {
                     ArithOp::ILt => IntPredicate::SLT,
                     ArithOp::ILtU => IntPredicate::ULT,
@@ -1621,17 +1651,17 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ArithOp::IGeU => IntPredicate::UGE,
                     _ => IntPredicate::SGT,
                 };
-                let cmp = checked(
+                let cmp = self.checked(
                     builder.build_int_compare(predicate, left, right, ""),
                     "icmp",
                 );
                 self.widen_bool(cmp, ty, builder)
             }
             ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod => {
-                let left = reg_float(lhs, state);
-                let right = reg_float(rhs, state);
+                let left = self.reg_float(lhs, state);
+                let right = self.reg_float(rhs, state);
                 if !matches!(self.lir_type(ty), BasicTypeEnum::FloatType(_)) {
-                    bug!(Span::dummy(), "`{op:?}` needs a float type, found `{ty}`");
+                    bug!(self.at(), "`{op:?}` needs a float type, found `{ty}`");
                 }
                 let value = match op {
                     ArithOp::FAdd => builder.build_float_add(left, right, ""),
@@ -1640,18 +1670,18 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ArithOp::FDiv => builder.build_float_div(left, right, ""),
                     _ => builder.build_float_rem(left, right, ""),
                 };
-                checked(value, "float arith").into()
+                self.checked(value, "float arith").into()
             }
             ArithOp::FLt | ArithOp::FGt | ArithOp::FLe | ArithOp::FGe => {
-                let left = reg_float(lhs, state);
-                let right = reg_float(rhs, state);
+                let left = self.reg_float(lhs, state);
+                let right = self.reg_float(rhs, state);
                 let predicate = match op {
                     ArithOp::FLt => FloatPredicate::OLT,
                     ArithOp::FLe => FloatPredicate::OLE,
                     ArithOp::FGe => FloatPredicate::OGE,
                     _ => FloatPredicate::OGT,
                 };
-                let cmp = checked(
+                let cmp = self.checked(
                     builder.build_float_compare(predicate, left, right, ""),
                     "fcmp",
                 );
@@ -1669,14 +1699,15 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) -> BasicValueEnum<'ctx> {
         let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
             bug!(
-                Span::dummy(),
+                self.at(),
                 "comparison result needs a bit-container type, found `{ty}`"
             );
         };
         if result_ty.get_bit_width() == 1 {
             cmp.into()
         } else {
-            checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool").into()
+            self.checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool")
+                .into()
         }
     }
 
@@ -1692,25 +1723,25 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         match state.regs.get(name).copied() {
             Some(BasicValueEnum::IntValue(value)) => value,
             Some(BasicValueEnum::PointerValue(value)) => {
-                checked(builder.build_ptr_to_int(value, self.native, ""), "ptrtoint")
+                self.checked(builder.build_ptr_to_int(value, self.native, ""), "ptrtoint")
             }
             Some(BasicValueEnum::FloatValue(value)) => {
                 let int_ty = self.int_type_of_width(value.get_type().get_bit_width());
-                match checked(builder.build_bit_cast(value, int_ty, ""), "float bitcast") {
+                match self.checked(builder.build_bit_cast(value, int_ty, ""), "float bitcast") {
                     BasicValueEnum::IntValue(bits) => bits,
                     other => bug!(
-                        Span::dummy(),
+                        self.at(),
                         "float bitcast produced a `{}`",
                         other.get_type().print_to_string()
                     ),
                 }
             }
             Some(other) => bug!(
-                Span::dummy(),
+                self.at(),
                 "register `{name}` is a `{}`, not comparable",
                 other.get_type().print_to_string()
             ),
-            None => bug!(Span::dummy(), "use of undefined register `{name}`"),
+            None => bug!(self.at(), "use of undefined register `{name}`"),
         }
     }
 
@@ -1722,10 +1753,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             32 => self.context.i32_type(),
             64 => self.context.i64_type(),
             128 => self.context.i128_type(),
-            _ => bug!(
-                Span::dummy(),
-                "no integer type for a {width}-bit float operand"
-            ),
+            _ => bug!(self.at(), "no integer type for a {width}-bit float operand"),
         }
     }
 
@@ -1733,6 +1761,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// `branch.if` → `br i1` (the false edge is the next block in layout order
     /// when `els` is absent); `unreachable` → `unreachable`.
     fn lower_term(
+        &self,
         term: &LirTerm,
         builder: &Builder<'ctx>,
         blocks: &HashMap<&str, BasicBlock<'ctx>>,
@@ -1741,35 +1770,175 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     ) {
         match term {
             LirTerm::Return { .. } => {
-                checked(builder.build_return(None), "return");
+                self.checked(builder.build_return(None), "return");
             }
             LirTerm::Unreachable { .. } => {
-                checked(builder.build_unreachable(), "unreachable");
+                self.checked(builder.build_unreachable(), "unreachable");
             }
             LirTerm::Branch { target, .. } => {
-                let block = block_at(blocks, target.as_str());
-                checked(builder.build_unconditional_branch(block), "branch");
+                let block = self.block_at(blocks, target.as_str());
+                self.checked(builder.build_unconditional_branch(block), "branch");
             }
             LirTerm::BranchIf {
                 cond, then, els, ..
             } => {
-                let then_block = block_at(blocks, then.as_str());
+                let then_block = self.block_at(blocks, then.as_str());
                 let else_block = match els {
-                    Some(els) => block_at(blocks, els.as_str()),
+                    Some(els) => self.block_at(blocks, els.as_str()),
                     None => match next {
                         Some(next) => next,
                         None => bug!(
-                            Span::dummy(),
+                            self.at(),
                             "`branch.if` without `else` has no fall-through block"
                         ),
                     },
                 };
-                let condition = cond_value(cond, builder, state);
-                checked(
+                let condition = self.cond_value(cond, builder, state);
+                self.checked(
                     builder.build_conditional_branch(condition, then_block, else_block),
                     "branch.if",
                 );
             }
+        }
+    }
+}
+
+/// Helpers that read the lowering state, with the span of what is lowered
+/// for their ICEs.
+impl<'ctx> Lower<'ctx, '_> {
+    /// Returns a place's pointer, raising an ICE if it was never declared.
+    fn place_ptr(&self, name: &PlaceName, state: &FnState<'ctx>) -> PointerValue<'ctx> {
+        match state.places.get(name).copied() {
+            Some(ptr) => ptr,
+            None => bug!(self.at(), "use of undeclared place `{name}`"),
+        }
+    }
+
+    /// The address of every listed place, inputs then outputs (pointer ABI).
+    fn place_args(
+        &self,
+        ins: &[PlaceName],
+        outs: &[PlaceName],
+        state: &FnState<'ctx>,
+    ) -> Vec<BasicMetadataValueEnum<'ctx>> {
+        ins.iter()
+            .chain(outs.iter())
+            .map(|place| BasicMetadataValueEnum::from(self.place_ptr(place, state)))
+            .collect()
+    }
+
+    /// Reads a `branch.if` condition register as an `i1`: an `i1` is used
+    /// directly, any wider bit container is tested against zero.
+    fn cond_value(
+        &self,
+        reg: &Reg,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> IntValue<'ctx> {
+        let Some(value) = state.regs.get(reg).copied() else {
+            bug!(self.at(), "branch on undefined register `{reg}`");
+        };
+        match value {
+            BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => int,
+            BasicValueEnum::IntValue(int) => {
+                let zero = int.get_type().const_zero();
+                self.checked(
+                    builder.build_int_compare(IntPredicate::NE, int, zero, ""),
+                    "branch condition",
+                )
+            }
+            other => bug!(
+                self.at(),
+                "branch condition `{reg}` is a `{}`, not an integer",
+                other.get_type().print_to_string()
+            ),
+        }
+    }
+
+    /// Looks up a branch target, raising an ICE when it is unknown.
+    fn block_at(&self, blocks: &HashMap<&str, BasicBlock<'ctx>>, label: &str) -> BasicBlock<'ctx> {
+        match blocks.get(label) {
+            Some(block) => *block,
+            None => bug!(self.at(), "branch to unknown block `${label}`"),
+        }
+    }
+
+    /// Reads a register as a pointer value.
+    fn reg_ptr(&self, name: &Reg, state: &FnState<'ctx>) -> PointerValue<'ctx> {
+        match state.regs.get(name).copied() {
+            Some(BasicValueEnum::PointerValue(value)) => value,
+            Some(other) => bug!(
+                self.at(),
+                "register `{name}` is a `{}`, not a pointer",
+                other.get_type().print_to_string()
+            ),
+            None => bug!(self.at(), "use of undefined register `{name}`"),
+        }
+    }
+
+    /// Reads a register as an integer value.
+    fn reg_int(&self, name: &Reg, state: &FnState<'ctx>) -> IntValue<'ctx> {
+        match state.regs.get(name).copied() {
+            Some(BasicValueEnum::IntValue(value)) => value,
+            Some(other) => bug!(
+                self.at(),
+                "register `{name}` is a `{}`, not an integer",
+                other.get_type().print_to_string()
+            ),
+            None => bug!(self.at(), "use of undefined register `{name}`"),
+        }
+    }
+
+    /// A bitwise op or shift. LIR shifts by the amount modulo the width;
+    /// LLVM's shift is poison past it, so the amount is masked first.
+    fn bitwise(
+        &self,
+        op: &ArithOp,
+        lhs: &Reg,
+        rhs: &Reg,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let left = self.reg_int(lhs, state);
+        let right = self.reg_int(rhs, state);
+        let value = match op {
+            ArithOp::And => builder.build_and(left, right, ""),
+            ArithOp::Or => builder.build_or(left, right, ""),
+            ArithOp::Xor => builder.build_xor(left, right, ""),
+            _ => {
+                let width = u64::from(left.get_type().get_bit_width());
+                let mask = left.get_type().const_int(width - 1, false);
+                let amount = self.checked(builder.build_and(right, mask, ""), "shift mask");
+                match op {
+                    ArithOp::Shl => builder.build_left_shift(left, amount, ""),
+                    ArithOp::Shr => builder.build_right_shift(left, amount, true, ""),
+                    _ => builder.build_right_shift(left, amount, false, ""),
+                }
+            }
+        };
+        self.checked(value, "bitwise").into()
+    }
+
+    /// Reads a register as a float value.
+    fn reg_float(&self, name: &Reg, state: &FnState<'ctx>) -> FloatValue<'ctx> {
+        match state.regs.get(name).copied() {
+            Some(BasicValueEnum::FloatValue(value)) => value,
+            Some(other) => bug!(
+                self.at(),
+                "register `{name}` is a `{}`, not a float",
+                other.get_type().print_to_string()
+            ),
+            None => bug!(self.at(), "use of undefined register `{name}`"),
+        }
+    }
+
+    /// Sets a load's or store's alignment (`align` bytes).
+    fn aligned(&self, inst: Option<InstructionValue<'_>>, align: u32, what: &str) {
+        let Some(inst) = inst else {
+            bug!(self.at(), "{what} is not an instruction");
+        };
+        if let Err(err) = inst.set_alignment(align) {
+            bug!(self.at(), "cannot align {what} to {align}: {err}");
         }
     }
 }
@@ -1808,58 +1977,6 @@ fn builtin_symbol(name: &str) -> &str {
     }
 }
 
-/// Returns a place's pointer, raising an ICE if it was never declared.
-fn place_ptr<'ctx>(name: &PlaceName, state: &FnState<'ctx>) -> PointerValue<'ctx> {
-    match state.places.get(name).copied() {
-        Some(ptr) => ptr,
-        None => bug!(Span::dummy(), "use of undeclared place `{name}`"),
-    }
-}
-
-/// The address of every listed place, inputs then outputs (pointer ABI).
-fn place_args<'ctx>(
-    ins: &[PlaceName],
-    outs: &[PlaceName],
-    state: &FnState<'ctx>,
-) -> Vec<BasicMetadataValueEnum<'ctx>> {
-    ins.iter()
-        .chain(outs.iter())
-        .map(|place| BasicMetadataValueEnum::from(place_ptr(place, state)))
-        .collect()
-}
-
-/// Reads a `branch.if` condition register as an `i1`: an `i1` is used
-/// directly, any wider bit container is tested against zero.
-fn cond_value<'ctx>(reg: &Reg, builder: &Builder<'ctx>, state: &FnState<'ctx>) -> IntValue<'ctx> {
-    let Some(value) = state.regs.get(reg).copied() else {
-        bug!(Span::dummy(), "branch on undefined register `{reg}`");
-    };
-    match value {
-        BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => int,
-        BasicValueEnum::IntValue(int) => {
-            let zero = int.get_type().const_zero();
-            checked(
-                builder.build_int_compare(IntPredicate::NE, int, zero, ""),
-                "branch condition",
-            )
-        }
-        other => bug!(
-            Span::dummy(),
-            "branch condition `{reg}` is a `{}`, not an integer",
-            other.get_type().print_to_string()
-        ),
-    }
-}
-
-/// Looks up a branch target, raising an ICE when it is unknown.
-fn block_at<'ctx>(blocks: &HashMap<&str, BasicBlock<'ctx>>, label: &str) -> BasicBlock<'ctx> {
-    match blocks.get(label) {
-        Some(block) => *block,
-        None => bug!(Span::dummy(), "branch to unknown block `${label}`"),
-    }
-}
-
-/// Reads a register as an integer value.
 /// The LLVM ordering of a LIR atomic ordering.
 fn llvm_ordering(order: AtomicOrdering) -> inkwell::AtomicOrdering {
     match order {
@@ -1884,81 +2001,5 @@ fn rmw_bin_op(op: RmwOp) -> AtomicRMWBinOp {
         RmwOp::Min => AtomicRMWBinOp::Min,
         RmwOp::MaxU => AtomicRMWBinOp::UMax,
         RmwOp::MinU => AtomicRMWBinOp::UMin,
-    }
-}
-
-fn reg_ptr<'ctx>(name: &Reg, state: &FnState<'ctx>) -> PointerValue<'ctx> {
-    match state.regs.get(name).copied() {
-        Some(BasicValueEnum::PointerValue(value)) => value,
-        Some(other) => bug!(
-            Span::dummy(),
-            "register `{name}` is a `{}`, not a pointer",
-            other.get_type().print_to_string()
-        ),
-        None => bug!(Span::dummy(), "use of undefined register `{name}`"),
-    }
-}
-
-fn reg_int<'ctx>(name: &Reg, state: &FnState<'ctx>) -> IntValue<'ctx> {
-    match state.regs.get(name).copied() {
-        Some(BasicValueEnum::IntValue(value)) => value,
-        Some(other) => bug!(
-            Span::dummy(),
-            "register `{name}` is a `{}`, not an integer",
-            other.get_type().print_to_string()
-        ),
-        None => bug!(Span::dummy(), "use of undefined register `{name}`"),
-    }
-}
-
-/// A bitwise op or shift. LIR shifts by the amount modulo the width;
-/// LLVM's shift is poison past it, so the amount is masked first.
-fn bitwise<'ctx>(
-    op: &ArithOp,
-    lhs: &Reg,
-    rhs: &Reg,
-    builder: &Builder<'ctx>,
-    state: &FnState<'ctx>,
-) -> BasicValueEnum<'ctx> {
-    let left = reg_int(lhs, state);
-    let right = reg_int(rhs, state);
-    let value = match op {
-        ArithOp::And => builder.build_and(left, right, ""),
-        ArithOp::Or => builder.build_or(left, right, ""),
-        ArithOp::Xor => builder.build_xor(left, right, ""),
-        _ => {
-            let width = u64::from(left.get_type().get_bit_width());
-            let mask = left.get_type().const_int(width - 1, false);
-            let amount = checked(builder.build_and(right, mask, ""), "shift mask");
-            match op {
-                ArithOp::Shl => builder.build_left_shift(left, amount, ""),
-                ArithOp::Shr => builder.build_right_shift(left, amount, true, ""),
-                _ => builder.build_right_shift(left, amount, false, ""),
-            }
-        }
-    };
-    checked(value, "bitwise").into()
-}
-
-/// Reads a register as a float value.
-fn reg_float<'ctx>(name: &Reg, state: &FnState<'ctx>) -> FloatValue<'ctx> {
-    match state.regs.get(name).copied() {
-        Some(BasicValueEnum::FloatValue(value)) => value,
-        Some(other) => bug!(
-            Span::dummy(),
-            "register `{name}` is a `{}`, not a float",
-            other.get_type().print_to_string()
-        ),
-        None => bug!(Span::dummy(), "use of undefined register `{name}`"),
-    }
-}
-
-/// Sets a load's or store's alignment (`align` bytes).
-fn aligned(inst: Option<InstructionValue<'_>>, align: u32, what: &str) {
-    let Some(inst) = inst else {
-        bug!(Span::dummy(), "{what} is not an instruction");
-    };
-    if let Err(err) = inst.set_alignment(align) {
-        bug!(Span::dummy(), "cannot align {what} to {align}: {err}");
     }
 }

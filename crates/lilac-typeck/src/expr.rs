@@ -778,7 +778,7 @@ impl Checker<'_> {
         let target = self.resolve_type(target_ty);
         let span = operand.span();
         if target.is_error() {
-            let _ = self.check_expr(fcx, operand, None);
+            let _ = self.check_expr(fcx, operand, Some(TypeId::ERROR));
             return HirExpr::poison(span);
         }
         if target.is_ref {
@@ -931,7 +931,8 @@ impl Checker<'_> {
     }
 
     /// Checks both operands once: non-literal sides first, so a literal side
-    /// takes the other side's type.
+    /// takes the other side's type (an error type too, so a side that
+    /// failed leaves the literal silent).
     pub(crate) fn check_sides(
         &mut self,
         fcx: &mut FnCx,
@@ -946,11 +947,7 @@ impl Checker<'_> {
         }
         let left = (!left_lit).then(|| self.check_expr(fcx, lhs, None));
         let right = (!right_lit).then(|| self.check_expr(fcx, rhs, None));
-        let anchor = |side: &Option<HirExpr>| {
-            side.as_ref()
-                .map(|e| e.ty.id)
-                .filter(|id| *id != TypeId::ERROR)
-        };
+        let anchor = |side: &Option<HirExpr>| side.as_ref().map(|e| e.ty.id);
         let left = if let Some(left) = left {
             left
         } else {
@@ -960,8 +957,7 @@ impl Checker<'_> {
         let right = if let Some(right) = right {
             right
         } else {
-            let want = Some(left.ty.id).filter(|id| *id != TypeId::ERROR);
-            self.check_expr(fcx, rhs, want)
+            self.check_expr(fcx, rhs, Some(left.ty.id))
         };
         (left, right)
     }
@@ -979,7 +975,8 @@ impl Checker<'_> {
     ) -> HirExpr {
         let cond = self.check_cond(fcx, cond, "if");
         let then = self.check_expr(fcx, then, expected);
-        let els_expected = expected.or_else(|| (!then.ty.is_error()).then_some(then.ty.deref().id));
+        // A `then` that failed leaves the error type: the `else` stays silent.
+        let els_expected = expected.or(Some(then.ty.deref().id));
         let els = self.check_expr(fcx, els, els_expected);
         let result = match expected {
             Some(want) => TypeRef::value(want),
@@ -1130,7 +1127,7 @@ impl Checker<'_> {
         };
         let object = if let Some(name) = plain {
             let Ok(found) = self.lookup_item(name, ty.name_span) else {
-                return HirExpr::poison(span);
+                return self.struct_lit_failed(fcx, fields, span);
             };
             match found {
                 Some(def) if self.res.def(def).is_type() => {
@@ -1140,7 +1137,7 @@ impl Checker<'_> {
                     if self.res.def(def).generic_params.is_empty() {
                         let object = self.type_of_def(def, Vec::new());
                         if self.ensure_type(object, span).is_err() {
-                            return HirExpr::poison(span);
+                            return self.struct_lit_failed(fcx, fields, span);
                         }
                         object
                     } else {
@@ -1148,20 +1145,23 @@ impl Checker<'_> {
                             matches!(self.types.kind(*id), TypeKind::Instance { base, .. } if *base == def)
                         });
                         let Some(id) = inferred else {
-                            self.diags.emit(
-                                Diagnostic::error(
-                                    codes::E023,
-                                    format!("cannot infer generic arguments for `{name}`"),
-                                )
-                                .label(
-                                    span,
-                                    true,
-                                    format!(
-                                        "write `{name}[...] {{ ... }}` or annotate the binding"
+                            // An expected type that failed reported it.
+                            if expected != Some(TypeId::ERROR) {
+                                self.diags.emit(
+                                    Diagnostic::error(
+                                        codes::E023,
+                                        format!("cannot infer generic arguments for `{name}`"),
+                                    )
+                                    .label(
+                                        span,
+                                        true,
+                                        format!(
+                                            "write `{name}[...] {{ ... }}` or annotate the binding"
+                                        ),
                                     ),
-                                ),
-                            );
-                            return HirExpr::poison(span);
+                                );
+                            }
+                            return self.struct_lit_failed(fcx, fields, span);
                         };
                         TypeRef::value(id)
                     }
@@ -1174,13 +1174,13 @@ impl Checker<'_> {
                     .label(ty.span, true, "no such type in scope");
                     let diagnostic = self.suggest_type(diagnostic, name, ty.name_span);
                     self.diags.emit(diagnostic);
-                    return HirExpr::poison(span);
+                    return self.struct_lit_failed(fcx, fields, span);
                 }
             }
         } else {
             let resolved = self.resolve_type(ty);
             if resolved.is_error() {
-                return HirExpr::poison(span);
+                return self.struct_lit_failed(fcx, fields, span);
             }
             resolved.deref()
         };
@@ -1196,7 +1196,7 @@ impl Checker<'_> {
                     "only objects construct with `{ ... }`",
                 ),
             );
-            return HirExpr::poison(span);
+            return self.struct_lit_failed(fcx, fields, span);
         };
         let owner = self.type_parts(object.id).map(|(def, _)| def);
         let mut values: Vec<Option<HirExpr>> = vec![None; layout.len()];
@@ -1295,6 +1295,16 @@ impl Checker<'_> {
         }
     }
 
+    /// A struct literal whose type failed (reported): still checks each
+    /// field's value, against the error type so a tag or literal does not
+    /// ask for one, so errors inside the values are reported too.
+    fn struct_lit_failed(&mut self, fcx: &mut FnCx, fields: &[StructField], span: Span) -> HirExpr {
+        for field in fields {
+            let _ = self.check_expr(fcx, &field.value, Some(TypeId::ERROR));
+        }
+        HirExpr::poison(span)
+    }
+
     /// `$"..."`: each piece is a `@byte_buffer` (holes convert).
     fn check_fstring(&mut self, fcx: &mut FnCx, parts: &[FStrPart], span: Span) -> HirExpr {
         if parts.len() > 16 {
@@ -1382,14 +1392,23 @@ impl Checker<'_> {
         };
         let value = value.clone();
         let ty = self.const_type(def);
-        if ty.is_error() {
-            return;
-        }
         let span = self.res.def(def).span;
         let env = Env {
             file: Some(self.res.def(def).file),
             ..Env::default()
         };
+        if ty.is_error() {
+            // The type reported it. The initializer is still checked, against
+            // the error type, so errors inside it are reported too; the
+            // global stays out of the output, as nothing can lower it.
+            if let Some(value) = value {
+                self.with_env(env, |c| {
+                    let mut fcx = FnCx::new(Span::dummy());
+                    let _ = c.check_expr(&mut fcx, &value, Some(TypeId::ERROR));
+                });
+            }
+            return;
+        }
         let value = value.map(|value| {
             self.with_env(env, |c| {
                 let mut fcx = FnCx::new(Span::dummy());
@@ -1415,7 +1434,7 @@ impl Checker<'_> {
         };
         let hir = self.with_env(env, |c| {
             let mut fcx = FnCx::new(Span::dummy());
-            let hir = c.check_expr(&mut fcx, &value, (!ty.is_error()).then_some(ty.id));
+            let hir = c.check_expr(&mut fcx, &value, Some(ty.id));
             c.coerce(hir, ty, value.span())
         });
         self.out.consts.insert(def, hir);

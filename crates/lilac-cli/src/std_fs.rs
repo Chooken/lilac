@@ -25,4 +25,8 @@ impl Fs for StdFs {
         }
         Ok(entries)
     }
+
+    fn canonicalize(&mut self, path: &Path) -> io::Result<PathBuf> {
+        fs::canonicalize(path)
+    }
 }
