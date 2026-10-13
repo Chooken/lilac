@@ -35,9 +35,10 @@
 >   always matches the compiler's version. The compiler names no
 >   library: any folder in the install's `lib/` except the sysroot
 >   `lilac` can be bundled.
-> - **`lilac init` writes `lilac.toml` and nothing else.** The file lists
->   every setting with its default and its flag, and mounts every
->   bundled library. `init` never overwrites a file.
+> - **`lilac init` copies a template folder from the install.** Its
+>   `lilac.toml` lists every setting with its default and its flag and
+>   mounts every bundled library, beside a hello-world `src/main.lilac`.
+>   `init` never overwrites a file.
 
 ## Where things stand
 
@@ -278,7 +279,8 @@ Phase 3, which makes `lilac.toml` the marker for another project.
   - the reader checks keys against it. An unknown section or key is
     `E076`, with a did-you-mean among that section's keys
     (`Diagnostic::suggest`, on the key alone);
-  - `lilac init` writes its template from it (Phase 4);
+  - `lilac init`'s template states every key in it (Phase 4, checked
+    by a test);
   - the README lists it.
 - `E076` and its page cover a wrong value:
   - a value of the wrong type ("`build.mode` takes a string");
@@ -388,35 +390,49 @@ Phase 3, which makes `lilac.toml` the marker for another project.
 ## Phase 4: `lilac init`
 
 - `lilac init [<dir>]` defaults to `.`. It creates `<dir>` if it is
-  missing, and writes `<dir>/lilac.toml`. It never touches an existing
-  `lilac.toml`: that is an error, with exit 1.
-- The template comes from `SETTINGS`. Each section and key gets a
-  comment saying what it does and naming its flag. A key is set to its
-  default, or commented out when its default is computed
-  (`stack-traces`, `linker`). Then:
-  - `name` is the folder's name, made valid;
-  - the `target` comment names this machine's triple;
-  - `[libraries]` mounts every bundled library found
-    (`bundled_libraries`). When there is none, it holds a commented
-    example, and `init` says where it looked.
+  missing and copies the project template into it. It never touches an
+  existing `lilac.toml`: that is an error, with exit 1, before anything
+  is written. Any other file the template would write that is already
+  there is kept, with a note.
+- The template is a folder in the install folder,
+  `templates/project/` (`LILAC_TEMPLATE_DIR` overrides the
+  `templates/` folder, like `LILAC_LIB_DIR`), so it can be edited
+  without rebuilding `lilac`. The repository's `templates/` is what
+  `scripts/package.sh` copies. It holds:
+  - `lilac.toml`: every setting under a comment saying what it does
+    and naming its flag, set to its default or commented out when its
+    default is computed (`stack-traces`, `linker`), and `root = "src"`;
+  - `src/main.lilac`: a hello world through `Standard.Io`.
+- Placeholders, in any template file: `{{name}}` is the folder's name,
+  made valid; `{{host}}` is this machine's triple; the line holding
+  `{{libraries}}` becomes one `Name = { bundled = true }` per bundled
+  library found (`bundled_libraries`), or a commented example when
+  there is none, and `init` says where it looked. The template's
+  `lilac.toml` is valid TOML as it is (the placeholders sit in a string
+  and in comments).
 - When the folder has a `lilac.json`, `init` adds a note: the editor
   reads `lilac.toml` now, so the `root` and `libraries` from
   `lilac.json` belong in the new file.
-- `init` prints one status line (`Created lilac.toml for `hello``), and
-  `-q` silences it. `COMMANDS` and the usage text list `init`.
+- `init` prints one status line (``Created `hello` in hello
+  (lilac.toml, src/main.lilac)``), and `-q` silences it. `COMMANDS` and
+  the usage text list `init`.
 - The README gets a "Starting a project" section: `lilac init`, then
   `lilac build`.
 - Tests:
-  - the template reads back with no diagnostic, and resolves to the same
-    settings as an empty manifest, so it states the true defaults;
-  - it mentions every key in `SETTINGS`;
-  - running `init` twice fails and leaves the file alone;
+  - the repository's template, filled in, reads back with no
+    diagnostic and resolves to the same settings as an empty manifest
+    but for its root, so it states the true defaults;
+  - it mentions every key in `SETTINGS` with its flag;
+  - running `init` twice fails and leaves the files alone; a file
+    already there is kept;
   - with `LILAC_LIB_DIR` pointing at a folder holding `Standard/` and
     `lilac/`, `init` mounts only `Standard`;
-  - `init` in a new folder, plus a `main.lilac`, builds and runs with
-    the run-test sysroot.
+  - without the template, `init` fails and says where to point it;
+  - what `init` makes builds and prints `Hello, world!` with the
+    run-test sysroot.
 
-The template, on a Windows machine with `Standard` installed:
+The template's `lilac.toml`, filled in on a Windows machine with
+`Standard` installed:
 
 ```toml
 # How `lilac build` builds this project, and what the editor checks.
@@ -424,16 +440,17 @@ The template, on a Windows machine with `Standard` installed:
 # `lilac help` lists them.
 
 [project]
-# The program's name: the executable's file name.
+# The program's name: the executable's file name. By default, the
+# folder's name.
 name = "hello"
 # The folder holding the project's code, relative to this file.
-root = "."
+root = "src"
 
 [build]
 # "debug", "release" or "release-small" (--mode=, --release).
 mode = "debug"
-# A target triple, or "host" (--target=). This machine is
-# x86_64-pc-windows-msvc.
+# A target triple, or "host" for this machine (--target=). This machine
+# is x86_64-pc-windows-msvc.
 target = "host"
 # Record panic stack traces (--stack-traces=). By default, in debug
 # builds only.
@@ -452,8 +469,8 @@ libc = false
 # The C compiler that links when libc is on (--linker=). By default
 # LILAC_LINKER, else cc or clang.
 # linker = "clang"
-# More linker arguments. Relative paths are relative to this file
-# (--link-arg=).
+# More linker arguments (--link-arg=). Relative paths are relative to
+# this file.
 args = []
 ```
 
@@ -523,6 +540,7 @@ args = []
   folders and bundled libraries only.
 - `lilac.toml` as an editor document: errors while typing, quick fixes,
   key completion and hovers, and a schema for TOML extensions.
-- `lilac init` writing a `main.lilac` or a `.gitignore`.
+- `lilac init` writing a `.gitignore`, or `--template=<name>` choosing
+  another folder of `templates/`.
 - Numbers, dates, multi-line strings and arrays of tables in the reader,
   once a setting takes one.

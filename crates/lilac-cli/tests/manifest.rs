@@ -19,6 +19,11 @@ fn lib_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib")
 }
 
+/// The repository's `templates/`, the project templates' folder.
+fn template_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates")
+}
+
 /// A fresh temporary folder for one case.
 fn scratch(case: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("lilac-manifest-{}-{case}", std::process::id()));
@@ -34,7 +39,8 @@ fn write(dir: &Path, path: &str, text: &str) {
     std::fs::write(path, text).expect("writes file");
 }
 
-/// `lilac <args>` in `dir`, with `lib/` as the bundled libraries' folder.
+/// `lilac <args>` in `dir`, with the repository's bundled libraries and
+/// templates.
 fn lilac(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lilac"));
     command
@@ -42,6 +48,7 @@ fn lilac(dir: &Path, args: &[&str]) -> Command {
         .current_dir(dir)
         .env("NO_COLOR", "1")
         .env("LILAC_LIB_DIR", lib_dir())
+        .env("LILAC_TEMPLATE_DIR", template_dir())
         .env_remove("LILAC_LINKER");
     command
 }
@@ -316,5 +323,128 @@ fn link_arguments_are_relative_to_the_manifest() {
             .expect("runs greeter");
         assert_eq!(ran.status.code(), Some(3));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `lilac init` copies the project template, naming the folder and
+/// mounting the bundled libraries, and never changes a `lilac.toml` (or
+/// any other file) that is there.
+#[test]
+fn init_copies_the_template_once() {
+    let dir = scratch("init");
+    let bundled = dir.join("install");
+    for folder in ["Standard", "lilac", "not a library"] {
+        std::fs::create_dir_all(bundled.join(folder)).expect("creates folder");
+    }
+    let init = |args: &[&str]| {
+        let mut all = vec!["init"];
+        all.extend(args);
+        lilac(&dir, &all)
+            .env("LILAC_LIB_DIR", &bundled)
+            .output()
+            .expect("runs lilac")
+    };
+
+    let out = init(&["my app"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("Created `my-app` in my app (lilac.toml, src"),
+        "{err}"
+    );
+    let path = dir.join("my app/lilac.toml");
+    let text = std::fs::read_to_string(&path)
+        .expect("reads the manifest")
+        .replace("\r\n", "\n");
+    assert!(text.contains("\nname = \"my-app\"\n"), "{text}");
+    assert!(text.contains("\nroot = \"src\"\n"), "{text}");
+    assert!(text.contains("\nStandard = { bundled = true }\n"), "{text}");
+    assert!(!text.contains("lilac = "), "{text}");
+    assert!(!text.contains("not a library"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+    let main = std::fs::read_to_string(dir.join("my app/src/main.lilac")).expect("reads main");
+    assert!(main.contains("Hello, world!"), "{main}");
+
+    std::fs::write(&path, "# mine\n").expect("writes the manifest");
+    std::fs::remove_file(dir.join("my app/src/main.lilac")).expect("removes main");
+    let out = init(&["my app", "-q"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&path).expect("reads"), "# mine\n");
+    assert!(!dir.join("my app/src/main.lilac").exists());
+
+    // With nothing bundled, `[libraries]` holds an example and `init`
+    // says where it looked; a `lilac.json` gets a note, and code already
+    // there is kept.
+    std::fs::remove_dir_all(&bundled).expect("removes the libraries");
+    write(&dir, "old/lilac.json", "{}");
+    write(&dir, "old/src/main.lilac", "// mine\n");
+    let out = init(&["old"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("found no bundled library"), "{err}");
+    assert!(err.contains("lilac.json"), "{err}");
+    assert!(err.contains("note: kept the existing"), "{err}");
+    let text = std::fs::read_to_string(dir.join("old/lilac.toml"))
+        .expect("reads")
+        .replace("\r\n", "\n");
+    assert!(
+        text.contains("\n# Standard = { bundled = true }\n"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("old/src/main.lilac")).expect("reads"),
+        "// mine\n"
+    );
+
+    // `-q` prints nothing; a stray flag or a second folder is a usage error.
+    let out = init(&["quiet", "-q"]);
+    assert!(out.status.success());
+    assert_eq!(stderr(&out), "");
+    assert_eq!(init(&["--force"]).status.code(), Some(2));
+    assert_eq!(init(&["a", "b"]).status.code(), Some(2));
+
+    // Without the template, `init` says where to point it.
+    let out = lilac(&dir, &["init", "none"])
+        .env("LILAC_TEMPLATE_DIR", dir.join("missing"))
+        .output()
+        .expect("runs lilac");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("project template"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!dir.join("none").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What `lilac init` makes builds and runs as it is.
+#[test]
+fn init_then_build() {
+    if !cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        return;
+    }
+    let Some(sysroot) = support::sysroot() else {
+        eprintln!("skipping: no lld");
+        return;
+    };
+    let dir = scratch("init-build");
+    let project = dir.join("hello");
+    let out = run(&dir, &["init", "hello", "-q"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = lilac(&project, &["build", "-q"])
+        .env("LILAC_SYSROOT", &sysroot)
+        .output()
+        .expect("runs lilac");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let ran = Command::new(project.join("build/debug").join(exe("hello")))
+        .output()
+        .expect("runs hello");
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n"),
+        "Hello, world!\n"
+    );
+    assert!(ran.status.success());
     let _ = std::fs::remove_dir_all(&dir);
 }

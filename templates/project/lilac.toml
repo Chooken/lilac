@@ -1,0 +1,37 @@
+# How `lilac build` builds this project, and what the editor checks.
+# Each setting shows its default. A flag overrides it for one run;
+# `lilac help` lists them.
+
+[project]
+# The program's name: the executable's file name. By default, the
+# folder's name.
+name = "{{name}}"
+# The folder holding the project's code, relative to this file.
+root = "src"
+
+[build]
+# "debug", "release" or "release-small" (--mode=, --release).
+mode = "debug"
+# A target triple, or "host" for this machine (--target=). This machine
+# is {{host}}.
+target = "host"
+# Record panic stack traces (--stack-traces=). By default, in debug
+# builds only.
+# stack-traces = true
+# Where builds go, relative to this file (--build-dir=).
+dir = "build"
+
+[libraries]
+# Name = "folder", or Name = { bundled = true } for a library installed
+# with Lilac (--lib=Name=dir).
+# {{libraries}}
+
+[link]
+# Link through a C compiler and the C library (--libc).
+libc = false
+# The C compiler that links when libc is on (--linker=). By default
+# LILAC_LINKER, else cc or clang.
+# linker = "clang"
+# More linker arguments (--link-arg=). Relative paths are relative to
+# this file.
+args = []

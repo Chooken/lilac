@@ -830,3 +830,151 @@ fn error_page_example() {
     let page = lilac_error::codes::E076.doc();
     assert!(page.contains(rendered.trim_end()), "{rendered}");
 }
+
+/// The project template's `lilac.toml`, as the repository has it.
+const TEMPLATE: &str = include_str!("../../../templates/project/lilac.toml");
+
+/// The template filled for `proj` (with `\n` line ends, however git
+/// checked it out).
+fn filled(libraries: &[String]) -> String {
+    crate::fill(
+        &TEMPLATE.replace("\r\n", "\n"),
+        &crate::Fill {
+            name: "proj",
+            host: "x86_64-pc-windows-msvc",
+            libraries,
+        },
+    )
+}
+
+/// The template's manifest reads back with no diagnostic and states the
+/// true defaults: it resolves like an empty manifest, but for its root.
+#[test]
+fn the_template_is_the_defaults() {
+    let text = filled(&[]);
+    let read = manifest(&text, &["proj/src"]);
+    let settings = Settings::resolve(Some(&read), &Overrides::default(), host());
+    let empty = Settings::resolve(
+        Some(&Manifest::empty(Path::new(DIR))),
+        &Overrides::default(),
+        host(),
+    );
+    assert_eq!(
+        settings,
+        Settings {
+            root: Some(Path::new(DIR).join("src")),
+            ..empty
+        }
+    );
+    assert!(text.contains("# is x86_64-pc-windows-msvc.\n"), "{text}");
+    assert!(
+        text.contains("\n# Standard = { bundled = true }\n"),
+        "{text}"
+    );
+    assert!(!text.contains("{{"), "{text}");
+}
+
+/// Every key of [`SETTINGS`] is in the template, under its section, with
+/// its flag named, and no line is wider than 72 columns.
+#[test]
+fn the_template_has_every_setting() {
+    let libraries = ["Json".to_owned(), "Standard".to_owned()];
+    let text = filled(&libraries);
+    for setting in SETTINGS {
+        let key = if setting.is_library() {
+            "Standard"
+        } else {
+            setting.key
+        };
+        let section = text
+            .find(&format!("\n[{}]\n", setting.section))
+            .unwrap_or_else(|| panic!("[{}] in {text}", setting.section));
+        let at = text[section..]
+            .lines()
+            .position(|line| {
+                line.trim_start_matches("# ")
+                    .starts_with(&format!("{key} = "))
+            })
+            .unwrap_or_else(|| panic!("`{key}` in {text}"));
+        let before = text[section..]
+            .lines()
+            .take(at)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(flag) = setting.flag {
+            assert!(before.contains(&format!("({flag})")), "{key}: {text}");
+        }
+    }
+    for line in TEMPLATE.lines() {
+        assert!(line.len() <= 72, "{line}");
+    }
+    assert!(
+        text.contains("\nJson = { bundled = true }\nStandard = { bundled = true }\n"),
+        "{text}"
+    );
+    let mut fs = MemFs::default();
+    fs.add("proj/lilac.toml", &text);
+    fs.add("proj/src/", "");
+    fs.add("bundled/Json/", "");
+    fs.add("bundled/Standard/", "");
+    let mut sources = SourceMap::new();
+    let mut diags = Diags::new();
+    let read = Manifest::read(
+        Path::new(DIR),
+        Some(Path::new("bundled")),
+        &mut fs,
+        &mut sources,
+        &mut diags,
+    );
+    assert_eq!(diags.error_count(), 0);
+    let read = read.expect("a manifest").expect("no error");
+    assert_eq!(read.libraries.len(), 2);
+    assert!(read.libraries.iter().all(|library| library.bundled));
+}
+
+/// Placeholders fill on any line, keeping its line ending.
+#[test]
+fn filling_placeholders() {
+    let fill = crate::Fill {
+        name: "app",
+        host: "aarch64-apple-darwin",
+        libraries: &["A".to_owned(), "B".to_owned()],
+    };
+    assert_eq!(
+        crate::fill(
+            "a {{name}} {{host}} {{other}}\r\n  # {{libraries}}\r\nend",
+            &fill
+        ),
+        "a app aarch64-apple-darwin {{other}}\r\nA = { bundled = true }\r\n\
+         B = { bundled = true }\r\nend"
+    );
+    assert_eq!(
+        crate::fill("{{libraries}}", &fill),
+        "A = { bundled = true }\nB = { bundled = true }"
+    );
+}
+
+/// A template is every file under its folder, relative and sorted.
+#[test]
+fn reading_a_template() {
+    let mut fs = MemFs::default();
+    fs.add("tpl/src/main.lilac", "main");
+    fs.add("tpl/lilac.toml", "toml");
+    fs.add("tpl/empty/", "");
+    assert_eq!(
+        crate::read_template(Path::new("tpl"), &mut fs).expect("reads"),
+        [
+            (PathBuf::from("lilac.toml"), "toml".to_owned()),
+            (Path::new("src").join("main.lilac"), "main".to_owned()),
+        ]
+    );
+    assert!(crate::read_template(Path::new("missing"), &mut fs).is_err());
+    assert_eq!(
+        crate::template_dir(None, Some(Path::new("bin"))),
+        Some(Path::new("bin").join("..").join("templates"))
+    );
+    assert_eq!(
+        crate::template_dir(Some(PathBuf::from("t")), Some(Path::new("bin"))),
+        Some(PathBuf::from("t"))
+    );
+}

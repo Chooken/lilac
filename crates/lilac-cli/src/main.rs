@@ -1,7 +1,8 @@
 //! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` / `build` /
-//! `explain` / `demangle`.
+//! `init` / `explain` / `demangle`.
 
 mod build;
+mod init;
 mod link;
 mod progress;
 mod std_fs;
@@ -17,11 +18,12 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 /// The commands, for did-you-mean.
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "check",
     "emit-ir",
     "emit-llvm",
     "build",
+    "init",
     "explain",
     "demangle",
     "help",
@@ -78,11 +80,13 @@ fn unknown_flag(arg: &str) -> String {
 fn usage() -> &'static str {
     "usage:\n  lilac check [<file-or-dir>] [--error-format=human|json] [--color=auto|always|never] [--target=<triple>|host] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-ir [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-llvm [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]
   lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>|host] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
+  lilac init [<dir>] [-q|--quiet]
   lilac explain <code>
   lilac demangle [<symbol>...]
 
 A folder with a lilac.toml is a project: its settings apply, and a flag
-overrides its setting for one run. The folder defaults to `.`."
+overrides its setting for one run. The folder defaults to `.`. `lilac init`
+starts a project from the install's template (lilac.toml, src/main.lilac)."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -118,6 +122,7 @@ fn run() -> ExitCode {
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
+        "init" => init::cmd_init(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
         "demangle" => cmd_demangle(&args[1..]),
         "-h" | "--help" | "help" => {

@@ -71,7 +71,8 @@ impl Setting {
 pub const SECTIONS: &[&str] = &["project", "build", "libraries", "link"];
 
 /// Every setting a manifest takes: what `Manifest::read` checks keys
-/// against, what `lilac init` writes and what the README lists.
+/// against, and what `lilac init`'s template (`templates/project/`) and
+/// the README list.
 pub const SETTINGS: &[Setting] = &[
     Setting {
         section: "project",
@@ -94,7 +95,7 @@ pub const SETTINGS: &[Setting] = &[
         key: "mode",
         kind: Kind::Mode,
         default: Some("\"debug\""),
-        flag: Some("--mode="),
+        flag: Some("--mode=, --release"),
         about: "\"debug\", \"release\" or \"release-small\".",
     },
     Setting {

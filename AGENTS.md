@@ -404,6 +404,19 @@
   `Session::build_dir` is the folder the loader skips
   (`load_with_status`'s `build_dir`; `None` is `<root>/build`); `apply`
   sets it only with a manifest, so without one nothing changes.
+- `lilac init [<dir>]` (`init.rs`) copies the project template
+  `templates/project/` (`lilac.toml`, `src/main.lilac`): the install
+  folder's (`template_dir`: `LILAC_TEMPLATE_DIR`, else
+  `<exe dir>/../templates`; `scripts/package.sh` copies the repository's
+  `templates/`), read through `Fs` (`read_template`) and filled in
+  (`fill`: `{{name}}` from the folder via `default_name`, `{{host}}`,
+  and the line holding `{{libraries}}` becomes the `bundled_libraries`
+  mounts). The manifest is written first with `create_new`, so an
+  existing `lilac.toml` is an error (exit 1) and nothing is written;
+  any other existing file is kept. The template's `lilac.toml` must
+  state every `SETTINGS` key with its flag and the true defaults
+  (`settings_tests::the_template_*` read the repository's file), so a
+  new setting needs a line there.
 - The build folder is the manifest's `build.dir` (`build` beside it),
   else `<project>/build` (folder project) or `./build` (single file), with
   one folder per mode (`debug`, `release`, `release-small`) and a

@@ -16,6 +16,7 @@ bin/lilac(.exe)        the compiler
 bin/lilac-lsp(.exe)    the language server, for editors
 lib/lilac/             the linker and system stubs it uses
 lib/Standard/          the standard library
+templates/project/     what `lilac init` copies into a new project
 ```
 
 Unzip the folder anywhere and add its `bin` folder to your `PATH`. `lilac`
@@ -46,6 +47,31 @@ scripts/package-vscode.sh
 It packages `editors/vscode` as `package/lilac-<version>.vsix`. Install it
 with `code --install-extension package/lilac-<version>.vsix`; it starts
 `lilac-lsp` from your `PATH`.
+
+## Starting a project
+
+```bash
+lilac init hello
+cd hello
+```
+
+`lilac init` creates the folder if needed and copies the project
+template into it:
+
+```
+hello/lilac.toml        every setting with its default, and the standard library
+hello/src/main.lilac    a program printing "Hello, world!"
+```
+
+Then `lilac build` builds `build/debug/hello`. See
+[Projects](#projects-lilactoml) for the settings.
+
+`lilac init` never changes a `lilac.toml` that is already there, and keeps
+any other file it would have written. The template is the install
+folder's `templates/project/` (or `$LILAC_TEMPLATE_DIR/project/`): edit
+it to change what every new project starts with. In its files,
+`{{name}}` becomes the project's name, `{{host}}` this machine's triple,
+and a line holding `{{libraries}}` one line per bundled library.
 
 ## Building a program
 
