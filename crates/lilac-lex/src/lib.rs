@@ -17,10 +17,10 @@ use lilac_error::{codes, Diagnostic};
 use lilac_span::{Doc, FileId, Span, BYTE_ORDER_MARK};
 
 /// Every keyword, for editor completion.
-pub const KEYWORDS: [&str; 24] = [
+pub const KEYWORDS: [&str; 25] = [
     "object", "function", "enum", "alias", "extern", "export", "using", "private", "ref", "self",
     "unknown", "nothing", "loop", "if", "then", "else", "match", "break", "continue", "and", "or",
-    "return", "as", "fail",
+    "not", "return", "as", "fail",
 ];
 
 /// The keyword token `word` spells, if it is a keyword.
@@ -48,6 +48,7 @@ pub fn keyword(word: &str) -> Option<TokenKind> {
         "continue" => TokenKind::KwContinue,
         "and" => TokenKind::KwAnd,
         "or" => TokenKind::KwOr,
+        "not" => TokenKind::KwNot,
         "return" => TokenKind::KwReturn,
         "fail" => TokenKind::KwFail,
         "as" => TokenKind::KwAs,
@@ -114,6 +115,8 @@ pub enum TokenKind {
     KwAnd,
     /// `or` (short-circuit disjunction, no hook).
     KwOr,
+    /// `not` (prefix condition negation, no hook).
+    KwNot,
     /// `return`.
     KwReturn,
     /// `fail` (leave a function that can fail through its failure outs).
@@ -128,6 +131,18 @@ pub enum TokenKind {
     Eq,
     /// `==` (bit-equality, never overridden).
     EqEq,
+    /// `!=` (bit-inequality, never overridden).
+    BangEq,
+    /// `+=`.
+    PlusEq,
+    /// `-=`.
+    MinusEq,
+    /// `*=`.
+    StarEq,
+    /// `/=`.
+    SlashEq,
+    /// `%=`.
+    PercentEq,
     /// `=>` (inline bodies, enum constructors).
     FatArrow,
     /// `->` (multi-return capture types).
@@ -920,6 +935,12 @@ impl<'a> Lexer<'a> {
             [b'-', b'>'] => Some((TokenKind::Arrow, "->")),
             [b'<', b'='] => Some((TokenKind::LtEq, "<=")),
             [b'>', b'='] => Some((TokenKind::GtEq, ">=")),
+            [b'!', b'='] => Some((TokenKind::BangEq, "!=")),
+            [b'+', b'='] => Some((TokenKind::PlusEq, "+=")),
+            [b'-', b'='] => Some((TokenKind::MinusEq, "-=")),
+            [b'*', b'='] => Some((TokenKind::StarEq, "*=")),
+            [b'/', b'='] => Some((TokenKind::SlashEq, "/=")),
+            [b'%', b'='] => Some((TokenKind::PercentEq, "%=")),
             _ => None,
         };
         if let Some((kind, text)) = two_kind {
@@ -1201,6 +1222,25 @@ mod tests {
         assert!(error.msg.contains(msg), "{src:?}: {}", error.msg);
         assert_eq!(range(error), (lo, hi), "{src:?}: {}", error.msg);
         tokens
+    }
+
+    #[test]
+    fn compound_operators_and_not() {
+        use TokenKind::{
+            BangEq, Eof, Ident, KwNot, MinusEq, Number, PercentEq, PlusEq, SlashEq, StarEq,
+        };
+        let (tokens, errors) = lex("a!=b x+=1 x-=1 x*=1 x/=2 x%=1 not a");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            kinds(&tokens),
+            [
+                Ident, BangEq, Ident, Ident, PlusEq, Number, Ident, MinusEq, Number, Ident, StarEq,
+                Number, Ident, SlashEq, Number, Ident, PercentEq, Number, KwNot, Ident, Eof
+            ]
+        );
+        // `//` is a comment, not `/` then `/=`.
+        let (tokens, _) = lex("x//=c");
+        assert_eq!(kinds(&tokens), [Ident, Eof]);
     }
 
     #[test]

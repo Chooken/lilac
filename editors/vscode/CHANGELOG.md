@@ -2,6 +2,12 @@
 
 ## 0.7.0
 
+- `not`, `!=` and the compound assignments `+=`, `-=`, `*=`, `/=`, `%=`
+  are highlighted.
+- Hovers print `(-a).f()` and `(not a).b` with their parentheses.
+- Code in an f-string's `{…}` holes is highlighted as code, no longer in
+  the string's color; only the text between holes is string.
+
 - The server reads the workspace's `lilac.toml` (the manifest
   `lilac build` reads) instead of `lilac.json`: its root, libraries,
   target, mode and `link.libc` apply to every check, its mistakes are

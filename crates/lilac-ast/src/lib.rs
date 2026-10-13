@@ -384,6 +384,20 @@ pub enum Stmt {
         /// Whole-statement span.
         span: Span,
     },
+    /// `target op= expr` (`+=`, `-=`, `*=`, `/=`, `%=`): `target = target op
+    /// expr`, with the target checked once.
+    CompoundAssign {
+        /// Assignment target.
+        target: Expr,
+        /// The operator: `Add`, `Sub`, `Mul`, `Div` or `Mod`.
+        op: BinOp,
+        /// The `op=` token.
+        op_span: Span,
+        /// Right operand.
+        value: Expr,
+        /// Whole-statement span.
+        span: Span,
+    },
     /// Expression used for effects (`f()`).
     ExprStmt(Expr),
     /// Bare `return` (returns current named-slot values).
@@ -626,6 +640,13 @@ pub enum Expr {
         /// Whole-expression span (`ref` through value).
         span: Span,
     },
+    /// `not condition` (the `@bit8` negation, no hook; binds like a prefix `-`).
+    Not {
+        /// The condition.
+        value: Box<Expr>,
+        /// Whole-expression span (`not` through value).
+        span: Span,
+    },
     /// `expr as T` (postfix cast; `T` is the operand's expected type).
     Cast(Box<Expr>, Box<Type>),
     /// `Name[args]` in expression position: the receiver of a static member
@@ -678,6 +699,8 @@ pub enum BinOp {
     GtEq,
     /// `==` (strict bit-equality, never converted or overridden).
     EqEq,
+    /// `!=` (strict bit-inequality, never converted or overridden).
+    NotEq,
     /// `and` (short-circuit conjunction over `@bit8`, no hook).
     And,
     /// `or` (short-circuit disjunction over `@bit8`, no hook).
@@ -732,6 +755,7 @@ impl Expr {
             | Self::MatchValue { span, .. }
             | Self::StructLit { span, .. }
             | Self::RefOf { span, .. }
+            | Self::Not { span, .. }
             | Self::FString { span, .. }
             | Self::Error { span } => *span,
             Self::TypeApp(ty) => ty.span,
@@ -752,6 +776,7 @@ impl Stmt {
             Self::Let { span, .. }
             | Self::MultiLet { span, .. }
             | Self::Assign { span, .. }
+            | Self::CompoundAssign { span, .. }
             | Self::Guard { span, .. }
             | Self::Return { span }
             | Self::Fail { span }

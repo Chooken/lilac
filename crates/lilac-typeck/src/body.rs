@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lilac_ast::{
-    Block, Expr, FuncBody, FuncDecl, MatchArm, MatchArmBody, MatchPattern, Param, Stmt,
+    BinOp, Block, Expr, FuncBody, FuncDecl, MatchArm, MatchArmBody, MatchPattern, Param, Stmt,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed, Unreported};
 use lilac_hir::{
@@ -440,6 +440,13 @@ impl Checker<'_> {
                 value,
                 span,
             } => self.check_assign(fcx, target, value, *span, out),
+            Stmt::CompoundAssign {
+                target,
+                op,
+                op_span,
+                value,
+                span,
+            } => self.check_compound_assign(fcx, target, *op, *op_span, value, *span, out),
             Stmt::ExprStmt(expr) => self.check_expr_stmt(fcx, expr, out),
             Stmt::Return { span } => out.push(HirStmt::Return(*span)),
             Stmt::Fail { span } => self.check_fail(fcx, *span, out),
@@ -560,6 +567,54 @@ impl Checker<'_> {
             return;
         }
         let value_hir = self.check_expr(fcx, value, Some(place.ty.id));
+        self.assign_checked(place, value_hir, target.span(), span, out);
+    }
+
+    /// `target op= value`: `target = target op value`, with the target
+    /// checked once and read as the left operand (a place has no side
+    /// effects, so reading it twice is what the long form does).
+    #[allow(clippy::too_many_arguments)]
+    fn check_compound_assign(
+        &mut self,
+        fcx: &mut FnCx,
+        target: &Expr,
+        op: BinOp,
+        op_span: Span,
+        value: &Expr,
+        span: Span,
+        out: &mut Vec<HirStmt>,
+    ) {
+        let Ok(place) = self.check_place(fcx, target) else {
+            let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
+            return;
+        };
+        if place.ty.is_error() {
+            let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
+            return;
+        }
+        let left = Self::auto_deref(place.clone());
+        let right = self.check_expr(fcx, value, Some(left.ty.id));
+        if right.ty.is_error() {
+            return;
+        }
+        let right = Self::auto_deref(right);
+        let result = self.operator_call(op, left, right, span, Some(op_span));
+        if result.ty.is_error() {
+            return;
+        }
+        self.assign_checked(place, result, target.span(), span, out);
+    }
+
+    /// Stores a checked value into a checked place: through a `ref` place
+    /// unless the value is one, converted to the place's type.
+    fn assign_checked(
+        &mut self,
+        place: HirExpr,
+        value_hir: HirExpr,
+        target_span: Span,
+        span: Span,
+        out: &mut Vec<HirStmt>,
+    ) {
         let (place, want) = if place.ty.is_ref && !value_hir.ty.is_ref {
             let ty = place.ty.deref();
             (
@@ -574,7 +629,7 @@ impl Checker<'_> {
             let ty = place.ty;
             (place, ty)
         };
-        let value_hir = self.coerce(value_hir, want, target.span());
+        let value_hir = self.coerce(value_hir, want, target_span);
         let through_ref = matches!(place.kind, HirExprKind::Deref(_));
         if self.format_store(&value_hir, through_ref, span).is_err() {
             return;

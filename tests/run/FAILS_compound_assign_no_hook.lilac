@@ -1,0 +1,8 @@
+// expect-error: E043
+// `x += e` is `x = x + e`: with no `@add` for the operands it is the same
+// error as the long form, at the operator.
+
+main: function () nothing {
+    x: @bit32 = 0x1
+    x += 0x2
+}

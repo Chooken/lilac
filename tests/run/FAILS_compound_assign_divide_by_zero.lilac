@@ -1,0 +1,10 @@
+// expect-error: E060
+// `x /= 0x0` calls `Standard`'s `=>` `/` hook with a constant zero
+// divisor, which panics whatever `x` holds, like `x = x / 0x0`.
+
+using Standard
+
+main: function () nothing {
+    x: Int32 = 0x7
+    x /= 0x0 as Int32
+}

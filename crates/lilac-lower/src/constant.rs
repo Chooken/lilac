@@ -352,6 +352,10 @@ impl<'a> Lower<'a> {
                 let (left, right) = (self.eval(eval, lhs)?, self.eval(eval, rhs)?);
                 Some(Value::Int(u64::from(left == right), 8))
             }
+            HirExprKind::Not(inner) => {
+                let truthy = self.eval(eval, inner)?.truthy()?;
+                Some(Value::Int(u64::from(!truthy), 8))
+            }
             HirExprKind::If { cond, then, els } => {
                 if self.eval(eval, cond)?.truthy()? {
                     self.eval(eval, then)

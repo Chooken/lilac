@@ -1,8 +1,8 @@
 //! Blocks and statements.
 
 use lilac_ast::{
-    Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, PatternLiteral, Stmt,
-    Type, TypeShape,
+    BinOp, Block, Expr, LetBinding, MatchArm, MatchArmBody, MatchPattern, Param, PatternLiteral,
+    Stmt, Type, TypeShape,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::TokenKind;
@@ -508,6 +508,18 @@ impl Parser {
                 span,
             });
         }
+        if let Some(op) = compound_op(self.peek().kind) {
+            let op_span = self.bump().span;
+            let value = self.parse_expr_recover(diags)?;
+            let span = join_spans(target.span(), value.span());
+            return Ok(Stmt::CompoundAssign {
+                target,
+                op,
+                op_span,
+                value,
+                span,
+            });
+        }
         if self.peek().kind == TokenKind::KwElse {
             let start = target.span();
             return self.parse_guard(diags, Vec::new(), target, start);
@@ -716,4 +728,16 @@ pub(crate) fn starts_stmt(kind: TokenKind) -> bool {
                 | TokenKind::KwBreak
                 | TokenKind::KwContinue
         )
+}
+
+/// The operator a compound assignment token (`+=`, ...) applies.
+fn compound_op(kind: TokenKind) -> Option<BinOp> {
+    match kind {
+        TokenKind::PlusEq => Some(BinOp::Add),
+        TokenKind::MinusEq => Some(BinOp::Sub),
+        TokenKind::StarEq => Some(BinOp::Mul),
+        TokenKind::SlashEq => Some(BinOp::Div),
+        TokenKind::PercentEq => Some(BinOp::Mod),
+        _ => None,
+    }
 }

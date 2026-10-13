@@ -277,6 +277,22 @@ impl Lower<'_> {
                 });
                 LirOperand::Reg(reg)
             }
+            // `not c` is `c == 0`: a condition is true when it is nonzero.
+            HirExprKind::Not(inner) => {
+                let regs = self.regs(state, func, &[(**inner).clone()]);
+                let zero = state.constant(LirConst::Int(0), LirTy::Bit(8), span);
+                let zero = state.reg_of(zero, &LirTy::Bit(8), span);
+                let reg = state.reg();
+                state.emit(LirInst::Arith {
+                    op: ArithOp::Eq,
+                    lhs: regs[0].clone(),
+                    rhs: zero,
+                    dst: reg.clone(),
+                    ty: LirTy::Bit(8),
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
             HirExprKind::If { cond, then, els } => {
                 self.if_value(state, func, expr, cond, then, els)
             }

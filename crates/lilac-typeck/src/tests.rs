@@ -344,9 +344,13 @@ fn nested_literal_fold_divide_by_zero_is_e060() {
 }
 
 #[test]
-fn nested_literal_fold_mixed_kind_is_e010() {
-    let diags = check_src("main: function () nothing {\n    2 * 3 + 4.0\n}\n");
-    assert!(has_code(&diags, "E010"), "{diags:?}");
+fn nested_literal_fold_mixed_kind_is_float() {
+    // `2 * 3` folds as integers, then meets `4.5` and becomes a float.
+    let source = "main: function () nothing {\n    2 * 3 + 4.5\n}\n";
+    assert_eq!(
+        literal_type_and_bytes(source),
+        ("@fbit64".into(), "10.5".into())
+    );
 }
 
 #[test]
@@ -392,10 +396,28 @@ fn literal_fold_divide_by_zero_is_e060() {
 }
 
 #[test]
-fn literal_fold_mixed_kind_is_e010() {
-    let diags = check_src("main: function () nothing {\n    0x2 + 3.0\n}\n");
-    assert!(has_code(&diags, "E010"), "{diags:?}");
-    let diags = check_src("main: function () nothing {\n    3.0 - 0x2\n}\n");
+fn literal_fold_mixed_kind_is_float() {
+    // An integer meeting a float literal is rounded to the float type, on
+    // either side; the result is a float of the type the expression takes.
+    for (src, value) in [
+        ("5 + 2.5", "7.5"),
+        ("2.5 - 5", "-2.5"),
+        ("(1 - 3) * 1.5", "-3.0"),
+    ] {
+        let source = format!("main: function () nothing {{\n    {src}\n}}\n");
+        assert_eq!(
+            literal_type_and_bytes(&source),
+            ("@fbit64".into(), value.into()),
+            "{src}"
+        );
+    }
+    let source = "main: function () nothing {\n    x: @fbit32 = 5 / 2.0\n}\n";
+    assert_eq!(
+        literal_type_and_bytes(source),
+        ("@fbit32".into(), "2.5".into())
+    );
+    // A float result in an integer slot is still `E010`.
+    let diags = check_src("main: function () nothing {\n    x: @bit32 = 5 + 2.5\n}\n");
     assert!(has_code(&diags, "E010"), "{diags:?}");
 }
 
@@ -2772,4 +2794,124 @@ fn an_unused_generic_hook_still_reports_what_no_argument_fixes() {
          main: function () nothing {\n    c: Pair[@bit8] = Pair { value = 0x1 }\n}\n",
     );
     assert_eq!(messages(&diags), ["unresolved name `missing`"]);
+}
+
+const COUNTER: &str = "Counter: object {\n    n: @bit32\n\n    count: function (self) nothing {\n        self.n += 0x1\n    }\n}\n\
+                       @add: function (a: @bit32, b: @bit32) sum: @bit32 {\n    sum = @i_add_32(a, b)\n}\n";
+
+#[test]
+fn not_equal_is_not_of_equality() {
+    let (diags, hir, _) = check(
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit8 = 0x2\n    c: @bit8 = a != b\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+    let main = body_of(&hir, "c");
+    let HirStmt::Let { value, .. } = &main.body.as_ref().expect("body").stmts[2] else {
+        panic!("expected a let");
+    };
+    let HirExprKind::Not(inner) = &value.kind else {
+        panic!("expected `Not`, got {:?}", value.kind);
+    };
+    assert!(matches!(inner.kind, HirExprKind::Eq(..)));
+    let diags = check_src(
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit32 = 0x2\n    c: @bit8 = a != b\n}\n",
+    );
+    let msgs = messages(&diags);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("`!=` needs identical types")),
+        "{msgs:?}"
+    );
+}
+
+#[test]
+fn not_takes_a_condition() {
+    let diags = check_src(
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    c: @bit8 = not a\n    d: @bit8 = not 0x0\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+    let diags =
+        check_src("main: function () nothing {\n    a: @bit32 = 0x1\n    c: @bit8 = not a\n}\n");
+    assert!(has_code(&diags, "E010"), "{diags:?}");
+    assert!(messages(&diags)
+        .iter()
+        .any(|m| m.contains("`not` condition")));
+    let diags = check_src(&format!(
+        "{}main: function () nothing {{\n    a: @bit32 = 0x1\n    c: @bit8 = not a\n}}\n",
+        conversion_hook()
+    ));
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn compound_assignment_calls_the_hook_and_assigns() {
+    let (diags, hir, _) = check(&format!(
+        "{COUNTER}main: function () nothing {{\n    x: @bit32 = 0x1\n    x += 0x2\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "x");
+    let HirStmt::Assign { place, value, .. } = &main.body.as_ref().expect("body").stmts[1] else {
+        panic!("expected an assignment");
+    };
+    assert!(matches!(place.kind, HirExprKind::Local(_)));
+    let HirExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected the `@add` call, got {:?}", value.kind);
+    };
+    assert!(matches!(args[0].kind, HirExprKind::Local(_)));
+    assert!(matches!(args[1].kind, HirExprKind::Int(2)));
+}
+
+#[test]
+fn compound_assignment_with_no_hook_is_e043_at_the_operator() {
+    let src = "main: function () nothing {\n    x: @bit32 = 0x1\n    x -= 0x2\n}\n";
+    let diags = check_src(src);
+    let [error] = diags.diagnostics() else {
+        panic!("one error: {diags:?}");
+    };
+    assert_eq!(error.code, "E043");
+    let label = error
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .expect("label");
+    let at = u32::try_from(src.find("-=").expect("operator")).expect("small");
+    assert_eq!((label.span.lo.0, label.span.hi.0), (at, at + 2));
+    assert!(error
+        .notes
+        .iter()
+        .any(|note| note.contains("`x -= e` is `x = x - e`")));
+}
+
+#[test]
+fn compound_assignment_through_a_ref_receiver() {
+    let diags = check_src(&format!("{COUNTER}main: function () nothing {{\n}}\n"));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+}
+
+#[test]
+fn compound_assignment_moves_a_non_copyable_target() {
+    let (diags, hir, _) = check(&format!(
+        "{HANDLE}@add: function (a: Handle, b: @bit32) sum: Handle {{\n    sum = Handle {{ id = b }}\n    take(a)\n}}\n\
+         main: function () nothing {{\n    h: Handle = Handle {{ id = 0x1 }}\n    n: @bit32 = 0x2\n    h += n\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "h");
+    let HirStmt::Assign { value, old, .. } = &main.body.as_ref().expect("body").stmts[2] else {
+        panic!("expected an assignment");
+    };
+    assert!(matches!(old, lilac_hir::HirOld::Empty(_)), "{old:?}");
+    let HirExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected the `@add` call");
+    };
+    assert!(matches!(args[0].kind, HirExprKind::Move(_)));
+}
+
+#[test]
+fn compound_assignment_in_a_generic_folds_into_e042() {
+    let diags = check_src(&format!(
+        "{COUNTER}bump[T]: function (x: T, y: T) nothing {{\n    x += y\n}}\n\
+         main: function () nothing {{\n    bump[@bit32](0x1, 0x2)\n    bump[@bit8](0x1, 0x2)\n}}\n"
+    ));
+    assert!(has_code(&diags, "E042"), "{diags:?}");
+    assert!(!has_code(&diags, "E043"), "{diags:?}");
 }

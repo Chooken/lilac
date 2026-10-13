@@ -161,7 +161,10 @@ same `@fbit32` addition would give. The result is a
 single literal typed by the rules above, so `2 * 3 + 4` is the literal `10` and
 nothing is evaluated at run time; an integer result that does not fit the
 consumed width is `E060`, and so is a division or modulo by zero (or any
-non-finite float result). A mixed integer/float literal pair is `E010`. These
+non-finite float result). When an integer literal value meets a float literal
+value, the integer is rounded once to the float type and the pair folds as
+floats, since that loses the least: `5 + 2.5` is the float literal `7.5` (and
+`E010` in a bit slot, like any float). These
 are the only operators folded; comparisons and logical operators are never
 folded, and any operand that is not a literal (an identifier, a string) leaves
 the operation for ordinary type checking (its `@add`/`@sub`/… hook).
@@ -341,6 +344,8 @@ An expression is constant when it is one of:
 | an object or enum-variant literal | if every field / the payload is constant |
 | `value.field` | the field of a constant object |
 | `a == b` | bit equality of two constant values of one type (integers, objects, enum variants with their payloads) |
+| `a != b` | the negation of `a == b` |
+| `not c` | `0x1` when a constant `c` is zero, else `0x0` |
 | `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
 | `a and b`, `a or b` | short-circuit over a constant `a` (`b` only when it decides) |
 | a value `match` | the arm a constant scrutinee selects (a variant pattern binds its capture), else the `else` value |
@@ -1281,7 +1286,7 @@ instantiations are ordinary concrete bindings.
 
 ### Operators & Strict Equality
 
-Binary and unary operators desugar directly into function calls. For example, `a += b` desugars to `a = @add(a, b)`.
+Binary and unary operators desugar directly into function calls. For example, `a + b` desugars to `@add(a, b)`, and the compound assignment `a += b` to `a = @add(a, b)`.
 
 Operators never fall back to intrinsics implicitly: `a < b` requires a matching
 `@less_than(lhs, rhs)` binding for the operand types, even when `@i_less_than_8`
@@ -1295,7 +1300,7 @@ without them only the explicit intrinsic form works:
 }
 ```
 
-**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity.
+**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict.
 
 List of operators:
 | op | function |
@@ -1310,10 +1315,24 @@ List of operators:
 | **`lhs <= rhs`** | `@less_than_or_equal(lhs, rhs) output` |
 | **`lhs >= rhs`** | `@greater_than_or_equal(lhs, rhs) output` |
 | **`-value`** | `@negate(value) output` |
+| **`lhs == rhs`** | built in: bit-equality, `@bit8` |
+| **`lhs != rhs`** | built in: `not (lhs == rhs)` |
+| **`not value`** | built in: `@bit8` 1 when `value` is 0, else 0 |
+| **`x op= rhs`** | `x = x op rhs` for `+=`, `-=`, `*=`, `/=`, `%=` |
 
 Short-circuit `and` / `or` are builtin control flow, not overloadable hooks:
 they evaluate left to right over bit containers and never resolve an operator
-binding.
+binding. `not` is built in the same way: its operand is a condition (a
+`@bit8`, or a value with a `@conversion` to `@bit8`), and it binds like the
+prefix `-`, tighter than every binary operator and `as` and looser than a
+member access or call, so `not a == b` is `(not a) == b`; write `a != b` or
+`not (a == b)` to negate a comparison.
+
+A compound assignment `x op= rhs` is a statement, like `=`. It is
+`x = x op rhs`: the operator's hook found by exact signature, then an
+ordinary assignment. The target is a place (a variable, global or field),
+so naming it twice has no side effects. There are no separate in-place
+hooks.
 
 #### Operator hooks
 

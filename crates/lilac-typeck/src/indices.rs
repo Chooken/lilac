@@ -117,6 +117,7 @@ impl Checker<'_> {
             | HirExprKind::Deref(base)
             | HirExprKind::RefOf(base)
             | HirExprKind::Move(base)
+            | HirExprKind::Not(base)
             | HirExprKind::Retype(base) => self.expr_indices(base, guarded, bad),
             HirExprKind::Struct(values) => {
                 for value in values {

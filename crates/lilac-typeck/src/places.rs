@@ -852,7 +852,9 @@ impl Pass<'_, '_> {
                     self.expr(arg, true);
                 }
             }
-            HirExprKind::RefOf(inner) | HirExprKind::Retype(inner) => self.expr(inner, false),
+            HirExprKind::RefOf(inner) | HirExprKind::Retype(inner) | HirExprKind::Not(inner) => {
+                self.expr(inner, false);
+            }
             HirExprKind::Eq(lhs, rhs) => {
                 self.expr(lhs, false);
                 self.expr(rhs, false);

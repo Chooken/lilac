@@ -57,7 +57,7 @@
         { "match": "\\b(private)\\b", "name": "storage.modifier.lilac" },
         { "match": "\\b(ref|unknown|nothing|self)\\b", "name": "storage.type.lilac" },
         { "match": "\\b(if|then|else|loop|match|break|continue|return|fail)\\b", "name": "keyword.control.lilac" },
-        { "match": "\\b(and|or)\\b", "name": "keyword.operator.lilac" },
+        { "match": "\\b(and|or|not)\\b", "name": "keyword.operator.lilac" },
         { "match": "\\b(as)\\b", "name": "keyword.other.as.lilac" }
       ]
     },
@@ -72,13 +72,20 @@
     "fstrings": {
       "begin": "\\$\"",
       "end": "[\"\\n]",
-      "name": "string.interpolated.lilac",
+      "beginCaptures": { "0": { "name": "string.interpolated.lilac punctuation.definition.string.begin.lilac" } },
+      "endCaptures": { "0": { "name": "string.interpolated.lilac punctuation.definition.string.end.lilac" } },
+      "name": "meta.fstring.lilac",
       "patterns": [
-        { "match": "\\{\\{|\\}\\}", "name": "constant.character.escape.lilac" },
+        { "match": "\\{\\{|\\}\\}", "name": "string.interpolated.lilac constant.character.escape.lilac" },
+        { "match": "\\\\[\\\\\"]", "name": "string.interpolated.lilac constant.character.escape.lilac" },
+        { "match": "[^{}\"\\\\\\n]+|[\\\\}]", "name": "string.interpolated.lilac" },
         {
           "begin": "\\{",
           "end": "\\}",
-          "name": "punctuation.section.interpolation.lilac",
+          "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.lilac" } },
+          "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.lilac" } },
+          "name": "meta.interpolation.lilac",
+          "contentName": "meta.embedded.line.lilac",
           "patterns": [
             { "include": "#builtin-types" },
             { "include": "#hooks" },
@@ -86,10 +93,11 @@
             { "include": "#numbers" },
             { "include": "#fstrings" },
             { "include": "#strings" },
+            { "include": "#chars" },
+            { "include": "#brackets" },
             { "include": "#operators" }
           ]
-        },
-        { "match": "\\\\[\\\\\"]", "name": "constant.character.escape.lilac" }
+        }
       ]
     },
     "strings": {
@@ -109,7 +117,7 @@
       "name": "punctuation.section.brackets.lilac"
     },
     "operators": {
-      "match": "(==|=>|->|<=|>=|[.,:=+\\-*/%<>!])",
+      "match": "(==|!=|\\+=|-=|\\*=|/=|%=|=>|->|<=|>=|[.,:=+\\-*/%<>!])",
       "name": "keyword.operator.lilac"
     }
   }

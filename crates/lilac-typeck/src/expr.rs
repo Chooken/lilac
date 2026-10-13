@@ -64,6 +64,7 @@ impl Checker<'_> {
                 kind: HirExprKind::Int(u64::from(u32::from(*scalar))),
             },
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
+            Expr::Not { value, span } => self.check_not(fcx, value, *span),
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
             Expr::Member { obj, field, span } => {
                 if let Some((name, span)) = self.qualified_name(fcx, expr) {
@@ -863,34 +864,16 @@ impl Checker<'_> {
                     },
                 };
             }
-            BinOp::EqEq => {
-                let (left, right) = self.check_sides(fcx, lhs, rhs);
-                if left.ty.is_error() || right.ty.is_error() {
-                    return HirExpr::poison(span);
-                }
-                let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
-                if left.ty.id != right.ty.id {
-                    let (l, r) = (self.show_id(left.ty.id), self.show_id(right.ty.id));
-                    self.diags.emit(
-                        Diagnostic::error(
-                            codes::E010,
-                            format!(
-                                "mismatched types: `==` needs identical types, found {l} and {r}"
-                            ),
-                        )
-                        .label(left.span, false, format!("left side `{l}` here"))
-                        .label(
-                            right.span,
-                            true,
-                            format!("right side `{r}` here"),
-                        ),
-                    );
-                    return HirExpr::poison(span);
+            BinOp::EqEq => return self.check_equality(fcx, lhs, rhs, span, "=="),
+            BinOp::NotEq => {
+                let eq = self.check_equality(fcx, lhs, rhs, span, "!=");
+                if eq.ty.is_error() {
+                    return eq;
                 }
                 return HirExpr {
                     ty: Builtin::Bit8.value(),
                     span,
-                    kind: HirExprKind::Eq(Box::new(left), Box::new(right)),
+                    kind: HirExprKind::Not(Box::new(eq)),
                 };
             }
             _ => {}
@@ -903,6 +886,20 @@ impl Checker<'_> {
             return HirExpr::poison(span);
         }
         let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
+        self.operator_call(op, left, right, span, None)
+    }
+
+    /// `left op right` through the operator's hook, found by exact
+    /// signature (`E043` at `label` when there is none). `compound` is the
+    /// compound assignment's operator span, which the error labels instead.
+    pub(crate) fn operator_call(
+        &mut self,
+        op: BinOp,
+        left: HirExpr,
+        right: HirExpr,
+        span: Span,
+        compound: Option<Span>,
+    ) -> HirExpr {
         let hook = hook_name(op);
         let found = self.overloads(hook).into_iter().find(|candidate| {
             let sig = &candidate.sig;
@@ -920,7 +917,11 @@ impl Checker<'_> {
                     self.show_id(right.ty.id)
                 ),
             )
-            .label(span, true, "no exact operator overload");
+            .label(compound.unwrap_or(span), true, "no exact operator overload");
+            if compound.is_some() {
+                let symbol = op_symbol(op);
+                diagnostic = diagnostic.note(format!("`x {symbol}= e` is `x = x {symbol} e`"));
+            }
             if left.ty == right.ty && !left.ty.is_ref {
                 if let Some(help) = raw_operator_help(hook, left.ty.id) {
                     diagnostic = diagnostic.help(help);
@@ -944,6 +945,53 @@ impl Checker<'_> {
                 args: vec![left, right],
                 rest: Vec::new(),
             },
+        }
+    }
+
+    /// `not value`: the `@bit8` negation of a condition, never a hook.
+    fn check_not(&mut self, fcx: &mut FnCx, value: &Expr, span: Span) -> HirExpr {
+        let cond = self.check_cond(fcx, value, "not");
+        if cond.ty.is_error() {
+            return HirExpr::poison(span);
+        }
+        HirExpr {
+            ty: Builtin::Bit8.value(),
+            span,
+            kind: HirExprKind::Not(Box::new(cond)),
+        }
+    }
+
+    /// `lhs == rhs` (or `!=`, named by `what`): strict bit-equality of two
+    /// values of one type, never a hook.
+    fn check_equality(
+        &mut self,
+        fcx: &mut FnCx,
+        lhs: &Expr,
+        rhs: &Expr,
+        span: Span,
+        what: &str,
+    ) -> HirExpr {
+        let (left, right) = self.check_sides(fcx, lhs, rhs);
+        if left.ty.is_error() || right.ty.is_error() {
+            return HirExpr::poison(span);
+        }
+        let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
+        if left.ty.id != right.ty.id {
+            let (l, r) = (self.show_id(left.ty.id), self.show_id(right.ty.id));
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E010,
+                    format!("mismatched types: `{what}` needs identical types, found {l} and {r}"),
+                )
+                .label(left.span, false, format!("left side `{l}` here"))
+                .label(right.span, true, format!("right side `{r}` here")),
+            );
+            return HirExpr::poison(span);
+        }
+        HirExpr {
+            ty: Builtin::Bit8.value(),
+            span,
+            kind: HirExprKind::Eq(Box::new(left), Box::new(right)),
         }
     }
 
@@ -1555,4 +1603,15 @@ fn needs_context(expr: &Expr) -> bool {
 /// The name token of a struct-literal field (fields begin at their name).
 fn leading_field(field: &StructField) -> Span {
     crate::sigs::leading(field.span, &field.name)
+}
+
+/// How a compound assignment's operator is written (`+` for `+=`).
+fn op_symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        _ => "%",
+    }
 }

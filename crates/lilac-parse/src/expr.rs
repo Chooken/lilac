@@ -84,24 +84,30 @@ impl Parser {
     ) -> Result<Expr, ErrorGuaranteed> {
         self.chain(diags, |p, diags, chain| {
             let mut prefixes = Vec::new();
-            while matches!(p.peek().kind, TokenKind::Minus | TokenKind::KwRef) {
+            while matches!(
+                p.peek().kind,
+                TokenKind::Minus | TokenKind::KwRef | TokenKind::KwNot
+            ) {
                 prefixes.push(p.bump());
             }
             let mut expr = p.parse_postfix(diags)?;
             for prefix in prefixes.into_iter().rev() {
                 let span = join_spans(prefix.span, expr.span());
-                let wrapped = if prefix.kind == TokenKind::Minus {
-                    Expr::Call {
+                let wrapped = match prefix.kind {
+                    TokenKind::Minus => Expr::Call {
                         callee: Box::new(Expr::Ident("@negate".to_owned(), prefix.span)),
                         generic_args: Vec::new(),
                         args: vec![expr],
                         span,
-                    }
-                } else {
-                    Expr::RefOf {
+                    },
+                    TokenKind::KwNot => Expr::Not {
                         value: Box::new(expr),
                         span,
-                    }
+                    },
+                    _ => Expr::RefOf {
+                        value: Box::new(expr),
+                        span,
+                    },
                 };
                 expr = p.link(diags, chain, prefix.span, wrapped);
             }
@@ -455,7 +461,7 @@ pub(crate) fn binary_power(kind: TokenKind) -> Option<u8> {
     match kind {
         TokenKind::KwOr => Some(1),
         TokenKind::KwAnd => Some(2),
-        TokenKind::EqEq => Some(3),
+        TokenKind::EqEq | TokenKind::BangEq => Some(3),
         TokenKind::Lt | TokenKind::Gt | TokenKind::LtEq | TokenKind::GtEq => Some(4),
         TokenKind::Plus | TokenKind::Minus => Some(5),
         TokenKind::Star | TokenKind::Slash | TokenKind::Percent => Some(6),
@@ -470,6 +476,7 @@ pub(crate) fn binary_op(kind: TokenKind) -> Option<BinOp> {
         TokenKind::KwOr => Some(BinOp::Or),
         TokenKind::KwAnd => Some(BinOp::And),
         TokenKind::EqEq => Some(BinOp::EqEq),
+        TokenKind::BangEq => Some(BinOp::NotEq),
         TokenKind::Lt => Some(BinOp::Lt),
         TokenKind::Gt => Some(BinOp::Gt),
         TokenKind::LtEq => Some(BinOp::LtEq),
@@ -520,6 +527,7 @@ pub(crate) fn starts_expression(kind: TokenKind) -> bool {
             | TokenKind::FStrStart
             | TokenKind::At
             | TokenKind::KwRef
+            | TokenKind::KwNot
             | TokenKind::KwIf
             | TokenKind::KwMatch
             | TokenKind::KwSelf

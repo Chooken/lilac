@@ -366,7 +366,7 @@ fn power(op: BinOp) -> u8 {
     match op {
         BinOp::Or => 1,
         BinOp::And => 2,
-        BinOp::EqEq => 3,
+        BinOp::EqEq | BinOp::NotEq => 3,
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 4,
         BinOp::Add | BinOp::Sub => 5,
         BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
@@ -375,6 +375,10 @@ fn power(op: BinOp) -> u8 {
 
 /// How tightly `as` binds.
 const CAST_POWER: u8 = 7;
+
+/// How tightly a prefix (`-`, `ref`, `not`) binds: tighter than `as`,
+/// looser than a member access or call.
+const PREFIX_POWER: u8 = 8;
 
 fn op_text(op: BinOp) -> &'static str {
     match op {
@@ -388,6 +392,7 @@ fn op_text(op: BinOp) -> &'static str {
         BinOp::LtEq => "<=",
         BinOp::GtEq => ">=",
         BinOp::EqEq => "==",
+        BinOp::NotEq => "!=",
         BinOp::And => "and",
         BinOp::Or => "or",
     }
@@ -398,6 +403,18 @@ fn expr_power(expr: &Expr) -> u8 {
     match expr {
         Expr::BinOp { op, .. } => power(*op),
         Expr::Cast(..) => CAST_POWER,
+        Expr::RefOf { .. } | Expr::Not { .. } => PREFIX_POWER,
+        Expr::Call {
+            callee,
+            args,
+            generic_args,
+            ..
+        } if generic_args.is_empty()
+            && args.len() == 1
+            && matches!(&**callee, Expr::Ident(name, _) if name == "@negate") =>
+        {
+            PREFIX_POWER
+        }
         Expr::IfValue { .. } | Expr::MatchValue { .. } => 0,
         _ => u8::MAX,
     }
@@ -459,7 +476,7 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
                     return;
                 }
             }
-            operand(callee, CAST_POWER, depth, out);
+            operand(callee, PREFIX_POWER, depth, out);
             if !generic_args.is_empty() {
                 let args: Vec<String> = generic_args.iter().map(type_text).collect();
                 let _ = write!(out, "[{}]", args.join(", "));
@@ -469,7 +486,7 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
             out.push(')');
         }
         Expr::Member { obj, field, .. } => {
-            operand(obj, CAST_POWER, depth, out);
+            operand(obj, PREFIX_POWER, depth, out);
             out.push('.');
             out.push_str(field);
         }
@@ -491,6 +508,10 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
         }
         Expr::RefOf { value, .. } => {
             out.push_str("ref ");
+            operand(value, CAST_POWER, depth, out);
+        }
+        Expr::Not { value, .. } => {
+            out.push_str("not ");
             operand(value, CAST_POWER, depth, out);
         }
         Expr::Cast(value, ty) => {
@@ -587,6 +608,13 @@ mod tests {
             (r#""a\nb""#, r#""a\nb""#),
             ("Point { x = 0x1 }", "Point { … }"),
             ("Point.make(0x1)", "Point.make(0x1)"),
+            ("not a == b != c", "not a == b != c"),
+            ("not (a == b)", "not (a == b)"),
+            ("not (x as @bit8)", "not (x as @bit8)"),
+            ("not - not a", "not -not a"),
+            ("(not a).b", "(not a).b"),
+            ("(-a).f()", "(-a).f()"),
+            ("-a.f()", "-a.f()"),
         ] {
             assert_eq!(printed(&format!("k: T => {written}\n")), shown, "{written}");
         }

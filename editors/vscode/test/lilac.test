@@ -100,8 +100,19 @@ c: 'A'
 
 m: $"{@add(x)}"
 // ^^ string.interpolated.lilac
-//   ^ punctuation.section.interpolation.lilac
+//   ^ punctuation.section.interpolation.begin.lilac
 //    ^^^^ support.function.builtin.lilac
+//         ^ meta.embedded.line.lilac
+//         ^ - string.interpolated.lilac
+//           ^ punctuation.section.interpolation.end.lilac
+//            ^ string.interpolated.lilac
+o: $"a {count} b"
+//   ^^ string.interpolated.lilac
+//     ^ punctuation.section.interpolation.begin.lilac
+//      ^^^^^ meta.embedded.line.lilac
+//      ^^^^^ - string.interpolated.lilac
+//           ^ punctuation.section.interpolation.end.lilac
+//            ^^^ string.interpolated.lilac
 
 // SYNTAX TEST "source.lilac" "unterminated string"
 
@@ -134,9 +145,11 @@ m: $"{{ }}"
 //      ^^ constant.character.escape.lilac
 n: $"a {f("x")} b"
 // ^^ string.interpolated.lilac
-//      ^ punctuation.section.interpolation.lilac
+//     ^ punctuation.section.interpolation.begin.lilac
+//      ^ meta.embedded.line.lilac
 //        ^^^ string.quoted.double.lilac
-//            ^ punctuation.section.interpolation.lilac
+//            ^ punctuation.section.interpolation.end.lilac
+//             ^^^ string.interpolated.lilac
 
 // SYNTAX TEST "source.lilac" "empty input"
 

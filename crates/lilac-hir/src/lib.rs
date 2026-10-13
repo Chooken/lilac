@@ -665,6 +665,9 @@ pub enum HirExprKind {
     Retype(Box<HirExpr>),
     /// `lhs == rhs` (bit equality, `@bit8`).
     Eq(Box<HirExpr>, Box<HirExpr>),
+    /// The `@bit8` negation of a condition: 1 when it is 0, else 0 (`not c`;
+    /// `a != b` is `Not(Eq(a, b))`).
+    Not(Box<HirExpr>),
     /// `if c then x else y`.
     If {
         /// `@bit8` condition.
@@ -744,6 +747,7 @@ impl HirExpr {
             | HirExprKind::Deref(base)
             | HirExprKind::Move(base)
             | HirExprKind::RefOf(base)
+            | HirExprKind::Not(base)
             | HirExprKind::Retype(base) => base.walk(f),
             HirExprKind::Format(format) => {
                 for hole in &format.holes {

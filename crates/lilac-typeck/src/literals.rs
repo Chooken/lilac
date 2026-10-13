@@ -671,17 +671,58 @@ impl Checker<'_> {
                     }
                 }
             }
-            _ => {
-                self.diags.emit(
-                    Diagnostic::error(
-                        codes::E010,
-                        "mismatched types: cannot mix an integer and a float literal",
-                    )
-                    .label(span, true, "mixed int/float operands"),
-                );
-                None
+            // A mixed pair is float: the integer is rounded to `float` once,
+            // which loses less than truncating the float would.
+            (
+                Value::Int {
+                    negative,
+                    magnitude,
+                },
+                Value::Float(right),
+            ) => {
+                let left = self.int_to_float(negative, magnitude, span, float)?;
+                self.combine_floats(left, op, right, span, float)
+            }
+            (
+                Value::Float(left),
+                Value::Int {
+                    negative,
+                    magnitude,
+                },
+            ) => {
+                let right = self.int_to_float(negative, magnitude, span, float)?;
+                self.combine_floats(left, op, right, span, float)
             }
         }
+    }
+
+    /// An integer literal value rounded once to `float`.
+    fn int_to_float(
+        &mut self,
+        negative: bool,
+        magnitude: u128,
+        span: Span,
+        float: TypeId,
+    ) -> Option<FloatBits> {
+        let width = self.float_format(float);
+        let rounded = FloatBits::parse(&magnitude.to_string(), width).and_then(|bits| {
+            if negative {
+                FloatBits::zero(width).apply(FloatOp::Sub, bits)
+            } else {
+                Ok(bits)
+            }
+        });
+        if let Ok(bits) = rounded {
+            return Some(bits);
+        }
+        self.diags.emit(
+            Diagnostic::error(
+                codes::E060,
+                format!("integer does not fit in {}", self.show_id(float)),
+            )
+            .label(span, true, "expression out of range"),
+        );
+        None
     }
 
     /// Types a folded value by the literal rules.

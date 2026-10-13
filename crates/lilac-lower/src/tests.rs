@@ -429,3 +429,40 @@ fn layouts_follow_the_target() {
     assert!(text.contains("type #Pair size 16 align 8 {"), "{text}");
     assert!(text.contains("#bit_native = const 0x10"), "{text}");
 }
+
+#[test]
+fn not_and_not_equal_are_constant() {
+    let prelude = "one: function () r: @bit8 {\n    r = 0x1\n}\nPair: object {\n    a: @bit8\n    b: @bit8\n}\nOpt: enum {\n    None\n    Some: @bit8\n}\np: Pair => Pair { a = 0x1, b = 0x2 }\nq: Pair => Pair { a = 0x1, b = 0x3 }\n";
+    assert_arm(prelude, "not 0x0", Some(true));
+    assert_arm(prelude, "not 0x1", Some(false));
+    // A condition is true when it is nonzero.
+    assert_arm(prelude, "not 0x2", Some(false));
+    assert_arm(prelude, "not not 0x2", Some(true));
+    assert_arm(prelude, "0x1 != 0x2", Some(true));
+    assert_arm(prelude, "@i_add_32(0x1, 0x2) != 0x3", Some(false));
+    assert_arm(prelude, "p != q", Some(true));
+    assert_arm(prelude, "p != p", Some(false));
+    assert_arm(prelude, "Opt.Some(0x1) != Opt.Some(0x1)", Some(false));
+    assert_arm(prelude, "Opt.Some(0x1) != Opt.None", Some(true));
+    assert_arm(prelude, "not one()", None);
+    assert_arm(prelude, "one() != 0x1", None);
+    assert_arm(prelude, "not 0x1 and one()", Some(false));
+}
+
+#[test]
+fn a_guard_with_not_equal_rules_out_an_inline_division() {
+    let found = bad_divisions(
+        "safe: function (a: @bit32, b: @bit32) r: @bit32 => if b != 0x0 then @i_div_32(a, b) else 0x0
+unsafe: function (a: @bit32, b: @bit32) r: @bit32 => if not (b == 0x1) then @i_div_32(a, b) else 0x0
+fine: function (a: @bit32) r: @bit32 {
+    r = safe(a, 0x0)
+}
+bad: function (a: @bit32) r: @bit32 {
+    r = unsafe(a, 0x0)
+}
+main: function () nothing {
+}
+",
+    );
+    assert_eq!(found, [("bad".to_owned(), DivisionPanic::ByZero)]);
+}

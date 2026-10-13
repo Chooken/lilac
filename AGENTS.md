@@ -755,6 +755,13 @@ Where things live:
   owns into a capture or a hidden local (`bind_captures`, `bind_rest`):
   the ownership pass tracks a hidden out as full only on its side of the
   flag (`Own::Cond`, refined by `if flag`), so none is left to drop.
+- `!=` and `not` are built in (no hook): typeck emits `HirExprKind::Not`
+  (`a != b` is `Not(Eq(a, b))`), lowering `c == 0`, and the constant
+  evaluator folds it. A compound assignment (`Stmt::CompoundAssign`,
+  `x += e`) is desugared in typeck, not the parser
+  (`check_compound_assign`): the target is checked once and its place is
+  the left operand of `operator_call`, then `assign_checked` stores the
+  result, so the HIR is that of `x = x + e`.
 - Ownership (`lilac-typeck/src/places.rs`, `Checker::check_places`): a
   tree walk over each instance body that checked without an error
   (`Sink::holds_error`). The state is an `Own` per local (full, empty,

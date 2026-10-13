@@ -1398,6 +1398,7 @@ fn nesting_past_the_limit_is_one_e001() {
         ),
         ("casts", format!("x: @bit8 = 0x1{}", " as @bit8".repeat(n))),
         ("negations", format!("x: @bit32 = {}0x1", "-".repeat(n))),
+        ("nots", format!("x: @bit8 = {}0x1", "not ".repeat(n))),
         ("members", format!("x: @bit32 = a{}", ".b".repeat(n))),
         (
             "types",
@@ -1446,6 +1447,7 @@ fn grouping(expr: &Expr) -> String {
         }
         Expr::Cast(value, ty) => format!("({} as {})", grouping(value), ty.head()),
         Expr::RefOf { value, .. } => format!("(ref {})", grouping(value)),
+        Expr::Not { value, .. } => format!("(not {})", grouping(value)),
         Expr::Member { obj, field, .. } => format!("{}.{field}", grouping(obj)),
         Expr::Call { callee, args, .. } => {
             let args: Vec<String> = args.iter().map(grouping).collect();
@@ -1470,6 +1472,12 @@ fn operators_bind_by_precedence() {
         ("- ref -a", "@negate((ref @negate(a)))"),
         ("(a or b) and c", "((a Or b) And c)"),
         ("ref @move(a)", "(ref @move(a))"),
+        ("not a == b and c", "(((not a) EqEq b) And c)"),
+        ("not a.b()", "(not a.b())"),
+        ("not x as T", "((not x) as T)"),
+        ("a != b == c", "((a NotEq b) EqEq c)"),
+        ("a != b and c", "((a NotEq b) And c)"),
+        ("not - not a", "(not @negate((not a)))"),
     ] {
         let (program, diags, _) = parse(&in_main(&format!("x: T = {src}")));
         assert!(!diags.has_errors(), "{src}: {:?}", diags.diagnostics());
@@ -1868,4 +1876,35 @@ fn a_failed_item_keeps_its_own_header() {
     );
     // `}` where a name belongs: no header was read.
     assert_eq!(header("}\n"), Some((String::new(), false)));
+}
+
+#[test]
+fn compound_assignment_is_a_statement() {
+    for (src, want) in [
+        ("x += 0x1", BinOp::Add),
+        ("x -= 0x1", BinOp::Sub),
+        ("p.x *= 0x1", BinOp::Mul),
+        ("x /= 0x1", BinOp::Div),
+        ("x %= 0x1", BinOp::Mod),
+    ] {
+        let (program, diags, _) = parse(&in_main(src));
+        assert!(!diags.has_errors(), "{src}: {:?}", diags.diagnostics());
+        let ItemKind::Func(decl) = &program.items[0].kind else {
+            panic!("expected function");
+        };
+        let Some(FuncBody::Block(block)) = &decl.body else {
+            panic!("expected block body");
+        };
+        let Stmt::CompoundAssign { op, op_span, .. } = &block.stmts[0] else {
+            panic!(
+                "{src}: expected compound assignment, got {:?}",
+                block.stmts[0]
+            );
+        };
+        assert_eq!(*op, want, "{src}");
+        assert_eq!(op_span.hi.0 - op_span.lo.0, 2, "{src}");
+    }
+    // Not an expression.
+    let (_, diags, _) = parse(&in_main("f(x += 0x1)"));
+    assert!(diags.has_errors());
 }

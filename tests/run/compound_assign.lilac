@@ -1,0 +1,68 @@
+// expect-stdout: 10 7 21 3 1
+// expect-stdout: 5 7
+// expect-stdout: 12
+// expect-stdout: 2 3
+// expect-stdout: 3
+// expect-exit: 101
+// expect-stderr: panic: division by zero
+// expect-stderr:   at Standard.Int32.@div (Standard/int32.lilac:10:54)
+// expect-stderr:   at main (compound_assign.lilac:66:5)
+// `x op= e` is `x = x op e` through the operator's hook: on a local, a
+// field, a field through a `ref`, a global and an object with its own
+// `@add`. A divisor known only at run time still panics.
+
+using Standard
+using Standard.Io
+
+Point: object {
+    x: Int32
+    y: Int32
+
+    shift: function (self, by: Int32) nothing {
+        self.x += by
+        self.y += by
+    }
+}
+
+Pair: object {
+    a: Int32
+    b: Int32
+
+    @add: function (lhs: Pair, rhs: Int32) Pair => Pair { a = lhs.a + rhs, b = lhs.b * rhs }
+}
+
+total: Int32 = 0x5
+
+zero: @bit32
+
+main: function () nothing {
+    n: Int32 = 0x8
+    n += 0x2 as Int32
+    a: Int32 = n
+    n -= 0x3 as Int32
+    b: Int32 = n
+    n *= 0x3 as Int32
+    c: Int32 = n
+    n /= 0x7 as Int32
+    d: Int32 = n
+    n %= 0x2 as Int32
+    print_line($"{a} {b} {c} {d} {n}")
+    p: Point = Point { x = 0x2, y = 0x4 }
+    p.x += 0x3 as Int32
+    p.y += p.x
+    p.y -= 0x2 as Int32
+    print_line($"{p.x} {p.y}")
+    total += total
+    total += 0x2 as Int32
+    print_line($"{total}")
+    q: Point = Point { x = 0x1, y = 0x2 }
+    q.shift(0x2)
+    q.shift(-0x1)
+    pair: Pair = Pair { a = 0x1, b = 0x2 }
+    pair += 0x2 as Int32
+    print_line($"{q.x} {q.y}")
+    print_line($"{pair.a}")
+    divisor: Int32 = zero
+    n /= divisor
+    print_line($"unreachable {n}")
+}
