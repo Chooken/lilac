@@ -16,8 +16,9 @@
 //! folder below the root and each library whose name is an identifier is
 //! reached too, so code is checked (and an editor sees it in the project)
 //! even where nothing `using`s it. `using` itself is visibility only. Below
-//! the root, `build` (the build folder), a folder holding its own
-//! `lilac.json` (another project) and a library's mount name are skipped,
+//! the root, the build folder (`build`, unless the load names another), a
+//! folder holding its own
+//! `lilac.toml` (another project) and a library's mount name are skipped,
 //! and in any tree the folder of a library mounted inside it (a vendored
 //! library loads once, under its mount name); a root with no `*.lilac` file of its own (a repository holding
 //! several projects) loads only what its `using`s reach.
@@ -39,6 +40,9 @@ use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed};
 use lilac_lex::Lexer;
 use lilac_parse::Parser;
 use lilac_span::{FileId, SourceMap, Span};
+
+/// The project manifest's file name (`docs/manifest-plan.md`).
+pub const MANIFEST_FILE: &str = "lilac.toml";
 
 /// Injected filesystem: the loader never touches `std::fs` directly.
 pub trait Fs {
@@ -121,7 +125,7 @@ pub fn load(
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> Result<Project, ErrorGuaranteed> {
-    let (project, failed) = load_with_status(root, &[], fs, sources, diags);
+    let (project, failed) = load_with_status(root, &[], None, fs, sources, diags);
     if failed {
         Err(diags.already_reported())
     } else {
@@ -132,10 +136,13 @@ pub fn load(
 /// Like [`load`], but returns the (possibly partial) project together with a
 /// `failed` flag instead of an error, so callers can still map the files read
 /// before a bad `using`. `libraries` mounts each `(name, dir)` as the
-/// top-level namespace `name` (`using name.X` loads `dir/X`).
+/// top-level namespace `name` (`using name.X` loads `dir/X`). The build
+/// folder `build_dir` (`<root>/build` when `None`) is not loaded when it
+/// is in the project's tree.
 pub fn load_with_status(
     root: &Path,
     libraries: &[(String, PathBuf)],
+    build_dir: Option<&Path>,
     fs: &mut dyn Fs,
     sources: &mut SourceMap,
     diags: &mut Diags,
@@ -159,7 +166,7 @@ pub fn load_with_status(
         root_entries,
         None,
         None,
-        true,
+        Walk::Whole { build_dir },
         libraries,
         fs,
         sources,
@@ -194,12 +201,21 @@ pub fn load_file(
         Vec::new(),
         Some(file),
         None,
-        false,
+        Walk::Usings,
         libraries,
         fs,
         sources,
         diags,
     )
+}
+
+/// Which folders a load reaches besides its `using`s.
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    /// None: a root file or a lone namespace.
+    Usings,
+    /// Every project folder but the build folder (`None`: `<root>/build`).
+    Whole { build_dir: Option<&'a Path> },
 }
 
 /// A root file read before loading ([`load_file`]).
@@ -225,7 +241,7 @@ pub fn load_namespace(
         Vec::new(),
         None,
         Some(namespace),
-        false,
+        Walk::Usings,
         libraries,
         fs,
         sources,
@@ -235,22 +251,29 @@ pub fn load_namespace(
 
 /// The `using` fixpoint, starting from the root namespace's `root_entries`
 /// (or the already-read `root_file`) and, when given, the namespace `seed`.
-/// With `whole_root`, every project folder is reached too (see the module
-/// docs). Reaching a namespace also reaches its ancestors, so ancestor reach
-/// never depends on what else was imported.
+/// With [`Walk::Whole`], every project folder but the build folder is
+/// reached too (see the module docs). Reaching a namespace also reaches
+/// its ancestors, so ancestor reach never depends on what else was
+/// imported.
 #[allow(clippy::too_many_arguments)]
 fn load_from(
     root: &Path,
     root_entries: Vec<PathBuf>,
     root_file: Option<RootFile<'_>>,
     seed: Option<&str>,
-    whole_root: bool,
+    walk: Walk<'_>,
     libraries: &[(String, PathBuf)],
     fs: &mut dyn Fs,
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> (Project, bool) {
-    let whole_root = whole_root && root_entries.iter().any(|entry| is_lilac_file(entry));
+    let (whole_root, build_folder) = match walk {
+        Walk::Usings => (false, None),
+        Walk::Whole { build_dir } => (
+            root_entries.iter().any(|entry| is_lilac_file(entry)),
+            build_dir.map(|dir| canonical_folder(fs, dir)),
+        ),
+    };
     // The root namespace holds the root folder only when it is loaded as a
     // folder: a root file (`load_file`) or a lone namespace (`load_namespace`)
     // leaves it empty, so a library mounted there is no second path to it.
@@ -268,6 +291,7 @@ fn load_from(
         libraries,
         root_folder,
         library_folders,
+        build_folder,
         namespaces: vec![Namespace {
             path: String::new(),
             dir: root.to_path_buf(),
@@ -331,6 +355,9 @@ struct Loader<'a> {
     root_folder: PathBuf,
     /// Each library's folder, canonical, in `libraries` order.
     library_folders: Vec<PathBuf>,
+    /// The build folder, canonical, when the load names one (else it is
+    /// `build` under the root).
+    build_folder: Option<PathBuf>,
     namespaces: Vec<Namespace>,
     /// Directory listing per namespace.
     listings: Vec<Vec<PathBuf>>,
@@ -614,9 +641,9 @@ impl Loader<'_> {
 
     /// Reaches every identifier-named folder below the (reached) namespace
     /// at `path`, `""` being the project root. In the project's own tree,
-    /// `build`, a folder with its own `lilac.json` and a library's mount
-    /// name are skipped, and in any tree a folder of a library mounted
-    /// inside it ([`Self::mounted_at`]).
+    /// the build folder ([`Self::is_build_folder`]), a folder with its own
+    /// `lilac.toml` and a library's mount name are skipped, and in any tree
+    /// a folder of a library mounted inside it ([`Self::mounted_at`]).
     fn reach_children(&mut self, path: &str, fs: &mut dyn Fs, diags: &mut Diags) {
         let ns = self.ns_by_path[path];
         let in_project = path.is_empty() || !self.is_library(path);
@@ -633,7 +660,10 @@ impl Loader<'_> {
             } else {
                 format!("{path}.{child}")
             };
-            if in_project && path.is_empty() && (child == "build" || self.is_library(&child)) {
+            if in_project && path.is_empty() && self.is_library(&child) {
+                continue;
+            }
+            if in_project && self.is_build_folder(&child_path, fs) {
                 continue;
             }
             if in_project && self.is_other_project(&child_path, fs) {
@@ -655,19 +685,30 @@ impl Loader<'_> {
         }
     }
 
+    /// Whether the project folder at dotted `path` is the build folder: the
+    /// one the load names, else `build` under the root.
+    fn is_build_folder(&self, path: &str, fs: &mut dyn Fs) -> bool {
+        match &self.build_folder {
+            Some(folder) => {
+                canonical_folder(fs, &resolve_dir(self.root, self.libraries, path)) == *folder
+            }
+            None => path == "build",
+        }
+    }
+
     /// Whether dotted `path` starts at a mounted library.
     fn is_library(&self, path: &str) -> bool {
         let first = path.split('.').next().unwrap_or_default();
         self.libraries.iter().any(|(name, _)| name == first)
     }
 
-    /// Whether the folder at dotted `path` holds its own `lilac.json`.
+    /// Whether the folder at dotted `path` holds its own `lilac.toml`.
     fn is_other_project(&self, path: &str, fs: &mut dyn Fs) -> bool {
         let dir = resolve_dir(self.root, self.libraries, path);
         fs.list_dir(&dir).is_ok_and(|entries| {
             entries
                 .iter()
-                .any(|entry| entry.file_name() == Some(OsStr::new("lilac.json")))
+                .any(|entry| entry.file_name() == Some(OsStr::new(MANIFEST_FILE)))
         })
     }
 
@@ -749,8 +790,10 @@ pub fn single_file(name: &str, src: &str, sources: &mut SourceMap) -> Project {
     }
 }
 
-/// Whether a folder name can be a namespace segment.
-fn is_identifier(name: &str) -> bool {
+/// Whether a folder name can be a namespace segment (and a library's
+/// name).
+#[must_use]
+pub fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -1191,7 +1234,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1267,7 +1310,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1344,7 +1387,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1388,7 +1431,7 @@ mod tests {
         );
         fs.add(
             &root,
-            "Other/lilac.json",
+            "Other/lilac.toml",
             "{}
 ",
         );
@@ -1415,7 +1458,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1445,10 +1488,60 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         assert_eq!(project.namespaces.len(), 1);
         assert!(project.files.is_empty());
+    }
+
+    /// A build folder the load names is skipped wherever it is in the
+    /// tree, and a folder named `build` is then an ordinary namespace.
+    #[test]
+    fn a_named_build_folder_is_skipped() {
+        let root = PathBuf::from("proj");
+        let mut fs = MemFs::new();
+        for rel in [
+            "main.lilac",
+            "build/tools.lilac",
+            "out/debug/stray.lilac",
+            "Geo/out/nested.lilac",
+        ] {
+            fs.add(&root, rel, "x: function () nothing {}\n");
+        }
+        let load = |fs: &mut MemFs, build_dir: Option<&Path>| {
+            let mut diags = Diags::new();
+            let (project, failed) = super::load_with_status(
+                &root,
+                &[],
+                build_dir,
+                fs,
+                &mut SourceMap::new(),
+                &mut diags,
+            );
+            assert!(!failed, "{diags:?}");
+            project
+                .namespaces
+                .iter()
+                .map(|ns| ns.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            load(&mut fs, None),
+            ["", "Geo", "Geo.out", "out", "out.debug"]
+        );
+        assert_eq!(
+            load(&mut fs, Some(&root.join("out"))),
+            ["", "Geo", "Geo.out", "build"]
+        );
+        assert_eq!(
+            load(&mut fs, Some(&root.join("Geo").join("out"))),
+            ["", "Geo", "build", "out", "out.debug"]
+        );
+        // A build folder outside the tree skips nothing.
+        assert_eq!(
+            load(&mut fs, Some(Path::new("elsewhere"))),
+            ["", "Geo", "Geo.out", "build", "out", "out.debug"]
+        );
     }
 
     #[test]
@@ -1466,7 +1559,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), PathBuf::from("missing"))];
         let (_, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(e025_count(&diags), 1, "{diags:?}");
     }
@@ -1595,7 +1688,7 @@ mod tests {
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         let mut names: Vec<&str> = project
             .files
@@ -1632,7 +1725,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1662,7 +1755,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1692,7 +1785,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1757,7 +1850,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         assert!(!diags.has_errors(), "{diags:?}");
         let paths: Vec<&str> = project
@@ -1778,7 +1871,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1805,7 +1898,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (_, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1829,7 +1922,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (_, failed) =
-            super::load_with_status(&root, &libraries, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(e025_messages(&diags), ["folder `Second` is `First` again"]);
     }

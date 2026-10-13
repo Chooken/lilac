@@ -1,0 +1,16 @@
+// expect-stdout: hello from Util
+// expect-stdout: release
+// The folder's `lilac.toml` builds it in release mode and mounts the
+// library `Util` from `util/`; the harness's own flags merge over it.
+
+using Standard.Io
+using Util
+
+main: function () nothing {
+    greet()
+    if @builtin.Build.mode == .Release {
+        print_line("release")
+    } else {
+        print_line("debug")
+    }
+}

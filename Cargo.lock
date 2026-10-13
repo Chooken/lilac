@@ -233,6 +233,7 @@ dependencies = [
  "lilac-driver",
  "lilac-error",
  "lilac-ir",
+ "lilac-manifest",
  "lilac-module",
  "lilac-span",
  "lilac-ty",
@@ -357,6 +358,17 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "serde_json",
+]
+
+[[package]]
+name = "lilac-manifest"
+version = "0.2.0"
+dependencies = [
+ "lilac-driver",
+ "lilac-error",
+ "lilac-module",
+ "lilac-span",
+ "lilac-target",
 ]
 
 [[package]]

@@ -260,6 +260,10 @@ pub struct Session {
     pub project_files: Vec<(FileId, PathBuf)>,
     /// Mounted libraries (`--lib Name=dir`): `using Name.X` loads `dir/X`.
     pub libraries: Vec<(String, PathBuf)>,
+    /// The build folder, which a folder compile does not load as a
+    /// namespace; `None` means `<root>/build`. A manifest names it
+    /// (`lilac_manifest::Settings::apply`).
+    pub build_dir: Option<PathBuf>,
     /// The last compile's analysis, when [`Session::keep_analysis`] keeps
     /// one and the compile got through type checking (a later failure
     /// keeps it).
@@ -304,6 +308,7 @@ impl Default for Session {
             optimize: OptimizeMode::default(),
             project_files: Vec::new(),
             libraries: Vec::new(),
+            build_dir: None,
             analysis: None,
             keep_analysis: Keep::Nothing,
             require_entry: false,
@@ -367,6 +372,7 @@ impl Session {
         let (project, failed) = lilac_module::load_with_status(
             root,
             &self.libraries,
+            self.build_dir.as_deref(),
             fs,
             &mut self.source_map,
             &mut self.diags,

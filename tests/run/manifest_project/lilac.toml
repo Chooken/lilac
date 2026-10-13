@@ -1,0 +1,5 @@
+[build]
+mode = "release"
+
+[libraries]
+Util = "util"

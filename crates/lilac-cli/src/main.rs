@@ -10,6 +10,7 @@ use lilac_codegen::Backend as _;
 use lilac_driver::{ErrorFormat, OptimizeMode, Progress, Session, Target};
 use lilac_error::ErrorGuaranteed;
 use lilac_ir::LirModule;
+use lilac_manifest::{Manifest, Overrides, Settings, TargetChoice};
 use progress::{Reporter, Verbosity};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -75,10 +76,13 @@ fn unknown_flag(arg: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  lilac check <file-or-dir> [--error-format=human|json] [--color=auto|always|never] [--target=<triple>] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-ir <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]\n  lilac emit-llvm <file-or-dir> [--check] [--target=<triple>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--timings] [-q|--quiet]
-  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>] [--lib=<Name>=<dir>]... [--libc] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
+    "usage:\n  lilac check [<file-or-dir>] [--error-format=human|json] [--color=auto|always|never] [--target=<triple>|host] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-ir [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-llvm [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]
+  lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>|host] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
   lilac explain <code>
-  lilac demangle [<symbol>...]"
+  lilac demangle [<symbol>...]
+
+A folder with a lilac.toml is a project: its settings apply, and a flag
+overrides its setting for one run. The folder defaults to `.`."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -128,18 +132,19 @@ fn run() -> ExitCode {
     }
 }
 
-/// Shared flags parsed by both subcommands.
+/// Shared flags parsed by every compiling command.
 struct Common {
+    /// The file or folder to compile: `.` when none is given.
     file: String,
     check_only: bool,
-    target_set: bool,
     dump_lir: Option<PathBuf>,
-    /// `--stack-traces=on|off`, when given. `session.stack_traces` takes it,
-    /// else stays off; `lilac build` defaults it from the mode instead.
-    stack_traces: Option<bool>,
     /// `-q`/`--quiet` (nothing but diagnostics, winning over `--timings`)
     /// or `--timings` (each stage with its duration), when given.
     progress: Option<Verbosity>,
+    /// The flags that override a `lilac.toml` setting.
+    overrides: Overrides,
+    /// A session with only how it prints set; [`Common::configure`] sets
+    /// the rest from the settings.
     session: Session,
 }
 
@@ -160,6 +165,55 @@ impl Common {
     fn quiet(&self) -> bool {
         self.progress == Some(Verbosity::Quiet)
     }
+
+    /// Reads the folder argument's `lilac.toml`, if it has one, resolves
+    /// the flags over it and sets the session. Returns the settings and
+    /// what to compile: the manifest's `project.root`, else the argument.
+    /// A file argument reads no manifest. A manifest with an error is
+    /// reported here, and the command stops with 1.
+    fn configure(&mut self) -> Result<(Settings, PathBuf), ExitCode> {
+        let given = PathBuf::from(&self.file);
+        let manifest = if is_dir(&given) {
+            let dir = std::path::absolute(&given).unwrap_or_else(|_| given.clone());
+            let bundled = lilac_manifest::bundled_dir(
+                std::env::var_os(lilac_manifest::LIB_DIR_VAR).map(PathBuf::from),
+                exe_dir().as_deref(),
+            );
+            let quiet = self.quiet();
+            let session = &mut self.session;
+            match Manifest::read(
+                &dir,
+                bundled.as_deref(),
+                &mut StdFs,
+                &mut session.source_map,
+                &mut session.diags,
+            ) {
+                Some(Ok(manifest)) if session.diags.error_count() == 0 => Some(manifest),
+                Some(_) => {
+                    print_diagnostics(session, quiet);
+                    return Err(ExitCode::from(1));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        self.overrides.env_linker = std::env::var_os(link::LINKER_VAR)
+            .filter(|linker| !linker.is_empty())
+            .map(PathBuf::from);
+        let settings = Settings::resolve(manifest.as_ref(), &self.overrides, self.session.host);
+        settings.apply(&mut self.session);
+        self.session.stack_traces = self.overrides.stack_traces.unwrap_or(false);
+        let input = settings.root.clone().unwrap_or(given);
+        Ok((settings, input))
+    }
+}
+
+/// The folder holding the running `lilac`.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
 /// Hooks a `--timings` reporter into `session` for `check` and `emit-*`.
@@ -198,15 +252,12 @@ fn parse_color(choice: &str) -> Result<bool, ExitCode> {
 fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitCode> {
     let mut file: Option<String> = None;
     let mut check_only = false;
-    let mut target_set = false;
     let mut dump_lir: Option<PathBuf> = None;
-    let mut stack_traces: Option<bool> = None;
     let mut progress: Option<Verbosity> = None;
+    let mut overrides = Overrides::default();
     let mut session = Session::new();
     session.opts.color = progress::auto_color();
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
+    for arg in args {
         if let Some(choice) = arg.strip_prefix("--color=") {
             session.opts.color = parse_color(choice)?;
         } else if let Some(format) = arg.strip_prefix("--error-format=") {
@@ -219,30 +270,15 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
                 }
             }
         } else if let Some(value) = arg.strip_prefix("--target=") {
-            match Target::parse(value) {
-                Ok(target) => {
-                    session.target = target;
-                    target_set = true;
-                }
-                Err(err) => {
-                    eprintln!("invalid --target={value}: {err}");
-                    return Err(ExitCode::from(2));
-                }
-            }
+            overrides.target = Some(parse_target(value)?);
         } else if parse_progress_flag(arg, &mut progress) {
             // `--timings` or `-q`.
         } else if allow_check_flag && *arg == "--check" {
             check_only = true;
-        } else if let Some(mode) = arg.strip_prefix("--mode=") {
-            let Some(parsed) = OptimizeMode::parse(mode) else {
-                eprintln!("unknown --mode={mode}; want debug|release|release-small");
-                return Err(ExitCode::from(2));
-            };
-            session.optimize = parsed;
-        } else if parse_session_flag(arg, &mut session) {
-            // Consumed by the session-wide parser above: `--release`.
-        } else if let Some(value) = arg.strip_prefix("--stack-traces=") {
-            stack_traces = Some(parse_on_off("--stack-traces", value)?);
+        } else if parse_setting_flag(arg, &mut overrides)? {
+            // `--mode=`, `--release`, `--stack-traces=`, `--libc`.
+        } else if *arg == "--verbose" {
+            session.opts.verbose = true;
         } else if let Some(dir) = arg.strip_prefix("--dump-lir=") {
             if dir.is_empty() {
                 eprintln!("--dump-lir= needs a path\n{HELP_HINT}");
@@ -250,45 +286,54 @@ fn parse_common(args: &[String], allow_check_flag: bool) -> Result<Common, ExitC
             }
             dump_lir = Some(PathBuf::from(dir));
         } else if let Some(mount) = arg.strip_prefix("--lib=") {
-            let Some((name, dir)) = mount
-                .split_once('=')
-                .filter(|(n, d)| !n.is_empty() && !d.is_empty())
-            else {
-                eprintln!("--lib= needs `Name=dir`\n{HELP_HINT}");
-                return Err(ExitCode::from(2));
-            };
-            if name.starts_with('@') {
-                eprintln!("--lib={name}: `@` names are reserved for the compiler (`@builtin`)");
-                return Err(ExitCode::from(2));
-            }
-            session
-                .libraries
-                .push((name.to_owned(), PathBuf::from(dir)));
+            overrides.libraries.push(parse_library(mount)?);
         } else if arg.starts_with('-') {
             eprintln!("{}", unknown_flag(arg));
             return Err(ExitCode::from(2));
         } else if file.is_none() {
             file = Some(arg.clone());
         } else {
-            eprintln!("expected one file\n{HELP_HINT}");
+            eprintln!("expected one file or folder\n{HELP_HINT}");
             return Err(ExitCode::from(2));
         }
-        index += 1;
     }
-    let Some(file) = file else {
-        eprintln!("missing <file>\n{HELP_HINT}");
-        return Err(ExitCode::from(2));
-    };
-    session.stack_traces = stack_traces.unwrap_or(false);
     Ok(Common {
-        file,
+        file: file.unwrap_or_else(|| ".".to_owned()),
         check_only,
-        target_set,
         dump_lir,
-        stack_traces,
         progress,
+        overrides,
         session,
     })
+}
+
+/// `--target=`: a triple, or `host`.
+fn parse_target(value: &str) -> Result<TargetChoice, ExitCode> {
+    if value == "host" {
+        return Ok(TargetChoice::Host);
+    }
+    Target::parse(value)
+        .map(TargetChoice::Triple)
+        .map_err(|err| {
+            eprintln!("invalid --target={value}: {err}");
+            ExitCode::from(2)
+        })
+}
+
+/// `--lib=Name=dir`.
+fn parse_library(mount: &str) -> Result<(String, PathBuf), ExitCode> {
+    let Some((name, dir)) = mount
+        .split_once('=')
+        .filter(|(n, d)| !n.is_empty() && !d.is_empty())
+    else {
+        eprintln!("--lib= needs `Name=dir`\n{HELP_HINT}");
+        return Err(ExitCode::from(2));
+    };
+    if name.starts_with('@') {
+        eprintln!("--lib={name}: `@` names are reserved for the compiler (`@builtin`)");
+        return Err(ExitCode::from(2));
+    }
+    Ok((name.to_owned(), PathBuf::from(dir)))
 }
 
 /// `on`/`off` for a switch flag.
@@ -303,17 +348,28 @@ fn parse_on_off(flag: &str, value: &str) -> Result<bool, ExitCode> {
     }
 }
 
-/// Parses the session-wide scalar flags `--release` and `--verbose`, returning
-/// `true` when `arg` was one.
-///
-/// Kept out of [`parse_common`] to stay under the pedantic line budget.
-fn parse_session_flag(arg: &str, session: &mut Session) -> bool {
-    match arg {
-        "--release" => session.optimize = OptimizeMode::Release,
-        "--verbose" => session.opts.verbose = true,
-        _ => return false,
+/// Parses the flags that override a scalar setting (`--mode=`,
+/// `--release`, `--stack-traces=` and `--libc[=on|off]`), returning `true`
+/// when `arg` was one.
+fn parse_setting_flag(arg: &str, overrides: &mut Overrides) -> Result<bool, ExitCode> {
+    if arg == "--release" {
+        overrides.mode = Some(OptimizeMode::Release);
+    } else if let Some(mode) = arg.strip_prefix("--mode=") {
+        let Some(parsed) = OptimizeMode::parse(mode) else {
+            eprintln!("unknown --mode={mode}; want debug|release|release-small");
+            return Err(ExitCode::from(2));
+        };
+        overrides.mode = Some(parsed);
+    } else if let Some(value) = arg.strip_prefix("--stack-traces=") {
+        overrides.stack_traces = Some(parse_on_off("--stack-traces", value)?);
+    } else if arg == "--libc" {
+        overrides.libc = Some(true);
+    } else if let Some(value) = arg.strip_prefix("--libc=") {
+        overrides.libc = Some(parse_on_off("--libc", value)?);
+    } else {
+        return Ok(false);
     }
-    true
+    Ok(true)
 }
 
 /// Parses `--timings` and `-q`/`--quiet` into `progress` (quiet wins),
@@ -374,15 +430,15 @@ fn compile_with_dumps(
     (result, io_error)
 }
 
-fn read_source(path: &str) -> Result<String, ExitCode> {
+fn read_source(path: &Path) -> Result<String, ExitCode> {
     std::fs::read_to_string(path).map_err(|err| {
-        eprintln!("cannot read {path}: {err}");
+        eprintln!("cannot read {}: {err}", path.display());
         ExitCode::from(2)
     })
 }
 
 /// Whether `path` names a directory (a project root) rather than a source file.
-fn is_dir(path: &str) -> bool {
+fn is_dir(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
@@ -392,14 +448,19 @@ fn is_dir(path: &str) -> bool {
 /// `Err(ExitCode)` when the source file cannot be read (exit 2).
 fn compile_input(
     session: &mut Session,
-    path: &str,
+    path: &Path,
     dump_dir: Option<&Path>,
 ) -> Result<(Result<LirModule, ErrorGuaranteed>, Option<String>), ExitCode> {
     if is_dir(path) {
         Ok(compile_project_with_dumps(session, path, dump_dir))
     } else {
         let src = read_source(path)?;
-        Ok(compile_with_dumps(session, path, &src, dump_dir))
+        Ok(compile_with_dumps(
+            session,
+            &path.to_string_lossy(),
+            &src,
+            dump_dir,
+        ))
     }
 }
 
@@ -408,38 +469,37 @@ fn compile_input(
 /// [`StdFs`] and compiled as one project.
 fn compile_project_with_dumps(
     session: &mut Session,
-    root: &str,
+    root: &Path,
     dump_dir: Option<&Path>,
 ) -> (Result<LirModule, ErrorGuaranteed>, Option<String>) {
     let mut fs = StdFs;
     let Some(dir) = dump_dir else {
-        return (session.compile_project(Path::new(root), &mut fs), None);
+        return (session.compile_project(root, &mut fs), None);
     };
     if let Err(err) = std::fs::create_dir_all(dir) {
         return (
-            session.compile_project(Path::new(root), &mut fs),
+            session.compile_project(root, &mut fs),
             Some(format!(
                 "cannot create LIR dump directory {}: {err}",
                 dir.display()
             )),
         );
     }
-    let stem = Path::new(root)
+    let stem = root
         .file_name()
         .and_then(|stem| stem.to_str())
         .unwrap_or("module")
         .to_owned();
     let mut io_error: Option<String> = None;
-    let result =
-        session.compile_project_with_stages(Path::new(root), &mut fs, &mut |stage, lir| {
-            if io_error.is_some() {
-                return;
-            }
-            let path = dir.join(format!("{stem}.{stage}.lir"));
-            if let Err(err) = std::fs::write(&path, lir.to_text()) {
-                io_error = Some(format!("cannot write LIR dump {}: {err}", path.display()));
-            }
-        });
+    let result = session.compile_project_with_stages(root, &mut fs, &mut |stage, lir| {
+        if io_error.is_some() {
+            return;
+        }
+        let path = dir.join(format!("{stem}.{stage}.lir"));
+        if let Err(err) = std::fs::write(&path, lir.to_text()) {
+            io_error = Some(format!("cannot write LIR dump {}: {err}", path.display()));
+        }
+    });
     (result, io_error)
 }
 
@@ -520,13 +580,16 @@ fn cmd_check(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let quiet = common.quiet();
+    let (_, input) = match common.configure() {
+        Ok(configured) => configured,
+        Err(code) => return code,
+    };
     let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
-    let (result, dump_err) =
-        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
+    let (result, dump_err) = match compile_input(&mut session, &input, common.dump_lir.as_deref()) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
     if let Some(reporter) = &timings {
         reporter.end();
     }
@@ -548,13 +611,16 @@ fn cmd_emit_ir(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let quiet = common.quiet();
+    let (_, input) = match common.configure() {
+        Ok(configured) => configured,
+        Err(code) => return code,
+    };
     let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
-    let (result, dump_err) =
-        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
+    let (result, dump_err) = match compile_input(&mut session, &input, common.dump_lir.as_deref()) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
     if let Some(reporter) = &timings {
         reporter.end();
     }
@@ -602,23 +668,24 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let quiet = common.quiet();
+    let (settings, input) = match common.configure() {
+        Ok(configured) => configured,
+        Err(code) => return code,
+    };
     let timings = stage_timings(common.verbosity(None), &mut common.session);
     let mut session = common.session;
     // Unlike `check`/`emit-ir`, `emit-llvm` defaults to the real host so the IR
     // data layout matches the machine it will run on. An explicit `--target=`
     // still wins.
-    let target = if common.target_set {
-        session.target
-    } else {
-        session.host
-    };
-    session.target = target;
+    if settings.target.is_none() {
+        session.target = session.host;
+    }
+    let target = session.target;
     let triple = target.to_triple();
-    let (result, dump_err) =
-        match compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
+    let (result, dump_err) = match compile_input(&mut session, &input, common.dump_lir.as_deref()) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
     if let Some(reporter) = &timings {
         reporter.end();
     }
@@ -669,7 +736,9 @@ fn cmd_emit_llvm(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_with_dumps, opt_level, parse_common, ExitCode, OptimizeMode, Session};
+    use super::{
+        compile_with_dumps, opt_level, parse_common, ExitCode, OptimizeMode, Session, TargetChoice,
+    };
     use lilac_codegen::OptLevel;
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -677,12 +746,25 @@ mod tests {
     }
 
     #[test]
-    fn target_set_tracks_explicit_target() {
+    fn target_flag_takes_a_triple_or_host() {
         let with = parse_common(&args(&["--target=x86_64-pc-windows-msvc", "f.lilac"]), true)
             .expect("valid args");
-        assert!(with.target_set);
+        assert_eq!(
+            with.overrides.target,
+            Some(TargetChoice::Triple(
+                lilac_driver::Target::parse("x86_64-pc-windows-msvc").expect("triple")
+            ))
+        );
+        let host = parse_common(&args(&["--target=host"]), true).expect("valid args");
+        assert_eq!(host.overrides.target, Some(TargetChoice::Host));
         let without = parse_common(&args(&["f.lilac"]), true).expect("valid args");
-        assert!(!without.target_set);
+        assert_eq!(without.overrides.target, None);
+    }
+
+    #[test]
+    fn input_defaults_to_current_dir() {
+        let common = parse_common(&args(&["--release"]), false).expect("valid args");
+        assert_eq!(common.file, ".");
     }
 
     #[test]
@@ -694,63 +776,63 @@ mod tests {
 
     #[test]
     fn optimization_flags_last_wins() {
-        let common = parse_common(
-            &args(&["f.lilac", "--mode=debug", "--mode=release-small"]),
-            false,
-        )
-        .expect("valid args");
-        assert_eq!(common.session.optimize, OptimizeMode::ReleaseSmall);
+        let mode = |flags: &[&str]| {
+            parse_common(&args(flags), false)
+                .expect("valid args")
+                .overrides
+                .mode
+        };
+        assert_eq!(
+            mode(&["f.lilac", "--mode=debug", "--mode=release-small"]),
+            Some(OptimizeMode::ReleaseSmall)
+        );
+        assert_eq!(mode(&["f.lilac", "--release"]), Some(OptimizeMode::Release));
+        assert_eq!(
+            mode(&["f.lilac", "--release", "--mode=debug"]),
+            Some(OptimizeMode::Debug)
+        );
+        assert_eq!(mode(&["f.lilac"]), None);
     }
 
-    #[test]
-    fn release_is_release() {
-        let common = parse_common(&args(&["f.lilac", "--release"]), false).expect("valid args");
-        assert_eq!(common.session.optimize, OptimizeMode::Release);
-    }
-
-    /// Outside `lilac build`, stack traces are off unless asked for.
     #[test]
     fn stack_traces_flag_parses() {
         let traces = |flags: &[&str]| {
             let mut all = vec!["f.lilac"];
             all.extend(flags);
-            parse_common(&args(&all), false).map(|common| common.session.stack_traces)
+            parse_common(&args(&all), false).map(|common| common.overrides.stack_traces)
         };
-        assert_eq!(traces(&[]), Ok(false));
-        assert_eq!(traces(&["--release", "--stack-traces=on"]), Ok(true));
-        assert_eq!(traces(&["--stack-traces=off"]), Ok(false));
+        assert_eq!(traces(&[]), Ok(None));
+        assert_eq!(traces(&["--release", "--stack-traces=on"]), Ok(Some(true)));
+        assert_eq!(traces(&["--stack-traces=off"]), Ok(Some(false)));
         assert_eq!(traces(&["--stack-traces=maybe"]), Err(ExitCode::from(2)));
+    }
+
+    #[test]
+    fn libc_flag_parses() {
+        let libc =
+            |flags: &[&str]| parse_common(&args(flags), false).map(|common| common.overrides.libc);
+        assert_eq!(libc(&[]), Ok(None));
+        assert_eq!(libc(&["--libc"]), Ok(Some(true)));
+        assert_eq!(libc(&["--libc=on"]), Ok(Some(true)));
+        assert_eq!(libc(&["--libc", "--libc=off"]), Ok(Some(false)));
+        assert_eq!(libc(&["--libc=yes"]), Err(ExitCode::from(2)));
+    }
+
+    #[test]
+    fn library_flags_parse() {
+        let common = parse_common(&args(&["--lib=A=a", "--lib=B=b/c"]), false).expect("valid args");
+        assert_eq!(
+            common.overrides.libraries,
+            [("A".to_owned(), "a".into()), ("B".to_owned(), "b/c".into())]
+        );
+        for bad in ["--lib=A", "--lib==a", "--lib=@builtin=a"] {
+            assert!(parse_common(&args(&[bad]), false).is_err(), "{bad}");
+        }
     }
 
     #[test]
     fn unknown_mode_is_rejected() {
         assert!(parse_common(&args(&["f.lilac", "--mode=bogus"]), false).is_err());
-    }
-
-    #[test]
-    fn empty_dump_lir_is_rejected() {
-        assert!(parse_common(&args(&["f.lilac", "--dump-lir="]), false).is_err());
-    }
-
-    #[test]
-    fn release_then_opt_flag_last_wins() {
-        let common = parse_common(&args(&["f.lilac", "--release", "--mode=debug"]), false)
-            .expect("valid args");
-        assert_eq!(common.session.optimize, OptimizeMode::Debug);
-    }
-
-    #[test]
-    fn target_flag_overrides_target_not_host() {
-        let common = parse_common(
-            &args(&["f.lilac", "--target=x86_64-pc-windows-msvc"]),
-            false,
-        )
-        .expect("valid args");
-        assert_eq!(common.session.target.to_triple(), "x86_64-pc-windows-msvc");
-        assert_eq!(
-            common.session.host.to_triple(),
-            lilac_driver::Target::host().to_triple()
-        );
     }
 
     #[test]

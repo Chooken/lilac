@@ -1,0 +1,14 @@
+[package]
+name = "lilac-manifest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lilac-span = { path = "../lilac-span" }
+lilac-error = { path = "../lilac-error" }
+lilac-driver = { path = "../lilac-driver" }
+lilac-module = { path = "../lilac-module" }
+lilac-target = { path = "../lilac-target" }
+
+[lints]
+workspace = true

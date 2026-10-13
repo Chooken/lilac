@@ -170,10 +170,15 @@ pub fn render(program: &Path, args: &[OsString]) -> String {
     line
 }
 
-/// Runs the linker. `Err` carries the message to print.
-pub fn run(program: &Path, args: &[OsString]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
+/// Runs the linker, in `dir` when given (a manifest's folder, so relative
+/// link arguments are relative to it). `Err` carries the message to print.
+pub fn run(program: &Path, args: &[OsString], dir: Option<&Path>) -> Result<(), String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let output = command
         .output()
         .map_err(|err| format!("cannot run linker {}: {err}", program.display()))?;
     if output.status.success() {

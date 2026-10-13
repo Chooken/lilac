@@ -241,8 +241,8 @@
   are `NsId`s, and each file has a `FileScope` (its visible-name map, already
   filtered by visibility and reach). Typeck and lowering look names up through
   `Resolved::lookup` with the file's id (`E029` on an ambiguous use).
-- Libraries: `--lib=Name=dir` (CLI) / `lilac.json` `"libraries"` and the
-  `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
+- Libraries: `--lib=Name=dir` and `lilac.toml`'s `[libraries]` (CLI) /
+  `lilac.json` `"libraries"` and the `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
   `Session.libraries` carries them into `lilac_module::load_with_status`.
   `using *.A` is relative to the importing file's namespace.
 - Projects and mounted libraries load whole: after the `using` fixpoint
@@ -250,8 +250,8 @@
   library (`Loader::reach_children`; a missing library folder is `E025`),
   and typeck already checks every non-generic item, so unused code is
   checked and the editor compiles every project file in its project. The
-  root skips `build`, a folder with its own `lilac.json` and a library's
-  mount name; a root with no `*.lilac` file (a folder of projects) loads
+  root skips the build folder (`build`, or the manifest's `build.dir`), a
+  folder with its own `lilac.toml` and a library's mount name; a root with no `*.lilac` file (a folder of projects) loads
   only what `using`s reach. `using` is visibility only. DCE prunes unused functions, data and type layouts
   (`prune_layouts`), so an unused library emits only its `export`s. Extern `ref` slots
   lower as `ref #unknown` (casts at each call), so declarations of one C
@@ -365,13 +365,56 @@
 
 - `lilac build [<file-or-dir>]` compiles, writes an object file
   (`Backend::emit_object`, with an `Entry` and a `CodegenStep` callback) and
-  links an executable. The CLI takes all build configuration as flags;
-  `lilac.json` is for the language server only.
-- The build folder is `<project>/build` (folder project) or `./build`
-  (single file), with one folder per mode (`debug`, `release`,
-  `release-small`) and a `<triple>/` level for a cross target. The mode folder
-  holds the executable and `obj/` with the kept object file. `--build-dir`
-  and `-o` override it.
+  links an executable. A project's configuration is its `lilac.toml`, and
+  a flag overrides its setting for one run (`docs/manifest-plan.md`);
+  `lilac.json` is still the language server's until it moves over.
+- The CLI (`main.rs`): `build`, `check`, `emit-ir` and `emit-llvm` take a
+  file or folder, `.` by default. The flag parsers fill
+  `lilac_manifest::Overrides`, not the session; `Common::configure` reads
+  a folder argument's manifest (`Manifest::read` over `StdFs`, the folder
+  made absolute, so every manifest path is), resolves the flags over it
+  (`Settings::resolve`, with `LILAC_LINKER` as `env_linker`), applies it
+  to the session and returns what to compile (`project.root`, else the
+  argument). A manifest with any error is printed through the session
+  (human or JSON, with the summary) and the command exits 1 before
+  compiling. A file argument reads no manifest. A setting neither gives
+  is `None` and the command keeps its own default: `check`/`emit-ir`
+  `x86_64-unknown-none` and `Entry::CMain`, `emit-llvm` and `build` the
+  host, `build` `Entry::Native`; with a manifest the target is the host
+  and `link.libc` is off. `check`/`emit-*` take stack traces only from
+  the flag. `--libc[=on|off]` and `--target=host` are common flags.
+- `lilac.toml` (`lilac-manifest`, std-only, no TOML crate): `toml::read`
+  is TOML 1.0
+  less numbers, dates, multi-line strings and `[[…]]`, all `E075` like
+  every other mistake (TOML's redefinition rules: `Kind` says what made a
+  table). Each key and value keeps its span; the reader recovers at the
+  next line (after any array the statement left open) and returns a
+  table only with no error. Arrays and inline tables nest, and keys have
+  parts, at most `MAX_NESTING` (32), which bounds its recursion;
+  `tests/progress.rs` checks it on random input. `settings.rs` is the
+  schema: `SETTINGS` (section, key, kind, default, flag, description) is
+  the one table of keys, and `Manifest::read` (through `lilac_module::Fs`,
+  `None` without a `lilac.toml`) checks each against it, `E076` at the key
+  or value (did-you-mean fixes for sections, keys and modes); a setting
+  with an error is left out. `Settings::resolve` puts `Overrides` (the
+  flags, and `LILAC_LINKER` after `--linker=`) over the manifest over the
+  defaults, joining the manifest's paths to its folder, and
+  `Settings::apply` sets the session. `{ bundled = true }` mounts
+  `bundled_dir()/Name` (`LILAC_LIB_DIR`, else `<exe dir>/../lib`).
+  `Session::build_dir` is the folder the loader skips
+  (`load_with_status`'s `build_dir`; `None` is `<root>/build`); `apply`
+  sets it only with a manifest, so without one nothing changes.
+- The build folder is the manifest's `build.dir` (`build` beside it),
+  else `<project>/build` (folder project) or `./build` (single file), with
+  one folder per mode (`debug`, `release`, `release-small`) and a
+  `<triple>/` level for a cross target. The mode folder holds the
+  executable and `obj/` with the kept object file. `--build-dir` and `-o`
+  override it; the program's name is `project.name`, else the folder's or
+  file's. In a manifest build the linker runs in the manifest's folder
+  (`link::run`'s `dir`), with the object, the executable, the sysroot and
+  a linker path made absolute, so a relative `link.args` or
+  `--link-arg=` is relative to the manifest.
+
 - `Target::link_info` in `lilac-target` is the single table of per-OS link
   facts (`LinkInfo`: lld flavor, suffixes, entry symbol, system stubs).
 - **Native mode is the default** (`Entry::Native`, on Windows, Linux and

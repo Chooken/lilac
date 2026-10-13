@@ -73,14 +73,16 @@ Common flags:
 | --- | --- |
 | `--release` | Optimized build (`--mode=release`); `--mode=release-small` optimizes for size. |
 | `-o <path>` | Write the executable to `<path>` instead of the build folder. |
-| `--target=<triple>` | Cross-compile, for example `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`. |
+| `--target=<triple>` | Cross-compile, for example `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`; `host` is this machine. |
 | `--lib=<Name>=<dir>` | Mount a library folder as namespace `Name`. |
 | `--link-arg=<arg>` | Pass an argument to the linker, for example a library to link. |
-| `--libc` | Link through a C compiler and the C library (see below). |
+| `--libc[=on\|off]` | Link through a C compiler and the C library (see below). |
 | `--stack-traces=on\|off` | Print a stack trace when the program panics; on by default in debug builds. |
 | `-q`, `--timings` | Print nothing, or print how long each stage took. |
 
-To use the standard library, mount it from the install folder:
+A project folder records its settings, and the libraries it uses, in a
+`lilac.toml` (see [Projects](#projects-lilactoml)), so none of this needs
+retyping. A single file mounts the standard library with a flag:
 
 ```bash
 lilac build hello.lilac --lib=Standard=<install>/lib/Standard
@@ -115,9 +117,69 @@ functions with `extern` and pass the library with `--link-arg=`.
 `--linker=<path>`) with the C library instead. Use it to link static C
 libraries, or code that still uses `Standard.C`.
 
+## Projects: `lilac.toml`
+
+A folder with a `lilac.toml` is a project. `lilac build`, `check`,
+`emit-ir` and `emit-llvm` read it when given the folder, or when run in it
+with no argument, so they all build and check the same program:
+
+```toml
+[project]
+name = "hello"
+root = "src"
+
+[build]
+mode = "release"
+target = "host"
+stack-traces = true
+dir = "build"
+
+[libraries]
+Standard = { bundled = true }
+Util = "vendor/Util"
+Json = { path = "../json/lib" }
+
+[link]
+libc = true
+linker = "clang"
+args = ["-lm", "vendor/libgreet.a"]
+```
+
+| Setting | Value | Default | Flag |
+| --- | --- | --- | --- |
+| `project.name` | letters, digits, `-`, `_`, `.` | the folder's name | none |
+| `project.root` | the folder holding the code | `"."` | none |
+| `build.mode` | `"debug"`, `"release"`, `"release-small"` | `"debug"` | `--mode=`, `--release` |
+| `build.target` | a triple, or `"host"` | `"host"` | `--target=` |
+| `build.stack-traces` | `true` or `false` | on in debug builds only | `--stack-traces=` |
+| `build.dir` | where builds go | `"build"` | `--build-dir=` |
+| `libraries.<Name>` | `"folder"`, `{ path = "folder" }` or `{ bundled = true }` | none | `--lib=Name=dir` |
+| `link.libc` | `true` or `false` | `false` | `--libc[=on\|off]` |
+| `link.linker` | a program on `PATH`, or a path | `LILAC_LINKER`, else `cc` or `clang` | `--linker=` |
+| `link.args` | an array of strings | `[]` | `--link-arg=` |
+
+- **Flags win, for one run.** A flag beats the manifest, and the manifest
+  beats the default. `--lib=Name=dir` replaces the manifest's `Name`,
+  `--link-arg=`s come after `link.args`, and the linker is `--linker=`,
+  then `LILAC_LINKER`, then `link.linker`.
+- **Paths** in the manifest are relative to its folder. In a double-quoted
+  TOML string `\` starts an escape, so write Windows paths with `/` or in
+  single quotes (`'C:\libs\Util'`). The linker runs in the manifest's
+  folder, so `link.args` paths are relative to it too.
+- **Bundled libraries.** `Standard = { bundled = true }` mounts the
+  `Standard` installed with Lilac (`lib/Standard`, or the folder
+  `LILAC_LIB_DIR` names), so the manifest holds no path on your machine,
+  and the library always matches the compiler.
+- A file argument reads no manifest, and nothing searches parent folders.
+  A folder below the project's root with its own `lilac.toml` is another
+  project and is not loaded.
+- A mistake in the manifest is an error (`E075` for TOML Lilac does not
+  read, `E076` for an unknown setting or a wrong value), and nothing
+  builds until it is fixed.
+
 ## Checking a program
 
-`lilac check <file-or-dir>` reports errors without building, and takes the
+`lilac check [<file-or-dir>]` reports errors without building, and takes the
 same `-q`, `--timings` and `--lib=` flags. Every error has a code; `lilac
 explain <code>` prints its page:
 

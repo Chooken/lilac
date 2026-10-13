@@ -1,12 +1,15 @@
 //! `lilac build`: compile, write an object file, and link an executable into
 //! the build folder, printing progress as it goes.
 //!
-//! The build folder is `<project>/build` for a folder project and `./build`
-//! for a single file (`--build-dir` moves it). Each mode gets a folder
-//! (`build/debug`, `build/release`, …), nested under the triple for a cross
-//! target (`build/<triple>/debug`). The mode folder holds the executable and
-//! `obj/` with the object file, which is kept. `-o` puts the executable
-//! elsewhere.
+//! The build folder is the manifest's `build.dir` (`build` beside
+//! `lilac.toml` by default), else `<project>/build` for a folder project
+//! and `./build` for a single file (`--build-dir` moves it). Each mode gets
+//! a folder (`build/debug`, `build/release`, …), nested under the triple
+//! for a cross target (`build/<triple>/debug`). The mode folder holds the
+//! executable and `obj/` with the object file, which is kept. `-o` puts the
+//! executable elsewhere. In a manifest build the linker runs in the
+//! manifest's folder, so a relative link argument is relative to it, and
+//! every path Lilac passes it is absolute.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -14,29 +17,18 @@ use std::process::ExitCode;
 
 use lilac_codegen::Backend as _;
 use lilac_driver::{Entry, ErrorFormat, LinkInfo, OptimizeMode, Progress, Session};
+use lilac_manifest::{Overrides, Settings};
 
 use crate::link;
 use crate::progress::{Reporter, Verbosity};
 
-/// The flags only `build` takes.
-#[derive(Debug, Default, PartialEq)]
-pub struct BuildFlags {
-    /// `-o <path>`: where the executable goes.
-    pub output: Option<PathBuf>,
-    /// `--build-dir=<dir>`: the build folder.
-    pub build_dir: Option<PathBuf>,
-    /// `--libc`: link through a C compiler driver with C's startup code.
-    pub libc: bool,
-    /// `--linker=<path>`: the `--libc` driver.
-    pub linker: Option<PathBuf>,
-    /// `--link-arg=<arg>`: extra linker arguments, in order.
-    pub link_args: Vec<String>,
-}
-
-/// Splits the build-only flags off `args`, returning them with the rest
-/// (for `parse_common`). A missing input defaults to `.`.
-pub fn parse_build_flags(args: &[String]) -> Result<(BuildFlags, Vec<String>), String> {
-    let mut flags = BuildFlags::default();
+/// Splits the build-only flags off `args` into `overrides`, returning
+/// `-o`'s path and the rest (for `parse_common`).
+pub fn parse_build_flags(
+    args: &[String],
+    overrides: &mut Overrides,
+) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    let mut output = None;
     let mut rest = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -51,23 +43,18 @@ pub fn parse_build_flags(args: &[String]) -> Result<(BuildFlags, Vec<String>), S
             let Some(path) = iter.next() else {
                 return Err("-o needs a path".to_owned());
             };
-            flags.output = Some(PathBuf::from(nonempty(path, "-o")?));
+            output = Some(PathBuf::from(nonempty(path, "-o")?));
         } else if let Some(dir) = arg.strip_prefix("--build-dir=") {
-            flags.build_dir = Some(PathBuf::from(nonempty(dir, "--build-dir=")?));
-        } else if arg == "--libc" {
-            flags.libc = true;
+            overrides.build_dir = Some(PathBuf::from(nonempty(dir, "--build-dir=")?));
         } else if let Some(path) = arg.strip_prefix("--linker=") {
-            flags.linker = Some(PathBuf::from(nonempty(path, "--linker=")?));
+            overrides.linker = Some(PathBuf::from(nonempty(path, "--linker=")?));
         } else if let Some(value) = arg.strip_prefix("--link-arg=") {
-            flags.link_args.push(nonempty(value, "--link-arg=")?);
+            overrides.link_args.push(nonempty(value, "--link-arg=")?);
         } else {
             rest.push(arg.clone());
         }
     }
-    if !rest.iter().any(|arg| !arg.starts_with('-')) {
-        rest.push(".".to_owned());
-    }
-    Ok((flags, rest))
+    Ok((output, rest))
 }
 
 /// Where a build's files go.
@@ -79,35 +66,33 @@ pub struct Layout {
     pub exe: PathBuf,
 }
 
-/// Computes the build layout. `project_dir` is the folder project's root
-/// (`None` for a single file, whose build folder is `./build`); `cross` is
-/// the triple when it differs from the host.
+/// Computes the build layout in the build folder `build_dir`. `output` is
+/// `-o`; `cross` is the triple when it differs from the host.
 pub fn layout(
     name: &str,
-    project_dir: Option<&Path>,
-    flags: &BuildFlags,
+    build_dir: &Path,
+    output: Option<&Path>,
     mode: &str,
     cross: Option<&str>,
     info: &LinkInfo,
 ) -> Layout {
-    let mut dir = flags.build_dir.clone().unwrap_or_else(|| {
-        project_dir.map_or_else(|| PathBuf::from("build"), |root| root.join("build"))
-    });
+    let mut dir = build_dir.to_path_buf();
     if let Some(triple) = cross {
         dir.push(triple);
     }
     dir.push(mode);
-    let exe = flags
-        .output
-        .clone()
-        .unwrap_or_else(|| dir.join(format!("{name}{}", info.exe_suffix)));
+    let exe = output.map_or_else(
+        || dir.join(format!("{name}{}", info.exe_suffix)),
+        Path::to_path_buf,
+    );
     Layout {
         obj: dir.join("obj").join(format!("{name}{}", info.obj_suffix)),
         exe,
     }
 }
 
-/// The program name: the file stem, or the project folder's name.
+/// The program name without a manifest: the file stem, or the project
+/// folder's name.
 fn program_name(input: &Path, is_dir: bool) -> String {
     let named = if is_dir {
         std::fs::canonicalize(input).ok().and_then(|path| {
@@ -122,26 +107,40 @@ fn program_name(input: &Path, is_dir: bool) -> String {
     named.unwrap_or_else(|| "main".to_owned())
 }
 
+/// A path made absolute against the working folder, for a linker that runs
+/// in another one.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub fn cmd_build(args: &[String]) -> ExitCode {
-    let (flags, rest) = match parse_build_flags(args) {
+    let mut overrides = Overrides::default();
+    let (output, rest) = match parse_build_flags(args, &mut overrides) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}\n{}", crate::HELP_HINT);
             return ExitCode::from(2);
         }
     };
-    let common = match crate::parse_common(&rest, false) {
+    let mut common = match crate::parse_common(&rest, false) {
         Ok(common) => common,
+        Err(code) => return code,
+    };
+    common.overrides.build_dir = overrides.build_dir;
+    common.overrides.linker = overrides.linker;
+    common.overrides.link_args = overrides.link_args;
+    let (settings, input) = match common.configure() {
+        Ok(configured) => configured,
         Err(code) => return code,
     };
     let verbosity = common
         .verbosity(Some(Verbosity::Normal))
         .unwrap_or(Verbosity::Normal);
     let mut session = common.session;
-    session.stack_traces = common
+    session.stack_traces = settings
         .stack_traces
         .unwrap_or(session.optimize == OptimizeMode::Debug);
-    if !common.target_set {
+    if settings.target.is_none() {
         session.target = session.host;
     }
     let triple = session.target.to_triple();
@@ -151,44 +150,50 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     };
     let reporter = Reporter::new(verbosity, session.opts.color);
 
-    let input = Path::new(&common.file);
-    let is_dir = crate::is_dir(&common.file);
-    let name = program_name(input, is_dir);
+    let is_dir = crate::is_dir(&input);
+    let name = settings
+        .name
+        .clone()
+        .unwrap_or_else(|| program_name(&input, is_dir));
     let mode = session.optimize.name();
     let cross = (session.target != session.host).then_some(triple.as_str());
-    let paths = layout(&name, is_dir.then_some(input), &flags, mode, cross, &info);
+    let build_dir = settings.build_dir.clone().unwrap_or_else(|| {
+        if is_dir {
+            input.join("build")
+        } else {
+            PathBuf::from("build")
+        }
+    });
+    let mut paths = layout(&name, &build_dir, output.as_deref(), mode, cross, &info);
+    // The linker runs in the manifest's folder, so Lilac's own paths are
+    // absolute.
+    let link_dir = settings.manifest_dir.clone();
+    if link_dir.is_some() {
+        paths = Layout {
+            obj: absolute(&paths.obj),
+            exe: absolute(&paths.exe),
+        };
+    }
 
     reporter.status(
         "Compiling",
-        &format!("{name} ({}) [{mode}, {triple}]", input.display()),
+        &format!("{name} ({}) [{mode}, {triple}]", common.file),
     );
     session.require_entry = true;
-    session.entry = if flags.libc {
-        Entry::CMain
-    } else {
-        Entry::Native
-    };
+    if settings.libc.is_none() {
+        session.entry = Entry::Native;
+    }
     let hook = reporter.clone();
     session.progress = Some(Progress::new(move |stage, event| hook.stage(stage, event)));
     let (result, dump_err) =
-        match crate::compile_input(&mut session, &common.file, common.dump_lir.as_deref()) {
+        match crate::compile_input(&mut session, &input, common.dump_lir.as_deref()) {
             Ok(pair) => pair,
             Err(code) => return code,
         };
     reporter.end();
     eprint!("{}", session.render_diagnostics());
     let Ok(module) = result else {
-        if session.opts.error_format == ErrorFormat::Human {
-            let errors = session.diags.error_count();
-            let noun = if errors == 1 { "error" } else { "errors" };
-            let hidden = match session.hidden_errors() {
-                0 => String::new(),
-                n => format!("; {n} not shown"),
-            };
-            reporter.error(&format!(
-                "could not compile `{name}` ({errors} {noun}{hidden})"
-            ));
-        }
+        could_not_compile(&session, &reporter, &name);
         return ExitCode::from(1);
     };
     if let Some(err) = &dump_err {
@@ -196,7 +201,13 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    if let Err(err) = emit_and_link(&module, &session, &flags, &info, &paths, &reporter) {
+    let link = Link {
+        settings: &settings,
+        info: &info,
+        paths: &paths,
+        dir: link_dir.as_deref(),
+    };
+    if let Err(err) = emit_and_link(&module, &session, &link, &reporter) {
         reporter.error(&err);
         return ExitCode::from(1);
     }
@@ -205,15 +216,40 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The closing line of a build that did not compile (human output only).
+fn could_not_compile(session: &Session, reporter: &Reporter, name: &str) {
+    if session.opts.error_format != ErrorFormat::Human {
+        return;
+    }
+    let errors = session.diags.error_count();
+    let noun = if errors == 1 { "error" } else { "errors" };
+    let hidden = match session.hidden_errors() {
+        0 => String::new(),
+        n => format!("; {n} not shown"),
+    };
+    reporter.error(&format!(
+        "could not compile `{name}` ({errors} {noun}{hidden})"
+    ));
+}
+
+/// What linking needs.
+struct Link<'a> {
+    settings: &'a Settings,
+    info: &'a LinkInfo,
+    paths: &'a Layout,
+    /// The folder the linker runs in: the manifest's, else the working
+    /// folder (`None`).
+    dir: Option<&'a Path>,
+}
+
 /// Compiles `module` to the object file and links the executable.
 fn emit_and_link(
     module: &lilac_ir::LirModule,
     session: &Session,
-    flags: &BuildFlags,
-    info: &LinkInfo,
-    paths: &Layout,
+    link: &Link<'_>,
     reporter: &Reporter,
 ) -> Result<(), String> {
+    let paths = link.paths;
     let file_name = |path: &Path| {
         path.file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -231,58 +267,68 @@ fn emit_and_link(
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     }
-    let (program, link_args, linker_name) = link_command(flags, session, info, paths)?;
+    let (program, link_args, linker_name) = link_command(link, session)?;
     reporter.linking(
         &file_name(&paths.exe),
         &linker_name,
         &link::render(&program, &link_args),
     );
-    link::run(&program, &link_args)
+    link::run(&program, &link_args, link.dir)
 }
 
 /// The linker program, its arguments, and a short name for the progress
 /// line.
 fn link_command(
-    flags: &BuildFlags,
+    link: &Link<'_>,
     session: &Session,
-    info: &LinkInfo,
-    paths: &Layout,
 ) -> Result<(PathBuf, Vec<OsString>, String), String> {
     let exists = |path: &Path| path.is_file() || path.is_dir();
+    // In another folder, a path the run was given is made absolute.
+    let place = |path: PathBuf| {
+        if link.dir.is_some() && path.components().count() > 1 {
+            absolute(&path)
+        } else {
+            path
+        }
+    };
     let triple = session.target.to_triple();
-    if flags.libc {
+    let (settings, paths) = (link.settings, link.paths);
+    if session.entry == Entry::CMain {
         let program = link::find_driver(
-            flags.linker.as_deref(),
-            std::env::var_os(link::LINKER_VAR).map(PathBuf::from),
+            settings.linker.as_deref(),
+            None,
             std::env::var_os("PATH").as_deref(),
             &exists,
         )?;
+        let program = place(program);
         let cross = (session.target != session.host).then_some(triple.as_str());
-        let args = link::libc_args(&paths.obj, &paths.exe, cross, &flags.link_args);
+        let args = link::libc_args(&paths.obj, &paths.exe, cross, &settings.link_args);
         let name = program
             .file_stem()
             .map_or_else(|| "cc".to_owned(), |n| n.to_string_lossy().into_owned());
         return Ok((program, args, name));
     }
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
     let sysroot = link::find_sysroot(
         std::env::var_os(link::SYSROOT_VAR).map(PathBuf::from),
-        exe_dir.as_deref(),
+        crate::exe_dir().as_deref(),
         &exists,
     )?;
+    let sysroot = if link.dir.is_some() {
+        absolute(&sysroot)
+    } else {
+        sysroot
+    };
     let program = sysroot
         .join("bin")
         .join(format!("lld{}", std::env::consts::EXE_SUFFIX));
     let args = link::native_args(
-        info,
+        link.info,
         &triple,
         session.target.arch.as_str(),
         &sysroot,
         &paths.obj,
         &paths.exe,
-        &flags.link_args,
+        &settings.link_args,
     );
     Ok((program, args, "lld".to_owned()))
 }
@@ -321,40 +367,45 @@ mod tests {
 
     #[test]
     fn build_flags_split_from_common_flags() {
-        let (flags, rest) = parse_build_flags(&args(&[
-            "--libc",
-            "-o",
-            "out/x.exe",
-            "--release",
-            "--link-arg=a.lib",
-            "--link-arg=b.lib",
-            "-q",
-            "src",
-        ]))
+        let mut overrides = Overrides::default();
+        let (output, rest) = parse_build_flags(
+            &args(&[
+                "--libc",
+                "-o",
+                "out/x.exe",
+                "--release",
+                "--link-arg=a.lib",
+                "--link-arg=b.lib",
+                "--build-dir=b",
+                "--linker=clang",
+                "-q",
+                "src",
+            ]),
+            &mut overrides,
+        )
         .expect("valid");
-        assert!(flags.libc);
-        assert_eq!(flags.output, Some(PathBuf::from("out/x.exe")));
-        assert_eq!(flags.link_args, ["a.lib", "b.lib"]);
-        assert_eq!(rest, ["--release", "-q", "src"]);
-    }
-
-    #[test]
-    fn input_defaults_to_current_dir() {
-        let (_, rest) = parse_build_flags(&args(&["--release"])).expect("valid");
-        assert_eq!(rest, ["--release", "."]);
+        assert_eq!(output, Some(PathBuf::from("out/x.exe")));
+        assert_eq!(overrides.link_args, ["a.lib", "b.lib"]);
+        assert_eq!(overrides.build_dir, Some(PathBuf::from("b")));
+        assert_eq!(overrides.linker, Some(PathBuf::from("clang")));
+        assert_eq!(rest, ["--libc", "--release", "-q", "src"]);
     }
 
     #[test]
     fn bad_build_flags_are_rejected() {
-        assert!(parse_build_flags(&args(&["-o"])).is_err());
-        assert!(parse_build_flags(&args(&["--build-dir="])).is_err());
-        assert!(parse_build_flags(&args(&["--link-arg="])).is_err());
+        for bad in [
+            &["-o"][..],
+            &["--build-dir="],
+            &["--link-arg="],
+            &["--linker="],
+        ] {
+            assert!(parse_build_flags(&args(bad), &mut Overrides::default()).is_err());
+        }
     }
 
     #[test]
     fn layout_uses_the_build_folder() {
-        let flags = BuildFlags::default();
-        let single = layout("hello", None, &flags, "debug", None, &windows());
+        let single = layout("hello", Path::new("build"), None, "debug", None, &windows());
         assert_eq!(
             single,
             Layout {
@@ -367,8 +418,8 @@ mod tests {
         );
         let project = layout(
             "app",
-            Some(Path::new("proj")),
-            &flags,
+            &Path::new("proj").join("build"),
+            None,
             "release",
             None,
             &windows(),
@@ -382,8 +433,8 @@ mod tests {
         );
         let cross = layout(
             "app",
+            Path::new("build"),
             None,
-            &flags,
             "debug",
             Some("x86_64-unknown-linux-gnu"),
             &windows(),
@@ -398,16 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn layout_overrides() {
-        let flags = BuildFlags {
-            build_dir: Some(PathBuf::from("b")),
-            output: Some(PathBuf::from("bin/x.exe")),
-            ..BuildFlags::default()
-        };
+    fn output_overrides_the_executable() {
         let paths = layout(
             "app",
-            Some(Path::new("proj")),
-            &flags,
+            Path::new("b"),
+            Some(Path::new("bin/x.exe")),
             "debug",
             None,
             &windows(),
