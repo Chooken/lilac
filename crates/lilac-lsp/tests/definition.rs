@@ -246,8 +246,8 @@ fn definition_in_project_mode_with_vscode_style_uri() {
 }
 
 #[test]
-fn definition_uses_the_lilac_json_root() {
-    // The workspace root is `dir`, but `lilac.json` points the project at
+fn definition_uses_the_lilac_toml_root() {
+    // The workspace root is `dir`, but `lilac.toml` points the project at
     // `dir/proj`. Cross-file definition proves the project (not a per-file
     // fallback) compiled, since a standalone `main.lilac` could not resolve
     // `helper` in `lib.lilac`.
@@ -258,7 +258,7 @@ fn definition_uses_the_lilac_json_root() {
     let main = proj.join("main.lilac");
     let text = "main: function () nothing {\n    helper()\n}\n";
     std::fs::write(&main, text).expect("main");
-    std::fs::write(dir.join("lilac.json"), r#"{ "root": "proj" }"#).expect("config");
+    std::fs::write(dir.join("lilac.toml"), "[project]\nroot = \"proj\"\n").expect("config");
     let root = Url::from_directory_path(&dir).expect("root uri");
     let main_uri = vscode_file_uri(&main);
 

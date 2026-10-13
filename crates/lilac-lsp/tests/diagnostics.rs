@@ -397,29 +397,32 @@ fn requests_do_not_postpone_diagnostics() {
     handle.join().expect("server thread");
 }
 
-/// A spanless project error goes to `lilac.json` when there is one.
+/// A spanless project error goes to `lilac.toml` when there is one.
 #[test]
-fn spanless_errors_go_to_lilac_json() {
+fn spanless_errors_go_to_lilac_toml() {
     let dir = temp_project("anchor-config");
-    std::fs::write(
-        dir.join("lilac.json"),
-        r#"{ "libraries": { "Gone": "gone" } }"#,
-    )
-    .expect("write");
+    std::fs::write(dir.join("lilac.toml"), "[project]\n").expect("write");
     let main = dir.join("main.lilac");
     std::fs::write(&main, "main: function () nothing {\n}\n").expect("write");
 
     let (client, handle) = start_server();
-    initialize(
+    initialize_with(
         &client,
-        Some(&Url::from_directory_path(&dir).expect("root")),
+        serde_json::json!({
+            "capabilities": {},
+            "workspaceFolders": [{
+                "uri": Url::from_directory_path(&dir).expect("root").as_str(),
+                "name": "ws",
+            }],
+            "initializationOptions": { "libraries": { "Gone": "gone" } },
+        }),
     );
     did_open(
         &client,
         &Url::from_file_path(&main).expect("uri"),
         "main: function () nothing {\n}\n",
     );
-    let config = Url::from_file_path(dir.join("lilac.json")).expect("uri");
+    let config = Url::from_file_path(dir.join("lilac.toml")).expect("uri");
     let params = publish_for(&client, &config);
     assert!(has_code(&params, "E025"), "{:?}", params.diagnostics);
 
@@ -428,7 +431,7 @@ fn spanless_errors_go_to_lilac_json() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Without `lilac.json`, a spanless error goes to the root's `main.lilac`,
+/// Without `lilac.toml`, a spanless error goes to the root's `main.lilac`,
 /// not to whichever document is open.
 #[test]
 fn spanless_errors_go_to_the_root_main() {
@@ -537,7 +540,7 @@ fn library_setting_changes_apply() {
 }
 
 /// A client that can register watchers is asked to watch `.lilac` files
-/// and `lilac.json`.
+/// and `lilac.toml`.
 #[test]
 fn file_watchers_are_registered() {
     let (client, handle) = start_server();
@@ -559,7 +562,7 @@ fn file_watchers_are_registered() {
     assert_eq!(request.method, "client/registerCapability");
     let text = request.params.to_string();
     assert!(text.contains("workspace/didChangeWatchedFiles"), "{text}");
-    assert!(text.contains("**/lilac.json"), "{text}");
+    assert!(text.contains("**/lilac.toml"), "{text}");
     shutdown(&client);
     handle.join().expect("server thread");
 }
@@ -705,19 +708,19 @@ fn an_edit_cancels_a_slow_compile() {
     handle.join().expect("server thread");
 }
 
-/// A library vendored inside the workspace and mounted by `lilac.json`
-/// (`"Util": "vendor/Util"`) loads once, under its mount name: no file,
-/// `lilac.json` included, gets an `E025` or any other diagnostic.
+/// A library vendored inside the workspace and mounted by `lilac.toml`
+/// (`Util = "vendor/Util"`) loads once, under its mount name: no file,
+/// `lilac.toml` included, gets an `E025` or any other diagnostic.
 #[test]
-fn a_vendored_library_from_lilac_json_checks_clean() {
+fn a_vendored_library_from_lilac_toml_checks_clean() {
     let dir = temp_project("vendored");
-    std::fs::write(
-        dir.join("lilac.json"),
-        r#"{ "libraries": { "Util": "vendor/Util" } }"#,
-    )
-    .expect("write");
     let util = dir.join("vendor").join("Util");
     std::fs::create_dir_all(&util).expect("mkdir");
+    std::fs::write(
+        dir.join("lilac.toml"),
+        "[libraries]\nUtil = \"vendor/Util\"\n",
+    )
+    .expect("write");
     std::fs::write(
         util.join("util.lilac"),
         "helper: function () nothing {\n}\n",
@@ -735,7 +738,7 @@ fn a_vendored_library_from_lilac_json_checks_clean() {
     let main_uri = Url::from_file_path(&main).expect("uri");
     did_open(&client, &main_uri, text);
     // Every publish of this compile is empty (a spanless error would go to
-    // `lilac.json`), up to `main.lilac`'s and for a second after it.
+    // `lilac.toml`), up to `main.lilac`'s and for a second after it.
     let mut seen_main = false;
     loop {
         let message = match client

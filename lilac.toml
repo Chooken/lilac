@@ -1,0 +1,5 @@
+# The repository is the editor's project: `lib/Standard` checked as a
+# library, and the run tests and examples beside it.
+
+[libraries]
+Standard = "lib/Standard"

@@ -350,6 +350,7 @@ dependencies = [
  "lilac-hir",
  "lilac-ir",
  "lilac-lex",
+ "lilac-manifest",
  "lilac-module",
  "lilac-parse",
  "lilac-resolve",

@@ -40,6 +40,7 @@ pub mod handlers;
 pub mod hints;
 pub mod index;
 pub mod lir;
+pub mod manifest;
 pub mod navigate;
 pub mod render;
 pub mod roots;

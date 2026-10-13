@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+- The server reads the workspace's `lilac.toml` (the manifest
+  `lilac build` reads) instead of `lilac.json`: its root, libraries,
+  target, mode and `link.libc` apply to every check, its mistakes are
+  shown on it, and saving it rechecks. A workspace with only a
+  `lilac.json` is told to move it. The extension starts in a workspace
+  with a `lilac.toml`, so its errors show before a `.lilac` file opens.
+
 ## 0.5.0
 
 - **Lilac: Restart Language Server** command, to pick up a rebuilt

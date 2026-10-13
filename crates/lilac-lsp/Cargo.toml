@@ -17,6 +17,7 @@ lilac-lex = { path = "../lilac-lex" }
 lilac-parse = { path = "../lilac-parse" }
 lilac-resolve = { path = "../lilac-resolve" }
 lilac-span = { path = "../lilac-span" }
+lilac-manifest = { path = "../lilac-manifest" }
 lilac-module = { path = "../lilac-module" }
 lilac-ty = { path = "../lilac-ty" }
 crossbeam-channel = "0.5"

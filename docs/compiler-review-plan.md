@@ -14,7 +14,8 @@
 >   until then the LIR codec and `--cache-dir` are deleted.
 > - **`lilac.json` stays LSP workspace settings.** A Zig-style build system is
 >   planned later; nothing here makes the CLI read `lilac.json` or auto-mount
->   `Standard`.
+>   `Standard`. (Superseded: `lilac.toml` replaces it for the CLI and the editor,
+>   `docs/manifest-plan.md`.)
 
 ## Ground rules
 

@@ -241,8 +241,9 @@
   are `NsId`s, and each file has a `FileScope` (its visible-name map, already
   filtered by visibility and reach). Typeck and lowering look names up through
   `Resolved::lookup` with the file's id (`E029` on an ambiguous use).
-- Libraries: `--lib=Name=dir` and `lilac.toml`'s `[libraries]` (CLI) /
-  `lilac.json` `"libraries"` and the `lilac.libraries` setting (LSP) mount `dir` as the top-level namespace `Name`;
+- Libraries: `--lib=Name=dir` and `lilac.toml`'s `[libraries]` (the
+  language server's `lilac.libraries` setting is its `--lib=`) mount `dir`
+  as the top-level namespace `Name`;
   `Session.libraries` carries them into `lilac_module::load_with_status`.
   `using *.A` is relative to the importing file's namespace.
 - Projects and mounted libraries load whole: after the `using` fixpoint
@@ -367,7 +368,7 @@
   (`Backend::emit_object`, with an `Entry` and a `CodegenStep` callback) and
   links an executable. A project's configuration is its `lilac.toml`, and
   a flag overrides its setting for one run (`docs/manifest-plan.md`);
-  `lilac.json` is still the language server's until it moves over.
+  the language server reads it too.
 - The CLI (`main.rs`): `build`, `check`, `emit-ir` and `emit-llvm` take a
   file or folder, `.` by default. The flag parsers fill
   `lilac_manifest::Overrides`, not the session; `Common::configure` reads
@@ -487,8 +488,21 @@
   and `serde_json` (and thus serde). The compiler crates stay std-only.
 - The VSCode extension under `editors/vscode/` launches it via the
   `lilac.serverPath` setting (default `lilac-lsp` on PATH).
-- Compile units: the project (`lilac.json` `root`, else the workspace
-  folder); an open file it does not reach is compiled as its library
+- Settings (`manifest.rs`, `Server::read_manifest`): the workspace's
+  `lilac.toml`, read from disk by `Manifest::read` and resolved with the
+  `lilac.libraries` setting as the `--lib=` overrides
+  (`Settings::resolve`), so the editor checks what `lilac build` builds:
+  `new_session` calls `Settings::apply` (root, libraries, target, mode,
+  libc, build folder; `require_entry` stays off), and without a manifest
+  the session is the default one. An `E075` keeps the last good manifest
+  (`Server::good_manifest`), an `E076` drops only its setting. The
+  manifest's diagnostics ride in each compile's publish on `lilac.toml`
+  (`Job::manifest`), with the project's spanless ones, so neither clears
+  the other; a manifest makes the server compile at startup. A workspace
+  with a `lilac.json` and no `lilac.toml` gets one `window/showMessage`
+  warning (`lilac.json` is not read).
+- Compile units: the project (the manifest's `project.root`, else the
+  workspace folder); an open file it does not reach is compiled as its library
   namespace (`Session::compile_namespace_with_stages`), else its folder, else
   alone (`compile::unit_of`: alone when the parser finds a top-level `main`
   function, `declares_main`, counting a failed declaration whose header
@@ -528,10 +542,10 @@
   Each publish carries the version of the document it compiled. The
   retained analysis must stay `Send + Sync` (no `Rc` in `Resolved`, and
   `lilac_driver::Progress` is `Send + Sync`). A diagnostic without a span goes to
-  `lilac.json`, else the unit's `main.lilac`, else its first open file by
-  URI (`Server::project_anchor`). The server registers watchers for
-  `**/*.lilac` and `**/lilac.json` (recompile; a `lilac.json` change
-  re-reads the root and libraries) and takes `lilac.libraries` from
+  `lilac.toml`, else the unit's `main.lilac`, else its first open file by
+  URI (`Job::project_anchor`). The server registers watchers for
+  `**/*.lilac` and `**/lilac.toml` (recompile; a change to the
+  workspace's `lilac.toml` re-reads the settings) and takes `lilac.libraries` from
   `workspace/didChangeConfiguration` without a restart.
 - Navigation (`navigate.rs`): a name is an item (`DefId`: the index's
   `defs` and `uses`), a local, keyed by its declaration's name span

@@ -1,5 +1,5 @@
 //! Compiling the workspace off the main thread: a [`Job`] snapshots what a
-//! compile reads (documents, root, libraries), runs on the worker
+//! compile reads (documents, root, settings), runs on the worker
 //! ([`spawn_worker`]), and comes back as [`Compiled`]: the retained
 //! analyses and the diagnostics to publish.
 
@@ -15,6 +15,7 @@ use lilac_driver::{Keep, Session};
 use lilac_error::{Diagnostic, Diags, ErrorGuaranteed};
 use lilac_ir::LirModule;
 use lilac_lex::Lexer;
+use lilac_manifest::Settings;
 use lilac_parse::Parser;
 use lilac_span::FileId;
 use lsp_types::{Diagnostic as LspDiagnostic, Url};
@@ -33,12 +34,14 @@ pub struct Job {
     pub generation: u64,
     /// The open documents.
     pub documents: Documents,
-    /// The workspace folder (holds `lilac.json`).
-    pub workspace: Option<PathBuf>,
     /// The project root.
     pub root: Option<PathBuf>,
-    /// Mounted libraries.
-    pub libraries: Vec<(String, PathBuf)>,
+    /// The workspace's settings (its `lilac.toml` under the
+    /// `lilac.libraries` setting), applied to every session.
+    pub settings: Settings,
+    /// The workspace's `lilac.toml` and its diagnostics, published with
+    /// the project's diagnostics that have no span.
+    pub manifest: Option<(Url, Vec<LspDiagnostic>)>,
     /// Set by the server when a newer compile is due: every session of
     /// this job stops at its next check, and [`Job::run`] returns `None`.
     pub cancel: Arc<AtomicBool>,
@@ -134,7 +137,7 @@ impl Job {
         let mut covered: HashSet<Url> = HashSet::new();
         let project = match &self.root {
             Some(root) => {
-                let mut session = new_session(&self.libraries, &self.cancel);
+                let mut session = new_session(&self.settings, &self.cancel);
                 let mut fs = OverlayFs { overlay: &overlay };
                 let mut capture = Capture::new(self.capture_lir);
                 let result =
@@ -156,6 +159,13 @@ impl Job {
             }
             None => None,
         };
+        // In the same publish as the project's, so neither clears the other.
+        if let Some((manifest, found)) = &self.manifest {
+            by_uri
+                .entry(manifest.clone())
+                .or_default()
+                .extend(found.iter().cloned());
+        }
         let per_file = self.compile_units(&overlay, &mut covered, &mut by_uri)?;
 
         // Key everything by the client's spelling of an open document's URI
@@ -195,16 +205,11 @@ impl Job {
     }
 
     /// Where the project's diagnostics without a source span go: the
-    /// workspace's `lilac.json`, else the root's `main.lilac`, else the
+    /// workspace's `lilac.toml`, else the root's `main.lilac`, else the
     /// first open document under the root (by URI, so the choice is stable).
     fn project_anchor(&self, root: &Path) -> Option<Url> {
-        let config = self
-            .workspace
-            .as_deref()
-            .map(|workspace| workspace.join("lilac.json"))
-            .filter(|config| config.is_file());
-        if let Some(config) = config {
-            return Url::from_file_path(config).ok();
+        if let Some((manifest, _)) = &self.manifest {
+            return Some(manifest.clone());
         }
         let open: Vec<&Url> = self
             .documents
@@ -250,7 +255,11 @@ impl Job {
                 continue;
             }
             units
-                .entry(unit_of(&document.path, &document.text, &self.libraries))
+                .entry(unit_of(
+                    &document.path,
+                    &document.text,
+                    &self.settings.libraries,
+                ))
                 .or_default()
                 .push(uri.clone());
         }
@@ -263,7 +272,7 @@ impl Job {
             {
                 continue;
             }
-            let mut session = new_session(&self.libraries, &self.cancel);
+            let mut session = new_session(&self.settings, &self.cancel);
             let mut capture = Capture::new(self.capture_lir);
             let mut on_stage = |name, lir: &LirModule| capture.stage(name, lir);
             let mut fs = OverlayFs { overlay };
@@ -307,10 +316,12 @@ impl Job {
 
 /// A compiler session for editor use. It analyzes tolerantly and keeps
 /// the analysis, so hover/definition keep working while the buffer has
-/// syntax or type errors, and stops when `cancel` is set.
-fn new_session(libraries: &[(String, PathBuf)], cancel: &Arc<AtomicBool>) -> Session {
+/// syntax or type errors, and stops when `cancel` is set. The settings
+/// give its libraries and, with a manifest, its target, mode and entry;
+/// it never requires the platform hooks, which only a build needs.
+fn new_session(settings: &Settings, cancel: &Arc<AtomicBool>) -> Session {
     let mut session = Session::new();
-    session.libraries = libraries.to_vec();
+    settings.apply(&mut session);
     session.cancel = Some(Arc::clone(cancel));
     session.keep_analysis = Keep::Partial;
     session

@@ -11,6 +11,7 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:lilac",
+    "workspaceContains:lilac.toml",
     "onCommand:lilac.showLir",
     "onCommand:lilac.selectLirStage",
     "onCommand:lilac.restartServer"
@@ -74,7 +75,7 @@
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "string" },
-          "description": "Mounted libraries, as { \"Name\": \"dir\" } (the CLI's --lib=Name=dir). A relative dir is taken from the workspace folder. Merged over lilac.json's \"libraries\"."
+          "description": "Mounted libraries, as { \"Name\": \"dir\" } (the CLI's --lib=Name=dir). A relative dir is taken from the workspace folder. Each replaces the library of its name in lilac.toml's [libraries], as --lib= does."
         }
       }
     }

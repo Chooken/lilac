@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
+use lilac_driver::Target;
+use lilac_manifest::{Manifest, Overrides, Settings};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
@@ -18,6 +20,7 @@ use lsp_types::{
 use crate::compile::{self, Job, Outcome};
 use crate::documents::{Document, Documents, Edit};
 use crate::index::Retained;
+use crate::manifest::{self, ManifestFile};
 use crate::roots::{self, canonical_file_uri};
 
 /// Quiet time after the last change before recompiling. Requests (hover,
@@ -66,15 +69,24 @@ enum Wait {
 pub struct Server {
     connection: Connection,
     documents: Documents,
-    /// The workspace folder (holds `lilac.json`).
+    /// The workspace folder (holds `lilac.toml`).
     workspace: Option<PathBuf>,
-    /// The `lilac.libraries` setting.
+    /// The `lilac.libraries` setting: each replaces the manifest's library
+    /// of its name, as `--lib=` does.
     setting_libraries: Vec<(String, PathBuf)>,
-    /// The project root ([`roots::project_root`] of the workspace).
+    /// The workspace's `lilac.toml` as last read (`None` without one).
+    manifest: Option<ManifestFile>,
+    /// The last manifest that was TOML Lilac reads: a syntax error
+    /// (`E075`) keeps its settings.
+    good_manifest: Option<Manifest>,
+    /// The settings every session gets: `setting_libraries` over
+    /// `good_manifest`.
+    settings: Settings,
+    /// The project root: the manifest's `project.root`, else the
+    /// workspace folder.
     root: Option<PathBuf>,
-    /// Mounted libraries (`lilac.json` and `lilac.libraries`), passed to
-    /// every session.
-    libraries: Vec<(String, PathBuf)>,
+    /// Whether the user was told `lilac.json` is no longer read.
+    warned_json: bool,
     /// Whether the client accepts `workspace/semanticTokens/refresh`.
     refresh_tokens: bool,
     /// Id of the next server-to-client request.
@@ -133,8 +145,8 @@ enum IrView {
 
 impl Server {
     /// New server over `connection` for `workspace` (project mode) or `None`,
-    /// with the `lilac.libraries` setting `setting_libraries` (merged over
-    /// `lilac.json`'s). With `refresh_tokens`, the client is asked to
+    /// with the `lilac.libraries` setting `setting_libraries` (over the
+    /// manifest's libraries). With `refresh_tokens`, the client is asked to
     /// re-request semantic tokens after every compile.
     #[must_use]
     pub fn new(
@@ -149,8 +161,11 @@ impl Server {
             documents: Documents::new(),
             workspace,
             setting_libraries,
+            manifest: None,
+            good_manifest: None,
+            settings: Settings::default(),
             root: None,
-            libraries: Vec::new(),
+            warned_json: false,
             refresh_tokens,
             next_request: 0,
             deadline: None,
@@ -168,22 +183,59 @@ impl Server {
             parked: Vec::new(),
             ir_view: IrView::Unused,
         };
-        server.configure();
+        server.read_manifest();
+        // Show the manifest's errors before any document opens.
+        if server.manifest.is_some() {
+            server.touch();
+        }
         server
     }
 
-    /// Re-reads `lilac.json`: the project root and the mounted libraries.
+    /// Re-reads the workspace's `lilac.toml` from disk, then the settings.
+    /// A workspace with only a `lilac.json` is told once that it is no
+    /// longer read.
+    fn read_manifest(&mut self) {
+        self.manifest = self.workspace.as_deref().and_then(manifest::read);
+        match &self.manifest {
+            Some(file) => {
+                if let Some(manifest) = &file.manifest {
+                    self.good_manifest = Some(manifest.clone());
+                }
+            }
+            None => self.good_manifest = None,
+        }
+        let json = self
+            .workspace
+            .as_deref()
+            .is_some_and(|workspace| workspace.join("lilac.json").is_file());
+        if json && self.manifest.is_none() && !self.warned_json {
+            self.warned_json = true;
+            self.show_message(
+                lsp_types::MessageType::WARNING,
+                "Lilac no longer reads lilac.json: move its `root` and `libraries` into a \
+                 lilac.toml (`lilac init` writes one).",
+            );
+        }
+        self.configure();
+    }
+
+    /// Resolves the settings: the `lilac.libraries` setting over the last
+    /// good manifest, whose `project.root` is the project root.
     fn configure(&mut self) {
-        let workspace = self.workspace.as_deref();
-        self.libraries = roots::merge_libraries(
-            workspace.map_or_else(Vec::new, roots::config_libraries),
-            self.setting_libraries.clone(),
-        );
-        self.root = workspace.map(roots::project_root);
+        let overrides = Overrides {
+            libraries: self.setting_libraries.clone(),
+            ..Overrides::default()
+        };
+        self.settings = Settings::resolve(self.good_manifest.as_ref(), &overrides, Target::host());
+        self.root = self
+            .settings
+            .root
+            .clone()
+            .or_else(|| self.workspace.clone());
     }
 
     /// Asks the client to report changes to `.lilac` files and
-    /// `lilac.json` (`workspace/didChangeWatchedFiles`), for a client that
+    /// `lilac.toml` (`workspace/didChangeWatchedFiles`), for a client that
     /// supports registering watchers.
     pub fn watch_files(&mut self) {
         self.next_request += 1;
@@ -197,7 +249,7 @@ impl Server {
                     "registerOptions": {
                         "watchers": [
                             { "globPattern": "**/*.lilac" },
-                            { "globPattern": "**/lilac.json" },
+                            { "globPattern": "**/lilac.toml" },
                         ],
                     },
                 }],
@@ -475,9 +527,14 @@ impl Server {
             let Some(retained) = self.retained_for(uri) else {
                 return Ok(null);
             };
-            crate::navigate::prepare_rename(retained, uri, params.position, &self.libraries)
-                .map_err(refused)?
-                .and_then(|range| serde_json::to_value(range).ok())
+            crate::navigate::prepare_rename(
+                retained,
+                uri,
+                params.position,
+                &self.settings.libraries,
+            )
+            .map_err(refused)?
+            .and_then(|range| serde_json::to_value(range).ok())
         } else {
             let Ok(params) =
                 serde_json::from_value::<lsp_types::RenameParams>(request.params.clone())
@@ -494,7 +551,7 @@ impl Server {
                 uri,
                 position.position,
                 &params.new_name,
-                &self.libraries,
+                &self.settings.libraries,
             )
             .map_err(refused)?
             .and_then(|edit| serde_json::to_value(edit).ok())
@@ -641,17 +698,25 @@ impl Server {
             }
             // Files changed on disk (new, deleted, `git checkout`): files
             // are read afresh on every compile, so recompiling is enough,
-            // plus re-reading `lilac.json` when it changed.
+            // plus re-reading the workspace's `lilac.toml` when it changed
+            // (it is read from disk, so an edit applies once saved).
             "workspace/didChangeWatchedFiles" => {
                 if let Ok(params) = notification
                     .extract::<DidChangeWatchedFilesParams>("workspace/didChangeWatchedFiles")
                 {
-                    let config = params.changes.iter().any(|change| {
-                        roots::url_to_path(&change.uri)
-                            .is_some_and(|path| path.file_name() == Some("lilac.json".as_ref()))
+                    let manifest = self
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| workspace.join(lilac_manifest::MANIFEST_FILE));
+                    let changed = params.changes.iter().any(|change| {
+                        roots::url_to_path(&change.uri).is_some_and(|path| {
+                            manifest
+                                .as_ref()
+                                .is_some_and(|manifest| same_file(&path, manifest))
+                        })
                     });
-                    if config {
-                        self.configure();
+                    if changed {
+                        self.read_manifest();
                     }
                     self.touch();
                 }
@@ -743,9 +808,12 @@ impl Server {
         let job = Job {
             generation: self.generation,
             documents: self.documents.clone(),
-            workspace: self.workspace.clone(),
             root: self.root.clone(),
-            libraries: self.libraries.clone(),
+            settings: self.settings.clone(),
+            manifest: self
+                .manifest
+                .as_ref()
+                .map(|file| (file.uri.clone(), file.diagnostics.clone())),
             cancel: Arc::clone(&cancel),
             capture_lir: self.ir_view != IrView::Unused,
         };
@@ -828,8 +896,13 @@ impl Server {
 
     /// Shows `message` to the user as an error (`window/showMessage`).
     fn show_error(&self, message: &str) {
+        self.show_message(lsp_types::MessageType::ERROR, message);
+    }
+
+    /// Shows `message` to the user (`window/showMessage`).
+    fn show_message(&self, typ: lsp_types::MessageType, message: &str) {
         let params = lsp_types::ShowMessageParams {
-            typ: lsp_types::MessageType::ERROR,
+            typ,
             message: message.to_owned(),
         };
         if let Ok(params) = serde_json::to_value(params) {
@@ -863,6 +936,14 @@ impl Server {
     }
 }
 
+/// Whether two paths name one file, however the client spells the drive.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (Url::from_file_path(a), Url::from_file_path(b)) {
+        (Ok(a), Ok(b)) => canonical_file_uri(&a) == canonical_file_uri(&b),
+        _ => a == b,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,9 +969,9 @@ mod tests {
         Job {
             generation: server.generation,
             documents: server.documents.clone(),
-            workspace: None,
             root: None,
-            libraries: Vec::new(),
+            settings: Settings::default(),
+            manifest: None,
             cancel: Arc::new(AtomicBool::new(false)),
             capture_lir: server.ir_view != IrView::Unused,
         }

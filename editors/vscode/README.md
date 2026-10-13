@@ -15,22 +15,34 @@ language server adds semantic highlighting on top.
 ## Language server and project settings
 
 The extension starts `lilac-lsp` (the `lilac.serverPath` setting) for
-diagnostics, hover, go-to-definition and semantic highlighting. Put a
-`lilac.json` in the workspace folder to describe the project:
+diagnostics, hover, go-to-definition and semantic highlighting. It reads
+the workspace folder's `lilac.toml`, the project manifest `lilac build`
+reads (`lilac init` writes one), so the editor checks the program the
+CLI builds:
 
-```json
-{
-  "root": "src",
-  "libraries": { "Standard": "lib/Standard" }
-}
+```toml
+[project]
+root = "src"
+
+[build]
+target = "host"
+
+[libraries]
+Standard = { bundled = true }
 ```
 
-- `root`: the project's root folder (default: the workspace folder).
-- `libraries`: libraries to mount, as the CLI's `--lib=Name=dir`. A relative
-  `dir` is taken from the workspace folder.
+Its root, libraries, target, mode and `link.libc` apply to every check
+(the main project's README lists every setting). Mistakes in it are
+shown on the file. The server reads it from disk, so a change applies
+when the file is saved. A file that is not TOML keeps the last settings
+that were.
 
-The `lilac.libraries` setting mounts libraries the same way and wins on a name
-both define. Restart the server (reload the window) after changing either.
+The `lilac.libraries` setting mounts libraries as `{ "Name": "dir" }`
+(a relative `dir` is taken from the workspace folder); each replaces the
+manifest's library of that name, as `--lib=` does on the command line.
+
+`lilac.json` is no longer read: move its `root` and `libraries` into
+`lilac.toml`.
 
 An open file the project does not reach is checked as the library namespace
 it lies in, else as its folder (when the folder has a `main.lilac` or the file
