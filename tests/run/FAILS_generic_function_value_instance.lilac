@@ -1,0 +1,16 @@
+// expect-error: E042
+// expect-stderr: error[E042]: type `Empty` does not satisfy `double[T]` requirements
+// expect-stderr:   --> FAILS_generic_function_value_instance.lilac:15:48
+// expect-stderr:                at main (FAILS_generic_function_value_instance.lilac:15:48)
+// An instance named by `ref` is requested like a call's: one whose body
+// fails is `E042`, traced to the `ref`.
+
+double[T]: function (value: T) out: T {
+    out = value + value
+}
+
+Empty: object {}
+
+main: function () nothing {
+    f: ref function (value: Empty) Empty = ref double[Empty]
+}

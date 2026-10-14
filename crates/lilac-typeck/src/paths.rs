@@ -72,6 +72,27 @@ pub(crate) fn segment_spans(span: Span, name: &str) -> Option<Vec<Span>> {
     Some(spans)
 }
 
+/// The name chain the path `name` spelled at `span` is (`A.B.f` as
+/// `A`, `.B`, `.f`), as the parser builds one: each segment at its own
+/// span ([`segment_spans`]), or at `span` when the path was written with
+/// space between its segments.
+pub(crate) fn path_expr(name: &str, span: Span) -> Expr {
+    let spans = segment_spans(span, name).unwrap_or_default();
+    let mut segments = name.split('.').enumerate().map(|(at, segment)| {
+        let at = spans.get(at).copied().unwrap_or(span);
+        (segment.to_owned(), at)
+    });
+    let (head, head_span) = segments.next().unwrap_or_else(|| (String::new(), span));
+    segments.fold(Expr::Ident(head, head_span), |obj, (field, at)| {
+        let start = obj.span();
+        Expr::Member {
+            obj: Box::new(obj),
+            field,
+            span: Span::new(start.lo.0, at.hi.0, at.file),
+        }
+    })
+}
+
 impl Checker<'_> {
     /// The namespace of the file being checked.
     pub(crate) fn file_ns(&self) -> NsId {

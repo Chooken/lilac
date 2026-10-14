@@ -1,7 +1,7 @@
 # Function Values Plan
 
-> Status: phases 1, 2 and 3 implemented, 2026-10-14. The decisions marked "agreed" were settled
-> in discussion; the rest are proposed.
+> Status: implemented (phases 1 to 4), 2026-10-14. The decisions marked
+> "agreed" were settled in discussion; the rest are proposed.
 >
 > Goal: a function value is a `ref function`. It can live anywhere a value
 > lives (a field, a global, a constant, an array, an enum payload, a
@@ -569,11 +569,12 @@ ARENA_TABLE: AllocatorTable = AllocatorTable {
 
 ### Implementation
 
-- **Parser:** inside `ref`'s operand only, a member chain may end in
-  `[args]` with no `(` after it. It parses as a new `Expr::Instance {
-  callee, generic_args, span }`. Today this is "expected `(` after
-  generic arguments"; it stays that error everywhere else, so the
-  bracket reservation holds.
+- **Parser:** a member chain may end in `[args]` with no `(` after it,
+  past anything but a plain path. It parses as a new `Expr::Instance {
+  callee, generic_args, span }`, under `ref` or not, so that typeck can
+  say `E077` without `ref` (as built, this replaced the planned "only
+  under `ref`": a parse error there would hide the fix). Arguments only
+  parse as types, so an index such as `make()[0]` stays a parse error.
   - `ref id[@bit32]` keeps parsing as `Expr::TypeApp`.
   - The nesting counter counts the new node (`Parser::link`).
 - **Typeck:**

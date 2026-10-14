@@ -925,6 +925,42 @@ fn func_value_call_checks() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+const GENERIC_ITEMS: &str = "id[T]: function (value: T) out: T {\n    out = value\n}\nBox[T]: object {\n    value: T\n    make: function (value: T) out: Box[T] {\n        out = Box[T] { value = value }\n    }\n    convert[U]: function (self, extra: U) out: U {\n        out = extra\n    }\n}\nPlain: object {\n    count: @bit8\n    pick[T]: function (first: T, second: T) out: T {\n        out = second\n    }\n    picker: function () out: ref function (first: @bit8, second: @bit8) @bit8 {\n        out = ref pick[@bit8]\n    }\n}\nG: @bit8 = 0x1\n";
+
+#[test]
+fn generic_instances_are_function_values() {
+    let diags = check_src(&format!(
+        "{GENERIC_ITEMS}main: function () nothing {{\n    a: ref function (value: @bit32) @bit32 = ref id[@bit32]\n    b: ref function (value: @bit8) Box[@bit8] = ref Box[@bit8].make\n    c: ref function (first: @bit8, second: @bit8) @bit8 = ref Plain.pick[@bit8]\n    d: ref function (self: ref Box[@bit8], extra: @bit32) @bit32 = ref Box[@bit8].convert[@bit32]\n}}\nlater[T]: function (value: T) out: T {{\n    f: ref function (value: T) T = ref id[T]\n    out = f(value)\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn generic_instance_errors() {
+    let cases = [
+        // No arguments, too many, and arguments for what takes none.
+        ("ref id", "E044"),
+        ("ref id[@bit32, @bit8]", "E044"),
+        ("ref Box[@bit8].make[@bit8]", "E044"),
+        ("ref Box.make", "E044"),
+        ("ref G[@bit8]", "E044"),
+        ("ref Box[@bit8].convert", "E044"),
+        // Not behind `ref`.
+        ("id[@bit32]", "E077"),
+        ("Box[@bit8].convert[@bit32]", "E077"),
+        // A type, a missing name, a bound method.
+        ("ref Box[@bit8]", "E021"),
+        ("ref Missing[@bit8]", "E021"),
+        ("ref Plain { count = 0x1 }.pick[@bit8]", "E010"),
+    ];
+    for (value, code) in cases {
+        let diags = check_src(&format!(
+            "{GENERIC_ITEMS}main: function () nothing {{\n    f: ref unknown = {value} as ref unknown\n}}\n"
+        ));
+        assert_eq!(codes_of(&diags), [code], "{value}: {diags:?}");
+    }
+}
+
 #[test]
 fn recursive_inline_is_allowed() {
     let diags = check_src(

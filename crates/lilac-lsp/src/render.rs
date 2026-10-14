@@ -518,6 +518,24 @@ fn expr_list(exprs: &[Expr], depth: usize, out: &mut Value) {
     }
 }
 
+/// A character literal as source writes it.
+fn char_text(ch: char) -> String {
+    match ch {
+        '\n' => "'\\n'".to_owned(),
+        '\\' => "'\\\\'".to_owned(),
+        ch => format!("'{ch}'"),
+    }
+}
+
+/// `[A, B]` after a generic call's or instance's callee; nothing for none.
+fn generic_args_text(generic_args: &[Type], out: &mut Value) {
+    if generic_args.is_empty() {
+        return;
+    }
+    let types: Vec<String> = generic_args.iter().map(type_text).collect();
+    let _ = write!(out, "[{}]", types.join(", "));
+}
+
 /// Prints an expression as source writes it; a block-shaped one (a struct
 /// literal, a `match`, an f-string) is elided to `…`.
 fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
@@ -534,13 +552,7 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
         }
         Expr::Number(text, _) => out.push_str(text),
         Expr::Str(bytes, _) => out.push_str(&string_text(bytes)),
-        Expr::Char(ch, _) => match ch {
-            '\n' => out.push_str("'\\n'"),
-            '\\' => out.push_str("'\\\\'"),
-            ch => {
-                let _ = write!(out, "'{ch}'");
-            }
-        },
+        Expr::Char(ch, _) => out.push_str(&char_text(*ch)),
         Expr::Call {
             callee,
             generic_args,
@@ -555,10 +567,7 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
                 }
             }
             operand(callee, PREFIX_POWER, depth, out);
-            if !generic_args.is_empty() {
-                let args: Vec<String> = generic_args.iter().map(type_text).collect();
-                let _ = write!(out, "[{}]", args.join(", "));
-            }
+            generic_args_text(generic_args, out);
             out.push('(');
             expr_list(args, depth, out);
             out.push(')');
@@ -567,6 +576,14 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
             operand(obj, PREFIX_POWER, depth, out);
             out.push('.');
             out.push_str(field);
+        }
+        Expr::Instance {
+            callee,
+            generic_args,
+            ..
+        } => {
+            operand(callee, PREFIX_POWER, depth, out);
+            generic_args_text(generic_args, out);
         }
         Expr::BinOp { lhs, op, rhs, .. } => {
             let power = power(*op);
@@ -610,10 +627,7 @@ fn expr_text(expr: &Expr, depth: usize, out: &mut Value) {
         } => {
             out.push('.');
             out.push_str(function);
-            if !generic_args.is_empty() {
-                let types: Vec<String> = generic_args.iter().map(type_text).collect();
-                let _ = write!(out, "[{}]", types.join(", "));
-            }
+            generic_args_text(generic_args, out);
             out.push('(');
             expr_list(args, depth, out);
             out.push(')');

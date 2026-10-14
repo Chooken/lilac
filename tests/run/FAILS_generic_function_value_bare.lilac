@@ -1,0 +1,13 @@
+// expect-error: E044
+// expect-stderr: error[E044]: wrong number of generic arguments for `id`
+// expect-stderr:    = help: a function value is one instance: give `id` its arguments, `id[…]`
+// A generic function's value names one instance; its arguments are never
+// inferred.
+
+id[T]: function (value: T) out: T {
+    out = value
+}
+
+main: function () nothing {
+    f: ref function (value: @bit32) @bit32 = ref id
+}

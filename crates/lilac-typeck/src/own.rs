@@ -17,6 +17,7 @@ use lilac_ty::TypeRef;
 
 use crate::body::FnCx;
 use crate::calls::Called;
+use crate::expr::Naming;
 use crate::Checker;
 
 impl Checker<'_> {
@@ -100,20 +101,20 @@ impl Checker<'_> {
 
     /// The own member `def` (from [`Self::own_member`]) named `name` at
     /// `span` as a value: a constant's value, or a static function's
-    /// address (`E077` unless `behind_ref`).
+    /// address (`E077` unless `naming` is behind `ref`).
     pub(crate) fn own_value(
         &mut self,
         def: DefId,
         name: &str,
         span: Span,
-        behind_ref: bool,
+        naming: Naming,
     ) -> HirExpr {
         self.record_use(span, def);
         if let DefKind::Const { .. } = self.res.def(def).kind {
             return self.const_value(def, span);
         }
         match self.own_type_args(name, span) {
-            Ok(args) => self.func_value(def, args, name, span, behind_ref),
+            Ok(args) => self.func_value(def, args, name, span, naming),
             Err(_) => HirExpr::poison(span),
         }
     }
@@ -137,7 +138,7 @@ impl Checker<'_> {
                 let error = self.generic_arity(span, name, 0, generic_args.len());
                 return Err(self.callee_failed(fcx, args, error));
             }
-            let callee = self.own_value(def, name, name_span, false);
+            let callee = self.own_value(def, name, name_span, Naming::VALUE);
             return self.value_call(fcx, callee, &format!("`{name}`"), args, span);
         }
         self.record_use(name_span, def);

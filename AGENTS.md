@@ -400,9 +400,16 @@
   (`Checker::bare_function_type`) except as an alias's target, and it
   recovers as the `ref` type. `ref f`, `ref A.f` and `ref Type.method`
   build `HirExprKind::FuncRef` (`Checker::func_value`: a method's receiver
-  is its first parameter; a name without `ref` is `E077`, `check_name`'s
-  `behind_ref`). Any expression of the type is callable
-  (`Checker::value_call`, `E022` otherwise) as `HirCallee::Value`; a
+  is its first parameter; a name without `ref` is `E077`: `Naming`,
+  which `check_name`, `static_member` and `own_value` pass on). A generic
+  function's value is one instance (phase 4): `ref id[@bit32]` parses as
+  an `Expr::TypeApp` and `ref Box[@bit8].convert[@bit32]` (brackets past
+  anything but a path) as an `Expr::Instance`; `check_type_app` rebuilds
+  the path's chain (`paths::path_expr`) and `check_instance_value`
+  resolves it with `Naming::generic_args`, which `func_value` appends to
+  the owner's (`E044` on a wrong count, none inferred). Any expression
+  of the type is callable (`Checker::value_call`, `E022` otherwise) as
+  `HirCallee::Value`; a
   member call `value.f(x)` is a method or a field call by what `f` is.
   Lowering (`Lower::emit_call`) reads the callee into a place first, then
   the arguments, then loads it into a register in the call block (a

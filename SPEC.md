@@ -695,9 +695,19 @@ takes `f`, then `value`. `()` is `nothing` (`E001`). A declaration may parenthes
 the same way, or leave them bare (§4, "Function Signatures").
 
 Hooks and intrinsics are not values (`E021`), nor are a function that can
-fail (`E057`), a variadic `extern` (`E028`) or a generic function
-(`E044`). A local shadows a function: `ref f` of a local `f` is the local's
-address, so `ref` of a function reference is a double reference (`E010`).
+fail (`E057`) or a variadic `extern` (`E028`). A local shadows a function:
+`ref f` of a local `f` is the local's address, so `ref` of a function
+reference is a double reference (`E010`).
+
+**Generic instances.** A generic function's value is one instance, named
+with its arguments as at a call: `ref id[@bit32]`, `ref Box[@bit32].make`,
+`ref Plain.pick[@bit8]` (a generic static of a plain type) and `ref
+Box[@bit8].convert[@bit32]` (a generic method of a generic type: the
+type's arguments, then its own). The arguments are never inferred: `ref
+id` is `E044`, as is a wrong count or arguments on what takes none. An
+instance whose body fails is `E042` at the `ref`, as at a call. Inside a
+generic body `ref id[T]` is the instance at each instance's `T`. Without
+`ref`, `id[@bit32]` is `E077`.
 
 **Calls through a value.** Any expression of a function reference type is
 callable: a local or parameter (`f(x)`), a field (`machine.step(x)`), a
@@ -1374,7 +1384,9 @@ too few, too many, or any argument on a non-generic declaration — is `E044`;
 the bogus application is never built. In expression position `Name[args]`
 may be followed by `(` (a generic call), `.` (a static member,
 `GenObject[@bit32].make()`), or `{` (a struct literal,
-`GenObject[@bit32] { value = 0x0 }`). A struct literal may omit the
+`GenObject[@bit32] { value = 0x0 }`), or end a function's instance under
+`ref` (`ref gen_function[@bit32]`, `ref GenObject[@bit32].convert[@bit8]`,
+"Function values"). A struct literal may omit the
 arguments when the expected type supplies them:
 `x: GenObject[@bit32] = GenObject { value = 0x0 }`.
 

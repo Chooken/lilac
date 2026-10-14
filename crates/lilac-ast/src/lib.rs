@@ -653,6 +653,17 @@ pub enum Expr {
     /// `Name[args]` in expression position: the receiver of a static member
     /// (`Box[@bit32].make()`, `Optional[T].Some(x)`).
     TypeApp(Box<Type>),
+    /// `callee[args]` with no call after it, where `callee` is no plain path
+    /// (`Box[@bit8].convert[@bit32]`): an instance of a generic function, a
+    /// value behind `ref`. A plain path's (`id[@bit32]`) is a `TypeApp`.
+    Instance {
+        /// The function: a member chain.
+        callee: Box<Expr>,
+        /// The function's own generic arguments.
+        generic_args: Vec<Type>,
+        /// Whole-expression span (callee through `]`).
+        span: Span,
+    },
     /// The initializer of the declaration shorthand `name: Type.function(args)`
     /// (`name: Type = Type.function(args)`): the declared type is the
     /// receiver, and `function` must be a static function of it returning
@@ -751,6 +762,7 @@ impl Expr {
             | Self::Call { span, .. }
             | Self::Construct { span, .. }
             | Self::Member { span, .. }
+            | Self::Instance { span, .. }
             | Self::BinOp { span, .. }
             | Self::IfValue { span, .. }
             | Self::MatchValue { span, .. }

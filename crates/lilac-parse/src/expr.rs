@@ -191,14 +191,19 @@ impl Parser {
                         continue;
                     }
                     // `Name[args]` not followed by a call is a type in value
-                    // position: a static receiver (`Box[T].make()`) or a struct
-                    // literal head (`Box[T] { ... }`).
+                    // position: a static receiver (`Box[T].make()`), a struct
+                    // literal head (`Box[T] { ... }`) or a generic function's
+                    // instance (`ref id[T]`). Past anything but a path it can
+                    // only be an instance (`ref Box[T].convert[U]`).
                     let Some((name, name_span)) = path_of(&expr) else {
-                        return Err(Self::err(
-                            diags,
-                            open,
-                            "expected `(` after generic arguments",
-                        ));
+                        let span = join_spans(expr.span(), self.prev_span());
+                        let instance = Expr::Instance {
+                            callee: Box::new(expr),
+                            generic_args,
+                            span,
+                        };
+                        expr = self.link(diags, chain, open, instance);
+                        continue;
                     };
                     let mut ty = named_type(name, name_span, generic_args);
                     ty.span = join_spans(name_span, self.prev_span());

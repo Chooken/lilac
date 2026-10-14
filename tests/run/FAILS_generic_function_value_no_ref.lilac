@@ -1,0 +1,16 @@
+// expect-error: E077
+// expect-stderr: error[E077]: `make` is a function, a value only behind `ref`
+// An instance is a function value only behind `ref`, past a type's
+// arguments too.
+
+Box[T]: object {
+    value: T
+
+    make[U]: function (value: T, extra: U) out: Box[T] {
+        out = Box[T] { value = value }
+    }
+}
+
+main: function () nothing {
+    f: ref function (value: @bit8, extra: @bit32) Box[@bit8] = Box[@bit8].make[@bit32]
+}

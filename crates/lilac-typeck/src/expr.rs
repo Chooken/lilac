@@ -21,7 +21,7 @@ use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 use crate::body::{local_expr, FnCx};
 use crate::calls::Called;
 use crate::literals::is_foldable_literal;
-use crate::paths::{path_tail, shadowed_alias_note};
+use crate::paths::{path_expr, path_tail, shadowed_alias_note};
 use crate::sigs::BINARY_HOOKS;
 use crate::{Checker, Env, Requirement};
 
@@ -38,6 +38,31 @@ pub(crate) enum Receiver {
     Type(TypeRef),
     /// A generic type written without arguments (`Optional.Some(x)`).
     Bare(DefId),
+}
+
+/// How a name is used as a value: whether it is `ref`'s operand or a place
+/// (`behind_ref`: a function named there is its address, no `E077`), and
+/// the generic arguments naming one of a generic function's instances
+/// (`ref id[@bit32]`; none for a plain name).
+#[derive(Clone, Copy)]
+pub(crate) struct Naming<'a> {
+    /// Under `ref`, or a place.
+    pub(crate) behind_ref: bool,
+    /// The function's own generic arguments.
+    pub(crate) generic_args: &'a [AstType],
+}
+
+impl Naming<'_> {
+    /// A plain value.
+    pub(crate) const VALUE: Naming<'static> = Naming {
+        behind_ref: false,
+        generic_args: &[],
+    };
+    /// `ref`'s operand, or a place.
+    pub(crate) const PLACE: Naming<'static> = Naming {
+        behind_ref: true,
+        generic_args: &[],
+    };
 }
 
 impl Checker<'_> {
@@ -137,16 +162,12 @@ impl Checker<'_> {
                 self.check_struct_lit(fcx, ty, fields, *span, expected)
             }
             Expr::FString { parts, span } => self.check_fstring(fcx, parts, *span, expected),
-            Expr::TypeApp(ty) => {
-                self.diags.emit(
-                    Diagnostic::error(
-                        codes::E021,
-                        format!("cannot use type `{}` as a value", ty.head()),
-                    )
-                    .label(ty.span, true, "a type, not a value"),
-                );
-                HirExpr::poison(ty.span)
-            }
+            Expr::TypeApp(ty) => self.check_type_app(fcx, ty, false),
+            Expr::Instance {
+                callee,
+                generic_args,
+                span,
+            } => self.check_instance_value(fcx, callee, generic_args, *span, false),
             Expr::Error { span } => HirExpr::poison(*span),
         }
     }
@@ -236,13 +257,13 @@ impl Checker<'_> {
     // ---- names -----------------------------------------------------------
 
     fn check_ident(&mut self, fcx: &mut FnCx, name: &str, span: Span) -> HirExpr {
-        self.check_name(fcx, name, span, false)
+        self.check_name(fcx, name, span, Naming::VALUE)
     }
 
-    /// A name or path as a value. `behind_ref`: it is the operand of `ref`
-    /// (or a place), so a function named here is its address without
-    /// `E077`.
-    fn check_name(&mut self, fcx: &mut FnCx, name: &str, span: Span, behind_ref: bool) -> HirExpr {
+    /// A name or path as a value. Under `ref` (or as a place, `naming`) a
+    /// function named here is its address without `E077`; `naming`'s
+    /// generic arguments name a generic function's instance.
+    fn check_name(&mut self, fcx: &mut FnCx, name: &str, span: Span, naming: Naming) -> HirExpr {
         if let Some(local) = fcx.lookup(name) {
             self.record_local_use(fcx, local, span);
             return local_expr(local, fcx.ty(local), span);
@@ -255,7 +276,7 @@ impl Checker<'_> {
             return HirExpr::poison(span);
         }
         if let Some(def) = self.own_member(name) {
-            return self.own_value(def, name, span, behind_ref);
+            return self.own_value(def, name, span, naming);
         }
         let Ok(found) = self.lookup_item(name, span) else {
             return HirExpr::poison(span);
@@ -274,7 +295,7 @@ impl Checker<'_> {
         };
         self.record_use(path_tail(span, name), def);
         match &self.res.def(def).kind {
-            DefKind::Func(_) => self.func_value(def, Vec::new(), name, span, behind_ref),
+            DefKind::Func(_) => self.func_value(def, Vec::new(), name, span, naming),
             DefKind::Const { .. } | DefKind::Global { .. } => self.item_value(def, span),
             DefKind::Object | DefKind::Enum | DefKind::Alias(_) => {
                 self.diags.emit(
@@ -328,14 +349,16 @@ impl Checker<'_> {
     /// parameters are the function's own, a method's receiver first. An
     /// `export` or `extern` is a C function, so its value is a `ref export
     /// function (…)`, the C symbol's address. Named without `ref`
-    /// (`behind_ref` false) it is `E077`, and still that value.
+    /// (`naming` not behind `ref`) it is `E077`, and still that value;
+    /// `naming`'s generic arguments (exactly the function's own, `E044`)
+    /// follow `type_args`.
     pub(crate) fn func_value(
         &mut self,
         def: DefId,
         type_args: Vec<TypeRef>,
         name: &str,
         span: Span,
-        behind_ref: bool,
+        naming: Naming,
     ) -> HirExpr {
         let Some(decl) = self.res.def(def).func() else {
             lilac_error::bug!(span, "`{name}` is not a function");
@@ -364,12 +387,37 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         }
-        let generic = self.res.def(def).generic_params.len();
-        if generic > 0 {
-            self.generic_arity(span, name, generic, 0);
+        let own = self.res.def(def).generic_params.len();
+        let given = naming.generic_args;
+        if given.len() != own {
+            let noun = if own == 1 { "argument" } else { "arguments" };
+            let mut diagnostic = Diagnostic::error(
+                codes::E044,
+                format!("wrong number of generic arguments for `{name}`"),
+            )
+            .label(
+                span,
+                true,
+                format!("expected {own} generic {noun}, found {}", given.len()),
+            );
+            if given.is_empty() {
+                diagnostic = diagnostic.help(format!(
+                    "a function value is one instance: give `{name}` its arguments, `{name}[…]`"
+                ));
+            }
+            self.diags.emit(diagnostic);
             return HirExpr::poison(span);
         }
-        if !behind_ref {
+        let mut args = type_args;
+        for arg in given {
+            let arg = self.resolve_type(arg);
+            if arg.is_error() {
+                // `resolve_type` reported it.
+                return HirExpr::poison(span);
+            }
+            args.push(arg);
+        }
+        if !naming.behind_ref {
             self.diags.emit(
                 Diagnostic::error(
                     codes::E077,
@@ -383,10 +431,7 @@ impl Checker<'_> {
                 ),
             );
         }
-        let key = FuncKey {
-            def,
-            args: type_args,
-        };
+        let key = FuncKey { def, args };
         let Ok(sig) = self.request(key.clone(), span) else {
             return HirExpr::poison(span);
         };
@@ -517,18 +562,20 @@ impl Checker<'_> {
                     self.record_local_use(fcx, local, *span);
                     return Ok(local_expr(local, fcx.ty(local), *span));
                 }
-                let item = self.check_name(fcx, name, *span, true);
+                let item = self.check_name(fcx, name, *span, Naming::PLACE);
                 self.item_place(item, name)
             }
             Expr::Member { obj, field, span } => {
                 if let Some((path, span)) = self.qualified_name(fcx, expr) {
-                    let item = self.check_name(fcx, &path, span, true);
+                    let item = self.check_name(fcx, &path, span, Naming::PLACE);
                     return self.item_place(item, &path);
                 }
                 // `Type.NAME`: a constant or variant, never a place.
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let item = match receiver {
-                        Ok(receiver) => self.static_member(receiver, field, *span, None, true),
+                        Ok(receiver) => {
+                            self.static_member(receiver, field, *span, None, Naming::PLACE)
+                        }
                         Err(_) => HirExpr::poison(*span),
                     };
                     return self.item_place(item, field);
@@ -668,7 +715,7 @@ impl Checker<'_> {
             let Ok(receiver) = receiver else {
                 return HirExpr::poison(span);
             };
-            return self.static_member(receiver, field, span, expected, false);
+            return self.static_member(receiver, field, span, expected, Naming::VALUE);
         }
         let base = self.check_expr(fcx, obj, None);
         if base.ty.is_error() {
@@ -679,14 +726,14 @@ impl Checker<'_> {
     }
 
     /// `Type.name` as a value: a constant of the type, a function of it
-    /// (its address: `E077` unless `behind_ref`), or a variant.
+    /// (its address, `E077` unless `naming` is behind `ref`), or a variant.
     fn static_member(
         &mut self,
         receiver: Receiver,
         field: &str,
         span: Span,
         expected: Option<TypeId>,
-        behind_ref: bool,
+        naming: Naming,
     ) -> HirExpr {
         if self.record_static_member(receiver, span, field).is_err() {
             return HirExpr::poison(span);
@@ -694,7 +741,7 @@ impl Checker<'_> {
         if let Some(constant) = self.member_constant(receiver, field, span) {
             return constant;
         }
-        if let Some(function) = self.member_function(receiver, field, span, behind_ref) {
+        if let Some(function) = self.member_function(receiver, field, span, naming) {
             return function;
         }
         let ty = match receiver {
@@ -740,7 +787,7 @@ impl Checker<'_> {
         receiver: Receiver,
         field: &str,
         span: Span,
-        behind_ref: bool,
+        naming: Naming,
     ) -> Option<HirExpr> {
         let (owner, type_args) = match receiver {
             Receiver::Type(ty) if !ty.is_ref => self.type_parts(ty.id)?,
@@ -762,7 +809,7 @@ impl Checker<'_> {
             self.generic_arity(span, &name, count, 0);
             return Some(HirExpr::poison(span));
         }
-        Some(self.func_value(member, type_args, field, span, behind_ref))
+        Some(self.func_value(member, type_args, field, span, naming))
     }
 
     /// `E021` for `Type.NAME` on a type with no variants (an object, a
@@ -963,17 +1010,19 @@ impl Checker<'_> {
     ) -> Result<HirExpr, ErrorGuaranteed> {
         match value {
             Expr::Ident(name, span) if fcx.lookup(name).is_none() => {
-                let item = self.check_name(fcx, name, *span, true);
+                let item = self.check_name(fcx, name, *span, Naming::PLACE);
                 self.addressable_item(item, name)
             }
             Expr::Member { obj, field, span } => {
                 if let Some((path, path_span)) = self.qualified_name(fcx, value) {
-                    let item = self.check_name(fcx, &path, path_span, true);
+                    let item = self.check_name(fcx, &path, path_span, Naming::PLACE);
                     return self.addressable_item(item, &path);
                 }
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let item = match receiver {
-                        Ok(receiver) => self.static_member(receiver, field, *span, None, true),
+                        Ok(receiver) => {
+                            self.static_member(receiver, field, *span, None, Naming::PLACE)
+                        }
                         Err(_) => HirExpr::poison(*span),
                     };
                     return self.addressable_item(item, field);
@@ -987,6 +1036,12 @@ impl Checker<'_> {
                 Ok(self.field_access(base, field, *span, None, false, shadowed))
             }
             Expr::Ident(..) => self.check_place(fcx, value),
+            Expr::TypeApp(ty) => Ok(self.check_type_app(fcx, ty, true)),
+            Expr::Instance {
+                callee,
+                generic_args,
+                span,
+            } => Ok(self.check_instance_value(fcx, callee, generic_args, *span, true)),
             _ => Err(self.diags.emit(
                 Diagnostic::error(codes::E010, "cannot take `ref` of this expression").label(
                     value.span(),
@@ -994,6 +1049,84 @@ impl Checker<'_> {
                     "only variables, globals, fields and functions have addresses",
                 ),
             )),
+        }
+    }
+
+    /// `Name[args]` as a value: a generic function's instance (`ref
+    /// id[@bit32]`, [`Self::check_instance`]); a type is no value (`E021`).
+    fn check_type_app(&mut self, fcx: &mut FnCx, ty: &AstType, behind_ref: bool) -> HirExpr {
+        let TypeShape::Named { name, args } = &ty.shape else {
+            lilac_error::bug!(ty.span, "a type in value position is a named type");
+        };
+        let callee = path_expr(name, ty.name_span);
+        self.check_instance_value(fcx, &callee, args, ty.span, behind_ref)
+    }
+
+    /// `callee[generic_args]`, the instance of a generic function they name
+    /// (`ref id[@bit32]`, `ref Box[@bit8].convert[@bit32]`), as a value:
+    /// its address ([`Self::func_value`], `E077` unless `behind_ref`).
+    /// Nothing else takes generic arguments without a call (`E044`).
+    fn check_instance_value(
+        &mut self,
+        fcx: &mut FnCx,
+        callee: &Expr,
+        generic_args: &[AstType],
+        span: Span,
+        behind_ref: bool,
+    ) -> HirExpr {
+        let naming = Naming {
+            behind_ref,
+            generic_args,
+        };
+        let (item, name) = match callee {
+            Expr::Ident(name, at) => (self.check_name(fcx, name, *at, naming), name.clone()),
+            Expr::Member {
+                obj,
+                field,
+                span: at,
+            } => {
+                if let Some((path, path_span)) = self.qualified_name(fcx, callee) {
+                    (self.check_name(fcx, &path, path_span, naming), path)
+                } else if let Some(receiver) = self.static_receiver(fcx, obj) {
+                    let item = match receiver {
+                        Ok(receiver) => self.static_member(receiver, field, *at, None, naming),
+                        Err(_) => HirExpr::poison(*at),
+                    };
+                    (item, field.clone())
+                } else {
+                    // `value.f[T]`: a field, or a method, which is no value.
+                    let base = self.check_expr(fcx, obj, None);
+                    if base.ty.is_error() || self.no_bound_method(&base, field, *at).is_err() {
+                        return HirExpr::poison(span);
+                    }
+                    let shadowed = self.shadowed_alias(fcx, &base);
+                    let item = self.field_access(base, field, *at, None, false, shadowed);
+                    (item, field.clone())
+                }
+            }
+            _ => {
+                let _ = self.check_expr(fcx, callee, None);
+                self.diags.emit(
+                    Diagnostic::error(
+                        codes::E044,
+                        "generic arguments without a call need a generic function's name",
+                    )
+                    .label(span, true, "not a function's name")
+                    .help("a function value has no generic arguments: call it without them"),
+                );
+                return HirExpr::poison(span);
+            }
+        };
+        match item.kind {
+            HirExprKind::FuncRef(_) => HirExpr { span, ..item },
+            // Checking the name reported it.
+            HirExprKind::Poison => HirExpr::poison(span),
+            _ => {
+                if !item.ty.is_error() {
+                    self.generic_arity(span, &name, 0, generic_args.len());
+                }
+                HirExpr::poison(span)
+            }
         }
     }
 

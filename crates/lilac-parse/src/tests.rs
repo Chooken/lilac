@@ -417,6 +417,40 @@ fn generic_type_in_value_position() {
 }
 
 #[test]
+fn generic_function_instances_parse() {
+    let stmts = main_stmts(
+        "main: function () nothing {\n    a: T = ref id[@bit8]\n    b: T = ref Box[@bit8].convert[@bit32]\n    c: T = Box[@bit8].convert[@bit32]\n}\n",
+    );
+    let value = |at: usize| {
+        let Stmt::Let { value, .. } = &stmts[at] else {
+            panic!("{:?}", stmts[at]);
+        };
+        value
+    };
+    // A plain path's instance is a `TypeApp`, resolved in typeck.
+    let Expr::RefOf { value: a, .. } = value(0) else {
+        panic!("{:?}", value(0));
+    };
+    assert!(matches!(a.as_ref(), Expr::TypeApp(ty) if ty.head() == "id" && ty.args().len() == 1));
+    // Past a type's arguments it is an `Instance`, under `ref` or not.
+    let Expr::RefOf { value: b, span } = value(1) else {
+        panic!("{:?}", value(1));
+    };
+    let Expr::Instance {
+        callee,
+        generic_args,
+        span: instance,
+    } = b.as_ref()
+    else {
+        panic!("{b:?}");
+    };
+    assert!(matches!(callee.as_ref(), Expr::Member { field, .. } if field == "convert"));
+    assert_eq!(generic_args.len(), 1);
+    assert_eq!(instance.hi, span.hi);
+    assert!(matches!(value(2), Expr::Instance { .. }));
+}
+
+#[test]
 fn continue_is_a_statement() {
     let stmts =
         main_stmts("main: function () nothing {\n    loop if x { continue } else continue\n}\n");
