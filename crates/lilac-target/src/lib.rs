@@ -113,6 +113,27 @@ impl Arch {
             Self::X86_64 | Self::Aarch64 | Self::Riscv64 | Self::Wasm64
         )
     }
+
+    /// The LLVM CPU code is built for: `pentium4` on 32-bit x86, so float
+    /// arithmetic uses SSE2 (x87 rounds twice), else `generic`.
+    #[must_use]
+    pub fn baseline_cpu(self) -> &'static str {
+        match self {
+            Self::X86 => "pentium4",
+            _ => "generic",
+        }
+    }
+
+    /// The LLVM features added to [`Self::baseline_cpu`]: `VFPv2` on 32-bit
+    /// Arm, so floats use the FPU (the C ABI still passes them in integer
+    /// registers), else none.
+    #[must_use]
+    pub fn baseline_features(self) -> &'static str {
+        match self {
+            Self::Arm => "+vfp2",
+            _ => "",
+        }
+    }
 }
 
 /// Vendor component of a target triple.

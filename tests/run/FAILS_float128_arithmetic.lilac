@@ -1,0 +1,22 @@
+// expect-error: E078
+// expect-stderr: error[E078]: 128-bit float arithmetic is not available on `x86_64-unknown-none`
+// No target has 128-bit float instructions, and the software routines
+// LLVM would call are not linked, so arithmetic on an `@fbit128` is an
+// error where it is live. Storing one and `==` are fine, and so is an
+// operation in a function nothing calls.
+
+unused: function (a: @fbit128, b: @fbit128) sum: @fbit128 {
+    sum = @f_add_128(a, b)
+}
+
+double: function (a: @fbit128) sum: @fbit128 {
+    sum = @f_add_128(a, a)
+}
+
+main: function () nothing {
+    a: @fbit128 = 1.5
+    b: @fbit128 = a
+    if a == b {
+        b = double(a)
+    }
+}

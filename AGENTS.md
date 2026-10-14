@@ -32,7 +32,17 @@
   `@address_to_ptr` lower inline to `bitcast`s. `@align_of` is a constant like `@size_of`. A reachable user
   `@linux_syscall` or `@linux_thread_clone` off Linux x86-64/aarch64
   (`Target::has_syscall`) is `E035`, checked after DCE like `E031`
-  (`lilac_ir::check_live_syscalls`).
+  (`lilac_ir::check_live_syscalls`). So is `@fbit128` arithmetic, negation
+  or ordering, which no target has instructions for and nothing links the
+  routines of: `E078` (`check_live_wide_floats`).
+- Floats (`lilac-codegen-llvm/src/float.rs`): `f.mod` calls the
+  backend's own exact remainder (`.lilac.fmod.32`/`.64`, internal IR
+  text after musl; `@fbit16` goes through the 32-bit one), never `fmod`,
+  so it links without a libm in every mode. Native x86-64 also defines
+  the half conversions LLVM calls (`__extendhfsf2`, `__truncsfhf2`).
+  `crates/lilac-cli/tests/numeric_link.rs` cross-links every numeric
+  intrinsic for the six native targets, so a new one cannot leak a
+  libcall: add new intrinsics to its program.
 - Threads (`lilac-codegen-llvm/src/threads.rs`): a thread starts in a C
   function, `Standard.Os`'s `thread_start` (an `export`, symbol
   `lilac_thread_start`), which runs the start block's `entry(argument)`;
@@ -198,6 +208,9 @@
   accepted triple builds an LLVM `TargetMachine` (`target_tests` in
   `lilac-codegen-llvm`). `Target::supported()` lists one target per
   accepted architecture and OS pair.
+- The target machine's CPU and features are `Arch::baseline_cpu` and
+  `baseline_features`: `pentium4` on 32-bit x86 (SSE2; x87 rounds twice)
+  and `+vfp2` on 32-bit Arm, else `generic`.
 
 ## Layouts (`lilac-layout`)
 
@@ -933,7 +946,7 @@ bug fix that changes generated code.
   a builtin layout). `lilac build` turns it on in debug and
   `--stack-traces=on|off` overrides; `check`/`emit-*` leave it off unless
   asked, so IR dumps stay readable.
-- `E031` and `E035` carry a compile-time trace: `Diagnostic::trace`, a
+- `E031`, `E035` and `E078` carry a compile-time trace: `Diagnostic::trace`, a
   `TraceFrame` tree of every call site that reaches the error, built by
   `lilac_ir::CallGraph::trace` from the module after DCE (so only live
   callers), with `trace::is_hidden` (`.lilac.*`) glue spliced out. Each

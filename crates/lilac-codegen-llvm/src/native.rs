@@ -13,14 +13,18 @@
 //! stack. On Windows, a module with thread-locals gets the TLS directory a C
 //! runtime would define.
 //!
-//! macOS needs none of this: its system interface is `libSystem`, which a
+//! macOS needs none of the above: its system interface is `libSystem`, which a
 //! native program links anyway, and which already defines the memory
 //! functions.
+//!
+//! On x86-64 (macOS too) it also defines the half-precision conversions
+//! LLVM calls (`float::HALF`).
 
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::IntType;
 
+use crate::float::HALF;
 use crate::threads::{append_assembly, append_ir, has_thread_locals, windows_tls_directory};
 
 /// `__chkstk` for x86-64 Windows: probes each page from the stack pointer
@@ -113,6 +117,12 @@ pub(crate) fn define<'ctx>(
     triple: &str,
     native: IntType<'ctx>,
 ) {
+    // x86-64 converts half-precision floats by calling compiler-rt's
+    // routines, which no native program links (`libSystem` exports them,
+    // but its stub lists only what `Standard` declares).
+    if triple.starts_with("x86_64") {
+        append_ir(module, "half", HALF);
+    }
     if is_apple(triple) {
         return;
     }

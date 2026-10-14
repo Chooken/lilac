@@ -1,5 +1,5 @@
 //! Checking a module: the verifier, and the checks of what stays live
-//! after dead-code elimination (`@compile_error`, `@linux_syscall`).
+//! after dead-code elimination (`@compile_error`, `@linux_syscall`, 128-bit floats).
 
 use std::collections::{HashMap, HashSet};
 
@@ -107,6 +107,101 @@ pub fn check_live_syscalls<S: std::hash::BuildHasher>(
         Err(diags.already_reported())
     } else {
         Ok(())
+    }
+}
+
+/// `E078` for each 128-bit float operation (arithmetic, negation, or an
+/// ordered comparison) a reachable user function makes: no supported
+/// target has the instructions, and the software routines LLVM would
+/// call are not linked. Storing, copying and `==` of an `@fbit128` stay
+/// available. Run after DCE, like [`check_live_syscalls`].
+///
+/// # Errors
+///
+/// Returns `Err` after emitting a diagnostic for every such operation.
+pub fn check_live_wide_floats<S: std::hash::BuildHasher>(
+    module: &LirModule,
+    names: &HashMap<String, String, S>,
+    diags: &mut Diags,
+) -> Result<(), ErrorGuaranteed> {
+    let wide = LirTy::FBit(128);
+    let mut graph = None;
+    let mut failed = false;
+    for func in module
+        .funcs
+        .iter()
+        .filter(|func| !trace::is_hidden(func.name.as_str()))
+    {
+        for block in &func.blocks {
+            // A register lives in its block, so its type is its definition's
+            // there.
+            let mut types: HashMap<&Reg, &LirTy> = HashMap::new();
+            for inst in &block.insts {
+                if let LirInst::Arith {
+                    op, lhs, ty, span, ..
+                } = inst
+                {
+                    let operand = if op.is_comparison() {
+                        types.get(lhs).copied()
+                    } else {
+                        Some(ty)
+                    };
+                    if operand == Some(&wide) && op.is_float() {
+                        failed = true;
+                        let graph = graph.get_or_insert_with(|| CallGraph::new(module));
+                        diags.emit(
+                            Diagnostic::error(
+                                codes::E078,
+                                format!(
+                                    "128-bit float arithmetic is not available on `{}`",
+                                    module.target
+                                ),
+                            )
+                            .label(*span, true, "an operation on an `@fbit128`".to_owned())
+                            .help(
+                                "an `@fbit128` can be stored, copied and compared with `==`; \
+                                 compute in `@fbit64`"
+                                    .to_owned(),
+                            )
+                            .trace(graph.trace(
+                                func.name.as_str(),
+                                *span,
+                                names,
+                            )),
+                        );
+                    }
+                }
+                if let Some((dst, ty)) = defined_reg(inst) {
+                    types.insert(dst, ty);
+                }
+            }
+        }
+    }
+    if failed {
+        Err(diags.already_reported())
+    } else {
+        Ok(())
+    }
+}
+
+/// The register `inst` defines and its type, if it defines one.
+fn defined_reg(inst: &LirInst) -> Option<(&Reg, &LirTy)> {
+    match inst {
+        LirInst::CopyReg { dst, ty, .. }
+        | LirInst::Const { dst, ty, .. }
+        | LirInst::Load { dst, ty, .. }
+        | LirInst::Addr { dst, ty, .. }
+        | LirInst::AddrFunc { dst, ty, .. }
+        | LirInst::AddrGlobal { dst, ty, .. }
+        | LirInst::Field { dst, ty, .. }
+        | LirInst::Convert { dst, ty, .. }
+        | LirInst::FieldAddr { dst, ty, .. }
+        | LirInst::ElemAddr { dst, ty, .. }
+        | LirInst::Arith { dst, ty, .. }
+        | LirInst::AtomicLoad { dst, ty, .. }
+        | LirInst::AtomicRmw { dst, ty, .. }
+        | LirInst::CmpXchg { dst, ty, .. } => Some((dst, ty)),
+        _ => None,
     }
 }
 

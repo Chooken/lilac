@@ -31,7 +31,7 @@ pub use runtime::{
     build_runtime, entry_point, hook_externs, panic_runtime, Entry, PanicMessage, PanicRuntime,
 };
 pub use ty::LirTy;
-pub use verify::{check_live_compile_errors, check_live_syscalls, verify};
+pub use verify::{check_live_compile_errors, check_live_syscalls, check_live_wide_floats, verify};
 
 /// IR version header; bump on any normative IR change.
 pub const LILAC_IR_VERSION: &str = "0.5";

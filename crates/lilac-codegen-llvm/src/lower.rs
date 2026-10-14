@@ -1920,7 +1920,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ArithOp::FSub => builder.build_float_sub(left, right, ""),
                     ArithOp::FMul => builder.build_float_mul(left, right, ""),
                     ArithOp::FDiv => builder.build_float_div(left, right, ""),
-                    _ => builder.build_float_rem(left, right, ""),
+                    _ => return self.float_remainder(left, right, ty, builder),
                 };
                 self.checked(value, "float arith").into()
             }
@@ -1960,6 +1960,53 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         } else {
             self.checked(builder.build_int_z_extend(cmp, result_ty, ""), "widen bool")
                 .into()
+        }
+    }
+
+    /// `f.mod`: a call of the backend's exact `.lilac.fmod.32`/`.64`
+    /// (`float.rs`), never `frem`, which LLVM turns into a call to the C
+    /// library's `fmod`. A 16-bit remainder is the 32-bit one between
+    /// exact conversions; a 128-bit one stays `frem` (`E078` refuses
+    /// 128-bit float arithmetic before the backend).
+    fn float_remainder(
+        &self,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+        ty: &LirTy,
+        builder: &Builder<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let bits = match ty {
+            LirTy::FBit(bits) => u32::from(*bits),
+            _ => bug!(self.at(), "`f.mod` needs a float type, found `{ty}`"),
+        };
+        if bits == 128 {
+            return self
+                .checked(builder.build_float_rem(left, right, ""), "float arith")
+                .into();
+        }
+        let (left, right) = if bits == 16 {
+            let single = self.context.f32_type();
+            (
+                self.checked(builder.build_float_ext(left, single, ""), "widen"),
+                self.checked(builder.build_float_ext(right, single, ""), "widen"),
+            )
+        } else {
+            (left, right)
+        };
+        let helper = crate::float::remainder(&self.module, bits.max(32));
+        let call = self.checked(
+            builder.build_call(helper, &[left.into(), right.into()], ""),
+            "fmod",
+        );
+        let ValueKind::Basic(BasicValueEnum::FloatValue(value)) = call.try_as_basic_value() else {
+            bug!(self.at(), "`.lilac.fmod` returned no float");
+        };
+        if bits == 16 {
+            let half = self.context.f16_type();
+            self.checked(builder.build_float_trunc(value, half, ""), "narrow")
+                .into()
+        } else {
+            value.into()
         }
     }
 

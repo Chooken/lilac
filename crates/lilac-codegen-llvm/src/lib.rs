@@ -17,7 +17,9 @@ use inkwell::OptimizationLevel;
 use lilac_codegen::{Backend, CodegenStep, Entry, OptLevel};
 use lilac_error::Emitter;
 use lilac_ir::LirModule;
+use lilac_target::Arch;
 
+mod float;
 mod lower;
 mod native;
 mod runtime;
@@ -69,8 +71,11 @@ impl LlvmBackend {
         let target = Target::from_triple(&triple)
             .map_err(|e| format!("unknown target triple `{}`: {e}", self.triple))?;
         let (optimize, _) = self.optimize_settings();
+        let arch = self.triple.split('-').next().and_then(Arch::parse);
+        let cpu = arch.map_or("generic", Arch::baseline_cpu);
+        let features = arch.map_or("", Arch::baseline_features);
         let machine: TargetMachine = target
-            .create_target_machine(&triple, "generic", "", optimize, reloc, CodeModel::Default)
+            .create_target_machine(&triple, cpu, features, optimize, reloc, CodeModel::Default)
             .ok_or_else(|| format!("failed to create target machine for `{}`", self.triple))?;
         module.set_data_layout(&machine.get_target_data().get_data_layout());
 
@@ -1047,7 +1052,7 @@ mod tests {
             "fsub float",
             "fmul float",
             "fdiv float",
-            "frem float",
+            "call float @.lilac.fmod.32(float",
             "fcmp olt float",
             "fcmp ogt float",
         ] {
@@ -2440,8 +2445,8 @@ mod target_tests {
             .unwrap_or_else(|error| panic!("LLVM has no target `{target}`: {error}"));
         llvm.create_target_machine(
             &triple,
-            "generic",
-            "",
+            target.arch.baseline_cpu(),
+            target.arch.baseline_features(),
             OptimizationLevel::None,
             RelocMode::Default,
             CodeModel::Default,
@@ -2456,6 +2461,39 @@ mod target_tests {
         for target in &targets {
             machine(*target);
         }
+    }
+
+    /// 32-bit x86 computes floats in SSE2 (`Arch::baseline_cpu`), never on
+    /// the x87 stack, whose 80-bit registers round each result twice.
+    #[test]
+    fn x86_floats_use_sse2() {
+        let context = Context::create();
+        let backend = super::LlvmBackend::new("i686-unknown-linux-gnu", OptLevel::O0);
+        let (module, machine) = backend
+            .prepare_module(&context, RelocMode::Default)
+            .expect("an i686 machine");
+        let double = context.f64_type();
+        let function = module.add_function(
+            "add",
+            double.fn_type(&[double.into(), double.into()], false),
+            None,
+        );
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(function, "entry"));
+        let sum = builder
+            .build_float_add(
+                function.get_nth_param(0).expect("a").into_float_value(),
+                function.get_nth_param(1).expect("b").into_float_value(),
+                "sum",
+            )
+            .expect("an add");
+        builder.build_return(Some(&sum)).expect("a return");
+        let assembly = machine
+            .write_to_memory_buffer(&module, inkwell::targets::FileType::Assembly)
+            .expect("assembly");
+        let text = String::from_utf8_lossy(assembly.as_slice());
+        assert!(text.contains("addsd"), "{text}");
+        assert!(!text.contains("%st"), "{text}");
     }
 
     #[test]

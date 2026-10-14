@@ -639,6 +639,7 @@ impl Session {
             &lowered.names,
             &mut self.diags,
         )?;
+        lilac_ir::check_live_wide_floats(&lir, &lowered.names, &mut self.diags)?;
         if self.stack_traces {
             lilac_ir::trace::instrument(&mut lir, &self.source_map, &lowered.names);
         }
