@@ -186,8 +186,9 @@ private {
         }
     }
 
-    /// `value` rounded up to a multiple of `alignment` (a power of two).
-    align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
+    /// `value` rounded up to a multiple of `alignment` (a power of two),
+    /// wrapping: an address may be past `Int.MAX` on a 32-bit target.
+    align_up: function (value: Int, alignment: Int) Int => @bit_and_native(value.wrapping_add(alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
 
     /// `count` elements of `element` bytes, refused before the product
     /// could overflow (no mapping could hold it then).

@@ -124,7 +124,7 @@ ArenaAllocator: object {
         // The address is aligned, not the offset: a large alignment may
         // be more than the mapping's.
         base_address: Int = @ptr_to_address(self.current_block.base)
-        start: Int = align_up(base_address + self.current_block.used, alignment) - base_address
+        start: Int = align_up(base_address.wrapping_add(self.current_block.used), alignment).wrapping_subtract(base_address)
 
         if size > self.block_size - start {
 
@@ -134,7 +134,7 @@ ArenaAllocator: object {
                 self.add_new_general_block()
             }
             base_address = @ptr_to_address(self.current_block.base)
-            start = align_up(base_address + self.current_block.used, alignment) - base_address
+            start = align_up(base_address.wrapping_add(self.current_block.used), alignment).wrapping_subtract(base_address)
         }
 
         allocation = @ptr_add(self.current_block.base, start as @bit_native)
@@ -243,7 +243,7 @@ ArenaAllocator: object {
             arena_block: ref ArenaBlock = allocate_block(align_up(overhead + size, page))
 
             base_address: Int = @ptr_to_address(arena_block.base)
-            start: Int = align_up(base_address + @size_of(ArenaBlock), alignment) - base_address
+            start: Int = align_up(base_address.wrapping_add(@size_of(ArenaBlock)), alignment).wrapping_subtract(base_address)
 
             if self.current_custom_block.get() -> value: ref ArenaBlock {
                 value.next = .Some(arena_block)

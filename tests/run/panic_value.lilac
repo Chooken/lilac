@@ -1,0 +1,22 @@
+// expect-stdout: 5
+// expect-exit: 101
+// expect-stderr: panic: too small
+// expect-stderr:   at pick (panic_value.lilac:15:80)
+// expect-stderr:   at main (panic_value.lilac:21:20)
+// `@panic` and `@trap` never return, so as a value they are whatever is
+// expected: `if c then @panic(m) else x`, the shape of `Standard`'s
+// overflow checks. The second call's operand is a global nothing writes,
+// so nothing folds it (a constant one would be `E060`).
+
+using Standard.Io
+
+low: @bit32 = 0x1
+
+pick: function (value: @bit32) @bit32 => if @i_less_than_u_32(value, 0x2) then @panic("too small") else value
+
+main: function () nothing {
+    total: @bit32 = if @i_less_than_u_32(low, 0x9) then pick(0x5) else @trap()
+    shown: Standard.Uint32 = total
+    print_line($"{shown}")
+    rest: @bit32 = pick(low)
+}

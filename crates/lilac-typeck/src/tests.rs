@@ -110,11 +110,11 @@ fn literal_type(src: &str) -> String {
 /// Numeric objects mirroring `lib/Standard`: one exact-width
 /// `@conversion(from: <bit|fbit>)` per type, no widening pairs.
 fn numeric_objects() -> &'static str {
-    "Int8: object { private { data: @bit8 } @conversion: function (from: @bit8) to: Int8 { to = Int8 { data = from } } }\n\
-     Int16: object { private { data: @bit16 } @conversion: function (from: @bit16) to: Int16 { to = Int16 { data = from } } }\n\
-     Int32: object { private { data: @bit32 } @conversion: function (from: @bit32) to: Int32 { to = Int32 { data = from } } }\n\
-     Int64: object { private { data: @bit64 } @conversion: function (from: @bit64) to: Int64 { to = Int64 { data = from } } }\n\
-     Int: object { private { data: @bit_native } @conversion: function (from: @bit_native) to: Int { to = Int { data = from } } }\n\
+    "Int8: object { private { data: @bit8 } @conversion: function (from: @bit8) to: Int8 { to = Int8 { data = from } } @negate: function (value: Int8) to: Int8 { to = value } }\n\
+     Int16: object { private { data: @bit16 } @conversion: function (from: @bit16) to: Int16 { to = Int16 { data = from } } @negate: function (value: Int16) to: Int16 { to = value } }\n\
+     Int32: object { private { data: @bit32 } @conversion: function (from: @bit32) to: Int32 { to = Int32 { data = from } } @negate: function (value: Int32) to: Int32 { to = value } }\n\
+     Int64: object { private { data: @bit64 } @conversion: function (from: @bit64) to: Int64 { to = Int64 { data = from } } @negate: function (value: Int64) to: Int64 { to = value } }\n\
+     Int: object { private { data: @bit_native } @conversion: function (from: @bit_native) to: Int { to = Int { data = from } } @negate: function (value: Int) to: Int { to = value } }\n\
      Float32: object { private { data: @fbit32 } @conversion: function (from: @fbit32) to: Float32 { to = Float32 { data = from } } }\n\
      Float64: object { private { data: @fbit64 } @conversion: function (from: @fbit64) to: Float64 { to = Float64 { data = from } } }\n"
 }
@@ -269,6 +269,25 @@ fn negative_literal_overflow_is_e060() {
     let diags =
         check_src("main: function () nothing {\n    x: @bit64 = -0x8000_0000_0000_0001\n}\n");
     assert!(has_code(&diags, "E060"), "{diags:?}");
+}
+
+#[test]
+fn negative_float_literal_folds_at_the_slot_type() {
+    // Two float objects with `@negate`s: `-1.5` in an `@fbit32` slot must
+    // not pick one of them; it is the negated literal.
+    let src = "F16: object {\n    data: @fbit16\n    @negate: function (value: F16) F16 => F16 { data = @f_negate_16(value.data) }\n    @conversion: function (from: @fbit16) F16 => F16 { data = from }\n}\n\
+               F32: object {\n    data: @fbit32\n    @negate: function (value: F32) F32 => F32 { data = @f_negate_32(value.data) }\n    @conversion: function (from: @fbit32) F32 => F32 { data = from }\n}\n\
+               main: function () nothing {\n    a: @bit8 = @f_less_than_32(@bits_to_fbit_32(0x0), -1.5)\n    b: F16 = -2.0\n}\n";
+    let diags = check_src(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
+#[test]
+fn negative_literal_needs_negate_on_a_numeric_object() {
+    let src = "U: object {\n    data: @bit8\n    @conversion: function (from: @bit8) U => U { data = from }\n}\n\
+               main: function () nothing {\n    a: U = -1\n}\n";
+    let diags = check_src(src);
+    assert!(has_code(&diags, "E043"), "{diags:?}");
 }
 
 #[test]

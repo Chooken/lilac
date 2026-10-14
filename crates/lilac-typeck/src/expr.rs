@@ -105,25 +105,7 @@ impl Checker<'_> {
             } => match self.check_call(fcx, callee, generic_args, args, *span, expected) {
                 // A call used as a value is its first out; the rest drop.
                 Ok(Called::Call { callee, args, outs }) => {
-                    let Some((&first, rest)) = outs.split_first() else {
-                        self.diags.emit(
-                            Diagnostic::error(codes::E022, "this call returns no value").label(
-                                *span,
-                                true,
-                                "a value is expected here",
-                            ),
-                        );
-                        return HirExpr::poison(*span);
-                    };
-                    HirExpr {
-                        ty: first,
-                        span: *span,
-                        kind: HirExprKind::Call {
-                            callee,
-                            args,
-                            rest: rest.to_vec(),
-                        },
-                    }
+                    self.call_value(callee, args, &outs, *span, expected)
                 }
                 Ok(Called::Value(value)) => value,
                 Err(_) => HirExpr::poison(*span),
@@ -172,8 +154,65 @@ impl Checker<'_> {
         }
     }
 
+    /// A call used as a value: its first out; the rest drop.
+    fn call_value(
+        &mut self,
+        callee: HirCallee,
+        args: Vec<HirExpr>,
+        outs: &[TypeRef],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> HirExpr {
+        // `@panic` and `@trap` never return, so as a value they are
+        // whatever is expected (`if c then @panic(m) else x`).
+        if let (HirCallee::Intrinsic(Intrinsic::Panic | Intrinsic::Trap), Some(want)) =
+            (&callee, expected)
+        {
+            return HirExpr {
+                ty: self.types.value_type(want),
+                span,
+                kind: HirExprKind::Call {
+                    callee,
+                    args,
+                    rest: Vec::new(),
+                },
+            };
+        }
+        let Some((&first, rest)) = outs.split_first() else {
+            self.diags.emit(
+                Diagnostic::error(codes::E022, "this call returns no value").label(
+                    span,
+                    true,
+                    "a value is expected here",
+                ),
+            );
+            return HirExpr::poison(span);
+        };
+        HirExpr {
+            ty: first,
+            span,
+            kind: HirExprKind::Call {
+                callee,
+                args,
+                rest: rest.to_vec(),
+            },
+        }
+    }
+
     /// Fits `expr` into a `want` slot: deref, exact, or one conversion.
     pub(crate) fn coerce(&mut self, expr: HirExpr, want: TypeRef, want_span: Span) -> HirExpr {
+        self.coerce_or_fix(expr, want, want_span, None)
+    }
+
+    /// [`Checker::coerce`]; `cast` is the span of an `as T` after a postfix
+    /// operand, which a conversion method's call may replace.
+    fn coerce_or_fix(
+        &mut self,
+        expr: HirExpr,
+        want: TypeRef,
+        want_span: Span,
+        cast: Option<Span>,
+    ) -> HirExpr {
         if expr.ty.is_error() || want.is_error() {
             return expr;
         }
@@ -212,12 +251,94 @@ impl Checker<'_> {
         )
         .label(want_span, false, format!("expected `{target}` here"))
         .label(expr.span, true, "conversion attempted here");
+        let diagnostic = self.conversion_methods(diagnostic, source, want.id, cast);
         self.emit_requirement(
             diagnostic,
             Requirement::Conversion { from: source },
             &[expr.ty.id, want.id],
         );
         HirExpr::poison(expr.span)
+    }
+
+    /// Names the methods of `from`'s type that take only `self` and give a
+    /// `to`: the conversions it offers where no `@conversion` is exact
+    /// (`Standard`'s `to_int32_truncated`, `to_float64_rounded`). Each that
+    /// cannot fail is a fix replacing `cast`, when the error is an `as`.
+    fn conversion_methods(
+        &mut self,
+        mut diagnostic: Diagnostic,
+        from: TypeId,
+        to: TypeId,
+        cast: Option<Span>,
+    ) -> Diagnostic {
+        let Some((def, args)) = self.type_parts(from) else {
+            return diagnostic;
+        };
+        if !args.is_empty() {
+            return diagnostic;
+        }
+        let mut members: Vec<(String, DefId)> = self
+            .res
+            .def(def)
+            .members
+            .iter()
+            .map(|(name, id)| (name.clone(), *id))
+            .collect();
+        members.sort();
+        let mut methods = Vec::new();
+        for (name, member) in members {
+            let found = self.res.def(member);
+            let (DefKind::Func(decl), Visibility::Public) = (&found.kind, found.vis) else {
+                continue;
+            };
+            let fails = match &decl.failures {
+                None => false,
+                Some(outs) if outs.is_empty() => true,
+                Some(_) => continue,
+            };
+            if !decl.generic_params.is_empty()
+                || decl.params.len() != 1
+                || decl.returns.len() != 1
+                || !decl.params[0].is_receiver()
+            {
+                continue;
+            }
+            let Ok(sig) = self.sig_of(member) else {
+                continue;
+            };
+            let out = sig.returns[0];
+            if sig.params[0].id == from && out.id == to && !out.is_ref {
+                methods.push((name, fails));
+            }
+        }
+        if methods.is_empty() {
+            return diagnostic;
+        }
+        let listed: Vec<String> = methods
+            .iter()
+            .map(|(name, fails)| {
+                if *fails {
+                    format!("`{name}()` (which can fail)")
+                } else {
+                    format!("`{name}()`")
+                }
+            })
+            .collect();
+        let (shown_from, shown_to) = (self.show_id(from), self.show_id(to));
+        diagnostic = diagnostic.help(format!(
+            "`{shown_from}` converts to `{shown_to}` with a method: {}",
+            listed.join(", ")
+        ));
+        if let Some(cast) = cast {
+            for (name, _) in methods.iter().filter(|(_, fails)| !fails) {
+                diagnostic = diagnostic.fix(
+                    cast,
+                    format!(".{name}()"),
+                    format!("replace the `as` with `.{name}()`"),
+                );
+            }
+        }
+        diagnostic
     }
 
     /// Wraps a by-value `expr` in its `@conversion` to `to`, if one exists.
@@ -1234,7 +1355,13 @@ impl Checker<'_> {
             self.mismatch(target, value.ty, target_ty.span, span);
             return HirExpr::poison(span);
         }
-        self.coerce(value, target, target_ty.span)
+        // A method call can replace `as T` only after a postfix operand.
+        let cast = matches!(
+            operand,
+            Expr::Ident(..) | Expr::Call { .. } | Expr::Member { .. }
+        )
+        .then(|| Span::new(span.hi.0, target_ty.span.hi.0, span.file));
+        self.coerce_or_fix(value, target, target_ty.span, cast)
     }
 
     // ---- operators --------------------------------------------------------

@@ -35,7 +35,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         sources: &sources,
         names: HashMap::new(),
         bad_indices: Vec::new(),
-        bad_divisions: Vec::new(),
+        bad_panics: Vec::new(),
         bad_globals: Vec::new(),
         // Signatures need no layout, so any target does.
         target: lilac_target::Target::default(),

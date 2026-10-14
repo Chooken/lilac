@@ -10,7 +10,7 @@
 //! fuel: a `=>` call whose definition is already being expanded is not
 //! constant, so evaluation always terminates. `None` means "not constant",
 //! which is never an error by itself; when the reason is a division that
-//! panics, the evaluator says so ([`DivisionPanic`]), and lowering reports
+//! panics, the evaluator says so ([`ConstantPanic`]), and lowering reports
 //! the live ones as `E060`.
 
 use std::cmp::Ordering;
@@ -25,7 +25,7 @@ use lilac_ir::{ArithOp, LirTy, UnaryOp};
 use lilac_resolve::DefId;
 use lilac_ty::TypeRef;
 
-use crate::{DivisionPanic, Lower};
+use crate::{ConstantPanic, Lower};
 
 /// A constant value.
 #[derive(Clone, PartialEq, Debug)]
@@ -178,18 +178,18 @@ pub(crate) fn division_panic(
     left: Option<u64>,
     right: u64,
     width: u32,
-) -> Option<DivisionPanic> {
+) -> Option<ConstantPanic> {
     if !is_division(op) {
         return None;
     }
     let mask = mask_of(width);
     if right & mask == 0 {
-        return Some(DivisionPanic::ByZero);
+        return Some(ConstantPanic::ByZero);
     }
     let signed = matches!(op, ArithOp::IDiv | ArithOp::IMod);
     let min = 1u64 << (width - 1);
     let overflows = signed && right & mask == mask && left.is_some_and(|left| left & mask == min);
-    overflows.then_some(DivisionPanic::Overflow)
+    overflows.then_some(ConstantPanic::Overflow)
 }
 
 /// Whether `op` is an integer division or remainder (the operations that
@@ -210,7 +210,7 @@ pub(crate) fn eval_arith(
     left: u64,
     right: u64,
     width: u32,
-) -> Result<Option<Value>, DivisionPanic> {
+) -> Result<Option<Value>, ConstantPanic> {
     match division_panic(op, Some(left), right, width) {
         Some(panic) => Err(panic),
         None => Ok(fold_arith(op, left, right, width)),
@@ -330,9 +330,9 @@ fn fold_unary(op: UnaryOp, value: u64, width: u32) -> Option<Value> {
 pub(crate) struct Eval {
     stack: Vec<DefId>,
     frames: Vec<HashMap<LocalId, Value>>,
-    /// Set when evaluation stopped at a division that panics: the reason
-    /// the value is not constant.
-    panic: Option<DivisionPanic>,
+    /// Set when evaluation stopped at a division or a `@panic` that
+    /// panics: the reason the value is not constant.
+    panic: Option<ConstantPanic>,
     /// A `=>` call's arguments that are not constant leave their
     /// parameters unbound instead of making the call not constant
     /// ([`Lower::inline_call_panic`]). Only [`Eval::panic`] is read then.
@@ -354,7 +354,7 @@ impl<'a> Lower<'a> {
     pub(crate) fn constant_or_panic(
         &mut self,
         expr: &HirExpr,
-    ) -> Result<Value, Option<DivisionPanic>> {
+    ) -> Result<Value, Option<ConstantPanic>> {
         let mut eval = Eval::default();
         eval.frames.push(HashMap::new());
         self.eval(&mut eval, expr).ok_or(eval.panic)
@@ -368,7 +368,7 @@ impl<'a> Lower<'a> {
     pub(crate) fn global_constant(
         &mut self,
         expr: &HirExpr,
-    ) -> Result<Value, Option<DivisionPanic>> {
+    ) -> Result<Value, Option<ConstantPanic>> {
         let mut eval = Eval::default();
         eval.frames.push(HashMap::new());
         self.eval_built(&mut eval, expr).ok_or(eval.panic)
@@ -404,7 +404,7 @@ impl<'a> Lower<'a> {
         &mut self,
         key: &FuncKey,
         args: &[HirExpr],
-    ) -> Option<DivisionPanic> {
+    ) -> Option<ConstantPanic> {
         let callee: &'a HirFunc = self.funcs.get(key).copied()?;
         let body = inline_body(callee)?;
         if self.partial_panic(key.def, HashMap::new(), body).is_some() {
@@ -426,7 +426,7 @@ impl<'a> Lower<'a> {
         def: DefId,
         frame: HashMap<LocalId, Value>,
         body: &HirExpr,
-    ) -> Option<DivisionPanic> {
+    ) -> Option<ConstantPanic> {
         let mut eval = Eval {
             partial: true,
             ..Eval::default()
@@ -680,6 +680,15 @@ impl<'a> Lower<'a> {
         args: &[HirExpr],
         ty: TypeRef,
     ) -> Option<Value> {
+        if intrinsic == Intrinsic::Panic {
+            // Reached with every condition on the way known: the
+            // evaluation panics (`Standard`'s overflow checks).
+            eval.panic = args
+                .first()
+                .and_then(literal_message)
+                .map(ConstantPanic::Message);
+            return None;
+        }
         if let (Intrinsic::Int(op, _), [dividend, divisor]) = (intrinsic, args) {
             if let Some(op) = arith_op(op, false).filter(is_division) {
                 return self.eval_division(eval, &op, dividend, divisor);
@@ -825,6 +834,17 @@ impl<'a> Lower<'a> {
     }
 }
 
+/// The text of a `@panic` message written as a literal: a string, or a
+/// format with no holes.
+fn literal_message(message: &HirExpr) -> Option<String> {
+    let bytes = match &message.kind {
+        HirExprKind::Str(bytes) => bytes.clone(),
+        HirExprKind::Format(format) if format.holes.is_empty() => format.pieces.concat(),
+        _ => return None,
+    };
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Whether `intrinsic` takes or makes a float.
 fn is_float_intrinsic(intrinsic: Intrinsic) -> bool {
     matches!(
@@ -959,16 +979,16 @@ mod tests {
     #[test]
     fn eval_arith_says_why_a_division_panics() {
         for op in [ArithOp::IDiv, ArithOp::IDivU, ArithOp::IMod, ArithOp::IModU] {
-            assert_eq!(eval_arith(&op, 5, 0, 8), Err(DivisionPanic::ByZero));
+            assert_eq!(eval_arith(&op, 5, 0, 8), Err(ConstantPanic::ByZero));
             // Only the operand width's bits count.
-            assert_eq!(eval_arith(&op, 5, 0x100, 8), Err(DivisionPanic::ByZero));
+            assert_eq!(eval_arith(&op, 5, 0x100, 8), Err(ConstantPanic::ByZero));
         }
         for (min, width) in [(0x80, 8), (0x8000, 16), (0x8000_0000, 32), (1 << 63, 64)] {
             let minus_one = mask_of(width);
             for op in [ArithOp::IDiv, ArithOp::IMod] {
                 assert_eq!(
                     eval_arith(&op, min, minus_one, width),
-                    Err(DivisionPanic::Overflow),
+                    Err(ConstantPanic::Overflow),
                     "{op:?} at {width} bits"
                 );
             }
@@ -985,7 +1005,7 @@ mod tests {
         // A zero divisor is known without the dividend; the overflow is not.
         assert_eq!(
             division_panic(&ArithOp::IDivU, None, 0, 32),
-            Some(DivisionPanic::ByZero)
+            Some(ConstantPanic::ByZero)
         );
         assert_eq!(division_panic(&ArithOp::IDiv, None, 0xffff_ffff, 32), None);
         assert_eq!(division_panic(&ArithOp::IAdd, Some(1), 0, 32), None);

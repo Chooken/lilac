@@ -1,0 +1,13 @@
+// expect-error: E043
+// expect-stderr:    = help: `Standard.Int64` converts to `Standard.Float64` with a method: `to_float64_rounded()`
+// expect-stderr:    = help: replace the `as` with `.to_float64_rounded()`
+// `as` is a `@conversion`, and `Standard` defines one only where every
+// value converts exactly: a 64-bit integer does not fit a `Float64`'s
+// significand. The error names the type's methods that do convert.
+
+using Standard
+
+main: function () nothing {
+    count: Int64 = 5
+    ratio: Float64 = count as Float64
+}

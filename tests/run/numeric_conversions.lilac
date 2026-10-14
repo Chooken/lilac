@@ -1,0 +1,66 @@
+// expect-stdout: -100 200 -100 -100 3
+// expect-stdout: 127 none 255 none none -128 255
+// expect-stdout: 44 -56 65236 -1
+// expect-stdout: 3 -3 2147483647 -2147483648 0 255 0
+// expect-stdout: 3 none none none 65504 none
+// expect-stdout: 16777216 9007199254740992 2048
+// The conversion matrix (math plan phase 2): `as` only where every value
+// converts exactly, `to_X()` that fails out of range, `to_X_wrapping()`,
+// a float's saturating `to_X_truncated()` (NaN is 0) and an integer's
+// `to_floatN_rounded()`.
+
+using Standard
+using Standard.Io
+
+zero: Float64 = 0.0
+
+show_int8: function (value: Int16) nothing {
+    if value.to_int8() -> narrow: Int8 { print($"{narrow} ") } else { print("none ") }
+}
+
+show_uint8: function (value: Int16) nothing {
+    if value.to_uint8() -> narrow: Uint8 { print($"{narrow} ") } else { print("none ") }
+}
+
+main: function () nothing {
+    // Exact: widening, and unsigned into a wider signed.
+    small: Int8 = -100
+    byte: Uint8 = 200
+    float: Float32 = 3.25
+    print_line($"{small as Int16} {byte as Int16} {small as Int64} {(small as Float64).to_int8_truncated()} {(float as Float64).to_int8_truncated()}")
+
+    // Checked: in range or none.
+    show_int8(127)
+    show_int8(128)
+    show_uint8(255)
+    show_uint8(256)
+    show_uint8(-1)
+    show_int8(-128)
+    if byte.to_int8() -> signed: Int8 { print($"{signed}") } else { print_line("255") }
+
+    // Wrapping: the low bits.
+    wide: Int32 = 300
+    print_line($"{wide.to_uint8_wrapping()} {byte.to_int8_wrapping()} {wide.wrapping_negate().to_uint16_wrapping()} {Uint64.MAX.to_int_wrapping()}")
+
+    // Truncating: toward zero, saturating, NaN is 0.
+    third: Float64 = 3.9
+    huge: Float64 = 1e300
+    nan: Float64 = zero / zero
+    print_line($"{third.to_int32_truncated()} {(-third).to_int32_truncated()} {huge.to_int32_truncated()} {(-huge).to_int32_truncated()} {nan.to_int32_truncated()} {huge.to_uint8_truncated()} {(-huge).to_uint8_truncated()}")
+
+    // Checked from a float: integral and in range.
+    three: Float64 = 3.0
+    if three.to_int32() -> value: Int32 { print($"{value} ") } else { print("none ") }
+    if third.to_int32() -> value: Int32 { print($"{value} ") } else { print("none ") }
+    if huge.to_int64() -> value: Int64 { print($"{value} ") } else { print("none ") }
+    if nan.to_int8() -> value: Int8 { print($"{value} ") } else { print("none ") }
+    largest: Float16 = 65504.0
+    if largest.to_uint16() -> value: Uint16 { print($"{value} ") } else { print("none ") }
+    if (largest as Float32 * 2.0).to_uint16() -> value: Uint16 { print_line($"{value}") } else { print_line("none") }
+
+    // Rounding to nearest, ties to even.
+    odd: Int32 = 16777217
+    odd64: Int64 = 9007199254740993
+    over: Int32 = 2049
+    print_line($"{odd.to_float32_rounded().to_int32_truncated()} {odd64.to_float64_rounded().to_int64_truncated()} {over.to_float16_rounded().to_int32_truncated()}")
+}

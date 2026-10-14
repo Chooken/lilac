@@ -1,6 +1,6 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; not started.
+> Status: agreed, 2026-10-14; phases 0-2 done.
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -289,6 +289,9 @@ All in `lib/Standard`, one file per type as today.
   an alias of `Uint8`.
 - **`Float16`** as a storage type: conversions, classification and
   `@format` through `Float32`. Its arithmetic is phase 0's question.
+  (Landed: its arithmetic and conversions. Classification is phase 4's
+  and `@format` phase 6's, as for every float, since no float has
+  either yet.)
 - **Mixed literal hooks.** Every type gets `(T, @bitW)`/`(@bitW, T)`
   (integers) or `(T, @fbitW)`/`(@fbitW, T)` (floats) for each operator,
   as `Int` has, so `x > 1.0` and `n * 2` work. First check that a float
@@ -313,16 +316,18 @@ All in `lib/Standard`, one file per type as today.
 - **Integer overflow policy** (decision above). Each `@add`/`@sub`/`@mul`
   hook stays `=>`:
 
-      @add: function (lhs: Int32, rhs: Int32) Int32 => add_checked_32(lhs.data, rhs.data)
+      @add: function (lhs: Int32, rhs: Int32) Int32 =>
+          Int32 { data = if @builtin.Build.mode == .Debug and @i_add_overflows_32(lhs.data, rhs.data) then @panic("attempt to add with overflow") else @i_add_32(lhs.data, rhs.data) }
 
-  `add_checked_32` is a private `=>` that branches on
+  (Landed inline rather than through a private `add_checked_32`, so a
+  panic's trace ends at the operator, as division's does.) It branches on
   `@builtin.Build.mode == .Debug` (a constant condition, so Release
   lowers only the wrapping arm) and panics with
   `attempt to add with overflow`. `@negate` of `MIN` and `abs` of `MIN`
   follow the same rule. The constant evaluator folds a literal overflow
   as `E060`, as it already does for division.
 - **The wrapping opt-in lands with the policy.** `wrapping_add`,
-  `wrapping_sub`, `wrapping_multiply` and `wrapping_negate` are `=>`
+  `wrapping_subtract`, `wrapping_multiply` and `wrapping_negate` are `=>`
   methods over the raw intrinsics on every integer type, and they wrap in
   every mode. In the same commit, any code in `Standard` that relies on
   wrapping switches to them. Find it by running the run tests in Debug,
@@ -333,12 +338,21 @@ All in `lib/Standard`, one file per type as today.
 Tests:
 - A run test per family: unsigned arithmetic and comparisons, mixed
   literals and the conversion matrix.
-- `FAILS_integer_overflow_debug.lilac` (exit 101, the message).
+- `integer_overflow_debug.lilac` (exit 101, the message; a run-time
+  panic, so no `FAILS_` prefix), and `FAILS_integer_overflow_constant.lilac`
+  (`E060`).
 - `integer_overflow_release.lilac` (`// build-arg: --release`, wraps).
 - `integer_wrapping.lilac`: the `wrapping_*` methods wrap in Debug.
 - `FAILS_lossy_as.lilac` (`E043` for `Int64 as Float64` that names the
   method to use, through a fix-it if the conversion search can suggest
   one).
+- Landed with it: `@panic` and `@trap` are values of any expected type
+  (`panic_value.lilac`); a `=>` call whose constant arguments reach a
+  `@panic` is `E060` with that message; a negative literal into a type
+  with no `@negate` is `E043` (`FAILS_negative_unsigned.lilac`), and a
+  negative float literal folds like an integer one; any missing
+  conversion's `E043` names the source type's `to_…` methods that give
+  the target, with a fix-it on an `as`.
 
 ## Phase 3: integer methods
 

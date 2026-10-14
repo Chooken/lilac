@@ -1,0 +1,19 @@
+// expect-stdout: before
+// expect-exit: 101
+// expect-stderr: panic: attempt to add with overflow
+// expect-stderr:   at Standard.Int8.@add (Standard/int8.lilac:40:99)
+// expect-stderr:   at main (integer_overflow_debug.lilac:17:17)
+// `Standard`'s integer `+`, `-`, `*` and negation panic on overflow in a
+// Debug build. The operand is a global nothing writes, so nothing folds it
+// (a constant overflow is `E060`).
+
+using Standard
+using Standard.Io
+
+largest: Int8 = 127
+
+main: function () nothing {
+    print_line("before")
+    sum: Int8 = largest + 1
+    print_line($"{sum}")
+}

@@ -11,7 +11,7 @@ use lilac_span::Span;
 use lilac_ty::{Builtin, TypeKind, TypeRef};
 
 use crate::constant;
-use crate::{BadDivision, BadIndex, DivisionPanic, FnState, Lower};
+use crate::{BadIndex, BadPanic, ConstantPanic, FnState, Lower};
 
 impl Lower<'_> {
     #[allow(clippy::too_many_lines)]
@@ -176,8 +176,7 @@ impl Lower<'_> {
             | Intrinsic::Memmove
             | Intrinsic::Memset
             | Intrinsic::LinuxSyscall
-            | Intrinsic::LinuxThreadClone
-            | Intrinsic::Trap => {
+            | Intrinsic::LinuxThreadClone => {
                 let Some(name) = intrinsic.leaf_builtin() else {
                     lilac_error::bug!(span, "intrinsic `{intrinsic:?}` has no leaf");
                 };
@@ -189,9 +188,6 @@ impl Lower<'_> {
                     outs: out.iter().cloned().collect(),
                     span,
                 });
-                if intrinsic == Intrinsic::Trap {
-                    state.end(LirTerm::Unreachable { span });
-                }
                 out.map_or(LirOperand::Reg(Reg::default()), LirOperand::Place)
             }
             Intrinsic::Atomic(op, ordering, _) => {
@@ -204,10 +200,23 @@ impl Lower<'_> {
                 });
                 LirOperand::Reg(Reg::default())
             }
+            Intrinsic::Trap => {
+                let Some(leaf) = intrinsic.leaf_builtin() else {
+                    lilac_error::bug!(span, "`@trap` has no leaf");
+                };
+                state.emit(LirInst::Call {
+                    func: LirCallee::Builtin(leaf.to_owned()),
+                    ins: Vec::new(),
+                    outs: Vec::new(),
+                    span,
+                });
+                state.end(LirTerm::Unreachable { span });
+                self.never_value(state, ty, span)
+            }
             Intrinsic::Panic => {
                 let msg = self.arg(state, func, &args[0]);
                 self.panic_with(state, func, msg, span);
-                LirOperand::Reg(Reg::default())
+                self.never_value(state, ty, span)
             }
             Intrinsic::ArrayAt => self.lower_array_at(state, func, args, span),
             Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
@@ -268,6 +277,17 @@ impl Lower<'_> {
     /// Ends the block with `.lilac.panic(msg, site)` and `unreachable`,
     /// where `msg` is a panic message place ([`Self::panic_text`]) and
     /// `site` is this call's stack-trace line.
+    /// What a call that never returns gives as a value of `ty` (`if c
+    /// then @panic(m) else x`): a place in the unreachable block after
+    /// it, for the value's consumer to read.
+    fn never_value(&mut self, state: &mut FnState, ty: TypeRef, span: Span) -> LirOperand {
+        if ty.is_error() {
+            LirOperand::Reg(Reg::default())
+        } else {
+            LirOperand::Place(self.tmp(state, ty, span))
+        }
+    }
+
     pub(crate) fn panic_with(
         &mut self,
         state: &mut FnState,
@@ -293,7 +313,7 @@ impl Lower<'_> {
     /// `-1` panics with "division overflow". A test the constant operands
     /// rule out is not emitted, so the backend never divides by zero or
     /// overflows. Constant operands that make it panic are `E060`
-    /// ([`BadDivision`]). Returns the operands in the block that divides
+    /// ([`BadPanic`]). Returns the operands in the block that divides
     /// (registers do not cross blocks, so a tested pair is kept in places).
     fn check_division(
         &mut self,
@@ -320,7 +340,7 @@ impl Lower<'_> {
         if let Some(panic) =
             divisor.and_then(|right| constant::division_panic(op, dividend, right, width))
         {
-            self.bad_divisions.push(BadDivision {
+            self.bad_panics.push(BadPanic {
                 func: Some(self.symbols[&func.key].as_str().to_owned()),
                 span,
                 panic,
@@ -355,7 +375,7 @@ impl Lower<'_> {
         let mut operands = regs;
         if by_zero {
             let zero = equals_const(state, &operands[1], 0, lir, span);
-            self.panic_when(state, func, zero, DivisionPanic::ByZero, span);
+            self.panic_when(state, func, zero, &ConstantPanic::ByZero, span);
             operands = reload(state);
         }
         if overflow {
@@ -370,7 +390,7 @@ impl Lower<'_> {
                 ty: LirTy::Bit(8),
                 span,
             });
-            self.panic_when(state, func, both, DivisionPanic::Overflow, span);
+            self.panic_when(state, func, both, &ConstantPanic::Overflow, span);
             operands = reload(state);
         }
         operands
@@ -383,7 +403,7 @@ impl Lower<'_> {
         state: &mut FnState,
         func: &HirFunc,
         cond: Reg,
-        panic: DivisionPanic,
+        panic: &ConstantPanic,
         span: Span,
     ) {
         let (fail, ok) = (state.label(), state.label());

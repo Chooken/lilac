@@ -1,0 +1,11 @@
+// expect-error: E060
+// expect-stderr: error[E060]: attempt to add with overflow
+// `Int8.MAX + 1` calls `Standard`'s `=>` `@add` with constant operands,
+// and its Debug overflow check panics: the panic is known at compile
+// time.
+
+using Standard
+
+main: function () nothing {
+    past: Int8 = Int8.MAX + 1
+}

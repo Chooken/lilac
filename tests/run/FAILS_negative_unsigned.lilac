@@ -1,0 +1,10 @@
+// expect-error: E043
+// expect-stderr: error[E043]: no @negate for Standard.Uint8
+// A negative literal needs the type's `@negate`; an unsigned integer has
+// none, so `-1` is an error, never `Uint8.MAX`.
+
+using Standard
+
+main: function () nothing {
+    byte: Uint8 = -1
+}

@@ -1,0 +1,19 @@
+// build-arg: --release
+// expect-stdout: -128 127 0 -128 -2
+// expect-stdout: 0 65535
+// In a Release build `Standard`'s integer operators wrap around instead
+// of panicking (the overflow check is under a constant
+// `@builtin.Build.mode == .Debug`, so it is not compiled at all).
+
+using Standard
+using Standard.Io
+
+largest: Int8 = 127
+smallest: Int8 = -128
+top: Uint8 = 255
+none: Uint16 = 0
+
+main: function () nothing {
+    print_line($"{largest + 1} {smallest - 1} {top + 1 + 0} {-smallest} {largest * 2}")
+    print_line($"{top + 1} {none - 1}")
+}

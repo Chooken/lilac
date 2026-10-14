@@ -216,24 +216,24 @@ fn division_by_zero_is_not_constant() {
 }
 
 /// The function (by source name) and panic of each collected `E060`.
-fn bad_divisions(src: &str) -> Vec<(String, DivisionPanic)> {
+fn bad_panics(src: &str) -> Vec<(String, ConstantPanic)> {
     let (lowered, _) = lowered_on(src, lilac_target::Target::default());
     lowered
-        .bad_divisions
+        .bad_panics
         .iter()
         .map(|bad| {
             let name = bad
                 .func
                 .as_ref()
                 .map_or_else(|| "<global>".to_owned(), |func| lowered.names[func].clone());
-            (name, bad.panic)
+            (name, bad.panic.clone())
         })
         .collect()
 }
 
 #[test]
 fn constant_divisions_that_panic_are_collected() {
-    let found = bad_divisions(
+    let found = bad_panics(
         "div: function (a: @bit32, b: @bit32) r: @bit32 => @i_div_32(a, b)
 twice: function (a: @bit32) r: @bit32 => div(a, 0x0)
 pass: function (a: @bit32, b: @bit32) r: @bit32 => div(a, b)
@@ -269,9 +269,9 @@ main: function () nothing {
 }
 ",
     );
-    let found: Vec<(&str, DivisionPanic)> = found
+    let found: Vec<(&str, ConstantPanic)> = found
         .iter()
-        .map(|(name, panic)| (name.as_str(), *panic))
+        .map(|(name, panic)| (name.as_str(), panic.clone()))
         .collect();
     assert_eq!(
         found,
@@ -279,21 +279,46 @@ main: function () nothing {
             // `twice`'s own body divides by zero; its callers are not
             // reported again (`through_nested`), but one whose constant
             // argument reaches a division is (`through_pass`).
-            ("twice", DivisionPanic::ByZero),
-            ("by_zero", DivisionPanic::ByZero),
-            ("runtime_dividend", DivisionPanic::ByZero),
-            ("overflow", DivisionPanic::Overflow),
-            ("through_hook", DivisionPanic::ByZero),
-            ("through_pass", DivisionPanic::ByZero),
+            ("twice", ConstantPanic::ByZero),
+            ("by_zero", ConstantPanic::ByZero),
+            ("runtime_dividend", ConstantPanic::ByZero),
+            ("overflow", ConstantPanic::Overflow),
+            ("through_hook", ConstantPanic::ByZero),
+            ("through_pass", ConstantPanic::ByZero),
         ]
     );
 }
 
 #[test]
 fn a_global_initializer_that_divides_by_zero_is_e060() {
-    let found =
-        bad_divisions("g: @bit32 = @i_div_u_32(0x1, 0x0)\nmain: function () nothing {\n}\n");
-    assert_eq!(found, [("<global>".to_owned(), DivisionPanic::ByZero)]);
+    let found = bad_panics("g: @bit32 = @i_div_u_32(0x1, 0x0)\nmain: function () nothing {\n}\n");
+    assert_eq!(found, [("<global>".to_owned(), ConstantPanic::ByZero)]);
+}
+
+#[test]
+fn a_constant_call_that_reaches_a_panic_is_e060_with_its_message() {
+    let found = bad_panics(
+        "pick: function (a: @bit32) r: @bit32 => if @i_less_than_u_32(a, 0x2) then @panic(\"too small\") else a
+g: @bit32 = pick(0x1)
+small: function () r: @bit32 {
+    r = pick(0x0)
+}
+fine: function (a: @bit32) r: @bit32 {
+    r = pick(0x5)
+    r = pick(a)
+}
+main: function () nothing {
+}
+",
+    );
+    let message = ConstantPanic::Message("too small".to_owned());
+    assert_eq!(
+        found,
+        [
+            ("<global>".to_owned(), message.clone()),
+            ("small".to_owned(), message),
+        ]
+    );
 }
 
 /// Each division gets only the tests its constant operands leave open.
@@ -451,7 +476,7 @@ fn not_and_not_equal_are_constant() {
 
 #[test]
 fn a_guard_with_not_equal_rules_out_an_inline_division() {
-    let found = bad_divisions(
+    let found = bad_panics(
         "safe: function (a: @bit32, b: @bit32) r: @bit32 => if b != 0x0 then @i_div_32(a, b) else 0x0
 unsafe: function (a: @bit32, b: @bit32) r: @bit32 => if not (b == 0x1) then @i_div_32(a, b) else 0x0
 fine: function (a: @bit32) r: @bit32 {
@@ -464,5 +489,5 @@ main: function () nothing {
 }
 ",
     );
-    assert_eq!(found, [("bad".to_owned(), DivisionPanic::ByZero)]);
+    assert_eq!(found, [("bad".to_owned(), ConstantPanic::ByZero)]);
 }

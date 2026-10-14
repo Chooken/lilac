@@ -9,12 +9,12 @@ use lilac_ty::TypeRef;
 
 use crate::constant::Value;
 use crate::symbols::namespace_prefix;
-use crate::{BadDivision, FnState, Lower, Place};
+use crate::{BadPanic, FnState, Lower, Place};
 
 impl Lower<'_> {
     /// Adds every global to the module. An initializer that is not a
     /// constant expression is recorded in `bad_globals` (`E038`), or in
-    /// `bad_divisions` (`E060`) when a division in it panics, and the
+    /// `bad_panics` (`E060`) when a division in it panics, and the
     /// global starts zeroed.
     pub(crate) fn lower_globals(&mut self) {
         let mut globals: Vec<(&DefId, &lilac_hir::HirGlobal)> = self.hir.globals.iter().collect();
@@ -28,7 +28,7 @@ impl Lower<'_> {
                     Ok(constant) => Some(self.encode_value(&constant, global.ty)),
                     // A division that panics is the reason: `E060`, not `E038`.
                     Err(Some(panic)) => {
-                        self.bad_divisions.push(BadDivision {
+                        self.bad_panics.push(BadPanic {
                             func: None,
                             span: value.span,
                             panic,

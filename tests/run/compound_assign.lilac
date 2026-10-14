@@ -5,7 +5,7 @@
 // expect-stdout: 3
 // expect-exit: 101
 // expect-stderr: panic: division by zero
-// expect-stderr:   at Standard.Int32.@div (Standard/int32.lilac:16:54)
+// expect-stderr:   at Standard.Int32.@div (Standard/int32.lilac:26:69)
 // expect-stderr:   at main (compound_assign.lilac:66:5)
 // `x op= e` is `x = x op e` through the operator's hook: on a local, a
 // field, a field through a `ref`, a global and an object with its own

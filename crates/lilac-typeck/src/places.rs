@@ -851,6 +851,14 @@ impl Pass<'_, '_> {
                 for arg in args {
                     self.expr(arg, true);
                 }
+                // A `@panic` or `@trap` value (`if c then @panic(m) else
+                // x`) ends its path like the statement does.
+                if matches!(
+                    callee,
+                    HirCallee::Intrinsic(Intrinsic::Panic | Intrinsic::Trap)
+                ) {
+                    self.state = None;
+                }
             }
             HirExprKind::RefOf(inner) | HirExprKind::Retype(inner) | HirExprKind::Not(inner) => {
                 self.expr(inner, false);

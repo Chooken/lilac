@@ -165,7 +165,7 @@ Notation: `T`/`K`/`V`/`E` are generic parameters; `!name` is a `data` const;
 | Type | Underlying | Notes |
 |---|---|---|
 | `Bool` | `@bit8` | `true`/`false` data consts (`0x1`/`0x0`); strict non-zero test in conditions |
-| `Byte` | `@bit8` | |
+| `Byte` | `@bit8` | alias of `Uint8` |
 | `Char` | `@bit32` | Unicode scalar value; helpers in `Standard.Text` |
 | `Int8/16/32/64` | `@bit8/16/32/64` | signed interpretation |
 | `Int` | `@bit_native` | pointer-width signed |
@@ -216,6 +216,23 @@ unsigned variants; float variants. Unsigned comparisons bind
 **Conversions:** width widening (`@conversion` per pair, e.g.
 `@conversion(from: @bit8) to: @bit32`), `Char`↔`@bit32`, `@bit*`↔float,
 `@bit*`→`@byte_buffer` textual? (textual lives in `Text`).
+
+> **Today** (math plan phase 2, generated one file per type): every
+> integer type has `MIN`/`MAX`, the operators with a bit container on
+> either side (so `n * 2` and `1 < n` need no `as`), `@format`,
+> `hex`/`binary`, and `wrapping_add`/`_subtract`/`_multiply`/`_negate`.
+> `+`, `-`, `*` and negation panic on overflow in Debug builds
+> (`attempt to add with overflow`, …) and wrap in Release; `/` and `%`
+> panic on a zero divisor (and `MIN / -1`) in every mode. Floats
+> (`Float16` too) have their arithmetic and comparisons, with an
+> `@fbitW` on either side. `as` is an `@conversion` only where every
+> value converts exactly: widening of one signedness, unsigned into a
+> wider signed type, an integer into a float whose significand holds it,
+> and a narrower float into a wider one. Everything else is a method
+> that says what it does: `to_X() value: X else nothing` (fails out of
+> range, and for a float on a fraction or NaN), `to_X_wrapping()` (the
+> low bits), a float's `to_X_truncated()` (toward zero, saturating, NaN
+> is 0) and `to_floatN_rounded()` (to nearest, ties to even).
 
 **Conventions:** documented in §2 (no declarations).
 
@@ -546,15 +563,16 @@ becomes fully thread-safe through them.
 
 * **Integer:** `abs`, `min`, `max`, `clamp`, `pow`, `gcd`, `lcm`, `div_rem`,
   `div_floor`, `div_ceil`, `is_power_of_two`, `next_power_of_two`,
-  `checked_add`/`sub`/`mul` (`Result`), `saturating_*`, `wrapping_*`.
+  `checked_add`/`sub`/`mul` (`Result`), `saturating_*`, `wrapping_*`
+  (`wrapping_*` landed with the numeric types, §3.1).
 * **Float:** `abs`, `min`, `max`, `clamp`, `sqrt`, `cbrt`, `pow`, `exp`, `ln`,
   `log2`, `log10`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`, `trunc`,
   `fract`, `is_nan`, `is_infinite`, `is_finite`, `copysign`, `lerp`.
 * **Constants:** `PI`, `E`, `TAU`, `INFINITY`, `NAN`, `EPSILON` (per width).
 * **`Random`:** `new(seed)`, `next_u32`, `next_u64`, `next_int(range)`,
   `next_float()`, `shuffle[T](ref List[T])`; `Seed`/entropy from `C.Time`.
-* **Numeric conversions:** `@conversion` int↔float (lossy, explicit),
-  rounding helpers.
+* **Numeric conversions:** on the numeric types (§3.1): `as` only where
+  exact, named `to_…` methods otherwise.
 
 > `sqrt`/`pow`/trig need `libm` (`link = ["m"]`) or C externs — see §5.
 

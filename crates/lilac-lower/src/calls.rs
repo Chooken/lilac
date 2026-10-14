@@ -6,7 +6,7 @@ use lilac_span::Span;
 use lilac_ty::{TypeKind, TypeRef};
 
 use crate::symbols::c_ty;
-use crate::{BadDivision, FnState, Lower};
+use crate::{BadPanic, FnState, Lower};
 
 impl Lower<'_> {
     /// The C type an `extern` slot uses ([`Self::abi_slot`] with every
@@ -53,7 +53,7 @@ impl Lower<'_> {
             // an operator hook) panics at this call: `E060` here, since the
             // body itself sees only parameters.
             if let Some(panic) = self.inline_call_panic(key, args) {
-                self.bad_divisions.push(BadDivision {
+                self.bad_panics.push(BadPanic {
                     func: Some(self.symbols[&func.key].as_str().to_owned()),
                     span,
                     panic,

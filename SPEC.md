@@ -150,7 +150,12 @@ or 128), so `0.1` as an `@fbit128` has all 113 bits of `0.1`; a value too
 small for the smallest subnormal is zero. A value that rounds past the type's
 largest finite value is `E060`. A float literal in a bit or integer slot is
 `E010` (no implicit float→int). Unary `-` is an operator, not part of the
-literal; reading digits from a runtime `@byte_buffer` is standard-library work,
+literal, but `-` directly before a number literal folds into a negative
+literal of the expected type (`x: @bit8 = -128` is `0x80`, `-1.5` is the
+negated float), so it never calls an `@negate`. A numeric object (one
+with a `@conversion` from a bit or float type) takes a negative literal
+only when it has an `@negate`, so `-1` into an unsigned integer type is
+`E043`, never its maximum; reading digits from a runtime `@byte_buffer` is standard-library work,
 not a compiler intrinsic.
 
 Arithmetic between two literals of the same kind is folded at compile time: a
@@ -365,7 +370,7 @@ and nothing else. In particular:
   constant, so evaluation always terminates. There is no step limit.
 - Integer arithmetic wraps like the runtime operation; a division or
   remainder that panics (see [Integer division](#integer-division)) is not
-  constant. Float arithmetic is never constant.
+  constant. Neither is a `@panic` or `@trap` it reaches. Float arithmetic is never constant.
 
 Not being constant is never an error: the condition is simply a runtime
 branch. The one exception is a division that would panic, which is `E060`
@@ -495,8 +500,8 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@linux_syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
 | **`@linux_thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, entry, argument)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child calls `entry` (a C function's address, `ref unknown`: `ref` of an `export` converted with `as`) with `argument`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@linux_syscall` (`E035`). |
 | **`@trap()`** | `()` |
- Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
-| **`@panic`** | `(message: M)` | Writes `panic: <message>` and the stack trace through `@compiler_print`, then exits with code 101. `M` is the type `@compiler_print` takes (`@byte_buffer` without one), with the slot rules of §2: when it is an `@format_args(W)`, a literal, an f-string or one value is a message. Does not return (see §8, "Platform hooks"). |
+ Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. As a value it is of whatever type is expected (`if c then x else @trap()`). |
+| **`@panic`** | `(message: M)` | Writes `panic: <message>` and the stack trace through `@compiler_print`, then exits with code 101. `M` is the type `@compiler_print` takes (`@byte_buffer` without one), with the slot rules of §2: when it is an `@format_args(W)`, a literal, an f-string or one value is a message. Does not return (see §8, "Platform hooks"). As a value it is of whatever type is expected (`if c then @panic("bad") else x`). |
 | **`@atomic_load_W`** | `(ref @bitW): @bitW` | Atomic load. |
 | **`@atomic_store_W`** | `(ref @bitW, @bitW)` | Atomic store. |
 | **`@atomic_swap_W`** | `(ref @bitW, @bitW): @bitW` | Atomically replaces the value; returns the old one. |
@@ -575,6 +580,12 @@ in an arm a constant condition rules out):
 
 Literal arithmetic (`1 / 0`, §2) is folded before any type is known and is
 the same `E060`.
+
+A call to a `=>` function whose constant arguments reach a `@panic` with a
+literal message (or a hole-free f-string) is `E060` the same way, with that
+message. This is how `Standard`'s integer overflow checks report a constant
+overflow: `Int8.MAX + 1` is `attempt to add with overflow` in a Debug
+build (in Release the check is not compiled and the sum wraps).
 
 The raw memory builtins (`@write`, `@read`, `@drop`) are for buffer and
 allocator authors: they move values in and out of memory the compiler does

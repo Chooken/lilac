@@ -401,8 +401,33 @@ impl Checker<'_> {
         let Expr::Number(bytes, lit_span) = operand else {
             return None;
         };
+        // A numeric object takes a negative literal only when it has a
+        // `@negate`: one without (an unsigned integer) reports the missing
+        // hook, never wraps `-1` to its maximum.
+        if let Some(id) = expected.filter(|id| !self.is_bit(*id)) {
+            if self.conversion_source(id, false).is_some() && !self.can_negate(id) {
+                let ty = self.show_id(id);
+                self.diags.emit(
+                    Diagnostic::error(codes::E043, format!("no @negate for {ty}"))
+                        .label(span, true, format!("{ty} has no negative values"))
+                        .help(format!(
+                            "`-` needs a `@negate: function (value: {ty}) {ty}` hook"
+                        )),
+                );
+                return Some(HirExpr::poison(span));
+            }
+        }
         if is_float_literal(bytes) {
-            return None;
+            // A float literal is its magnitude at the slot's type, sign
+            // flipped, so `-1.0` never picks some type's `@negate`.
+            if self.float_in_bit_slot(expected, span, "literal") {
+                return Some(HirExpr::poison(span));
+            }
+            let target = self.float_target(expected);
+            return Some(match self.float_literal(bytes, target, *lit_span) {
+                Some(bits) => Self::float(target, bits.negate(), span),
+                None => HirExpr::poison(span),
+            });
         }
         let Some(magnitude) = integer_magnitude(bytes) else {
             self.diags.emit(
@@ -429,6 +454,13 @@ impl Checker<'_> {
                 Some((ty, value)) => Self::int(ty, value, span),
                 None => HirExpr::poison(span),
             },
+        )
+    }
+
+    /// Whether `ty` has a `@negate(ty) ty` hook.
+    fn can_negate(&self, ty: TypeId) -> bool {
+        self.overloads("@negate").iter().any(
+            |hook| matches!(hook.sig.params.as_slice(), [param] if param.id == ty && !param.is_ref),
         )
     }
 
@@ -629,7 +661,7 @@ impl Checker<'_> {
                 };
                 let (left, right) = (signed(ln, lm), signed(rn, rm));
                 // The same `E060` lowering reports for a constant zero
-                // divisor (`lilac_lower::DivisionPanic`).
+                // divisor (`lilac_lower::ConstantPanic`).
                 if matches!(op, BinOp::Div | BinOp::Mod) && right == 0 {
                     self.diags
                         .emit(Diagnostic::error(codes::E060, "division by zero").label(
