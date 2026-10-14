@@ -29,6 +29,6 @@ main: function () nothing {
     }
     y: E = if x == .B then x else .B as E
     b: Box[E] = Box { v = .B }
-    f: function (e: E) nothing = take
+    f: ref function (e: E) nothing = ref take
     f(.B)
 }

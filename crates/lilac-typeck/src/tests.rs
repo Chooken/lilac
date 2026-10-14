@@ -920,7 +920,7 @@ fn structlit_unknown_field_is_e021() {
 #[test]
 fn func_value_call_checks() {
     let diags = check_src(
-        "main: function () nothing {\n    add: function (@bit32) @bit32 = addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x2)\n}\n",
+        "main: function () nothing {\n    add: ref function (@bit32) @bit32 = ref addOne\n    value: @bit32 = 0x0\n    value = add(value)\n    add = ref addTwo\n    value = add(value)\n}\naddOne: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x1)\n}\naddTwo: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x2)\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -2589,7 +2589,7 @@ fn failed_type_is_an_error_type_for_later_uses() {
         // A struct literal inferred from it, and one of a type holding it.
         "Box[T]: object {\n    v: T\n}\nHolder: object {\n    e: E\n}\nmain: function () nothing {\n    b: Box[E] = Box { v = .B }\n    h: Holder = Holder { e = .B }\n}\n",
         // Calling a local whose function type names it.
-        "take: function (e: E) nothing {\n}\nmain: function () nothing {\n    f: function (e: E) nothing = take\n    f(.B)\n}\n",
+        "take: function (e: E) nothing {\n}\nmain: function () nothing {\n    f: ref function (e: E) nothing = ref take\n    f(.B)\n}\n",
     ];
     for uses in uses {
         let src = format!("{SELF_CONTAINING}{uses}");
@@ -2914,4 +2914,114 @@ fn compound_assignment_in_a_generic_folds_into_e042() {
     ));
     assert!(has_code(&diags, "E042"), "{diags:?}");
     assert!(!has_code(&diags, "E043"), "{diags:?}");
+}
+
+const ADD_ONE: &str =
+    "add_one: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x1)\n}\n";
+
+/// A function reference points at code: nothing reads, writes or drops
+/// through it, it has no fields, and `==` needs one function type.
+#[test]
+fn function_references_are_never_dereferenced() {
+    for (body, code) in [
+        ("    x: @bit32 = f.value\n", "E021"),
+        ("    x: @bit32 = @read(f)\n", "E010"),
+        ("    @drop(f)\n", "E010"),
+        (
+            "    g: ref function (@bit64) @bit64 = @address_to_ptr(0x0) as ref function (@bit64) @bit64\n    if f == g {\n    }\n",
+            "E010",
+        ),
+        ("    g: ref unknown = f as ref unknown\n    if f == g {\n    }\n", "E010"),
+    ] {
+        let src = format!(
+            "{ADD_ONE}main: function () nothing {{\n    f: ref function (@bit32) @bit32 = ref add_one\n{body}}}\n"
+        );
+        assert_eq!(codes_of(&check_src(&src)), [code], "{src}");
+    }
+}
+
+/// Assigning a function reference rebinds the place, through a `ref` to
+/// it too, and the same function compares equal.
+#[test]
+fn function_references_rebind_and_compare() {
+    let src = format!(
+        "{ADD_ONE}main: function () nothing {{\n    f: ref function (@bit32) @bit32 = ref add_one\n    f = ref add_one\n    if f == ref add_one {{\n    }}\n}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+    let src = format!(
+        "{ADD_ONE}Holder: object {{\n    f: ref function (@bit32) @bit32\n}}\nmain: function () nothing {{\n    holder: Holder = Holder {{ f = ref add_one }}\n    through: ref Holder = ref holder\n    through.f = ref add_one\n    x: @bit32 = through.f(0x1)\n    if holder.f == through.f {{\n    }}\n}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+}
+
+/// `E077` recovers as the `ref` type: one error, and later uses check.
+#[test]
+fn bare_function_type_reports_once() {
+    let src = format!(
+        "{ADD_ONE}Callback: alias function (@bit32) @bit32\nmain: function () nothing {{\n    f: function (@bit32) @bit32 = ref add_one\n    x: @bit32 = f(0x1)\n    g: Callback = ref add_one\n    y: @bit32 = g(x)\n    h: ref function (@bit32) @bit32 = add_one\n    z: @bit32 = h(y)\n}}\n"
+    );
+    assert_eq!(
+        codes_of(&check_src(&src)),
+        ["E077", "E077", "E077"],
+        "{src}"
+    );
+}
+
+/// In a template, `value.f(x)` is decided per instance: a method in one,
+/// a function-reference field in another.
+#[test]
+fn template_calls_a_method_or_a_field() {
+    let src = format!(
+        "{ADD_ONE}WithMethod: object {{\n    f: function (self, value: @bit32) result: @bit32 {{\n        result = value\n    }}\n}}\nWithField: object {{\n    f: ref function (@bit32) @bit32\n}}\nrun[T]: function (value: ref T) result: @bit32 {{\n    result = value.f(0x1)\n}}\nmain: function () nothing {{\n    a: WithMethod = WithMethod {{}}\n    b: WithField = WithField {{ f = ref add_one }}\n    x: @bit32 = run[WithMethod](ref a)\n    y: @bit32 = run[WithField](ref b)\n}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+}
+
+/// `ref` takes a function's address by path or as a type's member; a
+/// method's receiver becomes its first parameter, and there are no bound
+/// methods.
+#[test]
+fn function_addresses_by_path_and_member() {
+    let src = format!(
+        "{ADD_ONE}Box: object {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n    take: function (self: Box) value: @bit32 {{\n        value = self.value\n    }}\n    make: function () out: Box {{\n        out = Box {{ value = 0x1 }}\n    }}\n}}\nmain: function () nothing {{\n    get: ref function (ref Box) @bit32 = ref Box.get\n    take: ref function (Box) @bit32 = ref Box.take\n    make: ref function () Box = ref Box.make\n    b: Box = make()\n    x: @bit32 = get(ref b)\n}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+    let src = format!(
+        "{ADD_ONE}Box: object {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n}}\nmain: function () nothing {{\n    b: Box = Box {{ value = 0x1 }}\n    get: ref function (ref Box) @bit32 = ref b.get\n}}\n"
+    );
+    let diags = check_src(&src);
+    assert_eq!(codes_of(&diags), ["E010"], "{src}");
+    assert!(
+        diags.diagnostics()[0]
+            .helps
+            .iter()
+            .any(|help| help.text.contains("`ref Box.get`")),
+        "{diags:?}"
+    );
+}
+
+/// Hooks, failing functions, variadic externs and generic functions are
+/// not function values.
+#[test]
+fn some_functions_are_not_values() {
+    for (items, value, code) in [
+        (
+            "risky: function () value: @bit32 else nothing {\n    value = 0x1\n}\n",
+            "ref risky",
+            "E057",
+        ),
+        (
+            "printf: extern function (format: ref @bit8, ...) result: @bit32\n",
+            "ref printf",
+            "E028",
+        ),
+        (
+            "id[T]: function (value: T) out: T {\n    out = value\n}\n",
+            "ref id",
+            "E044",
+        ),
+    ] {
+        let src = format!("{items}main: function () nothing {{\n    f: ref unknown = {value} as ref unknown\n}}\n");
+        assert_eq!(codes_of(&check_src(&src)), [code], "{src}");
+    }
 }

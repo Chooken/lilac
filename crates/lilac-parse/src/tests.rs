@@ -627,7 +627,7 @@ fn qualified_match_patterns() {
 #[test]
 fn enum_members_parse() {
     let (program, diags, _) = parse(
-        "Opt[T]: enum {\n    Some: T\n    None\n    Callback: function (x: @bit8) nothing\n    get: function (self) v: T {\n    }\n    @on_drop: function (self) nothing {}\n    map[U]: function (self) nothing {}\n    private {\n        helper: function () nothing => 0x0\n    }\n}\n",
+        "Opt[T]: enum {\n    Some: T\n    None\n    Callback: ref function (x: @bit8) nothing\n    get: function (self) v: T {\n    }\n    @on_drop: function (self) nothing {}\n    map[U]: function (self) nothing {}\n    private {\n        helper: function () nothing => 0x0\n    }\n}\n",
     );
     assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
     let ItemKind::Enum {
@@ -754,6 +754,156 @@ fn func_type_position_parses() {
     assert_eq!(func.params[0].name, "");
     assert_eq!(func.params[0].ty.head(), "@bit32");
     assert_eq!(func.returns.len(), 1);
+}
+
+/// `ref export function (…)` is a C function's reference in every slot: a
+/// field, a parameter and a global.
+#[test]
+fn ref_export_function_types_parse() {
+    let src = "Order: object {\n    compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32\n}\n\
+sort: function (compare: ref export function (@bit32) @bit32) nothing {\n}\n\
+handler: ref export function () nothing\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Object { members, .. } = &program.items[0].kind else {
+        panic!("expected an object");
+    };
+    let ItemKind::Field { ty: field } = &members[0].kind else {
+        panic!("expected a field");
+    };
+    let ItemKind::Func(sort) = &program.items[1].kind else {
+        panic!("expected a function");
+    };
+    let ItemKind::Global { ty: global, .. } = &program.items[2].kind else {
+        panic!("expected a global");
+    };
+    for (ty, params) in [(field, 2), (&sort.params[0].ty, 1), (global, 0)] {
+        assert!(ty.is_ref, "{ty:?}");
+        let TypeShape::Function(func) = &ty.shape else {
+            panic!("expected a function type, got {ty:?}");
+        };
+        assert!(func.is_export, "{ty:?}");
+        assert_eq!(func.params.len(), params);
+    }
+}
+
+/// A function type's outs are `nothing`, one slot or a parenthesized list,
+/// so one inside a slot list ends at its out and the list goes on.
+#[test]
+fn function_type_outs_end_at_one_slot() {
+    let src = "apply: function (f: ref function (@bit32) @bit32, value: @bit32) out: @bit32 {\n}\n\
+split: function (f: ref function (n: @bit32) (q: @bit32, r: @bit32), g: ref function () else nothing) nothing {\n}\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Func(apply) = &program.items[0].kind else {
+        panic!("expected a function");
+    };
+    let names: Vec<_> = apply.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["f", "value"]);
+    let TypeShape::Function(f) = &apply.params[0].ty.shape else {
+        panic!("{:?}", apply.params[0].ty);
+    };
+    assert_eq!(f.returns.len(), 1);
+    let ItemKind::Func(split) = &program.items[1].kind else {
+        panic!("expected a function");
+    };
+    assert_eq!(split.params.len(), 2);
+    let TypeShape::Function(f) = &split.params[0].ty.shape else {
+        panic!("{:?}", split.params[0].ty);
+    };
+    let outs: Vec<_> = f.returns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(outs, ["q", "r"]);
+    let TypeShape::Function(g) = &split.params[1].ty.shape else {
+        panic!("{:?}", split.params[1].ty);
+    };
+    assert!(g.returns.is_empty());
+    assert_eq!(g.failures.as_ref().map(Vec::len), Some(0));
+}
+
+/// `()` as a function type's outs is `nothing`, said once.
+#[test]
+fn empty_function_type_outs_is_e001() {
+    let src = "run: function (f: ref function () ()) nothing {\n}\n";
+    let (_, diags, _) = parse(src);
+    let errors: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == "E001")
+        .collect();
+    assert_eq!(errors.len(), 1, "{diags:?}");
+    assert!(errors[0].msg.contains("is `nothing`"), "{diags:?}");
+    let fix = errors[0].suggestions().next().expect("a fix");
+    assert_eq!(
+        (fix.span.lo.0, fix.span.hi.0, fix.replacement.as_str()),
+        (34, 36, "nothing")
+    );
+}
+
+/// Declarations keep unparenthesized outs, in a type's body too.
+#[test]
+fn declarations_keep_bare_outs() {
+    let src = "Pair: enum {\n    One\n    split: function (self) a: @bit8, b: @bit8 {\n    }\n}\n\
+divide: function (n: @bit32) q: @bit32, r: @bit32 {\n}\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Enum { members, .. } = &program.items[0].kind else {
+        panic!("expected an enum");
+    };
+    let ItemKind::Func(split) = &members[0].kind else {
+        panic!("expected a method");
+    };
+    assert_eq!(split.returns.len(), 2);
+    let ItemKind::Func(divide) = &program.items[1].kind else {
+        panic!("expected a function");
+    };
+    assert_eq!(divide.returns.len(), 2);
+}
+
+/// A declaration may parenthesize its outs as a function type does, and
+/// both spellings parse alike: success and failure outs, a method, an
+/// `extern` and an `=>` body.
+#[test]
+fn declarations_may_parenthesize_outs() {
+    let src =
+        "Pair: enum {\n    One\n    split: function (self) (a: @bit8, b: @bit8) {\n    }\n}\n\
+divide: function (n: @bit32) (q: @bit32, r: @bit32) else (code: @bit32, why: @bit8) {\n}\n\
+pair: extern function () (a: @bit32, b: @bit32)\n\
+one: function () (a: @bit32) => 0x1\n";
+    let (program, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    let ItemKind::Enum { members, .. } = &program.items[0].kind else {
+        panic!("expected an enum");
+    };
+    let ItemKind::Func(split) = &members[0].kind else {
+        panic!("expected a method");
+    };
+    assert_eq!(split.returns.len(), 2);
+    let funcs: Vec<_> = program.items[1..]
+        .iter()
+        .map(|item| match &item.kind {
+            ItemKind::Func(decl) => decl,
+            other => panic!("expected a function, got {other:?}"),
+        })
+        .collect();
+    let names: Vec<_> = funcs[0].returns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["q", "r"]);
+    assert_eq!(funcs[0].failures.as_ref().map(Vec::len), Some(2));
+    assert_eq!(funcs[1].returns.len(), 2);
+    assert_eq!(funcs[2].returns.len(), 1);
+}
+
+/// `ref ref function` is still the double-reference error.
+#[test]
+fn ref_ref_function_is_e001() {
+    let src = "main: function () nothing {\n    f: ref ref function () nothing\n}\n";
+    let (_, diags, _) = parse(src);
+    assert!(
+        diags
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "E001" && d.msg.contains("double references")),
+        "{diags:?}"
+    );
 }
 
 #[test]

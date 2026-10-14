@@ -1,0 +1,8 @@
+// expect-error: E001
+// A type's body declares constants (`=>`), never globals (`=`).
+
+Box: object {
+    COUNT: @bit32 = 0x0
+}
+
+main: function () nothing {}

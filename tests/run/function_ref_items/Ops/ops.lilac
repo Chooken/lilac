@@ -1,0 +1,6 @@
+/// Set by `main`: a function reference in another namespace.
+HANDLER: ref function (@bit32) @bit32
+
+triple: function (value: @bit32) result: @bit32 {
+    result = @i_mul_32(value, 0x3)
+}

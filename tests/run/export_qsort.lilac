@@ -12,7 +12,7 @@ Numbers: object {
     d: @bit32
 }
 
-qsort: extern function (base: ref Numbers, count: @bit_native, size: @bit_native, compare: export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
+qsort: extern function (base: ref Numbers, count: @bit_native, size: @bit_native, compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
 
 compare: export function (a: ref @bit32, b: ref @bit32) order: @bit32 {
     order = 0x0
@@ -33,7 +33,7 @@ check: function (value: @bit32, want: @bit32, code: @bit32) nothing {
 
 main: function () nothing {
     numbers: Numbers = Numbers { a = 0x1e, b = -0x5, c = 0x7, d = 0x0 }
-    qsort(ref numbers, 0x4, 0x4, compare)
+    qsort(ref numbers, 0x4, 0x4, ref compare)
     check(numbers.a, -0x5, 0x1)
     check(numbers.b, 0x0, 0x2)
     check(numbers.c, 0x7, 0x3)

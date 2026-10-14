@@ -4,6 +4,12 @@ Int32: object {
         data: @bit32
     }
 
+    /// The largest `Int32`.
+    MAX: Int32 => Int32 { data = 0x7FFFFFFF }
+
+    /// The smallest `Int32`.
+    MIN: Int32 => Int32 { data = 0x80000000 }
+
     @add: function (lhs: Int32, rhs: Int32) Int32 => @i_add_32(lhs.data, rhs.data)
     @sub: function (lhs: Int32, rhs: Int32) Int32 => @i_sub_32(lhs.data, rhs.data)
     @mul: function (lhs: Int32, rhs: Int32) Int32 => @i_mul_32(lhs.data, rhs.data)

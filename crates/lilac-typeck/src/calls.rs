@@ -13,7 +13,7 @@ use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
-use crate::body::FnCx;
+use crate::body::{local_expr, FnCx};
 use crate::expr::{tail_span, Receiver};
 use crate::literals::is_foldable_literal;
 use crate::paths::shadowed_alias_note;
@@ -35,6 +35,44 @@ pub(crate) enum Called {
 }
 
 impl Checker<'_> {
+    /// `.Variant(payload)`: the expected enum's variant.
+    fn tag_call(
+        &mut self,
+        fcx: &mut FnCx,
+        name: &str,
+        tag_span: Span,
+        args: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<Called, ErrorGuaranteed> {
+        self.record_tag(tag_span, expected, &[]);
+        if name.is_empty() {
+            // The parser reported the `.` with no name.
+            self.empty_names += 1;
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+        }
+        let Some(want) = expected else {
+            let error =
+                self.diags.emit(
+                    Diagnostic::error(codes::E024, "tag construction needs an expected type")
+                        .label(tag_span, true, "annotate the binding"),
+                );
+            return Err(self.callee_failed(fcx, args, error));
+        };
+        if want == TypeId::ERROR {
+            // The expected type reported it.
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+        }
+        let tag = tail_span(tag_span, name);
+        Ok(Called::Value(self.variant_value(
+            want,
+            name,
+            Some((fcx, args)),
+            span,
+            tag,
+        )))
+    }
+
     pub(crate) fn check_call(
         &mut self,
         fcx: &mut FnCx,
@@ -95,33 +133,7 @@ impl Checker<'_> {
                     expected,
                 )
             }
-            Expr::Tag(name, tag_span) => {
-                self.record_tag(*tag_span, expected, &[]);
-                if name.is_empty() {
-                    // The parser reported the `.` with no name.
-                    self.empty_names += 1;
-                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
-                }
-                let Some(want) = expected else {
-                    let error = self.diags.emit(
-                        Diagnostic::error(codes::E024, "tag construction needs an expected type")
-                            .label(*tag_span, true, "annotate the binding"),
-                    );
-                    return Err(self.callee_failed(fcx, args, error));
-                };
-                if want == TypeId::ERROR {
-                    // The expected type reported it.
-                    return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
-                }
-                let tag = tail_span(*tag_span, name);
-                Ok(Called::Value(self.variant_value(
-                    want,
-                    name,
-                    Some((fcx, args)),
-                    span,
-                    tag,
-                )))
-            }
+            Expr::Tag(name, tag_span) => self.tag_call(fcx, name, *tag_span, args, span, expected),
             Expr::TypeApp(ty) => {
                 let resolved = self.resolve_type(ty);
                 if resolved.is_error() {
@@ -133,17 +145,21 @@ impl Checker<'_> {
             }
             _ => {
                 let checked = self.check_expr(fcx, callee, None);
-                let error =
-                    if checked.ty.is_error() {
-                        // Checking the callee reported it.
-                        self.diags.already_reported()
-                    } else {
-                        self.diags.emit(
-                            Diagnostic::error(codes::E022, "this expression is not callable")
-                                .label(span, true, "only functions can be called"),
+                if !generic_args.is_empty() && !checked.ty.is_error() {
+                    let error = self.diags.emit(
+                        Diagnostic::error(
+                            codes::E044,
+                            "a function reference takes no generic arguments",
                         )
-                    };
-                Err(self.callee_failed(fcx, args, error))
+                        .label(
+                            span,
+                            true,
+                            "its function is already one instance",
+                        ),
+                    );
+                    return Err(self.callee_failed(fcx, args, error));
+                }
+                self.value_call(fcx, checked, "this expression", args, span)
             }
         }
     }
@@ -170,30 +186,8 @@ impl Checker<'_> {
                 let error = self.generic_arity(span, name, 0, generic_args.len());
                 return Err(self.callee_failed(fcx, args, error));
             }
-            let ty = fcx.ty(local);
-            if ty.is_error() {
-                // Its declared type reported it.
-                return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
-            }
-            let TypeKind::Func {
-                params, returns, ..
-            } = self.types.kind(ty.id).clone()
-            else {
-                let error = self.diags.emit(
-                    Diagnostic::error(codes::E022, format!("`{name}` is not callable")).label(
-                        name_span,
-                        true,
-                        "only functions can be called",
-                    ),
-                );
-                return Err(self.callee_failed(fcx, args, error));
-            };
-            let args = self.check_args(fcx, &params, args, span)?;
-            return Ok(Called::Call {
-                callee: HirCallee::Local(local),
-                args,
-                outs: returns,
-            });
+            let callee = local_expr(local, fcx.ty(local), name_span);
+            return self.value_call(fcx, callee, &format!("`{name}`"), args, span);
         }
         if name.starts_with('@') && !name.contains('.') {
             if let Some(intrinsic) = Intrinsic::lookup(name) {
@@ -240,8 +234,20 @@ impl Checker<'_> {
             return Err(self.callee_failed(fcx, args, error));
         };
         self.record_use(crate::paths::path_tail(name_span, name), def);
-        if let DefKind::Func(_) = self.res.def(def).kind {
-            return self.func_call(fcx, def, Vec::new(), generic_args, args, span, None);
+        match self.res.def(def).kind {
+            DefKind::Func(_) => {
+                return self.func_call(fcx, def, Vec::new(), generic_args, args, span, None);
+            }
+            // A constant or global holding a function reference.
+            DefKind::Const { .. } | DefKind::Global { .. } => {
+                if !generic_args.is_empty() {
+                    let error = self.generic_arity(span, name, 0, generic_args.len());
+                    return Err(self.callee_failed(fcx, args, error));
+                }
+                let callee = self.item_value(def, name_span);
+                return self.value_call(fcx, callee, &format!("`{name}`"), args, span);
+            }
+            _ => {}
         }
         let error = self.diags.emit(
             Diagnostic::error(codes::E022, "this item is not callable").label(
@@ -251,6 +257,53 @@ impl Checker<'_> {
             ),
         );
         Err(self.callee_failed(fcx, args, error))
+    }
+
+    /// A call through `callee`, a function reference (`ref function (…)`),
+    /// described as `what` when it is not one (`E022`). No `self` is
+    /// passed: the arguments are the function type's parameters. The callee
+    /// is evaluated before the arguments.
+    pub(crate) fn value_call(
+        &mut self,
+        fcx: &mut FnCx,
+        callee: HirExpr,
+        what: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        if callee.ty.is_error() {
+            // Checking the callee reported it.
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+        }
+        let function = if callee.ty.is_ref {
+            match self.types.kind(callee.ty.id) {
+                TypeKind::Func {
+                    params, returns, ..
+                } => Some((params.clone(), returns.clone())),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some((params, returns)) = function else {
+            let shown = self.show(callee.ty);
+            let error = self.emit_involving(
+                Diagnostic::error(
+                    codes::E022,
+                    format!("{what} is a `{shown}`, not a function"),
+                )
+                .label(callee.span, true, "not callable")
+                .help("only functions and function references (`ref function (…)`) can be called"),
+                &[callee.ty.id],
+            );
+            return Err(self.callee_failed(fcx, args, error));
+        };
+        let args = self.check_args(fcx, &params, args, span)?;
+        Ok(Called::Call {
+            callee: HirCallee::Value(Box::new(callee)),
+            args,
+            outs: returns,
+        })
     }
 
     /// A call whose callee failed (`error` reports it): still checks each
@@ -462,6 +515,24 @@ impl Checker<'_> {
         }
     }
 
+    /// `diagnostic` (a method `field` the receiver lacks), with the note
+    /// naming the method a generic-derived receiver must have.
+    fn method_requirement(
+        &mut self,
+        fcx: &mut FnCx,
+        diagnostic: Diagnostic,
+        receiver: &HirExpr,
+        field: &str,
+        args: &[Expr],
+        expected: Option<TypeId>,
+    ) -> Diagnostic {
+        if !self.is_generic_derived(receiver.ty.deref()) {
+            return diagnostic;
+        }
+        let probed = self.probe_args(fcx, args);
+        diagnostic.note(self.required_method_note(field, Some(receiver.ty), &probed, expected))
+    }
+
     /// `value.method(...)`: the receiver is passed as `ref Self`.
     #[allow(clippy::too_many_arguments)]
     fn method_call(
@@ -486,16 +557,9 @@ impl Checker<'_> {
                 format!("cannot call method `{field}` on `{owner}`"),
             )
             .label(span, true, "methods need an object");
-            let mut diagnostic = shadowed_alias_note(diagnostic, shadowed);
-            if self.is_generic_derived(base) {
-                let probed = self.probe_args(fcx, args);
-                diagnostic = diagnostic.note(self.required_method_note(
-                    field,
-                    Some(receiver.ty),
-                    &probed,
-                    expected,
-                ));
-            }
+            let diagnostic = shadowed_alias_note(diagnostic, shadowed);
+            let diagnostic =
+                self.method_requirement(fcx, diagnostic, &receiver, field, args, expected);
             let error = self.missing(diagnostic, true, field, owner, None, &[base.id]);
             return Err(self.callee_failed(fcx, args, error));
         };
@@ -508,18 +572,22 @@ impl Checker<'_> {
             diagnostic =
                 self.suggest_member(diagnostic, def, field, tail_span(member_span, field), true);
             diagnostic = shadowed_alias_note(diagnostic, shadowed);
-            if self.is_generic_derived(base) {
-                let probed = self.probe_args(fcx, args);
-                diagnostic = diagnostic.note(self.required_method_note(
-                    field,
-                    Some(receiver.ty),
-                    &probed,
-                    expected,
-                ));
-            }
+            diagnostic = self.method_requirement(fcx, diagnostic, &receiver, field, args, expected);
             let error = self.missing(diagnostic, true, field, owner, Some(def), &[]);
             return Err(self.callee_failed(fcx, args, error));
         };
+        if let DefKind::Field(_) = self.res.def(member).kind {
+            return self.field_call(
+                fcx,
+                receiver,
+                (def, member),
+                field,
+                generic_args,
+                args,
+                span,
+                member_span,
+            );
+        }
         if !matches!(self.res.def(member).kind, DefKind::Func(_)) {
             let error = self.diags.emit(
                 Diagnostic::error(codes::E022, format!("`{field}` is not callable")).label(
@@ -558,7 +626,7 @@ impl Checker<'_> {
             return Err(self.callee_failed(fcx, args, error));
         }
         let receiver = if takes_value {
-            Self::auto_deref(receiver)
+            self.auto_deref(receiver)
         } else if receiver.ty.is_ref {
             receiver
         } else {
@@ -577,6 +645,46 @@ impl Checker<'_> {
             span,
             Some(receiver),
         )
+    }
+
+    /// `value.field(...)` where `field` (the member `owner.member`) is a
+    /// field: a call through the function reference it holds, which passes
+    /// no `self`. The field is read before the arguments are evaluated.
+    #[allow(clippy::too_many_arguments)]
+    fn field_call(
+        &mut self,
+        fcx: &mut FnCx,
+        receiver: HirExpr,
+        (owner, member): (DefId, DefId),
+        field: &str,
+        generic_args: &[AstType],
+        args: &[Expr],
+        span: Span,
+        member_span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        if self.private_denied(member, owner, member_span) {
+            // `private_denied` reported `E026`.
+            return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
+        }
+        self.record_use(tail_span(member_span, field), member);
+        if !generic_args.is_empty() {
+            let error = self.generic_arity(span, field, 0, generic_args.len());
+            return Err(self.callee_failed(fcx, args, error));
+        }
+        let base = self.auto_deref(receiver);
+        let fields = self.fields_of(base.ty.id).unwrap_or_default();
+        let Some(index) = fields.iter().position(|(name, _)| name == field) else {
+            lilac_error::bug!(member_span, "`{field}` is a member but no field");
+        };
+        let callee = HirExpr {
+            ty: fields[index].1,
+            span: member_span,
+            kind: HirExprKind::Field {
+                base: Box::new(base),
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+            },
+        };
+        self.value_call(fcx, callee, &format!("field `{field}`"), args, span)
     }
 
     /// Emits a missing-member diagnostic and records the requirement.
@@ -940,7 +1048,7 @@ impl Checker<'_> {
             let value = if param.is_ref {
                 value
             } else {
-                Self::auto_deref(value)
+                self.auto_deref(value)
             };
             checked.push(value);
         }
@@ -1191,7 +1299,7 @@ impl Checker<'_> {
                     let value = self.coerce(value, TypeRef::value(id), arg.span());
                     return (!value.ty.is_error()).then_some(value);
                 }
-                let value = Self::auto_deref(value);
+                let value = self.auto_deref(value);
                 if value.ty.id != id {
                     let diagnostic = Diagnostic::error(
                         codes::E010,
@@ -1235,7 +1343,7 @@ impl Checker<'_> {
                 if value.ty.is_error() {
                     return None;
                 }
-                let value = Self::auto_deref(value);
+                let value = self.auto_deref(value);
                 if self.is_bit(value.ty.id) {
                     return Some(value);
                 }

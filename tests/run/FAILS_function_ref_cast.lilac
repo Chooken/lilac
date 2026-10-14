@@ -1,0 +1,13 @@
+// expect-error: E010
+// expect-stderr: error[E010]: cannot cast `ref function (@bit32) @bit32` to `ref function (@bit64) @bit64`
+// A function reference casts only to and from `ref unknown`: a direct cast
+// between two signatures is a mismatch.
+
+add_one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+main: function () nothing {
+    f: ref function (@bit32) @bit32 = ref add_one
+    g: ref function (@bit64) @bit64 = f as ref function (@bit64) @bit64
+}

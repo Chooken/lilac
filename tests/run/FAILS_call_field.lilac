@@ -1,0 +1,12 @@
+// expect-error: E022
+// expect-stderr: error[E022]: field `count` is a `@bit32`, not a function
+// Only a field holding a function reference can be called.
+
+Counter: object {
+    count: @bit32
+}
+
+main: function () nothing {
+    counter: Counter = Counter { count = 0x0 }
+    counter.count(0x1)
+}

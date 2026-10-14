@@ -1,0 +1,8 @@
+// expect-error: E077
+// expect-stderr: error[E077]: a function type is a value only behind `ref`
+// A function value is a reference to its code: its type is written
+// `ref function (…)`.
+
+main: function () nothing {
+    f: function (@bit32) @bit32 = @address_to_ptr(0x0) as ref function (@bit32) @bit32
+}

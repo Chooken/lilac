@@ -4,6 +4,12 @@ Int64: object {
         data: @bit64
     }
 
+    /// The largest `Int64`.
+    MAX: Int64 => Int64 { data = 0x7FFFFFFFFFFFFFFF }
+
+    /// The smallest `Int64`.
+    MIN: Int64 => Int64 { data = 0x8000000000000000 }
+
     @add: function (lhs: Int64, rhs: Int64) Int64 => @i_add_64(lhs.data, rhs.data)
     @sub: function (lhs: Int64, rhs: Int64) Int64 => @i_sub_64(lhs.data, rhs.data)
     @mul: function (lhs: Int64, rhs: Int64) Int64 => @i_mul_64(lhs.data, rhs.data)

@@ -6,23 +6,27 @@ function @main
     alloca ref #unknown %add : zeroed
     alloca #bit32 %value : zeroed
     alloca #bit32 %tmp.1 : zeroed
-    alloca #bit32 %tmp.2 : zeroed
+    alloca ref #unknown %tmp.2 : zeroed
     alloca #bit32 %tmp.3 : zeroed
     alloca #bit32 %tmp.4 : zeroed
+    alloca ref #unknown %tmp.5 : zeroed
+    alloca #bit32 %tmp.6 : zeroed
     &1: ref #unknown = addr.func @.root.addOne
     copy &1 -> %add
     &2: #bit32 = const 0x0
     copy &2 -> %value
-    copy %value -> %tmp.2
-    &3: ref #unknown = copy %add
-    call &3 (in %tmp.2) (out %tmp.1)
+    copy %add -> %tmp.2
+    copy %value -> %tmp.3
+    &3: ref #unknown = copy %tmp.2
+    call &3 (in %tmp.3) (out %tmp.1)
     copy %tmp.1 -> %value
     &4: ref #unknown = addr.func @.root.addTwo
     copy &4 -> %add
-    copy %value -> %tmp.4
-    &5: ref #unknown = copy %add
-    call &5 (in %tmp.4) (out %tmp.3)
-    copy %tmp.3 -> %value
+    copy %add -> %tmp.5
+    copy %value -> %tmp.6
+    &5: ref #unknown = copy %tmp.5
+    call &5 (in %tmp.6) (out %tmp.4)
+    copy %tmp.4 -> %value
     return
 }
 function @.root.addOne

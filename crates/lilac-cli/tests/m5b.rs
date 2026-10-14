@@ -285,3 +285,40 @@ fn drops_and_zero_init_visible() {
         "{text}"
     );
 }
+
+/// A function reference is the function's identity. The backend never
+/// marks a defined function `unnamed_addr` (which would let LLVM merge two
+/// with the same body): no snapshot has one. An optimized build of
+/// `function_refs.lilac` keeps both of its identical functions (LLVM folds
+/// `a == b` to false because they are distinct; `compiles_and_runs_on_host`
+/// runs it in release, where it traps if they compare equal).
+#[test]
+fn functions_keep_their_addresses() {
+    for entry in std::fs::read_dir(ui_dir()).expect("reads tests/ui") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().is_some_and(|ext| ext == "ll") {
+            let text = std::fs::read_to_string(&path).expect("reads a snapshot");
+            for line in text.lines().filter(|line| line.starts_with("define")) {
+                assert!(!line.contains("unnamed_addr"), "{}: {line}", path.display());
+            }
+        }
+    }
+    let output = lilac()
+        .args(["emit-llvm", "--mode=release", &ui("function_refs.lilac")])
+        .output()
+        .expect("runs lilac");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let release = String::from_utf8_lossy(&output.stdout);
+    for name in ["@.root.one(", "@.root.same("] {
+        assert!(
+            release
+                .lines()
+                .any(|line| line.starts_with("define") && line.contains(name)),
+            "{name} was folded away:\n{release}"
+        );
+    }
+}

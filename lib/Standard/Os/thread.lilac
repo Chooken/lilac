@@ -18,8 +18,11 @@ Thread: object {
     memory: ref unknown
 }
 
+/// What a thread runs: `entry(argument)`.
+ThreadEntry: alias function (argument: ref unknown) nothing
+
 /// Starts a thread running `entry(argument)`.
-spawn: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+spawn: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[Thread, Error] {
     match @builtin.Target.os {
         .Windows => {
             start: ref unknown = allocate(start_size).get() else -> why: Error {
@@ -28,7 +31,7 @@ spawn: function (entry: function (argument: ref unknown) nothing, argument: ref 
             }
             start_block(start, entry, argument)
             id: @bit32 = 0x0
-            handle: ref unknown = Windows.CreateThread(null(), 0x0, thread_start as ref unknown, start, 0x0, ref id)
+            handle: ref unknown = Windows.CreateThread(null(), 0x0, ref thread_start as ref unknown, start, 0x0, ref id)
             if @ptr_to_address(handle) == 0x0 {
                 why: Error = error_of_windows(Windows.GetLastError())
                 deallocate(start)
@@ -111,7 +114,7 @@ yield_thread: function () nothing {
 private {
     /// The block `thread_start` reads: the function, then its argument.
     StartBlock: object {
-        entry: @bit_native
+        entry: ref ThreadEntry
         argument: ref unknown
     }
 
@@ -119,21 +122,18 @@ private {
     /// native Linux `clone` call it with the start block, and it runs
     /// `entry(argument)`.
     thread_start: export "lilac_thread_start" function (start: ref unknown) result: ref unknown {
-        slot: ref function (argument: ref unknown) nothing = start as ref function (argument: ref unknown) nothing
-        entry: function (argument: ref unknown) nothing = slot
         block: ref StartBlock = start as ref StartBlock
-        entry(block.argument)
+        block.entry(block.argument)
         result = null()
     }
 
     start_size: @bit_native => 0x10
 
     /// Fills the start block at `memory`.
-    start_block: function (memory: ref unknown, entry: function (argument: ref unknown) nothing, argument: ref unknown) nothing {
+    start_block: function (memory: ref unknown, entry: ref ThreadEntry, argument: ref unknown) nothing {
         block: ref StartBlock = memory as ref StartBlock
         block.argument = argument
-        slot: ref function (argument: ref unknown) nothing = memory as ref function (argument: ref unknown) nothing
-        slot = entry
+        block.entry = entry
     }
 
     /// The native Linux thread mapping: the id word at 0, the start block
@@ -144,7 +144,7 @@ private {
     clone_tls: @bit_native => 0x40
     clone_tls_size: @bit_native => 0x3FC0
 
-    clone_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+    clone_thread: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[Thread, Error] {
         mapping: ref unknown = map_pages(clone_mapping).get() else -> why: Error {
             result = .Error(why)
             return
@@ -154,7 +154,7 @@ private {
         // Shares everything a thread does; the id word is set before
         // `clone` returns and cleared when the thread exits.
         flags: @bit_native = @bit_or_native(@bit_or_native(@bit_or_native(Linux.CLONE_VM, Linux.CLONE_FS), @bit_or_native(Linux.CLONE_FILES, Linux.CLONE_SIGHAND)), @bit_or_native(@bit_or_native(Linux.CLONE_THREAD, Linux.CLONE_SYSVSEM), @bit_or_native(Linux.CLONE_SETTLS, @bit_or_native(Linux.CLONE_PARENT_SETTID, Linux.CLONE_CHILD_CLEARTID))))
-        raw: @bit_native = @linux_thread_clone(flags, @ptr_add(mapping, clone_mapping), mapping, mapping, @ptr_add(mapping, clone_tls), clone_tls_size, thread_start as ref unknown, start)
+        raw: @bit_native = @linux_thread_clone(flags, @ptr_add(mapping, clone_mapping), mapping, mapping, @ptr_add(mapping, clone_tls), clone_tls_size, ref thread_start as ref unknown, start)
         if Linux.is_error(raw) {
             why: Error = error_of_errno(Linux.errno_of(raw))
             unmap_pages(mapping, clone_mapping)
@@ -171,14 +171,14 @@ private {
     pthread_join: extern function (thread: @bit_native, value_ptr: ref unknown) result: @bit32
     sched_yield: extern function () result: @bit32
 
-    posix_spawn_thread: function (entry: function (argument: ref unknown) nothing, argument: ref unknown) result: Result[Thread, Error] {
+    posix_spawn_thread: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[Thread, Error] {
         start: ref unknown = allocate(start_size).get() else -> why: Error {
             result = .Error(why)
             return
         }
         start_block(start, entry, argument)
         handle: @bit_native = 0x0
-        code: @bit32 = pthread_create(ref handle, null(), thread_start as ref unknown, start)
+        code: @bit32 = pthread_create(ref handle, null(), ref thread_start as ref unknown, start)
         if code == 0x0 {
             thread: Thread { value = handle, memory = start }
             result = .Ok(thread)

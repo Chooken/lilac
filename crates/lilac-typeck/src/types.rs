@@ -5,7 +5,7 @@
 //! also when its member hooks are instantiated and registered, so operators,
 //! conversions and RAII hooks of `Box[@bit32]` exist as soon as the type does.
 
-use lilac_ast::{Type as AstType, TypeShape};
+use lilac_ast::{FuncType, Type as AstType, TypeShape};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::{FuncKey, Layout, SemanticKind, TypeHooks};
 use lilac_resolve::{DefId, DefKind};
@@ -60,29 +60,12 @@ impl Checker<'_> {
             // The parser already reported it.
             TypeShape::Error => TypeRef::ERROR,
             TypeShape::Function(func) => {
-                if func.failures.is_some() {
-                    self.diags.emit(
-                        Diagnostic::error(codes::E057, "a function type cannot fail")
-                            .label(ty.span, true, "declared with `else` outs")
-                            .help("only a named function can fail; call it directly"),
-                    );
-                    return TypeRef::ERROR;
+                if !ty.is_ref {
+                    self.bare_function_type(ty);
                 }
-                let params = func
-                    .params
-                    .iter()
-                    .map(|slot| self.resolve_syntax(&slot.ty))
-                    .collect();
-                let returns = func
-                    .returns
-                    .iter()
-                    .map(|slot| self.resolve_syntax(&slot.ty))
-                    .collect();
-                let id = self.types.intern_func_abi(params, returns, func.is_export);
-                TypeRef {
-                    id,
-                    is_ref: ty.is_ref,
-                }
+                let id = self.resolve_function(ty, func);
+                // A bare one recovers as the reference it should be.
+                id.map_or(TypeRef::ERROR, TypeRef::reference)
             }
             TypeShape::Array {
                 element,
@@ -91,14 +74,126 @@ impl Checker<'_> {
             } => self.resolve_array(ty, element, len, *len_span),
             TypeShape::FormatArgs { writer } => self.resolve_format_args(ty, writer),
             // Outside a method's receiver, `self` names no type.
-            TypeShape::SelfType => self.resolve_named(ty, "self", &[]),
-            TypeShape::Named { name, args } => self.resolve_named(ty, name, args),
+            TypeShape::SelfType => self.resolve_named(ty, "self", &[], false),
+            TypeShape::Named { name, args } => self.resolve_named(ty, name, args, false),
+        }
+    }
+
+    /// The function type `func` spells (written at `ty`), `None` when it
+    /// cannot be one (`E057`, reported). Only an alias's target may be one
+    /// without `ref`; every other caller checks the `ref`.
+    pub(crate) fn resolve_function(&mut self, ty: &AstType, func: &FuncType) -> Option<TypeId> {
+        if func.failures.is_some() {
+            self.diags.emit(
+                Diagnostic::error(codes::E057, "a function type cannot fail")
+                    .label(ty.span, true, "declared with `else` outs")
+                    .help("only a named function can fail; call it directly"),
+            );
+            return None;
+        }
+        let params = func
+            .params
+            .iter()
+            .map(|slot| self.resolve_syntax(&slot.ty))
+            .collect();
+        let returns = func
+            .returns
+            .iter()
+            .map(|slot| self.resolve_syntax(&slot.ty))
+            .collect();
+        Some(self.types.intern_func_abi(params, returns, func.is_export))
+    }
+
+    /// `E077` for a function type written without `ref`, at `ty`: its fix
+    /// inserts the `ref`.
+    fn bare_function_type(&mut self, ty: &AstType) {
+        let keyword = if ty.name_span.is_dummy() {
+            ty.span
+        } else {
+            ty.name_span
+        };
+        self.diags.emit(
+            Diagnostic::error(codes::E077, "a function type is a value only behind `ref`")
+                .label(keyword, true, "write `ref function`")
+                .fix(
+                    Span::new(ty.span.lo.0, ty.span.lo.0, ty.span.file),
+                    "ref ",
+                    "a function value is a reference to its code: add `ref`",
+                ),
+        );
+    }
+
+    /// `E077` for an alias of a function type used without `ref`, at `ty`.
+    fn bare_function_alias(&mut self, ty: &AstType, name: &str) {
+        self.diags.emit(
+            Diagnostic::error(
+                codes::E077,
+                format!("`{name}` is a function type, a value only behind `ref`"),
+            )
+            .label(ty.span, true, format!("write `ref {name}`"))
+            .fix(
+                Span::new(ty.span.lo.0, ty.span.lo.0, ty.span.file),
+                "ref ",
+                "a function value is a reference to its code: add `ref`",
+            ),
+        );
+    }
+
+    /// The type `ty`, a use of the alias `def` named `name`, stands for.
+    /// `bare_function` as in [`Checker::resolve_named`].
+    fn resolve_alias_use(
+        &mut self,
+        ty: &AstType,
+        name: &str,
+        def: DefId,
+        args: &[AstType],
+        bare_function: bool,
+    ) -> TypeRef {
+        if !args.is_empty() {
+            self.arity_error(ty, name, Some(def), args.len());
+            return TypeRef::ERROR;
+        }
+        // The alias's own error was reported at its declaration.
+        let target = self.alias_type(def, ty.name_span);
+        if target.is_error() {
+            return TypeRef::ERROR;
+        }
+        if target.is_ref && ty.is_ref {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E010,
+                    format!("`{name}` is already a reference; it cannot take `ref`"),
+                )
+                .label(ty.span, true, format!("write `{name}`"))
+                .help("double references are invalid unless wrapped inside an object"),
+            );
+            return TypeRef::ERROR;
+        }
+        // A bare function type lives only behind `ref`, but an alias's
+        // target (`bare_function`) names one as it is.
+        let bare = !target.is_ref && !ty.is_ref && self.types.is_func(target.id);
+        if bare && bare_function {
+            return target;
+        }
+        if bare {
+            self.bare_function_alias(ty, name);
+        }
+        TypeRef {
+            id: target.id,
+            is_ref: ty.is_ref || target.is_ref || bare,
         }
     }
 
     /// Resolves a named type: a generic parameter, a builtin, or an
-    /// object/enum with its arguments.
-    fn resolve_named(&mut self, ty: &AstType, name: &str, args: &[AstType]) -> TypeRef {
+    /// object/enum with its arguments. `bare_function`: an alias of a bare
+    /// function type may be named without `ref` (an alias's target).
+    pub(crate) fn resolve_named(
+        &mut self,
+        ty: &AstType,
+        name: &str,
+        args: &[AstType],
+        bare_function: bool,
+    ) -> TypeRef {
         let name_span = path_tail(ty.name_span, name);
         if !ty.name_span.is_dummy() {
             let kind = if self.types.builtin(name).is_some() {
@@ -143,19 +238,7 @@ impl Checker<'_> {
         if let Some(def) = found.filter(|def| matches!(self.res.def(*def).kind, DefKind::Alias(_)))
         {
             self.record_use(name_span, def);
-            if !args.is_empty() {
-                self.arity_error(ty, name, Some(def), args.len());
-                return TypeRef::ERROR;
-            }
-            // The alias's own error was reported at its declaration.
-            let target = self.alias_type(def, ty.name_span);
-            if target.is_error() {
-                return TypeRef::ERROR;
-            }
-            return TypeRef {
-                id: target.id,
-                is_ref: ty.is_ref,
-            };
+            return self.resolve_alias_use(ty, name, def, args, bare_function);
         }
         let Some(def) = found.filter(|def| self.res.def(*def).is_type()) else {
             let diagnostic = Diagnostic::error(codes::E023, format!("unknown type `{name}`"))
@@ -163,6 +246,8 @@ impl Checker<'_> {
             let diagnostic = if name == "@format_args" {
                 diagnostic
                     .help("a format names the type its holes are written into: `@format_args(W)`")
+            } else if self.is_owner_param(name) {
+                self.owner_param_note(diagnostic, name)
             } else {
                 self.suggest_type(diagnostic, name, ty.name_span)
             };
@@ -186,6 +271,32 @@ impl Checker<'_> {
         let mut resolved = self.type_of_def(def, resolved_args);
         resolved.is_ref = ty.is_ref;
         resolved
+    }
+
+    /// Whether `name` is a generic parameter of the type being checked that
+    /// is not in scope: only a member constant is checked with its type as
+    /// owner but without the type's parameters.
+    pub(crate) fn is_owner_param(&self, name: &str) -> bool {
+        self.env.owner.is_some_and(|owner| {
+            !self.env.params.iter().any(|param| param == name)
+                && self
+                    .res
+                    .def(owner)
+                    .generic_params
+                    .iter()
+                    .any(|param| param == name)
+        })
+    }
+
+    /// Says why a member constant cannot name its type's parameter `name`.
+    pub(crate) fn owner_param_note(&self, diagnostic: Diagnostic, name: &str) -> Diagnostic {
+        let owner = self
+            .env
+            .owner
+            .map_or("", |owner| self.res.def(owner).name.as_str());
+        diagnostic.note(format!(
+            "a constant of `{owner}` is one value for every instance of it, so it cannot name `{name}`"
+        ))
     }
 
     /// `E044` for a type applied to the wrong number of arguments.

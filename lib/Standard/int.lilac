@@ -4,6 +4,13 @@ Int: object {
         data: @bit_native
     }
 
+    /// The largest `Int`: `2^(w - 1) - 1` at the target's pointer width
+    /// `w` (C's `PTRDIFF_MAX`).
+    MAX: Int => Int { data = @bit_shift_right_u_native(@bit_not_native(0x0), 0x1) }
+
+    /// The smallest `Int`: `-2^(w - 1)`.
+    MIN: Int => Int { data = @bit_not_native(@bit_shift_right_u_native(@bit_not_native(0x0), 0x1)) }
+
     @add: function (lhs: Int, rhs: Int) Int => @i_add_native(lhs.data, rhs.data)
     @sub: function (lhs: Int, rhs: Int) Int => @i_sub_native(lhs.data, rhs.data)
     @mul: function (lhs: Int, rhs: Int) Int => @i_mul_native(lhs.data, rhs.data)

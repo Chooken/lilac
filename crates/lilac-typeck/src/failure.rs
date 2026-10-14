@@ -128,7 +128,7 @@ impl Checker<'_> {
         };
         let name = match &callee {
             HirCallee::Func(key) => self.function_name(key.def),
-            HirCallee::Local(local) => fcx.locals[local.0 as usize].name.clone(),
+            HirCallee::Value(_) => "this function reference".to_owned(),
             HirCallee::Intrinsic(_) => match value {
                 Expr::Call { callee, .. } => match &**callee {
                     Expr::Ident(name, _) => name.clone(),

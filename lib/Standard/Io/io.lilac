@@ -75,7 +75,7 @@ private {
         /// A formatter that writes into this line. It holds the line's
         /// address, so it is used only while the line is in place.
         formatter: function (self) out: Formatter {
-            out = Formatter.over(self as ref unknown, push)
+            out = Formatter.over(self as ref unknown, ref push)
         }
 
         /// Writes what is buffered; a failure is dropped, as C's `printf`

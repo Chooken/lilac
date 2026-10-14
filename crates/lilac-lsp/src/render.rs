@@ -6,9 +6,10 @@
 
 use std::fmt::Write as _;
 
-use lilac_ast::{BinOp, Expr, FuncDecl, Param, Type, TypeShape};
+use lilac_ast::{BinOp, Expr, FuncDecl, FuncType, Param, Type, TypeShape};
 use lilac_hir::intrinsics::Intrinsic;
 use lilac_resolve::{DefId, DefKind, Resolved};
+use lilac_ty::{TypeKind, TypeRef, Types};
 
 /// A rendered declaration and where each parameter is in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +32,8 @@ const MAX_VALUE_DEPTH: usize = 8;
 
 /// `def`'s declaration: a function's signature (its owner before its name),
 /// a type's head and up to `slots` of its fields or variants, a field or
-/// variant's slot, a constant or global with its initializer.
+/// variant's slot, a constant (a member one after its type) or global
+/// with its initializer.
 #[must_use]
 pub fn declaration(resolved: &Resolved, def: DefId, slots: usize) -> Rendered {
     let data = resolved.def(def);
@@ -79,6 +81,12 @@ pub fn declaration(resolved: &Resolved, def: DefId, slots: usize) -> Rendered {
             out.push(&type_text(ty));
         }
         DefKind::Const { ty, value } => {
+            // A member constant is named through its type, whatever the
+            // type's arguments: `Int.MAX`.
+            if let Some(owner) = data.parent {
+                out.push(&resolved.def(owner).name);
+                out.push(".");
+            }
             out.push(&data.name);
             out.push(": ");
             out.push(&type_text(ty));
@@ -108,6 +116,66 @@ pub fn call(resolved: &Resolved, def: DefId, skip_receiver: bool) -> Option<Rend
     Some(out.finish())
 }
 
+/// `name: ref function (param: slot, ...) outs` for a call through a
+/// function reference of type `ty`. The slots are `ty`'s own (a generic
+/// instance's, not its template's); a parameter or out is named where
+/// `syntax`, the function type as declared, names it with the same number
+/// of slots.
+#[must_use]
+pub fn value_call(
+    types: &Types,
+    name: &str,
+    ty: TypeRef,
+    syntax: Option<&FuncType>,
+) -> Option<Rendered> {
+    let TypeKind::Func {
+        params,
+        returns,
+        c_abi,
+    } = types.kind(ty.id)
+    else {
+        return None;
+    };
+    let names = |slots: &[TypeRef], declared: Option<&Vec<Param>>| -> Vec<String> {
+        let declared = declared.filter(|declared| declared.len() == slots.len());
+        slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let shown = types.display_ref(*slot);
+                match declared.map(|declared| declared[index].name.as_str()) {
+                    Some(name) if !name.is_empty() => format!("{name}: {shown}"),
+                    _ => shown,
+                }
+            })
+            .collect()
+    };
+    let mut out = Out::default();
+    out.push(name);
+    out.push(if *c_abi {
+        ": ref export function ("
+    } else {
+        ": ref function ("
+    });
+    for (index, param) in names(params, syntax.map(|syntax| &syntax.params))
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            out.push(", ");
+        }
+        out.param(param);
+    }
+    out.push(") ");
+    let returns = names(returns, syntax.map(|syntax| &syntax.returns));
+    match returns.len() {
+        0 => out.push("nothing"),
+        1 => out.push(&returns[0]),
+        _ => out.push(&format!("({})", returns.join(", "))),
+    }
+    Some(out.finish())
+}
+
 /// `@name: function (param: slot, ...) result` for an intrinsic, from its
 /// table.
 #[must_use]
@@ -131,7 +199,8 @@ pub fn intrinsic(name: &str, intrinsic: Intrinsic) -> Rendered {
 }
 
 /// Where `def` is declared, when that is not the root namespace: its owner
-/// for a field or variant (a method names it already), else its namespace.
+/// for a field or variant (a method or constant names it already), else its
+/// namespace.
 #[must_use]
 pub fn context(resolved: &Resolved, def: DefId) -> Option<String> {
     let data = resolved.def(def);
@@ -286,6 +355,15 @@ fn outs_text(outs: &[Param]) -> String {
     }
 }
 
+/// A function type's outs: `nothing`, one, or more in parentheses.
+fn type_outs_text(outs: &[Param]) -> String {
+    if outs.len() > 1 {
+        format!("({})", outs_text(outs))
+    } else {
+        outs_text(outs)
+    }
+}
+
 /// A type as written.
 #[must_use]
 pub fn type_text(ty: &Type) -> String {
@@ -301,11 +379,11 @@ pub fn type_text(ty: &Type) -> String {
                 "{}function ({}) {}",
                 if func.is_export { "export " } else { "" },
                 params.join(", "),
-                outs_text(&func.returns)
+                type_outs_text(&func.returns)
             );
             if let Some(failures) = &func.failures {
                 text.push_str(" else ");
-                text.push_str(&outs_text(failures));
+                text.push_str(&type_outs_text(failures));
             }
             text
         }

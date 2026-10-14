@@ -80,7 +80,8 @@ pub enum ItemKind {
         /// Declared type.
         ty: Type,
     },
-    /// `name: Type => expr`: an inline constant (folds through substitution).
+    /// `name: Type => expr`: an inline constant (folds through substitution),
+    /// at the top level or in a type's body (`Int.MAX`).
     Const {
         /// Declared type.
         ty: Type,

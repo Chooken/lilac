@@ -1,0 +1,42 @@
+// libc
+// expect-stdout: -5 0 7 30
+// A `ref export function` stored in an object: `qsort` gets the
+// comparator from a field, and Lilac calls the same field itself with
+// the C ABI.
+
+using Standard
+using Standard.Io
+
+Numbers: object {
+    a: @bit32
+    b: @bit32
+    c: @bit32
+    d: @bit32
+}
+
+Order: object {
+    compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32
+}
+
+qsort: extern function (base: ref Numbers, count: @bit_native, size: @bit_native, compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
+
+ascending: export function (a: ref @bit32, b: ref @bit32) order: @bit32 {
+    order = 0x0
+    if @i_less_than_32(a, b) {
+        order = -0x1
+    }
+    if @i_less_than_32(b, a) {
+        order = 0x1
+    }
+}
+
+main: function () nothing {
+    numbers: Numbers = Numbers { a = 0x1e, b = -0x5, c = 0x7, d = 0x0 }
+    order: Order = Order { compare = ref ascending }
+    qsort(ref numbers, 0x4, 0x4, order.compare)
+    low: @bit32 = 0x1
+    high: @bit32 = 0x2
+    if order.compare(ref low, ref high) == 0xFFFFFFFF {
+        print_line($"{numbers.a as Int32} {numbers.b as Int32} {numbers.c as Int32} {numbers.d as Int32}")
+    }
+}

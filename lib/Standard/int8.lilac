@@ -4,6 +4,12 @@ Int8: object {
         data: @bit8
     }
 
+    /// The largest `Int8`.
+    MAX: Int8 => Int8 { data = 0x7F }
+
+    /// The smallest `Int8`.
+    MIN: Int8 => Int8 { data = 0x80 }
+
     @add: function (lhs: Int8, rhs: Int8) Int8 => @i_add_8(lhs.data, rhs.data)
     @sub: function (lhs: Int8, rhs: Int8) Int8 => @i_sub_8(lhs.data, rhs.data)
     @mul: function (lhs: Int8, rhs: Int8) Int8 => @i_mul_8(lhs.data, rhs.data)

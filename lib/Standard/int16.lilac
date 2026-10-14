@@ -4,6 +4,12 @@ Int16: object {
         data: @bit16
     }
 
+    /// The largest `Int16`.
+    MAX: Int16 => Int16 { data = 0x7FFF }
+
+    /// The smallest `Int16`.
+    MIN: Int16 => Int16 { data = 0x8000 }
+
     @add: function (lhs: Int16, rhs: Int16) Int16 => @i_add_16(lhs.data, rhs.data)
     @sub: function (lhs: Int16, rhs: Int16) Int16 => @i_sub_16(lhs.data, rhs.data)
     @mul: function (lhs: Int16, rhs: Int16) Int16 => @i_mul_16(lhs.data, rhs.data)

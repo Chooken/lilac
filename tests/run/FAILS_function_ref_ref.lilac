@@ -1,0 +1,14 @@
+// expect-error: E010
+// expect-stderr: error[E010]: cannot take `ref` of a reference
+// expect-stderr:    = help: `f` is already a function reference: use `f`
+// `ref` of a function reference was once a pointer to the slot, called as
+// if it were the function. A function reference is already a reference.
+
+add_one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+main: function () nothing {
+    f: ref function (@bit32) @bit32 = ref add_one
+    g: ref function (@bit32) @bit32 = ref f
+}

@@ -13,11 +13,11 @@
 Formatter: object {
     private {
         target: ref unknown
-        sink: FormatSink
+        sink: ref FormatSink
     }
 
     /// A formatter that hands every byte to `sink(target, bytes)`.
-    over: function (target: ref unknown, sink: FormatSink) out: Formatter {
+    over: function (target: ref unknown, sink: ref FormatSink) out: Formatter {
         out = Formatter { target = target, sink = sink }
     }
 
@@ -36,8 +36,7 @@ Formatter: object {
 
     /// Writes `bytes` as they are.
     write_bytes: function (self, bytes: @byte_buffer) nothing {
-        sink: FormatSink = self.sink
-        sink(self.target, bytes)
+        self.sink(self.target, bytes)
     }
 }
 
@@ -107,7 +106,7 @@ Padded: object {
 
     @format: function (self, out: ref Formatter) nothing {
         length: @bit_native = 0x0
-        counter: Formatter = Formatter.over(ref length as ref unknown, count_characters)
+        counter: Formatter = Formatter.over(ref length as ref unknown, ref count_characters)
         counter.write(self.text)
         padding: @bit_native = 0x0
         if @i_greater_than_u_native(self.width, length) {

@@ -844,9 +844,9 @@ impl Pass<'_, '_> {
                 }
             }
             HirExprKind::Call { callee, args, .. } => {
-                if let HirCallee::Local(id) = callee {
-                    let id = *id;
-                    self.require_full(&HirPath::local(id), span);
+                // The callee is read first: a function reference copies.
+                if let HirCallee::Value(callee) = callee {
+                    self.expr(callee, true);
                 }
                 for arg in args {
                     self.expr(arg, true);

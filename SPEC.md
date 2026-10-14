@@ -39,6 +39,8 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`unknown`**: An opaque type of indeterminate size. It can only be instantiated behind a reference (`ref unknown`), serving as Lilac's mechanism for type-erased pointers (analogous to `void*`).
 
+* **`ref function (params) outs`**: A function value: the address of a function's code (§4). Like `unknown`, a function type lives only behind a reference; a bare `function (…)` type is `E077`, except as a type alias's target (§6). `ref export function (params) outs` is a C function's address (§9). More than one out is parenthesized: `ref function (@bit32) (@bit32, @bit32)`.
+
 * **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables (and in `else nothing`: a function that can fail with no failure outs, §4). It is not a type and occupies no memory.
 
 * **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing object type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
@@ -84,7 +86,7 @@ through the function:
   own `@on_copy` copies through the hook; a type with its own `@on_drop`
   and no `@on_copy` moves; any other type copies field by field when every
   field (or payload) copies, and moves when one does not. Builtins, `ref`s,
-  function values and arrays copy bitwise. A fresh value (a call result, a
+  function references and arrays copy bitwise. A fresh value (a call result, a
   literal) moves into its owner.
 * **`@move(a)`** moves any place, copyable or not, without its copy hook
   (hand an `Rc` over without a bump). `a` is empty after.
@@ -472,7 +474,7 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@ptr_to_address`** | `(ptr)` | The address of `ptr` (`ref unknown`) as a `@bit_native`. |
 | **`@address_to_ptr`** | `(address)` | The `ref unknown` at `address` (`@bit_native`); `@address_to_ptr(0x0)` is null. |
 | **`@linux_syscall`** | `(number, a0, a1, a2, a3, a4, a5)` | The Linux system-call instruction: system call `number` with six `@bit_native` arguments (pass `0x0` for unused ones). Returns the result, or `-errno`, as `@bit_native`. Only on Linux for x86-64 and aarch64; a reachable call on any other target is `E035`. |
-| **`@linux_thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, entry, argument)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child calls `entry` (a C function's address, `ref unknown`: an `export` converted with `as`) with `argument`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@linux_syscall` (`E035`). |
+| **`@linux_thread_clone`** | `(flags, stack, parent_tid, child_tid, tls_area, tls_size, entry, argument)` | A Linux thread from the `clone` system call: `flags` (`@bit_native`) as `clone`'s, the child on `stack` (its top, `ref unknown`), `parent_tid`/`child_tid` as `clone`'s, and its thread-local block laid out in `tls_size` zeroed bytes at `tls_area` (the thread pointer it gets with `CLONE_SETTLS`). The child calls `entry` (a C function's address, `ref unknown`: `ref` of an `export` converted with `as`) with `argument`, then exits. Returns the child's id or `-errno` (`-ENOMEM` when the area is too small). Linux x86-64 and aarch64 only, like `@linux_syscall` (`E035`). |
 | **`@trap()`** | `()` |
  Stops the program at once with the target's trap instruction (an abnormal end, not an exit code). Does not return. |
 | **`@panic`** | `(message: M)` | Writes `panic: <message>` and the stack trace through `@compiler_print`, then exits with code 101. `M` is the type `@compiler_print` takes (`@byte_buffer` without one), with the slot rules of §2: when it is an `@format_args(W)`, a literal, an f-string or one value is a message. Does not return (see §8, "Platform hooks"). |
@@ -585,6 +587,11 @@ multi_func: function () result_1: @bit8, result_2: @bit16 {
 val1: @bit8, val2: @bit16 = multi_func()
 ```
 
+The outs may also be parenthesized, as a function type writes them
+(§4, "Function values"): `multi_func: function () (result_1: @bit8, result_2:
+@bit16) { … }` is the same declaration, and so is `else (code: @bit32)` for
+failure outs.
+
 A caller need not bind every result. The bindings take the results left to
 right, and the results past them are dropped at the end of the statement
 (`@on_drop` runs, so nothing leaks). A call used as a value is its first
@@ -655,9 +662,53 @@ Captures on a condition that cannot fail, and a guard on a call that
 cannot fail, are `E062`. The declaration shorthand may fail too:
 `arena: Arena.create(size) else -> why: Os.Error { return }`.
 
-A function that can fail cannot be a value, a function type cannot fail
+A function that can fail cannot be a function value, a function type cannot fail
 (`E057`), and neither can an `extern`, an `export` (`E028`) or a hook
 (`E022`).
+
+### Function values
+
+A function value is a reference to a function's code, `ref function
+(params) outs`. `ref f` takes the address of the function `f`, also by path
+(`ref A.B.f`) or as a type's member (`ref Type.make`). A method's receiver
+becomes its first parameter: `ref Box.get` is a `ref function (ref Box)
+@bit32` for `get: function (self) value: @bit32`, and `ref Box.take` takes a
+`Box` for `self: Box`. There are no bound methods (`ref box.get` is `E010`).
+A function named without `ref` is `E077`.
+
+```lilac
+double: function (value: @bit32) result: @bit32 => @i_mul_32(value, 0x2)
+
+apply: function (f: ref function (@bit32) @bit32, value: @bit32) result: @bit32 {
+    result = f(value)
+}
+
+main: function () nothing {
+    four: @bit32 = apply(ref double, 0x2)
+}
+```
+
+A function type's outs are `nothing`, one slot, or a parenthesized list
+(`ref function (n: @bit32) (quotient: @bit32, remainder: @bit32)`), as in
+Go, so a function type inside a slot list ends at its out: `apply` above
+takes `f`, then `value`. `()` is `nothing` (`E001`). A declaration may parenthesize its outs
+the same way, or leave them bare (§4, "Function Signatures").
+
+Hooks and intrinsics are not values (`E021`), nor are a function that can
+fail (`E057`), a variadic `extern` (`E028`) or a generic function
+(`E044`). A local shadows a function: `ref f` of a local `f` is the local's
+address, so `ref` of a function reference is a double reference (`E010`).
+
+**Calls through a value.** Any expression of a function reference type is
+callable: a local or parameter (`f(x)`), a field (`machine.step(x)`), a
+global or constant (`HANDLER(x)`), a call's result (`pick(0x1)(x)`) or any
+other expression (`(if fast then quick else slow)(x)`). A call through a
+value never passes `self`: members of a type share one namespace, so
+`value.f(x)` calls the method `f` when `f` is a method and the field `f`
+when it is a field, decided per instance in a generic body.
+
+The callee is evaluated first, then the arguments left to right, so a field
+callee is read before an argument can move or reassign its object.
 
 ### Control Flow
 
@@ -832,6 +883,7 @@ statically allocated value for the whole program, read and assigned like a
 local (`count = @i_add_32(count, 0x1)`, `origin.x = 0x9`, `ref count`).
 `name: Type` with no initializer is a zeroed global. A top-level
 `name: Type => value` is an inline constant instead (§7), with no storage.
+Globals are top-level only; a type's body declares constants (see Objects).
 
 The initializer is evaluated at compile time and must be a constant
 expression (the forms in §2's constant-condition table, plus object
@@ -874,6 +926,26 @@ References **auto-dereference by default**. Operators act on the underlying valu
 
 * It does **not** perform pointer arithmetic. To manipulate raw memory addresses, a reference must be explicitly converted to `@bit_native`.
 
+**Function references are never dereferenced.** A `ref function (…)`
+points at code, so, like `ref unknown`, it does not auto-dereference:
+
+* Assigning one rebinds the place; there is no function to write through.
+* `==` and `!=` compare addresses, and both sides need the same function
+  type (`E010`). Two references are equal exactly when they name the same
+  function: the compiler never merges two functions' code, even identical
+  bodies, so each function has its own address.
+* It has no fields (`E021`), and `@read`, `@write` and `@drop` of one are
+  `E010`. It copies bitwise and has no drop.
+
+It casts with `as` to and from `ref unknown` (both `ref function` and `ref
+export function`), and any other cast between two function types is
+`E010`, also from a Lilac function to a C one. A cast through `ref unknown`
+is sound only when every slot keeps its representation: a `ref X` slot and
+a `ref unknown` slot always do, so a `ref function (self: ref Arena, size:
+@bit_native) …` may be called as a `ref function (context: ref unknown,
+size: @bit_native) …`. Changing a slot's width, or the calling convention
+(Lilac and C), is undefined behavior.
+
 ## 6. Composite Types & Namespaces
 
 ### Objects
@@ -894,6 +966,47 @@ Object: object {
     // They can also be called via instance.InstanceFunction()
     // This desugars to Object.InstanceFunction(ref instance) anyways.
     InstanceFunction: function (self) nothing {}
+}
+```
+
+A type's body may also declare **constants**, `NAME: Type => value`,
+named through the type: `Int.MAX`, `Box.LIMIT`. A constant is inlined at
+each use like a top-level one (§7) and folds in constant conditions and
+global initializers. It belongs to the type, not to a value (`n.MAX` is an
+error), and to the type as a whole: a generic type's constant is one value
+for every instance (`Gen.SIZE` is `Gen[@bit8].SIZE`), so its type and
+initializer cannot name the type's parameters (`E023`, `E021`). A type
+parameter's constant, `T.LIMIT` in a generic body, is looked up on each
+instance's type. A constant in a `private { }` block is named only from
+the type's own members and constants (`E026`). A type's body declares no
+globals: `NAME: Type = value` there is `E001`.
+
+```lilac
+Int: object {
+    private {
+        data: @bit_native
+    }
+
+    MAX: Int => Int { data = @bit_shift_right_u_native(@bit_not_native(0x0), 0x1) }
+}
+
+fits: function (n: Int, element: Int) Bool => n <= Int.MAX / element
+```
+
+A field of a function reference type is **callable**: `machine.step(x)`
+calls through the field, with no `self` (§4). A type's members share one
+namespace, so a field and a method of one name cannot both exist, and
+`value.step(x)` is a method call or a field call by what `step` is. An
+object of function references is an interface's table by hand:
+
+```lilac
+Sink: object {
+    context: ref unknown
+    write: ref function (context: ref unknown, amount: @bit32) nothing
+}
+
+send: function (sink: ref Sink, amount: @bit32) nothing {
+    sink.write(sink.context, amount)
 }
 ```
 
@@ -1143,8 +1256,8 @@ that contains itself by value, directly or through other fields and
 payloads, is `E053`; store the recursive part behind a `ref`.
 
 An enum body may also declare members exactly like an object: methods
-(`name: function (self) ... { }` or `=> expr`), hooks (`@name: ...`) and
-`private { }` blocks. A `name: function (...) ...` with a body is a method; a
+(`name: function (self) ... { }` or `=> expr`), constants (`NAME: Type =>
+value`, named `Enum.NAME`), hooks (`@name: ...`) and `private { }` blocks. A `name: function (...) ...` with a body is a method; a
 `name: Type` without one is a payload variant. (The old `union` keyword was removed:
 it spelled the same type. Legacy `union { ... }` declarations fail to
 parse; rename them to `enum`.)
@@ -1178,7 +1291,10 @@ Callback: alias function (Event) nothing
   used, and a generic type named without its arguments, are `E044`.
 * It names a type, never a reference: `Name: alias ref T` is `E001`;
   write `ref Name` where it is used. `unknown` lives only behind a `ref`,
-  so `alias unknown` is `E023`.
+  so `alias unknown` is `E023`. A function type also lives only behind
+  a `ref`, but its alias is the one place it is written bare: `Callback:
+  alias function (Event) nothing` is used as `ref Callback`, and a bare
+  `Callback` is `E077` (§1).
 * An alias that needs itself to be known, directly or through other
   aliases (`Pair: alias Both[Pair]`), is `E074`, reported once at the use
   that closes the loop.
@@ -1399,7 +1515,8 @@ exact-match rule as the implicit path applies:
 The single builtin exception is the **`ref unknown` ↔ any `ref T`** cast, in
 both directions: it is a no-op pointer retype with no `@conversion`.
 `as ref unknown` is the only way to make a type-erased pointer from a concrete
-`ref`, and `as ref T` is the way to recover one. Any other `ref` mismatch —
+`ref`, and `as ref T` is the way to recover one; a `ref function (…)` casts
+the same way (§5). Any other `ref` mismatch —
 including `ref T as T` — is `E010`, consistent with the implicit path.
 
 ```lilac
@@ -1582,7 +1699,7 @@ to check against, so each must carry its own:
   (widen them with `as`).
 
 A variadic `extern` cannot be used as a function value (`E028`): function
-types have no `...`. A non-variadic one named as a value is a C function
+types have no `...`. `ref` of a non-variadic one is a C function
 (see `export`). The backend declares it with a C variadic prototype,
 so each target's varargs convention applies (on Apple arm64, varargs go on the
 stack, which a fixed prototype gets wrong).
@@ -1613,22 +1730,23 @@ Rules (`E055` unless noted):
   project and in mounted libraries alike, so an unused one still emits.
 
 Lilac calls an `export` by name like any function (the Lilac ABI, no C
-conversion). Named as a value, it is a C function: its type is
-`export function (params) outs`, and its value is the C symbol's address.
+conversion). Its address, `ref compare`, is a C function: its type is
+`ref export function (params) outs`, and its value is the C symbol's
+address.
 
-**C function values.** `export function (params) outs` is the type of a C
-function's address. It is a C type, so it passes to and from `extern`s
+**C function values.** `ref export function (params) outs` is the type of a
+C function's address. It is a C type, so it passes to and from `extern`s
 (`qsort`'s comparator, a thread start routine), and calling a value of it
-uses the C ABI. Its slots follow the `extern` rules (`E028`). An `export`
-or a non-variadic `extern` named as a value has this type. It converts to
-and from `ref unknown` with `as`; a Lilac `function` value never converts
-to it, since the two ABIs differ.
+uses the C ABI. Its slots follow the `extern` rules (`E028`). `ref` of an
+`export` or a non-variadic `extern` has this type. It converts to and from
+`ref unknown` with `as`; a Lilac `ref function` never converts to it, since
+the two ABIs differ (`E010`).
 
 ```lilac
-qsort: extern function (base: ref unknown, count: @bit_native, size: @bit_native, compare: export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
+qsort: extern function (base: ref unknown, count: @bit_native, size: @bit_native, compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
 
 sort: function (values: ref unknown, count: @bit_native) nothing {
-    qsort(values, count, 0x4, compare)
+    qsort(values, count, 0x4, ref compare)
 }
 ```
 

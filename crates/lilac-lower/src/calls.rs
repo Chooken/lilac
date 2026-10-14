@@ -1,7 +1,7 @@
 //! Calls: Lilac calls and `extern` calls through the C ABI.
 
-use lilac_hir::{FuncKey, HirCallee, HirExpr, HirFunc, Layout, LocalId};
-use lilac_ir::{LirCallee, LirInst, LirOperand, LirTy, PlaceName, Reg};
+use lilac_hir::{FuncKey, HirCallee, HirExpr, HirFunc, Layout};
+use lilac_ir::{LirCallee, LirInst, LirOperand, LirTy, PlaceName, Symbol};
 use lilac_span::Span;
 use lilac_ty::{TypeKind, TypeRef};
 
@@ -60,31 +60,46 @@ impl Lower<'_> {
                 });
             }
         }
-        if let HirCallee::Local(id) = callee {
-            if let TypeKind::Func {
-                returns,
-                c_abi: true,
-                ..
-            } = self.types.kind(func.local(*id).ty.id)
-            {
+        if let HirCallee::Value(value) = callee {
+            // The callee is read first, into a place: the arguments may
+            // branch, and a register lives in its block.
+            let place = self.arg(state, func, value);
+            let TypeKind::Func { returns, c_abi, .. } = self.types.kind(value.ty.id) else {
+                lilac_error::bug!(
+                    span,
+                    "a call through a value that is not a function reference"
+                );
+            };
+            if *c_abi {
                 let returns = returns.clone();
-                let reg = callee_reg(state, *id, span);
                 self.emit_c_call(
                     state,
                     func,
-                    LirCallee::CReg(reg),
+                    Callee::Place(place),
                     args,
                     outs,
                     &returns,
                     span,
                 );
-                return;
+            } else {
+                let ins: Vec<PlaceName> =
+                    args.iter().map(|arg| self.arg(state, func, arg)).collect();
+                let reg = state.reg_of(LirOperand::Place(place), &LirTy::opaque_ref(), span);
+                state.emit(LirInst::Call {
+                    func: LirCallee::Reg(reg),
+                    ins,
+                    outs: outs.to_vec(),
+                    span,
+                });
             }
+            return;
         }
         let ins: Vec<PlaceName> = args.iter().map(|arg| self.arg(state, func, arg)).collect();
         let target = match callee {
             HirCallee::Func(key) => LirCallee::Func(self.symbol(key)),
-            HirCallee::Local(id) => LirCallee::Reg(callee_reg(state, *id, span)),
+            HirCallee::Value(_) => {
+                lilac_error::bug!(span, "a value callee in the direct call path")
+            }
             HirCallee::Intrinsic(_) => {
                 lilac_error::bug!(span, "intrinsic in the general call path")
             }
@@ -121,7 +136,7 @@ impl Lower<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        let target = LirCallee::Func(symbol);
+        let target = Callee::Func(symbol);
         self.emit_c_call(state, func, target, args, outs, &returns, span);
     }
 
@@ -132,7 +147,7 @@ impl Lower<'_> {
         &mut self,
         state: &mut FnState,
         func: &HirFunc,
-        target: LirCallee,
+        target: Callee,
         args: &[HirExpr],
         outs: &[PlaceName],
         returns: &[TypeRef],
@@ -173,6 +188,12 @@ impl Lower<'_> {
             });
             ins.push(inner);
         }
+        let func_target = match target {
+            Callee::Func(symbol) => LirCallee::Func(symbol),
+            Callee::Place(place) => {
+                LirCallee::CReg(state.reg_of(LirOperand::Place(place), &LirTy::opaque_ref(), span))
+            }
+        };
         let mut call_outs = Vec::with_capacity(outs.len());
         let mut rewrap = Vec::new();
         for (out, ty) in outs.iter().zip(returns) {
@@ -187,7 +208,7 @@ impl Lower<'_> {
             }
         }
         state.emit(LirInst::Call {
-            func: target,
+            func: func_target,
             ins,
             outs: call_outs,
             span,
@@ -219,17 +240,11 @@ impl Lower<'_> {
     }
 }
 
-/// The function address a local holds, in a register.
-fn callee_reg(state: &mut FnState, id: LocalId, span: Span) -> Reg {
-    let Some(place) = state.places.get(&id).cloned() else {
-        lilac_error::bug!(span, "call through an undeclared local");
-    };
-    let reg = state.reg();
-    state.emit(LirInst::CopyReg {
-        src: LirOperand::Place(place),
-        dst: reg.clone(),
-        ty: LirTy::opaque_ref(),
-        span,
-    });
-    reg
+/// What a C ABI call ([`Lower::emit_c_call`]) calls.
+pub(crate) enum Callee {
+    /// A function by symbol.
+    Func(Symbol),
+    /// The C function address in a place, read after the arguments (they
+    /// may branch, and a register lives in its block).
+    Place(PlaceName),
 }

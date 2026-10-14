@@ -3,9 +3,9 @@
 
 use lilac_ast::{
     ArmTest, Conditional, EnumVariant, Expr, FuncBody, FuncDecl, Item, ItemArm, ItemKind,
-    MatchPattern, Param, Type, TypeShape,
+    MatchPattern, Param, Type,
 };
-use lilac_error::ErrorGuaranteed;
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::{Token, TokenKind};
 use lilac_span::Span;
 
@@ -208,8 +208,17 @@ impl Parser {
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, true);
             }
             if self.peek().kind == TokenKind::Eq {
-                self.bump();
+                let eq = self.bump();
                 let value = self.parse_expr(diags)?;
+                if in_object {
+                    return Err(diags.emit(
+                        Diagnostic::error(codes::E001, "a type's body declares no globals")
+                            .label(eq.span, true, "`=` declares a global only at the top level")
+                            .help(format!(
+                                "write `{name}: Type => value` for a constant, or move the global to the top level"
+                            )),
+                    ));
+                }
                 return Self::const_item(diags, name, name_span, &generic_params, ty, value, false);
             }
             if !in_object && self.at_decl_shorthand() {
@@ -570,8 +579,9 @@ impl Parser {
     /// Parses an enum body: variants (`One`, `Some: T`) interleaved with
     /// members. A member is a hook (`@name: ...`), a `private { ... }` block,
     /// a generic declaration (`name[T]: ...`), a nested `object`/`enum`
-    /// (rejected by the resolver, `E036`), or a `function` with a body; any
-    /// other `name: Type` is a payload variant.
+    /// (rejected by the resolver, `E036`), a `function` with a body, or a
+    /// constant (`name: Type => value`); any other `name: Type` is a
+    /// payload variant.
     pub(crate) fn parse_enum_body(
         &mut self,
         diags: &mut lilac_error::Diags,
@@ -608,39 +618,40 @@ impl Parser {
             }
             let doc = self.peek().doc.as_deref().cloned();
             let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
+            let name_span = ident.span;
+            // `name: function (…) … { … }` is a method, never a payload: a
+            // function payload is a `ref function`.
+            if self.peek().kind == TokenKind::Colon && self.peek_at(1).kind == TokenKind::KwFunction
+            {
+                self.bump();
+                self.bump();
+                let decl = self.parse_func_rest(diags, false, Vec::new())?;
+                members.push(Item {
+                    doc,
+                    name: ident.text,
+                    kind: ItemKind::Func(decl),
+                    span: join_spans(name_span, self.prev_span()),
+                });
+                continue;
+            }
             let payload = if self.peek().kind == TokenKind::Colon {
                 self.bump();
                 Some(self.parse_type(diags))
             } else {
                 None
             };
-            let name_span = ident.span;
-            if let Some(Type {
-                shape: TypeShape::Function(func),
-                ..
-            }) = &payload
+            // `NAME: Type => value` is a constant, not a variant.
+            if let Some(ty) = payload
+                .as_ref()
+                .filter(|_| self.peek().kind == TokenKind::FatArrow)
             {
-                if matches!(self.peek().kind, TokenKind::LBrace | TokenKind::FatArrow) {
-                    let func = func.clone();
-                    let body = self.parse_func_body(diags, false)?;
-                    members.push(Item {
-                        doc: doc.clone(),
-                        name: ident.text,
-                        kind: ItemKind::Func(FuncDecl {
-                            generic_params: Vec::new(),
-                            params: func.params,
-                            returns: func.returns,
-                            failures: func.failures,
-                            body,
-                            is_extern: false,
-                            is_export: false,
-                            link_name: None,
-                            variadic: false,
-                        }),
-                        span: join_spans(name_span, self.prev_span()),
-                    });
-                    continue;
-                }
+                self.bump();
+                let value = self.parse_expr(diags)?;
+                let mut item =
+                    Self::const_item(diags, ident.text, name_span, &[], ty.clone(), value, true)?;
+                item.doc = doc;
+                members.push(item);
+                continue;
             }
             let end = payload.as_ref().map_or(name_span, |ty| ty.span);
             variants.push(EnumVariant {
@@ -735,11 +746,25 @@ impl Parser {
                 self.bump();
                 Ok(Some(FuncBody::Inline(self.parse_expr(diags)?)))
             }
-            _ => Err(Self::expected(
-                diags,
-                self.peek(),
-                "`{` or `=>` for function body",
-            )),
+            // `name: function (…) …` with no body is most likely meant to
+            // hold a function, which is a `ref function` (`E077`).
+            _ => {
+                let found = self.peek();
+                Err(diags.emit(
+                    Diagnostic::error(
+                        codes::E001,
+                        format!(
+                            "expected `{{` or `=>` for function body, found {}",
+                            found.describe()
+                        ),
+                    )
+                    .label(found.span, true, String::new())
+                    .help(
+                        "a function needs a body; a field or global that holds a function \
+                         is a `ref function (…) …`",
+                    ),
+                ))
+            }
         }
     }
 
@@ -814,14 +839,15 @@ impl Parser {
         Ok((returns, Some(failures)))
     }
 
-    /// `nothing`, or `name: Type` slots separated by commas.
+    /// `nothing`, `name: Type` slots separated by commas, or the slots in
+    /// parentheses as a function type writes them (no type starts with
+    /// `(`, so the two never meet).
     fn parse_out_slots(
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<Vec<Param>, ErrorGuaranteed> {
-        if self.peek().kind == TokenKind::KwNothing {
-            self.bump();
-            return Ok(Vec::new());
+        if matches!(self.peek().kind, TokenKind::KwNothing | TokenKind::LParen) {
+            return self.parse_type_outs(diags);
         }
         let mut slots = Vec::new();
         loop {

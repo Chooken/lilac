@@ -1,7 +1,7 @@
 //! Types: names with generic arguments, `ref`, arrays and function types.
 
-use lilac_ast::{FuncType, Type, TypeShape};
-use lilac_error::ErrorGuaranteed;
+use lilac_ast::{FuncType, Param, Type, TypeShape};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_lex::{Token, TokenKind};
 use lilac_span::Span;
 
@@ -55,13 +55,7 @@ impl Parser {
             return self.parse_func_type(diags, start, start, false);
         }
         if first.kind == TokenKind::KwExport {
-            // `export function (…)`: a C function's address.
-            let keyword = self.expect(diags, TokenKind::KwFunction, "`function` after `export`")?;
-            let mut ty = self.parse_func_type(diags, start, keyword.span, false)?;
-            if let TypeShape::Function(func) = &mut ty.shape {
-                func.is_export = true;
-            }
-            return Ok(ty);
+            return self.parse_export_func_type(diags, start, false);
         }
         let (is_ref, name_token) = match first.kind {
             TokenKind::KwRef => {
@@ -81,6 +75,10 @@ impl Parser {
                         keyword.span,
                         true,
                     );
+                }
+                if self.peek().kind == TokenKind::KwExport {
+                    self.bump();
+                    return self.parse_export_func_type(diags, start, true);
                 }
                 (true, self.parse_type_name(diags)?)
             }
@@ -198,6 +196,79 @@ impl Parser {
         })
     }
 
+    /// Parses `function (params) returns` after `export` (and a `ref`
+    /// before it, `is_ref`), from `start`: a C function's type.
+    fn parse_export_func_type(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+        start: Span,
+        is_ref: bool,
+    ) -> Result<Type, ErrorGuaranteed> {
+        let keyword = self.expect(diags, TokenKind::KwFunction, "`function` after `export`")?;
+        let mut ty =
+            self.parse_func_type(diags, join_spans(start, keyword.span), keyword.span, is_ref)?;
+        if let TypeShape::Function(func) = &mut ty.shape {
+            func.is_export = true;
+        }
+        Ok(ty)
+    }
+
+    /// A function type's outs: `nothing`, one slot, or a parenthesized
+    /// list (`(quotient: @bit32, remainder: @bit32)`). As in Go, more than
+    /// one out needs the parentheses, so a function type inside a slot
+    /// list ends at its out: `(f: ref function (@bit32) @bit32, value:
+    /// @bit32)` has two parameters. A declaration may write its outs this
+    /// way too (`parse_out_slots`).
+    pub(crate) fn parse_type_outs(
+        &mut self,
+        diags: &mut lilac_error::Diags,
+    ) -> Result<Vec<Param>, ErrorGuaranteed> {
+        match self.peek().kind {
+            TokenKind::KwNothing => {
+                self.bump();
+                Ok(Vec::new())
+            }
+            TokenKind::LParen => {
+                let open = self.bump();
+                let mut outs = Vec::new();
+                loop {
+                    if self.peek().kind == TokenKind::Eof {
+                        return Err(Self::unclosed(diags, &open, "out list", self.peek()));
+                    }
+                    if self.peek().kind == TokenKind::RParen && outs.is_empty() {
+                        // Read as `nothing`, so the rest parses.
+                        let close = self.bump().span;
+                        let list = join_spans(open.span, close);
+                        diags.emit(
+                            Diagnostic::error(codes::E001, "an empty out list is `nothing`")
+                                .label(list, true, "")
+                                .fix(list, "nothing", "write `nothing`"),
+                        );
+                        return Ok(outs);
+                    }
+                    outs.push(self.parse_param(diags)?);
+                    match self.peek().kind {
+                        TokenKind::Comma => {
+                            self.bump();
+                        }
+                        TokenKind::RParen => {
+                            self.bump();
+                            return Ok(outs);
+                        }
+                        _ => {
+                            return Err(Self::expected(
+                                diags,
+                                self.peek(),
+                                "`,` or `)` in a function type's outs",
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => Ok(vec![self.parse_param(diags)?]),
+        }
+    }
+
     /// Parses `function (params) returns` after the `function` keyword.
     pub(crate) fn parse_func_type(
         &mut self,
@@ -233,7 +304,18 @@ impl Parser {
             }
         }
         self.bump();
-        let (returns, failures) = self.parse_returns(diags)?;
+        // As in a declaration, `function () else nothing` omits the outs.
+        let returns = if self.peek().kind == TokenKind::KwElse {
+            Vec::new()
+        } else {
+            self.parse_type_outs(diags)?
+        };
+        let failures = if self.peek().kind == TokenKind::KwElse {
+            self.bump();
+            Some(self.parse_type_outs(diags)?)
+        } else {
+            None
+        };
         let end = self.prev_span();
         Ok(Type {
             shape: TypeShape::Function(FuncType {

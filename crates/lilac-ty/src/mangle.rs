@@ -531,7 +531,12 @@ impl<'s> Parsed<'s> {
                 Task::FunctionReturns => {
                     if self.src.get(after) == Some(&b'E') {
                         out.push("nothing");
+                    } else if self.src.get(self.end(after)) == Some(&b'E') {
+                        tasks.push(Task::List(after, true));
                     } else {
+                        // More than one out is parenthesized, as written.
+                        out.push("(");
+                        tasks.push(Task::Text(")"));
                         tasks.push(Task::List(after, true));
                     }
                 }
@@ -600,7 +605,7 @@ impl<'s> Parsed<'s> {
                 }
                 out.push("function (");
                 tasks.push(Task::FunctionReturns);
-                tasks.push(Task::Text(") -> "));
+                tasks.push(Task::Text(") "));
                 tasks.push(Task::List(params, true));
             }
             b'p' => {
@@ -916,6 +921,9 @@ mod tests {
             out.push(TypeRef::value(types.intern_array(ty.id, index as u64 + 1)));
             out.push(TypeRef::value(types.intern_format_args(ty.id)));
             out.push(TypeRef::value(types.intern_func(vec![*ty], vec![other])));
+            out.push(TypeRef::value(
+                types.intern_func(vec![other], vec![*ty, other]),
+            ));
             out.push(TypeRef::value(types.intern_func_abi(
                 vec![*ty, other],
                 Vec::new(),
@@ -956,13 +964,14 @@ mod tests {
         for _ in 0..count {
             let mut pick = || pool[next(pool.len())];
             let (a, b) = (pick(), pick());
-            let ty = match next(7) {
+            let ty = match next(8) {
                 0 => TypeRef::reference(a.id),
                 1 => TypeRef::value(types.intern_instance(DefId(3), vec![a])),
                 2 => TypeRef::value(types.intern_instance(DefId(4), vec![a, b])),
                 3 => TypeRef::value(types.intern_array(a.id, next(200) as u64 + 1)),
                 4 => TypeRef::value(types.intern_func(vec![a, b], vec![b])),
                 5 => TypeRef::value(types.intern_format_args(a.id)),
+                6 => TypeRef::value(types.intern_func(Vec::new(), vec![a, b])),
                 _ => TypeRef::value(types.intern_func_abi(vec![a], Vec::new(), true)),
             };
             pool.push(ty);
@@ -1056,7 +1065,7 @@ mod tests {
         assert_eq!(types.mangle(func), "[F6NumberNN1A1B6HolderEE]");
         assert_eq!(
             demangle(&types.mangle(func)).as_deref(),
-            Some("[function (Number, A.B.Holder) -> nothing]")
+            Some("[function (Number, A.B.Holder) nothing]")
         );
         let c_func = types.intern_func_abi(
             vec![TypeRef::reference(number.id)],

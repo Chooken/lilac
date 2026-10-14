@@ -109,6 +109,9 @@ impl Checker<'_> {
                         self.check_index(array, index, bad);
                     }
                 }
+                if let HirCallee::Value(callee) = callee {
+                    self.expr_indices(callee, guarded, bad);
+                }
                 for arg in args {
                     self.expr_indices(arg, guarded, bad);
                 }

@@ -175,7 +175,7 @@ impl Checker<'_> {
             self.mismatch(want, expr.ty, want_span, span);
             return HirExpr::poison(span);
         }
-        let expr = Self::auto_deref(expr);
+        let expr = self.auto_deref(expr);
         if expr.ty.id == want.id {
             return expr;
         }
@@ -220,9 +220,10 @@ impl Checker<'_> {
         })
     }
 
-    /// `*expr` when `expr` is a reference (never through `ref unknown`).
-    pub(crate) fn auto_deref(expr: HirExpr) -> HirExpr {
-        if !expr.ty.is_ref || expr.ty.id == Builtin::Unknown.id() {
+    /// `*expr` when `expr` is a reference, never through an opaque one
+    /// (`ref unknown`, a function reference: [`lilac_ty::Types::is_opaque_ref`]).
+    pub(crate) fn auto_deref(&self, expr: HirExpr) -> HirExpr {
+        if !expr.ty.is_ref || self.types.is_opaque_ref(expr.ty) {
             return expr;
         }
         HirExpr {
@@ -235,6 +236,13 @@ impl Checker<'_> {
     // ---- names -----------------------------------------------------------
 
     fn check_ident(&mut self, fcx: &mut FnCx, name: &str, span: Span) -> HirExpr {
+        self.check_name(fcx, name, span, false)
+    }
+
+    /// A name or path as a value. `behind_ref`: it is the operand of `ref`
+    /// (or a place), so a function named here is its address without
+    /// `E077`.
+    fn check_name(&mut self, fcx: &mut FnCx, name: &str, span: Span, behind_ref: bool) -> HirExpr {
         if let Some(local) = fcx.lookup(name) {
             self.record_local_use(fcx, local, span);
             return local_expr(local, fcx.ty(local), span);
@@ -252,51 +260,18 @@ impl Checker<'_> {
         let Some(def) = found else {
             let diagnostic = Diagnostic::error(codes::E021, format!("unresolved name `{name}`"))
                 .label(span, true, "not a local or item");
-            let diagnostic = self.suggest_value(fcx, diagnostic, name, span);
+            let diagnostic = if self.is_owner_param(name) {
+                self.owner_param_note(diagnostic, name)
+            } else {
+                self.suggest_value(fcx, diagnostic, name, span)
+            };
             self.diags.emit(diagnostic);
             return HirExpr::poison(span);
         };
         self.record_use(path_tail(span, name), def);
         match &self.res.def(def).kind {
-            DefKind::Func(decl) if decl.variadic => {
-                self.diags.emit(
-                    Diagnostic::error(
-                        codes::E028,
-                        format!("cannot use variadic extern `{name}` as a value"),
-                    )
-                    .label(span, true, "function types have no `...`")
-                    .help("call it directly, or wrap it in a function with fixed parameters"),
-                );
-                HirExpr::poison(span)
-            }
-            DefKind::Func(decl) => {
-                // An `export` or `extern` is a C function: its value is the
-                // C symbol's address.
-                let c_abi = decl.is_export || decl.is_extern;
-                let fails = decl.failures.is_some();
-                self.func_value(def, name, span, c_abi, fails)
-            }
-            DefKind::Const { .. } => {
-                self.use_builtin_const(def);
-                let ty = self.const_type(def);
-                HirExpr {
-                    ty,
-                    span,
-                    kind: HirExprKind::Const(def),
-                }
-            }
-            DefKind::Global { .. } => {
-                let ty = self.const_type(def);
-                if ty.is_error() {
-                    // The type's own error was reported at the declaration.
-                    return HirExpr::poison(span);
-                }
-                HirExpr {
-                    ty,
-                    span,
-                    kind: HirExprKind::Global(def),
-                }
-            }
+            DefKind::Func(_) => self.func_value(def, Vec::new(), name, span, behind_ref),
+            DefKind::Const { .. } | DefKind::Global { .. } => self.item_value(def, span),
             DefKind::Object | DefKind::Enum | DefKind::Alias(_) => {
                 self.diags.emit(
                     Diagnostic::error(codes::E021, format!("cannot use type `{name}` as a value"))
@@ -310,7 +285,7 @@ impl Checker<'_> {
                         codes::E021,
                         format!("cannot use function `{name}` as a value"),
                     )
-                    .label(span, true, "hooks are not values"),
+                    .label(span, true, "hooks are not function values"),
                 );
                 HirExpr::poison(span)
             }
@@ -327,20 +302,58 @@ impl Checker<'_> {
         }
     }
 
-    /// A plain function named as a value.
-    fn func_value(
+    /// The constant or global `def` named at `span` as a value.
+    pub(crate) fn item_value(&mut self, def: DefId, span: Span) -> HirExpr {
+        if let DefKind::Const { .. } = self.res.def(def).kind {
+            return self.const_value(def, span);
+        }
+        let ty = self.const_type(def);
+        if ty.is_error() {
+            // The type's own error was reported at the declaration.
+            return HirExpr::poison(span);
+        }
+        HirExpr {
+            ty,
+            span,
+            kind: HirExprKind::Global(def),
+        }
+    }
+
+    /// The function `def` (of a type instantiated at `type_args`, if a
+    /// member) as a value: its address, a `ref function (…)` whose
+    /// parameters are the function's own, a method's receiver first. An
+    /// `export` or `extern` is a C function, so its value is a `ref export
+    /// function (…)`, the C symbol's address. Named without `ref`
+    /// (`behind_ref` false) it is `E077`, and still that value.
+    pub(crate) fn func_value(
         &mut self,
         def: DefId,
+        type_args: Vec<TypeRef>,
         name: &str,
         span: Span,
-        c_abi: bool,
-        fails: bool,
+        behind_ref: bool,
     ) -> HirExpr {
+        let Some(decl) = self.res.def(def).func() else {
+            lilac_error::bug!(span, "`{name}` is not a function");
+        };
+        let (variadic, fails) = (decl.variadic, decl.failures.is_some());
+        let c_abi = decl.is_export || decl.is_extern;
+        if variadic {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E028,
+                    format!("cannot use variadic extern `{name}` as a function value"),
+                )
+                .label(span, true, "function types have no `...`")
+                .help("call it directly, or wrap it in a function with fixed parameters"),
+            );
+            return HirExpr::poison(span);
+        }
         if fails {
             self.diags.emit(
                 Diagnostic::error(
                     codes::E057,
-                    format!("`{name}` can fail, so it cannot be a value"),
+                    format!("`{name}` can fail, so it cannot be a function value"),
                 )
                 .label(span, true, "a function value cannot fail")
                 .help("call it here, or wrap the call in a function that handles it"),
@@ -352,13 +365,30 @@ impl Checker<'_> {
             self.generic_arity(span, name, generic, 0);
             return HirExpr::poison(span);
         }
-        let key = FuncKey::plain(def);
+        if !behind_ref {
+            self.diags.emit(
+                Diagnostic::error(
+                    codes::E077,
+                    format!("`{name}` is a function, a value only behind `ref`"),
+                )
+                .label(span, true, "write `ref` before it")
+                .fix(
+                    Span::new(span.lo.0, span.lo.0, span.file),
+                    "ref ",
+                    "a function value is a reference to its code: add `ref`",
+                ),
+            );
+        }
+        let key = FuncKey {
+            def,
+            args: type_args,
+        };
         let Ok(sig) = self.request(key.clone(), span) else {
             return HirExpr::poison(span);
         };
         let id = self.types.intern_func_abi(sig.params, sig.returns, c_abi);
         HirExpr {
-            ty: TypeRef::value(id),
+            ty: TypeRef::reference(id),
             span,
             kind: HirExprKind::FuncRef(key),
         }
@@ -483,13 +513,21 @@ impl Checker<'_> {
                     self.record_local_use(fcx, local, *span);
                     return Ok(local_expr(local, fcx.ty(local), *span));
                 }
-                let item = self.check_ident(fcx, name, *span);
+                let item = self.check_name(fcx, name, *span, true);
                 self.item_place(item, name)
             }
             Expr::Member { obj, field, span } => {
                 if let Some((path, span)) = self.qualified_name(fcx, expr) {
-                    let item = self.check_ident(fcx, &path, span);
+                    let item = self.check_name(fcx, &path, span, true);
                     return self.item_place(item, &path);
+                }
+                // `Type.NAME`: a constant or variant, never a place.
+                if let Some(receiver) = self.static_receiver(fcx, obj) {
+                    let item = match receiver {
+                        Ok(receiver) => self.static_member(receiver, field, *span, None, true),
+                        Err(_) => HirExpr::poison(*span),
+                    };
+                    return self.item_place(item, field);
                 }
                 let base = self.check_place(fcx, obj)?;
                 if base.ty.is_error() {
@@ -535,7 +573,7 @@ impl Checker<'_> {
         annotate: bool,
         shadowed: Option<(String, Span)>,
     ) -> HirExpr {
-        let base = Self::auto_deref(base);
+        let base = self.auto_deref(base);
         let receiver = MemberReceiver::Value(base.ty);
         if self.record_member(span, field, Some(receiver)).is_err() {
             return HirExpr::poison(span);
@@ -569,6 +607,15 @@ impl Checker<'_> {
         .label(span, true, "no such member");
         if let Some((def, _)) = self.type_parts(ty) {
             diagnostic = self.suggest_member(diagnostic, def, field, tail_span(span, field), false);
+            // A constant belongs to the type, not to its values.
+            if let Some(member) = self.res.member(def, field) {
+                if matches!(self.res.def(member).kind, DefKind::Const { .. }) {
+                    let name = &self.res.def(def).name;
+                    diagnostic = diagnostic.help(format!(
+                        "`{field}` is a constant of `{name}`: write `{name}.{field}`"
+                    ));
+                }
+            }
         }
         diagnostic = shadowed_alias_note(diagnostic, shadowed);
         if annotate && self.is_generic_derived(base.ty) {
@@ -617,17 +664,7 @@ impl Checker<'_> {
             let Ok(receiver) = receiver else {
                 return HirExpr::poison(span);
             };
-            if self.record_static_member(receiver, span, field).is_err() {
-                return HirExpr::poison(span);
-            }
-            let ty = match receiver {
-                Receiver::Type(ty) => ty,
-                Receiver::Bare(def) => match self.infer_bare(def, expected, span) {
-                    Ok(ty) => ty,
-                    Err(_) => return HirExpr::poison(span),
-                },
-            };
-            return self.variant_value(ty.id, field, None, span, tail_span(span, field));
+            return self.static_member(receiver, field, span, expected, false);
         }
         let base = self.check_expr(fcx, obj, None);
         if base.ty.is_error() {
@@ -635,6 +672,140 @@ impl Checker<'_> {
         }
         let shadowed = self.shadowed_alias(fcx, &base);
         self.field_access(base, field, span, expected, true, shadowed)
+    }
+
+    /// `Type.name` as a value: a constant of the type, a function of it
+    /// (its address: `E077` unless `behind_ref`), or a variant.
+    fn static_member(
+        &mut self,
+        receiver: Receiver,
+        field: &str,
+        span: Span,
+        expected: Option<TypeId>,
+        behind_ref: bool,
+    ) -> HirExpr {
+        if self.record_static_member(receiver, span, field).is_err() {
+            return HirExpr::poison(span);
+        }
+        if let Some(constant) = self.member_constant(receiver, field, span) {
+            return constant;
+        }
+        if let Some(function) = self.member_function(receiver, field, span, behind_ref) {
+            return function;
+        }
+        let ty = match receiver {
+            Receiver::Type(ty) => ty,
+            Receiver::Bare(def) => match self.infer_bare(def, expected, span) {
+                Ok(ty) => ty,
+                Err(_) => return HirExpr::poison(span),
+            },
+        };
+        if !ty.is_error() && self.variants_of(ty.id).is_none() {
+            return self.missing_constant(ty, field, span);
+        }
+        self.variant_value(ty.id, field, None, span, tail_span(span, field))
+    }
+
+    /// `Type.NAME` when `NAME` is a constant declared in the type's body
+    /// (`Int.MAX`): the constant, whatever the type's arguments (one
+    /// constant serves every instance). `None` when the type has no such
+    /// constant.
+    fn member_constant(&mut self, receiver: Receiver, field: &str, span: Span) -> Option<HirExpr> {
+        let owner = match receiver {
+            Receiver::Type(ty) if !ty.is_ref => self.type_parts(ty.id)?.0,
+            Receiver::Type(_) => return None,
+            Receiver::Bare(def) => def,
+        };
+        let member = self.res.member(owner, field)?;
+        if !matches!(self.res.def(member).kind, DefKind::Const { .. }) {
+            return None;
+        }
+        if self.private_denied(member, owner, span) {
+            return Some(HirExpr::poison(span));
+        }
+        self.record_use(tail_span(span, field), member);
+        Some(self.const_value(member, span))
+    }
+
+    /// `Type.f` when `f` is a function of the type: its address
+    /// ([`Self::func_value`]), at the type's arguments; a method's receiver
+    /// is the value's first parameter. `None` when the type has no such
+    /// function.
+    fn member_function(
+        &mut self,
+        receiver: Receiver,
+        field: &str,
+        span: Span,
+        behind_ref: bool,
+    ) -> Option<HirExpr> {
+        let (owner, type_args) = match receiver {
+            Receiver::Type(ty) if !ty.is_ref => self.type_parts(ty.id)?,
+            Receiver::Type(_) => return None,
+            Receiver::Bare(def) => (def, Vec::new()),
+        };
+        let member = self.res.member(owner, field)?;
+        if !matches!(self.res.def(member).kind, DefKind::Func(_)) {
+            return None;
+        }
+        if self.private_denied(member, owner, span) {
+            return Some(HirExpr::poison(span));
+        }
+        self.record_use(tail_span(span, field), member);
+        if let Receiver::Bare(def) = receiver {
+            // `Box.make` names no instance of `Box`.
+            let name = self.res.def(def).name.clone();
+            let count = self.res.def(def).generic_params.len();
+            self.generic_arity(span, &name, count, 0);
+            return Some(HirExpr::poison(span));
+        }
+        Some(self.func_value(member, type_args, field, span, behind_ref))
+    }
+
+    /// `E021` for `Type.NAME` on a type with no variants (an object, a
+    /// builtin, a generic parameter) and no constant `NAME`.
+    fn missing_constant(&mut self, ty: TypeRef, field: &str, span: Span) -> HirExpr {
+        let owner = self.show(ty);
+        let mut diagnostic = Diagnostic::error(
+            codes::E021,
+            format!("no constant `{field}` on `{owner}`"),
+        )
+        .label(span, true, "no such constant");
+        let owner_def = self.type_parts(ty.id).map(|(def, _)| def);
+        if let Some(def) = owner_def {
+            let names = self.member_names(def, |kind| matches!(kind, DefKind::Const { .. }));
+            diagnostic = crate::suggest::suggest(
+                diagnostic,
+                field,
+                tail_span(span, field),
+                names.iter().map(String::as_str),
+            );
+            // A field or method of that name is reached another way.
+            diagnostic = match self.res.member(def, field).map(|id| &self.res.def(id).kind) {
+                Some(DefKind::Field(_)) => diagnostic.help(format!(
+                    "`{field}` is a field: read it from a value of `{owner}`"
+                )),
+                Some(DefKind::Func(_)) => diagnostic.help(format!(
+                    "`{field}` is a function: call it, `{owner}.{field}(...)`"
+                )),
+                _ => diagnostic,
+            };
+        }
+        let involved = if owner_def.is_some() {
+            &[][..]
+        } else {
+            &[ty.id]
+        };
+        self.emit_requirement(
+            diagnostic,
+            Requirement::Missing {
+                method: false,
+                name: field.to_owned(),
+                owner,
+                owner_def,
+            },
+            involved,
+        );
+        HirExpr::poison(span)
     }
 
     /// The instance of generic `def` the expected type names (`E044` if none).
@@ -742,6 +913,8 @@ impl Checker<'_> {
 
     // ---- references and casts ---------------------------------------------
 
+    /// `ref operand`: a place's address, or a function's (`ref f`, `ref
+    /// A.B.f`, `ref Type.f`), which is already a `ref function (…)`.
     fn check_ref_of(&mut self, fcx: &mut FnCx, value: &Expr, span: Span) -> HirExpr {
         let Ok(place) = self.check_place_for_ref(fcx, value) else {
             return HirExpr::poison(span);
@@ -749,14 +922,25 @@ impl Checker<'_> {
         if place.ty.is_error() {
             return place;
         }
+        if let HirExprKind::FuncRef(_) = place.kind {
+            return HirExpr { span, ..place };
+        }
         if place.ty.is_ref {
-            self.diags.emit(
-                Diagnostic::error(codes::E010, "cannot take `ref` of a reference").label(
+            let mut diagnostic = Diagnostic::error(codes::E010, "cannot take `ref` of a reference")
+                .label(
                     span,
                     true,
                     "double references are invalid unless wrapped inside an object",
-                ),
-            );
+                );
+            if self.types.is_func(place.ty.id) {
+                diagnostic = diagnostic.help(match value {
+                    Expr::Ident(name, _) => {
+                        format!("`{name}` is already a function reference: use `{name}`")
+                    }
+                    _ => "this is already a function reference: use it without `ref`".to_owned(),
+                });
+            }
+            self.diags.emit(diagnostic);
             return HirExpr::poison(span);
         }
         HirExpr {
@@ -766,31 +950,106 @@ impl Checker<'_> {
         }
     }
 
-    /// A place to take the address of (a local or field chain).
+    /// What `ref value` takes the address of: a local, global or field
+    /// chain, or a function named by a name, path or `Type.f`.
     fn check_place_for_ref(
         &mut self,
         fcx: &mut FnCx,
         value: &Expr,
     ) -> Result<HirExpr, ErrorGuaranteed> {
         match value {
-            Expr::Ident(..) | Expr::Member { .. } => self.check_place(fcx, value),
+            Expr::Ident(name, span) if fcx.lookup(name).is_none() => {
+                let item = self.check_name(fcx, name, *span, true);
+                self.addressable_item(item, name)
+            }
+            Expr::Member { obj, field, span } => {
+                if let Some((path, path_span)) = self.qualified_name(fcx, value) {
+                    let item = self.check_name(fcx, &path, path_span, true);
+                    return self.addressable_item(item, &path);
+                }
+                if let Some(receiver) = self.static_receiver(fcx, obj) {
+                    let item = match receiver {
+                        Ok(receiver) => self.static_member(receiver, field, *span, None, true),
+                        Err(_) => HirExpr::poison(*span),
+                    };
+                    return self.addressable_item(item, field);
+                }
+                let base = self.check_place(fcx, obj)?;
+                if base.ty.is_error() {
+                    return Ok(HirExpr::poison(*span));
+                }
+                self.no_bound_method(&base, field, *span)?;
+                let shadowed = self.shadowed_alias(fcx, &base);
+                Ok(self.field_access(base, field, *span, None, false, shadowed))
+            }
+            Expr::Ident(..) => self.check_place(fcx, value),
             _ => Err(self.diags.emit(
                 Diagnostic::error(codes::E010, "cannot take `ref` of this expression").label(
                     value.span(),
                     true,
-                    "only variables and fields have addresses",
+                    "only variables, globals, fields and functions have addresses",
                 ),
             )),
         }
     }
 
-    /// `operand as T`: one conversion (or a literal pinned to `T`); the
-    /// `ref unknown` <-> `ref T` pointer cast is a pure retype.
-    /// Whether `id` is an `export function` type: a C function's address.
-    pub(crate) fn is_c_function(&self, id: TypeId) -> bool {
-        matches!(self.types.kind(id), TypeKind::Func { c_abi: true, .. })
+    /// An item named under `ref`: a global or a function has an address.
+    fn addressable_item(&mut self, item: HirExpr, name: &str) -> Result<HirExpr, ErrorGuaranteed> {
+        match item.kind {
+            HirExprKind::Global(_) | HirExprKind::FuncRef(_) => Ok(item),
+            // `check_name` reported why the name is no value.
+            HirExprKind::Poison => Err(self.diags.already_reported()),
+            _ => Err(self.diags.emit(
+                Diagnostic::error(codes::E010, format!("cannot take `ref` of `{name}`")).label(
+                    item.span,
+                    true,
+                    "only variables, globals, fields and functions have addresses",
+                ),
+            )),
+        }
     }
 
+    /// `E010` for `ref value.method`: there are no bound methods, so a
+    /// method's address is taken from its type, `ref Type.method`.
+    fn no_bound_method(
+        &mut self,
+        base: &HirExpr,
+        field: &str,
+        span: Span,
+    ) -> Result<(), ErrorGuaranteed> {
+        let ty = self.auto_deref(base.clone()).ty;
+        if ty.is_ref {
+            return Ok(());
+        }
+        let Some((owner, _)) = self.type_parts(ty.id) else {
+            return Ok(());
+        };
+        let is_field = self
+            .fields_of(ty.id)
+            .is_some_and(|fields| fields.iter().any(|(name, _)| name == field));
+        let is_function = self
+            .res
+            .member(owner, field)
+            .is_some_and(|member| matches!(self.res.def(member).kind, DefKind::Func(_)));
+        if is_field || !is_function {
+            return Ok(());
+        }
+        let shown = self.show_id(ty.id);
+        Err(self.diags.emit(
+            Diagnostic::error(
+                codes::E010,
+                format!("cannot take `ref` of method `{field}` of a value"),
+            )
+            .label(span, true, "a function value holds no receiver")
+            .help(format!(
+                "there are no bound methods: `ref {shown}.{field}` is the method, taking the receiver as its first parameter"
+            )),
+        ))
+    }
+
+    /// `operand as T`: one conversion (or a literal pinned to `T`). A cast
+    /// between `ref unknown` and any `ref T` (a function reference too) is
+    /// a pure retype; any other cast between two `ref` types is `E010`.
     fn check_cast(&mut self, fcx: &mut FnCx, operand: &Expr, target_ty: &AstType) -> HirExpr {
         let target = self.resolve_type(target_ty);
         let span = operand.span();
@@ -804,9 +1063,7 @@ impl Checker<'_> {
                 return value;
             }
             let unknown = Builtin::Unknown.id();
-            // A C function's address converts to `ref unknown`.
-            let c_function = !value.ty.is_ref && self.is_c_function(value.ty.id);
-            if (value.ty.is_ref || c_function && target.id == unknown)
+            if value.ty.is_ref
                 && (value.ty.id == unknown || target.id == unknown || value.ty.id == target.id)
             {
                 return HirExpr {
@@ -815,21 +1072,26 @@ impl Checker<'_> {
                     kind: HirExprKind::Retype(Box::new(value)),
                 };
             }
+            if value.ty.is_ref && self.types.is_func(value.ty.id) && self.types.is_func(target.id) {
+                let (from, to) = (self.show(value.ty), self.show(target));
+                self.emit_involving(
+                    Diagnostic::error(
+                        codes::E010,
+                        format!("cannot cast `{from}` to `{to}`"),
+                    )
+                    .label(span, true, format!("a `{from}`"))
+                    .label(target_ty.span, false, "a different function type")
+                    .help("a function reference casts only to and from `ref unknown`; a cast through it is sound only when every slot has the same representation"),
+                    &[value.ty.id, target.id],
+                );
+                return HirExpr::poison(span);
+            }
             self.mismatch(target, value.ty, target_ty.span, span);
             return HirExpr::poison(span);
         }
         let value = self.check_expr(fcx, operand, Some(target.id));
         if value.ty.is_error() {
             return value;
-        }
-        // `ref unknown` converts to a C function type.
-        if value.ty.is_ref && value.ty.id == Builtin::Unknown.id() && self.is_c_function(target.id)
-        {
-            return HirExpr {
-                ty: target,
-                span,
-                kind: HirExprKind::Retype(Box::new(value)),
-            };
         }
         if value.ty.is_ref {
             self.mismatch(target, value.ty, target_ty.span, span);
@@ -885,7 +1147,7 @@ impl Checker<'_> {
         if left.ty.is_error() || right.ty.is_error() {
             return HirExpr::poison(span);
         }
-        let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
+        let (left, right) = (self.auto_deref(left), self.auto_deref(right));
         self.operator_call(op, left, right, span, None)
     }
 
@@ -975,7 +1237,7 @@ impl Checker<'_> {
         if left.ty.is_error() || right.ty.is_error() {
             return HirExpr::poison(span);
         }
-        let (left, right) = (Self::auto_deref(left), Self::auto_deref(right));
+        let (left, right) = (self.auto_deref(left), self.auto_deref(right));
         if left.ty.id != right.ty.id {
             let (l, r) = (self.show_id(left.ty.id), self.show_id(right.ty.id));
             self.diags.emit(
@@ -1041,12 +1303,12 @@ impl Checker<'_> {
         let cond = self.check_cond(fcx, cond, "if");
         let then = self.check_expr(fcx, then, expected);
         // A `then` that failed leaves the error type: the `else` stays silent.
-        let els_expected = expected.or(Some(then.ty.deref().id));
+        let els_expected = expected.or(Some(self.types.read_type(then.ty).id));
         let els = self.check_expr(fcx, els, els_expected);
         let result = match expected {
-            Some(want) => TypeRef::value(want),
-            None if !then.ty.is_error() => then.ty.deref(),
-            None if !els.ty.is_error() => els.ty.deref(),
+            Some(want) => self.types.value_type(want),
+            None if !then.ty.is_error() => self.types.read_type(then.ty),
+            None if !els.ty.is_error() => self.types.read_type(els.ty),
             None => return HirExpr::poison(span),
         };
         if expected.is_none()
@@ -1120,15 +1382,15 @@ impl Checker<'_> {
             };
             fcx.close();
             if first.is_none() && !value.ty.is_error() {
-                first = Some(value.ty.deref());
+                first = Some(self.types.read_type(value.ty));
             }
             checked.push((pattern, capture, value, arm.span));
         }
         let els = self.check_expr(fcx, els, expected.or(first.map(|t| t.id)));
         let result = match (expected, first) {
-            (Some(want), _) => TypeRef::value(want),
+            (Some(want), _) => self.types.value_type(want),
             (None, Some(first)) => first,
-            (None, None) if !els.ty.is_error() => els.ty.deref(),
+            (None, None) if !els.ty.is_error() => self.types.read_type(els.ty),
             _ => return HirExpr::poison(span),
         };
         if expected.is_none() && !failed {
@@ -1384,6 +1646,29 @@ impl Checker<'_> {
 
     // ---- module constants ---------------------------------------------------
 
+    /// A use of constant `def`: its value is inlined where it is used.
+    fn const_value(&mut self, def: DefId, span: Span) -> HirExpr {
+        self.use_builtin_const(def);
+        let ty = self.const_type(def);
+        HirExpr {
+            ty,
+            span,
+            kind: HirExprKind::Const(def),
+        }
+    }
+
+    /// Where a constant or global is checked: its file, and for a member
+    /// constant its type, whose private members it reaches. A type's
+    /// generic parameters are not in scope: one constant serves every
+    /// instance.
+    fn const_env(&self, def: DefId) -> Env {
+        Env {
+            file: Some(self.res.def(def).file),
+            owner: self.res.def(def).parent,
+            ..Env::default()
+        }
+    }
+
     /// The declared type of a constant or global.
     pub(crate) fn const_type(&mut self, def: DefId) -> TypeRef {
         if let Some(ty) = self.const_types.get(&def) {
@@ -1394,10 +1679,7 @@ impl Checker<'_> {
             return TypeRef::ERROR;
         };
         let ty = ty.clone();
-        let env = Env {
-            file: Some(self.res.def(def).file),
-            ..Env::default()
-        };
+        let env = self.const_env(def);
         let mut resolved = self.with_env(env, |c| c.resolve_type(&ty));
         let what = if matches!(self.res.def(def).kind, DefKind::Global { .. }) {
             "a global"
@@ -1444,10 +1726,7 @@ impl Checker<'_> {
         let value = value.clone();
         let ty = self.const_type(def);
         let span = self.res.def(def).span;
-        let env = Env {
-            file: Some(self.res.def(def).file),
-            ..Env::default()
-        };
+        let env = self.const_env(def);
         if ty.is_error() {
             // The type reported it. The initializer is still checked, against
             // the error type, so errors inside it are reported too; the
@@ -1479,10 +1758,7 @@ impl Checker<'_> {
         };
         let value = value.clone();
         let ty = self.const_type(def);
-        let env = Env {
-            file: Some(self.res.def(def).file),
-            ..Env::default()
-        };
+        let env = self.const_env(def);
         let hir = self.with_env(env, |c| {
             let mut fcx = FnCx::new(Span::dummy());
             let hir = c.check_expr(&mut fcx, &value, Some(ty.id));

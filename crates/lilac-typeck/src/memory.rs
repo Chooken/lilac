@@ -114,15 +114,19 @@ impl Checker<'_> {
             // The operand reported it.
             return Err(self.diags.already_reported());
         }
-        let unknown = pointer.ty.id == Builtin::Unknown.id();
-        if pointer.ty.is_ref && !unknown {
+        if pointer.ty.is_ref && !self.types.is_opaque_ref(pointer.ty) {
             return Ok(pointer);
         }
         let found = self.show(pointer.ty);
-        let (label, help) = if pointer.ty.is_ref {
+        let (label, help) = if pointer.ty.id == Builtin::Unknown.id() && pointer.ty.is_ref {
             (
                 "`ref unknown` has no type to move or drop",
                 "cast it to the type the memory holds: `address as ref T`",
+            )
+        } else if pointer.ty.is_ref {
+            (
+                "a function reference points at code, not at a value",
+                "a function reference copies and needs no drop: assign it instead",
             )
         } else {
             (

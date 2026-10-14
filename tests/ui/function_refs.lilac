@@ -1,0 +1,24 @@
+// Two functions with the same body keep their own addresses: references
+// to them compare unequal in every mode (no `unnamed_addr`, no folding).
+
+one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+same: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+main: function () nothing {
+    a: ref function (@bit32) @bit32 = ref one
+    b: ref function (@bit32) @bit32 = ref same
+    if a == b {
+        @trap()
+    }
+    if a != ref one {
+        @trap()
+    }
+    if a(0x1) != b(0x1) {
+        @trap()
+    }
+}

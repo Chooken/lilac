@@ -680,7 +680,11 @@ impl Lower<'_> {
 
     fn lir_ty(&self, ty: TypeRef) -> LirTy {
         let base = match self.types.kind(ty.id) {
-            TypeKind::Func { .. } => return LirTy::opaque_ref(),
+            // A function is a value only behind `ref` (`E077`).
+            TypeKind::Func { .. } if ty.is_ref => return LirTy::opaque_ref(),
+            TypeKind::Func { .. } => {
+                lilac_error::bug!(Span::dummy(), "a function type lowered by value")
+            }
             TypeKind::Bit8 => LirTy::Bit(8),
             TypeKind::Bit16 => LirTy::Bit(16),
             TypeKind::Bit32 => LirTy::Bit(32),

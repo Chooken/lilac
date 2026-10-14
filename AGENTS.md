@@ -304,6 +304,16 @@
   `check_struct_lit` then see through it. `Types::add_alias` records it
   for display only (a type spelled with arguments that one alias names
   prints as the alias); mangling and layouts never see aliases.
+- Member constants (`NAME: Type => value` in an object or enum body, a
+  `DefKind::Const` whose `parent` is the type): a static access
+  `Type.NAME` (`Checker::static_member`, also `Generic.NAME`,
+  `Generic[X].NAME` and a parameter's `T.NAME`) tries the type's constant
+  (`member_constant`) before a variant, and a miss on a non-enum is
+  `E021` through `emit_requirement` (`missing_constant`). A constant is
+  checked in `const_env`: the type as `owner` (its private members
+  reach), no generic parameters (one value for every instance;
+  `owner_param_note` says so). Never reachable through a value; `=` in a
+  type's body is a parse error (`E001`).
 - Namespace qualification: every non-root symbol/type is prefixed by its dotted
   namespace path (`A.B.foo`, `A.Object.Method`). A **root free function is
   `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it
@@ -354,13 +364,40 @@
   call, the out returned). Direct Lilac calls skip it. The driver roots
   every export in DCE once the module has a root (`main` or the entry
   stub); `--export` is gone.
-- C function values: `export function (…)` (`FuncType::is_export`,
-  `TypeKind::Func::c_abi`). An `export` or non-variadic `extern` named as a
-  value has that type, and `addr.func` of an export is its C entry. A call
+- Function values (`docs/function-values-plan.md`, phase 1): a function
+  value is `ref function (…) …` (`ref export function (…) …` for C), the
+  function's address. A function type's outs are `nothing`, one slot or
+  a parenthesized list (`Parser::parse_type_outs`, Go's rule), so one
+  ends at its out inside a slot list; a declaration may write its outs either way
+  (`parse_out_slots` hands a `(` to `parse_type_outs`; no type starts
+  with `(`), and `Types::display`, the demangler and the editor's
+  `render::type_outs_text` parenthesize more than one out. A type body's
+  `name: function` is always a method (`parse_func_rest`). A bare function type is `E077`
+  (`Checker::bare_function_type`) except as an alias's target, and it
+  recovers as the `ref` type. `ref f`, `ref A.f` and `ref Type.method`
+  build `HirExprKind::FuncRef` (`Checker::func_value`: a method's receiver
+  is its first parameter; a name without `ref` is `E077`, `check_name`'s
+  `behind_ref`). Any expression of the type is callable
+  (`Checker::value_call`, `E022` otherwise) as `HirCallee::Value`; a
+  member call `value.f(x)` is a method or a field call by what `f` is.
+  Lowering (`Lower::emit_call`) reads the callee into a place first, then
+  the arguments, then loads it into a register in the call block (a
+  register lives in its block), and calls `LirCallee::Reg`, or `CReg`
+  through `emit_c_call` (`Callee::Place`) for C. A function reference is
+  opaque like `ref unknown` (`Types::is_opaque_ref`): never
+  auto-dereferenced, no fields, `@read`/`@write`/`@drop` `E010`, `==`
+  compares addresses; `Types::read_type` is the type a place of it reads
+  as and `value_type` restores the `ref` on an expected `TypeId`. Casts go
+  only through `ref unknown` (`check_cast`; another function type is
+  `E010`). `lir_ty` makes a bare function type an ICE. Addresses are
+  identities: the backend never sets `unnamed_addr` on a function
+  (`m5b.rs`'s `functions_keep_their_addresses`).
+- C function values: `ref export function (…)` (`FuncType::is_export`,
+  `TypeKind::Func::c_abi`). `ref` of an `export` or non-variadic `extern`
+  has that type, and `addr.func` of an export is its C entry. A call
   through one is `LirCallee::CReg` (`call c &r`), lowered by
-  `emit_c_call` like an extern call (wrapper objects pass their field).
-  It converts to and from `ref unknown` with `as` (`check_cast`), and
-  `check_c_function_types` makes a non-C slot or `>1` out `E028`.
+  `emit_c_call` like an extern call (wrapper objects pass their field),
+  and `check_c_function_types` makes a non-C slot or `>1` out `E028`.
 
 ## Build and link
 
@@ -574,7 +611,11 @@
   context, an alias, a constant or global with its initializer printed
   from its expression (elided whole to `…` past a length or depth), and
   an intrinsic from `Intrinsic::signature`. `Rendered::params` are the
-  parameters' UTF-16 ranges for signature help. A hover, on a use or on
+  parameters' UTF-16 ranges for signature help; a call through a
+  function reference (a field, global or local) renders the reference's
+  type (`render::value_call`: the slots of its type, named from the
+  declaration's `function (…)` or its alias's, `Scope::func_syntax`). A
+  hover, on a use or on
   the declared name (`navigate::declaration_at`), is the
   declaration in a `lilac` block, its context, then its `///` doc
   (`Def::doc`, `Intrinsic::doc`, `Builtin::doc`); signature help shows

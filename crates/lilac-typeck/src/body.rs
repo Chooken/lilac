@@ -592,12 +592,12 @@ impl Checker<'_> {
             let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
             return;
         }
-        let left = Self::auto_deref(place.clone());
+        let left = self.auto_deref(place.clone());
         let right = self.check_expr(fcx, value, Some(left.ty.id));
         if right.ty.is_error() {
             return;
         }
-        let right = Self::auto_deref(right);
+        let right = self.auto_deref(right);
         let result = self.operator_call(op, left, right, span, Some(op_span));
         if result.ty.is_error() {
             return;
@@ -606,7 +606,9 @@ impl Checker<'_> {
     }
 
     /// Stores a checked value into a checked place: through a `ref` place
-    /// unless the value is one, converted to the place's type.
+    /// unless the value is one or the place is opaque (`ref unknown`, a
+    /// function reference: assigning one rebinds it), converted to the
+    /// place's type.
     fn assign_checked(
         &mut self,
         place: HirExpr,
@@ -615,7 +617,8 @@ impl Checker<'_> {
         span: Span,
         out: &mut Vec<HirStmt>,
     ) {
-        let (place, want) = if place.ty.is_ref && !value_hir.ty.is_ref {
+        let through = !value_hir.ty.is_ref && !self.types.is_opaque_ref(place.ty);
+        let (place, want) = if place.ty.is_ref && through {
             let ty = place.ty.deref();
             (
                 HirExpr {
@@ -790,7 +793,7 @@ impl Checker<'_> {
         if hir.ty.is_error() {
             return hir;
         }
-        let hir = Self::auto_deref(hir);
+        let hir = self.auto_deref(hir);
         let bit8 = Builtin::Bit8.id();
         if hir.ty.id == bit8 {
             return hir;
@@ -818,7 +821,7 @@ impl Checker<'_> {
         let bit8 = Builtin::Bit8.id();
         let expected = matches!(scrutinee, Expr::Number(..)).then_some(bit8);
         let hir = self.check_expr(fcx, scrutinee, expected);
-        Self::auto_deref(hir)
+        self.auto_deref(hir)
     }
 
     /// Records the tag of `arm`, at `span`: the variants of `scrutinee`

@@ -146,7 +146,7 @@ capture_push: function (target: ref unknown, text: @byte_buffer) nothing {
 // Exits with `code` unless `text` formats as exactly `want`.
 expect_format: function (text: Format, want: @byte_buffer, code: @bit32) nothing {
     capture: Capture = Capture { used = 0x0, bytes = @array(@bit8, 0x100) {} }
-    out: Formatter = Formatter.over(ref capture as ref unknown, capture_push)
+    out: Formatter = Formatter.over(ref capture as ref unknown, ref capture_push)
     out.write(text)
     if capture.used == @byte_buffer_len(want) {
     } else {

@@ -1,5 +1,5 @@
 // expect-exit: 0
-// An `export`'s value is a C function: Lilac calls it through a local with
+// `ref` of an `export` is a C function: Lilac calls it through a local with
 // the C ABI (a wrapper object passes and returns its field), and converts it
 // to `ref unknown` and back.
 
@@ -14,14 +14,14 @@ scale: export "lilac_scale" function (x: Wrapped, by: @bit32) result: Wrapped {
 }
 
 main: function () nothing {
-    f: export function (x: Wrapped, by: @bit32) result: Wrapped = scale
+    f: ref export function (x: Wrapped, by: @bit32) result: Wrapped = ref scale
     r: Wrapped = f(Wrapped { value = 0x6 }, 0x7)
     if r.value == 0x2a {
     } else {
         exit(0x1)
     }
     address: ref unknown = f as ref unknown
-    g: export function (x: Wrapped, by: @bit32) result: Wrapped = address as export function (x: Wrapped, by: @bit32) result: Wrapped
+    g: ref export function (x: Wrapped, by: @bit32) result: Wrapped = address as ref export function (x: Wrapped, by: @bit32) result: Wrapped
     s: Wrapped = g(r, 0x2)
     if s.value == 0x54 {
     } else {

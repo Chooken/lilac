@@ -51,7 +51,7 @@ main: function () nothing {
         }
         job: ref Work = @array_at(at, index)
         job.counter = ref counter
-        thread: Os.Thread = Os.spawn(work, job as ref unknown).get() else {
+        thread: Os.Thread = Os.spawn(ref work, job as ref unknown).get() else {
             exit(0x1)
             return
         }

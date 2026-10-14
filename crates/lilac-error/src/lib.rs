@@ -191,6 +191,25 @@ impl Diagnostic {
         self
     }
 
+    /// Adds a fix replacing `span` with `replacement`, shown as the `help:`
+    /// line `help` (builder style).
+    #[must_use]
+    pub fn fix(
+        mut self,
+        span: Span,
+        replacement: impl Into<String>,
+        help: impl Into<String>,
+    ) -> Self {
+        self.helps.push(Help {
+            text: help.into(),
+            fix: Some(Suggestion {
+                span,
+                replacement: replacement.into(),
+            }),
+        });
+        self
+    }
+
     /// The fixes among [`Self::helps`].
     pub fn suggestions(&self) -> impl Iterator<Item = &Suggestion> {
         self.helps.iter().filter_map(|help| help.fix.as_ref())

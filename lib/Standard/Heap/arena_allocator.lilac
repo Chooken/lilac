@@ -217,7 +217,7 @@ ArenaAllocator: object {
                 @panic("Can't allocate a negative count.")
             }
 
-            if element > 0 and count > MAX / element {
+            if element > 0 and count > Int.MAX / element {
                 @panic("Out of memory.")
             }
 
@@ -245,7 +245,7 @@ ArenaAllocator: object {
             // address is aligned, and the pages may be aligned less.
             page: Int = @builtin.Target.page_size
             overhead: Int = @size_of(ArenaBlock) + (alignment - 1)
-            if size > MAX - overhead - (page - 1) {
+            if size > Int.MAX - overhead - (page - 1) {
                 @panic("Out of memory.")
             }
 
@@ -290,9 +290,6 @@ private {
 
     /// `ArenaAllocator.init`'s block size: 512 KiB.
     ARENA_DEFAULT_SIZE: Int => 512 * 1024
-
-    /// The largest `Int`: no size can be more (the target's `isize::MAX`).
-    MAX: Int => @bit_shift_right_u_native(@bit_not_native(0x0), 0x1)
 
     /// Unmaps `first` and every block after it.
     unmap_blocks: function (first: Optional[ref ArenaBlock]) nothing {

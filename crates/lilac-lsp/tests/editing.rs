@@ -5,7 +5,7 @@ use std::time::Duration;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, ResponseError};
 use lsp_types::{
     CodeActionOrCommand, CompletionItem, CompletionResponse, CompletionTextEdit,
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams, Documentation,
     PublishDiagnosticsParams, SignatureHelp, TextDocumentContentChangeEvent, TextDocumentItem, Url,
     VersionedTextDocumentIdentifier,
 };
@@ -919,6 +919,228 @@ main: function () nothing {
         ["create", "zero"]
     );
     assert_eq!(complete("    b: Box[@bit8].", "Box[@bit8]."), ["create"]);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// After `Type.` a type's constants complete beside its static functions
+/// and variants, also on a generic type with or without arguments; a
+/// value's members leave them out.
+#[test]
+fn member_constants_complete_on_the_type() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/constants.lilac").expect("uri");
+    let program = "\
+Limits: object {
+    LOW: @bit8 => 0x1
+    HIGH: @bit8 => 0x9
+    value: @bit8
+    make: function () limits: Limits {
+        limits = Limits { value = Limits.LOW }
+    }
+    get: function (self) value: @bit8 {
+        value = self.value
+    }
+}
+Level: enum {
+    Off
+    On
+    COUNT: @bit8 => 0x2
+}
+Gen[T]: object {
+    SIZE: @bit8 => 0x4
+    item: T
+}
+main: function () nothing {
+    limits: Limits = Limits.make()
+    // EDIT
+}
+";
+    let mut version = 1;
+    let mut complete = |edit: &str| -> Vec<String> {
+        let text = program.replace("    // EDIT", edit);
+        if version == 1 {
+            did_open(&client, &uri, &text);
+        } else {
+            did_change(&client, &uri, version, &text);
+        }
+        version += 1;
+        let result = request(
+            &client,
+            "textDocument/completion",
+            position(&uri, after(&text, edit)),
+        )
+        .expect("completion");
+        let items = match serde_json::from_value::<Option<CompletionResponse>>(result)
+            .expect("completions")
+        {
+            Some(CompletionResponse::Array(items)) => items,
+            Some(CompletionResponse::List(list)) => list.items,
+            None => Vec::new(),
+        };
+        let mut labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
+        labels.sort_unstable();
+        labels
+    };
+    assert_eq!(
+        complete("    x: @bit8 = Limits."),
+        ["HIGH", "LOW", "get", "make"]
+    );
+    assert_eq!(complete("    y: @bit8 = Level."), ["COUNT", "Off", "On"]);
+    assert_eq!(complete("    z: @bit8 = Gen."), ["SIZE"]);
+    assert_eq!(complete("    w: @bit8 = Gen[@bit8]."), ["SIZE"]);
+    assert_eq!(complete("    limits."), ["get", "make", "value"]);
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// A call through a function reference shows the reference's signature:
+/// a field's (its parameter names as declared, through an alias too, and
+/// its doc), a global's and a local's (the type's slots, unnamed).
+#[test]
+fn signature_help_through_function_references() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/refs.lilac").expect("uri");
+    let program = "\
+Combine: alias function (left: @bit8, right: @bit8) total: @bit8
+add: function (a: @bit8, b: @bit8) total: @bit8 {
+    total = @i_add_8(a, b)
+}
+Machine: object {
+    /// Runs one step.
+    step: ref function (input: @bit8, scale: @bit8) output: @bit8
+    combine: ref Combine
+}
+/// What runs last.
+HANDLER: ref function (code: @bit8) nothing
+main: function () nothing {
+    machine: Machine = Machine { step = ref add, combine = ref add }
+    local: ref function (@bit8, @bit8) @bit8 = ref add
+    // EDIT
+}
+";
+    did_open(&client, &uri, program);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+    let mut version = 2;
+    let mut signature = |edit: &str| -> SignatureHelp {
+        let text = program.replace("    // EDIT", edit);
+        did_change(&client, &uri, version, &text);
+        version += 1;
+        let result = request(
+            &client,
+            "textDocument/signatureHelp",
+            position(&uri, after(&text, edit)),
+        )
+        .expect("signature help");
+        serde_json::from_value(result).expect("a signature")
+    };
+
+    let help = signature("    x: @bit8 = machine.step(0x1, ");
+    assert_eq!(
+        help.signatures[0].label,
+        "step: ref function (input: @bit8, scale: @bit8) output: @bit8"
+    );
+    assert_eq!(help.active_parameter, Some(1));
+    let Some(Documentation::MarkupContent(doc)) = &help.signatures[0].documentation else {
+        panic!("a doc: {help:?}");
+    };
+    assert_eq!(doc.value, "Runs one step.");
+
+    let help = signature("    x: @bit8 = machine.combine(");
+    assert_eq!(
+        help.signatures[0].label,
+        "combine: ref function (left: @bit8, right: @bit8) total: @bit8"
+    );
+
+    let help = signature("    HANDLER(");
+    assert_eq!(
+        help.signatures[0].label,
+        "HANDLER: ref function (code: @bit8) nothing"
+    );
+
+    let help = signature("    x: @bit8 = local(0x1, ");
+    assert_eq!(
+        help.signatures[0].label,
+        "local: ref function (@bit8, @bit8) @bit8"
+    );
+    assert_eq!(help.active_parameter, Some(1));
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+/// `E077`'s fix inserts the missing `ref`, before a bare function type and
+/// before a function named as a value.
+#[test]
+fn bare_function_fix_inserts_ref() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "\
+add_one: function (value: @bit8) result: @bit8 {
+    result = @i_add_8(value, 0x1)
+}
+main: function () nothing {
+    f: function (@bit8) @bit8 = ref add_one
+    g: ref function (@bit8) @bit8 = add_one
+}
+";
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    assert_eq!(
+        published.diagnostics.len(),
+        2,
+        "{:?}",
+        published.diagnostics
+    );
+    let mut inserted = Vec::new();
+    for diagnostic in &published.diagnostics {
+        let result = request(
+            &client,
+            "textDocument/codeAction",
+            serde_json::json!({
+                "textDocument": { "uri": uri.as_str() },
+                "range": diagnostic.range,
+                "context": { "diagnostics": [diagnostic] },
+            }),
+        )
+        .expect("code actions");
+        let actions: Vec<CodeActionOrCommand> = serde_json::from_value(result).expect("actions");
+        let [CodeActionOrCommand::CodeAction(action)] = actions.as_slice() else {
+            panic!("one quick fix: {actions:?}");
+        };
+        let edits = &action
+            .edit
+            .as_ref()
+            .expect("edit")
+            .changes
+            .as_ref()
+            .expect("changes")[&uri];
+        let [edit] = edits.as_slice() else {
+            panic!("one edit: {edits:?}");
+        };
+        assert_eq!(edit.range.start, edit.range.end, "{edit:?}");
+        inserted.push((edit.range.start, edit.new_text.clone()));
+    }
+    inserted.sort_by_key(|(start, _)| (start.line, start.character));
+    assert_eq!(
+        inserted,
+        [
+            (lsp_types::Position::new(4, 7), "ref ".to_owned()),
+            (lsp_types::Position::new(5, 36), "ref ".to_owned()),
+        ]
+    );
+
     shutdown(&client);
     handle.join().expect("server thread");
 }

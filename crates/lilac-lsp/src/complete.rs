@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use lilac_ast::{FuncType, Type as AstType, TypeShape};
 use lilac_driver::Analysis;
 use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{Layout, LocalSite, MemberReceiver};
@@ -182,8 +183,9 @@ impl<'a> Scope<'a> {
                 Segment::Def(id) => Some(self.item(id)),
                 Segment::Ns(ns) => Some(Named::Ns(ns)),
             },
+            // A constant is a value: `Int.MAX.` lists its type's members.
             Named::Type(def) | Named::Constructor(def) => {
-                resolved.member(def, segment).map(Named::Item)
+                resolved.member(def, segment).map(|id| self.item(id))
             }
             Named::Value(ty) => {
                 if let Some((_, field)) = self
@@ -197,6 +199,34 @@ impl<'a> Scope<'a> {
                 resolved.member(def, segment).map(Named::Item)
             }
             Named::Item(_) => None,
+        }
+    }
+
+    /// The function type `ty` declares in `def`'s declaration: a
+    /// `function (…)` as written, or the one an alias it names stands
+    /// for (looked up from `def`'s file), for its slot names.
+    fn func_syntax<'d>(&'d self, def: DefId, ty: &'d AstType) -> Option<&'d FuncType> {
+        let resolved = &self.analysis.resolved;
+        match &ty.shape {
+            TypeShape::Function(func) => Some(func),
+            TypeShape::Named { name, args } if args.is_empty() => {
+                let alias = if name.contains('.') {
+                    resolved.lookup_path(name)?
+                } else {
+                    match resolved.lookup(resolved.def(def).file, name)? {
+                        Lookup::One(id) => *id,
+                        Lookup::Ambiguous(..) => return None,
+                    }
+                };
+                match &resolved.def(alias).kind {
+                    DefKind::Alias(AstType {
+                        shape: TypeShape::Function(func),
+                        ..
+                    }) => Some(func),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -281,7 +311,7 @@ impl<'a> Scope<'a> {
                 .filter(|id| {
                     matches!(
                         resolved.def(**id).kind,
-                        DefKind::Func(_) | DefKind::Variant(_)
+                        DefKind::Func(_) | DefKind::Variant(_) | DefKind::Const { .. }
                     )
                 })
                 .filter_map(|id| self.item_entry(*id))
@@ -581,21 +611,48 @@ pub fn signature_help(
         (name, []) => (None, *name),
         (name, rest) => (Some(scope.resolve(rest)?), *name),
     };
-    let def = match receiver {
-        None => match scope.head(method)? {
-            Named::Item(def) => def,
-            _ => return None,
-        },
-        Some(receiver) => match scope.step(receiver, method)? {
-            Named::Item(def) => def,
-            _ => return None,
-        },
+    let named = match receiver {
+        None => scope.head(method)?,
+        Some(receiver) => scope.step(receiver, method)?,
     };
-    let by_value = matches!(receiver, Some(Named::Value(_)));
     let resolved = &scope.analysis.resolved;
-    let rendered = render::call(resolved, def, by_value)?;
-    let doc = resolved.def(def).doc.as_ref().map(|doc| doc.text.clone());
-    Some(help(rendered, doc, argument))
+    let doc_of = |def: DefId| resolved.def(def).doc.as_ref().map(|doc| doc.text.clone());
+    let types = &scope.analysis.types;
+    match named {
+        Named::Item(def) if resolved.def(def).func().is_some() => {
+            let by_value = matches!(receiver, Some(Named::Value(_)));
+            let rendered = render::call(resolved, def, by_value)?;
+            Some(help(rendered, doc_of(def), argument))
+        }
+        // A call through a global function reference (`HANDLER(`).
+        Named::Item(def) => {
+            let DefKind::Global { ty: syntax, .. } = &resolved.def(def).kind else {
+                return None;
+            };
+            let ty = scope.analysis.hir.globals.get(&def)?.ty;
+            let syntax = scope.func_syntax(def, syntax);
+            let rendered = render::value_call(types, method, ty, syntax)?;
+            Some(help(rendered, doc_of(def), argument))
+        }
+        // A call through a function-reference field (`self.on_done(`) or
+        // local (`callback(`).
+        Named::Value(ty) => {
+            let field = match receiver {
+                Some(Named::Value(owner)) => scope
+                    .type_def(owner)
+                    .and_then(|owner| resolved.member(owner, method))
+                    .filter(|field| matches!(resolved.def(*field).kind, DefKind::Field(_))),
+                _ => None,
+            };
+            let syntax = field.and_then(|field| match &resolved.def(field).kind {
+                DefKind::Field(syntax) => scope.func_syntax(field, syntax),
+                _ => None,
+            });
+            let rendered = render::value_call(types, method, ty, syntax)?;
+            Some(help(rendered, field.and_then(doc_of), argument))
+        }
+        Named::Ns(_) | Named::Type(_) | Named::Constructor(_) => None,
+    }
 }
 
 /// Markdown for an editor.

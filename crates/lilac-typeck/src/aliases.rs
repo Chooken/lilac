@@ -7,6 +7,7 @@
 //! [`Types::display`]: lilac_ty::Types::display
 //! [`Types::add_alias`]: lilac_ty::Types::add_alias
 
+use lilac_ast::TypeShape;
 use lilac_error::{codes, Diagnostic};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
@@ -56,7 +57,15 @@ impl Checker<'_> {
         self.aliases.insert(def, AliasState::Active);
         self.alias_stack.push(def);
         let env = self.env_of(def, Vec::new(), None);
-        let resolved = self.with_env(env, |c| c.resolve_syntax(&syntax));
+        // An alias's target is the one place a bare function type may be
+        // written: each use then writes `ref Name`.
+        let resolved = self.with_env(env, |c| match &syntax.shape {
+            TypeShape::Function(func) if !syntax.is_ref => c
+                .resolve_function(&syntax, func)
+                .map_or(TypeRef::ERROR, TypeRef::value),
+            TypeShape::Named { name, args } => c.resolve_named(&syntax, name, args, true),
+            _ => c.resolve_syntax(&syntax),
+        });
         self.alias_stack.pop();
         // A cycle through this alias already failed it.
         let ty = match self.aliases.get(&def) {

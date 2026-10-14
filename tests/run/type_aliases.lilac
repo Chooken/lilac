@@ -45,7 +45,7 @@ main: function () nothing {
     byte: Byte = 0x7
     check(byte == 0x7, 0x1)
 
-    callback: Callback = double
+    callback: ref Callback = ref double
     check(callback(0x4) == 0x8, 0x2)
 
     bytes: Bytes = Bytes {}

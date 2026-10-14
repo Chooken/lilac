@@ -17,7 +17,8 @@
 //!   `expect-exit: trap` instead expects the program to stop on a trap
 //!   instruction (a signal on Unix, an exception status on Windows).
 //! - `// expect-error: <code>` — the program must fail `lilac check` with this
-//!   diagnostic code; nothing is linked or run.
+//!   diagnostic code; nothing is linked or run. Each `expect-stderr` line
+//!   must then be a line of `check`'s output (in any order, among others).
 //! - `// pending: <reason>` — a known bug: skipped by `run_programs` and
 //!   exercised by the ignored `run_pending_programs` instead. Remove the line
 //!   when the fix lands.
@@ -33,7 +34,6 @@
 //! source locations (in diagnostics and stack traces) read the same on every
 //! machine. The program runs in a scratch folder, where any files it
 //! creates land.
-
 //!
 //! A program is a single `*.lilac` file or a folder project, whose header is
 //! read from its `main.lilac`.
@@ -161,6 +161,12 @@ fn run_one(
         }
         if !stderr.contains(&format!("[{code}]")) {
             return Err(format!("expected {code}, got:\n{stderr}"));
+        }
+        let stderr = stderr.replace("\r\n", "\n");
+        for line in &expect.stderr {
+            if !stderr.lines().any(|got| got == line) {
+                return Err(format!("expected the line {line:?} in:\n{stderr}"));
+            }
         }
         return Ok(());
     }

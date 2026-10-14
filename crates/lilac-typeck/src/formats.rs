@@ -274,7 +274,7 @@ impl Checker<'_> {
             // The format reported it.
             return Err(self.callee_failed(fcx, &args[1..], self.diags.already_reported()));
         }
-        let format = Self::auto_deref(format);
+        let format = self.auto_deref(format);
         let Some(writer) = self.format_writer(format.ty.id) else {
             let found = self.show(format.ty);
             let diagnostic = Diagnostic::error(

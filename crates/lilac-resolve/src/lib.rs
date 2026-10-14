@@ -60,7 +60,8 @@ pub enum DefKind {
     Field(AstType),
     /// `Variant` / `Variant: Type` inside an enum.
     Variant(Option<AstType>),
-    /// `name: Type => expr` inline constant.
+    /// `name: Type => expr` inline constant; in a type's body, `parent` is
+    /// the type and it is named `Type.name`.
     Const {
         /// Declared type.
         ty: AstType,

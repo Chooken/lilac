@@ -309,3 +309,36 @@ fn hovers_render_declarations_with_their_docs() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// A member constant renders after its type, whatever the type's
+/// arguments, on a use and on its declaration, with its doc.
+#[test]
+fn hover_on_a_member_constant_names_its_type() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "\
+Gen[T]: object {
+    /// How many there are.
+    SIZE: @bit8 => 0x4
+    item: T
+}
+main: function () nothing {
+    x: @bit8 = Gen[@bit8].SIZE
+}
+";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let expected = "```lilac\nGen.SIZE: @bit8 => 0x4\n```\n\n---\n\nHow many there are.";
+    for (line, character) in [(6, 27), (2, 5)] {
+        let hover = hover_at(&client, &uri, line, character).expect("hover present");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("markup: {hover:?}");
+        };
+        assert_eq!(markup.value, expected);
+    }
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

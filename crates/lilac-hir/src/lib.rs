@@ -607,8 +607,9 @@ pub struct HirExpr {
 pub enum HirCallee {
     /// A function instance.
     Func(FuncKey),
-    /// A function value held in a local.
-    Local(LocalId),
+    /// A function reference (`ref function (…)`): any expression of that
+    /// type. It is evaluated before the arguments, and passes no `self`.
+    Value(Box<HirExpr>),
     /// A compiler intrinsic.
     Intrinsic(Intrinsic),
 }
@@ -657,7 +658,7 @@ pub enum HirExprKind {
         /// they are dropped at the end of the statement.
         rest: Vec<TypeRef>,
     },
-    /// A function used as a value.
+    /// A function's address (`ref f`), typed `ref function (…)`.
     FuncRef(FuncKey),
     /// `ref place`.
     RefOf(Box<HirExpr>),
@@ -764,7 +765,10 @@ impl HirExpr {
                     payload.walk(f);
                 }
             }
-            HirExprKind::Call { args, .. } => {
+            HirExprKind::Call { callee, args, .. } => {
+                if let HirCallee::Value(callee) = callee {
+                    callee.walk(f);
+                }
                 for arg in args {
                     arg.walk(f);
                 }

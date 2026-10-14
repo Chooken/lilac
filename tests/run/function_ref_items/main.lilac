@@ -1,0 +1,49 @@
+// expect-stdout: 5 6 9 12 16 7 8 2
+// Anything of function reference type is callable: a global, a constant,
+// a global in another namespace, a call's result, a parenthesized
+// expression, and a qualified or static function's address.
+
+using Standard.Io
+using Ops
+
+double: function (value: @bit32) result: @bit32 {
+    result = @i_mul_32(value, 0x2)
+}
+
+add_one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+Picker: object {
+    pick: function (big: @bit8) chosen: ref function (@bit32) @bit32 {
+        chosen = ref add_one
+        if big == 0x1 {
+            chosen = ref double
+        }
+    }
+
+    /// Bare `self` is `ref Picker`: the method's first parameter.
+    halve: function (self, value: @bit32) result: @bit32 {
+        result = @i_div_u_32(value, self.by)
+    }
+
+    by: @bit32
+}
+
+current: ref function (@bit32) @bit32
+DOUBLE: ref function (@bit32) @bit32 => ref double
+
+main: function () nothing {
+    current = ref add_one
+    a: @bit32 = current(0x4)
+    b: @bit32 = DOUBLE(0x3)
+    Ops.HANDLER = ref Ops.triple
+    c: @bit32 = Ops.HANDLER(0x3)
+    d: @bit32 = Picker.pick(0x1)(0x6)
+    e: @bit32 = (if a == 0x5 then DOUBLE else current)(0x8)
+    f: @bit32 = Picker.pick(0x0)(0x6)
+    g: ref function (@bit32) @bit32 = Picker.pick(0x0)
+    picker: Picker = Picker { by = 0x2 }
+    halve: ref function (ref Picker, @bit32) @bit32 = ref Picker.halve
+    print_line($"{a} {b} {c} {d} {e} {f} {g(0x7)} {halve(ref picker, 0x4)}")
+}

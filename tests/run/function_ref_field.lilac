@@ -1,0 +1,46 @@
+// expect-stdout: 10 11 20 21
+// expect-stdout: 7 3 9
+// A field holding a function reference is called like a method, without
+// `self`: through a value and through a `ref`. The callee is read before
+// the arguments, so an argument that reassigns the field does not change
+// which function this call runs, and an argument that branches (a
+// division checks its divisor) still calls the callee it read.
+
+using Standard.Io
+
+Machine: object {
+    step: ref function (@bit32) @bit32
+    count: @bit32
+}
+
+add_one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+double: function (value: @bit32) result: @bit32 {
+    result = @i_mul_32(value, 0x2)
+}
+
+/// Points `machine.step` at `double` and passes `value` on.
+retarget: function (machine: ref Machine, value: @bit32) result: @bit32 {
+    machine.step = ref double
+    result = value
+}
+
+main: function () nothing {
+    machine: Machine = Machine { step = ref add_one, count = 0x0 }
+    a: @bit32 = machine.step(0x9)
+    through: ref Machine = ref machine
+    b: @bit32 = through.step(0xA)
+    machine.step = ref double
+    c: @bit32 = machine.step(0xA)
+    machine.step = ref add_one
+    // `add_one` runs: the field was read before `retarget` changed it.
+    d: @bit32 = machine.step(retarget(ref machine, 0x14))
+    print_line($"{a} {b} {c} {d}")
+    // Now it is `double`.
+    e: @bit32 = machine.step(0x3)
+    divisor: @bit32 = 0x2
+    f: @bit32 = machine.step(@i_div_u_32(0x9, divisor))
+    print_line($"{@i_add_32(e, 0x1)} {@i_add_32(through.count, 0x3)} {@i_add_32(f, 0x1)}")
+}

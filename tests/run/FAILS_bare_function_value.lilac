@@ -1,0 +1,11 @@
+// expect-error: E077
+// expect-stderr: error[E077]: `add_one` is a function, a value only behind `ref`
+// Naming a function as a value takes its address with `ref`.
+
+add_one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+main: function () nothing {
+    f: ref function (@bit32) @bit32 = add_one
+}

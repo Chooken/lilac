@@ -49,7 +49,7 @@ impl Lower<'_> {
                     .map(|id| self.declare(state, func, *id))
                     .collect();
                 if let HirExprKind::Call {
-                    callee: callee @ (HirCallee::Func(_) | HirCallee::Local(_)),
+                    callee: callee @ (HirCallee::Func(_) | HirCallee::Value(_)),
                     args,
                     rest,
                 } = &call.kind

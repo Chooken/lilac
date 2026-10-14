@@ -1597,7 +1597,7 @@ main: function () nothing {}
         let mut session = Session::new();
         let result = session.compile_lir(
             "addr.lilac",
-            "boom: function () nothing {\n    @compile_error(\"addr\")\n}\n\nmain: function () nothing {\n    f: function () nothing = boom\n}\n",
+            "boom: function () nothing {\n    @compile_error(\"addr\")\n}\n\nmain: function () nothing {\n    f: ref function () nothing = ref boom\n}\n",
         );
         let rendered = session.render_diagnostics();
         assert!(result.is_err(), "{rendered}");

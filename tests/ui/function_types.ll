@@ -11,27 +11,35 @@ entry:
   store i32 0, ptr %value, align 4
   %tmp.1 = alloca i32, align 4
   store i32 0, ptr %tmp.1, align 4
-  %tmp.2 = alloca i32, align 4
-  store i32 0, ptr %tmp.2, align 4
+  %tmp.2 = alloca ptr, align 8
+  store ptr null, ptr %tmp.2, align 8
   %tmp.3 = alloca i32, align 4
   store i32 0, ptr %tmp.3, align 4
   %tmp.4 = alloca i32, align 4
   store i32 0, ptr %tmp.4, align 4
+  %tmp.5 = alloca ptr, align 8
+  store ptr null, ptr %tmp.5, align 8
+  %tmp.6 = alloca i32, align 4
+  store i32 0, ptr %tmp.6, align 4
   store ptr @.root.addOne, ptr %add, align 8
   store i32 0, ptr %value, align 4
-  %0 = load i32, ptr %value, align 4
-  store i32 %0, ptr %tmp.2, align 4
-  %1 = load ptr, ptr %add, align 8
-  call void %1(ptr %tmp.2, ptr %tmp.1)
-  %2 = load i32, ptr %tmp.1, align 4
-  store i32 %2, ptr %value, align 4
+  %0 = load ptr, ptr %add, align 8
+  store ptr %0, ptr %tmp.2, align 8
+  %1 = load i32, ptr %value, align 4
+  store i32 %1, ptr %tmp.3, align 4
+  %2 = load ptr, ptr %tmp.2, align 8
+  call void %2(ptr %tmp.3, ptr %tmp.1)
+  %3 = load i32, ptr %tmp.1, align 4
+  store i32 %3, ptr %value, align 4
   store ptr @.root.addTwo, ptr %add, align 8
-  %3 = load i32, ptr %value, align 4
-  store i32 %3, ptr %tmp.4, align 4
   %4 = load ptr, ptr %add, align 8
-  call void %4(ptr %tmp.4, ptr %tmp.3)
-  %5 = load i32, ptr %tmp.3, align 4
-  store i32 %5, ptr %value, align 4
+  store ptr %4, ptr %tmp.5, align 8
+  %5 = load i32, ptr %value, align 4
+  store i32 %5, ptr %tmp.6, align 4
+  %6 = load ptr, ptr %tmp.5, align 8
+  call void %6(ptr %tmp.6, ptr %tmp.4)
+  %7 = load i32, ptr %tmp.4, align 4
+  store i32 %7, ptr %value, align 4
   ret void
 }
 

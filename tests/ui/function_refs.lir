@@ -1,0 +1,87 @@
+lilac_ir = "0.5"
+target = "x86_64-unknown-none"
+function @.root.one
+  in #bit32 %value
+  out #bit32 %result
+{
+  $entry:
+    zero %result
+    &1: #bit32 = const 0x1
+    &2: #bit32 = copy %value
+    &3: #bit32 = i.add &2, &1
+    copy &3 -> %result
+    return
+}
+function @.root.same
+  in #bit32 %value
+  out #bit32 %result
+{
+  $entry:
+    zero %result
+    &1: #bit32 = const 0x1
+    &2: #bit32 = copy %value
+    &3: #bit32 = i.add &2, &1
+    copy &3 -> %result
+    return
+}
+function @main
+{
+  $entry:
+    alloca ref #unknown %a : zeroed
+    alloca ref #unknown %b : zeroed
+    alloca #bit32 %tmp.1 : zeroed
+    alloca ref #unknown %tmp.2 : zeroed
+    alloca #bit32 %tmp.3 : zeroed
+    alloca #bit32 %tmp.4 : zeroed
+    alloca ref #unknown %tmp.5 : zeroed
+    alloca #bit32 %tmp.6 : zeroed
+    &1: ref #unknown = addr.func @.root.one
+    copy &1 -> %a
+    &2: ref #unknown = addr.func @.root.same
+    copy &2 -> %b
+    &3: ref #unknown = copy %a
+    &4: ref #unknown = copy %b
+    &5: #bit8 = cmp.eql &3, &4
+    branch.if &5, $l.1, $l.2
+  $l.1:
+    call @lilac_abort (in) (out)
+    unreachable
+  $l.2:
+    branch $l.3
+  $l.3:
+    &6: ref #unknown = addr.func @.root.one
+    &7: ref #unknown = copy %a
+    &8: #bit8 = cmp.eql &7, &6
+    &9: #bit8 = const 0x0
+    &10: #bit8 = cmp.eql &8, &9
+    branch.if &10, $l.4, $l.5
+  $l.4:
+    call @lilac_abort (in) (out)
+    unreachable
+  $l.5:
+    branch $l.6
+  $l.6:
+    copy %a -> %tmp.2
+    &11: #bit32 = const 0x1
+    copy &11 -> %tmp.3
+    &12: ref #unknown = copy %tmp.2
+    call &12 (in %tmp.3) (out %tmp.1)
+    copy %b -> %tmp.5
+    &13: #bit32 = const 0x1
+    copy &13 -> %tmp.6
+    &14: ref #unknown = copy %tmp.5
+    call &14 (in %tmp.6) (out %tmp.4)
+    &15: #bit32 = copy %tmp.1
+    &16: #bit32 = copy %tmp.4
+    &17: #bit8 = cmp.eql &15, &16
+    &18: #bit8 = const 0x0
+    &19: #bit8 = cmp.eql &17, &18
+    branch.if &19, $l.7, $l.8
+  $l.7:
+    call @lilac_abort (in) (out)
+    unreachable
+  $l.8:
+    branch $l.9
+  $l.9:
+    return
+}

@@ -687,3 +687,78 @@ fn aliases_hover_navigate_and_rename() {
     shutdown(&client);
     handle.join().expect("server thread");
 }
+
+/// `ref f` and `ref Type.method` are uses of the function (references,
+/// rename), and a called function-reference field is a use of the field
+/// (hover, references).
+#[test]
+fn function_references_navigate() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/refs.lilac").expect("uri");
+    let text = "\
+add: function (a: @bit8, b: @bit8) total: @bit8 {
+    total = @i_add_8(a, b)
+}
+Machine: object {
+    step: ref function (input: @bit8, scale: @bit8) output: @bit8
+    run: function (self, input: @bit8) output: @bit8 {
+        output = self.step(input, input)
+    }
+}
+main: function () nothing {
+    machine: Machine = Machine { step = ref add }
+    x: @bit8 = machine.step(0x1, 0x2)
+    run: ref function (ref Machine, @bit8) @bit8 = ref Machine.run
+    y: @bit8 = run(ref machine, x)
+}
+";
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(lsp_types::DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+
+    assert_eq!(
+        starts(&references(&client, &uri, at(text, "add:", 0, 0), true)),
+        [at(text, "add:", 0, 0), at(text, "ref add", 0, 4)]
+    );
+    assert_eq!(
+        starts(&references(&client, &uri, at(text, "run:", 0, 0), false)),
+        [at(text, "Machine.run", 0, 8)]
+    );
+    assert_eq!(
+        starts(&references(&client, &uri, at(text, "step:", 0, 0), false)),
+        [
+            at(text, "self.step", 0, 5),
+            at(text, "step = ", 0, 0),
+            at(text, "machine.step", 0, 8),
+        ]
+    );
+    assert_eq!(
+        hover_text(&client, &uri, at(text, "machine.step", 0, 9)),
+        "```lilac\nstep: ref function (input: @bit8, scale: @bit8) output: @bit8\n```\nin `Machine`"
+    );
+
+    let mut params = position(&uri, at(text, "ref add", 0, 5));
+    params["newName"] = serde_json::json!("plus");
+    let edit: WorkspaceEdit =
+        serde_json::from_value(request(&client, "textDocument/rename", params).expect("rename"))
+            .expect("edit");
+    let plus = |at: (u32, u32)| (at, "plus".to_owned());
+    assert_eq!(
+        edits_by_start(&edit),
+        vec![
+            plus(at(text, "add:", 0, 0)),
+            plus(at(text, "ref add", 0, 4))
+        ]
+    );
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}

@@ -1,0 +1,10 @@
+// expect-error: E023
+// A constant of `Gen[T]` is one value for every instance, so it cannot
+// name `T`.
+
+Gen[T]: object {
+    EMPTY: T => 0x0
+    item: T
+}
+
+main: function () nothing {}

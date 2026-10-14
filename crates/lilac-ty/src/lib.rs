@@ -528,6 +528,42 @@ impl Types {
         &self.kinds[id.0 as usize]
     }
 
+    /// Whether `ty` is a reference that is never dereferenced: `ref
+    /// unknown`, which points at nothing known, and a function reference
+    /// (`ref function (…)`), which points at code. Neither auto-derefs, has
+    /// fields, or is read or written through.
+    pub fn is_opaque_ref(&self, ty: TypeRef) -> bool {
+        ty.is_ref && matches!(self.kind(ty.id), TypeKind::Unknown | TypeKind::Func { .. })
+    }
+
+    /// Whether `id` is a function type (`function (…)`, either ABI).
+    pub fn is_func(&self, id: TypeId) -> bool {
+        matches!(self.kind(id), TypeKind::Func { .. })
+    }
+
+    /// The type a read of `ty` gives where a value is wanted (an `if` or
+    /// `match` value, an auto-deref): the pointee of a `ref`, except an
+    /// opaque reference ([`Self::is_opaque_ref`]), which is read as itself.
+    pub fn read_type(&self, ty: TypeRef) -> TypeRef {
+        if self.is_opaque_ref(ty) {
+            ty
+        } else {
+            ty.deref()
+        }
+    }
+
+    /// The type a value of `id` has: `unknown` and a function type live
+    /// only behind `ref` (`ref unknown`, `ref function (…)`), every other
+    /// type by value. An expected type travels as a [`TypeId`], so this
+    /// restores the `ref`.
+    pub fn value_type(&self, id: TypeId) -> TypeRef {
+        if self.is_opaque_ref(TypeRef::reference(id)) {
+            TypeRef::reference(id)
+        } else {
+            TypeRef::value(id)
+        }
+    }
+
     /// Pretty-prints a type in Lilac syntax (`@bit32`, `Number`), cut at
     /// [`DISPLAY_LIMIT`].
     pub fn display(&self, id: TypeId) -> String {
@@ -606,11 +642,16 @@ impl Types {
                 }
                 out.push_str("function (");
                 list(self, params, out);
-                out.push_str(") -> ");
-                if returns.is_empty() {
-                    out.push_str("nothing");
-                } else {
-                    list(self, returns, out);
+                out.push_str(") ");
+                match returns.len() {
+                    0 => out.push_str("nothing"),
+                    1 => list(self, returns, out),
+                    // More than one out is parenthesized, as written.
+                    _ => {
+                        out.push('(');
+                        list(self, returns, out);
+                        out.push(')');
+                    }
                 }
             }
             TypeKind::Error => out.push_str("<error>"),
@@ -724,10 +765,10 @@ mod tests {
         let one = types.intern_func(params.clone(), returns.clone());
         let again = types.intern_func(params, returns);
         assert_eq!(one, again);
-        assert_eq!(types.display(one), "function (@bit8) -> @bit32");
+        assert_eq!(types.display(one), "function (@bit8) @bit32");
         let nullary = types.intern_func(Vec::new(), Vec::new());
         assert_ne!(one, nullary);
-        assert_eq!(types.display(nullary), "function () -> nothing");
+        assert_eq!(types.display(nullary), "function () nothing");
     }
 
     #[test]
