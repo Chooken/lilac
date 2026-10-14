@@ -24,14 +24,16 @@ pub(crate) fn suggest<'a>(
 }
 
 impl Checker<'_> {
-    /// The names a value can be spelled with here: locals in scope and the
-    /// file's visible functions and constants.
+    /// The names a value can be spelled with here: locals in scope, the
+    /// own type's constants and static functions, and the file's visible
+    /// functions and constants.
     pub(crate) fn value_names(&self, fcx: &FnCx) -> Vec<String> {
         let mut names: Vec<String> = fcx
             .scopes
             .iter()
             .flat_map(|scope| scope.keys().cloned())
             .collect();
+        names.extend(self.own_names());
         names.extend(self.visible_names(|kind| {
             matches!(
                 kind,

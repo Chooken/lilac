@@ -1,0 +1,13 @@
+// expect-error: E021
+// expect-stderr: error[E021]: cannot name `start` in a constant of generic `List`
+// A constant of a generic type is one value for every instance, so it
+// cannot call the type's static functions, which belong to each instance.
+
+List[T]: object {
+    FIRST: @bit32 => start()
+    item: T
+
+    start: function () @bit32 => 0x1
+}
+
+main: function () nothing {}

@@ -213,6 +213,9 @@ impl Checker<'_> {
             }
             return self.hook_call(fcx, name, &overloads, args, span);
         }
+        if let Some(def) = self.own_member(name) {
+            return self.own_call(fcx, def, name, name_span, generic_args, args, span);
+        }
         let receiver = Expr::Ident(name.to_owned(), name_span);
         if let Some(receiver) = self.static_receiver(fcx, &receiver) {
             self.callee(fcx, args, receiver)?;
@@ -228,6 +231,7 @@ impl Checker<'_> {
                     format!("unresolved name `{name}`"),
                 )
                 .label(name_span, true, "not a local, item, or intrinsic");
+                let diagnostic = self.own_instance_help(fcx, diagnostic, name);
                 let diagnostic = self.suggest_value(fcx, diagnostic, name, name_span);
                 self.diags.emit(diagnostic)
             };

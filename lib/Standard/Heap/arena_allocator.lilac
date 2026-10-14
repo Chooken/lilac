@@ -24,7 +24,7 @@ ArenaAllocator: object {
 
     /// An arena of `ARENA_DEFAULT_SIZE` blocks.
     init: function () allocator: ArenaAllocator {
-        allocator = ArenaAllocator.init_sized(ARENA_DEFAULT_SIZE)
+        allocator = init_sized(ARENA_DEFAULT_SIZE)
     }
 
     /// An arena of blocks of at least `default_block_size` bytes (rounded
@@ -45,7 +45,7 @@ ArenaAllocator: object {
             @panic("Out of memory.")
         }
 
-        arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(real_size)
+        arena_block: ref ArenaBlock = allocate_block(real_size)
 
         allocator = ArenaAllocator {
             first_block = arena_block
@@ -233,7 +233,7 @@ ArenaAllocator: object {
         }
 
         add_new_general_block: function (self) nothing {
-            arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(self.block_size)
+            arena_block: ref ArenaBlock = allocate_block(self.block_size)
 
             self.current_block.next = .Some(arena_block)
             self.current_block = arena_block
@@ -249,7 +249,7 @@ ArenaAllocator: object {
                 @panic("Out of memory.")
             }
 
-            arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(align_up(overhead + size, page))
+            arena_block: ref ArenaBlock = allocate_block(align_up(overhead + size, page))
 
             base_address: Int = @ptr_to_address(arena_block.base)
             start: Int = align_up(base_address + @size_of(ArenaBlock), alignment) - base_address

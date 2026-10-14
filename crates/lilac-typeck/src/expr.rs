@@ -254,6 +254,9 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         }
+        if let Some(def) = self.own_member(name) {
+            return self.own_value(def, name, span, behind_ref);
+        }
         let Ok(found) = self.lookup_item(name, span) else {
             return HirExpr::poison(span);
         };
@@ -263,6 +266,7 @@ impl Checker<'_> {
             let diagnostic = if self.is_owner_param(name) {
                 self.owner_param_note(diagnostic, name)
             } else {
+                let diagnostic = self.own_instance_help(fcx, diagnostic, name);
                 self.suggest_value(fcx, diagnostic, name, span)
             };
             self.diags.emit(diagnostic);
@@ -454,7 +458,7 @@ impl Checker<'_> {
                 })
             }
             Expr::Ident(name, span) => {
-                if fcx.lookup(name).is_some() {
+                if fcx.lookup(name).is_some() || self.own_member(name).is_some() {
                     return None;
                 }
                 if let Some(index) = self.env.params.iter().position(|param| param == name) {
@@ -1647,7 +1651,7 @@ impl Checker<'_> {
     // ---- module constants ---------------------------------------------------
 
     /// A use of constant `def`: its value is inlined where it is used.
-    fn const_value(&mut self, def: DefId, span: Span) -> HirExpr {
+    pub(crate) fn const_value(&mut self, def: DefId, span: Span) -> HirExpr {
         self.use_builtin_const(def);
         let ty = self.const_type(def);
         HirExpr {

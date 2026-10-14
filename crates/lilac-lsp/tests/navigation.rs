@@ -446,6 +446,58 @@ fn rename_refuses_keywords_and_hooks() {
     handle.join().expect("server thread");
 }
 
+/// A member constant and a static function are uses by their bare names
+/// inside their type as well as through the type, so a rename edits both.
+#[test]
+fn rename_a_member_used_bare_and_qualified() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "\
+Box: object {
+    LIMIT: @bit8 => 0x7
+    value: @bit8
+    make: function () box: Box {
+        box = Box { value = LIMIT }
+    }
+    again: function () box: Box => make()
+}
+main: function () nothing {
+    x: @bit8 = Box.LIMIT
+    box: Box = Box.make()
+}
+";
+    did_open(&client, &uri, text);
+    let published = publish_for(&client, &uri);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(lsp_types::DiagnosticSeverity::HINT)),
+        "{:?}",
+        published.diagnostics
+    );
+
+    let mut params = position(&uri, at(text, "= LIMIT", 0, 2));
+    params["newName"] = serde_json::json!("MOST");
+    let edit: WorkspaceEdit =
+        serde_json::from_value(request(&client, "textDocument/rename", params).expect("rename"))
+            .expect("edit");
+    let most = |nth| (at(text, "LIMIT", nth, 0), "MOST".to_owned());
+    assert_eq!(edits_by_start(&edit), vec![most(0), most(1), most(2)]);
+
+    let mut params = position(&uri, at(text, "make()", 0, 0));
+    params["newName"] = serde_json::json!("build");
+    let edit: WorkspaceEdit =
+        serde_json::from_value(request(&client, "textDocument/rename", params).expect("rename"))
+            .expect("edit");
+    let build = |nth| (at(text, "make", nth, 0), "build".to_owned());
+    assert_eq!(edits_by_start(&edit), vec![build(0), build(1), build(2)]);
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 #[test]
 fn rename_refuses_a_library_definition() {
     let dir = std::env::temp_dir().join(format!("lilac-lsp-rename-lib-{}", std::process::id()));

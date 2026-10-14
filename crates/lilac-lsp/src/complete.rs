@@ -144,6 +144,13 @@ impl<'a> Scope<'a> {
             return Some(Named::Value(site.ty));
         }
         let resolved = &self.analysis.resolved;
+        if let Some(id) = self
+            .own_type()
+            .and_then(|owner| resolved.member(owner, name))
+            .filter(|id| resolved.def(*id).is_own_name())
+        {
+            return Some(self.item(id));
+        }
         if let Some(ns) = resolved.alias(self.file, name) {
             return Some(Named::Ns(ns));
         }
@@ -380,7 +387,27 @@ impl<'a> Scope<'a> {
             .collect()
     }
 
-    /// The entries for a bare name: locals, the file's visible items and
+    /// The object or enum whose body holds the cursor. Types are
+    /// top-level only, so there is at most one.
+    fn own_type(&self) -> Option<DefId> {
+        let resolved = &self.analysis.resolved;
+        resolved
+            .namespaces
+            .get(self.ns.0 as usize)?
+            .items
+            .values()
+            .copied()
+            .find(|id| {
+                let def = resolved.def(*id);
+                def.is_type()
+                    && def.file == self.file
+                    && def.span.lo.0 <= self.at
+                    && self.at < def.span.hi.0
+            })
+    }
+
+    /// The entries for a bare name: locals, the constants and static
+    /// functions of the type the cursor is in, the file's visible items and
     /// `using … as` aliases, the namespaces within reach, keywords and
     /// builtin types.
     fn names(&self) -> Vec<Entry> {
@@ -395,6 +422,17 @@ impl<'a> Scope<'a> {
                 detail: Some(types.display_ref(site.ty)),
             })
             .collect();
+        if let Some(owner) = self.own_type() {
+            let resolved = &self.analysis.resolved;
+            entries.extend(
+                resolved
+                    .def(owner)
+                    .members
+                    .values()
+                    .filter(|id| resolved.def(**id).is_own_name())
+                    .filter_map(|id| self.item_entry(*id)),
+            );
+        }
         if let Some(scope) = self.analysis.resolved.files.get(&self.file) {
             entries.extend(scope.visible.values().filter_map(|lookup| match lookup {
                 Lookup::One(id) => self.item_entry(*id),

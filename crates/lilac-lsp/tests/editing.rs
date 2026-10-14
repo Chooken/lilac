@@ -995,6 +995,71 @@ main: function () nothing {
     handle.join().expect("server thread");
 }
 
+/// Inside a type's body, its constants and static functions complete by
+/// their bare names; its fields and methods do not (they go through
+/// `self`), and outside the type none of them do.
+#[test]
+fn own_names_complete_inside_the_type() {
+    let (client, handle) = start_server();
+    initialize(&client, serde_json::json!({ "capabilities": {} }));
+    let uri = Url::parse("file:///c:/own.lilac").expect("uri");
+    let program = "\
+Limits: object {
+    LOW: @bit8 => 0x1
+    value: @bit8
+    make: function () limits: Limits {
+        limits = Limits { value = 0x1 }
+    }
+    get: function (self) result: @bit8 {
+        // INSIDE
+        result = self.value
+    }
+}
+main: function () nothing {
+    // OUTSIDE
+}
+";
+    did_open(&client, &uri, program);
+    let _ = publish_for(&client, &uri);
+    let mut version = 2;
+    let mut complete = |marker: &str, edit: &str| -> Vec<String> {
+        let text = program.replace(marker, edit);
+        did_change(&client, &uri, version, &text);
+        version += 1;
+        let result = request(
+            &client,
+            "textDocument/completion",
+            position(&uri, after(&text, edit)),
+        )
+        .expect("completion");
+        match serde_json::from_value::<Option<CompletionResponse>>(result).expect("completions") {
+            Some(CompletionResponse::Array(items)) => items,
+            Some(CompletionResponse::List(list)) => list.items,
+            None => Vec::new(),
+        }
+        .into_iter()
+        .map(|item| item.label)
+        .collect()
+    };
+    let inside = complete("// INSIDE", "x: @bit8 = L");
+    for name in ["LOW", "make", "Limits"] {
+        assert!(
+            inside.iter().any(|label| label == name),
+            "{name}: {inside:?}"
+        );
+    }
+    for name in ["value", "get"] {
+        assert!(
+            !inside.iter().any(|label| label == name),
+            "{name}: {inside:?}"
+        );
+    }
+    let outside = complete("// OUTSIDE", "x: @bit8 = L");
+    assert!(!outside.iter().any(|label| label == "LOW"), "{outside:?}");
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 /// A call through a function reference shows the reference's signature:
 /// a field's (its parameter names as declared, through an alias too, and
 /// its doc), a global's and a local's (the type's slots, unnamed).

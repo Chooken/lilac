@@ -1,0 +1,16 @@
+// expect-error: E021
+// expect-stderr:    = help: `value` is a field of `Box`: write `self.value`
+// expect-stderr:    = help: `get` is a method of `Box`: write `self.get(…)`
+// expect-stderr:    = help: `value` is a field of `Box`: read it from a value of `Box`
+// Fields and methods are not bare names in a type's bodies: they go
+// through `self`, or through a value of the type where there is none.
+
+Box: object {
+    value: @bit32
+
+    get: function (self) @bit32 => value
+    again: function (self) @bit32 => get()
+    make: function () @bit32 => value
+}
+
+main: function () nothing {}

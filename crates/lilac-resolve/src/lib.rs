@@ -123,6 +123,23 @@ impl Def {
     pub fn is_type(&self) -> bool {
         matches!(self.kind, DefKind::Object | DefKind::Enum)
     }
+
+    /// Whether this member of a type is a bare name in the type's own
+    /// bodies: a constant, or a static function (no receiver).
+    #[must_use]
+    pub fn is_own_name(&self) -> bool {
+        match &self.kind {
+            DefKind::Const { .. } => self.parent.is_some(),
+            DefKind::Func(decl) => {
+                self.parent.is_some()
+                    && !decl
+                        .params
+                        .first()
+                        .is_some_and(lilac_ast::Param::is_receiver)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What one segment of a qualified path names.

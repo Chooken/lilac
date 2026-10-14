@@ -3,8 +3,9 @@
 //! A path's first segment is a `using … as` alias, a name the file sees,
 //! else a namespace by reach ([`Resolved::namespace_named`]). Each later segment steps into a
 //! namespace: an item, else a child namespace. A path ends at an item;
-//! `Type.member` past it is a static member access. Locals and generic
-//! parameters come before all of this; the callers check them.
+//! `Type.member` past it is a static member access. Locals, generic
+//! parameters and the own type's names (`own.rs`) come before all of this;
+//! the callers check them.
 //!
 //! [`Resolved::namespace_named`]: lilac_resolve::Resolved::namespace_named
 
@@ -230,6 +231,7 @@ impl Checker<'_> {
             Expr::Ident(name, _) => {
                 if fcx.lookup(name).is_some()
                     || self.env.params.iter().any(|param| param == name)
+                    || self.own_member(name).is_some()
                     || self.types.builtin(name).is_some()
                 {
                     return None;

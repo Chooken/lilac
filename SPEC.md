@@ -993,6 +993,33 @@ Int: object {
 fits: function (n: Int, element: Int) Bool => n <= Int.MAX / element
 ```
 
+**Inside a type's bodies** (its methods, hooks and constants' initializers)
+its constants and static functions are in scope by their bare names:
+`LIMIT` is `Box.LIMIT` and `make()` is `Box.make()` there, and `ref make`
+is its address. A bare name is looked up in this order, and the first
+match wins: locals and parameters, the generic parameters, the type's
+constants and static functions, `using … as` aliases, then the file's
+items and the namespaces within reach. So a local shadows a constant, and
+a constant shadows a top-level item of its name (which a namespace path
+still reaches). In a generic type a bare static function is the current
+instance's: `grow(n)` in `List[T]` is `List[T].grow(n)`. A generic type's
+constant has no instance, so its initializer cannot call the type's
+static functions (`E021`). Fields and methods are not bare names: they go
+through `self` (`self.value`, `self.push(x)`), and an `E021` that names
+one says so. Variants stay `.Variant`.
+
+```lilac
+Box: object {
+    LIMIT: @bit32 => 0x7
+    value: @bit32
+
+    make: function () box: Box {
+        box = Box { value = LIMIT }
+    }
+    full: function () box: Box => make()
+}
+```
+
 A field of a function reference type is **callable**: `machine.step(x)`
 calls through the field, with no `self` (§4). A type's members share one
 namespace, so a field and a method of one name cannot both exist, and

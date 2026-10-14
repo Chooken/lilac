@@ -286,7 +286,8 @@
 - Paths (`lilac-typeck/src/paths.rs`): a type name is a dotted path
   (`A.B.Type`), and an expression member chain is flattened into one
   (`Checker::qualified_name`) while it walks namespaces;
-  `Checker::lookup_item` resolves every name and path. The head is the
+  `Checker::lookup_item` resolves every name and path. Locals, generic
+  parameters and the own type's names (below) come first. The head is the
   file's name, else a namespace by reach (`Resolved::namespace_named`), and
   each step is `Resolved::ns_member` (an item, a `private` one only within
   reach, else a child namespace); an item ends the path. `@builtin` is an
@@ -314,6 +315,17 @@
   reach), no generic parameters (one value for every instance;
   `owner_param_note` says so). Never reachable through a value; `=` in a
   type's body is a parse error (`E001`).
+- Own names (`lilac-typeck/src/own.rs`): in a body whose `Env::owner` is
+  a type (methods, hooks, member constants), the type's constants and
+  static functions (`Def::is_own_name`) are bare names, after locals and
+  generic parameters and before aliases and items: `check_name`
+  (`own_value`), `check_named_call` (`own_call`), and `static_receiver`
+  and `path_prefix` stop at one (a value, not a path head). A static is
+  instantiated at the own type's arguments (`own_type`, as bare `self`
+  is typed); a generic type's member constant has none, so naming one
+  there is `E021`. A miss naming a field or method gets
+  `own_instance_help`; did-you-mean includes `own_names`. The editor
+  completes them in the type's span (`Scope::own_type`).
 - Namespace qualification: every non-root symbol/type is prefixed by its dotted
   namespace path (`A.B.foo`, `A.Object.Method`). A **root free function is
   `.root.`-prefixed** (`.root.foo`, `lilac_lower::namespace_prefix`) so it
