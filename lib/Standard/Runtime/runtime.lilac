@@ -5,13 +5,21 @@
 
 using Standard.Os as Os
 using Standard.Io as Io
+using Standard.Heap as Heap
 
-/// Records the process arguments in `Standard.Os`, then runs the program:
-/// its root-namespace `main`.
+/// Records the process arguments in `Standard.Os`, sets
+/// `Heap.default_allocator` to an arena that lives as long as the program,
+/// then runs the program: its root-namespace `main`.
 @entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     Os.argument_count = count
     Os.argument_vector = arguments
     Os.environment_vector = environment
+
+    program_arena = .Some(Heap.ArenaAllocator.init())
+    if program_arena.get_ref() -> arena: ref Heap.ArenaAllocator {
+        Heap.default_allocator = .Some(Heap.Allocator.from[Heap.ArenaAllocator](arena))
+    }
+
     main()
 }
 
@@ -23,4 +31,9 @@ using Standard.Io as Io
 /// `Format`, so `@panic($"index {i} past {n}")` formats.
 @compiler_print: function (text: Format) nothing {
     Io.print_error(text)
+}
+
+private {
+    /// The arena behind `Heap.default_allocator`, set by `@entry`.
+    program_arena: Optional[Heap.ArenaAllocator] = .None
 }

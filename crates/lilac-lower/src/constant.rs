@@ -242,6 +242,39 @@ impl<'a> Lower<'a> {
         self.eval(&mut eval, expr).ok_or(eval.panic)
     }
 
+    /// A global initializer's value, like [`Self::constant_or_panic`]. Its
+    /// struct and variant literals are constant even when their types
+    /// have hooks: building a value runs no hook, and a global is never
+    /// dropped, so nothing is skipped (`Optional[Arena] = .None`). What
+    /// they are built from follows `eval`.
+    pub(crate) fn global_constant(
+        &mut self,
+        expr: &HirExpr,
+    ) -> Result<Value, Option<DivisionPanic>> {
+        let mut eval = Eval::default();
+        eval.frames.push(HashMap::new());
+        self.eval_built(&mut eval, expr).ok_or(eval.panic)
+    }
+
+    /// `expr` as a value built in place ([`Self::global_constant`]).
+    fn eval_built(&mut self, eval: &mut Eval, expr: &HirExpr) -> Option<Value> {
+        match &expr.kind {
+            HirExprKind::Struct(fields) if !expr.ty.is_ref => fields
+                .iter()
+                .map(|field| self.eval_built(eval, field))
+                .collect::<Option<Vec<_>>>()
+                .map(Value::Aggregate),
+            HirExprKind::Variant { index, payload } if !expr.ty.is_ref => {
+                let payload = match payload {
+                    Some(payload) => Some(Box::new(self.eval_built(eval, payload)?)),
+                    None => None,
+                };
+                Some(Value::Variant(*index, payload))
+            }
+            _ => self.eval(eval, expr),
+        }
+    }
+
     /// The panic a call to the `=>` function `key` reaches whatever its
     /// non-constant arguments hold: its body evaluated with the constant
     /// arguments bound and the others unknown. A panic in an argument is

@@ -22,6 +22,8 @@ ArenaAllocator: object {
         block_size: Int
     }
 
+    ALLOCATOR_TABLE: ref AllocatorTable[ArenaAllocator] => ref allocator_table
+
     /// `ArenaAllocator.init`'s block size: 512 KiB.
     DEFAULT_SIZE: Int => 512 * 1024
 
@@ -71,7 +73,7 @@ ArenaAllocator: object {
 
     /// A new allocation holding `value`, moved in.
     create[T]: function (self, value: T) allocation: ref T {
-        allocation = self.alloc_raw(@size_of(T), @align_of(T)) as ref T
+        allocation = self.allocate_raw(@size_of(T), @align_of(T)) as ref T
         @write(allocation, value)
     }
 
@@ -81,14 +83,14 @@ ArenaAllocator: object {
     }
 
     /// Room for `count` zeroed `T`s.
-    alloc[T]: function (self, count: Int) allocation: ref T {
-        allocation = self.alloc_raw(self.array_size(@size_of(T), count), @align_of(T)) as ref T
+    allocate[T]: function (self, count: Int) allocation: ref T {
+        allocation = self.allocate_raw(array_size(@size_of(T), count), @align_of(T)) as ref T
     }
 
     /// `ptr` (from `alloc`, `count` long) resized to `new_count`, keeping
     /// the first of them; new elements are zeroed.
-    realloc[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
-        allocation = self.realloc_raw(ptr as ref unknown, self.array_size(@size_of(T), count), self.array_size(@size_of(T), new_count), @align_of(T)) as ref T
+    reallocate[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
+        allocation = self.reallocate_raw(ptr as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
     }
 
     free[T]: function (self, ptr: ref T) nothing {
@@ -96,7 +98,7 @@ ArenaAllocator: object {
     }
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two).
-    alloc_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+    allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
 
         if size < 0 {
             @panic("Can't allocate a negative size.")
@@ -143,7 +145,7 @@ ArenaAllocator: object {
     /// bytes: in place when it is the current block's last allocation and
     /// fits, or when it shrinks, else copied to a new allocation. New bytes
     /// are zeroed.
-    realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+    reallocate_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
 
         if new_size < 0 or old_size < 0 {
             @panic("Can't allocate a negative size.")
@@ -175,12 +177,12 @@ ArenaAllocator: object {
             return
         }
 
-        allocation = self.alloc_raw(new_size, alignment)
+        allocation = self.allocate_raw(new_size, alignment)
         @memcpy(allocation, ptr, old_size)
     }
 
-    free_raw: function (self, allocation: ref unknown) nothing {
-        // no op. here incase someone wants to use allocators as interfaces.
+    /// Nothing: an arena gives memory back only at `reset`.
+    free_raw: function (self, _memory: ref unknown, _size: Int, _alignment: Int) nothing {
     }
 
     /// Frees every allocation at once. The blocks stay mapped (zeroed) for
@@ -213,20 +215,6 @@ ArenaAllocator: object {
     }
 
     private {
-        /// `count` elements of `element` bytes, refused before the product
-        /// could overflow (no mapping could hold it then).
-        array_size: function (self, element: Int, count: Int) size: Int {
-            if count < 0 {
-                @panic("Can't allocate a negative count.")
-            }
-
-            if element > 0 and count > Int.MAX / element {
-                @panic("Out of memory.")
-            }
-
-            size = element * count
-        }
-
         /// Whether `size` bytes at `alignment` fit an empty block wherever
         /// its pages are: after the header, the padding is at most
         /// `alignment - 1` bytes.
@@ -288,9 +276,6 @@ ArenaAllocator: object {
 }
 
 private {
-    /// `value` rounded up to a multiple of `alignment` (a power of two).
-    align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
-
     /// Unmaps `first` and every block after it.
     unmap_blocks: function (first: Optional[ref ArenaBlock]) nothing {
         optional_next: Optional[ref ArenaBlock] = first
@@ -328,5 +313,11 @@ private {
         size: Int
         used: Int
         next: Optional[ref ArenaBlock]
+    }
+
+    allocator_table: AllocatorTable[ArenaAllocator] = AllocatorTable {
+        allocate = ref ArenaAllocator.allocate_raw
+        reallocate = ref ArenaAllocator.reallocate_raw
+        free = ref ArenaAllocator.free_raw
     }
 }

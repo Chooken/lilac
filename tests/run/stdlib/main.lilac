@@ -137,8 +137,7 @@ Capture: object {
     bytes: @array(@bit8, 0x100)
 }
 
-capture_push: function (target: ref unknown, text: @byte_buffer) nothing {
-    capture: ref Capture = target as ref Capture
+capture_push: function (capture: ref Capture, text: @byte_buffer) nothing {
     @memcpy(@ptr_add(@array_at(ref capture.bytes, 0x0) as ref unknown, capture.used), @byte_buffer_ptr(text) as ref unknown, @byte_buffer_len(text))
     capture.used = @i_add_native(capture.used, @byte_buffer_len(text))
 }
@@ -146,7 +145,7 @@ capture_push: function (target: ref unknown, text: @byte_buffer) nothing {
 // Exits with `code` unless `text` formats as exactly `want`.
 expect_format: function (text: Format, want: @byte_buffer, code: @bit32) nothing {
     capture: Capture = Capture { used = 0x0, bytes = @array(@bit8, 0x100) {} }
-    out: Formatter = Formatter.over(ref capture as ref unknown, ref capture_push)
+    out: Formatter = Formatter.over[Capture](ref capture, ref capture_push)
     out.write(text)
     if capture.used == @byte_buffer_len(want) {
     } else {

@@ -4,5 +4,5 @@
 // never a namespace.
 
 main: function () nothing {
-    memory: Standard.Os.allocate(0x10)
+    memory: Standard.Os.map_pages(0x10)
 }

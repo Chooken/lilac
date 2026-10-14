@@ -1,0 +1,47 @@
+
+default_c_allocator: CAllocator {}
+
+/// The C library's heap: `calloc`, `realloc` and `free`. It needs a C
+/// library (`--libc`), and shares its heap with C code. Aligns to at most
+/// two pointers, C's `max_align_t`.
+CAllocator: object {
+
+    ALLOCATOR_TABLE: ref AllocatorTable[CAllocator] => ref c_table
+
+    ALLOCATOR: Allocator => Allocator.from[CAllocator](ref default_c_allocator)
+
+    allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        within_c_alignment(alignment)
+        allocation = C.calloc(0x1, size as @bit_native)
+    }
+
+    reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        within_c_alignment(alignment)
+        allocation = C.realloc(memory, new_size as @bit_native)
+        // `realloc` leaves what it adds unset.
+        if @ptr_to_address(allocation) != 0x0 and new_size > old_size {
+            @memset(@ptr_add(allocation, old_size as @bit_native), 0x0, (new_size - old_size) as @bit_native)
+        }
+    }
+
+    free_raw: function (self, memory: ref unknown, _size: Int, _alignment: Int) nothing {
+        C.free(memory)
+    }
+}
+
+private {
+
+    /// Refuses an alignment past C's `max_align_t`: two pointers.
+    within_c_alignment: function (alignment: Int) nothing {
+        if alignment > 2 * (@size_of(@bit_native) as Int) {
+            @panic("CAllocator aligns to at most two pointers.")
+        }
+    }
+
+    c_table: AllocatorTable[CAllocator] = AllocatorTable {
+        allocate = ref CAllocator.allocate_raw
+        reallocate = ref CAllocator.reallocate_raw
+        free = ref CAllocator.free_raw
+    }
+
+}

@@ -24,7 +24,7 @@ impl Lower<'_> {
             let (init, addresses) = global
                 .value
                 .as_ref()
-                .and_then(|value| match self.constant_or_panic(value) {
+                .and_then(|value| match self.global_constant(value) {
                     Ok(constant) => Some(self.encode_value(&constant, global.ty)),
                     // A division that panics is the reason: `E060`, not `E038`.
                     Err(Some(panic)) => {

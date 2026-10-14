@@ -3,8 +3,9 @@
 // `Windows` (kernel32), `Linux` (system calls, also under `--libc`) and
 // `MacOs` (libSystem), the raw namespaces beside this one. Only the live
 // arm is compiled, so a program links only what its target uses. With
-// `--libc`, the C library also owns the heap (`allocate`) and the process
-// exit (so C `stdio` flushes); a bare target (`.None`) has only that.
+// `--libc`, the C library also owns the process exit (so C `stdio`
+// flushes); a bare target (`.None`) has only that, and its pages come
+// from C's heap.
 //
 // This file: handles, reading and writing, and files.
 
@@ -146,7 +147,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
             opened: ref unknown = Windows.CreateFileW(wide, access, share, null(), disposition, Windows.FILE_ATTRIBUTE_NORMAL, null())
             code: @bit32 = Windows.GetLastError()
-            deallocate(wide as ref unknown)
+            unmap_pages(wide as ref unknown, wide_path_size(path))
             if @ptr_to_address(opened) == Windows.INVALID_HANDLE_VALUE {
                 result = .Error(error_of_windows(code))
             } else {
@@ -160,7 +161,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
             flags: @bit32 = @bit_or_32(posix_open_flags(mode, Linux.O_RDONLY, Linux.O_WRONLY, Linux.O_RDWR, Linux.O_CREAT, Linux.O_TRUNC, Linux.O_APPEND), Linux.O_CLOEXEC)
             opened: @bit_native = Linux.openat(Linux.AT_FDCWD, c, flags, 0x1B6)
-            deallocate(c as ref unknown)
+            unmap_pages(c as ref unknown, c_path_size(path))
             match linux_result(opened) {
                 .Ok -> descriptor: @bit_native {
                     result = .Ok(Handle { value = descriptor })
@@ -179,7 +180,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             mode_bits: @bit32 = 0x1B6
             opened: @bit32 = MacOs.open(c, flags, mode_bits)
             code: @bit32 = MacOs.errno()
-            deallocate(c as ref unknown)
+            unmap_pages(c as ref unknown, c_path_size(path))
             if opened == 0xFFFFFFFF {
                 result = .Error(error_of_errno(code))
             } else {
@@ -398,10 +399,11 @@ private {
 
     bit64_of: function (native: @bit_native) @bit64 => @extend_zero(native)
 
-    /// `path` as a NUL-terminated byte string from `allocate`.
+    /// `path` as a NUL-terminated byte string, in pages from `map_pages`:
+    /// give them back with `unmap_pages(c, c_path_size(path))`.
     c_path: function (path: @byte_buffer) result: Result[ref @bit8, Error] {
         length: @bit_native = @byte_buffer_len(path)
-        memory: ref unknown = allocate(@i_add_native(length, 0x1)).get() else -> why: Error {
+        memory: ref unknown = map_pages(c_path_size(path)).get() else -> why: Error {
             result = .Error(why)
             return
         }
@@ -410,10 +412,13 @@ private {
         result = .Ok(c)
     }
 
-    /// `path` as NUL-terminated UTF-16 from `allocate`.
+    c_path_size: function (path: @byte_buffer) @bit_native => @i_add_native(@byte_buffer_len(path), 0x1)
+
+    /// `path` as NUL-terminated UTF-16, in pages from `map_pages`: give
+    /// them back with `unmap_pages(wide, wide_path_size(path))`.
     wide_path: function (path: @byte_buffer) result: Result[ref @bit16, Error] {
         length: @bit_native = @byte_buffer_len(path)
-        memory: ref unknown = allocate(@i_mul_native(@i_add_native(length, 0x1), 0x2)).get() else -> why: Error {
+        memory: ref unknown = map_pages(wide_path_size(path)).get() else -> why: Error {
             result = .Error(why)
             return
         }
@@ -423,6 +428,9 @@ private {
         }
         result = .Ok(wide)
     }
+
+    /// UTF-16 takes at most one unit per byte of UTF-8, then the NUL.
+    wide_path_size: function (path: @byte_buffer) @bit_native => @i_mul_native(@i_add_native(@byte_buffer_len(path), 0x1), 0x2)
 
     /// A bare target's C library still has POSIX `write` in practice.
     bare_write: extern "write" function (fildes: @bit32, buf: ref unknown, nbyte: @bit_native) result: @bit_native

@@ -7,7 +7,7 @@
 
 using Standard
 using Standard.Io
-using Standard.Os
+using Standard.Heap
 
 Leaf: object {
     c: @bit32
@@ -23,10 +23,7 @@ Leaf: object {
 }
 
 main: function () nothing {
-    memory: ref unknown = allocate(@i_mul_native(@size_of(Leaf), 0x2)).get() else {
-        @panic("out of memory")
-    }
-    slots: ref Leaf = memory as ref Leaf
+    slots: ref Leaf = get_default_allocator().allocate[Leaf](2)
     second: ref Leaf = @ptr_add(slots as ref unknown, @size_of(Leaf)) as ref Leaf
     {
         @write(slots, Leaf { c = 'a' })
@@ -38,6 +35,6 @@ main: function () nothing {
         moved: Leaf = @read(second)
         print_char('|')
     }
-    deallocate(slots as ref unknown)
+    get_default_allocator().deallocate[Leaf](slots, 2)
     print_char(0xA)
 }

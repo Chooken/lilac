@@ -1,27 +1,203 @@
-// The heap allocator, over the OS (`Standard.Os`).
+// Allocators. `Allocator` is any allocator behind one handle: the
+// allocator's address and a table of its functions, so code that allocates
+// takes an `Allocator` and works with every kind. `default_allocator` is
+// the program's, used by `Box`.
+//
+// An allocator type `A` gives `Allocator.from[A]` its functions as the
+// member constant `ALLOCATOR_TABLE: ref AllocatorTable[A]`, a global
+// table:
+//
+//     ALLOCATOR_TABLE: ref AllocatorTable[Pool] => ref pool_table
+//
+//     pool_table: AllocatorTable[Pool] = AllocatorTable {
+//         allocate = ref Pool.allocate_raw
+//         reallocate = ref Pool.reallocate_raw
+//         free = ref Pool.free_raw
+//     }
 
-using Standard.Os
+/// The program's allocator, for `Box` and anything not given one. It is
+/// `None` until the runtime's `@entry` sets it (`Standard.Runtime` sets
+/// an arena); a program may assign another before anything allocates:
+/// what one allocator gives must go back to the same one.
+default_allocator: Optional[Allocator] = .None
 
+/// `default_allocator`, which must be set.
+get_default_allocator: function () allocator: Allocator {
+    match default_allocator {
+        .Some -> set: Allocator {
+            allocator = set
+            return
+        }
+    }
+    @panic("No default allocator: set `Heap.default_allocator` before allocating.")
+}
+
+/// An allocator type's functions, each taking the allocator first. `size`
+/// and `alignment` are in bytes; the `Allocator` handle checks them, so a
+/// size is always positive and an alignment a power of two.
+AllocatorTable[T]: object {
+    /// `size` zeroed bytes aligned to `alignment`, or null when out of
+    /// memory.
+    allocate: ref function (target: ref T, size: Int, alignment: Int) allocation: ref unknown
+    /// `memory` (`old_size` bytes from `allocate`) resized to `new_size`,
+    /// keeping its bytes up to the smaller size and zeroing the rest; null
+    /// when out of memory, and `memory` is then untouched.
+    reallocate: ref function (target: ref T, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown
+    /// Gives back `memory`, `size` bytes at `alignment` from `allocate`.
+    free: ref function (target: ref T, memory: ref unknown, size: Int, alignment: Int) nothing
+}
+
+/// Any allocator: its address and its functions. It points at the
+/// allocator, so it is used only while the allocator stays in place.
+/// Allocations are zeroed; running out of memory panics. A size of zero
+/// takes no memory: it gives an aligned address that is never read.
 Allocator: object {
 
-    /// A new allocation holding `value`, moved in. Free it with `destroy`.
-    create[T]: function(value: T) allocation: ref T {
-        memory: ref unknown = allocate(@size_of(T)).get() else {
-            @panic("out of memory")
+    private {
+        target: ref unknown
+        functions: ref AllocatorFunctions
+    }
+
+    from_raw: function (target: ref unknown, functions: ref AllocatorFunctions) Allocator => Allocator {
+        target = target
+        functions = functions
+    }
+
+    /// The allocator at `target`, with its type's `ALLOCATOR_TABLE`.
+    from[T]: function (target: ref T) allocator: Allocator {
+        allocator = over[T](target, T.ALLOCATOR_TABLE)
+    }
+
+    /// The allocator at `target`, with the functions in `table`.
+    over[T]: function (target: ref T, table: ref AllocatorTable[T]) allocator: Allocator {
+        allocator = Allocator {
+            target = target as ref unknown
+            functions = table as ref unknown as ref AllocatorFunctions
         }
-        allocation = memory as ref T
+    }
+
+    /// A new allocation holding `value`, moved in. Free it with `destroy`.
+    create[T]: function (self, value: T) allocation: ref T {
+        allocation = self.allocate_bytes(@size_of(T), @align_of(T)) as ref T
         @write(allocation, value)
     }
 
-    /// Drops the value at `allocation` and frees it.
-    destroy[T]: function(allocation: ref T) nothing {
+    /// Drops the value at `allocation` (from `create`) and frees it.
+    destroy[T]: function (self, allocation: ref T) nothing {
         @drop(allocation)
-        deallocate(allocation as ref unknown)
+        self.free_bytes(allocation as ref unknown, @size_of(T), @align_of(T))
     }
 
-    /// Frees `allocation` without dropping anything: its value was moved
-    /// out (`@read`).
-    free[T]: function(allocation: ref T) nothing {
-        deallocate(allocation as ref unknown)
+    /// Frees `allocation` (from `create`) without dropping anything: its
+    /// value was moved out (`@read`).
+    free[T]: function (self, allocation: ref T) nothing {
+        self.free_bytes(allocation as ref unknown, @size_of(T), @align_of(T))
+    }
+
+    /// Room for `count` zeroed `T`s. Free it with `deallocate`.
+    allocate[T]: function (self, count: Int) allocation: ref T {
+        allocation = self.allocate_bytes(array_size(@size_of(T), count), @align_of(T)) as ref T
+    }
+
+    /// `memory` (from `allocate`, `count` long) resized to `new_count`,
+    /// keeping the first of them; new elements are zeroed.
+    reallocate[T]: function (self, memory: ref T, count: Int, new_count: Int) allocation: ref T {
+        allocation = self.reallocate_bytes(memory as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
+    }
+
+    /// Frees `memory` (from `allocate`, `count` long) without dropping
+    /// anything.
+    deallocate[T]: function (self, memory: ref T, count: Int) nothing {
+        self.free_bytes(memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
+    }
+
+    /// `size` zeroed bytes aligned to `alignment` (a power of two).
+    allocate_bytes: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        check_request(size, alignment)
+        if size == 0 as Int {
+            allocation = empty_allocation(alignment)
+            return
+        }
+        allocation = self.functions.allocate(self.target, size, alignment)
+        if @ptr_to_address(allocation) == 0x0 {
+            @panic("Out of memory.")
+        }
+    }
+
+    /// `memory` (from `allocate_bytes`, `old_size` long) resized to
+    /// `new_size` bytes, keeping its bytes up to the smaller size; new
+    /// bytes are zeroed.
+    reallocate_bytes: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        check_request(old_size, alignment)
+        check_request(new_size, alignment)
+        if old_size == 0 as Int {
+            allocation = self.allocate_bytes(new_size, alignment)
+            return
+        }
+        if new_size == 0 as Int {
+            self.free_bytes(memory, old_size, alignment)
+            allocation = empty_allocation(alignment)
+            return
+        }
+        allocation = self.functions.reallocate(self.target, memory, old_size, new_size, alignment)
+        if @ptr_to_address(allocation) == 0x0 {
+            @panic("Out of memory.")
+        }
+    }
+
+    /// Frees `memory`, `size` bytes at `alignment` from `allocate_bytes`.
+    free_bytes: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+        check_request(size, alignment)
+        if size == 0 as Int {
+            return
+        }
+        self.functions.free(self.target, memory, size, alignment)
+    }
+}
+
+
+private {
+
+    /// `AllocatorTable` with the allocator's type erased, as `Allocator`
+    /// holds it: every table has this layout.
+    AllocatorFunctions: object {
+        allocate: ref function (target: ref unknown, size: Int, alignment: Int) allocation: ref unknown
+        reallocate: ref function (target: ref unknown, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown
+        free: ref function (target: ref unknown, memory: ref unknown, size: Int, alignment: Int) nothing
+    } 
+
+    /// Refuses a negative size or an alignment that is not a power of two.
+    check_request: function (size: Int, alignment: Int) nothing {
+        if size < 0 {
+            @panic("Can't allocate a negative size.")
+        }
+        if alignment <= 0 or @bit_and_native(alignment as @bit_native, (alignment - 1) as @bit_native) != 0x0 {
+            @panic("The alignment must be a power of two.")
+        }
+    }
+
+    /// A zero-size allocation: `alignment` itself, aligned and never read.
+    empty_allocation: function (alignment: Int) ref unknown => @address_to_ptr(alignment as @bit_native)
+
+    smaller: function (a: Int, b: Int) least: Int {
+        least = b
+        if a < b {
+            least = a
+        }
+    }
+
+    /// `value` rounded up to a multiple of `alignment` (a power of two).
+    align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
+
+    /// `count` elements of `element` bytes, refused before the product
+    /// could overflow (no mapping could hold it then).
+    array_size: function (element: Int, count: Int) size: Int {
+        if count < 0 {
+            @panic("Can't allocate a negative count.")
+        }
+        if element > 0 and count > Int.MAX / element {
+            @panic("Out of memory.")
+        }
+        size = element * count
     }
 }

@@ -924,7 +924,9 @@ Globals are top-level only; a type's body declares constants (see Objects).
 
 The initializer is evaluated at compile time and must be a constant
 expression (the forms in §2's constant-condition table, plus object
-literals and enum variants of constants); anything else is `E038`. No code
+literals and enum variants of constants, also of types with hooks, since
+building a value runs none: `slot: Optional[Buffer] = .None`); anything
+else is `E038`. No code
 runs before `@entry`, so a global needing a computed value is declared
 zeroed and assigned at run time. A global is never dropped: its `@on_drop`
 hook, if any, does not run at exit.

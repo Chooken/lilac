@@ -269,7 +269,11 @@ formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
 
 ### 3.2 `Standard.Memory`
 
-> **Today:** `Standard.Heap.Allocator` over `Standard.Os`:
+> **Today:** `Standard.Heap.Allocator` is any allocator as a handle
+> (`Allocator.from[T]`; `PageAllocator`, `ArenaAllocator`, `CAllocator`
+> with `--libc`). `Heap.default_allocator` is an `Optional[Allocator]`
+> that `Standard.Runtime`'s `@entry` sets to an arena
+> (`get_default_allocator()` reads it). The handle has
 > `create[T](value) ref T` (allocate, then `@write` the value in),
 > `destroy[T](ref T)` (`@drop`, then free) and `free[T](ref T)` (free a
 > slot whose value was moved out with `@read`). `Box[T]` (in `Standard`)

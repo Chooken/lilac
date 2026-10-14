@@ -9,6 +9,11 @@
 // Every consumer (`Io.print`, a string, a log) makes a `Formatter` over its
 // own storage, so each type needs one hook and each consumer one sink.
 
+Format: alias @format_args(Formatter)
+
+/// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
+FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
+
 /// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
 Formatter: object {
     private {
@@ -17,8 +22,13 @@ Formatter: object {
     }
 
     /// A formatter that hands every byte to `sink(target, bytes)`.
-    over: function (target: ref unknown, sink: ref FormatSink) out: Formatter {
-        out = Formatter { target = target, sink = sink }
+    over[T]: function (
+        target: ref T, 
+        sink: ref function (target: ref T, bytes: @byte_buffer) nothing
+    ) 
+        out: Formatter 
+    {
+        out = Formatter { target = target as ref unknown, sink = sink as ref unknown as ref FormatSink }
     }
 
     /// Writes an f-string, a literal, or one formattable value
@@ -39,11 +49,6 @@ Formatter: object {
         self.sink(self.target, bytes)
     }
 }
-
-Format: alias @format_args(Formatter)
-
-/// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
-FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
 
 // The bit containers format as unsigned decimal.
 @format: function (value: ref @bit8, out: ref Formatter) nothing {
@@ -106,7 +111,7 @@ Padded: object {
 
     @format: function (self, out: ref Formatter) nothing {
         length: @bit_native = 0x0
-        counter: Formatter = Formatter.over(ref length as ref unknown, ref count_characters)
+        counter: Formatter = Formatter.over[@bit_native](ref length, ref count_characters)
         counter.write(self.text)
         padding: @bit_native = 0x0
         if @i_greater_than_u_native(self.width, length) {
@@ -173,8 +178,7 @@ private {
 
     /// A sink that counts the code points it is given into the
     /// `@bit_native` at `target`: every byte but a UTF-8 continuation byte.
-    count_characters: function (target: ref unknown, bytes: @byte_buffer) nothing {
-        count: ref @bit_native = target as ref @bit_native
+    count_characters: function (count: ref @bit_native, bytes: @byte_buffer) nothing {
         data: ref @bit8 = @byte_buffer_ptr(bytes)
         length: @bit_native = @byte_buffer_len(bytes)
         index: @bit_native = 0x0

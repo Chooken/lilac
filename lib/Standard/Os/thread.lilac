@@ -14,7 +14,8 @@ Thread: object {
     /// The Windows thread handle, or the `pthread_t`; native Linux keeps
     /// the thread id.
     value: @bit_native
-    /// The start block (from `allocate`), or the native Linux mapping.
+    /// The start block (a page from `map_pages`), or the native Linux
+    /// mapping.
     memory: ref unknown
 }
 
@@ -25,7 +26,7 @@ ThreadEntry: alias function (argument: ref unknown) nothing
 spawn: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[Thread, Error] {
     match @builtin.Target.os {
         .Windows => {
-            start: ref unknown = allocate(start_size).get() else -> why: Error {
+            start: ref unknown = map_pages(start_size).get() else -> why: Error {
                 result = .Error(why)
                 return
             }
@@ -34,7 +35,7 @@ spawn: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[T
             handle: ref unknown = Windows.CreateThread(null(), 0x0, ref thread_start as ref unknown, start, 0x0, ref id)
             if @ptr_to_address(handle) == 0x0 {
                 why: Error = error_of_windows(Windows.GetLastError())
-                deallocate(start)
+                unmap_pages(start, start_size)
                 result = .Error(why)
             } else {
                 thread: Thread { value = @ptr_to_address(handle), memory = start }
@@ -67,7 +68,7 @@ join: function (thread: Thread) error: Optional[Error] {
                 error = .Some(error_of_windows(Windows.GetLastError()))
             }
             Windows.CloseHandle(handle)
-            deallocate(thread.memory)
+            unmap_pages(thread.memory, start_size)
         }
         .Linux => {
             if @builtin.Target.libc {
@@ -172,7 +173,7 @@ private {
     sched_yield: extern function () result: @bit32
 
     posix_spawn_thread: function (entry: ref ThreadEntry, argument: ref unknown) result: Result[Thread, Error] {
-        start: ref unknown = allocate(start_size).get() else -> why: Error {
+        start: ref unknown = map_pages(start_size).get() else -> why: Error {
             result = .Error(why)
             return
         }
@@ -183,7 +184,7 @@ private {
             thread: Thread { value = handle, memory = start }
             result = .Ok(thread)
         } else {
-            deallocate(start)
+            unmap_pages(start, start_size)
             result = .Error(error_of_errno(code))
         }
     }
@@ -192,7 +193,7 @@ private {
         error = .None
         code: @bit32 = pthread_join(thread.value, null())
         if code == 0x0 {
-            deallocate(thread.memory)
+            unmap_pages(thread.memory, start_size)
         } else {
             error = .Some(error_of_errno(code))
         }

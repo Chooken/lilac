@@ -1,0 +1,37 @@
+// lib: HeapChecks=tests/libs/HeapChecks
+// expect-stdout: dropped 2
+// expect-exit: 0
+// `Standard.Heap.Allocator` over each allocator with no C library: the
+// default (the runtime's arena), pages, and an arena through `from`. Each
+// gives zeroed, aligned memory; `reallocate` keeps the bytes and zeroes
+// what it adds, also after a shrink; a zero size takes no memory;
+// `destroy` drops and `Box.create_in` uses the allocator it is given
+// (`HeapChecks.exercise`). Exits with the number of the first failed
+// check.
+
+using Standard
+using Standard.Io
+using Standard.Heap
+using HeapChecks
+
+main: function () nothing {
+    exercise(get_default_allocator(), 0x10)
+    exercise(PageAllocator.ALLOCATOR, 0x20)
+
+    arena: ArenaAllocator = ArenaAllocator.init()
+    exercise(Allocator.from[ArenaAllocator](ref arena), 0x30)
+    used: Int = arena.get_used()
+    check(used > 0 as Int, 0x40)
+
+    // A box from the arena takes the arena's memory; one from the
+    // default does not.
+    drops = 0
+    {
+        boxed: Box[Counted] = Box[Counted].create_in(Allocator.from[ArenaAllocator](ref arena), Counted { value = 0x5 })
+        check(arena.get_used() > used, 0x41)
+        grown: Int = arena.get_used()
+        plain: Box[Counted] = Box[Counted].create(Counted { value = 0x6 })
+        check(arena.get_used() == grown, 0x42)
+    }
+    print_line($"dropped {drops}")
+}

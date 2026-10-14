@@ -1,0 +1,24 @@
+// libc
+// lib: HeapChecks=tests/libs/HeapChecks
+// expect-stdout: dropped 1
+// expect-exit: 0
+// `heap_allocators.lilac` under `--libc`: the C library's heap
+// (`CAllocator`), whose `reallocate` zeroes what `realloc` adds, beside
+// the default (the runtime's arena) and pages from the OS.
+
+using Standard
+using Standard.Io
+using Standard.Heap
+using HeapChecks
+
+main: function () nothing {
+    exercise(get_default_allocator(), 0x10)
+    exercise(CAllocator.ALLOCATOR, 0x20)
+    exercise(PageAllocator.ALLOCATOR, 0x30)
+
+    drops = 0
+    {
+        plain: Box[Counted] = Box[Counted].create(Counted { value = 0x6 })
+    }
+    print_line($"dropped {drops}")
+}

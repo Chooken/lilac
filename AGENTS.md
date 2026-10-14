@@ -114,7 +114,10 @@
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an
   assignment target too: `Checker::item_place`). `lilac-lower/src/globals.rs`
-  folds each initializer with the constant evaluator and encodes it as
+  folds each initializer with the constant evaluator (`global_constant`:
+  struct and variant literals of hooked types too, since building one runs
+  no hook and a global never drops, so `Optional[T] = .None` is constant
+  for any `T`) and encodes it as
   runs (`LirGlobal::init`: `(offset, bytes)` over an otherwise zero object,
   never the whole object; the backend fills the gaps with
   `zeroinitializer`) in the C layout (a non-constant one is `E038`,
@@ -153,12 +156,27 @@
   its names, argument orders, constant values and failure convention
   (`GetLastError`, raw `-errno` with `is_error`/`errno_of`, `errno()`).
   `Os` itself is the portable surface (`Handle`, `read`/`write`, `open`,
-  `allocate`, `map_pages`, clocks, `fill_random`, `exit`, `Error`, threads:
+  `map_pages`, clocks, `fill_random`, `exit`, `Error`, threads:
   `spawn`/`join`/`yield_thread`), each
   function one `match @builtin.Target.os` over them; `--libc` only moves
-  the heap and the exit to C. The rest of `Standard` uses only `Os`, and
+  the exit to C. `Os` has no heap (a heap is policy): its own scratch
+  memory (paths, thread start blocks) is pages. The rest of `Standard` uses only `Os`, and
   `Standard.C` is ISO C only. Every `Os.Windows`/`Os.MacOs` function must
   be in the `toolchain/` stubs (`tests/toolchain.rs` checks).
+- `Standard.Heap`: `Allocator` is any allocator as a handle (its address
+  and a `ref` to a static table of its functions, `AllocatorTable[T]`,
+  erased), built by `Allocator.from[T]` from the type's
+  `ALLOCATOR_TABLE` constant; it names no concrete allocator. The handle
+  checks sizes and alignments, answers a zero size with an aligned
+  address, passes every size to `free`, and panics when an allocator
+  returns null. Each allocator type is its own file: `PageAllocator`
+  (`Os.map_pages`, stateless), `ArenaAllocator`, and `CAllocator`
+  (`calloc`, needs `--libc`); the stateless ones offer
+  `Type.ALLOCATOR`. `default_allocator` is an `Optional[Allocator]`
+  global, `.None` until `Standard.Runtime`'s `@entry` sets it to a
+  program-long arena (a private `Optional[ArenaAllocator]` global,
+  reached by `get_ref`); `get_default_allocator` panics while it is
+  unset. `Box` keeps the `Allocator` it came from.
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR
@@ -525,7 +543,7 @@
 - `--libc` links through a C compiler driver (`--linker`, `LILAC_LINKER`,
   else `cc`/`clang` on `PATH`) with a C `main(argc, argv, envp)`
   (`Entry::CMain`) that calls `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
-  takes its heap and exit from the C library. It is the
+  takes its exit from the C library and `CAllocator` works. It is the
   permanent opt-in for static C libraries, and how code using `Standard.C`
   builds while that is phased out. Shared C libraries work in native mode
   (an `extern` plus `--link-arg=`); free their memory with their own free

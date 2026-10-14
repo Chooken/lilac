@@ -1,7 +1,7 @@
 // libc
 // expect-stdout: written
 // expect-exit: 0
-// `os_layer.lilac` under `--libc`: the heap is C's, exit is C's, and on
+// `os_layer.lilac` under `--libc`: exit is C's, and on
 // Windows random bytes come from the C runtime's `rand_s`.
 
 using Standard
@@ -112,22 +112,7 @@ random: function () nothing {
     check(nonzero(any), 0x40)
 }
 
-heap: function () nothing {
-    memory: ref unknown = Os.allocate(0x10).get() else {
-        exit(0x50)
-        return
-    }
-    bytes: ref @bit8 = memory as ref @bit8
-    @store_u8(bytes, 0xF, 0x2A)
-    grown: ref unknown = Os.reallocate(memory, 0x10000).get() else {
-        exit(0x51)
-        return
-    }
-
-    check(@load_u8(grown as ref @bit8, 0xF) == 0x2A, 0x52)
-    @store_u8(grown as ref @bit8, 0xFFFF, 0x1)
-    Os.deallocate(grown)
-
+pages: function () nothing {
     // Whole pages, zeroed, and the error for a size no address space has.
     size: @bit_native = Os.page_size()
     pages: ref unknown = Os.map_pages(size).get() else {
@@ -149,5 +134,5 @@ main: function () nothing {
     files()
     clocks()
     random()
-    heap()
+    pages()
 }

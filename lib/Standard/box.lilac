@@ -1,4 +1,4 @@
-using *.Heap
+using Standard.Heap as Heap
 
 /// One value on the heap, owned: a `Box` moves (it cannot be copied) and
 /// dropping it drops the value and frees its memory.
@@ -6,12 +6,21 @@ Box[T]: object {
 
     private {
         value: ref T
+        allocator: Heap.Allocator
     }
 
-    /// A box holding `data`, moved onto the heap.
+    /// A box holding `data`, moved onto the heap from
+    /// `Heap.default_allocator`.
     create: function(data: T) box: Box[T] {
+        box = create_in(Heap.get_default_allocator(), data)
+    }
+
+    /// A box holding `data`, moved into memory from `allocator`, which
+    /// must stay in place while the box lives.
+    create_in: function(allocator: Heap.Allocator, data: T) box: Box[T] {
         box = Box[T] {
-            value = Allocator.create[T](data)
+            value = allocator.create[T](data)
+            allocator = allocator
         }
     }
 
@@ -19,10 +28,10 @@ Box[T]: object {
     into_inner: function(self: Box[T]) data: T {
         @discard(self)
         data = @read(self.value)
-        Allocator.free[T](self.value)
+        self.allocator.free[T](self.value)
     }
 
     @on_drop: function(self) nothing {
-        Allocator.destroy[T](self.value)
+        self.allocator.destroy[T](self.value)
     }
 }

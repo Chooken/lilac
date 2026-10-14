@@ -1,0 +1,64 @@
+
+default_page_allocator: PageAllocator = PageAllocator {}
+
+/// Whole pages from the OS for each allocation (`Os.map_pages`), given
+/// back to it when freed. It keeps no state, so every thread may use it,
+/// but each allocation takes at least a page: allocate in bulk from it, or
+/// put an arena over it. Aligns to at most a page.
+PageAllocator: object {
+
+    ALLOCATOR_TABLE: ref AllocatorTable[PageAllocator] => ref page_table
+
+    ALLOCATOR: Allocator => Allocator.from[PageAllocator](ref default_page_allocator)
+
+    allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        within_page(alignment)
+        allocation = @address_to_ptr(0x0)
+        match Os.map_pages(size as @bit_native) {
+            .Ok -> pages: ref unknown => allocation = pages
+        }
+    }
+
+    /// In place while the size stays within the same pages, else moved to
+    /// new pages.
+    reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        within_page(alignment)
+        page: Int = @builtin.Target.page_size
+        if (old_size - 1) / page == (new_size - 1) / page {
+            // What a shrink gives back goes back to zero, for a later
+            // growth.
+            if new_size < old_size {
+                @memset(@ptr_add(memory, new_size as @bit_native), 0x0, (old_size - new_size) as @bit_native)
+            }
+            allocation = memory
+            return
+        }
+        allocation = self.allocate_raw(new_size, alignment)
+        if @ptr_to_address(allocation) == 0x0 {
+            return
+        }
+        @memcpy(allocation, memory, smaller(old_size, new_size) as @bit_native)
+        self.free_raw(memory, old_size, alignment)
+    }
+
+    free_raw: function (self, memory: ref unknown, size: Int, _alignment: Int) nothing {
+        Os.unmap_pages(memory, size as @bit_native)
+    }
+}
+
+private {
+
+    /// Refuses an alignment past a page.
+    within_page: function (alignment: Int) nothing {
+        if alignment > @builtin.Target.page_size {
+            @panic("PageAllocator aligns to at most a page.")
+        }
+    }
+
+    page_table: AllocatorTable[PageAllocator] = AllocatorTable {
+        allocate = ref PageAllocator.allocate_raw
+        reallocate = ref PageAllocator.reallocate_raw
+        free = ref PageAllocator.free_raw
+    }
+
+}
