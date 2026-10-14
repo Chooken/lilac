@@ -1005,7 +1005,9 @@ bug fix that changes generated code.
   "attempt to add with overflow" and so on; the four overflow families
   (`checked_*`, `wrapping_*`, `saturating_*`, `overflowing_*` for
   `add`/`subtract`/`multiply`/`negate`/`pow`), division/root/bit/wide
-  methods and `compare` (`Ordering` in `ordering.lilac`) take `self` by
+  methods, float constants/classification (`FloatClass` in
+  `float_class.lilac`), exact/bit/ULP/comparison/interpolation methods
+  and `compare` (`Ordering` in `ordering.lilac`) take `self` by
   value so the `=>` ones fold as constants, and `Standard` code that
   means to wrap (address arithmetic in `Heap`) uses `wrapping_*`. `as` exists only where exact; other conversions
   are `to_X()` (fails), `to_X_wrapping()`, `to_X_truncated()` and

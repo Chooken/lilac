@@ -219,7 +219,7 @@ unsigned variants; float variants. Unsigned comparisons bind
 `@conversion(from: @bit8) to: @bit32`), `Char`↔`@bit32`, `@bit*`↔float,
 `@bit*`→`@byte_buffer` textual? (textual lives in `Text`).
 
-> **Today** (math plan phases 2-3, generated one file per type): every
+> **Today** (math plan phases 2-4, generated one file per type): every
 > integer type has `MIN`/`MAX`, the operators with a bit container on
 > either side (so `n * 2` and `1 < n` need no `as`), `@format`,
 > `hex`/`binary`, `compare`, `abs`/`unsigned_abs`/`sign`,
@@ -234,8 +234,21 @@ unsigned variants; float variants. Unsigned comparisons bind
 > `+`, `-`, `*` and negation panic on overflow in Debug builds
 > (`attempt to add with overflow`, …) and wrap in Release; `/` and `%`
 > panic on a zero divisor (and `MIN / -1`) in every mode. Floats
-> (`Float16` too) have their arithmetic and comparisons, with an
-> `@fbitW` on either side. `as` is an `@conversion` only where every
+> (`Float16`, `Float32`, `Float64`) have their arithmetic and
+> comparisons with an `@fbitW` on either side, mathematical and format
+> constants (`PI`, `TAU`, `E`, `SQRT_2`, `INFINITY`, `NAN`, `EPSILON`,
+> `MIN_POSITIVE`, `MIN_SUBNORMAL`, `MAX`, `MIN`, `MANTISSA_BITS`,
+> `EXPONENT_BITS`), classification (`is_nan`, `is_infinite`, `is_finite`,
+> `is_normal`, `is_subnormal`, `is_zero`, `sign_bit`, `is_sign_negative`,
+> `is_sign_positive`, `classify` → `FloatClass`), exact operations
+> (`abs`, `copy_sign`, `floor`, `ceil`, `trunc`, `round`, `round_even`,
+> `fract`, `sqrt`, `multiply_add`, `min`, `max`, `min_number`,
+> `max_number`, `clamp`, `recip`, `to_radians`, `to_degrees`), bit/ULP
+> operations (`to_bits`, `from_bits`, `hex`, `binary`, `next_up`,
+> `next_down`, `ulp`, `exponent`, `mantissa`, `scale_by_power_of_two`,
+> `split_exponent`), comparisons (`equals`, `approximately_equals`,
+> `total_compare`, `compare`), and interpolation (`lerp`, `inverse_lerp`,
+> `remap`, `smooth_step`). `as` is an `@conversion` only where every
 > value converts exactly: widening of one signedness, unsigned into a
 > wider signed type, an integer into a float whose significand holds it,
 > and a narrower float into a wider one. Everything else is a method

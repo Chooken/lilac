@@ -3,12 +3,71 @@
 /// A 32-bit IEEE 754 binary floating-point number (C's `float`).
 ///
 /// Arithmetic is IEEE's, rounded to nearest (ties to even); `%` is C's
-/// `fmod`. `==` compares bits: `0.0 == -0.0` is false.
+/// `fmod`. `==` compares raw bits (`0.0 == -0.0` is `false` and equal
+/// NaNs are `true`); use `equals` for IEEE equality, `approximately_equals`
+/// for a tolerance and `total_compare` for sorting.
 Float32: object {
 
     private {
         data: @fbit32
     }
+
+    /// Archimedes' constant π.
+    PI: Float32 => Float32 { data = 3.14159265358979323846264338327950288 }
+
+    /// The full circle constant τ (`2π`).
+    TAU: Float32 => Float32 { data = 6.28318530717958647692528676655900577 }
+
+    /// Euler's number e.
+    E: Float32 => Float32 { data = 2.71828182845904523536028747135266250 }
+
+    /// `√2`.
+    SQRT_2: Float32 => Float32 { data = 1.41421356237309504880168872420969808 }
+
+    /// `1 / √2`.
+    FRAC_1_SQRT_2: Float32 => Float32 { data = 0.707106781186547524400844362104849039 }
+
+    /// `ln(2)`.
+    LN_2: Float32 => Float32 { data = 0.693147180559945309417232121458176568 }
+
+    /// `ln(10)`.
+    LN_10: Float32 => Float32 { data = 2.30258509299404568401799145468436421 }
+
+    /// `log2(e)`.
+    LOG2_E: Float32 => Float32 { data = 1.44269504088896340735992468100189214 }
+
+    /// `log10(e)`.
+    LOG10_E: Float32 => Float32 { data = 0.434294481903251827651128918916605082 }
+
+    /// Positive infinity (`+∞`).
+    INFINITY: Float32 => Float32 { data = @bits_to_fbit_32(0x7F800000) }
+
+    /// Negative infinity (`-∞`).
+    NEG_INFINITY: Float32 => Float32 { data = @bits_to_fbit_32(0xFF800000) }
+
+    /// The canonical quiet `NaN`.
+    NAN: Float32 => Float32 { data = @bits_to_fbit_32(0x7FC00000) }
+
+    /// Machine epsilon (`2^-23`): the step from `1.0` to the next larger `Float32`.
+    EPSILON: Float32 => Float32 { data = @bits_to_fbit_32(0x34000000) }
+
+    /// The smallest positive normal `Float32` (`2^-126`).
+    MIN_POSITIVE: Float32 => Float32 { data = @bits_to_fbit_32(0x00800000) }
+
+    /// The smallest positive subnormal `Float32` (`2^-149`).
+    MIN_SUBNORMAL: Float32 => Float32 { data = @bits_to_fbit_32(0x1) }
+
+    /// The largest finite `Float32`.
+    MAX: Float32 => Float32 { data = @bits_to_fbit_32(0x7F7FFFFF) }
+
+    /// The smallest finite `Float32` (`-MAX`).
+    MIN: Float32 => Float32 { data = @bits_to_fbit_32(0xFF7FFFFF) }
+
+    /// The number of stored mantissa (fraction) bits (24 bits of precision with the implicit leading bit).
+    MANTISSA_BITS: Uint32 => 23
+
+    /// The number of exponent bits.
+    EXPONENT_BITS: Uint32 => 8
 
     @add: function (lhs: Float32, rhs: Float32) Float32 => Float32 { data = @f_add_32(lhs.data, rhs.data) }
     @sub: function (lhs: Float32, rhs: Float32) Float32 => Float32 { data = @f_sub_32(lhs.data, rhs.data) }
@@ -47,6 +106,194 @@ Float32: object {
     @less_than_or_equal: function (lhs: @fbit32, rhs: Float32) Bool => @f_less_than_or_equal_32(lhs, rhs.data)
     @greater_than_or_equal: function (lhs: @fbit32, rhs: Float32) Bool => @f_greater_than_or_equal_32(lhs, rhs.data)
 
+    /// Whether `self` is a `NaN`.
+    is_nan: function (self: Float32) Bool => @i_greater_than_u_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x7F800000)
+
+    /// Whether `self` is `+∞` or `-∞`.
+    is_infinite: function (self: Float32) Bool => @bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF) == 0x7F800000
+
+    /// Whether `self` is finite (neither `NaN` nor `±∞`).
+    is_finite: function (self: Float32) Bool => @i_less_than_u_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x7F800000)
+
+    /// Whether `self` is a finite normal value (not zero, subnormal, infinite or `NaN`).
+    is_normal: function (self: Float32) Bool => @i_less_than_u_32(@i_sub_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x00800000), 0x7F000000)
+
+    /// Whether `self` is a non-zero subnormal value.
+    is_subnormal: function (self: Float32) Bool => @i_less_than_u_32(@i_sub_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x1), 0x007FFFFF)
+
+    /// Whether `self` is `+0.0` or `-0.0`.
+    is_zero: function (self: Float32) Bool => @bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF) == 0x0
+
+    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).
+    sign_bit: function (self: Float32) Bool => @bit_and_32(@fbit_to_bits_32(self.data), 0x80000000) != 0x0
+
+    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).
+    is_sign_negative: function (self: Float32) Bool => @bit_and_32(@fbit_to_bits_32(self.data), 0x80000000) != 0x0
+
+    /// Whether the sign bit of `self` is clear (including `+0.0` and positive `NaN`).
+    is_sign_positive: function (self: Float32) Bool => @bit_and_32(@fbit_to_bits_32(self.data), 0x80000000) == 0x0
+
+    /// The IEEE 754 category of `self`.
+    classify: function (self: Float32) FloatClass =>
+        if self.is_nan() then .Nan else if self.is_infinite() then .Infinite else if self.is_zero() then .Zero else if self.is_subnormal() then .Subnormal else .Normal
+
+    /// `|self|` (clears the sign bit).
+    abs: function (self: Float32) Float32 => Float32 { data = @f_abs_32(self.data) }
+
+    /// The magnitude of `self` with the sign bit of `sign`.
+    copy_sign: function (self: Float32, sign: Float32) Float32 => Float32 { data = @f_copy_sign_32(self.data, sign.data) }
+
+    /// Largest integral value not greater than `self` (`⌊self⌋`).
+    floor: function (self: Float32) Float32 => Float32 { data = @f_floor_32(self.data) }
+
+    /// Smallest integral value not less than `self` (`⌈self⌉`).
+    ceil: function (self: Float32) Float32 => Float32 { data = @f_ceil_32(self.data) }
+
+    /// Integral part of `self`, rounded toward zero.
+    trunc: function (self: Float32) Float32 => Float32 { data = @f_trunc_32(self.data) }
+
+    /// Nearest integral value to `self`, ties rounded away from zero.
+    round: function (self: Float32) Float32 => Float32 { data = @f_round_32(self.data) }
+
+    /// Nearest integral value to `self`, ties rounded to even.
+    round_even: function (self: Float32) Float32 => Float32 { data = @f_round_even_32(self.data) }
+
+    /// Fractional part of `self` (`self - self.trunc()`).
+    fract: function (self: Float32) Float32 => Float32 { data = @f_sub_32(self.data, @f_trunc_32(self.data)) }
+
+    /// `√self`, correctly rounded (`NaN` when `self < -0.0`).
+    sqrt: function (self: Float32) Float32 => Float32 { data = @f_sqrt_32(self.data) }
+
+    /// `self * b + c` rounded once (fused multiply-add).
+    multiply_add: function (self: Float32, b: Float32, c: Float32) Float32 => Float32 { data = @f_multiply_add_32(self.data, b.data, c.data) }
+
+    /// IEEE 754 `minimum`: propagates `NaN` and orders `-0.0 < +0.0`.
+    min: function (self: Float32, other: Float32) Float32 => Float32 { data = @f_min_32(self.data, other.data) }
+
+    /// IEEE 754 `maximum`: propagates `NaN` and orders `-0.0 < +0.0`.
+    max: function (self: Float32, other: Float32) Float32 => Float32 { data = @f_max_32(self.data, other.data) }
+
+    /// IEEE 754 `minimumNumber`: returns the non-`NaN` operand when one is `NaN`.
+    min_number: function (self: Float32, other: Float32) Float32 =>
+        if self.is_nan() then other else if other.is_nan() then self else Float32 { data = @f_min_32(self.data, other.data) }
+
+    /// IEEE 754 `maximumNumber`: returns the non-`NaN` operand when one is `NaN`.
+    max_number: function (self: Float32, other: Float32) Float32 =>
+        if self.is_nan() then other else if other.is_nan() then self else Float32 { data = @f_max_32(self.data, other.data) }
+
+    /// `self` bounded to `low..=high` (propagates `NaN`); panics when `low > high`.
+    clamp: function (self: Float32, low: Float32, high: Float32) Float32 =>
+        if @f_greater_than_32(low.data, high.data) then @panic("clamp: low is greater than high") else Float32 { data = @f_min_32(@f_max_32(self.data, low.data), high.data) }
+
+    /// `1.0 / self`.
+    recip: function (self: Float32) Float32 => Float32 { data = @f_div_32(1.0, self.data) }
+
+    /// `self` converted from degrees to radians (`self * (π / 180)`).
+    to_radians: function (self: Float32) Float32 => Float32 { data = @f_mul_32(self.data, 0.0174532925199432957692369076848861271) }
+
+    /// `self` converted from radians to degrees (`self * (180 / π)`).
+    to_degrees: function (self: Float32) Float32 => Float32 { data = @f_mul_32(self.data, 57.2957795130823208767981548141051703) }
+
+    /// The raw IEEE 754 bit pattern of `self`.
+    to_bits: function (self: Float32) Uint32 => @fbit_to_bits_32(self.data) as Uint32
+
+    /// The `Float32` with raw IEEE 754 bit pattern `bits`.
+    from_bits: function (bits: Uint32) Float32 => Float32 { data = @bits_to_fbit_32(bits as @bit32) }
+
+    /// Smallest representable `Float32` strictly greater than `self` (IEEE 754 `nextUp`).
+    next_up: function (self: Float32) Float32 =>
+        if self.is_nan() or self.data == Float32.INFINITY.data then self else if self.is_zero() then Float32.MIN_SUBNORMAL else if @bit_and_32(@fbit_to_bits_32(self.data), 0x80000000) == 0x0 then Float32 { data = @bits_to_fbit_32(@i_add_32(@fbit_to_bits_32(self.data), 0x1)) } else Float32 { data = @bits_to_fbit_32(@i_sub_32(@fbit_to_bits_32(self.data), 0x1)) }
+
+    /// Largest representable `Float32` strictly less than `self` (IEEE 754 `nextDown`).
+    next_down: function (self: Float32) Float32 =>
+        if self.is_nan() or self.data == Float32.NEG_INFINITY.data then self else if self.is_zero() then -Float32.MIN_SUBNORMAL else if @bit_and_32(@fbit_to_bits_32(self.data), 0x80000000) == 0x0 then Float32 { data = @bits_to_fbit_32(@i_sub_32(@fbit_to_bits_32(self.data), 0x1)) } else Float32 { data = @bits_to_fbit_32(@i_add_32(@fbit_to_bits_32(self.data), 0x1)) }
+
+    /// Unit in the last place of `self` (`NaN` for `±∞` and `NaN`).
+    ulp: function (self: Float32) Float32 =>
+        if not self.is_finite() then Float32.NAN else if @i_less_than_u_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x00800000) then Float32.MIN_SUBNORMAL else if @bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF) == 0x7F7FFFFF then Float32 { data = @f_sub_32(Float32.MAX.data, @bits_to_fbit_32(@i_sub_32(0x7F7FFFFF, 0x1))) } else Float32 { data = @f_sub_32(@bits_to_fbit_32(@i_add_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF), 0x1)), @bits_to_fbit_32(@bit_and_32(@fbit_to_bits_32(self.data), 0x7FFFFFFF))) }
+
+    /// The unbiased exponent field of `self` (`((bits >> MANTISSA_BITS) & mask) - 127`).
+    exponent: function (self: Float32) Int32 => (@bit_and_32(@bit_shift_right_u_32(@fbit_to_bits_32(self.data), 0x17), 0xFF) as Uint32).to_int32_wrapping() - 127
+
+    /// The stored mantissa (fraction) bits of `self`.
+    mantissa: function (self: Float32) Uint32 => @bit_and_32(@fbit_to_bits_32(self.data), 0x007FFFFF) as Uint32
+
+    /// `self * 2^n` rounded once (IEEE 754 `scaleB` / C's `ldexp`).
+    scale_by_power_of_two: function (self: Float32, n: Int32) scaled: Float32 {
+        if self.is_nan() or self.is_infinite() or self.is_zero() or n == 0 as Int32 {
+            scaled = self
+            return
+        }
+        norm: @fbit32 = self.data
+        adj: Int64 = n as Int64
+        if self.is_subnormal() {
+            norm = @f_mul_32(norm, 8388608.0)
+            adj = adj - 23
+        }
+        bits: @bit32 = @fbit_to_bits_32(norm)
+        exp_field: @bit32 = @bit_and_32(@bit_shift_right_u_32(bits, 0x17), 0xFF)
+        new_e: Int64 = (exp_field as Uint32 as Int64) + adj
+        if new_e > 254 {
+            scaled = Float32.INFINITY.copy_sign(self)
+            return
+        }
+        if new_e >= 1 {
+            ebits: @bit32 = new_e.to_uint32_wrapping() as @bit32
+            scaled = Float32 { data = @bits_to_fbit_32(@bit_or_32(@bit_and_32(bits, 0x807FFFFF), @bit_shift_left_32(ebits, 0x17))) }
+            return
+        }
+        if new_e < (-23 as Int64) {
+            scaled = (0.0 as Float32).copy_sign(self)
+            return
+        }
+        ebits: @bit32 = (new_e + 24).to_uint32_wrapping() as @bit32
+        shifted: @fbit32 = @bits_to_fbit_32(@bit_or_32(@bit_and_32(bits, 0x807FFFFF), @bit_shift_left_32(ebits, 0x17)))
+        scaled = Float32 { data = @f_mul_32(shifted, @bits_to_fbit_32(0x33800000)) }
+    }
+
+    /// Decomposes `self` into `(fraction, exponent)` with `self = fraction * 2^exponent`
+    /// and `|fraction|` in `[0.5, 1.0)` (C's `frexp`).
+    split_exponent: function (self: Float32) (fraction: Float32, exponent: Int32) {
+        if self.is_nan() or self.is_infinite() or self.is_zero() {
+            fraction = self
+            exponent = 0
+            return
+        }
+        norm: @fbit32 = self.data
+        adj: Int32 = 0
+        if self.is_subnormal() {
+            norm = @f_mul_32(norm, 8388608.0)
+            adj = -23
+        }
+        bits: @bit32 = @fbit_to_bits_32(norm)
+        exp_field: @bit32 = @bit_and_32(@bit_shift_right_u_32(bits, 0x17), 0xFF)
+        fraction = Float32 { data = @bits_to_fbit_32(@bit_or_32(@bit_and_32(bits, 0x807FFFFF), 0x3F000000)) }
+        exponent = ((exp_field as Uint32).to_int32_wrapping() - 126) + adj
+    }
+
+    /// IEEE 754 equality: `-0.0` equals `+0.0`, and `NaN` equals nothing.
+    equals: function (self: Float32, other: Float32) Bool =>
+        @f_less_than_or_equal_32(self.data, other.data) and @f_greater_than_or_equal_32(self.data, other.data)
+
+    /// Whether `|self - other| <= max(absolute, relative * max(|self|, |other|))`.
+    approximately_equals: function (self: Float32, other: Float32, relative: Float32, absolute: Float32) Bool =>
+        if self.equals(other) then true else if not self.is_finite() or not other.is_finite() then false else (self - other).abs() <= absolute.max(relative * self.abs().max(other.abs()))
+
+    /// IEEE 754 `totalOrder`: `-NaN < -∞ < … < -0.0 < +0.0 < … < +∞ < +NaN`.
+    total_compare: function (self: Float32, other: Float32) order: Ordering {
+        a: @bit32 = @fbit_to_bits_32(self.data)
+        b: @bit32 = @fbit_to_bits_32(other.data)
+        sa: @bit32 = @bit_xor_32(a, @bit_and_32(@bit_shift_right_32(a, 0x1F), 0x7FFFFFFF))
+        sb: @bit32 = @bit_xor_32(b, @bit_and_32(@bit_shift_right_32(b, 0x1F), 0x7FFFFFFF))
+        if @i_less_than_32(sa, sb) {
+            order = .Less
+        } else if sa == sb {
+            order = .Equal
+        } else {
+            order = .Greater
+        }
+    }
+
     /// IEEE partial ordering (`-0.0` equals `0.0`); fails when either value is
     /// a NaN.
     compare: function (self: Float32, other: Float32) order: Ordering else nothing {
@@ -63,6 +310,38 @@ Float32: object {
             return
         }
         fail
+    }
+
+    /// Linear interpolation between `self` and `to` at `t`: exact at `t = 0.0`
+    /// and `t = 1.0`, and monotonic.
+    lerp: function (self: Float32, to: Float32, t: Float32) interpolated: Float32 {
+        if (self <= 0.0 and to >= 0.0) or (self >= 0.0 and to <= 0.0) {
+            interpolated = t * to + (1.0 - t) * self
+            return
+        }
+        if t.equals(1.0) {
+            interpolated = to
+            return
+        }
+        x: Float32 = self + t * (to - self)
+        if (t > 1.0) == (to > self) {
+            interpolated = x.max(to)
+        } else {
+            interpolated = x.min(to)
+        }
+    }
+
+    /// Parameter `t` such that `low.lerp(high, t)` is `self` (`(self - low) / (high - low)`).
+    inverse_lerp: function (self: Float32, low: Float32, high: Float32) Float32 => (self - low) / (high - low)
+
+    /// `self` mapped linearly from `in_low..=in_high` to `out_low..=out_high`.
+    remap: function (self: Float32, in_low: Float32, in_high: Float32, out_low: Float32, out_high: Float32) Float32 =>
+        out_low.lerp(out_high, self.inverse_lerp(in_low, in_high))
+
+    /// Hermite interpolation (`3t^2 - 2t^3`) of `self` clamped to `low..=high`.
+    smooth_step: function (self: Float32, low: Float32, high: Float32) stepped: Float32 {
+        t: Float32 = self.inverse_lerp(low, high).clamp(0.0, 1.0)
+        stepped = t * t * (3.0 - 2.0 * t)
     }
 
     @conversion: function (from: @fbit32) Float32 => Float32 { data = from }
@@ -222,4 +501,10 @@ Float32: object {
         }
         fail
     }
+
+    /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.
+    hex: function (self: Float32) Hex => Hex { value = @extend_zero(@fbit_to_bits_32(self.data)) }
+
+    /// The IEEE 754 bits in binary: `{x.binary()}`.
+    binary: function (self: Float32) Binary => Binary { value = @extend_zero(@fbit_to_bits_32(self.data)) }
 }

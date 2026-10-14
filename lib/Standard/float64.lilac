@@ -3,12 +3,71 @@
 /// A 64-bit IEEE 754 binary floating-point number (C's `double`).
 ///
 /// Arithmetic is IEEE's, rounded to nearest (ties to even); `%` is C's
-/// `fmod`. `==` compares bits: `0.0 == -0.0` is false.
+/// `fmod`. `==` compares raw bits (`0.0 == -0.0` is `false` and equal
+/// NaNs are `true`); use `equals` for IEEE equality, `approximately_equals`
+/// for a tolerance and `total_compare` for sorting.
 Float64: object {
 
     private {
         data: @fbit64
     }
+
+    /// Archimedes' constant π.
+    PI: Float64 => Float64 { data = 3.14159265358979323846264338327950288 }
+
+    /// The full circle constant τ (`2π`).
+    TAU: Float64 => Float64 { data = 6.28318530717958647692528676655900577 }
+
+    /// Euler's number e.
+    E: Float64 => Float64 { data = 2.71828182845904523536028747135266250 }
+
+    /// `√2`.
+    SQRT_2: Float64 => Float64 { data = 1.41421356237309504880168872420969808 }
+
+    /// `1 / √2`.
+    FRAC_1_SQRT_2: Float64 => Float64 { data = 0.707106781186547524400844362104849039 }
+
+    /// `ln(2)`.
+    LN_2: Float64 => Float64 { data = 0.693147180559945309417232121458176568 }
+
+    /// `ln(10)`.
+    LN_10: Float64 => Float64 { data = 2.30258509299404568401799145468436421 }
+
+    /// `log2(e)`.
+    LOG2_E: Float64 => Float64 { data = 1.44269504088896340735992468100189214 }
+
+    /// `log10(e)`.
+    LOG10_E: Float64 => Float64 { data = 0.434294481903251827651128918916605082 }
+
+    /// Positive infinity (`+∞`).
+    INFINITY: Float64 => Float64 { data = @bits_to_fbit_64(0x7FF0000000000000) }
+
+    /// Negative infinity (`-∞`).
+    NEG_INFINITY: Float64 => Float64 { data = @bits_to_fbit_64(0xFFF0000000000000) }
+
+    /// The canonical quiet `NaN`.
+    NAN: Float64 => Float64 { data = @bits_to_fbit_64(0x7FF8000000000000) }
+
+    /// Machine epsilon (`2^-52`): the step from `1.0` to the next larger `Float64`.
+    EPSILON: Float64 => Float64 { data = @bits_to_fbit_64(0x3CB0000000000000) }
+
+    /// The smallest positive normal `Float64` (`2^-1022`).
+    MIN_POSITIVE: Float64 => Float64 { data = @bits_to_fbit_64(0x0010000000000000) }
+
+    /// The smallest positive subnormal `Float64` (`2^-1074`).
+    MIN_SUBNORMAL: Float64 => Float64 { data = @bits_to_fbit_64(0x1) }
+
+    /// The largest finite `Float64`.
+    MAX: Float64 => Float64 { data = @bits_to_fbit_64(0x7FEFFFFFFFFFFFFF) }
+
+    /// The smallest finite `Float64` (`-MAX`).
+    MIN: Float64 => Float64 { data = @bits_to_fbit_64(0xFFEFFFFFFFFFFFFF) }
+
+    /// The number of stored mantissa (fraction) bits (53 bits of precision with the implicit leading bit).
+    MANTISSA_BITS: Uint32 => 52
+
+    /// The number of exponent bits.
+    EXPONENT_BITS: Uint32 => 11
 
     @add: function (lhs: Float64, rhs: Float64) Float64 => Float64 { data = @f_add_64(lhs.data, rhs.data) }
     @sub: function (lhs: Float64, rhs: Float64) Float64 => Float64 { data = @f_sub_64(lhs.data, rhs.data) }
@@ -47,6 +106,194 @@ Float64: object {
     @less_than_or_equal: function (lhs: @fbit64, rhs: Float64) Bool => @f_less_than_or_equal_64(lhs, rhs.data)
     @greater_than_or_equal: function (lhs: @fbit64, rhs: Float64) Bool => @f_greater_than_or_equal_64(lhs, rhs.data)
 
+    /// Whether `self` is a `NaN`.
+    is_nan: function (self: Float64) Bool => @i_greater_than_u_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x7FF0000000000000)
+
+    /// Whether `self` is `+∞` or `-∞`.
+    is_infinite: function (self: Float64) Bool => @bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000
+
+    /// Whether `self` is finite (neither `NaN` nor `±∞`).
+    is_finite: function (self: Float64) Bool => @i_less_than_u_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x7FF0000000000000)
+
+    /// Whether `self` is a finite normal value (not zero, subnormal, infinite or `NaN`).
+    is_normal: function (self: Float64) Bool => @i_less_than_u_64(@i_sub_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x0010000000000000), 0x7FE0000000000000)
+
+    /// Whether `self` is a non-zero subnormal value.
+    is_subnormal: function (self: Float64) Bool => @i_less_than_u_64(@i_sub_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x1), 0x000FFFFFFFFFFFFF)
+
+    /// Whether `self` is `+0.0` or `-0.0`.
+    is_zero: function (self: Float64) Bool => @bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF) == 0x0
+
+    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).
+    sign_bit: function (self: Float64) Bool => @bit_and_64(@fbit_to_bits_64(self.data), 0x8000000000000000) != 0x0
+
+    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).
+    is_sign_negative: function (self: Float64) Bool => @bit_and_64(@fbit_to_bits_64(self.data), 0x8000000000000000) != 0x0
+
+    /// Whether the sign bit of `self` is clear (including `+0.0` and positive `NaN`).
+    is_sign_positive: function (self: Float64) Bool => @bit_and_64(@fbit_to_bits_64(self.data), 0x8000000000000000) == 0x0
+
+    /// The IEEE 754 category of `self`.
+    classify: function (self: Float64) FloatClass =>
+        if self.is_nan() then .Nan else if self.is_infinite() then .Infinite else if self.is_zero() then .Zero else if self.is_subnormal() then .Subnormal else .Normal
+
+    /// `|self|` (clears the sign bit).
+    abs: function (self: Float64) Float64 => Float64 { data = @f_abs_64(self.data) }
+
+    /// The magnitude of `self` with the sign bit of `sign`.
+    copy_sign: function (self: Float64, sign: Float64) Float64 => Float64 { data = @f_copy_sign_64(self.data, sign.data) }
+
+    /// Largest integral value not greater than `self` (`⌊self⌋`).
+    floor: function (self: Float64) Float64 => Float64 { data = @f_floor_64(self.data) }
+
+    /// Smallest integral value not less than `self` (`⌈self⌉`).
+    ceil: function (self: Float64) Float64 => Float64 { data = @f_ceil_64(self.data) }
+
+    /// Integral part of `self`, rounded toward zero.
+    trunc: function (self: Float64) Float64 => Float64 { data = @f_trunc_64(self.data) }
+
+    /// Nearest integral value to `self`, ties rounded away from zero.
+    round: function (self: Float64) Float64 => Float64 { data = @f_round_64(self.data) }
+
+    /// Nearest integral value to `self`, ties rounded to even.
+    round_even: function (self: Float64) Float64 => Float64 { data = @f_round_even_64(self.data) }
+
+    /// Fractional part of `self` (`self - self.trunc()`).
+    fract: function (self: Float64) Float64 => Float64 { data = @f_sub_64(self.data, @f_trunc_64(self.data)) }
+
+    /// `√self`, correctly rounded (`NaN` when `self < -0.0`).
+    sqrt: function (self: Float64) Float64 => Float64 { data = @f_sqrt_64(self.data) }
+
+    /// `self * b + c` rounded once (fused multiply-add).
+    multiply_add: function (self: Float64, b: Float64, c: Float64) Float64 => Float64 { data = @f_multiply_add_64(self.data, b.data, c.data) }
+
+    /// IEEE 754 `minimum`: propagates `NaN` and orders `-0.0 < +0.0`.
+    min: function (self: Float64, other: Float64) Float64 => Float64 { data = @f_min_64(self.data, other.data) }
+
+    /// IEEE 754 `maximum`: propagates `NaN` and orders `-0.0 < +0.0`.
+    max: function (self: Float64, other: Float64) Float64 => Float64 { data = @f_max_64(self.data, other.data) }
+
+    /// IEEE 754 `minimumNumber`: returns the non-`NaN` operand when one is `NaN`.
+    min_number: function (self: Float64, other: Float64) Float64 =>
+        if self.is_nan() then other else if other.is_nan() then self else Float64 { data = @f_min_64(self.data, other.data) }
+
+    /// IEEE 754 `maximumNumber`: returns the non-`NaN` operand when one is `NaN`.
+    max_number: function (self: Float64, other: Float64) Float64 =>
+        if self.is_nan() then other else if other.is_nan() then self else Float64 { data = @f_max_64(self.data, other.data) }
+
+    /// `self` bounded to `low..=high` (propagates `NaN`); panics when `low > high`.
+    clamp: function (self: Float64, low: Float64, high: Float64) Float64 =>
+        if @f_greater_than_64(low.data, high.data) then @panic("clamp: low is greater than high") else Float64 { data = @f_min_64(@f_max_64(self.data, low.data), high.data) }
+
+    /// `1.0 / self`.
+    recip: function (self: Float64) Float64 => Float64 { data = @f_div_64(1.0, self.data) }
+
+    /// `self` converted from degrees to radians (`self * (π / 180)`).
+    to_radians: function (self: Float64) Float64 => Float64 { data = @f_mul_64(self.data, 0.0174532925199432957692369076848861271) }
+
+    /// `self` converted from radians to degrees (`self * (180 / π)`).
+    to_degrees: function (self: Float64) Float64 => Float64 { data = @f_mul_64(self.data, 57.2957795130823208767981548141051703) }
+
+    /// The raw IEEE 754 bit pattern of `self`.
+    to_bits: function (self: Float64) Uint64 => @fbit_to_bits_64(self.data) as Uint64
+
+    /// The `Float64` with raw IEEE 754 bit pattern `bits`.
+    from_bits: function (bits: Uint64) Float64 => Float64 { data = @bits_to_fbit_64(bits as @bit64) }
+
+    /// Smallest representable `Float64` strictly greater than `self` (IEEE 754 `nextUp`).
+    next_up: function (self: Float64) Float64 =>
+        if self.is_nan() or self.data == Float64.INFINITY.data then self else if self.is_zero() then Float64.MIN_SUBNORMAL else if @bit_and_64(@fbit_to_bits_64(self.data), 0x8000000000000000) == 0x0 then Float64 { data = @bits_to_fbit_64(@i_add_64(@fbit_to_bits_64(self.data), 0x1)) } else Float64 { data = @bits_to_fbit_64(@i_sub_64(@fbit_to_bits_64(self.data), 0x1)) }
+
+    /// Largest representable `Float64` strictly less than `self` (IEEE 754 `nextDown`).
+    next_down: function (self: Float64) Float64 =>
+        if self.is_nan() or self.data == Float64.NEG_INFINITY.data then self else if self.is_zero() then -Float64.MIN_SUBNORMAL else if @bit_and_64(@fbit_to_bits_64(self.data), 0x8000000000000000) == 0x0 then Float64 { data = @bits_to_fbit_64(@i_sub_64(@fbit_to_bits_64(self.data), 0x1)) } else Float64 { data = @bits_to_fbit_64(@i_add_64(@fbit_to_bits_64(self.data), 0x1)) }
+
+    /// Unit in the last place of `self` (`NaN` for `±∞` and `NaN`).
+    ulp: function (self: Float64) Float64 =>
+        if not self.is_finite() then Float64.NAN else if @i_less_than_u_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x0010000000000000) then Float64.MIN_SUBNORMAL else if @bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF) == 0x7FEFFFFFFFFFFFFF then Float64 { data = @f_sub_64(Float64.MAX.data, @bits_to_fbit_64(@i_sub_64(0x7FEFFFFFFFFFFFFF, 0x1))) } else Float64 { data = @f_sub_64(@bits_to_fbit_64(@i_add_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF), 0x1)), @bits_to_fbit_64(@bit_and_64(@fbit_to_bits_64(self.data), 0x7FFFFFFFFFFFFFFF))) }
+
+    /// The unbiased exponent field of `self` (`((bits >> MANTISSA_BITS) & mask) - 1023`).
+    exponent: function (self: Float64) Int32 => (@bit_and_64(@bit_shift_right_u_64(@fbit_to_bits_64(self.data), 0x34), 0x7FF) as Uint64).to_int32_wrapping() - 1023
+
+    /// The stored mantissa (fraction) bits of `self`.
+    mantissa: function (self: Float64) Uint64 => @bit_and_64(@fbit_to_bits_64(self.data), 0x000FFFFFFFFFFFFF) as Uint64
+
+    /// `self * 2^n` rounded once (IEEE 754 `scaleB` / C's `ldexp`).
+    scale_by_power_of_two: function (self: Float64, n: Int32) scaled: Float64 {
+        if self.is_nan() or self.is_infinite() or self.is_zero() or n == 0 as Int32 {
+            scaled = self
+            return
+        }
+        norm: @fbit64 = self.data
+        adj: Int64 = n as Int64
+        if self.is_subnormal() {
+            norm = @f_mul_64(norm, 4503599627370496.0)
+            adj = adj - 52
+        }
+        bits: @bit64 = @fbit_to_bits_64(norm)
+        exp_field: @bit64 = @bit_and_64(@bit_shift_right_u_64(bits, 0x34), 0x7FF)
+        new_e: Int64 = (exp_field as Uint64).to_int64_wrapping() + adj
+        if new_e > 2046 {
+            scaled = Float64.INFINITY.copy_sign(self)
+            return
+        }
+        if new_e >= 1 {
+            ebits: @bit64 = new_e.to_uint64_wrapping() as @bit64
+            scaled = Float64 { data = @bits_to_fbit_64(@bit_or_64(@bit_and_64(bits, 0x800FFFFFFFFFFFFF), @bit_shift_left_64(ebits, 0x34))) }
+            return
+        }
+        if new_e < (-52 as Int64) {
+            scaled = (0.0 as Float64).copy_sign(self)
+            return
+        }
+        ebits: @bit64 = (new_e + 53).to_uint64_wrapping() as @bit64
+        shifted: @fbit64 = @bits_to_fbit_64(@bit_or_64(@bit_and_64(bits, 0x800FFFFFFFFFFFFF), @bit_shift_left_64(ebits, 0x34)))
+        scaled = Float64 { data = @f_mul_64(shifted, @bits_to_fbit_64(0x3CA0000000000000)) }
+    }
+
+    /// Decomposes `self` into `(fraction, exponent)` with `self = fraction * 2^exponent`
+    /// and `|fraction|` in `[0.5, 1.0)` (C's `frexp`).
+    split_exponent: function (self: Float64) (fraction: Float64, exponent: Int32) {
+        if self.is_nan() or self.is_infinite() or self.is_zero() {
+            fraction = self
+            exponent = 0
+            return
+        }
+        norm: @fbit64 = self.data
+        adj: Int32 = 0
+        if self.is_subnormal() {
+            norm = @f_mul_64(norm, 4503599627370496.0)
+            adj = -52
+        }
+        bits: @bit64 = @fbit_to_bits_64(norm)
+        exp_field: @bit64 = @bit_and_64(@bit_shift_right_u_64(bits, 0x34), 0x7FF)
+        fraction = Float64 { data = @bits_to_fbit_64(@bit_or_64(@bit_and_64(bits, 0x800FFFFFFFFFFFFF), 0x3FE0000000000000)) }
+        exponent = ((exp_field as Uint64).to_int32_wrapping() - 1022) + adj
+    }
+
+    /// IEEE 754 equality: `-0.0` equals `+0.0`, and `NaN` equals nothing.
+    equals: function (self: Float64, other: Float64) Bool =>
+        @f_less_than_or_equal_64(self.data, other.data) and @f_greater_than_or_equal_64(self.data, other.data)
+
+    /// Whether `|self - other| <= max(absolute, relative * max(|self|, |other|))`.
+    approximately_equals: function (self: Float64, other: Float64, relative: Float64, absolute: Float64) Bool =>
+        if self.equals(other) then true else if not self.is_finite() or not other.is_finite() then false else (self - other).abs() <= absolute.max(relative * self.abs().max(other.abs()))
+
+    /// IEEE 754 `totalOrder`: `-NaN < -∞ < … < -0.0 < +0.0 < … < +∞ < +NaN`.
+    total_compare: function (self: Float64, other: Float64) order: Ordering {
+        a: @bit64 = @fbit_to_bits_64(self.data)
+        b: @bit64 = @fbit_to_bits_64(other.data)
+        sa: @bit64 = @bit_xor_64(a, @bit_and_64(@bit_shift_right_64(a, 0x3F), 0x7FFFFFFFFFFFFFFF))
+        sb: @bit64 = @bit_xor_64(b, @bit_and_64(@bit_shift_right_64(b, 0x3F), 0x7FFFFFFFFFFFFFFF))
+        if @i_less_than_64(sa, sb) {
+            order = .Less
+        } else if sa == sb {
+            order = .Equal
+        } else {
+            order = .Greater
+        }
+    }
+
     /// IEEE partial ordering (`-0.0` equals `0.0`); fails when either value is
     /// a NaN.
     compare: function (self: Float64, other: Float64) order: Ordering else nothing {
@@ -63,6 +310,38 @@ Float64: object {
             return
         }
         fail
+    }
+
+    /// Linear interpolation between `self` and `to` at `t`: exact at `t = 0.0`
+    /// and `t = 1.0`, and monotonic.
+    lerp: function (self: Float64, to: Float64, t: Float64) interpolated: Float64 {
+        if (self <= 0.0 and to >= 0.0) or (self >= 0.0 and to <= 0.0) {
+            interpolated = t * to + (1.0 - t) * self
+            return
+        }
+        if t.equals(1.0) {
+            interpolated = to
+            return
+        }
+        x: Float64 = self + t * (to - self)
+        if (t > 1.0) == (to > self) {
+            interpolated = x.max(to)
+        } else {
+            interpolated = x.min(to)
+        }
+    }
+
+    /// Parameter `t` such that `low.lerp(high, t)` is `self` (`(self - low) / (high - low)`).
+    inverse_lerp: function (self: Float64, low: Float64, high: Float64) Float64 => (self - low) / (high - low)
+
+    /// `self` mapped linearly from `in_low..=in_high` to `out_low..=out_high`.
+    remap: function (self: Float64, in_low: Float64, in_high: Float64, out_low: Float64, out_high: Float64) Float64 =>
+        out_low.lerp(out_high, self.inverse_lerp(in_low, in_high))
+
+    /// Hermite interpolation (`3t^2 - 2t^3`) of `self` clamped to `low..=high`.
+    smooth_step: function (self: Float64, low: Float64, high: Float64) stepped: Float64 {
+        t: Float64 = self.inverse_lerp(low, high).clamp(0.0, 1.0)
+        stepped = t * t * (3.0 - 2.0 * t)
     }
 
     @conversion: function (from: @fbit64) Float64 => Float64 { data = from }
@@ -229,4 +508,10 @@ Float64: object {
         }
         fail
     }
+
+    /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.
+    hex: function (self: Float64) Hex => Hex { value = @fbit_to_bits_64(self.data) }
+
+    /// The IEEE 754 bits in binary: `{x.binary()}`.
+    binary: function (self: Float64) Binary => Binary { value = @fbit_to_bits_64(self.data) }
 }

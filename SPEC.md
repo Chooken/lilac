@@ -1545,7 +1545,7 @@ without them only the explicit intrinsic form works:
 }
 ```
 
-**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict.
+**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict. On floating-point values, `==` compares the IEEE 754 bit patterns directly: `0.0 == -0.0` is `0x0` (their sign bits differ) and two `NaN`s with identical bits are `0x1` (`Standard`'s float types provide `equals` for IEEE equality, `approximately_equals` for a tolerance and `total_compare` for `totalOrder` sorting).
 
 List of operators:
 | op | function |

@@ -1,6 +1,6 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; phases 0-3 done.
+> Status: agreed, 2026-10-14; phases 0-4 done.
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -405,7 +405,7 @@ Tests:
 
 ## Phase 4: float core
 
-On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
+**Done.** On `Float16`, `Float32` and `Float64`:
 
 - **Constants** (member constants, folded through phase 1):
   - `PI`, `TAU`, `E`, `SQRT_2`, `FRAC_1_SQRT_2`, `LN_2`, `LN_10`,
@@ -420,9 +420,9 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
 - **Classification:**
   - `is_nan`, `is_infinite`, `is_finite`, `is_normal`, `is_subnormal`,
     `is_zero`;
-  - `sign_bit`, `is_sign_negative`;
-  - `classify` (an enum: `Nan`, `Infinite`, `Zero`, `Subnormal`,
-    `Normal`).
+  - `sign_bit`, `is_sign_negative`, `is_sign_positive`;
+  - `classify` (`FloatClass` in `lib/Standard/float_class.lilac`: `Nan`,
+    `Infinite`, `Zero`, `Subnormal`, `Normal`).
 
   All are bit tests through `@fbit_to_bits`.
 - **Exact operations**, each one intrinsic and `=>`:
@@ -436,7 +436,8 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
   - `recip`;
   - `to_radians`, `to_degrees`.
 - **Bits and ULPs:**
-  - `to_bits`/`from_bits` (to and from the same-width `Uint`);
+  - `to_bits`/`from_bits` (to and from the same-width `Uint`),
+    `hex`/`binary`;
   - `next_up`, `next_down`, `ulp`;
   - `exponent`, `mantissa`;
   - `scale_by_power_of_two(n)` (exact `ldexp`);
@@ -458,8 +459,8 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
   - `inverse_lerp`, `remap`, `smooth_step`.
 
 Tests:
-- A run test per family, printing bits through phase 6's `@format` (or
-  `hex()` until it lands).
+- `float_constants_classify.lilac`, `float_exact_ops.lilac`,
+  `float_bits_ulps.lilac` and `float_comparison_lerp.lilac`.
 - The NaN, ±0, ±∞ and subnormal rows, on every function.
 
 ## Phase 5: elementary functions

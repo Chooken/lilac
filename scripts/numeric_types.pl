@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# Generates lib/Standard's numeric types (math plan phases 2-3): the ten
+# Generates lib/Standard's numeric types (math plan phases 2-4): the ten
 # integer files and three float files are this script's output, so change
 # the script and rerun it (`perl scripts/numeric_types.pl lib/Standard`)
 # rather than editing them by hand.
@@ -619,10 +619,77 @@ sub float_file {
     my ($name, $bits, $p, $max) = @$f;
     my $c = "\@fbit$bits";
     my $s = $bits;
+    my $uname = "Uint$bits";
+    my $um = "uint$bits";
+    my $mant_bits = $p - 1;
+    my $exp_bits = $bits - $p;
+    my $bias = (1 << ($exp_bits - 1)) - 1;
+    my $max_biased = 2 * $bias;
+    my $bias_m1 = $bias - 1;
+    my $mant_hex = sprintf('0x%X', $mant_bits);
+    my $shift_sign = sprintf('0x%X', $bits - 1);
+    my $exp_field_mask = sprintf('0x%X', (1 << $exp_bits) - 1);
+    my ($sign_mask, $abs_mask, $exp_mask, $mant_mask, $sign_and_mant,
+        $min_normal, $normal_span, $max_bits, $min_bits, $nan_bits,
+        $eps_bits, $neg_inf_bits, $two_pow_mant, $two_neg_p_bits, $half_exp_bits) =
+        $bits == 16 ? (
+            '0x8000', '0x7FFF', '0x7C00', '0x03FF', '0x83FF',
+            '0x0400', '0x7800', '0x7BFF', '0xFBFF', '0x7E00',
+            '0x1400', '0xFC00', '1024.0', '0x1000', '0x3800',
+        ) : $bits == 32 ? (
+            '0x80000000', '0x7FFFFFFF', '0x7F800000', '0x007FFFFF', '0x807FFFFF',
+            '0x00800000', '0x7F000000', '0x7F7FFFFF', '0xFF7FFFFF', '0x7FC00000',
+            '0x34000000', '0xFF800000', '8388608.0', '0x33800000', '0x3F000000',
+        ) : (
+            '0x8000000000000000', '0x7FFFFFFFFFFFFFFF', '0x7FF0000000000000', '0x000FFFFFFFFFFFFF', '0x800FFFFFFFFFFFFF',
+            '0x0010000000000000', '0x7FE0000000000000', '0x7FEFFFFFFFFFFFFF', '0xFFEFFFFFFFFFFFFF', '0x7FF8000000000000',
+            '0x3CB0000000000000', '0xFFF0000000000000', '4503599627370496.0', '0x3CA0000000000000', '0x3FE0000000000000',
+        );
     my $ctype = { 16 => '`_Float16`', 32 => "C's `float`", 64 => "C's `double`" }->{$bits};
     my $text = "/// A $bits-bit IEEE 754 binary floating-point number ($ctype).\n";
-    $text .= "///\n/// Arithmetic is IEEE's, rounded to nearest (ties to even); `%` is C's\n/// `fmod`. `==` compares bits: `0.0 == -0.0` is false.\n";
+    $text .= "///\n/// Arithmetic is IEEE's, rounded to nearest (ties to even); `%` is C's\n";
+    $text .= "/// `fmod`. `==` compares raw bits (`0.0 == -0.0` is `false` and equal\n";
+    $text .= "/// NaNs are `true`); use `equals` for IEEE equality, `approximately_equals`\n";
+    $text .= "/// for a tolerance and `total_compare` for sorting.\n";
     $text .= "$name: object {\n\n    private {\n        data: $c\n    }\n\n";
+
+    # Constants.
+    my @math_consts = (
+        ['PI', '3.14159265358979323846264338327950288', 'Archimedes\' constant π.'],
+        ['TAU', '6.28318530717958647692528676655900577', 'The full circle constant τ (`2π`).'],
+        ['E', '2.71828182845904523536028747135266250', 'Euler\'s number e.'],
+        ['SQRT_2', '1.41421356237309504880168872420969808', '`√2`.'],
+        ['FRAC_1_SQRT_2', '0.707106781186547524400844362104849039', '`1 / √2`.'],
+        ['LN_2', '0.693147180559945309417232121458176568', '`ln(2)`.'],
+        ['LN_10', '2.30258509299404568401799145468436421', '`ln(10)`.'],
+        ['LOG2_E', '1.44269504088896340735992468100189214', '`log2(e)`.'],
+        ['LOG10_E', '0.434294481903251827651128918916605082', '`log10(e)`.'],
+    );
+    for my $mc (@math_consts) {
+        my ($cname, $lit, $doc) = @$mc;
+        $text .= "    /// $doc\n    $cname: $name => $name { data = $lit }\n\n";
+    }
+    $text .= "    /// Positive infinity (`+∞`).\n";
+    $text .= "    INFINITY: $name => $name { data = \@bits_to_fbit_$s($exp_mask) }\n\n";
+    $text .= "    /// Negative infinity (`-∞`).\n";
+    $text .= "    NEG_INFINITY: $name => $name { data = \@bits_to_fbit_$s($neg_inf_bits) }\n\n";
+    $text .= "    /// The canonical quiet `NaN`.\n";
+    $text .= "    NAN: $name => $name { data = \@bits_to_fbit_$s($nan_bits) }\n\n";
+    $text .= "    /// Machine epsilon (`2^-$mant_bits`): the step from `1.0` to the next larger `$name`.\n";
+    $text .= "    EPSILON: $name => $name { data = \@bits_to_fbit_$s($eps_bits) }\n\n";
+    $text .= "    /// The smallest positive normal `$name` (`2^-" . ($bias - 1) . "`).\n";
+    $text .= "    MIN_POSITIVE: $name => $name { data = \@bits_to_fbit_$s($min_normal) }\n\n";
+    $text .= "    /// The smallest positive subnormal `$name` (`2^-" . ($bias - 1 + $mant_bits) . "`).\n";
+    $text .= "    MIN_SUBNORMAL: $name => $name { data = \@bits_to_fbit_$s(0x1) }\n\n";
+    $text .= "    /// The largest finite `$name`.\n";
+    $text .= "    MAX: $name => $name { data = \@bits_to_fbit_$s($max_bits) }\n\n";
+    $text .= "    /// The smallest finite `$name` (`-MAX`).\n";
+    $text .= "    MIN: $name => $name { data = \@bits_to_fbit_$s($min_bits) }\n\n";
+    $text .= "    /// The number of stored mantissa (fraction) bits ($p bits of precision with the implicit leading bit).\n";
+    $text .= "    MANTISSA_BITS: Uint32 => $mant_bits\n\n";
+    $text .= "    /// The number of exponent bits.\n";
+    $text .= "    EXPONENT_BITS: Uint32 => $exp_bits\n\n";
+
     my @compare = qw(less_than greater_than less_than_or_equal greater_than_or_equal);
     my @shapes = (
         [$name, $name, 'lhs.data', 'rhs.data'],
@@ -648,6 +715,177 @@ sub float_file {
         }
     }
 
+    # Classification.
+    $text .= "    /// Whether `self` is a `NaN`.\n";
+    $text .= "    is_nan: function (self: $name) Bool => \@i_greater_than_u_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), $exp_mask)\n\n";
+
+    $text .= "    /// Whether `self` is `+∞` or `-∞`.\n";
+    $text .= "    is_infinite: function (self: $name) Bool => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask) == $exp_mask\n\n";
+
+    $text .= "    /// Whether `self` is finite (neither `NaN` nor `±∞`).\n";
+    $text .= "    is_finite: function (self: $name) Bool => \@i_less_than_u_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), $exp_mask)\n\n";
+
+    $text .= "    /// Whether `self` is a finite normal value (not zero, subnormal, infinite or `NaN`).\n";
+    $text .= "    is_normal: function (self: $name) Bool => \@i_less_than_u_$s(\@i_sub_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), $min_normal), $normal_span)\n\n";
+
+    $text .= "    /// Whether `self` is a non-zero subnormal value.\n";
+    $text .= "    is_subnormal: function (self: $name) Bool => \@i_less_than_u_$s(\@i_sub_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), 0x1), $mant_mask)\n\n";
+
+    $text .= "    /// Whether `self` is `+0.0` or `-0.0`.\n";
+    $text .= "    is_zero: function (self: $name) Bool => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask) == 0x0\n\n";
+
+    $text .= "    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).\n";
+    $text .= "    sign_bit: function (self: $name) Bool => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $sign_mask) != 0x0\n\n";
+
+    $text .= "    /// Whether the sign bit of `self` is set (including `-0.0` and negative `NaN`).\n";
+    $text .= "    is_sign_negative: function (self: $name) Bool => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $sign_mask) != 0x0\n\n";
+
+    $text .= "    /// Whether the sign bit of `self` is clear (including `+0.0` and positive `NaN`).\n";
+    $text .= "    is_sign_positive: function (self: $name) Bool => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $sign_mask) == 0x0\n\n";
+
+    $text .= "    /// The IEEE 754 category of `self`.\n";
+    $text .= "    classify: function (self: $name) FloatClass =>\n";
+    $text .= "        if self.is_nan() then .Nan else if self.is_infinite() then .Infinite else if self.is_zero() then .Zero else if self.is_subnormal() then .Subnormal else .Normal\n\n";
+
+    # Exact operations.
+    $text .= "    /// `|self|` (clears the sign bit).\n";
+    $text .= "    abs: function (self: $name) $name => $name { data = \@f_abs_$s(self.data) }\n\n";
+
+    $text .= "    /// The magnitude of `self` with the sign bit of `sign`.\n";
+    $text .= "    copy_sign: function (self: $name, sign: $name) $name => $name { data = \@f_copy_sign_$s(self.data, sign.data) }\n\n";
+
+    $text .= "    /// Largest integral value not greater than `self` (`⌊self⌋`).\n";
+    $text .= "    floor: function (self: $name) $name => $name { data = \@f_floor_$s(self.data) }\n\n";
+
+    $text .= "    /// Smallest integral value not less than `self` (`⌈self⌉`).\n";
+    $text .= "    ceil: function (self: $name) $name => $name { data = \@f_ceil_$s(self.data) }\n\n";
+
+    $text .= "    /// Integral part of `self`, rounded toward zero.\n";
+    $text .= "    trunc: function (self: $name) $name => $name { data = \@f_trunc_$s(self.data) }\n\n";
+
+    $text .= "    /// Nearest integral value to `self`, ties rounded away from zero.\n";
+    $text .= "    round: function (self: $name) $name => $name { data = \@f_round_$s(self.data) }\n\n";
+
+    $text .= "    /// Nearest integral value to `self`, ties rounded to even.\n";
+    $text .= "    round_even: function (self: $name) $name => $name { data = \@f_round_even_$s(self.data) }\n\n";
+
+    $text .= "    /// Fractional part of `self` (`self - self.trunc()`).\n";
+    $text .= "    fract: function (self: $name) $name => $name { data = \@f_sub_$s(self.data, \@f_trunc_$s(self.data)) }\n\n";
+
+    $text .= "    /// `√self`, correctly rounded (`NaN` when `self < -0.0`).\n";
+    $text .= "    sqrt: function (self: $name) $name => $name { data = \@f_sqrt_$s(self.data) }\n\n";
+
+    $text .= "    /// `self * b + c` rounded once (fused multiply-add).\n";
+    $text .= "    multiply_add: function (self: $name, b: $name, c: $name) $name => $name { data = \@f_multiply_add_$s(self.data, b.data, c.data) }\n\n";
+
+    $text .= "    /// IEEE 754 `minimum`: propagates `NaN` and orders `-0.0 < +0.0`.\n";
+    $text .= "    min: function (self: $name, other: $name) $name => $name { data = \@f_min_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// IEEE 754 `maximum`: propagates `NaN` and orders `-0.0 < +0.0`.\n";
+    $text .= "    max: function (self: $name, other: $name) $name => $name { data = \@f_max_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// IEEE 754 `minimumNumber`: returns the non-`NaN` operand when one is `NaN`.\n";
+    $text .= "    min_number: function (self: $name, other: $name) $name =>\n";
+    $text .= "        if self.is_nan() then other else if other.is_nan() then self else $name { data = \@f_min_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// IEEE 754 `maximumNumber`: returns the non-`NaN` operand when one is `NaN`.\n";
+    $text .= "    max_number: function (self: $name, other: $name) $name =>\n";
+    $text .= "        if self.is_nan() then other else if other.is_nan() then self else $name { data = \@f_max_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// `self` bounded to `low..=high` (propagates `NaN`); panics when `low > high`.\n";
+    $text .= "    clamp: function (self: $name, low: $name, high: $name) $name =>\n";
+    $text .= "        if \@f_greater_than_$s(low.data, high.data) then \@panic(\"clamp: low is greater than high\") else $name { data = \@f_min_$s(\@f_max_$s(self.data, low.data), high.data) }\n\n";
+
+    $text .= "    /// `1.0 / self`.\n";
+    $text .= "    recip: function (self: $name) $name => $name { data = \@f_div_$s(1.0, self.data) }\n\n";
+
+    $text .= "    /// `self` converted from degrees to radians (`self * (π / 180)`).\n";
+    $text .= "    to_radians: function (self: $name) $name => $name { data = \@f_mul_$s(self.data, 0.0174532925199432957692369076848861271) }\n\n";
+
+    $text .= "    /// `self` converted from radians to degrees (`self * (180 / π)`).\n";
+    $text .= "    to_degrees: function (self: $name) $name => $name { data = \@f_mul_$s(self.data, 57.2957795130823208767981548141051703) }\n\n";
+
+    # Bits and ULPs.
+    $text .= "    /// The raw IEEE 754 bit pattern of `self`.\n";
+    $text .= "    to_bits: function (self: $name) $uname => \@fbit_to_bits_$s(self.data) as $uname\n\n";
+
+    $text .= "    /// The `$name` with raw IEEE 754 bit pattern `bits`.\n";
+    $text .= "    from_bits: function (bits: $uname) $name => $name { data = \@bits_to_fbit_$s(bits as \@bit$s) }\n\n";
+
+    $text .= "    /// Smallest representable `$name` strictly greater than `self` (IEEE 754 `nextUp`).\n";
+    $text .= "    next_up: function (self: $name) $name =>\n";
+    $text .= "        if self.is_nan() or self.data == $name.INFINITY.data then self else if self.is_zero() then $name.MIN_SUBNORMAL else if \@bit_and_$s(\@fbit_to_bits_$s(self.data), $sign_mask) == 0x0 then $name { data = \@bits_to_fbit_$s(\@i_add_$s(\@fbit_to_bits_$s(self.data), 0x1)) } else $name { data = \@bits_to_fbit_$s(\@i_sub_$s(\@fbit_to_bits_$s(self.data), 0x1)) }\n\n";
+
+    $text .= "    /// Largest representable `$name` strictly less than `self` (IEEE 754 `nextDown`).\n";
+    $text .= "    next_down: function (self: $name) $name =>\n";
+    $text .= "        if self.is_nan() or self.data == $name.NEG_INFINITY.data then self else if self.is_zero() then -$name.MIN_SUBNORMAL else if \@bit_and_$s(\@fbit_to_bits_$s(self.data), $sign_mask) == 0x0 then $name { data = \@bits_to_fbit_$s(\@i_sub_$s(\@fbit_to_bits_$s(self.data), 0x1)) } else $name { data = \@bits_to_fbit_$s(\@i_add_$s(\@fbit_to_bits_$s(self.data), 0x1)) }\n\n";
+
+    $text .= "    /// Unit in the last place of `self` (`NaN` for `±∞` and `NaN`).\n";
+    $text .= "    ulp: function (self: $name) $name =>\n";
+    $text .= "        if not self.is_finite() then $name.NAN else if \@i_less_than_u_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), $min_normal) then $name.MIN_SUBNORMAL else if \@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask) == $max_bits then $name { data = \@f_sub_$s($name.MAX.data, \@bits_to_fbit_$s(\@i_sub_$s($max_bits, 0x1))) } else $name { data = \@f_sub_$s(\@bits_to_fbit_$s(\@i_add_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask), 0x1)), \@bits_to_fbit_$s(\@bit_and_$s(\@fbit_to_bits_$s(self.data), $abs_mask))) }\n\n";
+
+    my $raw_exp = "\@bit_and_$s(\@bit_shift_right_u_$s(\@fbit_to_bits_$s(self.data), $mant_hex), $exp_field_mask)";
+    my $raw_exp_i32 = $bits < 32 ? "($raw_exp as $uname as Int32)" : "($raw_exp as $uname).to_int32_wrapping()";
+    $text .= "    /// The unbiased exponent field of `self` (`((bits >> MANTISSA_BITS) & mask) - $bias`).\n";
+    $text .= "    exponent: function (self: $name) Int32 => $raw_exp_i32 - $bias\n\n";
+
+    $text .= "    /// The stored mantissa (fraction) bits of `self`.\n";
+    $text .= "    mantissa: function (self: $name) $uname => \@bit_and_$s(\@fbit_to_bits_$s(self.data), $mant_mask) as $uname\n\n";
+
+    $text .= "    /// `self * 2^n` rounded once (IEEE 754 `scaleB` / C's `ldexp`).\n";
+    $text .= "    scale_by_power_of_two: function (self: $name, n: Int32) scaled: $name {\n";
+    $text .= "        if self.is_nan() or self.is_infinite() or self.is_zero() or n == 0 as Int32 {\n            scaled = self\n            return\n        }\n";
+    $text .= "        norm: $c = self.data\n";
+    $text .= "        adj: Int64 = n as Int64\n";
+    $text .= "        if self.is_subnormal() {\n";
+    $text .= "            norm = \@f_mul_$s(norm, $two_pow_mant)\n";
+    $text .= "            adj = adj - $mant_bits\n        }\n";
+    $text .= "        bits: \@bit$s = \@fbit_to_bits_$s(norm)\n";
+    $text .= "        exp_field: \@bit$s = \@bit_and_$s(\@bit_shift_right_u_$s(bits, $mant_hex), $exp_field_mask)\n";
+    my $exp_i64 = $bits < 64 ? "(exp_field as $uname as Int64)" : "(exp_field as $uname).to_int64_wrapping()";
+    $text .= "        new_e: Int64 = $exp_i64 + adj\n";
+    $text .= "        if new_e > $max_biased {\n            scaled = $name.INFINITY.copy_sign(self)\n            return\n        }\n";
+    $text .= "        if new_e >= 1 {\n";
+    $text .= "            ebits: \@bit$s = new_e.to_$um\_wrapping() as \@bit$s\n";
+    $text .= "            scaled = $name { data = \@bits_to_fbit_$s(\@bit_or_$s(\@bit_and_$s(bits, $sign_and_mant), \@bit_shift_left_$s(ebits, $mant_hex))) }\n";
+    $text .= "            return\n        }\n";
+    $text .= "        if new_e < (-$mant_bits as Int64) {\n            scaled = (0.0 as $name).copy_sign(self)\n            return\n        }\n";
+    $text .= "        ebits: \@bit$s = (new_e + $p).to_$um\_wrapping() as \@bit$s\n";
+    $text .= "        shifted: $c = \@bits_to_fbit_$s(\@bit_or_$s(\@bit_and_$s(bits, $sign_and_mant), \@bit_shift_left_$s(ebits, $mant_hex)))\n";
+    $text .= "        scaled = $name { data = \@f_mul_$s(shifted, \@bits_to_fbit_$s($two_neg_p_bits)) }\n    }\n\n";
+
+    $text .= "    /// Decomposes `self` into `(fraction, exponent)` with `self = fraction * 2^exponent`\n";
+    $text .= "    /// and `|fraction|` in `[0.5, 1.0)` (C's `frexp`).\n";
+    $text .= "    split_exponent: function (self: $name) (fraction: $name, exponent: Int32) {\n";
+    $text .= "        if self.is_nan() or self.is_infinite() or self.is_zero() {\n            fraction = self\n            exponent = 0\n            return\n        }\n";
+    $text .= "        norm: $c = self.data\n";
+    $text .= "        adj: Int32 = 0\n";
+    $text .= "        if self.is_subnormal() {\n";
+    $text .= "            norm = \@f_mul_$s(norm, $two_pow_mant)\n";
+    $text .= "            adj = -$mant_bits\n        }\n";
+    $text .= "        bits: \@bit$s = \@fbit_to_bits_$s(norm)\n";
+    $text .= "        exp_field: \@bit$s = \@bit_and_$s(\@bit_shift_right_u_$s(bits, $mant_hex), $exp_field_mask)\n";
+    my $exp_field_i32 = $bits < 32 ? "(exp_field as $uname as Int32)" : "(exp_field as $uname).to_int32_wrapping()";
+    $text .= "        fraction = $name { data = \@bits_to_fbit_$s(\@bit_or_$s(\@bit_and_$s(bits, $sign_and_mant), $half_exp_bits)) }\n";
+    $text .= "        exponent = ($exp_field_i32 - $bias_m1) + adj\n    }\n\n";
+
+    # Comparison and equality.
+    $text .= "    /// IEEE 754 equality: `-0.0` equals `+0.0`, and `NaN` equals nothing.\n";
+    $text .= "    equals: function (self: $name, other: $name) Bool =>\n";
+    $text .= "        \@f_less_than_or_equal_$s(self.data, other.data) and \@f_greater_than_or_equal_$s(self.data, other.data)\n\n";
+
+    $text .= "    /// Whether `|self - other| <= max(absolute, relative * max(|self|, |other|))`.\n";
+    $text .= "    approximately_equals: function (self: $name, other: $name, relative: $name, absolute: $name) Bool =>\n";
+    $text .= "        if self.equals(other) then true else if not self.is_finite() or not other.is_finite() then false else (self - other).abs() <= absolute.max(relative * self.abs().max(other.abs()))\n\n";
+
+    $text .= "    /// IEEE 754 `totalOrder`: `-NaN < -∞ < … < -0.0 < +0.0 < … < +∞ < +NaN`.\n";
+    $text .= "    total_compare: function (self: $name, other: $name) order: Ordering {\n";
+    $text .= "        a: \@bit$s = \@fbit_to_bits_$s(self.data)\n";
+    $text .= "        b: \@bit$s = \@fbit_to_bits_$s(other.data)\n";
+    $text .= "        sa: \@bit$s = \@bit_xor_$s(a, \@bit_and_$s(\@bit_shift_right_$s(a, $shift_sign), $abs_mask))\n";
+    $text .= "        sb: \@bit$s = \@bit_xor_$s(b, \@bit_and_$s(\@bit_shift_right_$s(b, $shift_sign), $abs_mask))\n";
+    $text .= "        if \@i_less_than_$s(sa, sb) {\n            order = .Less\n        } else if sa == sb {\n            order = .Equal\n        } else {\n            order = .Greater\n        }\n    }\n\n";
+
     $text .= "    /// IEEE partial ordering (`-0.0` equals `0.0`); fails when either value is\n";
     $text .= "    /// a NaN.\n";
     $text .= "    compare: function (self: $name, other: $name) order: Ordering else nothing {\n";
@@ -655,6 +893,28 @@ sub float_file {
     $text .= "        if \@f_greater_than_$s(self.data, other.data) {\n            order = .Greater\n            return\n        }\n";
     $text .= "        if \@f_less_than_or_equal_$s(self.data, other.data) {\n            order = .Equal\n            return\n        }\n";
     $text .= "        fail\n    }\n\n";
+
+    # Interpolation.
+    $text .= "    /// Linear interpolation between `self` and `to` at `t`: exact at `t = 0.0`\n";
+    $text .= "    /// and `t = 1.0`, and monotonic.\n";
+    $text .= "    lerp: function (self: $name, to: $name, t: $name) interpolated: $name {\n";
+    $text .= "        if (self <= 0.0 and to >= 0.0) or (self >= 0.0 and to <= 0.0) {\n";
+    $text .= "            interpolated = t * to + (1.0 - t) * self\n            return\n        }\n";
+    $text .= "        if t.equals(1.0) {\n            interpolated = to\n            return\n        }\n";
+    $text .= "        x: $name = self + t * (to - self)\n";
+    $text .= "        if (t > 1.0) == (to > self) {\n            interpolated = x.max(to)\n        } else {\n            interpolated = x.min(to)\n        }\n    }\n\n";
+
+    $text .= "    /// Parameter `t` such that `low.lerp(high, t)` is `self` (`(self - low) / (high - low)`).\n";
+    $text .= "    inverse_lerp: function (self: $name, low: $name, high: $name) $name => (self - low) / (high - low)\n\n";
+
+    $text .= "    /// `self` mapped linearly from `in_low..=in_high` to `out_low..=out_high`.\n";
+    $text .= "    remap: function (self: $name, in_low: $name, in_high: $name, out_low: $name, out_high: $name) $name =>\n";
+    $text .= "        out_low.lerp(out_high, self.inverse_lerp(in_low, in_high))\n\n";
+
+    $text .= "    /// Hermite interpolation (`3t^2 - 2t^3`) of `self` clamped to `low..=high`.\n";
+    $text .= "    smooth_step: function (self: $name, low: $name, high: $name) stepped: $name {\n";
+    $text .= "        t: $name = self.inverse_lerp(low, high).clamp(0.0, 1.0)\n";
+    $text .= "        stepped = t * t * (3.0 - 2.0 * t)\n    }\n\n";
 
     $text .= "    \@conversion: function (from: $c) $name => $name { data = from }\n";
     $text .= "    \@conversion: function (from: $name) $c => from.data\n\n";
@@ -709,8 +969,11 @@ sub float_file {
         $text .= "        if $low and $high and \@f_trunc_$s(self.data) == self.data {\n";
         $text .= "            value = $conv(self.data) as $tc\n            return\n        }\n        fail\n    }\n\n";
     }
-    $text =~ s/\n\n$/\n/;
-    $text .= "}\n";
+    my $bits64 = $bits == 64 ? "\@fbit_to_bits_64(self.data)" : "\@extend_zero(\@fbit_to_bits_$s(self.data))";
+    $text .= "    /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.\n";
+    $text .= "    hex: function (self: $name) Hex => Hex { value = $bits64 }\n\n";
+    $text .= "    /// The IEEE 754 bits in binary: `{x.binary()}`.\n";
+    $text .= "    binary: function (self: $name) Binary => Binary { value = $bits64 }\n}\n";
     return $text;
 }
 
