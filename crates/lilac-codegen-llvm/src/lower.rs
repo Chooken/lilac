@@ -8,6 +8,8 @@
 //! `unreachable`). Builtin calls use the value ABI and reuse the runtime
 //! definitions the `runtime` module emits before any user function.
 
+mod math;
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
@@ -824,6 +826,27 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// Lowers one instruction. A `CompileError` marker is reported as `E031`
     /// before verification; a survivor is an ICE.
+    /// `copy ref %src -> %dst`: copies what `src` points to into `dst`.
+    fn lower_copy_deref(
+        &self,
+        src: &PlaceName,
+        dst: &PlaceName,
+        builder: &Builder<'ctx>,
+        state: &FnState<'ctx>,
+    ) {
+        let from = self.pointer_in(src, builder, state);
+        let Some(ty) = state.place_types.get(dst) else {
+            bug!(self.at(), "copy to undeclared place `{dst}`");
+        };
+        let to = self.place_ptr(dst, state);
+        if ty.is_scalar() {
+            let value = self.load(builder, self.lir_type(ty), from, "copy load");
+            self.store(builder, to, value, "copy store");
+        } else {
+            self.copy_bytes(builder, to, from, ty);
+        }
+    }
+
     fn lower_inst(&self, inst: &LirInst, builder: &Builder<'ctx>, state: &mut FnState<'ctx>) {
         match inst {
             LirInst::Alloca { ty, place, .. } => {
@@ -836,19 +859,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             LirInst::CopyPlace { src, dst, .. } => {
                 self.write(src, self.place_ptr(dst, state), builder, state);
             }
-            LirInst::CopyDeref { src, dst, .. } => {
-                let from = self.pointer_in(src, builder, state);
-                let Some(ty) = state.place_types.get(dst) else {
-                    bug!(self.at(), "copy to undeclared place `{dst}`");
-                };
-                let to = self.place_ptr(dst, state);
-                if ty.is_scalar() {
-                    let value = self.load(builder, self.lir_type(ty), from, "copy load");
-                    self.store(builder, to, value, "copy store");
-                } else {
-                    self.copy_bytes(builder, to, from, ty);
-                }
-            }
+            LirInst::CopyDeref { src, dst, .. } => self.lower_copy_deref(src, dst, builder, state),
             LirInst::Const { dst, value, ty, .. } => {
                 let value = self.const_value(value, ty, builder);
                 state.regs.insert(dst.clone(), value);
@@ -907,6 +918,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 ..
             } => {
                 let value = self.arith(op, lhs, rhs, ty, builder, state);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::Unary { op, src, dst, .. } => {
+                let value = self.lower_unary(*op, src, builder, state);
+                state.regs.insert(dst.clone(), value);
+            }
+            LirInst::MulAdd { a, b, c, dst, .. } => {
+                let value = self.lower_mul_add([a, b, c], builder, state);
                 state.regs.insert(dst.clone(), value);
             }
             LirInst::Call {
@@ -1272,6 +1291,11 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state: &mut FnState<'ctx>,
     ) {
         let value = match op {
+            ConvertOp::IntToFloat
+            | ConvertOp::UintToFloat
+            | ConvertOp::FloatToInt
+            | ConvertOp::FloatToUint
+            | ConvertOp::FloatConvert => self.number_convert(op, src, ty, builder, state),
             ConvertOp::Trunc | ConvertOp::ExtendZero | ConvertOp::ExtendSign => {
                 let source = self.reg_int(src, state);
                 let BasicTypeEnum::IntType(result_ty) = self.lir_type(ty) else {
@@ -1939,6 +1963,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                 );
                 self.widen_bool(cmp, ty, builder)
             }
+            // `f.min`, rotates, saturation, overflow tests and the rest of
+            // phase 1 (`lower/math.rs`).
+            _ => self.numeric_pair(op, lhs, rhs, ty, builder, state),
         }
     }
 

@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use lilac_span::Span;
 
 use crate::{
-    ArithOp, ConvertOp, LirCallee, LirData, LirFormat, LirFunc, LirGlobal, LirInst, LirLayout,
-    LirLayoutKind, LirModule, LirOperand, LirTerm, SpannedText,
+    ArithOp, LirCallee, LirData, LirFormat, LirFunc, LirGlobal, LirInst, LirLayout, LirLayoutKind,
+    LirModule, LirOperand, LirTerm, SpannedText,
 };
 
 impl LirModule {
@@ -237,6 +237,23 @@ pub(crate) fn print_op(op: &ArithOp) -> &'static str {
         ArithOp::IGeU => "i.cmp.ge.u",
         ArithOp::FLe => "f.cmp.le",
         ArithOp::FGe => "f.cmp.ge",
+        ArithOp::FMin => "f.min",
+        ArithOp::FMax => "f.max",
+        ArithOp::FCopySign => "f.copy.sign",
+        ArithOp::RotL => "rotate.l",
+        ArithOp::RotR => "rotate.r",
+        ArithOp::IAddSat => "i.add.sat",
+        ArithOp::IAddSatU => "i.add.sat.u",
+        ArithOp::ISubSat => "i.sub.sat",
+        ArithOp::ISubSatU => "i.sub.sat.u",
+        ArithOp::IMulHigh => "i.mul.high",
+        ArithOp::IMulHighU => "i.mul.high.u",
+        ArithOp::IAddOverflows => "i.add.overflows",
+        ArithOp::IAddOverflowsU => "i.add.overflows.u",
+        ArithOp::ISubOverflows => "i.sub.overflows",
+        ArithOp::ISubOverflowsU => "i.sub.overflows.u",
+        ArithOp::IMulOverflows => "i.mul.overflows",
+        ArithOp::IMulOverflowsU => "i.mul.overflows.u",
     }
 }
 
@@ -310,15 +327,13 @@ pub(crate) fn print_inst(inst: &LirInst) -> String {
         }
         LirInst::Convert {
             op, src, dst, ty, ..
-        } => {
-            let op = match op {
-                ConvertOp::Trunc => "trunc",
-                ConvertOp::ExtendZero => "extend.zero",
-                ConvertOp::ExtendSign => "extend.sign",
-                ConvertOp::Bitcast => "bitcast",
-            };
-            format!("{dst}: {ty} = {op} {src}")
-        }
+        } => format!("{dst}: {ty} = {} {src}", op.name()),
+        LirInst::Unary {
+            op, src, dst, ty, ..
+        } => format!("{dst}: {ty} = {} {src}", op.name()),
+        LirInst::MulAdd {
+            a, b, c, dst, ty, ..
+        } => format!("{dst}: {ty} = f.mul.add {a}, {b}, {c}"),
         LirInst::FieldAddr { .. } | LirInst::ElemAddr { .. } => print_addr(inst),
         LirInst::Alloca { ty, place, .. } => format!("alloca {ty} {place} : zeroed"),
         LirInst::Drop { place, .. } => format!("drop {place}"),
@@ -465,6 +480,8 @@ pub(crate) fn inst_span(inst: &LirInst) -> Span {
         | LirInst::Alloca { span, .. }
         | LirInst::Drop { span, .. }
         | LirInst::Arith { span, .. }
+        | LirInst::Unary { span, .. }
+        | LirInst::MulAdd { span, .. }
         | LirInst::Zero { span, .. }
         | LirInst::AtomicLoad { span, .. }
         | LirInst::AtomicStore { span, .. }

@@ -5,7 +5,7 @@ use lilac_hir::intrinsics::{AtomicOp, Intrinsic, NumOp, Ordering};
 use lilac_hir::{HirExpr, HirExprKind, HirFunc, HirOld};
 use lilac_ir::{
     ArithOp, AtomicOrdering, ConvertOp, FloatBits, FloatWidth, LirCallee, LirConst, LirInst,
-    LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp,
+    LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, UnaryOp,
 };
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeKind, TypeRef};
@@ -84,6 +84,35 @@ impl Lower<'_> {
                 });
                 LirOperand::Reg(reg)
             }
+            Intrinsic::Float(NumOp::MultiplyAdd, _) => {
+                let regs = self.regs(state, func, args);
+                let reg = state.reg();
+                state.emit(LirInst::MulAdd {
+                    a: regs[0].clone(),
+                    b: regs[1].clone(),
+                    c: regs[2].clone(),
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
+            Intrinsic::Int(op, _) | Intrinsic::Float(op, _)
+                if constant::unary_op(op, matches!(intrinsic, Intrinsic::Float(..))).is_some() =>
+            {
+                let float = matches!(intrinsic, Intrinsic::Float(..));
+                let op: UnaryOp = constant::unary_op(op, float).expect("checked by the guard");
+                let src = self.value_reg(state, func, &args[0]);
+                let reg = state.reg();
+                state.emit(LirInst::Unary {
+                    op,
+                    src,
+                    dst: reg.clone(),
+                    ty: lir,
+                    span,
+                });
+                LirOperand::Reg(reg)
+            }
             Intrinsic::Int(op, _) | Intrinsic::Float(op, _) => {
                 let float = matches!(intrinsic, Intrinsic::Float(..));
                 let Some(op) = constant::arith_op(op, float) else {
@@ -108,11 +137,21 @@ impl Lower<'_> {
             | Intrinsic::BitsToFbit(_)
             | Intrinsic::Truncate
             | Intrinsic::ExtendZero
-            | Intrinsic::ExtendSign => {
+            | Intrinsic::ExtendSign
+            | Intrinsic::IntToFloat
+            | Intrinsic::UintToFloat
+            | Intrinsic::FloatToInt
+            | Intrinsic::FloatToUint
+            | Intrinsic::FloatConvert => {
                 let op = match intrinsic {
                     Intrinsic::Truncate => ConvertOp::Trunc,
                     Intrinsic::ExtendZero => ConvertOp::ExtendZero,
                     Intrinsic::ExtendSign => ConvertOp::ExtendSign,
+                    Intrinsic::IntToFloat => ConvertOp::IntToFloat,
+                    Intrinsic::UintToFloat => ConvertOp::UintToFloat,
+                    Intrinsic::FloatToInt => ConvertOp::FloatToInt,
+                    Intrinsic::FloatToUint => ConvertOp::FloatToUint,
+                    Intrinsic::FloatConvert => ConvertOp::FloatConvert,
                     _ => ConvertOp::Bitcast,
                 };
                 let src = self.value_reg(state, func, &args[0]);

@@ -328,6 +328,7 @@ name = "lilac-lower"
 version = "0.2.0"
 dependencies = [
  "lilac-error",
+ "lilac-float",
  "lilac-hir",
  "lilac-ir",
  "lilac-layout",

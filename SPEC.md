@@ -447,12 +447,28 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@bit_shift_left_W`** | `(@bitW, amount: @bitW): @bitW` | Shifts left by `amount` modulo the width (so a shift is never undefined). |
 | **`@bit_shift_right_W`** | `(@bitW, amount: @bitW): @bitW` | Arithmetic shift right (copies the sign bit), by `amount` modulo the width. |
 | **`@bit_shift_right_u_W`** | `(@bitW, amount: @bitW): @bitW` | Logical shift right (shifts in zeros), by `amount` modulo the width. |
+| **`@bit_rotate_left_W`**, **`@bit_rotate_right_W`** | `(@bitW, amount: @bitW): @bitW` | Rotates by `amount` modulo the width. |
+| **`@bit_count_ones_W`** | `(@bitW): @bitW` | The number of one bits. |
+| **`@bit_leading_zeros_W`**, **`@bit_trailing_zeros_W`** | `(@bitW): @bitW` | The number of zero bits above the highest one bit, or below the lowest; the width for zero. |
+| **`@bit_swap_bytes_W`** | `(@bitW): @bitW` | Reverses the byte order (`W` is not 8). |
+| **`@bit_reverse_W`** | `(@bitW): @bitW` | Reverses the bit order. |
+| **`@i_add_overflows_W`**, **`@i_sub_overflows_W`**, **`@i_mul_overflows_W`** | `(@bitW, @bitW): @bit8` | Whether the signed result does not fit (the wrapped `@i_add_W` and so on is then not the true one). The `_u_` forms (`@i_add_overflows_u_W`) are the unsigned test. |
+| **`@i_add_saturating_W`**, **`@i_sub_saturating_W`** | `(@bitW, @bitW): @bitW` | Signed addition or subtraction clamped to the range; the `_u_` forms clamp to the unsigned range. |
+| **`@i_multiply_high_W`**, **`@i_multiply_high_u_W`** | `(@bitW, @bitW): @bitW` | The upper `W` bits of the double-width signed or unsigned product. |
 | **`@f_add_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point addition using IEEE-754 bit interpretation. |
 | **`@f_sub_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point subtraction. |
 | **`@f_mul_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point multiplication. |
 | **`@f_div_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point division. |
 | **`@f_mod_W`** | `(@fbitW, @fbitW): @fbitW` | Floating-point modulo. |
 | **`@f_negate_W`** | `(@fbitW): @fbitW` | Float negation (IEEE-754 sign flip). |
+| **`@f_sqrt_W`** | `(@fbitW): @fbitW` | Square root, rounded once (NaN below zero, `-0` for `-0`). |
+| **`@f_multiply_add_W`** | `(a: @fbitW, b: @fbitW, c: @fbitW): @fbitW` | `a * b + c` rounded once. |
+| **`@f_abs_W`** | `(@fbitW): @fbitW` | Clears the sign bit. |
+| **`@f_copy_sign_W`** | `(magnitude: @fbitW, sign: @fbitW): @fbitW` | `magnitude` with the sign bit of `sign`. |
+| **`@f_floor_W`**, **`@f_ceil_W`**, **`@f_trunc_W`** | `(@fbitW): @fbitW` | The integral value below, above, or toward zero. |
+| **`@f_round_W`** | `(@fbitW): @fbitW` | The nearest integral value, ties away from zero. |
+| **`@f_round_even_W`** | `(@fbitW): @fbitW` | The nearest integral value, ties to even. |
+| **`@f_min_W`**, **`@f_max_W`** | `(@fbitW, @fbitW): @fbitW` | IEEE 754-2019 `minimum`/`maximum`: a NaN operand gives NaN, and `-0` is below `+0`. |
 | **`@f_less_than_W`** | `(@fbitW, @fbitW): @bit8` | Float less-than (IEEE-754). Returns `@bit8`. |
 | **`@f_greater_than_W`** | `(@fbitW, @fbitW): @bit8` | Float greater-than (IEEE-754). Returns `@bit8`. |
 | **`@f_less_than_or_equal_W`** | `(@fbitW, @fbitW): @bit8` | Float less-or-equal (IEEE-754; false when either is NaN). Returns `@bit8`. |
@@ -464,6 +480,9 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@truncate`** | `(value)` | Narrows a bit container; target width comes from the expected type (left-to-right). |
 | **`@extend_zero`** | `(value)` | Zero-extends a bit container; target width comes from the expected type (left-to-right). |
 | **`@extend_sign`** | `(value)` | Sign-extends a bit container (copies its top bit into the new bits); target width as `@extend_zero`. |
+| **`@int_to_float`**, **`@uint_to_float`** | `(@bitW)` | A signed or unsigned integer as the expected `@fbitV`, rounded to nearest even (to infinity past the largest float). |
+| **`@float_to_int`**, **`@float_to_uint`** | `(@fbitW)` | A float as the expected signed or unsigned `@bitV`: truncated toward zero, saturating at the range (`-∞` gives `MIN`, `+∞` `MAX`), NaN is `0`. |
+| **`@float_convert`** | `(@fbitW)` | A float as the expected `@fbitV` of another width: widened exactly, or narrowed with round to nearest even. |
 | **`@load_u8`**
  | `(buffer, offset)` | Loads one byte from `ref @bit8` at `@bit_native` byte offset. Returns `@bit8`. |
 | **`@store_u8`** | `(buffer, offset, value)` | Stores one `@bit8` value into `ref @bit8` at `@bit_native` byte offset. |
@@ -508,6 +527,19 @@ before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
 `@bitW`, the address is a `ref @bitW` (`ref place`), and every access is
 aligned to its width. A compare-swap's failure ordering is the strongest one
 valid for its ordering (`acquire` for `acq_rel`, `relaxed` for `release`).
+
+Every numeric intrinsic is defined on every input: no shift, rotation,
+count or conversion is undefined, and only integer division panics
+(below). On `@fbit128` the float operations and the conversions to or
+from it are `E078` where they are reachable: no target has them.
+
+The constant evaluator folds a numeric intrinsic on constant operands
+to exactly the bits the run-time operation gives, at the operation's own width
+(so a `=>` function over them is a constant on constant arguments, and
+`SQRT_2: @fbit64 = @f_sqrt_64(2.0)` is a constant global). A NaN
+result is never folded, since targets make different NaNs; the call is
+then an ordinary run-time operation (and a global initialized by one is
+`E038`).
 
 ### Integer division
 

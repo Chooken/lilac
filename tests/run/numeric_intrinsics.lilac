@@ -1,0 +1,174 @@
+// expect-stdout: 8 32 8 63 8
+// expect-stdout: 3 2147483648 9025 2018915346 128
+// expect-stdout: 1 1 1 1 0 1
+// expect-stdout: 127 128 255 0
+// expect-stdout: 2 18446744073709551615 4294967294 64
+// expect-stdout: 0 2147483647 2147483648 0 4294967295 255
+// expect-exit: 0
+// The hardware's numeric operations (math plan phase 1), each defined on
+// every input, through parameters so nothing folds. Integer results are
+// printed (unsigned decimal); float results are checked bit for bit.
+// The float rounding, fused multiply-add and min/max are the backend's
+// own code off aarch64, so they link with no C library.
+
+using Standard
+using Standard.Io
+using Standard.Process
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        exit(code)
+    }
+}
+
+count_ones32: function (x: @bit32) r: @bit32 { r = @bit_count_ones_32(x) }
+leading32: function (x: @bit32) r: @bit32 { r = @bit_leading_zeros_32(x) }
+trailing8: function (x: @bit8) r: @bit8 { r = @bit_trailing_zeros_8(x) }
+leading64: function (x: @bit64) r: @bit64 { r = @bit_leading_zeros_64(x) }
+trailing16: function (x: @bit16) r: @bit16 { r = @bit_trailing_zeros_16(x) }
+rotl8: function (x: @bit8, n: @bit8) r: @bit8 { r = @bit_rotate_left_8(x, n) }
+rotr32: function (x: @bit32, n: @bit32) r: @bit32 { r = @bit_rotate_right_32(x, n) }
+rotl16: function (x: @bit16, n: @bit16) r: @bit16 { r = @bit_rotate_left_16(x, n) }
+swap32: function (x: @bit32) r: @bit32 { r = @bit_swap_bytes_32(x) }
+reverse8: function (x: @bit8) r: @bit8 { r = @bit_reverse_8(x) }
+add_over8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_add_overflows_8(a, b) }
+add_over_u8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_add_overflows_u_8(a, b) }
+sub_over_u32: function (a: @bit32, b: @bit32) r: @bit8 { r = @i_sub_overflows_u_32(a, b) }
+mul_over64: function (a: @bit64, b: @bit64) r: @bit8 { r = @i_mul_overflows_64(a, b) }
+mul_over_u16: function (a: @bit16, b: @bit16) r: @bit8 { r = @i_mul_overflows_u_16(a, b) }
+sub_over8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_sub_overflows_8(a, b) }
+add_sat8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_add_saturating_8(a, b) }
+sub_sat8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_sub_saturating_8(a, b) }
+add_sat_u8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_add_saturating_u_8(a, b) }
+sub_sat_u32: function (a: @bit32, b: @bit32) r: @bit32 { r = @i_sub_saturating_u_32(a, b) }
+high_u64: function (a: @bit64, b: @bit64) r: @bit64 { r = @i_multiply_high_u_64(a, b) }
+high64: function (a: @bit64, b: @bit64) r: @bit64 { r = @i_multiply_high_64(a, b) }
+high_u32: function (a: @bit32, b: @bit32) r: @bit32 { r = @i_multiply_high_u_32(a, b) }
+high8: function (a: @bit8, b: @bit8) r: @bit8 { r = @i_multiply_high_8(a, b) }
+
+to_int32: function (x: @bit64) r: @bit32 { r = @float_to_int(@bits_to_fbit_64(x)) }
+to_uint32: function (x: @bit64) r: @bit32 { r = @float_to_uint(@bits_to_fbit_64(x)) }
+half_to_uint8: function (x: @bit16) r: @bit8 { r = @float_to_uint(@bits_to_fbit_16(x)) }
+
+sqrt64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_sqrt_64(@bits_to_fbit_64(x))) }
+floor64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_floor_64(@bits_to_fbit_64(x))) }
+ceil64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_ceil_64(@bits_to_fbit_64(x))) }
+trunc64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_trunc_64(@bits_to_fbit_64(x))) }
+round64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_round_64(@bits_to_fbit_64(x))) }
+round_even64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_round_even_64(@bits_to_fbit_64(x))) }
+abs64: function (x: @bit64) r: @bit64 { r = @fbit_to_bits_64(@f_abs_64(@bits_to_fbit_64(x))) }
+round_even16: function (x: @bit16) r: @bit16 { r = @fbit_to_bits_16(@f_round_even_16(@bits_to_fbit_16(x))) }
+copy_sign64: function (a: @bit64, b: @bit64) r: @bit64 {
+    r = @fbit_to_bits_64(@f_copy_sign_64(@bits_to_fbit_64(a), @bits_to_fbit_64(b)))
+}
+min64: function (a: @bit64, b: @bit64) r: @bit64 {
+    r = @fbit_to_bits_64(@f_min_64(@bits_to_fbit_64(a), @bits_to_fbit_64(b)))
+}
+max64: function (a: @bit64, b: @bit64) r: @bit64 {
+    r = @fbit_to_bits_64(@f_max_64(@bits_to_fbit_64(a), @bits_to_fbit_64(b)))
+}
+min16: function (a: @bit16, b: @bit16) r: @bit16 {
+    r = @fbit_to_bits_16(@f_min_16(@bits_to_fbit_16(a), @bits_to_fbit_16(b)))
+}
+fma64: function (a: @bit64, b: @bit64, c: @bit64) r: @bit64 {
+    r = @fbit_to_bits_64(@f_multiply_add_64(@bits_to_fbit_64(a), @bits_to_fbit_64(b), @bits_to_fbit_64(c)))
+}
+fma32: function (a: @bit32, b: @bit32, c: @bit32) r: @bit32 {
+    r = @fbit_to_bits_32(@f_multiply_add_32(@bits_to_fbit_32(a), @bits_to_fbit_32(b), @bits_to_fbit_32(c)))
+}
+fma16: function (a: @bit16, b: @bit16, c: @bit16) r: @bit16 {
+    r = @fbit_to_bits_16(@f_multiply_add_16(@bits_to_fbit_16(a), @bits_to_fbit_16(b), @bits_to_fbit_16(c)))
+}
+int_to_double: function (x: @bit32) r: @bit64 {
+    value: @fbit64 = @int_to_float(x)
+    r = @fbit_to_bits_64(value)
+}
+uint_to_double: function (x: @bit32) r: @bit64 {
+    value: @fbit64 = @uint_to_float(x)
+    r = @fbit_to_bits_64(value)
+}
+int_to_half: function (x: @bit32) r: @bit16 {
+    value: @fbit16 = @int_to_float(x)
+    r = @fbit_to_bits_16(value)
+}
+long_to_half: function (x: @bit64) r: @bit16 {
+    value: @fbit16 = @int_to_float(x)
+    r = @fbit_to_bits_16(value)
+}
+uint_to_half: function (x: @bit32) r: @bit16 {
+    value: @fbit16 = @uint_to_float(x)
+    r = @fbit_to_bits_16(value)
+}
+double_to_half: function (x: @bit64) r: @bit16 {
+    value: @fbit16 = @float_convert(@bits_to_fbit_64(x))
+    r = @fbit_to_bits_16(value)
+}
+half_to_double: function (x: @bit16) r: @bit64 {
+    value: @fbit64 = @float_convert(@bits_to_fbit_16(x))
+    r = @fbit_to_bits_64(value)
+}
+
+is_nan64: function (bits: @bit64) nan: @bit8 {
+    nan = @i_greater_than_u_64(@bit_and_64(bits, 0x7FFFFFFFFFFFFFFF), 0x7FF0000000000000)
+}
+
+main: function () nothing {
+    // Counts: zero is the width, never poison.
+    print_line($"{count_ones32(0xF0F0)} {leading32(0x0)} {trailing8(0x0)} {leading64(0x1)} {trailing16(0x100)}")
+    // Rotates take the amount modulo the width.
+    print_line($"{rotl8(0x81, 0x1)} {rotr32(0x1, 0x1)} {rotl16(0x1234, 0x14)} {swap32(0x12345678)} {reverse8(0x1)}")
+    print_line($"{add_over8(0x7F, 0x1)} {add_over_u8(0xFF, 0x1)} {sub_over_u32(0x0, 0x1)} {mul_over64(0x100000000, 0x100000000)} {mul_over_u16(0xFF, 0x101)} {sub_over8(0x80, 0x1)}")
+    print_line($"{add_sat8(0x64, 0x64)} {sub_sat8(0x9C, 0x64)} {add_sat_u8(0xC8, 0x64)} {sub_sat_u32(0x1, 0x2)}")
+    print_line($"{high_u64(0x8000000000000000, 0x4)} {high64(0xFFFFFFFFFFFFFFFF, 0x1)} {high_u32(0xFFFFFFFF, 0xFFFFFFFF)} {high8(0x80, 0x80)}")
+    // Float to integer saturates, and NaN is 0: NaN, +inf, -inf, -1.5
+    // unsigned, -1.5 signed, 300 as a half to `@bit8`.
+    print_line($"{to_int32(0x7FF8000000000000)} {to_int32(0x7FF0000000000000)} {to_int32(0xFFF0000000000000)} {to_uint32(0xBFF8000000000000)} {to_int32(0xBFF8000000000000)} {half_to_uint8(0x5CB0)}")
+
+    // sqrt(2), sqrt(-0) = -0, sqrt(-1) is NaN.
+    check(sqrt64(0x4000000000000000) == 0x3FF6A09E667F3BCD, 0x1)
+    check(sqrt64(0x8000000000000000) == 0x8000000000000000, 0x2)
+    check(is_nan64(sqrt64(0xBFF0000000000000)), 0x3)
+    // -0.5 rounds to -1, -0, -0, -1 (away), -0 (even).
+    check(floor64(0xBFE0000000000000) == 0xBFF0000000000000, 0x4)
+    check(ceil64(0xBFE0000000000000) == 0x8000000000000000, 0x5)
+    check(trunc64(0xBFE0000000000000) == 0x8000000000000000, 0x6)
+    check(round64(0xBFE0000000000000) == 0xBFF0000000000000, 0x7)
+    check(round_even64(0xBFE0000000000000) == 0x8000000000000000, 0x8)
+    // Ties: round(2.5) = 3, round_even(2.5) = 2, round_even(3.5) = 4,
+    // round(-2.5) = -3.
+    check(round64(0x4004000000000000) == 0x4008000000000000, 0x9)
+    check(round_even64(0x4004000000000000) == 0x4000000000000000, 0xA)
+    check(round_even64(0x400C000000000000) == 0x4010000000000000, 0xB)
+    check(round64(0xC004000000000000) == 0xC008000000000000, 0xC)
+    // A large value is already integral; infinity stays.
+    check(floor64(0x7E37E43C8800759C) == 0x7E37E43C8800759C, 0xD)
+    check(ceil64(0xFFF0000000000000) == 0xFFF0000000000000, 0xE)
+    // 2.5 as a half rounds to even: 2.
+    check(round_even16(0x4100) == 0x4000, 0xF)
+    check(abs64(0x8000000000000000) == 0x0, 0x10)
+    check(copy_sign64(0x3FF0000000000000, 0x8000000000000000) == 0xBFF0000000000000, 0x11)
+    // minimum/maximum: -0 below +0, NaN propagates.
+    check(min64(0x0, 0x8000000000000000) == 0x8000000000000000, 0x12)
+    check(max64(0x8000000000000000, 0x0) == 0x0, 0x13)
+    check(is_nan64(min64(0x3FF0000000000000, 0x7FF8000000000000)), 0x14)
+    check(max64(0x3FF0000000000000, 0x4000000000000000) == 0x4000000000000000, 0x15)
+    check(min16(0x8000, 0x0) == 0x8000, 0x16)
+    // 0.1 * 10 - 1 rounded once is the representation error: 2^-54 at
+    // 64 bits, 2^-26 at 32 and -2^-12 at 16 (unfused, all three are 0).
+    check(fma64(0x3FB999999999999A, 0x4024000000000000, 0xBFF0000000000000) == 0x3C90000000000000, 0x17)
+    check(fma32(0x3DCCCCCD, 0x41200000, 0xBF800000) == 0x32800000, 0x18)
+    check(fma16(0x2E66, 0x4900, 0xBC00) == 0x8C00, 0x19)
+    // Conversions: -1 signed, 2^32 - 1 unsigned; a half saturates to
+    // infinity past 65519, also from 64 bits.
+    check(int_to_double(0xFFFFFFFF) == 0xBFF0000000000000, 0x1A)
+    check(uint_to_double(0xFFFFFFFF) == 0x41EFFFFFFFE00000, 0x1B)
+    check(int_to_half(0xFFEF) == 0x7BFF, 0x1C)
+    check(int_to_half(0xFFF0) == 0x7C00, 0x1D)
+    check(uint_to_half(0xFFFFFFFF) == 0x7C00, 0x1E)
+    check(long_to_half(0xFFFFFF0000000000) == 0xFC00, 0x1F)
+    // 1 + 2^-11 + 2^-40 is just above a tie between halves: rounded once
+    // it goes up (through `float` rounded to nearest it would tie down).
+    check(double_to_half(0x3FF0020000001000) == 0x3C01, 0x20)
+    check(half_to_double(0x3C01) == 0x3FF0040000000000, 0x21)
+}

@@ -1163,6 +1163,18 @@ impl Checker<'_> {
                     ));
                 }
             },
+            Some(Slot::ExpectedFloat | Slot::AnyFloat) => match expected {
+                Some(want) if self.is_float(want) => vec![TypeRef::value(want)],
+                _ => {
+                    return Err(self.diags.emit(
+                        Diagnostic::error(
+                            codes::E024,
+                            format!("`{name}` needs an expected float type"),
+                        )
+                        .label(span, true, "annotate the binding"),
+                    ));
+                }
+            },
             Some(slot) => {
                 lilac_error::bug!(
                     span,
@@ -1342,23 +1354,34 @@ impl Checker<'_> {
                 self.emit_requirement(diagnostic, requirement, &[value.ty.id]);
                 None
             }
-            Slot::AnyBit | Slot::ExpectedBit => {
+            Slot::AnyBit | Slot::ExpectedBit | Slot::AnyFloat | Slot::ExpectedFloat => {
+                let float = matches!(slot, Slot::AnyFloat | Slot::ExpectedFloat);
                 let value = self.check_expr(fcx, arg, None);
                 if value.ty.is_error() {
                     return None;
                 }
                 let value = self.auto_deref(value);
-                if self.is_bit(value.ty.id) {
+                let fits = if float {
+                    self.is_float(value.ty.id)
+                } else {
+                    self.is_bit(value.ty.id)
+                };
+                if fits {
                     return Some(value);
                 }
+                let container = if float {
+                    "a float container"
+                } else {
+                    "a bit container"
+                };
                 let diagnostic = Diagnostic::error(
                     codes::E010,
                     format!(
-                        "mismatched types: expected a bit container, found {}",
+                        "mismatched types: expected {container}, found {}",
                         self.show_id(value.ty.id)
                     ),
                 )
-                .label(arg.span(), true, "not a bit container");
+                .label(arg.span(), true, format!("not {container}"));
                 let requirement = Requirement::Mismatch {
                     expected_ref: false,
                 };

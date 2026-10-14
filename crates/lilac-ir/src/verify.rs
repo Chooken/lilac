@@ -8,11 +8,12 @@ use lilac_span::Span;
 use lilac_target::Scalar;
 
 use crate::print::print_op;
+use crate::ConvertOp;
 use crate::{
     builtin_fields, builtin_sig, fields_of, format_template_layout, is_c_abi_type,
     is_variadic_arg_type, size_align, trace, AddressTarget, ArithOp, AtomicOrdering, CallGraph,
     LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand,
-    LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
+    LirTerm, LirTy, PlaceName, Reg, Symbol, UnaryOp, LILAC_IR_VERSION,
 };
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
@@ -137,16 +138,8 @@ pub fn check_live_wide_floats<S: std::hash::BuildHasher>(
             // there.
             let mut types: HashMap<&Reg, &LirTy> = HashMap::new();
             for inst in &block.insts {
-                if let LirInst::Arith {
-                    op, lhs, ty, span, ..
-                } = inst
-                {
-                    let operand = if op.is_comparison() {
-                        types.get(lhs).copied()
-                    } else {
-                        Some(ty)
-                    };
-                    if operand == Some(&wide) && op.is_float() {
+                if let Some(span) = wide_float_operation(inst, &types, &wide) {
+                    {
                         failed = true;
                         let graph = graph.get_or_insert_with(|| CallGraph::new(module));
                         diags.emit(
@@ -157,7 +150,7 @@ pub fn check_live_wide_floats<S: std::hash::BuildHasher>(
                                     module.target
                                 ),
                             )
-                            .label(*span, true, "an operation on an `@fbit128`".to_owned())
+                            .label(span, true, "an operation on an `@fbit128`".to_owned())
                             .help(
                                 "an `@fbit128` can be stored, copied and compared with `==`; \
                                  compute in `@fbit64`"
@@ -165,7 +158,7 @@ pub fn check_live_wide_floats<S: std::hash::BuildHasher>(
                             )
                             .trace(graph.trace(
                                 func.name.as_str(),
-                                *span,
+                                span,
                                 names,
                             )),
                         );
@@ -184,6 +177,40 @@ pub fn check_live_wide_floats<S: std::hash::BuildHasher>(
     }
 }
 
+/// The span of `inst` when it is float arithmetic on an `@fbit128`
+/// (`wide`): an operation, or a conversion to or from one. `types` are
+/// the block's registers so far.
+fn wide_float_operation(
+    inst: &LirInst,
+    types: &HashMap<&Reg, &LirTy>,
+    wide: &LirTy,
+) -> Option<Span> {
+    let hit = match inst {
+        LirInst::Arith { op, lhs, ty, .. } => {
+            let operand = if op.is_comparison() {
+                types.get(lhs).copied()
+            } else {
+                Some(ty)
+            };
+            op.is_float() && operand == Some(wide)
+        }
+        LirInst::Unary { op, ty, .. } => op.is_float() && ty == wide,
+        LirInst::MulAdd { ty, .. } => ty == wide,
+        LirInst::Convert { op, src, ty, .. } => {
+            matches!(
+                op,
+                ConvertOp::IntToFloat
+                    | ConvertOp::UintToFloat
+                    | ConvertOp::FloatToInt
+                    | ConvertOp::FloatToUint
+                    | ConvertOp::FloatConvert
+            ) && (ty == wide || types.get(src).copied() == Some(wide))
+        }
+        _ => false,
+    };
+    hit.then(|| crate::print::inst_span(inst))
+}
+
 /// The register `inst` defines and its type, if it defines one.
 fn defined_reg(inst: &LirInst) -> Option<(&Reg, &LirTy)> {
     match inst {
@@ -198,6 +225,8 @@ fn defined_reg(inst: &LirInst) -> Option<(&Reg, &LirTy)> {
         | LirInst::FieldAddr { dst, ty, .. }
         | LirInst::ElemAddr { dst, ty, .. }
         | LirInst::Arith { dst, ty, .. }
+        | LirInst::Unary { dst, ty, .. }
+        | LirInst::MulAdd { dst, ty, .. }
         | LirInst::AtomicLoad { dst, ty, .. }
         | LirInst::AtomicRmw { dst, ty, .. }
         | LirInst::CmpXchg { dst, ty, .. } => Some((dst, ty)),
@@ -815,6 +844,41 @@ impl Verifier<'_> {
                 self.check_arith_width(op, ty, lhs, rhs, regs, *span);
                 self.define_reg(regs, dst, ty, false, *span, func);
             }
+            LirInst::Unary {
+                op,
+                src,
+                dst,
+                ty,
+                span,
+            } => {
+                let kind_ok = if op.is_float() {
+                    ty.is_float()
+                } else {
+                    ty.is_int() && !(*op == UnaryOp::SwapBytes && *ty == LirTy::Bit(8))
+                };
+                if !kind_ok {
+                    self.error(format!("`{}` cannot take a `{ty}`", op.name()), *span);
+                }
+                self.check_operands_are(op.name(), &[src], ty, regs, *span);
+                self.define_reg(regs, dst, ty, false, *span, func);
+            }
+            LirInst::MulAdd {
+                a,
+                b,
+                c,
+                dst,
+                ty,
+                span,
+            } => {
+                if !ty.is_float() {
+                    self.error(
+                        format!("`f.mul.add` needs a float type, found `{ty}`"),
+                        *span,
+                    );
+                }
+                self.check_operands_are("f.mul.add", &[a, b, c], ty, regs, *span);
+                self.define_reg(regs, dst, ty, false, *span, func);
+            }
             LirInst::CompileError { call_span, .. } => {
                 lilac_error::bug!(*call_span, "`@compile_error` reached verify");
             }
@@ -1136,10 +1200,41 @@ impl Verifier<'_> {
                 }
             }
             LirInst::Convert {
-                src, dst, ty, span, ..
+                op,
+                src,
+                dst,
+                ty,
+                span,
             } => {
-                if !regs.contains_key(src.as_str()) {
-                    self.error(format!("use of undefined register `{src}`"), *span);
+                match regs.get(src.as_str()) {
+                    None => self.error(format!("use of undefined register `{src}`"), *span),
+                    Some(def) => {
+                        // The number conversions; `bitcast` and the width
+                        // changes are the backend's to check.
+                        let (from_float, to_float) = match op {
+                            ConvertOp::IntToFloat | ConvertOp::UintToFloat => (false, true),
+                            ConvertOp::FloatToInt | ConvertOp::FloatToUint => (true, false),
+                            ConvertOp::FloatConvert => (true, true),
+                            _ => {
+                                self.check_type(ty, *span);
+                                self.define_reg(regs, dst, ty, false, *span, func);
+                                return;
+                            }
+                        };
+                        let kind = |float: bool, ty: &LirTy| {
+                            if float {
+                                ty.is_float()
+                            } else {
+                                ty.is_int()
+                            }
+                        };
+                        if !kind(from_float, def.ty) || !kind(to_float, ty) {
+                            self.error(
+                                format!("`{}` cannot convert `{}` to `{ty}`", op.name(), def.ty),
+                                *span,
+                            );
+                        }
+                    }
                 }
                 self.check_type(ty, *span);
                 self.define_reg(regs, dst, ty, false, *span, func);
@@ -1450,14 +1545,8 @@ impl Verifier<'_> {
         regs: &Regs,
         span: Span,
     ) {
-        let is_float_arith = matches!(
-            op,
-            ArithOp::FAdd | ArithOp::FSub | ArithOp::FMul | ArithOp::FDiv | ArithOp::FMod
-        );
-        let is_float_cmp = matches!(
-            op,
-            ArithOp::FLt | ArithOp::FGt | ArithOp::FLe | ArithOp::FGe
-        );
+        let is_float_arith = op.is_float_arith();
+        let is_float_cmp = op.is_float() && op.is_comparison();
         if is_float_cmp {
             if *ty != LirTy::Bit(8) {
                 self.error(
@@ -1548,6 +1637,27 @@ impl Verifier<'_> {
                         span,
                     );
                 }
+            }
+        }
+    }
+
+    /// Checks that each operand register is defined with type `ty`.
+    fn check_operands_are(
+        &mut self,
+        what: &str,
+        operands: &[&Reg],
+        ty: &LirTy,
+        regs: &Regs,
+        span: Span,
+    ) {
+        for reg in operands {
+            match regs.get(reg.as_str()) {
+                None => self.error(format!("use of undefined register `{reg}`"), span),
+                Some(def) if def.ty != ty => self.error(
+                    format!("`{what}` operand `{reg}` is a `{}`, not a `{ty}`", def.ty),
+                    span,
+                ),
+                Some(_) => {}
             }
         }
     }

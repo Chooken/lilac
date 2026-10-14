@@ -450,6 +450,15 @@ print symmetrically (`&3: #bit32 = extend.zero &2`,
 `&4: #bit32 = field.addr %variable .member  // idx 0`); no UI snapshot
 covers them yet.
 
+The numeric conversions take the width of their result from its type
+and are defined on every input:
+* `&r: #fbitV = i.to.f &a` / `u.to.f`: a signed or unsigned integer,
+  rounded to nearest even (`sitofp`/`uitofp`);
+* `&r: #bitV = f.to.i &a` / `f.to.u`: truncated toward zero, saturating
+  at the range, NaN is `0` (`llvm.fptosi.sat`/`fptoui.sat`);
+* `&r: #fbitV = f.convert &a`: widened exactly or narrowed with round to
+  nearest even (`fpext`/`fptrunc`); the widths differ.
+
 ### atomics
 * `atomic.load.<order>`, `atomic.store.<order>`, the read-modify-writes
   `atomic.<op>.<order>` (`swap`, `add`, `sub`, `and`, `or`, `xor`, `max`,
@@ -712,6 +721,15 @@ Result is `#bit8` (`0x0` false, otherwise true). Input types must match;
 * ```i.div.u &a, &b -> &r``` / ```i.mod.u &a, &b -> &r``` (`udiv`/`urem`)
 All operands share one `#bit8/16/32/64/Native` width, carried on the result reg.
 
+Each defined on every input, with the same width rule:
+* ```i.add.sat &a, &b -> &r``` / ```i.sub.sat``` and the `.u` forms: the
+  result clamped to the range;
+* ```i.mul.high``` / ```i.mul.high.u```: the upper half of the
+  double-width product;
+* ```i.add.overflows``` / ```i.sub.overflows``` / ```i.mul.overflows```
+  and the `.u` forms: `#bit8`, whether the wrapped result overflowed (the
+  operands share a width; the result is the flag).
+
 Precondition: the divisor of `i.div`, `i.div.u`, `i.mod` and `i.mod.u` is
 never zero, and the operands of `i.div` and `i.mod` are never the minimum
 signed value with `-1`. The producer guarantees it: lowering tests each
@@ -724,12 +742,25 @@ precondition is undefined.
 
 ## Float Arithmetic
 * ```f.add &a, &b -> &r``` / ```f.sub``` / ```f.mul``` / ```f.div``` / ```f.mod```
-Same width rule as integer arithmetic.
+* ```f.min``` / ```f.max```: IEEE 754-2019 `minimum`/`maximum` (NaN
+  propagates, `-0 < +0`); ```f.copy.sign```: the left magnitude with the
+  right sign
+* `&r: #fbitW = f.mul.add &a, &b, &c`: `a * b + c` rounded once
+* `&r: #fbitW = f.sqrt &a` / `f.abs` / `f.floor` / `f.ceil` / `f.trunc` /
+  `f.round` (ties away from zero) / `f.round.even`: one-operand
+  operations (`LirInst::Unary`), exactly rounded
+Same width rule as integer arithmetic. On `#fbit128` each is `E078` where
+it is reachable (`check_live_wide_floats`), as is a conversion to or from
+one.
 
 ## Bitwise Operations
 * ```and &a, &b -> &r``` / ```or``` / ```xor``` (`not` is `xor` with all ones)
 * ```shift.l &a, &b -> &r``` / ```shift.r``` (arithmetic) / ```shift.r.u```
   (logical): the amount `&b` (same width as `&a`) is taken modulo the width.
+* ```rotate.l``` / ```rotate.r```: rotates by `&b` modulo the width.
+* `&r: #bitW = bit.count.ones &a` / `bit.leading.zeros` /
+  `bit.trailing.zeros` (the width for zero) / `bit.swap.bytes` (not at
+  `#bit8`) / `bit.reverse`.
 
 ## Literals (canonical text)
 * Ints: `&1: #bit32 = const 0x2a`: lowercase hex, no leading zeros, the

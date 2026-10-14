@@ -168,7 +168,8 @@ Tests:
 Left for later:
 - 32-bit targets have no native mode, so their 64-bit division routines
   (`__divdi3`, …) are needed only once one does.
-- `__truncdfhf2`, which phase 1's `@float_convert` will reach on x86-64.
+- `__truncdfhf2`, which phase 1's `@float_convert` would reach on
+  x86-64 (phase 1 converts halves through 32 bits instead).
 - `--libc` builds on Windows (MSVC's C runtime has no half conversions).
 
 ## Phase 1: the hardware's numeric operations
@@ -183,6 +184,36 @@ Every new intrinsic follows the usual path:
 - a row in SPEC §3.
 
 Each one is defined on every input.
+
+**Done**, as below. What the implementation adds to the plan:
+- The LIR has `LirInst::Unary` (the one-operand operations),
+  `LirInst::MulAdd` (`f.mul.add`), new `ArithOp`s (`f.min`, `rotate.l`,
+  `i.add.sat`, `i.mul.high`, `i.add.overflows`, …) and new `ConvertOp`s
+  (`i.to.f`, `u.to.f`, `f.to.i`, `f.to.u`, `f.convert`). `IR_SPEC.md`
+  lists them.
+- The backend (`lilac-codegen-llvm/src/lower/math.rs`) uses LLVM
+  intrinsics for the integer operations, which every target expands
+  inline. Float ones must not become C library calls (`floor`, `fma`,
+  `fmin`): aarch64 has an instruction for each, and elsewhere the
+  backend calls its own internal routines, IR text. A 16-bit operation
+  runs at 32 bits between exact conversions, except the fused
+  multiply-add, which rounds to odd at 53 and then 24 bits so only the
+  last rounding counts.
+- `lilac-float` (`ops.rs`) has the exact operations at every width:
+  `sqrt`, `multiply_add`, `round_to_integral` (a `Rounding`),
+  `minimum`/`maximum`, `copy_sign`, `compare`, `convert`, `from_int` and
+  `to_int`. The evaluator (`lilac-lower/src/constant.rs`) folds floats
+  with them, never a NaN result (targets make different NaNs) and
+  arithmetic only on finite operands with a finite result, as
+  `FloatBits::apply` does. A global may be a float constant.
+- On `@fbit128` every new float operation and conversion is `E078`.
+- Beyond the plan's tests, `crates/lilac-cli/tests/numeric_differential.rs`
+  builds a program running every operation at every width on generated
+  inputs (random bits, special values, values near integers), in debug
+  and release, and compares each result bit for bit with Rust's (an
+  exact model for `@fbit16`; a NaN only has to be a NaN).
+  `tests/run/numeric_folding.lilac` checks that the folds give the
+  run-time bits.
 
 **Conversions.** Like `@truncate`, these take their result width from
 the expected type, so there is one name per direction rather than per

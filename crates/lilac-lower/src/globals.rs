@@ -157,6 +157,15 @@ impl Lower<'_> {
                     scalars.push((at, bits.to_le_bytes().into_iter().take(len).collect()));
                 }
             }
+            (Value::Float(bits), _) => {
+                if bits.to_bits() != 0 {
+                    let len = (bits.width().bits() / 8) as usize;
+                    scalars.push((
+                        at,
+                        bits.to_bits().to_le_bytes().into_iter().take(len).collect(),
+                    ));
+                }
+            }
             (Value::Aggregate(values), Some(layout @ Layout::Object { .. })) => {
                 let slots = layout.slots();
                 let offsets = self.offsets(ty);

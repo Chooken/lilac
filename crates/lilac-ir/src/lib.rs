@@ -383,7 +383,7 @@ pub enum LirCallee {
 }
 
 /// Arithmetic/comparison operators (all explicitly typed at site).
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ArithOp {
     /// `i.add` (integer add).
     IAdd,
@@ -447,6 +447,40 @@ pub enum ArithOp {
     FLe,
     /// `f.cmp.ge` (false when either side is NaN).
     FGe,
+    /// `f.min`: IEEE 754-2019 `minimum` (NaN propagates, `-0 < +0`).
+    FMin,
+    /// `f.max`: IEEE 754-2019 `maximum`.
+    FMax,
+    /// `f.copy.sign`: the left magnitude with the right sign bit.
+    FCopySign,
+    /// `rotate.l`: rotates left by the right operand modulo the width.
+    RotL,
+    /// `rotate.r`: rotates right by the right operand modulo the width.
+    RotR,
+    /// `i.add.sat`: signed add clamped to the range.
+    IAddSat,
+    /// `i.add.sat.u`.
+    IAddSatU,
+    /// `i.sub.sat`.
+    ISubSat,
+    /// `i.sub.sat.u`.
+    ISubSatU,
+    /// `i.mul.high`: the upper half of the double-width signed product.
+    IMulHigh,
+    /// `i.mul.high.u`.
+    IMulHighU,
+    /// `i.add.overflows` (`#bit8`): whether the signed sum overflows.
+    IAddOverflows,
+    /// `i.add.overflows.u`.
+    IAddOverflowsU,
+    /// `i.sub.overflows`.
+    ISubOverflows,
+    /// `i.sub.overflows.u`.
+    ISubOverflowsU,
+    /// `i.mul.overflows`.
+    IMulOverflows,
+    /// `i.mul.overflows.u`.
+    IMulOverflowsU,
 }
 
 impl ArithOp {
@@ -468,6 +502,12 @@ impl ArithOp {
                 | Self::FGt
                 | Self::FLe
                 | Self::FGe
+                | Self::IAddOverflows
+                | Self::IAddOverflowsU
+                | Self::ISubOverflows
+                | Self::ISubOverflowsU
+                | Self::IMulOverflows
+                | Self::IMulOverflowsU
         )
     }
 
@@ -485,7 +525,83 @@ impl ArithOp {
                 | Self::FGt
                 | Self::FLe
                 | Self::FGe
+                | Self::FMin
+                | Self::FMax
+                | Self::FCopySign
         )
+    }
+
+    /// Whether this is float arithmetic: float operands and a result of
+    /// their type.
+    #[must_use]
+    pub fn is_float_arith(&self) -> bool {
+        self.is_float() && !self.is_comparison()
+    }
+}
+
+/// A one-operand operation (`LirInst::Unary`); the result has the
+/// operand's type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnaryOp {
+    /// `f.sqrt`: the square root, rounded once.
+    FSqrt,
+    /// `f.abs`: clears the sign bit.
+    FAbs,
+    /// `f.floor`.
+    FFloor,
+    /// `f.ceil`.
+    FCeil,
+    /// `f.trunc`.
+    FTrunc,
+    /// `f.round`: to the nearest integral value, ties away from zero.
+    FRound,
+    /// `f.round.even`: to the nearest integral value, ties to even.
+    FRoundEven,
+    /// `bit.count.ones`.
+    CountOnes,
+    /// `bit.leading.zeros` (the width for zero).
+    LeadingZeros,
+    /// `bit.trailing.zeros` (the width for zero).
+    TrailingZeros,
+    /// `bit.swap.bytes` (16 bits and wider).
+    SwapBytes,
+    /// `bit.reverse`.
+    Reverse,
+}
+
+impl UnaryOp {
+    /// Whether the operand is a float.
+    #[must_use]
+    pub fn is_float(self) -> bool {
+        matches!(
+            self,
+            Self::FSqrt
+                | Self::FAbs
+                | Self::FFloor
+                | Self::FCeil
+                | Self::FTrunc
+                | Self::FRound
+                | Self::FRoundEven
+        )
+    }
+
+    /// The printed name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FSqrt => "f.sqrt",
+            Self::FAbs => "f.abs",
+            Self::FFloor => "f.floor",
+            Self::FCeil => "f.ceil",
+            Self::FTrunc => "f.trunc",
+            Self::FRound => "f.round",
+            Self::FRoundEven => "f.round.even",
+            Self::CountOnes => "bit.count.ones",
+            Self::LeadingZeros => "bit.leading.zeros",
+            Self::TrailingZeros => "bit.trailing.zeros",
+            Self::SwapBytes => "bit.swap.bytes",
+            Self::Reverse => "bit.reverse",
+        }
     }
 }
 
@@ -698,6 +814,34 @@ pub enum LirInst {
         /// Destination register.
         dst: Reg,
         /// Result type.
+        ty: LirTy,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #t = op &s` (a one-operand operation of type `#t`).
+    Unary {
+        /// Operator.
+        op: UnaryOp,
+        /// Operand register.
+        src: Reg,
+        /// Destination register.
+        dst: Reg,
+        /// Operand and result type.
+        ty: LirTy,
+        /// Instruction span.
+        span: Span,
+    },
+    /// `&d: #f = f.mul.add &a, &b, &c`: `a * b + c` rounded once.
+    MulAdd {
+        /// Left factor.
+        a: Reg,
+        /// Right factor.
+        b: Reg,
+        /// Addend.
+        c: Reg,
+        /// Destination register.
+        dst: Reg,
+        /// Float type of every operand and the result.
         ty: LirTy,
         /// Instruction span.
         span: Span,
@@ -943,7 +1087,7 @@ impl RmwOp {
 }
 
 /// Width-conversion operators.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ConvertOp {
     /// `trunc` (narrowing).
     Trunc,
@@ -954,6 +1098,36 @@ pub enum ConvertOp {
     /// `bitcast` (same-width reinterpret: `@bit32` <-> `@fbit32`, or a
     /// reference <-> `#bit_native` address).
     Bitcast,
+    /// `i.to.f`: a signed integer to a float, rounded to nearest even.
+    IntToFloat,
+    /// `u.to.f`: an unsigned integer to a float, rounded to nearest even.
+    UintToFloat,
+    /// `f.to.i`: a float to a signed integer, truncated, saturating, NaN 0.
+    FloatToInt,
+    /// `f.to.u`: a float to an unsigned integer, truncated, saturating,
+    /// NaN 0.
+    FloatToUint,
+    /// `f.convert`: a float to another width, widened exactly or rounded
+    /// to nearest even.
+    FloatConvert,
+}
+
+impl ConvertOp {
+    /// The printed name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Trunc => "trunc",
+            Self::ExtendZero => "extend.zero",
+            Self::ExtendSign => "extend.sign",
+            Self::Bitcast => "bitcast",
+            Self::IntToFloat => "i.to.f",
+            Self::UintToFloat => "u.to.f",
+            Self::FloatToInt => "f.to.i",
+            Self::FloatToUint => "f.to.u",
+            Self::FloatConvert => "f.convert",
+        }
+    }
 }
 
 /// A block terminator (exactly one per block).

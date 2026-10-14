@@ -7,7 +7,8 @@
 //! kept and its arguments are unknown, so nothing folds away), and it is
 //! built for each native target at `debug` and `release`, cross-linked
 //! with the development sysroot's `lld`: an undefined symbol fails the
-//! link. Each later phase adds its intrinsics to [`program`].
+//! link. Each later phase adds its intrinsics to [`program`] (phase 1's
+//! rounding, fused multiply-add, conversions and bit counts are there).
 
 mod support;
 
@@ -52,7 +53,47 @@ const INT_COMPARE: [&str; 8] = [
     "greater_than_or_equal_u",
 ];
 
-const FLOAT_BINARY: [&str; 5] = ["add", "sub", "mul", "div", "mod"];
+const FLOAT_BINARY: [&str; 8] = ["add", "sub", "mul", "div", "mod", "min", "max", "copy_sign"];
+
+const FLOAT_UNARY: [&str; 8] = [
+    "negate",
+    "sqrt",
+    "abs",
+    "floor",
+    "ceil",
+    "trunc",
+    "round",
+    "round_even",
+];
+
+/// The phase 1 integer operations with two operands, and whether the
+/// result is the `@bit8` flag.
+const INT_PHASE1: [(&str, bool); 14] = [
+    ("bit_rotate_left", false),
+    ("bit_rotate_right", false),
+    ("i_add_saturating", false),
+    ("i_add_saturating_u", false),
+    ("i_sub_saturating", false),
+    ("i_sub_saturating_u", false),
+    ("i_multiply_high", false),
+    ("i_multiply_high_u", false),
+    ("i_add_overflows", true),
+    ("i_add_overflows_u", true),
+    ("i_sub_overflows", true),
+    ("i_sub_overflows_u", true),
+    ("i_mul_overflows", true),
+    ("i_mul_overflows_u", true),
+];
+
+const INT_UNARY: [&str; 7] = [
+    "i_negate",
+    "bit_not",
+    "bit_count_ones",
+    "bit_leading_zeros",
+    "bit_trailing_zeros",
+    "bit_swap_bytes",
+    "bit_reverse",
+];
 
 const FLOAT_COMPARE: [&str; 4] = [
     "less_than",
@@ -62,6 +103,7 @@ const FLOAT_COMPARE: [&str; 4] = [
 ];
 
 /// The probe program: a `main` and one export per operation and width.
+#[allow(clippy::too_many_lines, reason = "one template")]
 fn program() -> String {
     let mut text = String::from("main: function () nothing {\n}\n");
     for width in INT_WIDTHS {
@@ -89,7 +131,18 @@ fn program() -> String {
             )
             .expect("writes to a string");
         }
-        for name in ["i_negate", "bit_not"] {
+        for (name, flag) in INT_PHASE1 {
+            let result = if flag { "@bit8" } else { &ty };
+            writeln!(
+                text,
+                "probe_{name}_{width}: export function (a: {ty}, b: {ty}) r: {result} {{\n    r = @{name}_{width}(a, b)\n}}\n"
+            )
+            .expect("writes to a string");
+        }
+        for name in INT_UNARY {
+            if name == "bit_swap_bytes" && width == "8" {
+                continue;
+            }
             writeln!(
                 text,
                 "probe_{name}_{width}: export function (a: {ty}) r: {ty} {{\n    r = @{name}_{width}(a)\n}}\n"
@@ -118,12 +171,54 @@ fn program() -> String {
             )
             .expect("writes to a string");
         }
+        for op in FLOAT_UNARY {
+            writeln!(
+                text,
+                "probe_f_{op}_{width}: export function (a: {ty}) r: {ty} {{\n    r = @fbit_to_bits_{width}(@f_{op}_{width}({}))\n}}\n",
+                float("a")
+            )
+            .expect("writes to a string");
+        }
         writeln!(
             text,
-            "probe_f_negate_{width}: export function (a: {ty}) r: {ty} {{\n    r = @fbit_to_bits_{width}(@f_negate_{width}({}))\n}}\n",
-            float("a")
+            "probe_f_multiply_add_{width}: export function (a: {ty}, b: {ty}, c: {ty}) r: {ty} {{\n    r = @fbit_to_bits_{width}(@f_multiply_add_{width}({}, {}, {}))\n}}\n",
+            float("a"),
+            float("b"),
+            float("c")
         )
         .expect("writes to a string");
+        for int in INT_WIDTHS {
+            let int_ty = if int == "native" {
+                "@bit_native".to_owned()
+            } else {
+                format!("@bit{int}")
+            };
+            for op in ["float_to_int", "float_to_uint"] {
+                writeln!(
+                    text,
+                    "probe_{op}_{width}_{int}: export function (a: {ty}) r: {int_ty} {{\n    r = @{op}({})\n}}\n",
+                    float("a")
+                )
+                .expect("writes to a string");
+            }
+            for op in ["int_to_float", "uint_to_float"] {
+                writeln!(
+                    text,
+                    "probe_{op}_{int}_{width}: export function (a: {int_ty}) r: {ty} {{\n    value: @fbit{width} = @{op}(a)\n    r = @fbit_to_bits_{width}(value)\n}}\n"
+                )
+                .expect("writes to a string");
+            }
+        }
+        for to in FLOAT_WIDTHS {
+            if to != width {
+                writeln!(
+                    text,
+                    "probe_float_convert_{width}_{to}: export function (a: {ty}) r: @bit{to} {{\n    value: @fbit{to} = @float_convert({})\n    r = @fbit_to_bits_{to}(value)\n}}\n",
+                    float("a")
+                )
+                .expect("writes to a string");
+            }
+        }
     }
     text
 }

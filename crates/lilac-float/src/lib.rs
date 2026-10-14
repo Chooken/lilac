@@ -23,12 +23,14 @@
 //! [`FloatBits`].
 
 mod big;
+mod ops;
 #[cfg(test)]
 mod tests;
 
 use std::fmt;
 
 use big::Big;
+pub use ops::Rounding;
 
 /// The width of an IEEE 754 binary interchange format.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -127,6 +129,17 @@ impl FloatBits {
     #[must_use]
     pub fn negative_zero(width: FloatWidth) -> Self {
         pack(width, 1 << (width.bits() - 1))
+    }
+
+    /// The pattern `bits` of `width`, when it fits the width.
+    #[must_use]
+    pub fn from_bits(width: FloatWidth, bits: u128) -> Option<Self> {
+        Some(match width {
+            FloatWidth::W16 => Self::F16(u16::try_from(bits).ok()?),
+            FloatWidth::W32 => Self::F32(u32::try_from(bits).ok()?),
+            FloatWidth::W64 => Self::F64(u64::try_from(bits).ok()?),
+            FloatWidth::W128 => Self::F128(bits),
+        })
     }
 
     /// The width of the pattern.
@@ -275,24 +288,40 @@ struct Exact {
 
 /// `left + right` rounded once to `width`.
 fn sum(left: Exact, right: Exact, width: FloatWidth) -> Result<FloatBits, FloatError> {
+    let term = |value: Exact| {
+        (
+            value.negative,
+            Big::from_u128(value.significand),
+            value.exponent,
+        )
+    };
+    let (negative, magnitude, exponent) = exact_sum(&term(left), &term(right));
+    round_scaled(negative, &magnitude, exponent, width)
+}
+
+/// A signed term `(-1)^negative * magnitude * 2^exponent`.
+type Term = (bool, Big, i64);
+
+/// `left + right`, exact.
+fn exact_sum(left: &Term, right: &Term) -> Term {
     // Both over the smaller exponent: integers, so the sum is exact.
-    let low = left.exponent.min(right.exponent);
-    let widen = |value: Exact| {
-        let shift = usize::try_from(value.exponent - low).unwrap_or(usize::MAX);
-        Big::from_u128(value.significand).shl(shift)
+    let low = left.2.min(right.2);
+    let widen = |term: &Term| {
+        let shift = usize::try_from(term.2 - low).unwrap_or(usize::MAX);
+        term.1.shl(shift)
     };
     let (a, b) = (widen(left), widen(right));
-    let (negative, magnitude) = if left.negative == right.negative {
-        (left.negative, a.add(&b))
+    let (negative, magnitude) = if left.0 == right.0 {
+        (left.0, a.add(&b))
     } else {
         match a.cmp(&b) {
-            std::cmp::Ordering::Greater => (left.negative, difference(a, &b)),
-            std::cmp::Ordering::Less => (right.negative, difference(b, &a)),
+            std::cmp::Ordering::Greater => (left.0, difference(a, &b)),
+            std::cmp::Ordering::Less => (right.0, difference(b, &a)),
             // Round to nearest: an exact zero sum of opposite signs is `+0`.
             std::cmp::Ordering::Equal => (false, Big::from_u64(0)),
         }
     };
-    round_scaled(negative, &magnitude, low, width)
+    (negative, magnitude, low)
 }
 
 /// `a - b`, for `a >= b`.

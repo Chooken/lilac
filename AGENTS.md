@@ -43,6 +43,18 @@
   `crates/lilac-cli/tests/numeric_link.rs` cross-links every numeric
   intrinsic for the six native targets, so a new one cannot leak a
   libcall: add new intrinsics to its program.
+- Numeric operations (math plan phase 1; `lilac-codegen-llvm/src/lower/math.rs`):
+  `LirInst::Unary`, `LirInst::MulAdd`, the new `ArithOp`s and the
+  number `ConvertOp`s. Integer ones are LLVM intrinsics; float ones are
+  aarch64 instructions, elsewhere internal IR-text routines (never C's
+  `floor`/`fma`/`fmin`), and `@fbit16` runs at 32 bits (the fused
+  multiply-add rounds to odd so it rounds once). Halves convert through
+  32 bits, never `__truncdfhf2`. The constant evaluator folds them with
+  `lilac-float`'s exact operations (`ops.rs`), never to a NaN, so a
+  global may be a float constant (`globals.rs` encodes its bits).
+  `crates/lilac-cli/tests/numeric_differential.rs` runs each one on
+  generated inputs, debug and release, against Rust's results bit for
+  bit: add new operations to it.
 - Threads (`lilac-codegen-llvm/src/threads.rs`): a thread starts in a C
   function, `Standard.Os`'s `thread_start` (an `export`, symbol
   `lilac_thread_start`), which runs the start block's `entry(argument)`;

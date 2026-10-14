@@ -142,6 +142,66 @@ pub enum NumOp {
     Shr,
     /// `shift_right_u` (logical: shifts in zeros).
     ShrU,
+    /// `rotate_left` (integers only; the amount is taken modulo the width).
+    RotateLeft,
+    /// `rotate_right`.
+    RotateRight,
+    /// `count_ones` (unary, integers only).
+    CountOnes,
+    /// `leading_zeros` (unary; the width for zero).
+    LeadingZeros,
+    /// `trailing_zeros` (unary; the width for zero).
+    TrailingZeros,
+    /// `swap_bytes` (unary, 16 bits and wider).
+    SwapBytes,
+    /// `reverse` (unary: the bits in reverse order).
+    Reverse,
+    /// `add_overflows` (signed): whether the wrapping sum overflowed.
+    AddOverflows,
+    /// `add_overflows_u`.
+    AddOverflowsU,
+    /// `sub_overflows`.
+    SubOverflows,
+    /// `sub_overflows_u`.
+    SubOverflowsU,
+    /// `mul_overflows`.
+    MulOverflows,
+    /// `mul_overflows_u`.
+    MulOverflowsU,
+    /// `add_saturating` (signed): the sum clamped to the range.
+    AddSaturating,
+    /// `add_saturating_u`.
+    AddSaturatingU,
+    /// `sub_saturating`.
+    SubSaturating,
+    /// `sub_saturating_u`.
+    SubSaturatingU,
+    /// `multiply_high` (signed): the upper half of the double-width product.
+    MultiplyHigh,
+    /// `multiply_high_u`.
+    MultiplyHighU,
+    /// `sqrt` (unary, floats only).
+    Sqrt,
+    /// `multiply_add` (floats only): `a * b + c`, rounded once.
+    MultiplyAdd,
+    /// `abs` (unary, floats only): clears the sign bit.
+    Abs,
+    /// `copy_sign` (floats only): the first magnitude with the second sign.
+    CopySign,
+    /// `floor` (unary, floats only).
+    Floor,
+    /// `ceil` (unary, floats only).
+    Ceil,
+    /// `trunc` (unary, floats only).
+    Trunc,
+    /// `round` (unary, floats only): ties away from zero.
+    Round,
+    /// `round_even` (unary, floats only): ties to even.
+    RoundEven,
+    /// `min` (floats only): IEEE 754-2019 `minimum`.
+    Min,
+    /// `max` (floats only): IEEE 754-2019 `maximum`.
+    Max,
 }
 
 impl NumOp {
@@ -157,12 +217,52 @@ impl NumOp {
             "greater_than" => Self::Gt,
             "less_than_or_equal" => Self::Le,
             "greater_than_or_equal" => Self::Ge,
-            "div_u" if !float => Self::DivU,
-            "mod_u" if !float => Self::ModU,
-            "less_than_u" if !float => Self::LtU,
-            "greater_than_u" if !float => Self::GtU,
-            "less_than_or_equal_u" if !float => Self::LeU,
-            "greater_than_or_equal_u" if !float => Self::GeU,
+            _ if float => return Self::parse_float(name),
+            _ => return Self::parse_int(name),
+        };
+        Some(op)
+    }
+
+    /// An operation only `@i_` has.
+    fn parse_int(name: &str) -> Option<Self> {
+        let op = match name {
+            "div_u" => Self::DivU,
+            "mod_u" => Self::ModU,
+            "less_than_u" => Self::LtU,
+            "greater_than_u" => Self::GtU,
+            "less_than_or_equal_u" => Self::LeU,
+            "greater_than_or_equal_u" => Self::GeU,
+            "add_overflows" => Self::AddOverflows,
+            "add_overflows_u" => Self::AddOverflowsU,
+            "sub_overflows" => Self::SubOverflows,
+            "sub_overflows_u" => Self::SubOverflowsU,
+            "mul_overflows" => Self::MulOverflows,
+            "mul_overflows_u" => Self::MulOverflowsU,
+            "add_saturating" => Self::AddSaturating,
+            "add_saturating_u" => Self::AddSaturatingU,
+            "sub_saturating" => Self::SubSaturating,
+            "sub_saturating_u" => Self::SubSaturatingU,
+            "multiply_high" => Self::MultiplyHigh,
+            "multiply_high_u" => Self::MultiplyHighU,
+            _ => return None,
+        };
+        Some(op)
+    }
+
+    /// An operation only `@f_` has.
+    fn parse_float(name: &str) -> Option<Self> {
+        let op = match name {
+            "sqrt" => Self::Sqrt,
+            "multiply_add" => Self::MultiplyAdd,
+            "abs" => Self::Abs,
+            "copy_sign" => Self::CopySign,
+            "floor" => Self::Floor,
+            "ceil" => Self::Ceil,
+            "trunc" => Self::Trunc,
+            "round" => Self::Round,
+            "round_even" => Self::RoundEven,
+            "min" => Self::Min,
+            "max" => Self::Max,
             _ => return None,
         };
         Some(op)
@@ -178,15 +278,38 @@ impl NumOp {
             "shift_left" => Self::Shl,
             "shift_right" => Self::Shr,
             "shift_right_u" => Self::ShrU,
+            "rotate_left" => Self::RotateLeft,
+            "rotate_right" => Self::RotateRight,
+            "count_ones" => Self::CountOnes,
+            "leading_zeros" => Self::LeadingZeros,
+            "trailing_zeros" => Self::TrailingZeros,
+            "swap_bytes" => Self::SwapBytes,
+            "reverse" => Self::Reverse,
             _ => return None,
         };
         Some(op)
     }
 
-    /// Whether it takes one operand (`negate`, `not`).
+    /// Whether it takes one operand.
     #[must_use]
     pub fn is_unary(self) -> bool {
-        matches!(self, Self::Negate | Self::Not)
+        matches!(
+            self,
+            Self::Negate
+                | Self::Not
+                | Self::CountOnes
+                | Self::LeadingZeros
+                | Self::TrailingZeros
+                | Self::SwapBytes
+                | Self::Reverse
+                | Self::Sqrt
+                | Self::Abs
+                | Self::Floor
+                | Self::Ceil
+                | Self::Trunc
+                | Self::Round
+                | Self::RoundEven
+        )
     }
 
     /// Whether the result is a `@bit8` truth value.
@@ -202,6 +325,12 @@ impl NumOp {
                 | Self::GtU
                 | Self::LeU
                 | Self::GeU
+                | Self::AddOverflows
+                | Self::AddOverflowsU
+                | Self::SubOverflows
+                | Self::SubOverflowsU
+                | Self::MulOverflows
+                | Self::MulOverflowsU
         )
     }
 }
@@ -327,6 +456,17 @@ pub enum Intrinsic {
     ExtendZero,
     /// `@extend_sign` (width from the expected type).
     ExtendSign,
+    /// `@int_to_float` (signed; width from the expected type).
+    IntToFloat,
+    /// `@uint_to_float` (unsigned; width from the expected type).
+    UintToFloat,
+    /// `@float_to_int` (signed, saturating; width from the expected type).
+    FloatToInt,
+    /// `@float_to_uint` (unsigned, saturating; width from the expected
+    /// type).
+    FloatToUint,
+    /// `@float_convert` (width from the expected type).
+    FloatConvert,
     /// `@size_of(Type)` / `@size_of(value)`.
     SizeOf,
     /// `@load_u8(ptr, offset)`.
@@ -422,6 +562,10 @@ pub enum Slot {
     AnyBit,
     /// The expected bit type (`@truncate`/`@extend_zero` result).
     ExpectedBit,
+    /// Any float container (`@float_convert` operand).
+    AnyFloat,
+    /// The expected float type (`@float_convert` result).
+    ExpectedFloat,
     /// A type, or a value standing for its type (`@size_of`).
     Type,
     /// A value, or a place, of any type `name` (`@move`'s `T`).
@@ -445,7 +589,12 @@ impl Slot {
     pub fn is_checked(self) -> bool {
         matches!(
             self,
-            Self::Builtin(_) | Self::Ref(_) | Self::AnyBit | Self::ExpectedBit
+            Self::Builtin(_)
+                | Self::Ref(_)
+                | Self::AnyBit
+                | Self::ExpectedBit
+                | Self::AnyFloat
+                | Self::ExpectedFloat
         )
     }
 }
@@ -457,6 +606,7 @@ impl std::fmt::Display for Slot {
             Self::Builtin(ty) => f.write_str(ty.name()),
             Self::Ref(ty) => write!(f, "ref {}", ty.name()),
             Self::AnyBit | Self::ExpectedBit => f.write_str("@bitN"),
+            Self::AnyFloat | Self::ExpectedFloat => f.write_str("@fbitN"),
             Self::Type => f.write_str("Type"),
             Self::Param(name) => f.write_str(name),
             Self::RefParam(name) => write!(f, "ref {name}"),
@@ -495,10 +645,15 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 32] = [
+    const PLAIN: [(&'static str, Self); 37] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
+        ("@int_to_float", Self::IntToFloat),
+        ("@uint_to_float", Self::UintToFloat),
+        ("@float_to_int", Self::FloatToInt),
+        ("@float_to_uint", Self::FloatToUint),
+        ("@float_convert", Self::FloatConvert),
         ("@size_of", Self::SizeOf),
         ("@load_u8", Self::LoadU8),
         ("@store_u8", Self::StoreU8),
@@ -550,10 +705,12 @@ impl Intrinsic {
         }
         if let Some(rest) = name.strip_prefix("@bit_") {
             let (op, width) = rest.rsplit_once('_')?;
-            return Some(Self::Int(
-                NumOp::parse_bitwise(op)?,
-                IntWidth::parse(width)?,
-            ));
+            let (op, width) = (NumOp::parse_bitwise(op)?, IntWidth::parse(width)?);
+            // A byte has no bytes to swap.
+            if op == NumOp::SwapBytes && width == IntWidth::W8 {
+                return None;
+            }
+            return Some(Self::Int(op, width));
         }
         if let Some(rest) = name.strip_prefix("@f_") {
             let (op, width) = rest.rsplit_once('_')?;
@@ -607,7 +764,30 @@ impl Intrinsic {
     pub fn names() -> Vec<String> {
         const INT_WIDTHS: [&str; 5] = ["8", "16", "32", "64", "native"];
         const FLOAT_WIDTHS: [&str; 4] = ["16", "32", "64", "128"];
-        const NUM_OPS: [&str; 16] = [
+        const NUM_OPS: [&str; 39] = [
+            "add_overflows",
+            "add_overflows_u",
+            "sub_overflows",
+            "sub_overflows_u",
+            "mul_overflows",
+            "mul_overflows_u",
+            "add_saturating",
+            "add_saturating_u",
+            "sub_saturating",
+            "sub_saturating_u",
+            "multiply_high",
+            "multiply_high_u",
+            "sqrt",
+            "multiply_add",
+            "abs",
+            "copy_sign",
+            "floor",
+            "ceil",
+            "trunc",
+            "round",
+            "round_even",
+            "min",
+            "max",
             "add",
             "sub",
             "mul",
@@ -625,7 +805,7 @@ impl Intrinsic {
             "less_than_or_equal_u",
             "greater_than_or_equal_u",
         ];
-        const BIT_OPS: [&str; 7] = [
+        const BIT_OPS: [&str; 14] = [
             "and",
             "or",
             "xor",
@@ -633,6 +813,13 @@ impl Intrinsic {
             "shift_left",
             "shift_right",
             "shift_right_u",
+            "rotate_left",
+            "rotate_right",
+            "count_ones",
+            "leading_zeros",
+            "trailing_zeros",
+            "swap_bytes",
+            "reverse",
         ];
         const ORDERINGS: [&str; 5] = ["", "_relaxed", "_acquire", "_release", "_acq_rel"];
         let mut names: Vec<String> = Self::PLAIN
@@ -701,8 +888,8 @@ impl Intrinsic {
     #[must_use]
     pub fn signature(self) -> Signature {
         use Slot::{
-            AnyBit, Builtin, ExpectedBit, FormatArgs, Message, Ref, RefArray, RefParam,
-            StringLiteral, Type,
+            AnyBit, AnyFloat, Builtin, ExpectedBit, ExpectedFloat, FormatArgs, Message, Ref,
+            RefArray, RefParam, StringLiteral, Type,
         };
         let native = Builtin(Ty::BitNative);
         let sig = |params: &[(&'static str, Slot)], result: Option<Slot>| Signature {
@@ -732,6 +919,9 @@ impl Intrinsic {
             Self::Truncate | Self::ExtendZero | Self::ExtendSign => {
                 sig(&[("value", AnyBit)], Some(ExpectedBit))
             }
+            Self::IntToFloat | Self::UintToFloat => sig(&[("value", AnyBit)], Some(ExpectedFloat)),
+            Self::FloatToInt | Self::FloatToUint => sig(&[("value", AnyFloat)], Some(ExpectedBit)),
+            Self::FloatConvert => sig(&[("value", AnyFloat)], Some(ExpectedFloat)),
             Self::SizeOf | Self::AlignOf => sig(&[("type", Type)], Some(native)),
             Self::ArrayLen => sig(&[("array", Type)], Some(native)),
             Self::ArrayAt => sig(
@@ -851,8 +1041,12 @@ impl Intrinsic {
     fn numeric(op: NumOp, ty: Slot) -> Signature {
         let param = |name| Param { name, slot: ty };
         let params = match op {
-            NumOp::Negate | NumOp::Not => vec![param("value")],
-            NumOp::Shl | NumOp::Shr | NumOp::ShrU => vec![param("value"), param("amount")],
+            _ if op.is_unary() => vec![param("value")],
+            NumOp::Shl | NumOp::Shr | NumOp::ShrU | NumOp::RotateLeft | NumOp::RotateRight => {
+                vec![param("value"), param("amount")]
+            }
+            NumOp::CopySign => vec![param("magnitude"), param("sign")],
+            NumOp::MultiplyAdd => vec![param("left"), param("right"), param("addend")],
             _ => vec![param("left"), param("right")],
         };
         let result = if op.is_comparison() {
@@ -883,6 +1077,21 @@ impl Intrinsic {
             }
             Self::ExtendSign => {
                 "Widens `value` to the expected bit type, filling the new high bits with its sign bit."
+            }
+            Self::IntToFloat => {
+                "`value` as a signed integer, converted to the expected float type, rounded to nearest even."
+            }
+            Self::UintToFloat => {
+                "`value` as an unsigned integer, converted to the expected float type, rounded to nearest even."
+            }
+            Self::FloatToInt => {
+                "`value` truncated toward zero to the expected bit type as a signed integer; past the range it saturates at `MIN` or `MAX`, and NaN is 0."
+            }
+            Self::FloatToUint => {
+                "`value` truncated toward zero to the expected bit type as an unsigned integer; past the range it saturates at 0 or `MAX`, and NaN is 0."
+            }
+            Self::FloatConvert => {
+                "`value` converted to the expected float type: widened exactly, or narrowed rounding to nearest even."
             }
             Self::SizeOf => {
                 "The size in bytes of a type, or of a value's type: the C `sizeof` on the target."
@@ -998,6 +1207,70 @@ impl Intrinsic {
                 "`value >> amount`, shifting zeros in (logical); the amount is taken modulo the width."
                     .to_owned()
             }
+            _ => Self::numeric_doc_more(op).to_owned(),
+        }
+    }
+
+    /// The doc of the operations past the basic arithmetic.
+    fn numeric_doc_more(op: NumOp) -> &'static str {
+        match op {
+            NumOp::RotateLeft => "`value` rotated left by `amount`, taken modulo the width.",
+            NumOp::RotateRight => "`value` rotated right by `amount`, taken modulo the width.",
+            NumOp::CountOnes => "How many bits of `value` are set.",
+            NumOp::LeadingZeros => {
+                "How many zero bits `value` has above its highest set bit: the width for zero."
+            }
+            NumOp::TrailingZeros => {
+                "How many zero bits `value` has below its lowest set bit: the width for zero."
+            }
+            NumOp::SwapBytes => "`value` with its bytes in reverse order.",
+            NumOp::Reverse => "`value` with its bits in reverse order.",
+            NumOp::AddOverflows => {
+                "Whether `left + right` (signed) overflows, so the wrapped sum is wrong: `0x1` or `0x0`."
+            }
+            NumOp::AddOverflowsU => {
+                "Whether `left + right` (unsigned) overflows, so the wrapped sum is wrong: `0x1` or `0x0`."
+            }
+            NumOp::SubOverflows => {
+                "Whether `left - right` (signed) overflows, so the wrapped difference is wrong: `0x1` or `0x0`."
+            }
+            NumOp::SubOverflowsU => {
+                "Whether `left - right` (unsigned) goes below zero, so the wrapped difference is wrong: `0x1` or `0x0`."
+            }
+            NumOp::MulOverflows => {
+                "Whether `left * right` (signed) overflows, so the wrapped product is wrong: `0x1` or `0x0`."
+            }
+            NumOp::MulOverflowsU => {
+                "Whether `left * right` (unsigned) overflows, so the wrapped product is wrong: `0x1` or `0x0`."
+            }
+            NumOp::AddSaturating => "`left + right` (signed), clamped to `MIN` and `MAX`.",
+            NumOp::AddSaturatingU => "`left + right` (unsigned), clamped to `MAX`.",
+            NumOp::SubSaturating => "`left - right` (signed), clamped to `MIN` and `MAX`.",
+            NumOp::SubSaturatingU => "`left - right` (unsigned), clamped to 0.",
+            NumOp::MultiplyHigh => {
+                "The upper half of the double-width product `left * right` (signed)."
+            }
+            NumOp::MultiplyHighU => {
+                "The upper half of the double-width product `left * right` (unsigned)."
+            }
+            NumOp::Sqrt => "The square root of `value`, rounded once; NaN below zero.",
+            NumOp::MultiplyAdd => "`left * right + addend`, rounded once.",
+            NumOp::Abs => "`value` with its sign bit cleared.",
+            NumOp::CopySign => "`magnitude` with the sign bit of `sign`.",
+            NumOp::Floor => "The greatest integral value not above `value`.",
+            NumOp::Ceil => "The least integral value not below `value`.",
+            NumOp::Trunc => "`value` rounded toward zero to an integral value.",
+            NumOp::Round => {
+                "`value` rounded to the nearest integral value, ties away from zero."
+            }
+            NumOp::RoundEven => "`value` rounded to the nearest integral value, ties to even.",
+            NumOp::Min => {
+                "The lesser of `left` and `right` (IEEE `minimum`): NaN when either is NaN, and `-0` is less than `+0`."
+            }
+            NumOp::Max => {
+                "The greater of `left` and `right` (IEEE `maximum`): NaN when either is NaN, and `+0` is greater than `-0`."
+            }
+            _ => "",
         }
     }
 
@@ -1130,6 +1403,63 @@ mod tests {
         }
         assert!(!names.iter().any(|known| known == "@f_div_u_32"));
         assert!(!names.iter().any(|known| known == "@atomic_load_release_64"));
+    }
+
+    #[test]
+    fn phase_1_operations_are_named_and_typed() {
+        let names = Intrinsic::names();
+        for name in [
+            "@f_sqrt_16",
+            "@f_multiply_add_64",
+            "@f_round_even_32",
+            "@f_min_128",
+            "@f_copy_sign_64",
+            "@bit_count_ones_native",
+            "@bit_rotate_left_8",
+            "@bit_swap_bytes_16",
+            "@bit_reverse_8",
+            "@i_mul_overflows_u_64",
+            "@i_sub_saturating_32",
+            "@i_multiply_high_u_native",
+            "@int_to_float",
+            "@uint_to_float",
+            "@float_to_int",
+            "@float_to_uint",
+            "@float_convert",
+        ] {
+            assert!(names.iter().any(|known| known == name), "{name}");
+            assert!(Intrinsic::lookup(name).is_some(), "{name}");
+        }
+        // A byte swap needs two bytes; the float forms have no `_u`, and
+        // the bit forms no float.
+        for name in [
+            "@bit_swap_bytes_8",
+            "@f_sqrt_u_32",
+            "@i_sqrt_32",
+            "@f_rotate_left_32",
+            "@f_count_ones_32",
+            "@i_multiply_add_32",
+            "@f_add_saturating_32",
+        ] {
+            assert_eq!(Intrinsic::lookup(name), None, "{name}");
+            assert!(!names.iter().any(|known| known == name), "{name}");
+        }
+        let flag = Intrinsic::lookup("@i_add_overflows_u_16")
+            .expect("known")
+            .signature();
+        assert_eq!(flag.result, Some(Slot::Builtin(Ty::Bit8)));
+        assert_eq!(
+            slots("@i_add_overflows_u_16"),
+            vec![Slot::Builtin(Ty::Bit16), Slot::Builtin(Ty::Bit16)]
+        );
+        assert_eq!(
+            slots("@f_multiply_add_32"),
+            vec![Slot::Builtin(Ty::FBit32); 3]
+        );
+        let count = Intrinsic::lookup("@bit_leading_zeros_64")
+            .expect("known")
+            .signature();
+        assert_eq!(count.result, Some(Slot::Builtin(Ty::Bit64)));
     }
 
     #[test]

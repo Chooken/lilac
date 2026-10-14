@@ -323,6 +323,8 @@ fn inst_ty(inst: &LirInst) -> Option<&LirTy> {
         | LirInst::ElemAddr { ty, .. }
         | LirInst::Alloca { ty, .. }
         | LirInst::Arith { ty, .. }
+        | LirInst::Unary { ty, .. }
+        | LirInst::MulAdd { ty, .. }
         | LirInst::AtomicLoad { ty, .. }
         | LirInst::AtomicStore { ty, .. }
         | LirInst::AtomicRmw { ty, .. }
