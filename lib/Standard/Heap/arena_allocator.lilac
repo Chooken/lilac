@@ -1,47 +1,70 @@
 
 using Standard.Os as Os
 
-/// A bump allocator over one mapping of pages: each allocation takes the
-/// next bytes, aligned, and only `reset` (or dropping the arena) gives them
-/// back. Every byte past `used` is zero, so allocations start zeroed.
+/// A bump allocator over blocks of pages: each allocation takes the next
+/// bytes of the current block, aligned, and a full block moves on to the
+/// next one, mapping it if there is none. An allocation too big (or too
+/// aligned) for a block gets a custom block of its own. Only `reset` (or
+/// dropping the arena) gives memory back. Every byte past a block's `used`
+/// is zero, so allocations start zeroed. Not thread-safe.
 ArenaAllocator: object {
 
     private {
-        base: ref unknown
-        capacity: Int
-        used: Int
+        // Every block after `current_block` is empty; `reset` keeps them
+        // all for reuse.
+        first_block: ref ArenaBlock
+        current_block: ref ArenaBlock
+
+        // One allocation each; `reset` unmaps them.
+        first_custom_block: Optional[ref ArenaBlock]
+        current_custom_block: Optional[ref ArenaBlock]
+
+        block_size: Int
     }
 
-    get_capacity: function (self) Int => self.capacity
-    get_used: function (self) Int => self.used
+    /// An arena of `ARENA_DEFAULT_SIZE` blocks.
+    init: function () allocator: ArenaAllocator {
+        allocator = ArenaAllocator.init_sized(ARENA_DEFAULT_SIZE)
+    }
 
-    /// An arena of at least `capacity` bytes (rounded up to whole pages).
-    init: function (capacity: Int) allocator: ArenaAllocator {
+    /// An arena of blocks of at least `default_block_size` bytes (rounded
+    /// up to whole pages). The first block is mapped now.
+    init_sized: function (default_block_size: Int) allocator: ArenaAllocator {
 
-        if capacity < 0 {
-            @panic("Can't allocate a negative capacity.")
+        if default_block_size < 0 {
+            @panic("Can't allocate a negative block size.")
         }
 
-        if capacity == 0 as Int {
+        if default_block_size == 0 as Int {
             @panic("Can't allocate 0 bytes.")
         }
 
-        // The mapping is whole pages anyway, so the arena uses them all.
-        real_capacity: Int = align_up(capacity, @builtin.Target.page_size)
-        if real_capacity < capacity {
+        real_size: Int = align_up(default_block_size, @builtin.Target.page_size)
+
+        if real_size < default_block_size {
             @panic("Out of memory.")
         }
 
-        ptr: ref unknown = Os.map_pages(real_capacity).get() else {
-            @panic("Out of memory.")
-        }
+        arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(real_size)
 
         allocator = ArenaAllocator {
-            base = ptr
-            capacity = real_capacity
-            used = 0
+            first_block = arena_block
+            current_block = arena_block
+
+            first_custom_block = .None
+            current_custom_block = .None
+
+            block_size = real_size
         }
     }
+
+    /// Bytes the allocations take, alignment padding included (walks the
+    /// blocks).
+    get_used: function (self) Int => used_of(.Some(self.first_block)) + used_of(self.first_custom_block)
+
+    /// Bytes mapped for allocations: every block, less its header (walks
+    /// the blocks).
+    get_capacity: function (self) Int => capacity_of(.Some(self.first_block)) + capacity_of(self.first_custom_block)
 
     /// A new allocation holding `value`, moved in.
     create[T]: function (self, value: T) allocation: ref T {
@@ -85,32 +108,41 @@ ArenaAllocator: object {
             @panic("The alignment must be a power of two.")
         }
 
-        // No alignment past the whole arena fits, and refusing one keeps
-        // the sums below from overflowing.
-        if alignment > self.capacity {
-            @panic("The allocator is out of memory (full).")
+        // Only what surely fits an empty block goes in one, so the next
+        // block always takes it; that also keeps the sums below from
+        // overflowing.
+        if not self.fits_empty_block(size, alignment) {
+            allocation = self.add_new_custom_block(size, alignment)
+            return
         }
 
         // The address is aligned, not the offset: a large alignment may
         // be more than the mapping's.
-        base_address: Int = @ptr_to_address(self.base)
-        start: Int = align_up(base_address + self.used, alignment) - base_address
+        base_address: Int = @ptr_to_address(self.current_block.base)
+        start: Int = align_up(base_address + self.current_block.used, alignment) - base_address
 
-        if size > self.capacity - start {
-            // Possibly expand the arena in the future.
-            @panic("The allocator is out of memory (full).")
+        if size > self.block_size - start {
+
+            if self.current_block.next.get() -> block: ref ArenaBlock {
+                self.current_block = block
+            } else {
+                self.add_new_general_block()
+            }
+            base_address = @ptr_to_address(self.current_block.base)
+            start = align_up(base_address + self.current_block.used, alignment) - base_address
         }
 
-        allocation = @ptr_add(self.base, start as @bit_native)
-        self.used = start + size
+        allocation = @ptr_add(self.current_block.base, start as @bit_native)
+        self.current_block.used = start + size
     }
 
     /// `ptr` (from `alloc_raw`, `old_size` long) resized to `new_size`
-    /// bytes: in place when it is the last allocation or shrinks, else
-    /// copied to a new allocation. New bytes are zeroed.
+    /// bytes: in place when it is the current block's last allocation and
+    /// fits, or when it shrinks, else copied to a new allocation. New bytes
+    /// are zeroed.
     realloc_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
 
-        if new_size < 0 {
+        if new_size < 0 or old_size < 0 {
             @panic("Can't allocate a negative size.")
         }
 
@@ -118,27 +150,24 @@ ArenaAllocator: object {
             @panic("Can't allocate 0 bytes.")
         }
 
-        offset: Int = @i_sub_native(@ptr_to_address(ptr), @ptr_to_address(self.base))
-        if offset < 0 or old_size < 0 or old_size > self.used - offset {
-            @panic("The allocation is not from this allocator.")
-        }
-
-        if offset + old_size == self.used {
-            if new_size > self.capacity - offset {
-                @panic("The allocator is out of memory (full).")
-            }
-
+        // The current block's last allocation ends at its `used`. Any
+        // other block's allocation is out of this range (blocks never
+        // overlap), so only this one is checked.
+        block: ref ArenaBlock = self.current_block
+        offset: Int = @i_sub_native(@ptr_to_address(ptr), @ptr_to_address(block.base))
+        if offset >= @size_of(ArenaBlock) and offset <= block.used and old_size == block.used - offset and new_size <= block.size - offset {
             // Bytes it gives back go back to zero.
             if new_size < old_size {
                 @memset(@ptr_add(ptr, new_size as @bit_native), 0x0, old_size - new_size)
             }
 
             allocation = ptr
-            self.used = offset + new_size
+            block.used = offset + new_size
             return
         }
 
-        if new_size < old_size {
+        // What a shrink gives back stays used until `reset`.
+        if new_size <= old_size {
             allocation = ptr
             return
         }
@@ -151,30 +180,106 @@ ArenaAllocator: object {
         // no op. here incase someone wants to use allocators as interfaces.
     }
 
-    /// Frees every allocation at once.
+    /// Frees every allocation at once. The blocks stay mapped (zeroed) for
+    /// the allocations after it; each custom block is unmapped.
     reset: function (self) nothing {
-        // Only the bytes used need zeroing.
-        @memset(self.base, 0x0, self.used)
-        self.used = 0
+
+        optional_next: Optional[ref ArenaBlock] = .Some(self.first_block)
+
+        loop if optional_next.get() -> block: ref ArenaBlock {
+
+            optional_next = block.next
+
+            // Only the bytes used need zeroing; the header stays.
+            header: Int = @size_of(ArenaBlock)
+            @memset(@ptr_add(block.base, header as @bit_native), 0x0, block.used - header)
+            block.used = header
+
+        } else break
+
+        self.current_block = self.first_block
+
+        unmap_blocks(self.first_custom_block)
+        self.first_custom_block = .None
+        self.current_custom_block = .None
     }
 
     @on_drop: function (self) nothing {
-        Os.unmap_pages(self.base, self.capacity)
+        unmap_blocks(.Some(self.first_block))
+        unmap_blocks(self.first_custom_block)
     }
 
     private {
         /// `count` elements of `element` bytes, refused before the product
-        /// could overflow (it could never fit the arena then).
+        /// could overflow (no mapping could hold it then).
         array_size: function (self, element: Int, count: Int) size: Int {
             if count < 0 {
                 @panic("Can't allocate a negative count.")
             }
 
-            if element > 0 and count > self.capacity / element {
-                @panic("The allocator is out of memory (full).")
+            if element > 0 and count > MAX / element {
+                @panic("Out of memory.")
             }
 
             size = element * count
+        }
+
+        /// Whether `size` bytes at `alignment` fit an empty block wherever
+        /// its pages are: after the header, the padding is at most
+        /// `alignment - 1` bytes.
+        fits_empty_block: function (self, size: Int, alignment: Int) fits: Bool {
+            room: Int = self.block_size - @size_of(ArenaBlock)
+            fits = alignment <= room and size <= room - (alignment - 1)
+        }
+
+        add_new_general_block: function (self) nothing {
+            arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(self.block_size)
+
+            self.current_block.next = .Some(arena_block)
+            self.current_block = arena_block
+        }
+
+        add_new_custom_block: function (self, size: Int, alignment: Int) allocation: ref unknown {
+
+            // The header, then at most `alignment - 1` bytes of padding: the
+            // address is aligned, and the pages may be aligned less.
+            page: Int = @builtin.Target.page_size
+            overhead: Int = @size_of(ArenaBlock) + (alignment - 1)
+            if size > MAX - overhead - (page - 1) {
+                @panic("Out of memory.")
+            }
+
+            arena_block: ref ArenaBlock = ArenaAllocator.allocate_block(align_up(overhead + size, page))
+
+            base_address: Int = @ptr_to_address(arena_block.base)
+            start: Int = align_up(base_address + @size_of(ArenaBlock), alignment) - base_address
+
+            if self.current_custom_block.get() -> value: ref ArenaBlock {
+                value.next = .Some(arena_block)
+            } else {
+                self.first_custom_block = .Some(arena_block)
+            }
+
+            self.current_custom_block = .Some(arena_block)
+
+            allocation = @ptr_add(arena_block.base, start as @bit_native)
+            arena_block.used = start + size
+        }
+
+        allocate_block: function (size: Int) block: ref ArenaBlock {
+
+            ptr: ref unknown = Os.map_pages(size).get() else {
+                @panic("Out of memory.")
+            }
+
+            block = ptr as ref ArenaBlock
+
+            @write(block, ArenaBlock {
+                base = ptr
+                size = size
+                used = @size_of(ArenaBlock)
+                next = .None
+            })
         }
     }
 }
@@ -182,4 +287,49 @@ ArenaAllocator: object {
 private {
     /// `value` rounded up to a multiple of `alignment` (a power of two).
     align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
+
+    /// `ArenaAllocator.init`'s block size: 512 KiB.
+    ARENA_DEFAULT_SIZE: Int => 512 * 1024
+
+    /// The largest `Int`: no size can be more (the target's `isize::MAX`).
+    MAX: Int => @bit_shift_right_u_native(@bit_not_native(0x0), 0x1)
+
+    /// Unmaps `first` and every block after it.
+    unmap_blocks: function (first: Optional[ref ArenaBlock]) nothing {
+        optional_next: Optional[ref ArenaBlock] = first
+        loop if optional_next.get() -> block: ref ArenaBlock {
+            // Read before the unmap takes the header with it.
+            optional_next = block.next
+            Os.unmap_pages(block.base, block.size)
+        } else break
+    }
+
+    /// The bytes taken past the headers of `first` and every block after it.
+    used_of: function (first: Optional[ref ArenaBlock]) total: Int {
+        total = 0
+        optional_next: Optional[ref ArenaBlock] = first
+        loop if optional_next.get() -> block: ref ArenaBlock {
+            optional_next = block.next
+            total = total + (block.used - @size_of(ArenaBlock))
+        } else break
+    }
+
+    /// The bytes past the headers of `first` and every block after it.
+    capacity_of: function (first: Optional[ref ArenaBlock]) total: Int {
+        total = 0
+        optional_next: Optional[ref ArenaBlock] = first
+        loop if optional_next.get() -> block: ref ArenaBlock {
+            optional_next = block.next
+            total = total + (block.size - @size_of(ArenaBlock))
+        } else break
+    }
+
+    /// One mapping of pages: this header, then the allocations from
+    /// `@size_of(ArenaBlock)` up to `used`; the rest up to `size` is zero.
+    ArenaBlock: object {
+        base: ref unknown
+        size: Int
+        used: Int
+        next: Optional[ref ArenaBlock]
+    }
 }
