@@ -65,12 +65,23 @@ non-empty, not overlapping and within the type's size (the verifier checks
 all four). Lowering writes one run per stretch of nonzero scalars, joining
 runs less than 16 zero bytes apart, and never materializes the zeros; the
 backend emits a packed constant with `zeroinitializer` gaps.
-The symbol is the global's qualified name (a root global's under `.root.`);
-globals no `addr.global` names are removed by DCE.
+An initial value may also hold addresses, `offset: addr @f` (a function's;
+an `export`'s is its C entry) or `offset: addr !g` (a global's), printed in
+offset order among the runs. Each is a pointer-sized slot aligned to a
+pointer, inside the type, overlapping no run or other address, and names a
+function or global of the module; the backend puts a `ptr` there. Runs
+never join across an address.
+The symbol is the global's qualified name (a root global's under `.root.`).
+DCE keeps a global that a live `addr.global` names, or that a kept global's
+address points at; an `addr.global` reaches every function the global's
+addresses reach, through other globals too, so a function only a table
+points at stays alive.
 ```lilac-ir
 global !.root.count: #bit32 = bytes { 0: "*\x00\x00\x00" }
 global !.root.origin: #Point = bytes { 0: "\x03\x00\x00\x00\x04\x00\x00\x00" }
 global !.root.pointer: ref #bit32 = zeroed
+global !.root.TABLE: #Table = bytes { 0: addr @.root.add, 8: addr @.root.total }
+global !.root.sink: #Sink = bytes { 0: addr !.root.count, 8: addr !.root.TABLE }
 ```
 
 String const bytes are raw bytes: printable ASCII and newlines print as is, `"` and `\` are escaped with a backslash, and any other byte prints as `\xHH` (one byte, as in source).
@@ -750,7 +761,9 @@ Same width rule as integer arithmetic.
     `#bit_native`, and the result `ref #t`.
 12. `copy ref %src -> %dst`: `%src` is a `ref` place and `%dst` a place of
     its pointee's type. A global's initializer runs are ordered, non-empty,
-    disjoint and inside its size.
+    disjoint and inside its size; its addresses are ordered,
+    pointer-aligned, inside its size, overlap no run or each other, and
+    name a function or global of the module.
 13. Every `!` symbol (data, template or global) is defined once.
 14. A template has one more piece than holes, and each formatter is a
     place-ABI function (not a C `extern`, not variadic) with ins `ref #T,

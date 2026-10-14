@@ -898,6 +898,24 @@ origin: Point = Point { x = 0x3, y = 0x4 }
 scratch: @array(@bit8, 64)   // zeroed
 ```
 
+An initializer may also hold **addresses**: a function's (`ref f`, a
+function value) and another global's (`ref other`), in a field or an enum
+payload, also cast to another `ref` type (`ref count as ref unknown`).
+That makes static tables of functions (vtables) globals. An address is
+known only once the program is linked, so nothing in an initializer
+computes with one: comparing it, branching on it or reading it as a
+number (`@ptr_to_address`) is `E038`.
+
+```lilac
+Table: object {
+    add: ref function (context: ref unknown, amount: @bit32) nothing
+    total: ref function (context: ref unknown) total: @bit32
+}
+
+COUNTER_TABLE: Table = Table { add = ref counter_add, total = ref counter_total }
+counter_sink: Sink = Sink { context = ref counter as ref unknown, table = ref COUNTER_TABLE }
+```
+
 ### Parameters and `self`
 
 A by-value parameter (`x: T`) takes ownership: the caller's value moves

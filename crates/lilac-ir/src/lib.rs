@@ -250,8 +250,46 @@ pub struct LirGlobal {
     /// the type's size. Empty starts the global zeroed. A run costs only
     /// its bytes, so a large zero array in an initialized global is free.
     pub init: Vec<(u64, Vec<u8>)>,
+    /// The addresses in the initial value, in increasing offset order:
+    /// each a pointer-sized slot, aligned to a pointer, that no run or
+    /// other address overlaps (`ref f` or `ref OTHER` in the initializer).
+    pub addresses: Vec<LirAddress>,
     /// Declaration span.
     pub span: Span,
+}
+
+impl LirGlobal {
+    /// The functions and globals the initial value points at.
+    pub fn address_targets(&self) -> impl Iterator<Item = &AddressTarget> {
+        self.addresses.iter().map(|address| &address.target)
+    }
+}
+
+/// One address in a global's initial value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LirAddress {
+    /// Byte offset of the pointer in the global.
+    pub offset: u64,
+    /// What it points at.
+    pub target: AddressTarget,
+}
+
+/// What an address in a global's initial value points at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddressTarget {
+    /// A function of the module (`@f`; an `export`'s is its C entry).
+    Func(Symbol),
+    /// A global of the module (`!g`).
+    Global(Symbol),
+}
+
+impl fmt::Display for AddressTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Func(name) => write!(f, "@{}", name.as_str()),
+            Self::Global(name) => write!(f, "!{}", name.as_str()),
+        }
+    }
 }
 
 /// One function: signature places plus labeled blocks.

@@ -1,0 +1,46 @@
+// libc
+// expect-stdout: -5 0 7 30
+// expect-stdout: 9
+// A global table of C function values: an `export` (whose address is its
+// C entry) passed to `qsort` from the table, and an `extern` called
+// through it.
+
+using Standard
+using Standard.Io
+
+Numbers: object {
+    a: @bit32
+    b: @bit32
+    c: @bit32
+    d: @bit32
+}
+
+CTable: object {
+    compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32
+    absolute: ref export function (x: @bit32) y: @bit32
+}
+
+qsort: extern function (base: ref Numbers, count: @bit_native, size: @bit_native, compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32) nothing
+abs: extern function (x: @bit32) y: @bit32
+
+ascending: export function (a: ref @bit32, b: ref @bit32) order: @bit32 {
+    order = 0x0
+    if @i_less_than_32(a, b) {
+        order = -0x1
+    }
+    if @i_less_than_32(b, a) {
+        order = 0x1
+    }
+}
+
+C_TABLE: CTable = CTable {
+    compare = ref ascending
+    absolute = ref abs
+}
+
+main: function () nothing {
+    numbers: Numbers = Numbers { a = 0x1e, b = -0x5, c = 0x7, d = 0x0 }
+    qsort(ref numbers, 0x4, 0x4, C_TABLE.compare)
+    print_line($"{numbers.a as Int32} {numbers.b as Int32} {numbers.c as Int32} {numbers.d as Int32}")
+    print_line($"{C_TABLE.absolute(-0x9) as Int32}")
+}

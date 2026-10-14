@@ -34,6 +34,11 @@ pub(crate) enum Value {
     Aggregate(Vec<Value>),
     /// Enum variant index and payload.
     Variant(u32, Option<Box<Value>>),
+    /// A function's address (`ref f`). A global's initializer stores one;
+    /// nothing computes with it.
+    Func(FuncKey),
+    /// A global's address (`ref G`), like [`Value::Func`].
+    Global(DefId),
 }
 
 impl Value {
@@ -41,7 +46,23 @@ impl Value {
     pub(crate) fn truthy(&self) -> Option<bool> {
         match self {
             Self::Int(bits, _) => Some(*bits != 0),
-            Self::Aggregate(_) | Self::Variant(..) => None,
+            Self::Aggregate(_) | Self::Variant(..) | Self::Func(_) | Self::Global(_) => None,
+        }
+    }
+
+    /// Whether this is an address.
+    fn is_address(&self) -> bool {
+        matches!(self, Self::Func(_) | Self::Global(_))
+    }
+
+    /// Whether this is or holds an address. Nothing compares one: an
+    /// address is known only once the program is linked.
+    fn has_address(&self) -> bool {
+        match self {
+            Self::Int(..) => false,
+            Self::Func(_) | Self::Global(_) => true,
+            Self::Aggregate(values) => values.iter().any(Self::has_address),
+            Self::Variant(_, payload) => payload.as_deref().is_some_and(Self::has_address),
         }
     }
 }
@@ -299,7 +320,28 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The value of `expr`, which takes an address (`ref`, or a `ref`
+    /// cast): a function's address and a global's are constant, and so is
+    /// one cast to another `ref` type; any other `ref` is not.
+    fn eval_address(&mut self, eval: &mut Eval, expr: &HirExpr) -> Option<Value> {
+        match &expr.kind {
+            HirExprKind::FuncRef(key) => Some(Value::Func(key.clone())),
+            HirExprKind::RefOf(place) => match place.kind {
+                HirExprKind::Global(def) => Some(Value::Global(def)),
+                _ => None,
+            },
+            HirExprKind::Retype(inner) => self.eval(eval, inner).filter(Value::is_address),
+            _ => None,
+        }
+    }
+
     fn eval(&mut self, eval: &mut Eval, expr: &HirExpr) -> Option<Value> {
+        if matches!(
+            expr.kind,
+            HirExprKind::FuncRef(_) | HirExprKind::RefOf(_) | HirExprKind::Retype(_)
+        ) {
+            return self.eval_address(eval, expr);
+        }
         // A value with a drop or copy hook is never constant: skipping its
         // lowering would skip the hook.
         if expr.ty.is_ref || self.needs_drop(expr.ty) || self.needs_copy(expr.ty) {
@@ -345,13 +387,7 @@ impl<'a> Lower<'a> {
                 }
                 _ => None,
             },
-            // Bit equality, as lowered: both sides have one type, so equal
-            // values (an integer, the fields of an object, an enum's tag
-            // and payload) are equal bits.
-            HirExprKind::Eq(lhs, rhs) => {
-                let (left, right) = (self.eval(eval, lhs)?, self.eval(eval, rhs)?);
-                Some(Value::Int(u64::from(left == right), 8))
-            }
+            HirExprKind::Eq(lhs, rhs) => self.eval_eq(eval, lhs, rhs),
             HirExprKind::Not(inner) => {
                 let truthy = self.eval(eval, inner)?.truthy()?;
                 Some(Value::Int(u64::from(!truthy), 8))
@@ -392,13 +428,26 @@ impl<'a> Lower<'a> {
             | HirExprKind::Deref(_)
             | HirExprKind::Float(_)
             | HirExprKind::Str(_)
-            | HirExprKind::FuncRef(_)
-            | HirExprKind::RefOf(_)
-            | HirExprKind::Retype(_)
             | HirExprKind::Format(_)
             | HirExprKind::CompileError { .. }
-            | HirExprKind::Poison => None,
+            | HirExprKind::Poison
+            // Taken by `eval_address`.
+            | HirExprKind::FuncRef(_)
+            | HirExprKind::RefOf(_)
+            | HirExprKind::Retype(_) => None,
         }
+    }
+
+    /// `lhs == rhs`, bit equality as lowered: both sides have one type, so
+    /// equal values (an integer, the fields of an object, an enum's tag
+    /// and payload) are equal bits. Not constant when either holds an
+    /// address.
+    fn eval_eq(&mut self, eval: &mut Eval, lhs: &HirExpr, rhs: &HirExpr) -> Option<Value> {
+        let (left, right) = (self.eval(eval, lhs)?, self.eval(eval, rhs)?);
+        if left.has_address() || right.has_address() {
+            return None;
+        }
+        Some(Value::Int(u64::from(left == right), 8))
     }
 
     /// A call to the `=>` function `key`: its body with the arguments bound.

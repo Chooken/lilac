@@ -28,9 +28,9 @@ use inkwell::{AddressSpace, AtomicRMWBinOp, FloatPredicate, IntPredicate};
 use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
-    builtin_layout, builtin_sig, format_template_layout, ArithOp, AtomicOrdering, ConvertOp,
-    FloatWidth, LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand,
-    LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
+    builtin_layout, builtin_sig, format_template_layout, AddressTarget, ArithOp, AtomicOrdering,
+    ConvertOp, FloatWidth, LirCallee, LirConst, LirExport, LirFunc, LirGlobal, LirInst, LirLayout,
+    LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
@@ -81,6 +81,9 @@ pub(crate) struct Lower<'ctx, 'a> {
     /// an ICE points at; `Span::dummy()` outside one (declarations, and
     /// glue the backend writes itself).
     at: Cell<Span>,
+    /// Each `export`'s C entry symbol, by its LIR name: its address is the
+    /// entry's ([`Self::function_address`]).
+    exports: HashMap<&'a str, &'a str>,
 }
 
 impl<'ctx, 'a> Lower<'ctx, 'a> {
@@ -106,6 +109,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             os: Target::parse(triple).ok().map(|target| target.os),
             offset: Cell::new(None),
             at: Cell::new(Span::dummy()),
+            exports: lir
+                .funcs
+                .iter()
+                .filter_map(|func| {
+                    Some((func.name.as_str(), func.export.as_ref()?.symbol.as_str()))
+                })
+                .collect(),
         }
     }
 
@@ -154,7 +164,9 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// functions into the module, in that fixed order. Every function is
     /// declared before any body is lowered so calls and `addr.func` may
     /// reference functions defined later, and the runtime is defined first so
-    /// builtin calls reuse it. Aggregates are byte arrays to LLVM
+    /// builtin calls reuse it. Templates and the addresses in globals'
+    /// initial values are filled in once every function and global is
+    /// declared. Aggregates are byte arrays to LLVM
     /// ([`Self::lir_type`]), so no layout is defined.
     ///
     /// An `extern` signature outside the supported C scalar/pointer set (or
@@ -167,6 +179,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             self.declare_func(func)?;
         }
         self.define_formats();
+        self.fill_global_addresses();
         for func in &self.lir.funcs {
             self.lower_func(func);
             if let Some(export) = &func.export {
@@ -478,14 +491,14 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     }
 
     /// Defines each global variable: internal, aligned to its type, and
-    /// zeroed or holding its initializer runs ([`Self::global_bytes`]).
+    /// zeroed or holding its initializer ([`Self::global_bytes`]), with a
+    /// null in each address slot until [`Self::fill_global_addresses`].
     fn define_globals(&self) {
         for global in &self.lir.globals {
-            let sized = self.size_align(&global.ty);
-            let initializer = if global.init.is_empty() {
+            let initializer = if global.init.is_empty() && global.addresses.is_empty() {
                 self.lir_type(&global.ty).const_zero()
             } else {
-                self.global_bytes(&global.init, sized.size)
+                self.global_bytes(global, |_| self.ptr_type().const_null())
             };
             let value = self
                 .module
@@ -496,19 +509,58 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         }
     }
 
-    /// A global's initial bytes, `size` in all: its runs with the zero gaps
-    /// between and after them, as one packed constant (or the run alone
-    /// when it covers the object). A gap is a `zeroinitializer`, so a large
-    /// zero array costs nothing.
-    fn global_bytes(&self, runs: &[(u64, Vec<u8>)], size: u64) -> BasicValueEnum<'ctx> {
+    /// Sets the initializer of each global holding addresses, now that
+    /// every function and global they name is declared. The constant has
+    /// the type [`Self::define_globals`] gave it: only the pointers change.
+    fn fill_global_addresses(&self) {
+        for global in &self.lir.globals {
+            if global.addresses.is_empty() {
+                continue;
+            }
+            let initializer = self.global_bytes(global, |target| match target {
+                AddressTarget::Func(name) => self.function_address(name, global.span),
+                AddressTarget::Global(name) => match self.module.get_global(name.as_str()) {
+                    Some(value) => value.as_pointer_value(),
+                    None => bug!(global.span, "address of undeclared global `!{name}`"),
+                },
+            });
+            let Some(value) = self.module.get_global(global.name.as_str()) else {
+                bug!(global.span, "global `!{}` was not defined", global.name);
+            };
+            value.set_initializer(&initializer);
+        }
+    }
+
+    /// A global's initial value, its type's size in all: its runs and its
+    /// addresses (each pointer from `address`) with the zero gaps between
+    /// and after them, as one packed constant (or the run alone when it
+    /// covers the object). A gap is a `zeroinitializer`, so a large zero
+    /// array costs nothing.
+    fn global_bytes(
+        &self,
+        global: &LirGlobal,
+        address: impl Fn(&AddressTarget) -> PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let size = self.size_align(&global.ty).size;
+        let pointer = self.lir.target.scalar_layout(Scalar::Pointer).0;
+        let runs = global.init.iter().map(|(offset, bytes)| {
+            let value: BasicValueEnum<'ctx> = self.context.const_string(bytes, false).into();
+            (*offset, bytes.len() as u64, value)
+        });
+        let addresses = global.addresses.iter().map(|slot| {
+            let value: BasicValueEnum<'ctx> = address(&slot.target).into();
+            (slot.offset, pointer, value)
+        });
+        let mut values: Vec<(u64, u64, BasicValueEnum<'ctx>)> = runs.chain(addresses).collect();
+        values.sort_by_key(|(offset, _, _)| *offset);
         let mut parts: Vec<BasicValueEnum<'ctx>> = Vec::new();
         let mut at = 0;
-        for (offset, bytes) in runs {
-            if *offset > at {
+        for (offset, len, value) in values {
+            if offset > at {
                 parts.push(self.bytes_type(offset - at).const_zero());
             }
-            parts.push(self.context.const_string(bytes, false).into());
-            at = offset + bytes.len() as u64;
+            parts.push(value);
+            at = offset + len;
         }
         if at < size {
             parts.push(self.bytes_type(size - at).const_zero());
@@ -1274,6 +1326,20 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         state.place_types.insert(place.to_owned(), ty.clone());
     }
 
+    /// The address of function `name`: an `export`'s is its C entry's.
+    /// An ICE at `span` when it was not declared.
+    fn function_address(&self, name: &Symbol, span: Span) -> PointerValue<'ctx> {
+        let target = self
+            .exports
+            .get(name.as_str())
+            .copied()
+            .unwrap_or_else(|| symbol(name.as_str()));
+        match self.module.get_function(target) {
+            Some(function) => function.as_global_value().as_pointer_value(),
+            None => bug!(span, "address of unknown function `{name}`"),
+        }
+    }
+
     /// Materializes the address of `@name`, normalized to the instruction's
     /// declared type: an integer bit type gets `ptrtoint` (the indirect-call
     /// path `inttoptr`s it back); a pointer type keeps the function pointer.
@@ -1283,18 +1349,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         ty: &LirTy,
         builder: &Builder<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        // An export's address is its C entry's.
-        let export = self
-            .lir
-            .funcs
-            .iter()
-            .find(|func| func.name == *name)
-            .and_then(|func| func.export.as_ref());
-        let target = export.map_or_else(|| symbol(name.as_str()), |export| export.symbol.as_str());
-        let Some(function) = self.module.get_function(target) else {
-            bug!(self.at(), "address of unknown function `{name}`");
-        };
-        let ptr = function.as_global_value().as_pointer_value();
+        let ptr = self.function_address(name, self.at());
         match self.lir_type(ty) {
             BasicTypeEnum::IntType(int_ty) => self
                 .checked(builder.build_ptr_to_int(ptr, int_ty, ""), "ptrtoint")

@@ -1,6 +1,6 @@
 # Function Values Plan
 
-> Status: phases 1 and 2 implemented, 2026-10-14. The decisions marked "agreed" were settled
+> Status: phases 1, 2 and 3 implemented, 2026-10-14. The decisions marked "agreed" were settled
 > in discussion; the rest are proposed.
 >
 > Goal: a function value is a `ref function`. It can live anywhere a value

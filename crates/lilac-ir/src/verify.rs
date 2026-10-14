@@ -5,13 +5,14 @@ use std::collections::{HashMap, HashSet};
 
 use lilac_error::{codes, Diagnostic, Diags, ErrorGuaranteed};
 use lilac_span::Span;
+use lilac_target::Scalar;
 
 use crate::print::print_op;
 use crate::{
     builtin_fields, builtin_sig, fields_of, format_template_layout, is_c_abi_type,
-    is_variadic_arg_type, size_align, trace, ArithOp, AtomicOrdering, CallGraph, LirBlock,
-    LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand, LirTerm,
-    LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
+    is_variadic_arg_type, size_align, trace, AddressTarget, ArithOp, AtomicOrdering, CallGraph,
+    LirBlock, LirCallee, LirConst, LirExport, LirFunc, LirInst, LirLayout, LirModule, LirOperand,
+    LirTerm, LirTy, PlaceName, Reg, Symbol, LILAC_IR_VERSION,
 };
 
 /// Reports every `@compile_error` site in `module` as `E031`. Run after DCE:
@@ -231,10 +232,20 @@ impl Verifier<'_> {
         }
     }
 
-    /// Checks every global: a known type, and initializer runs that are
-    /// non-empty, in increasing offset order, not overlapping, and within the type's
-    /// size.
+    /// Checks every global: a known type, initializer runs that are
+    /// non-empty, in increasing offset order, not overlapping, and within
+    /// the type's size, and addresses in increasing offset order, each a
+    /// pointer-aligned slot inside the type that overlaps no run or other
+    /// address and names a function or global of the module.
     fn verify_globals(&mut self) {
+        let (pointer, pointer_align) = self.module.target.scalar_layout(Scalar::Pointer);
+        let funcs: HashSet<&Symbol> = self.module.funcs.iter().map(|func| &func.name).collect();
+        let globals: HashSet<&Symbol> = self
+            .module
+            .globals
+            .iter()
+            .map(|global| &global.name)
+            .collect();
         for global in &self.module.globals {
             let name = global.name.as_str();
             if !self.valid_type(&global.ty) {
@@ -268,6 +279,48 @@ impl Verifier<'_> {
                     break;
                 }
                 end = run_end.unwrap_or(size);
+            }
+            // Runs and addresses are both in offset order, so one walk over
+            // the runs finds the one each address could overlap.
+            let mut runs = global.init.iter().peekable();
+            let mut previous: Option<u64> = None;
+            for address in &global.addresses {
+                let offset = address.offset;
+                let slot_end = offset.checked_add(pointer);
+                while runs
+                    .next_if(|(start, bytes)| start.saturating_add(bytes.len() as u64) <= offset)
+                    .is_some()
+                {}
+                let overlaps_run = runs
+                    .peek()
+                    .is_some_and(|(start, _)| slot_end.is_none_or(|slot_end| *start < slot_end));
+                let fits = offset % pointer_align == 0
+                    && previous.is_none_or(|previous| offset >= previous + pointer)
+                    && slot_end.is_some_and(|slot_end| slot_end <= size)
+                    && !overlaps_run;
+                if !fits {
+                    self.error(
+                        format!(
+                            "global `!{name}`'s address at offset {offset} is misaligned, out of order, overlapping, or past its {size} bytes"
+                        ),
+                        global.span,
+                    );
+                    break;
+                }
+                previous = Some(offset);
+                let known = match &address.target {
+                    AddressTarget::Func(func) => funcs.contains(func),
+                    AddressTarget::Global(other) => globals.contains(other),
+                };
+                if !known {
+                    self.error(
+                        format!(
+                            "global `!{name}`'s address at offset {offset} names the unknown `{}`",
+                            address.target
+                        ),
+                        global.span,
+                    );
+                }
             }
         }
     }

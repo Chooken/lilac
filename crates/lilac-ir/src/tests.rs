@@ -1273,6 +1273,7 @@ fn global_initializer_runs_print_and_verify() {
             name: "g".into(),
             ty: t("#Pair"),
             init,
+            addresses: Vec::new(),
             span: test_span(),
         });
         module
@@ -1303,6 +1304,79 @@ fn global_initializer_runs_print_and_verify() {
     }
 }
 
+/// A global's addresses print in offset order among its runs, and each is
+/// a pointer-aligned slot inside the type, clear of every run and other
+/// address, naming a function or global of the module.
+#[test]
+fn global_addresses_print_and_verify() {
+    let func = || AddressTarget::Func("gen_function__bit32".into());
+    let global = |init: Vec<(u64, Vec<u8>)>, addresses: Vec<(u64, AddressTarget)>| {
+        let mut module = canonical_module();
+        module.layouts.insert(
+            "Table".to_owned(),
+            layout(&[
+                ("tag", "#bit32"),
+                ("call", "ref #unknown"),
+                ("next", "ref #unknown"),
+            ]),
+        );
+        module.globals.push(LirGlobal {
+            name: "table".into(),
+            ty: t("#Table"),
+            init,
+            addresses: addresses
+                .into_iter()
+                .map(|(offset, target)| LirAddress { offset, target })
+                .collect(),
+            span: test_span(),
+        });
+        module
+    };
+    let module = global(
+        vec![(0, vec![7])],
+        vec![(8, func()), (16, AddressTarget::Global("table".into()))],
+    );
+    assert!(
+        module.to_text().contains(
+            "global !table: #Table = bytes { 0: \"\\x07\", 8: addr @gen_function__bit32, 16: addr !table }\n"
+        ),
+        "{}",
+        module.to_text()
+    );
+    assert!(verify_messages(&module).is_empty());
+    let module = global(Vec::new(), vec![(8, func())]);
+    assert!(module
+        .to_text()
+        .contains("global !table: #Table = bytes { 8: addr @gen_function__bit32 }\n"));
+    for (init, addresses) in [
+        // Misaligned.
+        (Vec::new(), vec![(4, func())]),
+        // Past the end.
+        (Vec::new(), vec![(24, func())]),
+        // Out of order, and twice at one offset.
+        (Vec::new(), vec![(16, func()), (8, func())]),
+        (Vec::new(), vec![(8, func()), (8, func())]),
+        // Over a run.
+        (vec![(0, vec![1; 9])], vec![(8, func())]),
+        (vec![(12, vec![1])], vec![(8, func())]),
+    ] {
+        let errors = verify_messages(&global(init.clone(), addresses.clone()));
+        assert!(
+            errors.len() == 1 && errors[0].contains("is misaligned, out of order, overlapping"),
+            "{init:?} {addresses:?}: {errors:?}"
+        );
+    }
+    for target in [
+        AddressTarget::Func("missing".into()),
+        AddressTarget::Global("missing".into()),
+    ] {
+        let errors = verify_messages(&global(Vec::new(), vec![(8, target.clone())]));
+        assert!(
+            errors.len() == 1 && errors[0].contains(&format!("names the unknown `{target}`")),
+            "{target}: {errors:?}"
+        );
+    }
+}
 #[test]
 fn builtin_layout_has_expected_fields() {
     let byte_buffer = builtin_fields(&t("#byte_buffer")).expect("#byte_buffer has fields");

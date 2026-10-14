@@ -2,7 +2,7 @@
 //! folded to bytes in the target's layout, and the place a use names.
 
 use lilac_hir::Layout;
-use lilac_ir::{LirGlobal, LirInst, LirTy, Symbol};
+use lilac_ir::{AddressTarget, LirAddress, LirGlobal, LirInst, LirTy, Symbol};
 use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::TypeRef;
@@ -21,7 +21,7 @@ impl Lower<'_> {
         globals.sort_by_key(|(def, _)| def.0);
         for (def, global) in globals {
             let ty = self.lir_ty(global.ty);
-            let init = global
+            let (init, addresses) = global
                 .value
                 .as_ref()
                 .and_then(|value| match self.constant_or_panic(value) {
@@ -46,6 +46,7 @@ impl Lower<'_> {
                 name,
                 ty,
                 init,
+                addresses,
                 span: global.span,
             });
         }
@@ -95,16 +96,20 @@ impl Lower<'_> {
         Place::Indirect(holder)
     }
 
-    /// `value` as the initializer runs of a `ty` in the target's layout
-    /// (little-endian): each nonzero scalar's bytes at its offset, in
-    /// offset order, merged across gaps shorter than [`RUN_GAP`]. Nothing
-    /// is allocated for zero bytes, so the work is proportional to the
-    /// initialized scalars, not the object's size. Empty when every bit is
-    /// zero.
-    fn encode_value(&self, value: &Value, ty: TypeRef) -> Vec<(u64, Vec<u8>)> {
+    /// `value` as the initializer of a `ty` in the target's layout
+    /// (little-endian): its runs, each nonzero scalar's bytes at its
+    /// offset, in offset order, merged across gaps shorter than
+    /// [`RUN_GAP`] that hold no address; and its addresses, in offset
+    /// order. Nothing is allocated for zero bytes, so the work is
+    /// proportional to the initialized scalars, not the object's size.
+    /// Both are empty when every bit is zero.
+    fn encode_value(&self, value: &Value, ty: TypeRef) -> (Vec<(u64, Vec<u8>)>, Vec<LirAddress>) {
         let mut scalars = Vec::new();
-        self.encode(value, ty, 0, &mut scalars);
+        let mut addresses = Vec::new();
+        self.encode(value, ty, 0, &mut scalars, &mut addresses);
         scalars.sort_by_key(|(offset, _)| *offset);
+        addresses.sort_by_key(|address| address.offset);
+        let mut next_address = addresses.iter().map(|address| address.offset).peekable();
         let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
         for (offset, bytes) in scalars {
             if let Some((start, run)) = runs.last_mut() {
@@ -112,7 +117,10 @@ impl Lower<'_> {
                 if offset < end {
                     lilac_error::bug!(Span::dummy(), "two scalars of a global overlap");
                 }
-                if offset - end < RUN_GAP {
+                // A run joined across an address would cover its slot.
+                while next_address.next_if(|at| *at < end).is_some() {}
+                let address_between = next_address.peek().is_some_and(|at| *at < offset);
+                if offset - end < RUN_GAP && !address_between {
                     run.resize(usize::try_from(offset - *start).unwrap_or(usize::MAX), 0);
                     run.extend(bytes);
                     continue;
@@ -120,14 +128,29 @@ impl Lower<'_> {
             }
             runs.push((offset, bytes));
         }
-        runs
+        (runs, addresses)
     }
 
     /// Adds the bytes of `value` (of type `ty`, at offset `at`) to
-    /// `scalars`: each nonzero scalar's at its offset in the type's module
-    /// layout.
-    fn encode(&self, value: &Value, ty: TypeRef, at: u64, scalars: &mut Vec<(u64, Vec<u8>)>) {
+    /// `scalars`, each nonzero scalar's at its offset in the type's module
+    /// layout, and its addresses to `addresses`.
+    fn encode(
+        &self,
+        value: &Value,
+        ty: TypeRef,
+        at: u64,
+        scalars: &mut Vec<(u64, Vec<u8>)>,
+        addresses: &mut Vec<LirAddress>,
+    ) {
         match (value, self.layout(ty.id)) {
+            (Value::Func(key), _) => addresses.push(LirAddress {
+                offset: at,
+                target: AddressTarget::Func(self.symbol(key)),
+            }),
+            (Value::Global(def), _) => addresses.push(LirAddress {
+                offset: at,
+                target: AddressTarget::Global(self.global_symbol(*def)),
+            }),
             (Value::Int(bits, width), _) => {
                 if *bits != 0 {
                     let len = (*width / 8) as usize;
@@ -138,7 +161,7 @@ impl Lower<'_> {
                 let slots = layout.slots();
                 let offsets = self.offsets(ty);
                 for ((value, (_, ty)), offset) in values.iter().zip(slots).zip(offsets) {
-                    self.encode(value, ty, at + offset, scalars);
+                    self.encode(value, ty, at + offset, scalars, addresses);
                 }
             }
             // The tag at its offset, then the live payload at the payload
@@ -157,12 +180,13 @@ impl Lower<'_> {
                     tag,
                     at + offsets[0],
                     scalars,
+                    addresses,
                 );
                 if let Some(payload) = payload {
                     let (field, _) = self.payload_field(ty.id, *index);
                     let field = field as usize;
                     if let (Some((_, ty)), Some(offset)) = (slots.get(field), offsets.get(field)) {
-                        self.encode(payload, *ty, at + offset, scalars);
+                        self.encode(payload, *ty, at + offset, scalars, addresses);
                     }
                 }
             }

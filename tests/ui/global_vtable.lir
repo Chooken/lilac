@@ -1,0 +1,95 @@
+lilac_ir = "0.5"
+target = "x86_64-unknown-none"
+global !.root.count: #bit32 = bytes { 0: "\x02\x00\x00\x00" }
+global !.root.TABLE: #Table = bytes { 0: addr @.root.add, 8: addr @.root.total }
+global !.root.sink: #Sink = bytes { 0: addr !.root.count, 8: addr !.root.TABLE }
+type #Sink size 16 align 8 {
+    context: ref #unknown,
+    table: ref #Table,
+}
+type #Table size 16 align 8 {
+    add: ref #unknown,
+    total: ref #unknown,
+}
+function @.root.add
+  in ref #unknown %context
+  in #bit32 %amount
+{
+  $entry:
+    alloca ref #bit32 %count : zeroed
+    &1: ref #bit32 = copy %context
+    copy &1 -> %count
+    &2: #bit32 = load %count
+    &3: #bit32 = copy %amount
+    &4: #bit32 = i.add &2, &3
+    copy &4 -> ref %count
+    return
+}
+function @.root.total
+  in ref #unknown %context
+  out #bit32 %total
+{
+  $entry:
+    alloca ref #bit32 %count : zeroed
+    zero %total
+    &1: ref #bit32 = copy %context
+    copy &1 -> %count
+    &2: #bit32 = load %count
+    copy &2 -> %total
+    return
+}
+function @main
+{
+  $entry:
+    alloca ref #Sink %tmp.1 : zeroed
+    alloca ref #Table %tmp.2 : zeroed
+    alloca ref #unknown %tmp.3 : zeroed
+    alloca ref #Sink %tmp.4 : zeroed
+    alloca ref #unknown %tmp.5 : zeroed
+    alloca #bit32 %tmp.6 : zeroed
+    alloca #bit32 %tmp.7 : zeroed
+    alloca ref #Sink %tmp.8 : zeroed
+    alloca ref #Table %tmp.9 : zeroed
+    alloca ref #unknown %tmp.10 : zeroed
+    alloca ref #Sink %tmp.11 : zeroed
+    alloca ref #unknown %tmp.12 : zeroed
+    &1: ref #Sink = addr.global !.root.sink
+    copy &1 -> %tmp.1
+    &2: ref #Table = field %tmp.1 .table  // idx 1
+    copy &2 -> %tmp.2
+    &3: ref #unknown = field %tmp.2 .add  // idx 0
+    copy &3 -> %tmp.3
+    &4: ref #Sink = addr.global !.root.sink
+    copy &4 -> %tmp.4
+    &5: ref #unknown = field %tmp.4 .context  // idx 0
+    copy &5 -> %tmp.5
+    &6: #bit32 = const 0x3
+    copy &6 -> %tmp.6
+    &7: ref #unknown = copy %tmp.3
+    call &7 (in %tmp.5, %tmp.6) (out)
+    &8: ref #Sink = addr.global !.root.sink
+    copy &8 -> %tmp.8
+    &9: ref #Table = field %tmp.8 .table  // idx 1
+    copy &9 -> %tmp.9
+    &10: ref #unknown = field %tmp.9 .total  // idx 1
+    copy &10 -> %tmp.10
+    &11: ref #Sink = addr.global !.root.sink
+    copy &11 -> %tmp.11
+    &12: ref #unknown = field %tmp.11 .context  // idx 0
+    copy &12 -> %tmp.12
+    &13: ref #unknown = copy %tmp.10
+    call &13 (in %tmp.12) (out %tmp.7)
+    &14: #bit32 = const 0x5
+    &15: #bit32 = copy %tmp.7
+    &16: #bit8 = cmp.eql &15, &14
+    &17: #bit8 = const 0x0
+    &18: #bit8 = cmp.eql &16, &17
+    branch.if &18, $l.1, $l.2
+  $l.1:
+    call @lilac_abort (in) (out)
+    unreachable
+  $l.2:
+    branch $l.3
+  $l.3:
+    return
+}

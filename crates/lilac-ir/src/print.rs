@@ -137,18 +137,27 @@ pub(crate) fn print_format(format: &LirFormat) -> (String, Option<Span>) {
     (text, Some(format.span))
 }
 
-/// `global !name: #t = zeroed`, or `= bytes { 0: "…", 16: "…" }` with its
-/// initializer runs (every other byte is zero).
+/// `global !name: #t = zeroed`, or `= bytes { 0: "…", 8: addr @f, 16: addr
+/// !g }` with its initializer runs and addresses in offset order (every
+/// other byte is zero).
 pub(crate) fn print_global(global: &LirGlobal) -> (String, Option<Span>) {
-    let init = if global.init.is_empty() {
+    let init = if global.init.is_empty() && global.addresses.is_empty() {
         "zeroed".to_owned()
     } else {
-        let runs: Vec<String> = global
+        let mut parts: Vec<(u64, String)> = global
             .init
             .iter()
-            .map(|(offset, bytes)| format!("{offset}: \"{}\"", escape_data(bytes)))
+            .map(|(offset, bytes)| (*offset, format!("{offset}: \"{}\"", escape_data(bytes))))
+            .chain(global.addresses.iter().map(|address| {
+                (
+                    address.offset,
+                    format!("{}: addr {}", address.offset, address.target),
+                )
+            }))
             .collect();
-        format!("bytes {{ {} }}", runs.join(", "))
+        parts.sort_by_key(|(offset, _)| *offset);
+        let parts: Vec<String> = parts.into_iter().map(|(_, part)| part).collect();
+        format!("bytes {{ {} }}", parts.join(", "))
     };
     (
         format!("global !{}: {} = {init}", global.name.as_str(), global.ty),

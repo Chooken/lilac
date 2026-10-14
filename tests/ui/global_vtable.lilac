@@ -1,0 +1,43 @@
+// A static vtable: a global table of function addresses, and a global
+// pointing at the table and at its context, another global. In LIR each
+// address is an `addr` slot of the initializer; in LLVM a `ptr` in the
+// global's packed constant. Nothing calls `add` or `total` directly.
+
+Table: object {
+    add: ref function (context: ref unknown, amount: @bit32) nothing
+    total: ref function (context: ref unknown) total: @bit32
+}
+
+Sink: object {
+    context: ref unknown
+    table: ref Table
+}
+
+add: function (context: ref unknown, amount: @bit32) nothing {
+    count: ref @bit32 = context as ref @bit32
+    count = @i_add_32(count, amount)
+}
+
+total: function (context: ref unknown) total: @bit32 {
+    count: ref @bit32 = context as ref @bit32
+    total = count
+}
+
+count: @bit32 = 0x2
+
+TABLE: Table = Table {
+    add = ref add
+    total = ref total
+}
+
+sink: Sink = Sink {
+    context = ref count as ref unknown
+    table = ref TABLE
+}
+
+main: function () nothing {
+    sink.table.add(sink.context, 0x3)
+    if sink.table.total(sink.context) != 0x5 {
+        @trap()
+    }
+}

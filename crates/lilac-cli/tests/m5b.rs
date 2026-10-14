@@ -322,3 +322,38 @@ fn functions_keep_their_addresses() {
         );
     }
 }
+
+/// A global's addresses are `ptr`s in its packed constant at the layout's
+/// offsets, on a 32-bit target as on a 64-bit one: `global_vtable.lilac`'s
+/// table holds two function addresses and its sink a global's address
+/// beside the table's.
+#[test]
+fn global_addresses_are_pointers_in_the_constant() {
+    for (target, align) in [("x86_64-unknown-none", 8), ("i686-unknown-none", 4)] {
+        let output = lilac()
+            .current_dir(ui_dir())
+            .args([
+                "emit-llvm",
+                &format!("--target={target}"),
+                "global_vtable.lilac",
+            ])
+            .output()
+            .expect("runs lilac");
+        assert!(
+            output.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).expect("utf8 IR");
+        for line in [
+            format!(
+                "@.root.TABLE = internal global <{{ ptr, ptr }}> <{{ ptr @.root.add, ptr @.root.total }}>, align {align}"
+            ),
+            format!(
+                "@.root.sink = internal global <{{ ptr, ptr }}> <{{ ptr @.root.count, ptr @.root.TABLE }}>, align {align}"
+            ),
+        ] {
+            assert!(text.lines().any(|have| have == line), "{target}: {line}\n{text}");
+        }
+    }
+}

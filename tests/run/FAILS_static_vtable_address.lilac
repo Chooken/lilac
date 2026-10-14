@@ -1,0 +1,16 @@
+// expect-error: E038
+// expect-stderr: 10 | same: @bit8 = ref first == ref second
+// expect-stderr: 11 | address: @bit_native = @ptr_to_address(ref first as ref unknown)
+// A global's initializer may hold an address, but nothing computes with
+// one: comparing two addresses or reading one as a number is not
+// constant, since addresses are known only once the program is linked.
+
+first: function () nothing {}
+second: function () nothing {}
+same: @bit8 = ref first == ref second
+address: @bit_native = @ptr_to_address(ref first as ref unknown)
+
+main: function () nothing {
+    if same == 0x1 { first() }
+    if address == 0x0 { second() }
+}

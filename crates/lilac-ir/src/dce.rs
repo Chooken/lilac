@@ -1,5 +1,6 @@
 //! Reachability sweep: drops functions with no path from `main`, data
-//! consts and templates no surviving instruction names, and layouts no
+//! consts and templates no surviving instruction names, globals neither a
+//! surviving instruction nor a surviving global names, and layouts no
 //! surviving type names.
 //!
 //! The frontend lowers every declaration, so a function that nothing calls and a
@@ -15,15 +16,20 @@ use lilac_error::TraceFrame;
 use lilac_span::Span;
 
 use crate::trace::is_hidden;
-use crate::{LirCallee, LirConst, LirFormat, LirFunc, LirInst, LirModule, LirTy, Symbol};
+use crate::{
+    AddressTarget, LirCallee, LirConst, LirFormat, LirFunc, LirGlobal, LirInst, LirModule, LirTy,
+    Symbol,
+};
 
 /// How a caller reaches a callee: a direct `call`, or a taken address
-/// (`addr.func`, or a formatter in a `format`'s template).
+/// (`addr.func`, a formatter in a `format`'s template, or a function the
+/// initial value of an `addr.global`'s global points at).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeKind {
     /// `call @f`.
     Call,
-    /// `addr.func @f`, or a `format` whose template names `@f`.
+    /// `addr.func @f`, a `format` whose template names `@f`, or an
+    /// `addr.global` whose global's initial value reaches `@f`.
     Address,
 }
 
@@ -67,9 +73,10 @@ impl CallGraph {
     #[must_use]
     pub fn new(module: &LirModule) -> Self {
         let formats = formats_by_name(module);
+        let globals = global_funcs(module);
         let mut callers: HashMap<Symbol, Vec<Edge>> = HashMap::new();
         for func in &module.funcs {
-            for (target, span, kind) in callees(func, &formats) {
+            for (target, span, kind) in callees(func, &formats, &globals) {
                 callers.entry(target).or_default().push(Edge {
                     caller: func.name.clone(),
                     span,
@@ -172,6 +179,7 @@ pub fn reach<S: BuildHasher>(
         .map(|func| (func.name.as_str(), func))
         .collect();
     let formats = formats_by_name(module);
+    let globals = global_funcs(module);
     let mut reached: HashSet<Symbol> = HashSet::new();
     let mut queue: VecDeque<Symbol> = VecDeque::new();
     for func in &module.funcs {
@@ -194,7 +202,7 @@ pub fn reach<S: BuildHasher>(
         let Some(func) = funcs.get(name.as_str()) else {
             continue;
         };
-        for (target, _, _) in callees(func, &formats) {
+        for (target, _, _) in callees(func, &formats, &globals) {
             if funcs.contains_key(target.as_str()) && reached.insert(target.clone()) {
                 queue.push_back(target);
             }
@@ -212,7 +220,9 @@ pub fn reach<S: BuildHasher>(
 /// never called directly). A `format` reaches its template's formatters.
 /// Data consts survive only when a surviving instruction names them (a
 /// `const` of [`LirConst::Data`]), and templates when a surviving `format`
-/// does. Layouts
+/// does, and globals when a surviving `addr.global` names them or a
+/// surviving global's initial value points at them (an `addr.global`
+/// reaches the functions such a chain of globals points at). Layouts
 /// survive when a surviving function's signature or instruction type names
 /// them, directly or through another surviving layout's fields. With no `main`
 /// and no `extra_roots` the pass is a no-op; a non-empty `extra_roots` prunes
@@ -245,6 +255,19 @@ pub fn prune_unreachable<S: BuildHasher>(
             }
         }
     }
+    // A named global keeps the globals its initial value points at.
+    let by_name: HashMap<&Symbol, &LirGlobal> = module
+        .globals
+        .iter()
+        .map(|global| (&global.name, global))
+        .collect();
+    let mut live_globals: HashSet<&Symbol> = HashSet::new();
+    for name in &referenced {
+        if by_name.contains_key(name) && !live_globals.contains(name) {
+            live_globals.extend(reached_from(name, &by_name).1);
+        }
+    }
+    let live_globals: HashSet<Symbol> = live_globals.into_iter().cloned().collect();
     let referenced: HashSet<Symbol> = referenced.into_iter().cloned().collect();
     module.data.retain(|datum| referenced.contains(&datum.name));
     module
@@ -252,7 +275,7 @@ pub fn prune_unreachable<S: BuildHasher>(
         .retain(|format| referenced.contains(&format.name));
     module
         .globals
-        .retain(|global| referenced.contains(&global.name));
+        .retain(|global| live_globals.contains(&global.name));
     prune_layouts(module);
     Some(reach)
 }
@@ -326,10 +349,73 @@ fn formats_by_name(module: &LirModule) -> HashMap<&str, &LirFormat> {
         .collect()
 }
 
+/// The functions each global's initial value points at, directly or
+/// through the addresses of other globals it points at, for every global a
+/// function's `addr.global` names (each searched once, in address order).
+fn global_funcs(module: &LirModule) -> HashMap<&Symbol, Vec<Symbol>> {
+    let by_name: HashMap<&Symbol, &LirGlobal> = module
+        .globals
+        .iter()
+        .map(|global| (&global.name, global))
+        .collect();
+    let mut closures: HashMap<&Symbol, Vec<Symbol>> = HashMap::new();
+    for func in &module.funcs {
+        for block in &func.blocks {
+            for inst in &block.insts {
+                let LirInst::AddrGlobal { global, .. } = inst else {
+                    continue;
+                };
+                if !closures.contains_key(global) {
+                    let funcs = reached_from(global, &by_name).0;
+                    closures.insert(global, funcs);
+                }
+            }
+        }
+    }
+    closures
+}
+
+/// The functions and the globals that global `root`'s initial value
+/// reaches through its addresses, `root` among the globals.
+fn reached_from<'m>(
+    root: &'m Symbol,
+    by_name: &HashMap<&'m Symbol, &'m LirGlobal>,
+) -> (Vec<Symbol>, HashSet<&'m Symbol>) {
+    let mut funcs = Vec::new();
+    let mut seen_funcs: HashSet<&Symbol> = HashSet::new();
+    let mut globals: HashSet<&Symbol> = HashSet::from([root]);
+    let mut queue = VecDeque::from([root]);
+    while let Some(name) = queue.pop_front() {
+        let Some(global) = by_name.get(name) else {
+            continue;
+        };
+        for target in global.address_targets() {
+            match target {
+                AddressTarget::Func(func) => {
+                    if seen_funcs.insert(func) {
+                        funcs.push(func.clone());
+                    }
+                }
+                AddressTarget::Global(other) => {
+                    if globals.insert(other) {
+                        queue.push_back(other);
+                    }
+                }
+            }
+        }
+    }
+    (funcs, globals)
+}
+
 /// Direct `call` and `addr.func` targets of every instruction in `func`, in
 /// order, with their spans. A `format` takes the address of each formatter
-/// in its template (`formats`).
-fn callees(func: &LirFunc, formats: &HashMap<&str, &LirFormat>) -> Vec<(Symbol, Span, EdgeKind)> {
+/// in its template (`formats`), and an `addr.global` of each function the
+/// global's initial value reaches (`globals`, [`global_funcs`]).
+fn callees(
+    func: &LirFunc,
+    formats: &HashMap<&str, &LirFormat>,
+    globals: &HashMap<&Symbol, Vec<Symbol>>,
+) -> Vec<(Symbol, Span, EdgeKind)> {
     let mut targets = Vec::new();
     for block in &func.blocks {
         for inst in &block.insts {
@@ -341,6 +427,11 @@ fn callees(func: &LirFunc, formats: &HashMap<&str, &LirFormat>) -> Vec<(Symbol, 
                 } => targets.push((name.clone(), *span, EdgeKind::Call)),
                 LirInst::AddrFunc { func, span, .. } => {
                     targets.push((func.clone(), *span, EdgeKind::Address));
+                }
+                LirInst::AddrGlobal { global, span, .. } => {
+                    for func in globals.get(global).map_or(&[][..], Vec::as_slice) {
+                        targets.push((func.clone(), *span, EdgeKind::Address));
+                    }
                 }
                 LirInst::Format { template, span, .. } => {
                     let formatters = formats
@@ -364,7 +455,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::{LirBlock, LirData, LirTerm};
+    use crate::{LirBlock, LirData, LirGlobal, LirTerm};
     use lilac_span::Span;
 
     /// Builds one function whose `entry` block calls each name in `calls`
@@ -629,6 +720,91 @@ mod tests {
         assert_eq!(trace.callers[0].func, "f");
     }
 
+    /// A global named `name` whose initial value points at `targets`.
+    fn table(name: &str, targets: Vec<AddressTarget>) -> LirGlobal {
+        LirGlobal {
+            name: name.into(),
+            ty: t("[2 x ref #unknown]"),
+            init: Vec::new(),
+            addresses: targets
+                .into_iter()
+                .zip(0..)
+                .map(|(target, slot)| crate::LirAddress {
+                    offset: slot * 8,
+                    target,
+                })
+                .collect(),
+            span: Span::dummy(),
+        }
+    }
+
+    /// `main` takes the address of global `global`.
+    fn naming(global: &str) -> LirFunc {
+        let mut main = func("main", &[], &[]);
+        main.blocks[0].insts.push(LirInst::AddrGlobal {
+            global: global.into(),
+            dst: "g".into(),
+            ty: t("ref [2 x ref #unknown]"),
+            span: Span::dummy(),
+        });
+        main
+    }
+
+    /// `main` names `!outer`, which points at `!inner` and `@f`; `!inner`
+    /// points at `@g` and back at `!outer`. `!dead` and `@h` are unnamed.
+    fn vtable_module() -> LirModule {
+        let mut module =
+            LirModule::new(lilac_target::Target::parse("x86_64-unknown-none").expect("triple"));
+        module.funcs.push(naming("outer"));
+        for name in ["f", "g", "h"] {
+            module.funcs.push(func(name, &[], &[]));
+        }
+        module.globals.push(table(
+            "outer",
+            vec![
+                AddressTarget::Global("inner".into()),
+                AddressTarget::Func("f".into()),
+            ],
+        ));
+        module.globals.push(table(
+            "inner",
+            vec![
+                AddressTarget::Func("g".into()),
+                AddressTarget::Global("outer".into()),
+            ],
+        ));
+        module
+            .globals
+            .push(table("dead", vec![AddressTarget::Func("h".into())]));
+        module
+    }
+
+    #[test]
+    fn a_chain_of_globals_keeps_its_functions() {
+        let mut module = vtable_module();
+        prune_unreachable(&mut module, &HashSet::new());
+        let funcs: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(funcs, ["main", "f", "g"]);
+        let globals: Vec<&str> = module.globals.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(globals, ["outer", "inner"]);
+    }
+
+    #[test]
+    fn an_unnamed_vtable_keeps_nothing() {
+        let mut module = vtable_module();
+        module.funcs[0] = func("main", &[], &[]);
+        prune_unreachable(&mut module, &HashSet::new());
+        let funcs: Vec<&str> = module.funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(funcs, ["main"]);
+        assert!(module.globals.is_empty());
+    }
+
+    #[test]
+    fn trace_passes_through_a_vtable() {
+        let module = vtable_module();
+        assert_eq!(trace_of(&module, "g"), "g (main &)");
+        assert_eq!(trace_of(&module, "h"), "h");
+    }
     #[test]
     fn no_root_reaches_nothing() {
         let module = module_with(&["a", "b"], &[]);

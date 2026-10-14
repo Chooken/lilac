@@ -120,6 +120,18 @@
   `zeroinitializer`) in the C layout (a non-constant one is `E038`,
   `check_global_initializers`); a use is `addr.global` into an indirect
   place. `LirModule::globals` are pruned by DCE like data, never dropped.
+  An initializer may hold addresses (static vtables): the constant
+  evaluator's `Value::Func` (`ref f`) and `Value::Global` (`ref G`), passed
+  through `ref` casts, never compared or tested (`has_address`), encode as
+  `LirGlobal::addresses` (`LirAddress`: an offset and an `AddressTarget`,
+  printed `8: addr @f`, `16: addr !g`), slots no run covers. The verifier
+  checks each is pointer-aligned, inside, clear and names a module item.
+  DCE's `global_funcs` gives an `addr.global` an `EdgeKind::Address` edge
+  to every function the global's address closure reaches (so traces pass
+  through tables), and a kept global keeps the globals it points at. The
+  backend defines globals with null slots, then `fill_global_addresses`
+  once every function is declared (`function_address`: an export's is its
+  C entry).
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
   `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
   `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes
