@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# Generates lib/Standard's numeric types (math plan phase 2): the ten
+# Generates lib/Standard's numeric types (math plan phases 2-3): the ten
 # integer files and three float files are this script's output, so change
 # the script and rerun it (`perl scripts/numeric_types.pl lib/Standard`)
 # rather than editing them by hand.
@@ -78,7 +78,7 @@ sub int_file {
     my $c = container($bits);
     my $s = $bits;                      # intrinsic suffix
     my $u = $signed ? '' : '_u';        # unsigned intrinsic infix
-    my $helper = $signed ? '' : 'u_';   # helper infix
+    my $uname = $signed ? 'U' . lcfirst($name) : $name;
     my $kind = $signed ? 'signed' : 'unsigned';
     my $width = $bits eq 'native' ? 'pointer-width' : "$bits-bit";
     my $text = '';
@@ -149,15 +149,414 @@ sub int_file {
         }
     }
 
-    # Wrapping arithmetic.
-    for my $w (['add', 'self + other', 'add'], ['sub', 'self - other', 'subtract'], ['mul', 'self * other', 'multiply']) {
+    # Basics: compare, abs, unsigned_abs, sign, min, max, clamp, power of two.
+    $text .= "    /// How `self` orders against `other`: `.Less`, `.Equal` or `.Greater`.\n";
+    $text .= "    compare: function (self: $name, other: $name) Ordering =>\n";
+    $text .= "        if \@i_less_than$u\_$s(self.data, other.data) then .Less else if self.data == other.data then .Equal else .Greater\n\n";
+
+    if ($signed) {
+        $text .= "    /// `|self|`; panics on `MIN` in Debug builds and wraps to `MIN` in Release.\n";
+        $text .= "    abs: function (self: $name) $name =>\n";
+        $text .= "        $name { data = if \@i_less_than_$s(self.data, 0x0) then (if \@builtin.Build.mode == .Debug and \@i_sub_overflows_$s(0x0, self.data) then \@panic(\"attempt to negate with overflow\") else \@i_negate_$s(self.data)) else self.data }\n\n";
+
+        $text .= "    /// `|self|` as a `$uname`, defined for `MIN` without overflow.\n";
+        $text .= "    unsigned_abs: function (self: $name) $uname =>\n";
+        $text .= "        (if \@i_less_than_$s(self.data, 0x0) then \@i_negate_$s(self.data) else self.data) as $uname\n\n";
+
+        $text .= "    /// `-1` when negative, `0` when zero, `1` when positive.\n";
+        $text .= "    sign: function (self: $name) $name =>\n";
+        $text .= "        if \@i_less_than_$s(self.data, 0x0) then -1 else if self.data == 0x0 then 0 else 1\n\n";
+    } else {
+        $text .= "    /// `self` (an unsigned integer is already non-negative).\n";
+        $text .= "    abs: function (self: $name) $name => self\n\n";
+
+        $text .= "    /// `self`.\n";
+        $text .= "    unsigned_abs: function (self: $name) $name => self\n\n";
+
+        $text .= "    /// `0` when zero, `1` when positive.\n";
+        $text .= "    sign: function (self: $name) $name => if self.data == 0x0 then 0 else 1\n\n";
+    }
+
+    $text .= "    /// The smaller of `self` and `other`.\n";
+    $text .= "    min: function (self: $name, other: $name) $name =>\n";
+    $text .= "        if \@i_less_than$u\_$s(self.data, other.data) then self else other\n\n";
+
+    $text .= "    /// The larger of `self` and `other`.\n";
+    $text .= "    max: function (self: $name, other: $name) $name =>\n";
+    $text .= "        if \@i_greater_than$u\_$s(self.data, other.data) then self else other\n\n";
+
+    $text .= "    /// `self` bounded to `low..=high`; panics when `low > high`.\n";
+    $text .= "    clamp: function (self: $name, low: $name, high: $name) $name =>\n";
+    $text .= "        if \@i_greater_than$u\_$s(low.data, high.data) then \@panic(\"clamp: low is greater than high\") else if \@i_less_than$u\_$s(self.data, low.data) then low else if \@i_greater_than$u\_$s(self.data, high.data) then high else self\n\n";
+
+    $text .= "    /// Whether `self` is a positive power of two.\n";
+    if ($signed) {
+        $text .= "    is_power_of_two: function (self: $name) Bool =>\n";
+        $text .= "        \@i_greater_than_$s(self.data, 0x0) and \@bit_count_ones_$s(self.data) == 0x1\n\n";
+    } else {
+        $text .= "    is_power_of_two: function (self: $name) Bool => \@bit_count_ones_$s(self.data) == 0x1\n\n";
+    }
+
+    my $min_lz = $signed ? '0x1' : '0x0';
+    $text .= "    /// The smallest power of two greater than or equal to `self`; fails\n";
+    $text .= "    /// when the result overflows `$name`.\n";
+    $text .= "    next_power_of_two: function (self: $name) power: $name else nothing {\n";
+    $text .= "        if \@i_less_than_or_equal$u\_$s(self.data, 0x1) {\n";
+    $text .= "            power = 1\n            return\n        }\n";
+    $text .= "        zeros: $c = \@bit_leading_zeros_$s(\@i_sub_$s(self.data, 0x1))\n";
+    $text .= "        if \@i_greater_than_u_$s(zeros, $min_lz) {\n";
+    $text .= "            power = $name { data = \@i_add_$s(\@bit_shift_right_u_$s(\@bit_not_$s(0x0), zeros), 0x1) }\n";
+    $text .= "            return\n        }\n        fail\n    }\n\n";
+
+    # Division: div_floor, div_ceil, div_euclid, rem_euclid, div_rem, gcd, lcm.
+    if ($signed) {
+        $text .= "    /// `self / other` rounded toward negative infinity; panics when `other`\n";
+        $text .= "    /// is 0 or on `MIN / -1`.\n";
+        $text .= "    div_floor: function (self: $name, other: $name) quotient: $name {\n";
+        $text .= "        q: $c = \@i_div_$s(self.data, other.data)\n";
+        $text .= "        r: $c = \@i_mod_$s(self.data, other.data)\n";
+        $text .= "        if r != 0x0 and \@i_less_than_$s(\@bit_xor_$s(self.data, other.data), 0x0) {\n";
+        $text .= "            quotient = $name { data = \@i_sub_$s(q, 0x1) }\n";
+        $text .= "        } else {\n";
+        $text .= "            quotient = $name { data = q }\n        }\n    }\n\n";
+
+        $text .= "    /// `self / other` rounded toward positive infinity; panics when `other`\n";
+        $text .= "    /// is 0 or on `MIN / -1`.\n";
+        $text .= "    div_ceil: function (self: $name, other: $name) quotient: $name {\n";
+        $text .= "        q: $c = \@i_div_$s(self.data, other.data)\n";
+        $text .= "        r: $c = \@i_mod_$s(self.data, other.data)\n";
+        $text .= "        if r != 0x0 and \@i_greater_than_or_equal_$s(\@bit_xor_$s(self.data, other.data), 0x0) {\n";
+        $text .= "            quotient = $name { data = \@i_add_$s(q, 0x1) }\n";
+        $text .= "        } else {\n";
+        $text .= "            quotient = $name { data = q }\n        }\n    }\n\n";
+
+        $text .= "    /// Euclidean quotient: `self = div_euclid(other) * other + rem_euclid(other)`\n";
+        $text .= "    /// with `0 <= rem_euclid(other) < |other|`. Panics when `other` is 0 or\n";
+        $text .= "    /// on `MIN / -1`.\n";
+        $text .= "    div_euclid: function (self: $name, other: $name) quotient: $name {\n";
+        $text .= "        q: $c = \@i_div_$s(self.data, other.data)\n";
+        $text .= "        r: $c = \@i_mod_$s(self.data, other.data)\n";
+        $text .= "        if \@i_less_than_$s(r, 0x0) {\n";
+        $text .= "            if \@i_greater_than_$s(other.data, 0x0) {\n";
+        $text .= "                quotient = $name { data = \@i_sub_$s(q, 0x1) }\n";
+        $text .= "            } else {\n";
+        $text .= "                quotient = $name { data = \@i_add_$s(q, 0x1) }\n            }\n";
+        $text .= "        } else {\n";
+        $text .= "            quotient = $name { data = q }\n        }\n    }\n\n";
+
+        $text .= "    /// Least non-negative remainder of `self` divided by `other`: in\n";
+        $text .= "    /// `0..|other|`. Panics when `other` is 0 or on `MIN % -1`.\n";
+        $text .= "    rem_euclid: function (self: $name, other: $name) remainder: $name {\n";
+        $text .= "        r: $c = \@i_mod_$s(self.data, other.data)\n";
+        $text .= "        if \@i_less_than_$s(r, 0x0) {\n";
+        $text .= "            if \@i_greater_than_$s(other.data, 0x0) {\n";
+        $text .= "                remainder = $name { data = \@i_add_$s(r, other.data) }\n";
+        $text .= "            } else {\n";
+        $text .= "                remainder = $name { data = \@i_sub_$s(r, other.data) }\n            }\n";
+        $text .= "        } else {\n";
+        $text .= "            remainder = $name { data = r }\n        }\n    }\n\n";
+    } else {
+        $text .= "    /// `self / other` rounded toward negative infinity; panics when `other` is 0.\n";
+        $text .= "    div_floor: function (self: $name, other: $name) $name => $name { data = \@i_div_u_$s(self.data, other.data) }\n\n";
+
+        $text .= "    /// `self / other` rounded toward positive infinity; panics when `other` is 0.\n";
+        $text .= "    div_ceil: function (self: $name, other: $name) quotient: $name {\n";
+        $text .= "        q: $c = \@i_div_u_$s(self.data, other.data)\n";
+        $text .= "        r: $c = \@i_mod_u_$s(self.data, other.data)\n";
+        $text .= "        if r != 0x0 {\n";
+        $text .= "            quotient = $name { data = \@i_add_$s(q, 0x1) }\n";
+        $text .= "        } else {\n";
+        $text .= "            quotient = $name { data = q }\n        }\n    }\n\n";
+
+        $text .= "    /// Euclidean quotient (`self / other`); panics when `other` is 0.\n";
+        $text .= "    div_euclid: function (self: $name, other: $name) $name => $name { data = \@i_div_u_$s(self.data, other.data) }\n\n";
+
+        $text .= "    /// Euclidean remainder (`self % other`); panics when `other` is 0.\n";
+        $text .= "    rem_euclid: function (self: $name, other: $name) $name => $name { data = \@i_mod_u_$s(self.data, other.data) }\n\n";
+    }
+
+    $text .= "    /// `self / other` and `self % other`.\n";
+    $text .= "    div_rem: function (self: $name, other: $name) (quotient: $name, remainder: $name) {\n";
+    $text .= "        quotient = $name { data = \@i_div$u\_$s(self.data, other.data) }\n";
+    $text .= "        remainder = $name { data = \@i_mod$u\_$s(self.data, other.data) }\n    }\n\n";
+
+    if ($signed) {
+        $text .= "    /// Greatest common divisor of `|self|` and `|other|` (`0` when both are\n";
+        $text .= "    /// `0`); panics in Debug when the result is `|MIN|`.\n";
+        $text .= "    gcd: function (self: $name, other: $name) divisor: $name {\n";
+        $text .= "        raw: $c = self.unsigned_abs().gcd(other.unsigned_abs()) as $c\n";
+        $text .= "        if \@builtin.Build.mode == .Debug and \@i_less_than_$s(raw, 0x0) {\n";
+        $text .= "            \@panic(\"attempt to negate with overflow\")\n        }\n";
+        $text .= "        divisor = $name { data = raw }\n    }\n\n";
+
+        $text .= "    /// Least common multiple of `|self|` and `|other|` (`0` when either is\n";
+        $text .= "    /// `0`); panics on overflow in Debug and wraps in Release.\n";
+        $text .= "    lcm: function (self: $name, other: $name) multiple: $name {\n";
+        $text .= "        if self.data == 0x0 or other.data == 0x0 {\n            multiple = 0\n            return\n        }\n";
+        $text .= "        u: $uname = self.unsigned_abs()\n";
+        $text .= "        v: $uname = other.unsigned_abs()\n";
+        $text .= "        scaled: $c = (u / u.gcd(v)) as $c\n";
+        $text .= "        rhs: $c = v as $c\n";
+        $text .= "        prod: $c = \@i_mul_$s(scaled, rhs)\n";
+        $text .= "        if \@builtin.Build.mode == .Debug and (\@i_mul_overflows_u_$s(scaled, rhs) or \@i_less_than_$s(prod, 0x0)) {\n";
+        $text .= "            \@panic(\"attempt to multiply with overflow\")\n        }\n";
+        $text .= "        multiple = $name { data = prod }\n    }\n\n";
+    } else {
+        $text .= "    /// Greatest common divisor of `self` and `other` (`0` when both are `0`).\n";
+        $text .= "    gcd: function (self: $name, other: $name) divisor: $name {\n";
+        $text .= "        u: $c = self.data\n";
+        $text .= "        v: $c = other.data\n";
+        $text .= "        if u == 0x0 {\n            divisor = other\n            return\n        }\n";
+        $text .= "        if v == 0x0 {\n            divisor = self\n            return\n        }\n";
+        $text .= "        u_zeros: $c = \@bit_trailing_zeros_$s(u)\n";
+        $text .= "        v_zeros: $c = \@bit_trailing_zeros_$s(v)\n";
+        $text .= "        shift: $c = if \@i_less_than_u_$s(u_zeros, v_zeros) then u_zeros else v_zeros\n";
+        $text .= "        u = \@bit_shift_right_u_$s(u, u_zeros)\n";
+        $text .= "        loop {\n";
+        $text .= "            v = \@bit_shift_right_u_$s(v, \@bit_trailing_zeros_$s(v))\n";
+        $text .= "            if \@i_greater_than_u_$s(u, v) {\n";
+        $text .= "                swap: $c = u\n                u = v\n                v = swap\n            }\n";
+        $text .= "            v = \@i_sub_$s(v, u)\n";
+        $text .= "            if v == 0x0 { break }\n        }\n";
+        $text .= "        divisor = $name { data = \@bit_shift_left_$s(u, shift) }\n    }\n\n";
+
+        $text .= "    /// Least common multiple of `self` and `other` (`0` when either is `0`);\n";
+        $text .= "    /// panics on overflow in Debug and wraps in Release.\n";
+        $text .= "    lcm: function (self: $name, other: $name) multiple: $name {\n";
+        $text .= "        if self.data == 0x0 or other.data == 0x0 {\n            multiple = 0\n            return\n        }\n";
+        $text .= "        g: $name = self.gcd(other)\n";
+        $text .= "        multiple = (self / g) * other\n    }\n\n";
+    }
+
+    # Powers and roots: pow, isqrt, ilog2, ilog10.
+    $text .= "    /// `self^exponent`; panics on overflow in Debug builds and wraps in Release.\n";
+    $text .= "    pow: function (self: $name, exponent: Uint32) power: $name {\n";
+    $text .= "        result: $name, overflowed: Bool = self.overflowing_pow(exponent)\n";
+    $text .= "        if \@builtin.Build.mode == .Debug and overflowed {\n";
+    $text .= "            \@panic(\"attempt to multiply with overflow\")\n        }\n";
+    $text .= "        power = result\n    }\n\n";
+
+    $text .= "    /// `⌊√self⌋`" . ($signed ? "; panics when `self` is negative" : "") . ".\n";
+    $text .= "    isqrt: function (self: $name) root: $name {\n";
+    if ($signed) {
+        $text .= "        if \@i_less_than_$s(self.data, 0x0) {\n";
+        $text .= "            \@panic(\"attempt to calculate the integer square root of a negative number\")\n        }\n";
+    }
+    $text .= "        if \@i_less_than_u_$s(self.data, 0x2) {\n";
+    $text .= "            root = self\n            return\n        }\n";
+    $text .= "        rem: $c = self.data\n";
+    $text .= "        acc: $c = 0x0\n";
+    $text .= "        even_zeros: $c = \@bit_and_$s(\@bit_leading_zeros_$s(rem), \@bit_not_$s(0x1))\n";
+    $text .= "        top_four: $c = \@i_add_$s(\@bit_shift_right_u_$s(\@bit_not_$s(0x0), 0x2), 0x1)\n";
+    $text .= "        bit: $c = \@bit_shift_right_u_$s(top_four, even_zeros)\n";
+    $text .= "        loop {\n";
+    $text .= "            if bit == 0x0 { break }\n";
+    $text .= "            cand: $c = \@i_add_$s(acc, bit)\n";
+    $text .= "            acc = \@bit_shift_right_u_$s(acc, 0x1)\n";
+    $text .= "            if \@i_greater_than_or_equal_u_$s(rem, cand) {\n";
+    $text .= "                rem = \@i_sub_$s(rem, cand)\n";
+    $text .= "                acc = \@i_add_$s(acc, bit)\n            }\n";
+    $text .= "            bit = \@bit_shift_right_u_$s(bit, 0x2)\n        }\n";
+    $text .= "        root = $name { data = acc }\n    }\n\n";
+
+    my $non_positive = $signed ? "\@i_less_than_or_equal_$s(self.data, 0x0)" : "self.data == 0x0";
+    $text .= "    /// `⌊log2(self)⌋`; fails when `self <= 0`.\n";
+    $text .= "    ilog2: function (self: $name) exponent: $name else nothing {\n";
+    $text .= "        if $non_positive { fail }\n";
+    $text .= "        exponent = $name { data = \@i_sub_$s(\@bit_leading_zeros_$s(0x1), \@bit_leading_zeros_$s(self.data)) }\n    }\n\n";
+
+    $text .= "    /// `⌊log10(self)⌋`; fails when `self <= 0`.\n";
+    $text .= "    ilog10: function (self: $name) exponent: $name else nothing {\n";
+    $text .= "        if $non_positive { fail }\n";
+    $text .= "        rem: $c = self.data\n";
+    $text .= "        count: $c = 0x0\n";
+    $text .= "        loop {\n";
+    $text .= "            if \@i_less_than_u_$s(rem, 0xA) { break }\n";
+    $text .= "            rem = \@i_div_u_$s(rem, 0xA)\n";
+    $text .= "            count = \@i_add_$s(count, 0x1)\n        }\n";
+    $text .= "        exponent = $name { data = count }\n    }\n\n";
+
+    # Bits.
+    $text .= "    /// The number of `1` bits in `self`.\n";
+    $text .= "    count_ones: function (self: $name) $name => $name { data = \@bit_count_ones_$s(self.data) }\n\n";
+
+    $text .= "    /// The number of `0` bits in `self`.\n";
+    $text .= "    count_zeros: function (self: $name) $name => $name { data = \@bit_count_ones_$s(\@bit_not_$s(self.data)) }\n\n";
+
+    $text .= "    /// The number of leading `0` bits in `self`.\n";
+    $text .= "    leading_zeros: function (self: $name) $name => $name { data = \@bit_leading_zeros_$s(self.data) }\n\n";
+
+    $text .= "    /// The number of trailing `0` bits in `self`.\n";
+    $text .= "    trailing_zeros: function (self: $name) $name => $name { data = \@bit_trailing_zeros_$s(self.data) }\n\n";
+
+    $text .= "    /// The number of leading `1` bits in `self`.\n";
+    $text .= "    leading_ones: function (self: $name) $name => $name { data = \@bit_leading_zeros_$s(\@bit_not_$s(self.data)) }\n\n";
+
+    $text .= "    /// The number of trailing `1` bits in `self`.\n";
+    $text .= "    trailing_ones: function (self: $name) $name => $name { data = \@bit_trailing_zeros_$s(\@bit_not_$s(self.data)) }\n\n";
+
+    $text .= "    /// The bits of `self` rotated left by `amount` (modulo the bit width).\n";
+    $text .= "    rotate_left: function (self: $name, amount: $name) $name => $name { data = \@bit_rotate_left_$s(self.data, amount.data) }\n\n";
+
+    $text .= "    /// The bits of `self` rotated right by `amount` (modulo the bit width).\n";
+    $text .= "    rotate_right: function (self: $name, amount: $name) $name => $name { data = \@bit_rotate_right_$s(self.data, amount.data) }\n\n";
+
+    my $swapped = $bits eq '8' ? 'self' : "$name { data = \@bit_swap_bytes_$s(self.data) }";
+    $text .= "    /// The bytes of `self` in reverse order.\n";
+    $text .= "    swap_bytes: function (self: $name) $name => $swapped\n\n";
+
+    $text .= "    /// The bits of `self` in reverse order.\n";
+    $text .= "    reverse_bits: function (self: $name) $name => $name { data = \@bit_reverse_$s(self.data) }\n\n";
+
+    my $be_expr = $bits eq '8' ? 'self' : "match \@builtin.Target.arch {} else $swapped";
+    my $le_expr = $bits eq '8' ? 'self' : "match \@builtin.Target.arch {} else self";
+    $text .= "    /// `self` with its bytes in big-endian (network) order.\n";
+    $text .= "    to_big_endian: function (self: $name) $name => $be_expr\n\n";
+
+    $text .= "    /// `self` with its bytes in little-endian order.\n";
+    $text .= "    to_little_endian: function (self: $name) $name => $le_expr\n\n";
+
+    $text .= "    /// Native value from big-endian bytes.\n";
+    $text .= "    from_big_endian: function (self: $name) $name => $be_expr\n\n";
+
+    $text .= "    /// Native value from little-endian bytes.\n";
+    $text .= "    from_little_endian: function (self: $name) $name => $le_expr\n\n";
+
+    # Overflow families: checked_*, wrapping_*, saturating_*, overflowing_*.
+    my @ops = (
+        ['add', 'self + other', 'add', 'sum'],
+        ['sub', 'self - other', 'subtract', 'difference'],
+        ['mul', 'self * other', 'multiply', 'product'],
+    );
+    for my $w (@ops) {
+        my ($op, $what, $word, $out_name) = @$w;
+        $text .= "    /// `$what`; fails when the result overflows `$name`.\n";
+        $text .= "    checked_$word: function (self: $name, other: $name) $out_name: $name else nothing {\n";
+        $text .= "        if \@i_$op\_overflows$u\_$s(self.data, other.data) { fail }\n";
+        $text .= "        $out_name = $name { data = \@i_$op\_$s(self.data, other.data) }\n    }\n\n";
+    }
+    $text .= "    /// `-self`; fails when the result overflows `$name`.\n";
+    $text .= "    checked_negate: function (self: $name) negated: $name else nothing {\n";
+    if ($signed) {
+        $text .= "        if \@i_sub_overflows_$s(0x0, self.data) { fail }\n";
+        $text .= "        negated = $name { data = \@i_negate_$s(self.data) }\n    }\n\n";
+    } else {
+        $text .= "        if self.data != 0x0 { fail }\n";
+        $text .= "        negated = self\n    }\n\n";
+    }
+    $text .= "    /// `self^exponent`; fails when the result overflows `$name`.\n";
+    $text .= "    checked_pow: function (self: $name, exponent: Uint32) power: $name else nothing {\n";
+    $text .= "        result: $name, overflowed: Bool = self.overflowing_pow(exponent)\n";
+    $text .= "        if overflowed { fail }\n";
+    $text .= "        power = result\n    }\n\n";
+
+    for my $w (@ops) {
         my ($op, $what, $word) = @$w;
         $text .= "    /// `$what`, wrapping around at the type's range in every build mode.\n";
-        $text .= "    wrapping_$word: function (self, other: $name) $name => $name { data = \@i_$op\_$s(self.data, other.data) }\n\n";
+        $text .= "    wrapping_$word: function (self: $name, other: $name) $name => $name { data = \@i_$op\_$s(self.data, other.data) }\n\n";
     }
     $text .= "    /// `-self`, wrapping around at the type's range in every build mode"
         . ($signed ? " (`MIN` stays `MIN`)" : " (`2^w - self`, 0 for 0)") . ".\n";
-    $text .= "    wrapping_negate: function (self) $name => $name { data = \@i_negate_$s(self.data) }\n\n";
+    $text .= "    wrapping_negate: function (self: $name) $name => $name { data = \@i_negate_$s(self.data) }\n\n";
+
+    $text .= "    /// `self^exponent`, wrapping around at the type's range in every build mode.\n";
+    $text .= "    wrapping_pow: function (self: $name, exponent: Uint32) $name => self.overflowing_pow(exponent)\n\n";
+
+    $text .= "    /// `self + other`, clamped to `MIN..=MAX`.\n";
+    $text .= "    saturating_add: function (self: $name, other: $name) $name => $name { data = \@i_add_saturating$u\_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// `self - other`, clamped to `MIN..=MAX`.\n";
+    $text .= "    saturating_subtract: function (self: $name, other: $name) $name => $name { data = \@i_sub_saturating$u\_$s(self.data, other.data) }\n\n";
+
+    $text .= "    /// `self * other`, clamped to `MIN..=MAX`.\n";
+    if ($signed) {
+        $text .= "    saturating_multiply: function (self: $name, other: $name) $name =>\n";
+        $text .= "        if \@i_mul_overflows_$s(self.data, other.data) then (if \@i_less_than_$s(\@bit_xor_$s(self.data, other.data), 0x0) then $name.MIN else $name.MAX) else $name { data = \@i_mul_$s(self.data, other.data) }\n\n";
+    } else {
+        $text .= "    saturating_multiply: function (self: $name, other: $name) $name =>\n";
+        $text .= "        if \@i_mul_overflows_u_$s(self.data, other.data) then $name.MAX else $name { data = \@i_mul_$s(self.data, other.data) }\n\n";
+    }
+
+    $text .= "    /// `-self`, clamped to `MIN..=MAX`.\n";
+    if ($signed) {
+        $text .= "    saturating_negate: function (self: $name) $name =>\n";
+        $text .= "        if \@i_sub_overflows_$s(0x0, self.data) then $name.MAX else $name { data = \@i_negate_$s(self.data) }\n\n";
+    } else {
+        $text .= "    saturating_negate: function (self: $name) $name => $name.MIN\n\n";
+    }
+
+    $text .= "    /// `self^exponent`, clamped to `MIN..=MAX`.\n";
+    $text .= "    saturating_pow: function (self: $name, exponent: Uint32) power: $name {\n";
+    $text .= "        result: $name, overflowed: Bool = self.overflowing_pow(exponent)\n";
+    $text .= "        if overflowed {\n";
+    if ($signed) {
+        $text .= "            if \@i_less_than_$s(self.data, 0x0) and \@bit_and_32(exponent as \@bit32, 0x1) != 0x0 {\n";
+        $text .= "                power = $name.MIN\n            } else {\n                power = $name.MAX\n            }\n";
+    } else {
+        $text .= "            power = $name.MAX\n";
+    }
+    $text .= "        } else {\n            power = result\n        }\n    }\n\n";
+
+    for my $w (@ops) {
+        my ($op, $what, $word) = @$w;
+        $text .= "    /// Wrapping `$what` and whether it overflowed.\n";
+        $text .= "    overflowing_$word: function (self: $name, other: $name) (value: $name, overflowed: Bool) {\n";
+        $text .= "        value = $name { data = \@i_$op\_$s(self.data, other.data) }\n";
+        $text .= "        overflowed = \@i_$op\_overflows$u\_$s(self.data, other.data)\n    }\n\n";
+    }
+    $text .= "    /// Wrapping `-self` and whether it overflowed.\n";
+    $text .= "    overflowing_negate: function (self: $name) (value: $name, overflowed: Bool) {\n";
+    $text .= "        value = $name { data = \@i_negate_$s(self.data) }\n";
+    if ($signed) {
+        $text .= "        overflowed = \@i_sub_overflows_$s(0x0, self.data)\n    }\n\n";
+    } else {
+        $text .= "        overflowed = self.data != 0x0\n    }\n\n";
+    }
+
+    $text .= "    /// Wrapping `self^exponent` and whether it overflowed.\n";
+    $text .= "    overflowing_pow: function (self: $name, exponent: Uint32) (value: $name, overflowed: Bool) {\n";
+    $text .= "        exp: \@bit32 = exponent as \@bit32\n";
+    $text .= "        if exp == 0x0 {\n            value = 1\n            overflowed = false\n            return\n        }\n";
+    $text .= "        base: $c = self.data\n";
+    $text .= "        acc: $c = 0x1\n";
+    $text .= "        over: \@bit8 = 0x0\n";
+    $text .= "        loop {\n";
+    $text .= "            if \@bit_and_32(exp, 0x1) != 0x0 {\n";
+    $text .= "                if \@i_mul_overflows$u\_$s(acc, base) { over = 0x1 }\n";
+    $text .= "                acc = \@i_mul_$s(acc, base)\n            }\n";
+    $text .= "            exp = \@bit_shift_right_u_32(exp, 0x1)\n";
+    $text .= "            if exp == 0x0 { break }\n";
+    $text .= "            if \@i_mul_overflows$u\_$s(base, base) { over = 0x1 }\n";
+    $text .= "            base = \@i_mul_$s(base, base)\n        }\n";
+    $text .= "        value = $name { data = acc }\n";
+    $text .= "        overflowed = over\n    }\n\n";
+
+    # Wide arithmetic.
+    $text .= "    /// The double-width product `self * other` as its upper and lower halves.\n";
+    $text .= "    widening_multiply: function (self: $name, other: $name) (high: $name, low: $name) {\n";
+    $text .= "        high = $name { data = \@i_multiply_high$u\_$s(self.data, other.data) }\n";
+    $text .= "        low = $name { data = \@i_mul_$s(self.data, other.data) }\n    }\n\n";
+
+    $text .= "    /// `self + other + carry`, with the wrapped sum and whether it overflowed.\n";
+    $text .= "    carrying_add: function (self: $name, other: $name, carry: Bool) (sum: $name, carry_out: Bool) {\n";
+    $text .= "        first: $c = \@i_add_$s(self.data, other.data)\n";
+    $text .= "        over1: \@bit8 = \@i_add_overflows$u\_$s(self.data, other.data)\n";
+    $text .= "        bit: $c = if carry then 0x1 else 0x0\n";
+    $text .= "        second: $c = \@i_add_$s(first, bit)\n";
+    $text .= "        over2: \@bit8 = \@i_add_overflows$u\_$s(first, bit)\n";
+    $text .= "        sum = $name { data = second }\n";
+    $text .= "        carry_out = over1 != over2\n    }\n\n";
+
+    $text .= "    /// `self - other - borrow`, with the wrapped difference and whether it\n";
+    $text .= "    /// overflowed.\n";
+    $text .= "    borrowing_subtract: function (self: $name, other: $name, borrow: Bool) (difference: $name, borrow_out: Bool) {\n";
+    $text .= "        first: $c = \@i_sub_$s(self.data, other.data)\n";
+    $text .= "        over1: \@bit8 = \@i_sub_overflows$u\_$s(self.data, other.data)\n";
+    $text .= "        bit: $c = if borrow then 0x1 else 0x0\n";
+    $text .= "        second: $c = \@i_sub_$s(first, bit)\n";
+    $text .= "        over2: \@bit8 = \@i_sub_overflows$u\_$s(first, bit)\n";
+    $text .= "        difference = $name { data = second }\n";
+    $text .= "        borrow_out = over1 != over2\n    }\n\n";
 
     # Conversions.
     $text .= "    \@conversion: function (from: $c) $name => $name { data = from }\n";
@@ -181,14 +580,14 @@ sub int_file {
         push @cond, "\@i_greater_than_or_equal_$s(self.data, 0x0)" if $signed && !$vsigned;
         push @cond, "\@i_greater_than_or_equal_$vbits(bits, 0x0)" if !$signed && $vsigned;
         $text .= "    /// This value as a" . ($vname =~ /^I/ ? "n" : "") . " `$vname`; fails when it is out of `$vname`'s range.\n";
-        $text .= "    to_$m: function (self) value: $vname else nothing {\n";
+        $text .= "    to_$m: function (self: $name) value: $vname else nothing {\n";
         $text .= "        bits: $vc = $wrap\n";
         $text .= "        back: $c = $back\n";
         $text .= "        if " . join(' and ', @cond) . " {\n";
         $text .= "            value = bits\n            return\n        }\n        fail\n    }\n\n";
         $text .= "    /// This value as a" . ($vname =~ /^I/ ? "n" : "") . " `$vname`, wrapping around at `$vname`'s range: the\n";
         $text .= "    /// low bits" . (maxb($vbits) > minb($bits) ? ", " . ($signed ? "sign" : "zero") . "-extended" : "") . ".\n";
-        $text .= "    to_$m\_wrapping: function (self) $vname => $wrap as $vc as $vname\n\n";
+        $text .= "    to_$m\_wrapping: function (self: $name) $vname => $wrap as $vc as $vname\n\n";
     }
     my $to_float = $signed ? '@int_to_float' : '@uint_to_float';
     for my $f (grep { !float_exact($t, $_) } @floats) {
@@ -196,7 +595,7 @@ sub int_file {
         my $m = method_name($fname);
         $text .= "    /// This value as a `$fname`, rounded to the nearest (ties to even);\n";
         $text .= "    /// past `$fname`'s largest finite value it is an infinity.\n" if $fbits == 16;
-        $text .= "    to_$m\_rounded: function (self) $fname => $to_float(self.data) as \@fbit$fbits as $fname\n\n";
+        $text .= "    to_$m\_rounded: function (self: $name) $fname => $to_float(self.data) as \@fbit$fbits as $fname\n\n";
     }
 
     # Formatting.
@@ -209,9 +608,9 @@ sub int_file {
     }
     my $bits64 = $bits eq '64' ? 'self.data' : '@extend_zero(self.data)';
     $text .= "    /// The bits in hexadecimal, at this type's width: `{n.hex()}`.\n";
-    $text .= "    hex: function (self) Hex => Hex { value = $bits64 }\n\n";
+    $text .= "    hex: function (self: $name) Hex => Hex { value = $bits64 }\n\n";
     $text .= "    /// The bits in binary, at this type's width: `{n.binary()}`.\n";
-    $text .= "    binary: function (self) Binary => Binary { value = $bits64 }\n}\n";
+    $text .= "    binary: function (self: $name) Binary => Binary { value = $bits64 }\n}\n";
     return $text;
 }
 
@@ -248,6 +647,15 @@ sub float_file {
             $text .= "    \@negate: function (value: $name) $name => $name { data = \@f_negate_$s(value.data) }\n\n";
         }
     }
+
+    $text .= "    /// IEEE partial ordering (`-0.0` equals `0.0`); fails when either value is\n";
+    $text .= "    /// a NaN.\n";
+    $text .= "    compare: function (self: $name, other: $name) order: Ordering else nothing {\n";
+    $text .= "        if \@f_less_than_$s(self.data, other.data) {\n            order = .Less\n            return\n        }\n";
+    $text .= "        if \@f_greater_than_$s(self.data, other.data) {\n            order = .Greater\n            return\n        }\n";
+    $text .= "        if \@f_less_than_or_equal_$s(self.data, other.data) {\n            order = .Equal\n            return\n        }\n";
+    $text .= "        fail\n    }\n\n";
+
     $text .= "    \@conversion: function (from: $c) $name => $name { data = from }\n";
     $text .= "    \@conversion: function (from: $name) $c => from.data\n\n";
 
@@ -266,7 +674,7 @@ sub float_file {
         my $m = method_name($g->[0]);
         $text .= "    /// This value as a `$g->[0]`, rounded to the nearest (ties to even);\n";
         $text .= "    /// past `$g->[0]`'s largest finite value it is an infinity.\n";
-        $text .= "    to_$m\_rounded: function (self) $g->[0] => \@float_convert(self.data) as \@fbit$g->[1] as $g->[0]\n\n";
+        $text .= "    to_$m\_rounded: function (self: $name) $g->[0] => \@float_convert(self.data) as \@fbit$g->[1] as $g->[0]\n\n";
     }
     for my $t (@ints) {
         my ($tname, $tbits, $tsigned) = @$t;
@@ -276,10 +684,10 @@ sub float_file {
         my $an = $tname =~ /^I/ ? 'an' : 'a';
         $text .= "    /// This value as $an `$tname`, rounded toward zero; past `$tname`'s range\n";
         $text .= "    /// it is `$tname.MIN` or `$tname.MAX`, and NaN is 0.\n";
-        $text .= "    to_$m\_truncated: function (self) $tname => $conv(self.data) as $tc as $tname\n\n";
+        $text .= "    to_$m\_truncated: function (self: $name) $tname => $conv(self.data) as $tc as $tname\n\n";
         $text .= "    /// This value as $an `$tname`; fails on NaN, on an infinity, on a fraction\n";
         $text .= "    /// and out of `$tname`'s range.\n";
-        $text .= "    to_$m: function (self) value: $tname else nothing {\n";
+        $text .= "    to_$m: function (self: $name) value: $tname else nothing {\n";
         if ($tbits eq 'native') {
             my $wide = $tsigned ? 'Int64' : 'Uint64';
             my $wm = method_name($wide);

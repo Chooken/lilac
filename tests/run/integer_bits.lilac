@@ -1,0 +1,36 @@
+// expect-stdout: 0 8 8 0 1 7
+// expect-stdout: 8 8 0 0 0 8 8 0 2 3 0 0
+// expect-stdout: 3 c0 3412 2c48 1 80
+// expect-stdout: 78563412 12345678 12345678 12345678 5a
+// expect-stdout: 4 3412
+// Integer bit methods (math plan phase 3): bit counts, leading/trailing
+// zeros and ones, rotates, `swap_bytes`, `reverse_bits` and endian
+// conversions.
+
+using Standard
+using Standard.Io
+
+const_ones: Uint8 = (0x1D as Uint8).count_ones()
+const_be: Uint16 = (0x1234 as Uint16).to_big_endian()
+
+main: function () nothing {
+    z: Uint8 = 0
+    all: Int8 = -1
+    one: Int8 = 1
+    print_line($"{z.count_ones()} {z.count_zeros()} {all.count_ones()} {all.count_zeros()} {one.count_ones()} {one.count_zeros()}")
+
+    top: Int8 = Int8.MIN
+    mask: Uint8 = 0b11000111
+    print_line($"{z.leading_zeros()} {z.trailing_zeros()} {z.leading_ones()} {z.trailing_ones()} {all.leading_zeros()} {all.leading_ones()} {all.trailing_ones()} {top.leading_zeros()} {mask.leading_ones()} {mask.trailing_ones()} {mask.leading_zeros()} {mask.trailing_zeros()}")
+
+    b: Uint8 = 0x81
+    w: Uint16 = 0x1234
+    print_line($"{b.rotate_left(1).hex()} {b.rotate_right(1).hex()} {w.swap_bytes().hex()} {w.reverse_bits().hex()} {(0x80 as Uint8).reverse_bits().hex()} {(0x1 as Uint8).reverse_bits().hex()}")
+
+    v: Uint32 = 0x12345678
+    be: Uint32 = v.to_big_endian()
+    le: Uint32 = v.to_little_endian()
+    print_line($"{be.hex()} {le.hex()} {Uint32.from_big_endian(be).hex()} {be.from_big_endian().hex()} {(0x5A as Int8).to_big_endian().hex()}")
+
+    print_line($"{const_ones} {const_be.hex()}")
+}

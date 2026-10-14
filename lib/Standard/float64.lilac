@@ -47,6 +47,24 @@ Float64: object {
     @less_than_or_equal: function (lhs: @fbit64, rhs: Float64) Bool => @f_less_than_or_equal_64(lhs, rhs.data)
     @greater_than_or_equal: function (lhs: @fbit64, rhs: Float64) Bool => @f_greater_than_or_equal_64(lhs, rhs.data)
 
+    /// IEEE partial ordering (`-0.0` equals `0.0`); fails when either value is
+    /// a NaN.
+    compare: function (self: Float64, other: Float64) order: Ordering else nothing {
+        if @f_less_than_64(self.data, other.data) {
+            order = .Less
+            return
+        }
+        if @f_greater_than_64(self.data, other.data) {
+            order = .Greater
+            return
+        }
+        if @f_less_than_or_equal_64(self.data, other.data) {
+            order = .Equal
+            return
+        }
+        fail
+    }
+
     @conversion: function (from: @fbit64) Float64 => Float64 { data = from }
     @conversion: function (from: Float64) @fbit64 => from.data
 
@@ -62,19 +80,19 @@ Float64: object {
 
     /// This value as a `Float16`, rounded to the nearest (ties to even);
     /// past `Float16`'s largest finite value it is an infinity.
-    to_float16_rounded: function (self) Float16 => @float_convert(self.data) as @fbit16 as Float16
+    to_float16_rounded: function (self: Float64) Float16 => @float_convert(self.data) as @fbit16 as Float16
 
     /// This value as a `Float32`, rounded to the nearest (ties to even);
     /// past `Float32`'s largest finite value it is an infinity.
-    to_float32_rounded: function (self) Float32 => @float_convert(self.data) as @fbit32 as Float32
+    to_float32_rounded: function (self: Float64) Float32 => @float_convert(self.data) as @fbit32 as Float32
 
     /// This value as an `Int8`, rounded toward zero; past `Int8`'s range
     /// it is `Int8.MIN` or `Int8.MAX`, and NaN is 0.
-    to_int8_truncated: function (self) Int8 => @float_to_int(self.data) as @bit8 as Int8
+    to_int8_truncated: function (self: Float64) Int8 => @float_to_int(self.data) as @bit8 as Int8
 
     /// This value as an `Int8`; fails on NaN, on an infinity, on a fraction
     /// and out of `Int8`'s range.
-    to_int8: function (self) value: Int8 else nothing {
+    to_int8: function (self: Float64) value: Int8 else nothing {
         if @f_greater_than_or_equal_64(self.data, -128.0) and @f_less_than_64(self.data, 128.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_int(self.data) as @bit8
             return
@@ -84,11 +102,11 @@ Float64: object {
 
     /// This value as an `Int16`, rounded toward zero; past `Int16`'s range
     /// it is `Int16.MIN` or `Int16.MAX`, and NaN is 0.
-    to_int16_truncated: function (self) Int16 => @float_to_int(self.data) as @bit16 as Int16
+    to_int16_truncated: function (self: Float64) Int16 => @float_to_int(self.data) as @bit16 as Int16
 
     /// This value as an `Int16`; fails on NaN, on an infinity, on a fraction
     /// and out of `Int16`'s range.
-    to_int16: function (self) value: Int16 else nothing {
+    to_int16: function (self: Float64) value: Int16 else nothing {
         if @f_greater_than_or_equal_64(self.data, -32768.0) and @f_less_than_64(self.data, 32768.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_int(self.data) as @bit16
             return
@@ -98,11 +116,11 @@ Float64: object {
 
     /// This value as an `Int32`, rounded toward zero; past `Int32`'s range
     /// it is `Int32.MIN` or `Int32.MAX`, and NaN is 0.
-    to_int32_truncated: function (self) Int32 => @float_to_int(self.data) as @bit32 as Int32
+    to_int32_truncated: function (self: Float64) Int32 => @float_to_int(self.data) as @bit32 as Int32
 
     /// This value as an `Int32`; fails on NaN, on an infinity, on a fraction
     /// and out of `Int32`'s range.
-    to_int32: function (self) value: Int32 else nothing {
+    to_int32: function (self: Float64) value: Int32 else nothing {
         if @f_greater_than_or_equal_64(self.data, -2147483648.0) and @f_less_than_64(self.data, 2147483648.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_int(self.data) as @bit32
             return
@@ -112,11 +130,11 @@ Float64: object {
 
     /// This value as an `Int64`, rounded toward zero; past `Int64`'s range
     /// it is `Int64.MIN` or `Int64.MAX`, and NaN is 0.
-    to_int64_truncated: function (self) Int64 => @float_to_int(self.data) as @bit64 as Int64
+    to_int64_truncated: function (self: Float64) Int64 => @float_to_int(self.data) as @bit64 as Int64
 
     /// This value as an `Int64`; fails on NaN, on an infinity, on a fraction
     /// and out of `Int64`'s range.
-    to_int64: function (self) value: Int64 else nothing {
+    to_int64: function (self: Float64) value: Int64 else nothing {
         if @f_greater_than_or_equal_64(self.data, -9223372036854775808.0) and @f_less_than_64(self.data, 9223372036854775808.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_int(self.data) as @bit64
             return
@@ -126,11 +144,11 @@ Float64: object {
 
     /// This value as an `Int`, rounded toward zero; past `Int`'s range
     /// it is `Int.MIN` or `Int.MAX`, and NaN is 0.
-    to_int_truncated: function (self) Int => @float_to_int(self.data) as @bit_native as Int
+    to_int_truncated: function (self: Float64) Int => @float_to_int(self.data) as @bit_native as Int
 
     /// This value as an `Int`; fails on NaN, on an infinity, on a fraction
     /// and out of `Int`'s range.
-    to_int: function (self) value: Int else nothing {
+    to_int: function (self: Float64) value: Int else nothing {
         if self.to_int64() -> wide: Int64 {
             if wide.to_int() -> narrow: Int {
                 value = narrow
@@ -142,11 +160,11 @@ Float64: object {
 
     /// This value as a `Uint8`, rounded toward zero; past `Uint8`'s range
     /// it is `Uint8.MIN` or `Uint8.MAX`, and NaN is 0.
-    to_uint8_truncated: function (self) Uint8 => @float_to_uint(self.data) as @bit8 as Uint8
+    to_uint8_truncated: function (self: Float64) Uint8 => @float_to_uint(self.data) as @bit8 as Uint8
 
     /// This value as a `Uint8`; fails on NaN, on an infinity, on a fraction
     /// and out of `Uint8`'s range.
-    to_uint8: function (self) value: Uint8 else nothing {
+    to_uint8: function (self: Float64) value: Uint8 else nothing {
         if @f_greater_than_or_equal_64(self.data, 0.0) and @f_less_than_64(self.data, 256.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_uint(self.data) as @bit8
             return
@@ -156,11 +174,11 @@ Float64: object {
 
     /// This value as a `Uint16`, rounded toward zero; past `Uint16`'s range
     /// it is `Uint16.MIN` or `Uint16.MAX`, and NaN is 0.
-    to_uint16_truncated: function (self) Uint16 => @float_to_uint(self.data) as @bit16 as Uint16
+    to_uint16_truncated: function (self: Float64) Uint16 => @float_to_uint(self.data) as @bit16 as Uint16
 
     /// This value as a `Uint16`; fails on NaN, on an infinity, on a fraction
     /// and out of `Uint16`'s range.
-    to_uint16: function (self) value: Uint16 else nothing {
+    to_uint16: function (self: Float64) value: Uint16 else nothing {
         if @f_greater_than_or_equal_64(self.data, 0.0) and @f_less_than_64(self.data, 65536.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_uint(self.data) as @bit16
             return
@@ -170,11 +188,11 @@ Float64: object {
 
     /// This value as a `Uint32`, rounded toward zero; past `Uint32`'s range
     /// it is `Uint32.MIN` or `Uint32.MAX`, and NaN is 0.
-    to_uint32_truncated: function (self) Uint32 => @float_to_uint(self.data) as @bit32 as Uint32
+    to_uint32_truncated: function (self: Float64) Uint32 => @float_to_uint(self.data) as @bit32 as Uint32
 
     /// This value as a `Uint32`; fails on NaN, on an infinity, on a fraction
     /// and out of `Uint32`'s range.
-    to_uint32: function (self) value: Uint32 else nothing {
+    to_uint32: function (self: Float64) value: Uint32 else nothing {
         if @f_greater_than_or_equal_64(self.data, 0.0) and @f_less_than_64(self.data, 4294967296.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_uint(self.data) as @bit32
             return
@@ -184,11 +202,11 @@ Float64: object {
 
     /// This value as a `Uint64`, rounded toward zero; past `Uint64`'s range
     /// it is `Uint64.MIN` or `Uint64.MAX`, and NaN is 0.
-    to_uint64_truncated: function (self) Uint64 => @float_to_uint(self.data) as @bit64 as Uint64
+    to_uint64_truncated: function (self: Float64) Uint64 => @float_to_uint(self.data) as @bit64 as Uint64
 
     /// This value as a `Uint64`; fails on NaN, on an infinity, on a fraction
     /// and out of `Uint64`'s range.
-    to_uint64: function (self) value: Uint64 else nothing {
+    to_uint64: function (self: Float64) value: Uint64 else nothing {
         if @f_greater_than_or_equal_64(self.data, 0.0) and @f_less_than_64(self.data, 18446744073709551616.0) and @f_trunc_64(self.data) == self.data {
             value = @float_to_uint(self.data) as @bit64
             return
@@ -198,11 +216,11 @@ Float64: object {
 
     /// This value as a `Uint`, rounded toward zero; past `Uint`'s range
     /// it is `Uint.MIN` or `Uint.MAX`, and NaN is 0.
-    to_uint_truncated: function (self) Uint => @float_to_uint(self.data) as @bit_native as Uint
+    to_uint_truncated: function (self: Float64) Uint => @float_to_uint(self.data) as @bit_native as Uint
 
     /// This value as a `Uint`; fails on NaN, on an infinity, on a fraction
     /// and out of `Uint`'s range.
-    to_uint: function (self) value: Uint else nothing {
+    to_uint: function (self: Float64) value: Uint else nothing {
         if self.to_uint64() -> wide: Uint64 {
             if wide.to_uint() -> narrow: Uint {
                 value = narrow

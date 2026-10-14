@@ -1,0 +1,24 @@
+/// The IEEE 754 category of a floating-point value (`classify`).
+FloatClass: enum {
+    /// Not a number (`NaN`).
+    Nan
+    /// Positive or negative infinity (`±∞`).
+    Infinite
+    /// Positive or negative zero (`±0.0`).
+    Zero
+    /// A non-zero subnormal (denormal) value.
+    Subnormal
+    /// A finite normal value.
+    Normal
+
+    /// `Nan`, `Infinite`, `Zero`, `Subnormal` or `Normal`.
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Nan => out.write_bytes("Nan")
+            .Infinite => out.write_bytes("Infinite")
+            .Zero => out.write_bytes("Zero")
+            .Subnormal => out.write_bytes("Subnormal")
+            .Normal => out.write_bytes("Normal")
+        }
+    }
+}

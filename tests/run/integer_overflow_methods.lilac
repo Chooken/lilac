@@ -1,0 +1,70 @@
+// expect-stdout: 127 none -128 none -126 none 127 none -128 none 120
+// expect-stdout: 64 0 0 16
+// expect-stdout: 127 -128 127 -128 127 127 -128 255 0 255 255
+// expect-stdout: -128 true -128 false 127 true -2 true -128 true 0 false -128 false 0 true
+// expect-stdout: 1 0 fffffffffffffffe 1 -1 -1
+// expect-stdout: 0 true -128 false 0 false 255 true 127 false
+// Integer overflow families and wide arithmetic (math plan phase 3):
+// `checked_*`, `wrapping_pow`, `saturating_*`, `overflowing_*`,
+// `widening_multiply`, `carrying_add` and `borrowing_subtract`.
+
+using Standard
+using Standard.Io
+
+checked_chain: function (a: Int8, b: Int8) sum: Int8 else nothing {
+    first: Int8 = a.checked_add(b) else { fail }
+    doubled: Int8 = first.checked_multiply(2) else { fail }
+    sum = doubled
+}
+
+show_checked: function (ok: Int8, bad: Int8) nothing {
+    print($"{ok} ")
+}
+
+main: function () nothing {
+    ok_add: Int8 = (120 as Int8).checked_add(7) else { return }
+    ok_sub: Int8 = (-120 as Int8).checked_subtract(8) else { return }
+    ok_mul: Int8 = (-63 as Int8).checked_multiply(2) else { return }
+    ok_neg: Int8 = (-127 as Int8).checked_negate() else { return }
+    ok_pow: Int8 = (-2 as Int8).checked_pow(7) else { return }
+    print($"{ok_add} ")
+    if (120 as Int8).checked_add(8) -> v: Int8 { print($"{v} ") } else { print("none ") }
+    print($"{ok_sub} ")
+    if (-120 as Int8).checked_subtract(9) -> v: Int8 { print($"{v} ") } else { print("none ") }
+    print($"{ok_mul} ")
+    if (64 as Int8).checked_multiply(2) -> v: Int8 { print($"{v} ") } else { print("none ") }
+    print($"{ok_neg} ")
+    if Int8.MIN.checked_negate() -> v: Int8 { print($"{v} ") } else { print("none ") }
+    print($"{ok_pow} ")
+    if (-2 as Int8).checked_pow(8) -> v: Int8 { print($"{v} ") } else { print("none ") }
+    if checked_chain(30, 30) -> chained: Int8 {
+        if checked_chain(40, 30) -> v: Int8 { return }
+        print_line($"{chained}")
+    }
+
+    print_line($"{(2 as Uint8).wrapping_pow(6)} {(2 as Uint8).wrapping_pow(8)} {(-2 as Int8).wrapping_pow(8)} {(2 as Int8).wrapping_pow(4)}")
+
+    print_line($"{(100 as Int8).saturating_add(50)} {(-100 as Int8).saturating_subtract(50)} {(20 as Int8).saturating_multiply(10)} {(-20 as Int8).saturating_multiply(10)} {Int8.MIN.saturating_negate()} {(2 as Int8).saturating_pow(10)} {(-2 as Int8).saturating_pow(9)} {(200 as Uint8).saturating_add(100)} {(10 as Uint8).saturating_subtract(20)} {(20 as Uint8).saturating_multiply(20)} {(3 as Uint8).saturating_pow(10)}")
+
+    oa_v: Int8, oa_f: Bool = Int8.MAX.overflowing_add(1)
+    os_v: Int8, os_f: Bool = (-127 as Int8).overflowing_subtract(1)
+    os2_v: Int8, os2_f: Bool = Int8.MIN.overflowing_subtract(1)
+    om_v: Int8, om_f: Bool = Int8.MAX.overflowing_multiply(2)
+    on_v: Int8, on_f: Bool = Int8.MIN.overflowing_negate()
+    on_u_v: Uint8, on_u_f: Bool = (0 as Uint8).overflowing_negate()
+    op_v: Int8, op_f: Bool = (-2 as Int8).overflowing_pow(7)
+    op2_v: Int8, op2_f: Bool = (-2 as Int8).overflowing_pow(8)
+    print_line($"{oa_v} {oa_f} {os_v} {os_f} {os2_v} {os2_f} {om_v} {om_f} {on_v} {on_f} {on_u_v} {on_u_f} {op_v} {op_f} {op2_v} {op2_f}")
+
+    wh1: Uint64, wl1: Uint64 = (0x100000000 as Uint64).widening_multiply(0x100000000)
+    wh2: Uint64, wl2: Uint64 = Uint64.MAX.widening_multiply(Uint64.MAX)
+    sh: Int8, sl: Int8 = (-1 as Int8).widening_multiply(1)
+    print_line($"{wh1} {wl1} {wh2.hex()} {wl2.hex()} {sh} {sl}")
+
+    ca1_v: Uint8, ca1_c: Bool = Uint8.MAX.carrying_add(0, true)
+    ca2_v: Int8, ca2_c: Bool = Int8.MIN.carrying_add(-1, true)
+    bs1_v: Uint8, bs1_b: Bool = (1 as Uint8).borrowing_subtract(0, true)
+    bs2_v: Uint8, bs2_b: Bool = (0 as Uint8).borrowing_subtract(0, true)
+    bs3_v: Int8, bs3_b: Bool = Int8.MAX.borrowing_subtract(-1, true)
+    print_line($"{ca1_v} {ca1_c} {ca2_v} {ca2_c} {bs1_v} {bs1_b} {bs2_v} {bs2_b} {bs3_v} {bs3_b}")
+}

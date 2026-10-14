@@ -191,15 +191,17 @@ unsigned variants; float variants. Unsigned comparisons bind
 |---|---|---|
 | `Option[T]` | `enum { Some: T; None }` | `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`, `and_then`, `or`, `or_else`, `take`, `replace`, `iter` |
 | `Result[T, E]` | `enum { Ok: T; Error: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
-| `Ordering` | `enum { Less; Equal; Greater }` | `then`, `reverse`, `is_less`… |
+| `Ordering` | `enum { Less; Equal; Greater }` | `and_then`, `reverse`, `is_less`… |
 | `Never` | `enum {}` (empty) | uninhabited; result of `panic`/`abort` |
 | `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
 
 > **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
 > `get_ref: value: ref T else nothing` (the value in place),
-> `unwrap_or`, `unwrap_or_default`) and a first `Result[T, E]` (`Ok`,
+> `unwrap_or`, `unwrap_or_default`), a first `Result[T, E]` (`Ok`,
 > `Error`; `is_ok`, `get: value: T else error: E`, `error: error: E else
-> nothing`, `unwrap_or`). `get`, `error` and the `unwrap_or`s take `self`
+> nothing`, `unwrap_or`), and `Ordering` (`Less`, `Equal`, `Greater`;
+> `is_less`, `is_equal`, `is_greater`, `is_less_or_equal`,
+> `is_greater_or_equal`, `reverse`, `and_then`, `@format`). `get`, `error` and the `unwrap_or`s take `self`
 > by value, so they move the optional or result. Both start zeroed as their first variant:
 > a zeroed `Optional` is `Some`, so set `.None` explicitly.
 
@@ -217,10 +219,18 @@ unsigned variants; float variants. Unsigned comparisons bind
 `@conversion(from: @bit8) to: @bit32`), `Char`↔`@bit32`, `@bit*`↔float,
 `@bit*`→`@byte_buffer` textual? (textual lives in `Text`).
 
-> **Today** (math plan phase 2, generated one file per type): every
+> **Today** (math plan phases 2-3, generated one file per type): every
 > integer type has `MIN`/`MAX`, the operators with a bit container on
 > either side (so `n * 2` and `1 < n` need no `as`), `@format`,
-> `hex`/`binary`, and `wrapping_add`/`_subtract`/`_multiply`/`_negate`.
+> `hex`/`binary`, `compare`, `abs`/`unsigned_abs`/`sign`,
+> `min`/`max`/`clamp`, `is_power_of_two`/`next_power_of_two`,
+> `div_floor`/`div_ceil`/`div_euclid`/`rem_euclid`/`div_rem`/`gcd`/`lcm`,
+> `pow`/`isqrt`/`ilog2`/`ilog10`, bit counts/rotates/byte swaps/endian
+> conversions, the four overflow families (`checked_*`, `wrapping_*`,
+> `saturating_*`, `overflowing_*` for `add`/`subtract`/`multiply`/
+> `negate`/`pow`), and `widening_multiply`/`carrying_add`/
+> `borrowing_subtract` (`self` by value, `=>` where one intrinsic does
+> it).
 > `+`, `-`, `*` and negation panic on overflow in Debug builds
 > (`attempt to add with overflow`, …) and wrap in Release; `/` and `%`
 > panic on a zero divisor (and `MIN / -1`) in every mode. Floats

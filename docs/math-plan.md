@@ -1,6 +1,6 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; phases 0-2 done.
+> Status: agreed, 2026-10-14; phases 0-3 done.
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -356,8 +356,8 @@ Tests:
 
 ## Phase 3: integer methods
 
-On every integer type (`self` by value, all `=>` where one intrinsic
-does it):
+**Done.** On every integer type (`self` by value, all `=>` where one
+intrinsic does it):
 
 - Basics:
   - `abs`, `unsigned_abs` (to the unsigned type, defined for `MIN`),
@@ -379,23 +379,27 @@ does it):
   - `to_big_endian`, `to_little_endian`, `from_big_endian`,
     `from_little_endian` (constant on `@builtin.Target.arch`'s byte
     order).
-- Overflow, in four families for `add`/`sub`/`multiply`/`pow`:
+- Overflow, in four families for `add`/`subtract`/`multiply`/`negate`/`pow`:
   - `checked_*` fail;
-  - `wrapping_*` wrap (phase 2 has `add`/`sub`/`multiply`/`negate`;
+  - `wrapping_*` wrap (phase 2 has `add`/`subtract`/`multiply`/`negate`;
     this adds `wrapping_pow`);
   - `saturating_*` clamp;
   - `overflowing_*` return `value, overflowed: Bool`.
 - Wide arithmetic:
-  - `widening_multiply(other) high, low` (on `Uint64`, through
-    `@i_multiply_high`);
-  - `carrying_add(other, carry: Bool) sum, carry`;
-  - `borrowing_sub`.
+  - `widening_multiply(other) high, low` (through `@i_multiply_high`);
+  - `carrying_add(other, carry: Bool) sum, carry_out`;
+  - `borrowing_subtract(other, borrow: Bool) difference, borrow_out`.
 
-`Ordering` (STDLIB §3.1) lands here if nothing has added it yet:
-`enum { Less; Equal; Greater }`, with `compare` on every numeric type.
+`Ordering` (STDLIB §3.1, `lib/Standard/ordering.lilac`) landed here:
+`enum { Less; Equal; Greater }` with `is_less`/`is_equal`/`is_greater`/
+`is_less_or_equal`/`is_greater_or_equal`, `reverse`, `and_then` (`then`
+is a keyword) and `@format`, plus `compare` on every numeric type
+(on floats it fails when either operand is a NaN).
 
 Tests:
-- One run test per method family, printing boundary values (`MIN`,
+- `integer_basics.lilac`, `integer_division.lilac`,
+  `integer_powers_roots.lilac`, `integer_bits.lilac` and
+  `integer_overflow_methods.lilac`, printing boundary values (`MIN`,
   `MAX`, 0, ±1, powers of two).
 - `checked_*` exercised through `if … -> sum` and guards.
 

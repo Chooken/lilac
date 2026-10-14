@@ -59,6 +59,9 @@ ints: function () nothing {
     expect(-i64 < i64, 0xE)
     expect(-nat < nat, 0xE)
     expect(i8 % i8 == 0x0 as Int8, 0xF)
+    expect(a.compare(b) == .Greater, 0xF)
+    expect(b.compare(a).reverse() == .Greater, 0xF)
+    expect(b.compare(b).and_then(.Less) == .Less, 0xF)
 }
 
 floats: function () nothing {
