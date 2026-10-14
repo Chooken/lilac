@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0
+
+- Function values: hovers print `ref function (…) …` types (several
+  outs in parentheses) and `ref id[@bit32]`-style instances, and
+  signature help works for a call through a function reference (a
+  local, a field such as `self.on_done(`, or a global such as
+  `HANDLER(`), naming its slots from the declared `function (…)` or
+  its alias.
+- Inside an object or enum, its constants and static functions complete
+  as bare names, and `Int.MAX.` lists the constant's type's members.
+- Go to definition, references and rename follow function references
+  and members used both bare and qualified.
+
 ## 0.7.0
 
 - `not`, `!=` and the compound assignments `+=`, `-=`, `*=`, `/=`, `%=`
