@@ -1,0 +1,13 @@
+
+CInt: alias Int32
+
+if @builtin.Target.os == .Windows {
+    CLong: alias Int32
+} else {
+    CLong: alias Int64
+}
+
+CLongLong: alias Int64
+
+CFloat: alias Float32
+CDouble: alias Float64

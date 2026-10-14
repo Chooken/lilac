@@ -1,9 +1,0 @@
-CLongLong: object {
-    data: @bit64
-
-    @conversion: function(from: Int64) CLongLong => CLongLong { data = from }
-    @conversion: function(from: @bit64) CLongLong => CLongLong { data = from }
-
-    @conversion: function(from: CLongLong) @bit64 => from.data
-    @conversion: function(from: CLongLong) Int64 => from.data
-}

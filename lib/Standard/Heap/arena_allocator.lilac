@@ -22,9 +22,12 @@ ArenaAllocator: object {
         block_size: Int
     }
 
-    /// An arena of `ARENA_DEFAULT_SIZE` blocks.
+    /// `ArenaAllocator.init`'s block size: 512 KiB.
+    DEFAULT_SIZE: Int => 512 * 1024
+
+    /// An arena of `DEFAULT_SIZE` blocks.
     init: function () allocator: ArenaAllocator {
-        allocator = init_sized(ARENA_DEFAULT_SIZE)
+        allocator = init_sized(DEFAULT_SIZE)
     }
 
     /// An arena of blocks of at least `default_block_size` bytes (rounded
@@ -287,9 +290,6 @@ ArenaAllocator: object {
 private {
     /// `value` rounded up to a multiple of `alignment` (a power of two).
     align_up: function (value: Int, alignment: Int) Int => @bit_and_native((value + alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
-
-    /// `ArenaAllocator.init`'s block size: 512 KiB.
-    ARENA_DEFAULT_SIZE: Int => 512 * 1024
 
     /// Unmaps `first` and every block after it.
     unmap_blocks: function (first: Optional[ref ArenaBlock]) nothing {

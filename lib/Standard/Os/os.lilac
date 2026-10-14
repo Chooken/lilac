@@ -429,8 +429,7 @@ private {
 
     /// A bare target has no OS of its own: Standard needs a C library there.
     needs_libc: function () nothing {
-        if @builtin.Target.libc {
-        } else {
+        if not @builtin.Target.libc {
             @compile_error("Standard.Os needs a C library on a target with no OS; build with `--libc`")
         }
     }
