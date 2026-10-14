@@ -21,7 +21,7 @@ use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 use crate::calls::Called;
 use crate::sigs::leading;
 use crate::sink::has_error;
-use crate::{Checker, State};
+use crate::{Checker, Requirement, State};
 
 /// Per-function checking state.
 pub(crate) struct FnCx {
@@ -515,8 +515,8 @@ impl Checker<'_> {
                     .iter()
                     .map(|arm| {
                         fcx.open(arm.span);
-                        let (pattern, capture) =
-                            self.check_pattern(fcx, arm, arms, scrutinee.ty.id);
+                        let (pattern, capture, by_ref) =
+                            self.check_pattern(fcx, arm, arms, &scrutinee);
                         let body = match &arm.body {
                             MatchArmBody::Block(block) => self.check_block(fcx, block),
                             MatchArmBody::Inline(stmt) => self.check_stmt_block(fcx, stmt),
@@ -526,6 +526,7 @@ impl Checker<'_> {
                             pattern,
                             capture,
                             moves: false,
+                            by_ref,
                             body,
                         }
                     })
@@ -844,16 +845,19 @@ impl Checker<'_> {
         self.record_tag(span, Some(scrutinee), &taken);
     }
 
-    /// Checks one arm pattern of `arms` and declares its capture in the
-    /// current scope.
+    /// Checks one arm pattern of `arms` against the checked `scrutinee`
+    /// and declares its capture in the current scope: the pattern, the
+    /// capture, and whether the capture is by reference
+    /// ([`HirArm::by_ref`](lilac_hir::HirArm::by_ref)).
     pub(crate) fn check_pattern(
         &mut self,
         fcx: &mut FnCx,
         arm: &MatchArm,
         arms: &[MatchArm],
-        scrutinee: TypeId,
-    ) -> (HirPattern, Option<LocalId>) {
-        let poison = (HirPattern::Variant(u32::MAX), None);
+        scrutinee_expr: &HirExpr,
+    ) -> (HirPattern, Option<LocalId>, bool) {
+        let scrutinee = scrutinee_expr.ty.id;
+        let poison = (HirPattern::Variant(u32::MAX), None, false);
         match &arm.pattern {
             MatchPattern::Tag {
                 qualifier,
@@ -887,27 +891,41 @@ impl Checker<'_> {
                     return poison;
                 };
                 let Some(capture) = &arm.capture else {
-                    return (HirPattern::Variant(index), None);
+                    return (HirPattern::Variant(index), None, false);
                 };
                 let declared = self.resolve_type(&capture.ty);
+                let mut by_ref = false;
                 match payload {
+                    Some(payload) if payload.is_error() || declared.is_error() => {}
+                    // `-> v: ref P` on a `P` payload: the payload's address.
+                    Some(payload)
+                        if declared.is_ref && !payload.is_ref && declared.id == payload.id =>
+                    {
+                        by_ref = true;
+                        self.check_ref_capture(scrutinee_expr, payload, capture.span);
+                    }
                     Some(payload) => {
-                        if !payload.is_error() && !declared.is_error() && payload != declared {
-                            self.diags.emit(
-                                Diagnostic::error(
-                                    codes::E010,
-                                    format!(
-                                        "mismatched types: capture holds {}, declared {}",
-                                        self.show(payload),
-                                        self.show(declared)
-                                    ),
-                                )
-                                .label(
-                                    capture.span,
-                                    true,
-                                    "capture type here",
+                        if payload != declared {
+                            let mut diagnostic = Diagnostic::error(
+                                codes::E010,
+                                format!(
+                                    "mismatched types: capture holds {}, declared {}",
+                                    self.show(payload),
+                                    self.show(declared)
                                 ),
+                            )
+                            .label(
+                                capture.span,
+                                true,
+                                "capture type here",
                             );
+                            if declared.is_ref && !payload.is_ref {
+                                diagnostic = diagnostic.help(format!(
+                                    "a reference to this payload is `{}`",
+                                    self.show(TypeRef::reference(payload.id))
+                                ));
+                            }
+                            self.diags.emit(diagnostic);
                         }
                     }
                     None => {
@@ -925,12 +943,44 @@ impl Checker<'_> {
                     }
                 }
                 let local = self.declare(fcx, &capture.name, declared, capture.span);
-                (HirPattern::Variant(index), Some(local))
+                (HirPattern::Variant(index), Some(local), by_ref)
             }
-            MatchPattern::Literal { literal, span } => {
-                (self.literal_pattern(arm, literal, *span, scrutinee), None)
-            }
+            MatchPattern::Literal { literal, span } => (
+                self.literal_pattern(arm, literal, *span, scrutinee),
+                None,
+                false,
+            ),
         }
+    }
+
+    /// A by-reference capture of a `payload` value needs the enum in
+    /// memory: a place, or something behind a `ref`. A temporary is
+    /// `E010`, held as dependent on the payload's type, so a template
+    /// (whose payload may be a reference, which copies) reports nothing
+    /// and an instance folds it into `E042`.
+    fn check_ref_capture(&mut self, scrutinee: &HirExpr, payload: TypeRef, capture: Span) {
+        if scrutinee.is_place() || scrutinee.ty.is_error() {
+            return;
+        }
+        let diagnostic = Diagnostic::error(
+            codes::E010,
+            format!(
+                "cannot take a reference into a temporary `{}`",
+                self.show_id(scrutinee.ty.id)
+            ),
+        )
+        .label(
+            capture,
+            true,
+            "this capture is a reference into the payload",
+        )
+        .label(
+            scrutinee.span,
+            false,
+            "a temporary, dropped when the arm ends",
+        )
+        .help("bind the value to a local first, then match the local");
+        self.emit_requirement(diagnostic, Requirement::Ownership, &[payload.id]);
     }
 
     /// Resolves variant `name` of enum type `ty`: its index and payload type.

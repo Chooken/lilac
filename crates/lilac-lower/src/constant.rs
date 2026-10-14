@@ -510,6 +510,10 @@ impl<'a> Lower<'a> {
         };
         let arm = &arms[index];
         if let Some(capture) = arm.capture {
+            // An address into the matched value is no constant, like `ref`.
+            if arm.by_ref {
+                return None;
+            }
             let Value::Variant(_, Some(payload)) = value else {
                 return None;
             };

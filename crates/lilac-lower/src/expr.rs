@@ -544,8 +544,19 @@ impl Lower<'_> {
         span: Span,
     ) -> LirOperand {
         let place = self.place_of(state, func, inner);
+        Self::address_of(state, &place, lir, span)
+    }
+
+    /// The address of `place`, as a `lir` register: a direct place's
+    /// `addr`, or the pointer an indirect one holds.
+    pub(crate) fn address_of(
+        state: &mut FnState,
+        place: &Place,
+        lir: LirTy,
+        span: Span,
+    ) -> LirOperand {
         let reg = state.reg();
-        match &place {
+        match place {
             Place::Direct(name) => state.emit(LirInst::Addr {
                 place: name.clone(),
                 dst: reg.clone(),

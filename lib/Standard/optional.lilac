@@ -17,6 +17,19 @@ Optional[T]: enum {
         fail
     }
 
+    /// A reference to the `Some` value, left in place; fails on `None`.
+    /// Writes through it change the optional's value. For an
+    /// `Optional[ref X]` it is the stored reference itself.
+    get_ref: function (self) value: ref T else nothing {
+        match self {
+            .Some -> some_value: ref T {
+                value = some_value
+                return
+            }
+        }
+        fail
+    }
+
     unwrap_or: function(self: Optional[T], default: T) value: T {
         match self {
             .Some -> some_value: T {
@@ -35,6 +48,16 @@ Optional[T]: enum {
             }
         } else {
             value = T.default()
+        }
+    }
+
+    unwrap_or_panic: function(self: Optional[T]) value: T {
+        match self {
+            .Some -> some_value: T {
+                value = some_value
+            }
+        } else {
+            @panic("Tried to unwrap an Optional with a none value.")
         }
     }
 

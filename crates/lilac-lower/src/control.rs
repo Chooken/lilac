@@ -384,7 +384,7 @@ impl Lower<'_> {
                 scrutinee,
                 subject,
                 &arm.pattern,
-                arm.moves,
+                Binding::of(arm.moves, arm.by_ref),
                 capture,
             );
         }
@@ -491,8 +491,9 @@ impl Lower<'_> {
         test
     }
 
-    /// Initializes a capture local from the matched payload: moved out
-    /// (`moves`, which empties the scrutinee) or copied.
+    /// Initializes a capture local from the matched payload, as `binding`
+    /// says: moved out (which empties the scrutinee), copied, or the
+    /// payload slot's address.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind_capture(
         &mut self,
@@ -501,7 +502,7 @@ impl Lower<'_> {
         scrutinee: &HirExpr,
         subject: &Place,
         pattern: &HirPattern,
-        moves: bool,
+        binding: Binding,
         capture: LocalId,
     ) {
         let HirPattern::Variant(index) = pattern else {
@@ -514,20 +515,38 @@ impl Lower<'_> {
             ..
         } = *func.local(capture);
         let (field, name) = self.payload_field(scrutinee.ty.id, *index);
-        let payload = self.field_place(state, subject, field, &name, capture_ty, span);
-        if moves {
-            let lir = self.lir_ty(capture_ty);
-            state.read_into(&payload, &lir, &place, span);
-        } else {
-            let value = self.copy_out(state, &payload, capture_ty, span);
-            state.emit(LirInst::CopyPlace {
-                src: value,
-                dst: place,
-                span,
-            });
-        }
-        if moves {
-            Self::mark_expr(state, func, scrutinee, false);
+        let payload_ty = match binding {
+            Binding::Address => capture_ty.deref(),
+            Binding::Move | Binding::Copy => capture_ty,
+        };
+        let payload = self.field_place(state, subject, field, &name, payload_ty, span);
+        match binding {
+            Binding::Move => {
+                let lir = self.lir_ty(capture_ty);
+                state.read_into(&payload, &lir, &place, span);
+                Self::mark_expr(state, func, scrutinee, false);
+            }
+            Binding::Copy => {
+                let value = self.copy_out(state, &payload, capture_ty, span);
+                state.emit(LirInst::CopyPlace {
+                    src: value,
+                    dst: place,
+                    span,
+                });
+            }
+            Binding::Address => {
+                // The tag stays, and a write through the capture is a
+                // whole payload into a slot of its own layout, so the enum
+                // is still a whole value of this variant (`==` is a
+                // `memcmp`).
+                let lir = self.lir_ty(capture_ty);
+                let address = Self::address_of(state, &payload, lir, span);
+                state.emit(LirInst::CopyPlace {
+                    src: address,
+                    dst: place,
+                    span,
+                });
+            }
         }
         if !func.flags.is_empty() {
             Self::mark(state, func, &HirPath::local(capture), true, span);
@@ -705,7 +724,7 @@ impl Lower<'_> {
                 scrutinee,
                 subject,
                 &arm.pattern,
-                arm.moves,
+                Binding::of(arm.moves, arm.by_ref),
                 capture,
             );
         }
@@ -821,5 +840,27 @@ impl Lower<'_> {
         state.branch(&join, span);
         state.at(join);
         LirOperand::Place(result)
+    }
+}
+
+/// How a `match` capture takes its payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Binding {
+    /// A copy of the payload.
+    Copy,
+    /// The payload, moved out ([`HirArm::moves`]).
+    Move,
+    /// The payload slot's address ([`HirArm::by_ref`]).
+    Address,
+}
+
+impl Binding {
+    /// The binding of an arm whose capture `moves` or is `by_ref`.
+    pub(crate) fn of(moves: bool, by_ref: bool) -> Self {
+        match (moves, by_ref) {
+            (_, true) => Self::Address,
+            (true, false) => Self::Move,
+            (false, false) => Self::Copy,
+        }
     }
 }

@@ -485,7 +485,7 @@ impl Pass<'_, '_> {
                 for arm in &mut arms {
                     self.state = start.clone();
                     if let Some(capture) = arm.capture {
-                        arm.moves = self.capture(&scrutinee, path.as_ref(), capture);
+                        arm.moves = !arm.by_ref && self.capture(&scrutinee, path.as_ref(), capture);
                     }
                     self.block(&mut arm.body, arm.capture.into_iter().collect());
                     end = merge_states(self.c, self.locals, end, self.state.take());
@@ -885,7 +885,7 @@ impl Pass<'_, '_> {
                 for arm in arms {
                     self.state = start.clone();
                     if let Some(capture) = arm.capture {
-                        arm.moves = self.capture(scrutinee, path.as_ref(), capture);
+                        arm.moves = !arm.by_ref && self.capture(scrutinee, path.as_ref(), capture);
                         self.init_free(capture);
                     }
                     self.expr(&mut arm.value, true);
@@ -968,7 +968,9 @@ impl Pass<'_, '_> {
 
     /// Binds `capture` from the payload of `scrutinee` (the owned place
     /// `path`, when it is one): whether it moves the payload out, which
-    /// uses the matched value up. A payload that copies is copied.
+    /// uses the matched value up. A payload that copies is copied. A
+    /// by-reference capture (`HirArm::by_ref`) never comes here: it moves
+    /// nothing.
     fn capture(&mut self, scrutinee: &HirExpr, path: Option<&HirPath>, capture: LocalId) -> bool {
         let ty = self.local_ty(capture);
         if self.c.is_copyable(ty) {

@@ -1494,7 +1494,7 @@ impl Checker<'_> {
         let mut failed = false;
         for arm in arms {
             fcx.open(arm.span);
-            let (pattern, capture) = self.check_pattern(fcx, arm, arms, scrutinee.ty.id);
+            let (pattern, capture, by_ref) = self.check_pattern(fcx, arm, arms, &scrutinee);
             let value = match &arm.body {
                 MatchArmBody::Inline(stmt) => {
                     if let Stmt::ExprStmt(value) = stmt.as_ref() {
@@ -1521,7 +1521,7 @@ impl Checker<'_> {
             if first.is_none() && !value.ty.is_error() {
                 first = Some(self.types.read_type(value.ty));
             }
-            checked.push((pattern, capture, value, arm.span));
+            checked.push((pattern, capture, by_ref, value, arm.span));
         }
         let els = self.check_expr(fcx, els, expected.or(first.map(|t| t.id)));
         let result = match (expected, first) {
@@ -1533,7 +1533,7 @@ impl Checker<'_> {
         if expected.is_none() && !failed {
             let disagree = checked
                 .iter()
-                .map(|(_, _, value, _)| value.ty)
+                .map(|(_, _, _, value, _)| value.ty)
                 .chain(std::iter::once(els.ty))
                 .any(|ty| !ty.is_error() && ty.id != result.id);
             if disagree {
@@ -1549,11 +1549,12 @@ impl Checker<'_> {
         }
         let arms = checked
             .into_iter()
-            .map(|(pattern, capture, value, arm_span)| HirValueArm {
+            .map(|(pattern, capture, by_ref, value, arm_span)| HirValueArm {
                 pattern,
                 capture,
                 value: self.coerce(value, result, arm_span),
                 moves: false,
+                by_ref,
                 drops: Vec::new(),
             })
             .collect();

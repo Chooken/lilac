@@ -1,0 +1,20 @@
+// expect-error: E042
+// expect-stderr: error[E042]: type `@bit32` does not satisfy `through_fresh[T]` requirements
+// A reference capture on a temporary in a generic body checks as a
+// template (`T` may be a reference, which copies) and fails where an
+// instance with a value `T` is made.
+
+using Standard
+
+fresh[T]: function (value: T) Optional[T] => .Some(value)
+
+through_fresh[T]: function (value: T) nothing {
+    match fresh[T](value) {
+        .Some -> found: ref T {
+        }
+    }
+}
+
+main: function () nothing {
+    through_fresh[@bit32](0x1)
+}

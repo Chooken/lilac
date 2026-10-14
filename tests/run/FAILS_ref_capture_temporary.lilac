@@ -1,0 +1,16 @@
+// expect-error: E010
+// expect-stderr: error[E010]: cannot take a reference into a temporary `Standard.Optional[@bit32]`
+// A reference capture of a value payload needs the enum in memory; a
+// temporary is gone after its arm.
+
+using Standard
+
+make: function () Optional[@bit32] => .Some(0x1)
+
+main: function () nothing {
+    match make() {
+        .Some -> value: ref @bit32 {
+            value = 0x2
+        }
+    }
+}

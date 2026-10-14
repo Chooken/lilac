@@ -836,6 +836,33 @@ by-value parameter, a field of one, or a temporary such as
 through a `ref` cannot move a payload out (`E064`). A `match` that names
 every variant has no fall-through path, so an out set in every arm is set.
 
+A **reference capture** `-> name: ref P` on a payload of type `P` is the
+address of the payload inside the matched value: nothing is copied or
+moved, so it works through a `ref`, on an enum with its own `@on_drop`, and
+on a payload that does not copy. Writes through it change the matched
+value in place (`name.field = x`; `name = value` drops the old payload and
+stores the new one, as an assignment to any `ref` does), and
+`name = ref other` rebinds `name`, leaving the value alone. On a payload
+that is already a reference (`Optional[ref X]`, or `T = ref X` in a generic
+body) `ref P` is `P` itself (there is no `ref ref`), so the capture is
+the stored reference, copied as before. The matched value must be in
+memory: a temporary (`match make() { .Some -> v: ref P … }`) is `E010`,
+since it is gone when the arm ends; in a generic body that is decided per
+instance (`E042` for a value `T`). A capture names the payload's own type
+(`ref` of another is `E010`). Like every `ref`, it is not valid after its
+value changes variant (`optional = .None`) or ends.
+
+```lilac
+match optional {
+    .Some -> value: ref Counter {
+        value.count = @i_add_32(value.count, 0x1)
+    }
+}
+```
+
+`Optional.get_ref` gives the same reference from a function
+(`if slot.get_ref() -> value: ref T { … }`).
+
 Arm patterns are tags (`.Some` or `Enum.Some`); a payload binds with
 `-> name: Type`, and a single statement arm shortens to `=>`. A match on a
 bit container (`@bitN`) takes literal patterns instead: integers (`0x1`,

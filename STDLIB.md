@@ -196,6 +196,7 @@ unsigned variants; float variants. Unsigned comparisons bind
 | `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
 
 > **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
+> `get_ref: value: ref T else nothing` (the value in place),
 > `unwrap_or`, `unwrap_or_default`) and a first `Result[T, E]` (`Ok`,
 > `Error`; `is_ok`, `get: value: T else error: E`, `error: error: E else
 > nothing`, `unwrap_or`). `get`, `error` and the `unwrap_or`s take `self`

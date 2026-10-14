@@ -1,0 +1,14 @@
+// expect-error: E010
+// expect-stderr: error[E010]: mismatched types: capture holds @bit32, declared ref @bit64
+// expect-stderr:    = help: a reference to this payload is `ref @bit32`
+// A reference capture names the payload's own type.
+
+using Standard
+
+main: function () nothing {
+    value: Optional[@bit32] = .Some(0x1)
+    match value {
+        .Some -> wide: ref @bit64 {
+        }
+    }
+}

@@ -866,6 +866,17 @@ Where things live:
   A method whose first parameter is `self: T` (named `self`, of the
   owner's type) takes its receiver by value (`Checker::method_call`);
   bare `self` is `ref T` (`lilac_ast::Param::is_receiver`).
+- Reference captures (`docs/ref-captures-plan.md`): `-> v: ref P` on a
+  `P` payload (typeck's `check_pattern`, decided per instance, so a
+  generic `ref T` with `T = ref X` is the plain copying capture) sets
+  `HirArm::by_ref`/`HirValueArm::by_ref`: the capture holds the payload
+  slot's address. The ownership pass skips it (`arm.moves` stays false,
+  the enum stays full), lowering binds it with `Binding::Address`
+  (`control.rs`, through `Lower::address_of`, which `ref_value` shares),
+  and the constant evaluator refuses it. A scrutinee that is not a place
+  is `E010` through `emit_requirement` (`check_ref_capture`,
+  `Requirement::Ownership`), so it is dependent in templates and `E042`
+  in instances.
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`

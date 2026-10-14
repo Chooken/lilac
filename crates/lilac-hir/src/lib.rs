@@ -539,6 +539,10 @@ pub struct HirArm {
     /// Whether the capture moves the payload out, which uses up the
     /// matched value (else it copies).
     pub moves: bool,
+    /// Whether the capture is the address of the payload's slot inside
+    /// the matched value (`-> v: ref P` on a `P` payload): nothing moves
+    /// or copies, and the matched value is a place. Typeck decides it.
+    pub by_ref: bool,
     /// Arm body.
     pub body: HirBlock,
 }
@@ -575,6 +579,8 @@ pub struct HirValueArm {
     pub capture: Option<LocalId>,
     /// Whether the capture moves the payload out ([`HirArm::moves`]).
     pub moves: bool,
+    /// Whether the capture is the payload's address ([`HirArm::by_ref`]).
+    pub by_ref: bool,
     /// Arm value.
     pub value: HirExpr,
     /// What drops once the value is taken (the capture, if still full).
