@@ -31,7 +31,9 @@ all_zero: function (memory: ref unknown, size: Int) zero: Bool {
 general_checks: function (base: @bit32) nothing {
     page: Int = @builtin.Target.page_size
     general: GeneralAllocator = GeneralAllocator.init()
-    check(general.get_capacity() == 0 as Int, base)
+    // `init` maps the size classes' table, so capacity is already
+    // nonzero while nothing is used.
+    check(general.get_capacity() > 0 as Int, base)
 
     // Every size up to past the size classes, at every alignment up to
     // past a page: aligned, zeroed, writable, and freed again.

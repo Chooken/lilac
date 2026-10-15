@@ -1,7 +1,7 @@
 // build-arg: --stack-traces=off
 // expect-exit: 101
 // expect-stderr: panic: Freed or resized memory this allocator did not give, or with another size or alignment.
-// expect-stderr:   at Standard.Heap.slot_flag (Standard/Heap/general_allocator.lilac:664:17)
+// expect-stderr:   at Standard.Heap.slot_flag (Standard/Heap/general_allocator.lilac:621:17)
 // expect-stderr:   (stack trace disabled; build with --stack-traces=on)
 // A Debug `GeneralAllocator` panics on a free with a size of another class: the slot is in none of that class's slabs.
 
