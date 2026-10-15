@@ -190,32 +190,31 @@
   and a `ref` to a static table of its functions, `AllocatorTable[T]`,
   erased), built by `Allocator.from[T]` from the type's
   `ALLOCATOR_TABLE` constant; it names no concrete allocator. The handle
-  checks sizes and alignments, answers a zero size with an aligned
-  address, passes every size to `free`, and panics when an allocator
-  returns null. Each allocator type is its own file: `PageAllocator`
-  (`Os.map_pages`, stateless), `ArenaAllocator`, `GeneralAllocator`
-  and `CAllocator` (`calloc`, needs `--libc`); the stateless ones offer
-  `Type.ALLOCATOR`, and so does `GeneralAllocator` (over the global
-  `default_general_allocator`, initialized from `GeneralAllocator.EMPTY`).
-  `GeneralAllocator` is size classes (36, up to `MAX_SMALL`, each a free
-  list of slots carved from slabs whose header sits at their end, so
-  slots start page-aligned and keep no header; `class_of` rounds the
-  size to the alignment first, which keeps every class's slots aligned
-  enough) and, past them or a page's alignment, a mapping per
-  allocation with a `LargeHeader` just before it. `free` picks the class
-  from the size and alignment it is given, so the two must match the
-  allocation's. Links and internal results are `Optional`s of their real
-  types (a null exists only at the `AllocatorTable` boundary, `or_null`),
-  and the per-class states live in a `ClassTable` mapped and filled with
-  `.None` by the first small allocation, since a zeroed `Optional` is
-  `Some`. One spin lock (`acquire`, yielding) guards every call;
-  Debug builds keep a live flag per slot after the slab header, poison
-  freed slots and check frees and resizes against them
+  only forwards: each allocator checks sizes and alignments itself,
+  answers a zero size with an aligned address, and panics when out of
+  memory, so a returned reference is always live (`create`/`destroy`
+  only move values in with `@write` and drop them with `@drop`). Each
+  allocator type is its own file: `PageAllocator` (`Os.map_pages`,
+  stateless), `ArenaAllocator`, `GeneralAllocator` and `CAllocator`
+  (`calloc`, needs `--libc`); the stateless ones offer
+  `Type.ALLOCATOR` over a global instance. `GeneralAllocator` is size
+  classes (36, up to `MAX_SMALL`, each a free list of slots carved from
+  slabs whose header sits at their end, so slots start page-aligned and
+  keep no header; `class_of` rounds the size to the alignment first,
+  which keeps every class's slots aligned enough) and, past them or a
+  page's alignment, a mapping per allocation with a `LargeHeader` just
+  before it. `init` maps the size classes' table (panicking when out of
+  memory), so no allocator state depends on zeroed memory; only the
+  links (`SizeClass.free`/`slab`, `Slab.next`, `LargeHeader.next`/
+  `previous`) are `Optional`s of their real types. `free` picks the
+  class from the size and alignment it is given, so the two must match
+  the allocation's. One spin lock (`acquire`, yielding) guards every
+  call; Debug builds keep a live flag per slot after the slab header,
+  poison freed slots and check frees and resizes against them
   (`tests/run/general_allocator_*`). `default_allocator` is an `Optional[Allocator]`
   global, `.None` until `Standard.Runtime`'s `@entry` sets it to a
-  program-long arena (a private `Optional[ArenaAllocator]` global,
-  reached by `get_ref`); `get_default_allocator` panics while it is
-  unset. `Box` keeps the `Allocator` it came from.
+  program-long general allocator; `get_default_allocator` panics while
+  it is unset. `Box` keeps the `Allocator` it came from.
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR
