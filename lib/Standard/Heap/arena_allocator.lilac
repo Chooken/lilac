@@ -97,20 +97,16 @@ ArenaAllocator: object {
         // no-op
     }
 
-    /// `size` zeroed bytes aligned to `alignment` (a power of two).
+    /// `size` zeroed bytes aligned to `alignment` (a power of two); a
+    /// zero size takes no memory, giving an aligned address. Panics when
+    /// the request is bad or out of memory.
     allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
 
-        if size < 0 {
-            @panic("Can't allocate a negative size.")
-        }
+        check_request(size, alignment)
 
         if size == 0 as Int {
-            @panic("Can't allocate 0 bytes.")
-        }
-
-        if alignment > 0 and @bit_and_native(alignment as @bit_native, (alignment - 1) as @bit_native) == 0x0 {
-        } else {
-            @panic("The alignment must be a power of two.")
+            allocation = empty_allocation(alignment)
+            return
         }
 
         // Only what surely fits an empty block goes in one, so the next
@@ -147,12 +143,17 @@ ArenaAllocator: object {
     /// are zeroed.
     reallocate_raw: function (self, ptr: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
 
-        if new_size < 0 or old_size < 0 {
-            @panic("Can't allocate a negative size.")
+        check_request(old_size, alignment)
+        check_request(new_size, alignment)
+
+        if old_size == 0 as Int {
+            allocation = self.allocate_raw(new_size, alignment)
+            return
         }
 
         if new_size == 0 as Int {
-            @panic("Can't allocate 0 bytes.")
+            allocation = empty_allocation(alignment)
+            return
         }
 
         // The current block's last allocation ends at its `used`. Any
@@ -181,8 +182,10 @@ ArenaAllocator: object {
         @memcpy(allocation, ptr, old_size)
     }
 
-    /// Nothing: an arena gives memory back only at `reset`.
-    free_raw: function (self, _memory: ref unknown, _size: Int, _alignment: Int) nothing {
+    /// Nothing: an arena gives memory back only at `reset`. The request
+    /// itself is still checked.
+    free_raw: function (self, _memory: ref unknown, size: Int, alignment: Int) nothing {
+        check_request(size, alignment)
     }
 
     /// Frees every allocation at once. The blocks stay mapped (zeroed) for
