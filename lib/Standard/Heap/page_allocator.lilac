@@ -7,18 +7,40 @@ PageAllocator: object {
 
     ALLOCATOR_TABLE: ref AllocatorTable[PageAllocator] => ref page_table
 
+    /// This allocator as an `Allocator`. It keeps no state, so the handle
+    /// is usable wherever the program runs.
+    ALLOCATOR: Allocator => Allocator.from[PageAllocator](ref page_allocator_instance)
+
+    /// `size` zeroed bytes of pages aligned to `alignment` (at most a
+    /// page); panics when the request is bad or out of memory.
     allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        check_request(size, alignment)
         within_page(alignment)
-        allocation = @address_to_ptr(0x0)
-        match Os.map_pages(size as @bit_native) {
-            .Ok -> pages: ref unknown => allocation = pages
+        if size == 0 as Int {
+            allocation = empty_allocation(alignment)
+            return
         }
+        pages: ref unknown = Os.map_pages(size as @bit_native).get() else {
+            @panic("Out of memory.")
+        }
+        allocation = pages
     }
 
     /// In place while the size stays within the same pages, else moved to
     /// new pages.
     reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        check_request(old_size, alignment)
+        check_request(new_size, alignment)
         within_page(alignment)
+        if old_size == 0 as Int {
+            allocation = self.allocate_raw(new_size, alignment)
+            return
+        }
+        if new_size == 0 as Int {
+            self.free_raw(memory, old_size, alignment)
+            allocation = empty_allocation(alignment)
+            return
+        }
         page: Int = @builtin.Target.page_size
         if (old_size - 1) / page == (new_size - 1) / page {
             // What a shrink gives back goes back to zero, for a later
@@ -30,19 +52,27 @@ PageAllocator: object {
             return
         }
         allocation = self.allocate_raw(new_size, alignment)
-        if @ptr_to_address(allocation) == 0x0 {
-            return
-        }
         @memcpy(allocation, memory, smaller(old_size, new_size) as @bit_native)
         self.free_raw(memory, old_size, alignment)
     }
 
+    /// Gives back `memory`, `size` bytes at `alignment` from this
+    /// allocator.
     free_raw: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+        check_request(size, alignment)
+        within_page(alignment)
+        if size == 0 as Int {
+            return
+        }
         Os.unmap_pages(memory, size as @bit_native)
     }
 }
 
 private {
+
+    /// The allocator `ALLOCATOR` is built over: stateless, so one global
+    /// instance serves every handle.
+    page_allocator_instance: PageAllocator = PageAllocator {}
 
     /// Refuses an alignment past a page.
     within_page: function (alignment: Int) nothing {

@@ -6,26 +6,68 @@ CAllocator: object {
 
     ALLOCATOR_TABLE: ref AllocatorTable[CAllocator] => ref c_table
 
+    /// This allocator as an `Allocator`. It keeps no state, so the handle
+    /// is usable wherever the program runs.
+    ALLOCATOR: Allocator => Allocator.from[CAllocator](ref c_allocator_instance)
+
+    /// `size` zeroed bytes aligned to `alignment` (at most two pointers);
+    /// panics when the request is bad or out of memory.
     allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        check_request(size, alignment)
         within_c_alignment(alignment)
+        if size == 0 as Int {
+            allocation = empty_allocation(alignment)
+            return
+        }
         allocation = C.calloc(0x1, size as @bit_native)
+        if @ptr_to_address(allocation) == 0x0 {
+            @panic("Out of memory.")
+        }
     }
 
+    /// `memory` (`old_size` bytes at `alignment` from this allocator)
+    /// resized to `new_size`, keeping its bytes up to the smaller size and
+    /// zeroing the rest; panics when the request is bad or out of memory.
     reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        check_request(old_size, alignment)
+        check_request(new_size, alignment)
         within_c_alignment(alignment)
+        if old_size == 0 as Int {
+            allocation = self.allocate_raw(new_size, alignment)
+            return
+        }
+        if new_size == 0 as Int {
+            self.free_raw(memory, old_size, alignment)
+            allocation = empty_allocation(alignment)
+            return
+        }
         allocation = C.realloc(memory, new_size as @bit_native)
+        if @ptr_to_address(allocation) == 0x0 {
+            @panic("Out of memory.")
+        }
         // `realloc` leaves what it adds unset.
-        if @ptr_to_address(allocation) != 0x0 and new_size > old_size {
+        if new_size > old_size {
             @memset(@ptr_add(allocation, old_size as @bit_native), 0x0, (new_size - old_size) as @bit_native)
         }
     }
 
-    free_raw: function (self, memory: ref unknown, _size: Int, _alignment: Int) nothing {
+    /// Gives back `memory`, `size` bytes at `alignment` from this
+    /// allocator.
+    free_raw: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+        check_request(size, alignment)
+        within_c_alignment(alignment)
+        if size == 0 as Int {
+            return
+        }
         C.free(memory)
     }
 }
 
 private {
+
+    /// The allocator `ALLOCATOR` is built over: stateless, so one global
+    /// instance serves every handle.
+    c_allocator_instance: CAllocator = CAllocator {}
 
     /// Refuses an alignment past C's `max_align_t`: two pointers.
     within_c_alignment: function (alignment: Int) nothing {
