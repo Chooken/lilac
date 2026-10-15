@@ -93,9 +93,8 @@ ArenaAllocator: object {
         allocation = self.reallocate_raw(ptr as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
     }
 
-    free[T]: function (self, ptr: ref T, count: Int, alignment: Int) nothing {
-        // no-op
-    }
+    // Nothing: an arena gives memory back only at `reset`. 
+    free[T]: function (self, ptr: ref T, count: Int, alignment: Int) nothing {}
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two); a
     /// zero size takes no memory, giving an aligned address. Panics when
@@ -182,11 +181,8 @@ ArenaAllocator: object {
         @memcpy(allocation, ptr, old_size)
     }
 
-    /// Nothing: an arena gives memory back only at `reset`. The request
-    /// itself is still checked.
-    free_raw: function (self, _memory: ref unknown, size: Int, alignment: Int) nothing {
-        check_request(size, alignment)
-    }
+    /// Nothing: an arena gives memory back only at `reset`. 
+    free_raw: function (self, _memory: ref unknown, size: Int, alignment: Int) nothing {}
 
     /// Frees every allocation at once. The blocks stay mapped (zeroed) for
     /// the allocations after it; each custom block is unmapped.

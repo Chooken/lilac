@@ -78,58 +78,51 @@ Allocator: object {
 
     /// A new allocation holding `value`, moved in. Free it with `destroy`.
     create[T]: function (self, value: T) allocation: ref T {
-        allocation = self.allocate_bytes(@size_of(T), @align_of(T)) as ref T
+        allocation = self.functions.allocate(
+            self.target, 
+            @size_of(T), 
+            @align_of(T)
+        ) as ref T
         @write(allocation, value)
     }
 
     /// Drops the value at `allocation` (from `create`) and frees it.
     destroy[T]: function (self, allocation: ref T) nothing {
         @drop(allocation)
-        self.free_bytes(allocation as ref unknown, @size_of(T), @align_of(T))
+        self.functions.free(self.target, allocation as ref unknown, @size_of(T), @align_of(T))
     }
 
     /// Frees `allocation` (from `create`) without dropping anything: its
     /// value was moved out (`@read`).
     free[T]: function (self, allocation: ref T) nothing {
-        self.free_bytes(allocation as ref unknown, @size_of(T), @align_of(T))
+        self.functions.free(self.target, allocation as ref unknown, @size_of(T), @align_of(T))
     }
 
     /// Room for `count` zeroed `T`s. Free it with `deallocate`.
     allocate[T]: function (self, count: Int) allocation: ref T {
-        allocation = self.allocate_bytes(array_size(@size_of(T), count), @align_of(T)) as ref T
+        allocation = self.functions.allocate(
+            self.target, 
+            array_size(@size_of(T), count), 
+            @align_of(T)
+        ) as ref T
     }
 
     /// `memory` (from `allocate`, `count` long) resized to `new_count`,
     /// keeping the first of them; new elements are zeroed.
     reallocate[T]: function (self, memory: ref T, count: Int, new_count: Int) allocation: ref T {
-        allocation = self.reallocate_bytes(memory as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
+        allocation = self.functions.reallocate(
+            self.target, 
+            memory as ref unknown, 
+            array_size(@size_of(T), count), 
+            array_size(@size_of(T), new_count), 
+            @align_of(T)
+        ) as ref T
     }
 
     /// Frees `memory` (from `allocate`, `count` long) without dropping
     /// anything.
     deallocate[T]: function (self, memory: ref T, count: Int) nothing {
-        self.free_bytes(memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
-    }
-
-    /// `size` zeroed bytes aligned to `alignment` (a power of two),
-    /// from the allocator behind this handle. It checks the request and
-    /// panics when out of memory.
-    allocate_bytes: function (self, size: Int, alignment: Int) allocation: ref unknown {
-        allocation = self.functions.allocate(self.target, size, alignment)
-    }
-
-    /// `memory` (from `allocate_bytes`, `old_size` long) resized to
-    /// `new_size` bytes, keeping its bytes up to the smaller size; new
-    /// bytes are zeroed. From the allocator behind this handle, which
-    /// checks the request and panics when out of memory.
-    reallocate_bytes: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
-        allocation = self.functions.reallocate(self.target, memory, old_size, new_size, alignment)
-    }
-
-    /// Frees `memory`, `size` bytes at `alignment` from `allocate_bytes`,
-    /// with the allocator behind this handle.
-    free_bytes: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
-        self.functions.free(self.target, memory, size, alignment)
+        self.functions.free(self.target, memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
     }
 }
 
