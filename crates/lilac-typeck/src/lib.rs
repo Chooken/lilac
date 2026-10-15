@@ -296,6 +296,9 @@ pub(crate) struct Checker<'a> {
     pub type_stack: Vec<TypeId>,
     /// How many times each definition is on [`Checker::type_stack`].
     pub type_counts: HashMap<DefId, u32>,
+    /// Referents of `ref`s met while a type is laid out, laid out once it
+    /// is (`Checker::ensure_type`).
+    pub(crate) deferred_refs: Vec<(TypeRef, Span)>,
     /// Each type alias met so far ([`aliases::AliasState`]).
     pub(crate) aliases: HashMap<DefId, aliases::AliasState>,
     /// The aliases being resolved, innermost last (for `E074`'s chain).
@@ -405,6 +408,7 @@ impl<'a> Checker<'a> {
             sizes: HashMap::new(),
             type_stack: Vec::new(),
             type_counts: HashMap::new(),
+            deferred_refs: Vec::new(),
             aliases: HashMap::new(),
             alias_stack: Vec::new(),
             arrays: Vec::new(),

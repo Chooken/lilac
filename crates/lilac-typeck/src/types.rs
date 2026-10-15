@@ -376,6 +376,12 @@ impl Checker<'_> {
     /// each level (`function (T, T)` again and again) costs `n` steps, not
     /// `2^n`.
     pub(crate) fn ensure_type(&mut self, ty: TypeRef, span: Span) -> Result<(), ErrorGuaranteed> {
+        self.ensure(ty, span, true)
+    }
+
+    /// [`Checker::ensure_type`]; with `defer`, a `ref` met while a type is
+    /// laid out waits for that type ([`Checker::deferred_refs`]).
+    fn ensure(&mut self, ty: TypeRef, span: Span, defer: bool) -> Result<(), ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
             TypeKind::Func {
                 params, returns, ..
@@ -418,6 +424,11 @@ impl Checker<'_> {
                 });
             }
             Some(TypeState::Active) if ty.is_ref => return Ok(()),
+            // Laid out once the type being laid out is.
+            None if defer && ty.is_ref && !self.type_stack.is_empty() => {
+                self.deferred_refs.push((ty, span));
+                return Ok(());
+            }
             Some(TypeState::Active) => {
                 let name = self.show_id(ty.id);
                 return Err(self.diags.emit(
@@ -455,10 +466,37 @@ impl Checker<'_> {
         self.type_states.insert(ty.id, TypeState::Active);
         self.type_stack.push(ty.id);
         self.type_counts.insert(def, count);
-        let env = self.env_of(def, args.clone(), None);
-        let layout = self.with_env(env, |c| c.compute_layout(def));
+        let mark = self.deferred_refs.len();
+        let laid_out = self.lay_out_active(ty, def, &args, span);
+        // A `ref`'s referent never shapes this layout, so it is laid out
+        // after it: laying it out inside would find this type's own field
+        // types unfinished (`Holder { a: Optional[ref Node] }` laying out
+        // `Node`, whose `Optional[ref Node]` is still `Active`) and call
+        // them a cycle. This type stays on the stack meanwhile, so a type
+        // that grows through a `ref` still meets `MAX_RECURSION`. A
+        // referent's own error is its own: this type's layout stands.
+        let deferred = self.deferred_refs.split_off(mark);
+        if laid_out.is_ok() {
+            for (referent, at) in deferred {
+                let _ = self.ensure(referent, at, false);
+            }
+        }
         self.type_stack.pop();
         self.type_counts.insert(def, count - 1);
+        laid_out
+    }
+
+    /// Lays out `ty` (of `def[args]`), which is on the stack and
+    /// `Active`, and marks it `Done` or `Failed`.
+    fn lay_out_active(
+        &mut self,
+        ty: TypeRef,
+        def: DefId,
+        args: &[TypeRef],
+        span: Span,
+    ) -> Result<(), ErrorGuaranteed> {
+        let env = self.env_of(def, args.to_vec(), None);
+        let layout = self.with_env(env, |c| c.compute_layout(def));
         let Ok((layout, spans)) = layout else {
             // `compute_layout` reported it.
             self.type_states.insert(ty.id, TypeState::Failed);
@@ -475,7 +513,7 @@ impl Checker<'_> {
         self.out.layouts.insert(ty.id, layout);
         self.type_states.insert(ty.id, TypeState::Done);
         if !args.is_empty() {
-            self.register_instance_hooks(def, &args, span);
+            self.register_instance_hooks(def, args, span);
         }
         Ok(())
     }

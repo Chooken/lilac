@@ -1,8 +1,7 @@
 using Standard.Os as Os
 
 /// The process-wide `GeneralAllocator`, for `GeneralAllocator.ALLOCATOR`.
-/// A zeroed `GeneralAllocator` is an empty one, so it needs no setup.
-default_general_allocator: GeneralAllocator
+default_general_allocator: GeneralAllocator = GeneralAllocator.EMPTY
 
 /// A general-purpose allocator: any size at any alignment, each
 /// allocation freed on its own. Thread-safe (one lock around every call).
@@ -26,11 +25,11 @@ default_general_allocator: GeneralAllocator
 GeneralAllocator: object {
 
     private {
-        // Each size class's freed slots and slabs. A zeroed class has none.
-        classes: @array(SizeClass, 36)
-        // The live large allocations' headers, newest first; null when
-        // there are none.
-        large: ref unknown
+        // Each size class's freed slots and slabs, mapped by the first
+        // small allocation.
+        classes: Optional[ref ClassTable]
+        // The live large allocations' headers, newest first.
+        large: Optional[ref LargeHeader]
         // Bytes of live allocations, as requested, and bytes mapped.
         used: Int
         mapped: Int
@@ -44,18 +43,22 @@ GeneralAllocator: object {
     /// for every thread.
     ALLOCATOR: Allocator => Allocator.from[GeneralAllocator](ref default_general_allocator)
 
+    /// An empty allocator, as a constant (for globals); it maps nothing
+    /// until the first allocation.
+    EMPTY: GeneralAllocator => GeneralAllocator {
+        classes = .None
+        large = .None
+        used = 0
+        mapped = 0
+        lock = 0x0
+    }
+
     /// The largest request a size class takes: 16 KiB.
     MAX_SMALL: Int => 16 * 1024
 
     /// An empty allocator; it maps nothing until the first allocation.
     init: function () allocator: GeneralAllocator {
-        allocator = GeneralAllocator {
-            classes = @array(SizeClass, 36) {}
-            large = no_address()
-            used = 0
-            mapped = 0
-            lock = 0x0
-        }
+        allocator = EMPTY
     }
 
     /// Bytes of live allocations, as requested.
@@ -65,8 +68,8 @@ GeneralAllocator: object {
         self.release()
     }
 
-    /// Bytes mapped: every slab, used or not, and every large allocation
-    /// with its header and padding.
+    /// Bytes mapped: every slab, used or not, the size classes' table, and
+    /// every large allocation with its header and padding.
     get_capacity: function (self) mapped: Int {
         self.acquire()
         mapped = self.mapped
@@ -111,12 +114,13 @@ GeneralAllocator: object {
     }
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two), or
-    /// null when out of memory.
+    /// null when out of memory (`AllocatorTable`'s contract).
     allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
         check_request(size, alignment)
         self.acquire()
-        allocation = self.allocate_unlocked(size, alignment)
+        result: Optional[ref unknown] = self.allocate_unlocked(size, alignment)
         self.release()
+        allocation = or_null(result)
     }
 
     /// `memory` (`old_size` bytes at `alignment` from this allocator)
@@ -129,8 +133,9 @@ GeneralAllocator: object {
         check_request(old_size, alignment)
         check_request(new_size, alignment)
         self.acquire()
-        allocation = self.reallocate_unlocked(memory, old_size, new_size, alignment)
+        result: Optional[ref unknown] = self.reallocate_unlocked(memory, old_size, new_size, alignment)
         self.release()
+        allocation = or_null(result)
     }
 
     /// Gives back `memory`, `size` bytes at `alignment` from this
@@ -142,37 +147,31 @@ GeneralAllocator: object {
         self.release()
     }
 
-    /// Unmaps every slab and large allocation: everything allocated from
-    /// it is gone.
+    /// Unmaps every slab, the size classes' table and every large
+    /// allocation: everything allocated from it is gone.
     @on_drop: function (self) nothing {
-        index: Int = 0
-        loop {
-            if index == CLASS_COUNT {
-                break
-            }
-            state: ref SizeClass = @array_at(ref self.classes, index as @bit_native)
-            slab: ref unknown = state.slab
+        if self.classes.get() -> table: ref ClassTable {
+            index: Int = 0
             loop {
-                if is_none(slab) {
+                if index == CLASS_COUNT {
                     break
                 }
-                // Read before the unmap takes the header with it.
-                header: ref Slab = slab as ref Slab
-                slab = header.next
-                Os.unmap_pages(header.base, header.size as @bit_native)
+                next_slab: Optional[ref Slab] = class_at(table, index).slab
+                loop if next_slab.get() -> slab: ref Slab {
+                    // Read before the unmap takes the header with it.
+                    next_slab = slab.next
+                    Os.unmap_pages(slab.base, slab.size as @bit_native)
+                } else break
+                index = index + 1
             }
-            index = index + 1
+            Os.unmap_pages(table as ref unknown, class_table_size() as @bit_native)
         }
 
-        large: ref unknown = self.large
-        loop {
-            if is_none(large) {
-                break
-            }
-            header: ref LargeHeader = large as ref LargeHeader
-            large = header.next
+        next_large: Optional[ref LargeHeader] = self.large
+        loop if next_large.get() -> header: ref LargeHeader {
+            next_large = header.next
             Os.unmap_pages(header.mapping, header.mapping_size as @bit_native)
-        }
+        } else break
     }
 
     private {
@@ -198,33 +197,33 @@ GeneralAllocator: object {
             @atomic_store_release_32(ref self.lock, 0x0)
         }
 
-        allocate_unlocked: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        allocate_unlocked: function (self, size: Int, alignment: Int) allocation: Optional[ref unknown] {
             class: Int = class_of(size, alignment)
             if class < 0 {
                 allocation = self.allocate_large(size, alignment)
             } else {
                 allocation = self.allocate_small(class, size)
             }
-            if not is_none(allocation) {
+            if allocation.get() -> _memory: ref unknown {
                 self.used = self.used + size
             }
         }
 
-        reallocate_unlocked: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        reallocate_unlocked: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: Optional[ref unknown] {
             old_class: Int = class_of(old_size, alignment)
             new_class: Int = class_of(new_size, alignment)
 
             // The same slot.
             if old_class >= 0 and old_class == new_class {
                 if @builtin.Build.mode == .Debug {
-                    state: ref SizeClass = @array_at(ref self.classes, old_class as @bit_native)
+                    state: ref SizeClass = self.class_state(old_class)
                     flag: ref @bit8 = slot_flag(state, class_size(old_class), memory)
                     if @load_u8(flag, 0x0) == 0x0 {
                         @panic("Resized memory that was already freed.")
                     }
                 }
                 self.resize_in_place(memory, old_size, new_size)
-                allocation = memory
+                allocation = .Some(memory)
                 return
             }
 
@@ -237,18 +236,17 @@ GeneralAllocator: object {
                     if needed > header.mapping_size / 2 {
                         self.resize_in_place(memory, old_size, new_size)
                         header.size = new_size
-                        allocation = memory
+                        allocation = .Some(memory)
                         return
                     }
                 }
             }
 
             allocation = self.allocate_unlocked(new_size, alignment)
-            if is_none(allocation) {
-                return
+            if allocation.get() -> moved: ref unknown {
+                @memcpy(moved, memory, smaller(old_size, new_size) as @bit_native)
+                self.free_unlocked(memory, old_size, alignment)
             }
-            @memcpy(allocation, memory, smaller(old_size, new_size) as @bit_native)
-            self.free_unlocked(memory, old_size, alignment)
         }
 
         /// `memory`'s size changed where it is: new bytes are zeroed (a
@@ -270,47 +268,86 @@ GeneralAllocator: object {
             self.used = self.used - size
         }
 
-        /// A slot of `class` with its first `size` bytes zeroed, or null
-        /// when out of memory.
-        allocate_small: function (self, class: Int, size: Int) allocation: ref unknown {
-            state: ref SizeClass = @array_at(ref self.classes, class as @bit_native)
-            slot_size: Int = class_size(class)
+        /// The state of `class`, whose table a small allocation mapped:
+        /// freeing or resizing a slot means one was allocated. In a Debug
+        /// build, a panic when there is none.
+        class_state: function (self, class: Int) state: ref SizeClass {
+            table: ref ClassTable = self.classes.get() else {
+                @panic(NOT_OURS)
+            }
+            state = class_at(table, class)
+        }
 
-            if is_none(state.free) {
-                slab: ref unknown = state.slab
-                if is_none(slab) or slab_full(slab, slot_size) {
-                    slab = add_slab(state, slot_size)
-                    if is_none(slab) {
-                        allocation = no_address()
-                        return
-                    }
-                    self.mapped = self.mapped + (slab as ref Slab).size
-                }
-                // Never used: the pages are still zero.
-                header: ref Slab = slab as ref Slab
-                allocation = @ptr_add(header.base, header.carved as @bit_native)
-                header.carved = header.carved + slot_size
-            } else {
-                allocation = state.free
-                if @builtin.Build.mode == .Debug {
-                    check_poison(allocation, slot_size)
-                }
-                state.free = (allocation as ref FreeSlot).next
-                @memset(allocation, 0x0, size as @bit_native)
+        /// A slot of `class` with its first `size` bytes zeroed, or `None`
+        /// when out of memory.
+        allocate_small: function (self, class: Int, size: Int) allocation: Optional[ref unknown] {
+            allocation = .None
+            table: ref ClassTable = self.class_table().get() else {
+                return
+            }
+            state: ref SizeClass = class_at(table, class)
+            slot_size: Int = class_size(class)
+            slot: ref unknown = self.next_slot(state, slot_size, size).get() else {
+                return
             }
 
             if @builtin.Build.mode == .Debug {
-                flag: ref @bit8 = slot_flag(state, slot_size, allocation)
+                flag: ref @bit8 = slot_flag(state, slot_size, slot)
                 if @load_u8(flag, 0x0) != 0x0 {
                     @panic("GeneralAllocator is corrupted: a live slot was on the free list.")
                 }
                 @store_u8(flag, 0x0, 0x1)
             }
+            allocation = .Some(slot)
+        }
+
+        /// The size classes' table, mapped by the first call; `None` when
+        /// out of memory.
+        class_table: function (self) table: Optional[ref ClassTable] {
+            table = self.classes
+            if table.get() -> _mapped: ref ClassTable {
+                return
+            }
+            table = map_class_table()
+            if table.get() -> _added: ref ClassTable {
+                self.classes = table
+                self.mapped = self.mapped + class_table_size()
+            }
+        }
+
+        /// `state`'s next slot, its first `size` bytes zeroed: its most
+        /// recently freed one, else the next of its newest slab (never
+        /// used, so the pages are still zero); `None` when out of memory.
+        next_slot: function (self, state: ref SizeClass, slot_size: Int, size: Int) slot: Optional[ref unknown] {
+            slot = take_free(state, slot_size, size)
+            if slot.get() -> _freed: ref unknown {
+                return
+            }
+            slab: ref Slab = self.carving_slab(state, slot_size).get() else {
+                return
+            }
+            slot = .Some(@ptr_add(slab.base, slab.carved as @bit_native))
+            slab.carved = slab.carved + slot_size
+        }
+
+        /// `state`'s newest slab when it has a slot of `slot_size` left to
+        /// carve, else a new one; `None` when out of memory.
+        carving_slab: function (self, state: ref SizeClass, slot_size: Int) carving: Optional[ref Slab] {
+            if state.slab.get() -> newest: ref Slab {
+                if newest.carved <= newest.limit - slot_size {
+                    carving = .Some(newest)
+                    return
+                }
+            }
+            carving = add_slab(state, slot_size)
+            if carving.get() -> added: ref Slab {
+                self.mapped = self.mapped + added.size
+            }
         }
 
         /// Puts `memory`, a slot of `class`, back on its class's free list.
         free_small: function (self, class: Int, memory: ref unknown) nothing {
-            state: ref SizeClass = @array_at(ref self.classes, class as @bit_native)
+            state: ref SizeClass = self.class_state(class)
 
             if @builtin.Build.mode == .Debug {
                 slot_size: Int = class_size(class)
@@ -323,15 +360,15 @@ GeneralAllocator: object {
                 @memset(memory, POISON, slot_size as @bit_native)
             }
 
-            link: ref FreeSlot = memory as ref FreeSlot
-            link.next = state.free
-            state.free = memory
+            slot: ref FreeSlot = memory as ref FreeSlot
+            @write(slot, FreeSlot { next = state.free })
+            state.free = .Some(slot)
         }
 
         /// `size` zeroed bytes at `alignment` in a mapping of their own,
-        /// after a header, or null when out of memory.
-        allocate_large: function (self, size: Int, alignment: Int) allocation: ref unknown {
-            allocation = no_address()
+        /// after a header, or `None` when out of memory.
+        allocate_large: function (self, size: Int, alignment: Int) allocation: Optional[ref unknown] {
+            allocation = .None
 
             page: Int = @builtin.Target.page_size
             header_size: Int = @size_of(LargeHeader)
@@ -352,43 +389,40 @@ GeneralAllocator: object {
             }
             mapping_size: Int = align_up(padding + size, page)
 
-            mapping: ref unknown = map(mapping_size)
-            if is_none(mapping) {
+            mapping: ref unknown = map(mapping_size).get() else {
                 return
             }
             self.mapped = self.mapped + mapping_size
 
             base: Int = @ptr_to_address(mapping)
             offset: Int = align_up(base.wrapping_add(header_size), aligned).wrapping_subtract(base)
-            allocation = @ptr_add(mapping, offset as @bit_native)
+            memory: ref unknown = @ptr_add(mapping, offset as @bit_native)
 
-            header: ref LargeHeader = header_of(allocation)
+            header: ref LargeHeader = header_of(memory)
             @write(header, LargeHeader {
                 mapping = mapping
                 mapping_size = mapping_size
                 size = size
                 next = self.large
-                previous = no_address()
+                previous = .None
             })
-            if not is_none(self.large) {
-                newest: ref LargeHeader = self.large as ref LargeHeader
-                newest.previous = header as ref unknown
+            if self.large.get() -> newest: ref LargeHeader {
+                newest.previous = .Some(header)
             }
-            self.large = header as ref unknown
+            self.large = .Some(header)
+            allocation = .Some(memory)
         }
 
         /// Unmaps the large allocation `memory`, `size` bytes.
         free_large: function (self, memory: ref unknown, size: Int) nothing {
             header: ref LargeHeader = self.large_header(memory, size)
 
-            if is_none(header.previous) {
-                self.large = header.next
-            } else {
-                previous: ref LargeHeader = header.previous as ref LargeHeader
+            if header.previous.get() -> previous: ref LargeHeader {
                 previous.next = header.next
+            } else {
+                self.large = header.next
             }
-            if not is_none(header.next) {
-                next: ref LargeHeader = header.next as ref LargeHeader
+            if header.next.get() -> next: ref LargeHeader {
                 next.previous = header.previous
             }
 
@@ -405,15 +439,15 @@ GeneralAllocator: object {
         large_header: function (self, memory: ref unknown, size: Int) header: ref LargeHeader {
             header = header_of(memory)
             if @builtin.Build.mode == .Debug {
-                large: ref unknown = self.large
+                next_large: Optional[ref LargeHeader] = self.large
                 loop {
-                    if is_none(large) {
+                    live: ref LargeHeader = next_large.get() else {
                         @panic(NOT_OURS)
                     }
-                    if @ptr_to_address(large) == @ptr_to_address(header as ref unknown) {
+                    if @ptr_to_address(live as ref unknown) == @ptr_to_address(header as ref unknown) {
                         break
                     }
-                    large = (large as ref LargeHeader).next
+                    next_large = live.next
                 }
                 if header.size != size {
                     @panic(NOT_OURS)
@@ -425,7 +459,7 @@ GeneralAllocator: object {
 
 private {
 
-    /// The number of size classes, `GeneralAllocator.classes`' length.
+    /// The number of size classes, `ClassTable.classes`' length.
     CLASS_COUNT: Int => 36
 
     /// Every allocation's least alignment: C's `max_align_t` on 64-bit
@@ -440,18 +474,24 @@ private {
 
     NOT_OURS: @byte_buffer => "Freed or resized memory this allocator did not give, or with another size or alignment."
 
-    /// One size class: its freed slots and its slabs.
-    SizeClass: object {
-        // The first freed slot (a `FreeSlot`), null when none.
-        free: ref unknown
-        // The newest slab's header (a `Slab`), the one slots are carved
-        // from; null when none.
-        slab: ref unknown
+    /// Every size class's state, in pages of its own: a zeroed
+    /// `Optional` is `Some`, so the states are written `None` when it is
+    /// mapped (`map_class_table`).
+    ClassTable: object {
+        classes: @array(SizeClass, 36)
     }
 
-    /// A freed slot: the next freed slot of its class, null at the end.
+    /// One size class: its freed slots and its slabs.
+    SizeClass: object {
+        // The most recently freed slot.
+        free: Optional[ref FreeSlot]
+        // The newest slab, the one slots are carved from.
+        slab: Optional[ref Slab]
+    }
+
+    /// A freed slot: the slot freed before it.
     FreeSlot: object {
-        next: ref unknown
+        next: Optional[ref FreeSlot]
     }
 
     /// A slab's header, at its end so the slots start at its first page
@@ -465,8 +505,8 @@ private {
         carved: Int
         // Bytes of slots the slab holds.
         limit: Int
-        // The class's slab before this one, null when none.
-        next: ref unknown
+        // The class's slab before this one.
+        next: Optional[ref Slab]
     }
 
     /// A large allocation's header, just before it.
@@ -475,9 +515,9 @@ private {
         mapping_size: Int
         // Bytes the allocation takes, as requested.
         size: Int
-        // The live large allocations around it, null at either end.
-        next: ref unknown
-        previous: ref unknown
+        // The live large allocations around it.
+        next: Optional[ref LargeHeader]
+        previous: Optional[ref LargeHeader]
     }
 
     general_allocator_table: AllocatorTable[GeneralAllocator] = AllocatorTable {
@@ -486,9 +526,14 @@ private {
         free = ref GeneralAllocator.free_raw
     }
 
-    no_address: function () ref unknown => @address_to_ptr(0x0)
-
-    is_none: function (memory: ref unknown) Bool => @ptr_to_address(memory) == 0x0
+    /// `memory`, or null for `None`: what an `AllocatorTable` function
+    /// returns when out of memory.
+    or_null: function (memory: Optional[ref unknown]) allocation: ref unknown {
+        allocation = @address_to_ptr(0x0)
+        if memory.get() -> some: ref unknown {
+            allocation = some
+        }
+    }
 
     /// The size class of `size` bytes at `alignment`, or -1 when it is a
     /// large allocation. A class's slots are aligned to every power of two
@@ -537,12 +582,52 @@ private {
         size = power + ((class - 8) % 4 + 1) * (power / 4)
     }
 
-    /// Whether the slab `slab` has no slot of `slot_size` left to carve.
-    slab_full: function (slab: ref unknown, slot_size: Int) Bool => (slab as ref Slab).carved > (slab as ref Slab).limit - slot_size
+    class_at: function (table: ref ClassTable, class: Int) ref SizeClass => @array_at(ref table.classes, class as @bit_native)
 
-    /// A new slab for `state`'s slots of `slot_size`, now its newest; null
+    /// The pages `ClassTable` takes.
+    class_table_size: function () Int => align_up(@size_of(ClassTable), @builtin.Target.page_size)
+
+    /// A new table of empty size classes, or `None` when out of memory.
+    map_class_table: function () table: Optional[ref ClassTable] {
+        table = .None
+        memory: ref unknown = map(class_table_size()).get() else {
+            return
+        }
+        classes: ref ClassTable = memory as ref ClassTable
+        index: Int = 0
+        loop {
+            if index == CLASS_COUNT {
+                break
+            }
+            @write(class_at(classes, index), SizeClass {
+                free = .None
+                slab = .None
+            })
+            index = index + 1
+        }
+        table = .Some(classes)
+    }
+
+    /// `state`'s most recently freed slot, off its free list, with its
+    /// first `size` bytes zeroed; `None` when it has none.
+    take_free: function (state: ref SizeClass, slot_size: Int, size: Int) memory: Optional[ref unknown] {
+        memory = .None
+        slot: ref FreeSlot = state.free.get() else {
+            return
+        }
+        if @builtin.Build.mode == .Debug {
+            check_poison(slot as ref unknown, slot_size)
+        }
+        state.free = slot.next
+        @memset(slot as ref unknown, 0x0, size as @bit_native)
+        memory = .Some(slot as ref unknown)
+    }
+
+    /// A new slab for `state`'s slots of `slot_size`, now its newest; `None`
     /// when out of memory. It holds at least 16 slots.
-    add_slab: function (state: ref SizeClass, slot_size: Int) slab: ref unknown {
+    add_slab: function (state: ref SizeClass, slot_size: Int) slab: Optional[ref Slab] {
+        slab = .None
+
         size: Int = align_up(slot_size * 16, @builtin.Target.page_size)
         if size < MIN_SLAB {
             size = MIN_SLAB
@@ -554,42 +639,40 @@ private {
         }
         tail = align_up(tail, MIN_ALIGNMENT)
 
-        slab = map(size)
-        if is_none(slab) {
+        base: ref unknown = map(size).get() else {
             return
         }
-        base: ref unknown = slab
-        slab = @ptr_add(base, (size - tail) as @bit_native)
-        @write(slab as ref Slab, Slab {
+        header: ref Slab = @ptr_add(base, (size - tail) as @bit_native) as ref Slab
+        @write(header, Slab {
             base = base
             size = size
             carved = 0
             limit = (size - tail) / slot_size * slot_size
             next = state.slab
         })
-        state.slab = slab
+        state.slab = .Some(header)
+        slab = .Some(header)
     }
 
     /// The Debug live flag of the slot at `memory` in `state`'s slabs of
     /// `slot_size` slots; a panic when `memory` is no slot of them.
     slot_flag: function (state: ref SizeClass, slot_size: Int, memory: ref unknown) flag: ref @bit8 {
         address: @bit_native = @ptr_to_address(memory)
-        slab: ref unknown = state.slab
+        next_slab: Optional[ref Slab] = state.slab
         loop {
-            if is_none(slab) {
+            slab: ref Slab = next_slab.get() else {
                 @panic(NOT_OURS)
             }
-            header: ref Slab = slab as ref Slab
-            base: @bit_native = @ptr_to_address(header.base)
-            if @i_greater_than_or_equal_u_native(address, base) and @i_less_than_u_native(address, @i_add_native(base, header.carved as @bit_native)) {
+            base: @bit_native = @ptr_to_address(slab.base)
+            if @i_greater_than_or_equal_u_native(address, base) and @i_less_than_u_native(address, @i_add_native(base, slab.carved as @bit_native)) {
                 offset: Int = @i_sub_native(address, base)
                 if offset % slot_size != 0 as Int {
                     @panic(NOT_OURS)
                 }
-                flag = @ptr_add(slab, (@size_of(Slab) + offset / slot_size) as @bit_native) as ref @bit8
+                flag = @ptr_add(slab as ref unknown, (@size_of(Slab) + offset / slot_size) as @bit_native) as ref @bit8
                 return
             }
-            slab = header.next
+            next_slab = slab.next
         }
     }
 
@@ -612,11 +695,11 @@ private {
     /// The header just before the large allocation `memory`.
     header_of: function (memory: ref unknown) ref LargeHeader => @address_to_ptr(@i_sub_native(@ptr_to_address(memory), @size_of(LargeHeader) as @bit_native)) as ref LargeHeader
 
-    /// `size` bytes of fresh zeroed pages, or null when out of memory.
-    map: function (size: Int) memory: ref unknown {
-        memory = no_address()
+    /// `size` bytes of fresh zeroed pages, or `None` when out of memory.
+    map: function (size: Int) memory: Optional[ref unknown] {
+        memory = .None
         match Os.map_pages(size as @bit_native) {
-            .Ok -> pages: ref unknown => memory = pages
+            .Ok -> pages: ref unknown => memory = .Some(pages)
         }
     }
 

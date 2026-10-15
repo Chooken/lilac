@@ -1,0 +1,35 @@
+// expect-stdout: 7 dropped 0
+// expect-exit: 0
+// A global may be initialized from a `=>` constant of a type with a drop
+// hook: the constant's body builds the global in place, like a literal,
+// and a global never drops. The constant's private fields need no access
+// from outside the type.
+
+using Standard
+using Standard.Io
+
+drops: Int = 0
+
+Guarded: object {
+    private {
+        value: Int
+        next: Optional[ref Guarded]
+    }
+
+    EMPTY: Guarded => Guarded {
+        value = 7
+        next = .None
+    }
+
+    get_value: function (self) Int => self.value
+
+    @on_drop: function (self) nothing {
+        drops = drops + 1
+    }
+}
+
+global: Guarded = Guarded.EMPTY
+
+main: function () nothing {
+    print_line($"{global.get_value()} dropped {drops}")
+}

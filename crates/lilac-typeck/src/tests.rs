@@ -2148,6 +2148,25 @@ fn self_containing_type_is_e053() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+/// A `ref`'s referent is laid out after the type holding the `ref`, so a
+/// type first met inside another (`Opt[ref Node]` in `Holder`) is finished
+/// before `Node`'s own `Opt[ref Node]` field needs it: no false `E053`. A
+/// type that grows through a `ref` still stops at `E051`, and a referent's
+/// own error is still reported.
+#[test]
+fn ref_referents_are_laid_out_after_their_holder() {
+    let opt = "Opt[T]: enum {\n    Some: T\n    None\n}\n";
+    let src = format!(
+        "{opt}Holder: object {{\n    free: Opt[ref Node]\n}}\nNode: object {{\n    next: Opt[ref Node]\n}}\nmain: function () nothing {{\n}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+    let growing =
+        "W[T]: object {\n    w: ref W[W[T]]\n    v: T\n}\nf: function (x: W[@bit8]) nothing {\n}\n";
+    assert_eq!(codes_of(&check_src(growing)), ["E051"]);
+    let broken = "G[T]: object {\n    a: G[T]\n}\nH: object {\n    r: ref G[@bit8]\n}\nf: function (h: H) nothing {\n}\n";
+    assert_eq!(codes_of(&check_src(broken)), ["E053"]);
+}
+
 #[test]
 fn same_block_redeclaration_is_e020_but_nested_shadowing_is_fine() {
     let diags =

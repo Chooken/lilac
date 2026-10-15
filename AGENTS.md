@@ -139,7 +139,8 @@
   folds each initializer with the constant evaluator (`global_constant`:
   struct and variant literals of hooked types too, since building one runs
   no hook and a global never drops, so `Optional[T] = .None` is constant
-  for any `T`) and encodes it as
+  for any `T`; a `=>` constant's body builds in place the same way,
+  `eval_built`, so `G: T = T.EMPTY` is constant for a hooked `T`) and encodes it as
   runs (`LirGlobal::init`: `(offset, bytes)` over an otherwise zero object,
   never the whole object; the backend fills the gaps with
   `zeroinitializer`) in the C layout (a non-constant one is `E038`,
@@ -194,8 +195,8 @@
   returns null. Each allocator type is its own file: `PageAllocator`
   (`Os.map_pages`, stateless), `ArenaAllocator`, `GeneralAllocator`
   and `CAllocator` (`calloc`, needs `--libc`); the stateless ones offer
-  `Type.ALLOCATOR`, and so does `GeneralAllocator` (a zeroed one is
-  empty, so `default_general_allocator` is a plain global).
+  `Type.ALLOCATOR`, and so does `GeneralAllocator` (over the global
+  `default_general_allocator`, initialized from `GeneralAllocator.EMPTY`).
   `GeneralAllocator` is size classes (36, up to `MAX_SMALL`, each a free
   list of slots carved from slabs whose header sits at their end, so
   slots start page-aligned and keep no header; `class_of` rounds the
@@ -203,7 +204,11 @@
   enough) and, past them or a page's alignment, a mapping per
   allocation with a `LargeHeader` just before it. `free` picks the class
   from the size and alignment it is given, so the two must match the
-  allocation's. One spin lock (`acquire`, yielding) guards every call;
+  allocation's. Links and internal results are `Optional`s of their real
+  types (a null exists only at the `AllocatorTable` boundary, `or_null`),
+  and the per-class states live in a `ClassTable` mapped and filled with
+  `.None` by the first small allocation, since a zeroed `Optional` is
+  `Some`. One spin lock (`acquire`, yielding) guards every call;
   Debug builds keep a live flag per slot after the slab header, poison
   freed slots and check frees and resizes against them
   (`tests/run/general_allocator_*`). `default_allocator` is an `Optional[Allocator]`
@@ -265,7 +270,12 @@
   `ensure_type` first builds it (`layout.rs`, `Checker::sizes`); one past
   the limit is `E067` at the field or array length that crossed it, through
   `emit_requirement` (`Requirement::Size`), so a generic instance folds it
-  into `E042`. Templates are never laid out.
+  into `E042`. Templates are never laid out. A `ref`'s referent met
+  while a type is laid out waits in `Checker::deferred_refs` until that
+  type is `Done`, then is laid out with it still on `type_stack` (so
+  growth through a `ref` still meets `E051`): laid out inside, it would
+  find the holder's own field types `Active` and report a false `E053`
+  (`Holder { a: Optional[ref Node] }` before `Node`).
 - Lowering fills `LirModule::layouts` (`LirLayout`: kind, size, align, and
   each field's offset) once, from `lilac-layout`; everything after reads it
   (`lilac_ir::size_align` is a lookup, global initializers use the field

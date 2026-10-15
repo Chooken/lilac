@@ -389,6 +389,22 @@ impl<'a> Lower<'a> {
                 };
                 Some(Value::Variant(*index, payload))
             }
+            // A constant's body builds the value in place too, so one of a
+            // hooked type (`GeneralAllocator.EMPTY`) is as constant as its
+            // literal.
+            HirExprKind::Const(def) if !expr.ty.is_ref => {
+                if eval.stack.contains(def) {
+                    return None;
+                }
+                let hir = self.hir;
+                let body = hir.consts.get(def)?;
+                eval.stack.push(*def);
+                eval.frames.push(HashMap::new());
+                let value = self.eval_built(eval, body);
+                eval.frames.pop();
+                eval.stack.pop();
+                value
+            }
             _ => self.eval(eval, expr),
         }
     }
