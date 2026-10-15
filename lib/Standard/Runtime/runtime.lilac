@@ -8,15 +8,15 @@ using Standard.Io as Io
 using Standard.Heap as Heap
 
 /// Records the process arguments in `Standard.Os`, sets
-/// `Heap.default_allocator` to an arena that lives as long as the program,
+/// `Heap.default_allocator` to a general allocator that lives as long as the program,
 /// then runs the program: its root-namespace `main`.
 @entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
     Os.argument_count = count
     Os.argument_vector = arguments
     Os.environment_vector = environment
 
-    program_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.init()
-    Heap.default_allocator = .Some(program_allocator.allocator())
+    general_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.init()
+    Heap.default_allocator = .Some(general_allocator.allocator())
 
     main()
 }
