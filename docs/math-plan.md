@@ -1,6 +1,6 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; phases 0-4 done.
+> Status: agreed, 2026-10-14; phases 0-4, 6 done.
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -534,28 +534,36 @@ Verification (the production-grade gate):
 
 ## Phase 6: printing and parsing floats
 
-A beginner's first math program prints a float.
+**Done.** (`lib/Standard/float_format.lilac`, plus `scripts/numeric_types.pl`):
 
-- **`@format`.** `Float32`/`Float64` print the shortest decimal string
-  that reads back to the same bits, using the Ryū or Schubfach
-  algorithm (no big integers, no allocation). Output looks like `0.1`,
-  `1e300`, `-0`, `inf`, `nan`.
-- **Fixed and scientific.** Two wrappers, like `hex()`: `{x.fixed(3)}`
-  and `{x.scientific(4)}`. They are correctly rounded and need exact
-  decimal expansion: Ryū-printf or a fixed-size big integer on the
-  stack.
+- **`@format`.** `Float16`, `Float32` and `Float64` (and `@fbit16`/
+  `@fbit32`/`@fbit64`) print the shortest decimal string that reads back
+  to the same bits (Burger–Dybvig exact interval over a stack-allocated
+  64-limb big integer, no heap allocation). Output looks like `0.1`,
+  `1e300`, `-0`, `inf`, `-inf`, `nan`.
+- **Fixed and scientific.** `Fixed` and `Scientific` wrappers:
+  `{x.fixed(3)}` and `{x.scientific(4)}`, correctly rounded (ties to
+  even) from the exact binary value.
 - **Parsing.** `Float64.parse(text: @byte_buffer) value: Float64 else
-  error: ParseError` and `Int*.parse`. Floats use Eisel–Lemire with a
-  big-decimal fallback, so every input is correctly rounded. The
-  formats are the language's literal formats plus `inf`/`nan`. This sits
-  in `Standard` until `Text` exists (STDLIB §3.3 names `parse_float`).
-- Remove `FAILS_standard_float_hole` and update STDLIB §3.1a's note.
+  error: ParseError` (`Float32.parse`, `Float16.parse`, `Int*.parse` and
+  `Uint*.parse`), with `ParseError: enum { Empty; InvalidDigit;
+  Overflow; Trailing }`. Floats use the exact stack big-integer
+  converter (780 significant digits plus a sticky digit), so every input
+  including halfway points and subnormals is correctly rounded. The
+  formats are the language's literal formats (`0x` and `0b` on integers,
+  `_` separators) plus `inf`/`infinity`/`nan` on floats.
+- Removed `FAILS_standard_float_hole` and updated STDLIB §3.1a.
+- Fixed a lowering bug in `Lower::lower_assign` where a branching
+  assignment target (`@write(@array_at(…), v)`) read `v`'s register
+  across the bounds-check block.
 
 Tests:
-- Round-trip on random bits and on the hard cases (from Ryū's test
-  suite).
-- The fixed-precision rounding cases (`0.125` to 2 digits, `1e23`).
-- Parse cases at the halfway points.
+- `float_format.lilac`: special values, Ryū hard cases and round-trip on
+  generated `Float64` and `Float32` bit patterns.
+- `float_fixed_scientific.lilac`: fixed and scientific rounding cases
+  (`0.125` to 2 digits, `1e23`, ties to even, rollover).
+- `numeric_parse.lilac`: integer and float parsing, `ParseError`
+  variants, and IEEE halfway points.
 
 ## Phase 7: `Standard.Math.Random`
 

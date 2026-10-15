@@ -432,6 +432,16 @@ Uint8: object {
     /// low bits.
     to_int8_wrapping: function (self: Uint8) Int8 => self.data as @bit8 as Int8
 
+    /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Uint8 else error: ParseError {
+        raw: @bit64 = parse_unsigned_int(text, @extend_zero(Uint8.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Uint8 { data = @truncate(raw) }
+    }
+
     /// Unsigned decimal.
     @format: function (self, out: ref Formatter) nothing {
         write_unsigned(out, @extend_zero(self.data), 0xA)

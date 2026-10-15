@@ -549,6 +549,16 @@ Uint: object {
     /// This value as a `Float64`, rounded to the nearest (ties to even);
     to_float64_rounded: function (self: Uint) Float64 => @uint_to_float(self.data) as @fbit64 as Float64
 
+    /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Uint else error: ParseError {
+        raw: @bit64 = parse_unsigned_int(text, @extend_zero(Uint.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Uint { data = @truncate(raw) }
+    }
+
     /// Unsigned decimal.
     @format: function (self, out: ref Formatter) nothing {
         write_unsigned(out, @extend_zero(self.data), 0xA)

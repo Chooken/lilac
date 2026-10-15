@@ -495,6 +495,30 @@ Float16: object {
         fail
     }
 
+    /// Parses a `Float16` from decimal text (`1.5`, `1e-4`, `inf`, `-inf`, `nan`;
+    /// `_` separators allowed), rounded once to nearest (ties to even).
+    parse: function (text: @byte_buffer) value: Float16 else error: ParseError {
+        raw: @bit64 = parse_float_bits(text, 16) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Float16 { data = @bits_to_fbit_16(@truncate(raw)) }
+    }
+
+    /// Shortest decimal string that reads back to the same `Float16` bits.
+    @format: function (self, out: ref Formatter) nothing {
+        write_float_shortest(out, @extend_zero(@fbit_to_bits_16(self.data)), 16)
+    }
+
+    /// Formatted with `precision` digits after the decimal point: `{x.fixed(3)}`.
+    fixed: function (self: Float16, precision: Uint32) Fixed =>
+        Fixed { bits = @extend_zero(@fbit_to_bits_16(self.data)), width = 16, precision = precision as @bit32 }
+
+    /// Formatted in scientific notation with `precision` digits after the
+    /// decimal point: `{x.scientific(4)}`.
+    scientific: function (self: Float16, precision: Uint32) Scientific =>
+        Scientific { bits = @extend_zero(@fbit_to_bits_16(self.data)), width = 16, precision = precision as @bit32 }
+
     /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.
     hex: function (self: Float16) Hex => Hex { value = @extend_zero(@fbit_to_bits_16(self.data)) }
 

@@ -528,6 +528,16 @@ Int8: object {
     /// low bits, sign-extended.
     to_uint_wrapping: function (self: Int8) Uint => @extend_sign(self.data) as @bit_native as Uint
 
+    /// Parses a signed integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Int8 else error: ParseError {
+        raw: @bit64 = parse_signed_int(text, @extend_zero(@i_negate_8(Int8.MIN.data)), @extend_zero(Int8.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Int8 { data = @truncate(raw) }
+    }
+
     /// Signed decimal.
     @format: function (self, out: ref Formatter) nothing {
         write_signed(out, @extend_sign(self.data))

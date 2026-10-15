@@ -502,6 +502,30 @@ Float32: object {
         fail
     }
 
+    /// Parses a `Float32` from decimal text (`1.5`, `1e-4`, `inf`, `-inf`, `nan`;
+    /// `_` separators allowed), rounded once to nearest (ties to even).
+    parse: function (text: @byte_buffer) value: Float32 else error: ParseError {
+        raw: @bit64 = parse_float_bits(text, 32) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Float32 { data = @bits_to_fbit_32(@truncate(raw)) }
+    }
+
+    /// Shortest decimal string that reads back to the same `Float32` bits.
+    @format: function (self, out: ref Formatter) nothing {
+        write_float_shortest(out, @extend_zero(@fbit_to_bits_32(self.data)), 32)
+    }
+
+    /// Formatted with `precision` digits after the decimal point: `{x.fixed(3)}`.
+    fixed: function (self: Float32, precision: Uint32) Fixed =>
+        Fixed { bits = @extend_zero(@fbit_to_bits_32(self.data)), width = 32, precision = precision as @bit32 }
+
+    /// Formatted in scientific notation with `precision` digits after the
+    /// decimal point: `{x.scientific(4)}`.
+    scientific: function (self: Float32, precision: Uint32) Scientific =>
+        Scientific { bits = @extend_zero(@fbit_to_bits_32(self.data)), width = 32, precision = precision as @bit32 }
+
     /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.
     hex: function (self: Float32) Hex => Hex { value = @extend_zero(@fbit_to_bits_32(self.data)) }
 

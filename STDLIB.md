@@ -275,7 +275,8 @@ consumer meet in it:
 | `Formatter` | Where formatted text goes: an object holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
 | `Format` | `alias @format_args(Formatter)`: the type of an f-string written into a `Formatter`. |
 | `FormatSink` | `alias function (target: ref unknown, bytes: @byte_buffer) nothing`: what a consumer hands a `Formatter`. |
-| `Hex`, `Binary` | An integer's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}` on `Int`, `Int8`…`Int64`. |
+| `Hex`, `Binary` | A number's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}`. |
+| `Fixed`, `Scientific` | A float formatted with `precision` digits after the decimal point (ties rounded to even), fixed-point or scientific: `{x.fixed(3)}`, `{x.scientific(4)}`. |
 | `Padded` | `pad_left(ref f, width)`, `pad_right` and `pad_center` (an odd space goes after) pad a `Format` with spaces to `width` code points; a counting `Formatter` measures it first. |
 
 A type is formattable when it has a `@format` hook for `Formatter`, found
@@ -293,13 +294,14 @@ Point: object {
 ```
 
 `Standard` defines `@format` for `@bit8`…`@bit64` and `@bit_native`
-(unsigned decimal), `Int` and `Int8`…`Int64` (signed decimal), `Bool`
-(`true`/`false`), `@byte_buffer` (its bytes), `Format` (a nested format)
-and `Optional[T]` / `Result[T, E]` (`Some(v)`, `None`, `Ok(v)`,
+(unsigned decimal), `Int`/`Int8`…`Int64` (signed decimal),
+`Uint`/`Uint8`…`Uint64` (unsigned decimal), `@fbit16`/`@fbit32`/`@fbit64`
+and `Float16`/`Float32`/`Float64` (shortest round-trip decimal), `Bool`
+(`true`/`false`), `@byte_buffer` (its bytes), `Format` (a nested format),
+`Ordering`, `FloatClass`, `ParseError` and `Optional[T]` / `Result[T, E]` (`Some(v)`, `None`, `Ok(v)`,
 `Error(e)`: their hooks capture the payload through `self`, so they work
 when the payload types copy and have a `@format`, checked where they are
-used). Floats have none yet: shortest round-trip printing is its own work
-item, so a float hole is `E071`, never wrong digits. A character literal
+used). Every numeric type also provides `parse(text: @byte_buffer) value: T else error: ParseError`. A character literal
 is a `@bit32`, so `{'A'}` prints `65` until `Standard` has a `Char` type.
 
 A consumer makes a `Formatter` over its own storage: `Io.print` over a

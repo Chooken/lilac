@@ -551,6 +551,16 @@ Int16: object {
     /// past `Float16`'s largest finite value it is an infinity.
     to_float16_rounded: function (self: Int16) Float16 => @int_to_float(self.data) as @fbit16 as Float16
 
+    /// Parses a signed integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Int16 else error: ParseError {
+        raw: @bit64 = parse_signed_int(text, @extend_zero(@i_negate_16(Int16.MIN.data)), @extend_zero(Int16.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Int16 { data = @truncate(raw) }
+    }
+
     /// Signed decimal.
     @format: function (self, out: ref Formatter) nothing {
         write_signed(out, @extend_sign(self.data))

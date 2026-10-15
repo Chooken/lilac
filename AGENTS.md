@@ -1006,7 +1006,9 @@ bug fix that changes generated code.
   (`checked_*`, `wrapping_*`, `saturating_*`, `overflowing_*` for
   `add`/`subtract`/`multiply`/`negate`/`pow`), division/root/bit/wide
   methods, float constants/classification (`FloatClass` in
-  `float_class.lilac`), exact/bit/ULP/comparison/interpolation methods
+  `float_class.lilac`), exact/bit/ULP/comparison/interpolation methods,
+  `fixed`/`scientific`/`@format`/`parse` (`float_format.lilac`,
+  `ParseError`, over a stack 64-limb big integer)
   and `compare` (`Ordering` in `ordering.lilac`) take `self` by
   value so the `=>` ones fold as constants, and `Standard` code that
   means to wrap (address arithmetic in `Heap`) uses `wrapping_*`. `as` exists only where exact; other conversions

@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# Generates lib/Standard's numeric types (math plan phases 2-4): the ten
+# Generates lib/Standard's numeric types (math plan phases 2-4, 6): the ten
 # integer files and three float files are this script's output, so change
 # the script and rerun it (`perl scripts/numeric_types.pl lib/Standard`)
 # rather than editing them by hand.
@@ -598,11 +598,28 @@ sub int_file {
         $text .= "    to_$m\_rounded: function (self: $name) $fname => $to_float(self.data) as \@fbit$fbits as $fname\n\n";
     }
 
-    # Formatting.
+    # Formatting and parsing.
+    my $max64 = $bits eq '64' ? "$name.MAX.data" : "\@extend_zero($name.MAX.data)";
+    my $trunc_from64 = $bits eq '64' ? 'raw' : "\@truncate(raw)";
     if ($signed) {
+        my $min_mag64 = $bits eq '64' ? "\@i_negate_64($name.MIN.data)" : "\@extend_zero(\@i_negate_$s($name.MIN.data))";
+        $text .= "    /// Parses a signed integer in decimal, `0x` hexadecimal or `0b` binary\n";
+        $text .= "    /// (`_` separators allowed).\n";
+        $text .= "    parse: function (text: \@byte_buffer) value: $name else error: ParseError {\n";
+        $text .= "        raw: \@bit64 = parse_signed_int(text, $min_mag64, $max64) else -> err: ParseError {\n";
+        $text .= "            error = err\n            fail\n        }\n";
+        $text .= "        value = $name { data = $trunc_from64 }\n    }\n\n";
+
         $text .= "    /// Signed decimal.\n    \@format: function (self, out: ref Formatter) nothing {\n";
         $text .= "        write_signed(out, " . ($bits eq '64' ? 'self.data' : '@extend_sign(self.data)') . ")\n    }\n\n";
     } else {
+        $text .= "    /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary\n";
+        $text .= "    /// (`_` separators allowed).\n";
+        $text .= "    parse: function (text: \@byte_buffer) value: $name else error: ParseError {\n";
+        $text .= "        raw: \@bit64 = parse_unsigned_int(text, $max64) else -> err: ParseError {\n";
+        $text .= "            error = err\n            fail\n        }\n";
+        $text .= "        value = $name { data = $trunc_from64 }\n    }\n\n";
+
         $text .= "    /// Unsigned decimal.\n    \@format: function (self, out: ref Formatter) nothing {\n";
         $text .= "        write_unsigned(out, " . ($bits eq '64' ? 'self.data' : '@extend_zero(self.data)') . ", 0xA)\n    }\n\n";
     }
@@ -970,6 +987,27 @@ sub float_file {
         $text .= "            value = $conv(self.data) as $tc\n            return\n        }\n        fail\n    }\n\n";
     }
     my $bits64 = $bits == 64 ? "\@fbit_to_bits_64(self.data)" : "\@extend_zero(\@fbit_to_bits_$s(self.data))";
+    my $from_bits64 = $bits == 64 ? "\@bits_to_fbit_64(raw)" : "\@bits_to_fbit_$s(\@truncate(raw))";
+    $text .= "    /// Parses a `$name` from decimal text (`1.5`, `1e-4`, `inf`, `-inf`, `nan`;\n";
+    $text .= "    /// `_` separators allowed), rounded once to nearest (ties to even).\n";
+    $text .= "    parse: function (text: \@byte_buffer) value: $name else error: ParseError {\n";
+    $text .= "        raw: \@bit64 = parse_float_bits(text, $bits) else -> err: ParseError {\n";
+    $text .= "            error = err\n            fail\n        }\n";
+    $text .= "        value = $name { data = $from_bits64 }\n    }\n\n";
+
+    $text .= "    /// Shortest decimal string that reads back to the same `$name` bits.\n";
+    $text .= "    \@format: function (self, out: ref Formatter) nothing {\n";
+    $text .= "        write_float_shortest(out, $bits64, $bits)\n    }\n\n";
+
+    $text .= "    /// Formatted with `precision` digits after the decimal point: `{x.fixed(3)}`.\n";
+    $text .= "    fixed: function (self: $name, precision: Uint32) Fixed =>\n";
+    $text .= "        Fixed { bits = $bits64, width = $bits, precision = precision as \@bit32 }\n\n";
+
+    $text .= "    /// Formatted in scientific notation with `precision` digits after the\n";
+    $text .= "    /// decimal point: `{x.scientific(4)}`.\n";
+    $text .= "    scientific: function (self: $name, precision: Uint32) Scientific =>\n";
+    $text .= "        Scientific { bits = $bits64, width = $bits, precision = precision as \@bit32 }\n\n";
+
     $text .= "    /// The IEEE 754 bits in hexadecimal: `{x.hex()}`.\n";
     $text .= "    hex: function (self: $name) Hex => Hex { value = $bits64 }\n\n";
     $text .= "    /// The IEEE 754 bits in binary: `{x.binary()}`.\n";

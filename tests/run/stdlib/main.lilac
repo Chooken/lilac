@@ -200,6 +200,7 @@ formatting: function () nothing {
     expect_format($"[{pad_right(ref word, 0x6)}]", "[é255  ]", 0x69)
     expect_format($"[{pad_center(ref word, 0x7)}]", "[ é255  ]", 0x6A)
     expect_format($"[{pad_left(ref word, 0x2)}]", "[é255]", 0x6B)
+    expect_format($"{1.5 as Float64} {(0.125 as Float64).fixed(2)} {(1500.0 as Float64).scientific(1)}", "1.5 0.12 1.5e3", 0x6C)
 }
 
 main: function () nothing {
