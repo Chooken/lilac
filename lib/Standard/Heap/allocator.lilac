@@ -33,15 +33,15 @@ get_default_allocator: function () allocator: Allocator {
 }
 
 /// An allocator type's functions, each taking the allocator first. `size`
-/// and `alignment` are in bytes; the `Allocator` handle checks them, so a
-/// size is always positive and an alignment a power of two.
+/// and `alignment` are in bytes; each allocator checks them, so a size
+/// is always positive and an alignment a power of two.
 AllocatorTable[T]: object {
-    /// `size` zeroed bytes aligned to `alignment`, or null when out of
+    /// `size` zeroed bytes aligned to `alignment`; panics when out of
     /// memory.
     allocate: ref function (target: ref T, size: Int, alignment: Int) allocation: ref unknown
     /// `memory` (`old_size` bytes from `allocate`) resized to `new_size`,
-    /// keeping its bytes up to the smaller size and zeroing the rest; null
-    /// when out of memory, and `memory` is then untouched.
+    /// keeping its bytes up to the smaller size and zeroing the rest;
+    /// panics when out of memory, and `memory` is then untouched.
     reallocate: ref function (target: ref T, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown
     /// Gives back `memory`, `size` bytes from `allocate`.
     free: ref function (target: ref T, memory: ref unknown, size: Int, alignment: Int) nothing
@@ -111,46 +111,24 @@ Allocator: object {
         self.free_bytes(memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
     }
 
-    /// `size` zeroed bytes aligned to `alignment` (a power of two).
+    /// `size` zeroed bytes aligned to `alignment` (a power of two),
+    /// from the allocator behind this handle. It checks the request and
+    /// panics when out of memory.
     allocate_bytes: function (self, size: Int, alignment: Int) allocation: ref unknown {
-        check_request(size, alignment)
-        if size == 0 as Int {
-            allocation = empty_allocation(alignment)
-            return
-        }
         allocation = self.functions.allocate(self.target, size, alignment)
-        if @ptr_to_address(allocation) == 0x0 {
-            @panic("Out of memory.")
-        }
     }
 
     /// `memory` (from `allocate_bytes`, `old_size` long) resized to
     /// `new_size` bytes, keeping its bytes up to the smaller size; new
-    /// bytes are zeroed.
+    /// bytes are zeroed. From the allocator behind this handle, which
+    /// checks the request and panics when out of memory.
     reallocate_bytes: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
-        check_request(old_size, alignment)
-        check_request(new_size, alignment)
-        if old_size == 0 as Int {
-            allocation = self.allocate_bytes(new_size, alignment)
-            return
-        }
-        if new_size == 0 as Int {
-            self.free_bytes(memory, old_size, alignment)
-            allocation = empty_allocation(alignment)
-            return
-        }
         allocation = self.functions.reallocate(self.target, memory, old_size, new_size, alignment)
-        if @ptr_to_address(allocation) == 0x0 {
-            @panic("Out of memory.")
-        }
     }
 
-    /// Frees `memory`, `size` bytes at `alignment` from `allocate_bytes`.
+    /// Frees `memory`, `size` bytes at `alignment` from `allocate_bytes`,
+    /// with the allocator behind this handle.
     free_bytes: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
-        check_request(size, alignment)
-        if size == 0 as Int {
-            return
-        }
         self.functions.free(self.target, memory, size, alignment)
     }
 }
