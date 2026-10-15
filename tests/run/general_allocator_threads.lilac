@@ -1,6 +1,6 @@
 // expect-stdout: joined
 // expect-exit: 0
-// `GeneralAllocator.ALLOCATOR` from four threads at once: each keeps a
+// One shared `GeneralAllocator` from four threads at once: each keeps a
 // window of live allocations of many sizes (small and large), filled with
 // its own byte, and checks each is still whole when it frees it. The lock
 // keeps every slot and mapping with one owner. Exits with the number of
@@ -15,6 +15,7 @@ using Standard.Os as Os
 Work: object {
     tag: @bit8
     failed: @bit32
+    allocator: Allocator
 }
 
 check: function (ok: Bool, code: @bit32) nothing {
@@ -47,7 +48,7 @@ Live: object {
 
 work: function (argument: ref unknown) nothing {
     job: ref Work = argument as ref Work
-    allocator: Allocator = GeneralAllocator.ALLOCATOR
+    allocator: Allocator = job.allocator
     live: @array(Live, 16) = @array(Live, 16) {}
     window: ref @array(Live, 16) = ref live
 
@@ -93,6 +94,7 @@ work: function (argument: ref unknown) nothing {
 }
 
 main: function () nothing {
+    general: GeneralAllocator = GeneralAllocator.init()
     jobs: @array(Work, 4) = @array(Work, 4) {}
     at: ref @array(Work, 4) = ref jobs
     threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
@@ -105,6 +107,7 @@ main: function () nothing {
         }
         job: ref Work = @array_at(at, index)
         job.tag = tag
+        job.allocator = Allocator.from[GeneralAllocator](ref general)
         tag = @i_add_8(tag, 0x1)
         thread: Os.Thread = Os.spawn(ref work, job as ref unknown).get() else {
             exit(0x1)
@@ -127,6 +130,6 @@ main: function () nothing {
         code = @i_add_32(code, 0x1)
         index = @i_add_native(index, 0x1)
     }
-    check(default_general_allocator.get_used() == 0 as Int, 0x20)
+    check(general.get_used() == 0 as Int, 0x20)
     print("joined\n")
 }
