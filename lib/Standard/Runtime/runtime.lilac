@@ -15,10 +15,8 @@ using Standard.Heap as Heap
     Os.argument_vector = arguments
     Os.environment_vector = environment
 
-    program_arena = .Some(Heap.ArenaAllocator.init())
-    if program_arena.get_ref() -> arena: ref Heap.ArenaAllocator {
-        Heap.default_allocator = .Some(Heap.Allocator.from[Heap.ArenaAllocator](arena))
-    }
+    program_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.init()
+    Heap.default_allocator = .Some(program_allocator.allocator())
 
     main()
 }
@@ -31,9 +29,4 @@ using Standard.Heap as Heap
 /// `Format`, so `@panic($"index {i} past {n}")` formats.
 @compiler_print: function (text: Format) nothing {
     Io.print_error(text)
-}
-
-private {
-    /// The arena behind `Heap.default_allocator`, set by `@entry`.
-    program_arena: Optional[Heap.ArenaAllocator] = .None
 }

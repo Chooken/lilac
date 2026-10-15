@@ -1,10 +1,10 @@
 /// A value that may be missing: `Some` with it, or `None`. A zeroed
-/// `Optional` is `Some` with a zero value, so set `.None` explicitly.
+/// `Optional` is `None`.
 Optional[T]: enum {
-    /// The value is here.
-    Some: T
     /// There is no value.
     None
+    /// The value is here.
+    Some: T
 
     /// The value of a `Some` (moved out of the optional); fails on `None`.
     get: function(self: Optional[T]) value: T else nothing {

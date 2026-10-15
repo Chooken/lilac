@@ -1,6 +1,4 @@
 
-default_page_allocator: PageAllocator = PageAllocator {}
-
 /// Whole pages from the OS for each allocation (`Os.map_pages`), given
 /// back to it when freed. It keeps no state, so every thread may use it,
 /// but each allocation takes at least a page: allocate in bulk from it, or
@@ -8,8 +6,6 @@ default_page_allocator: PageAllocator = PageAllocator {}
 PageAllocator: object {
 
     ALLOCATOR_TABLE: ref AllocatorTable[PageAllocator] => ref page_table
-
-    ALLOCATOR: Allocator => Allocator.from[PageAllocator](ref default_page_allocator)
 
     allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
         within_page(alignment)

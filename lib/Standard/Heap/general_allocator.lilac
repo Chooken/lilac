@@ -1,8 +1,5 @@
 using Standard.Os as Os
 
-/// The process-wide `GeneralAllocator`, for `GeneralAllocator.ALLOCATOR`.
-default_general_allocator: GeneralAllocator = GeneralAllocator.EMPTY
-
 /// A general-purpose allocator: any size at any alignment, each
 /// allocation freed on its own. Thread-safe (one lock around every call).
 ///
@@ -38,10 +35,6 @@ GeneralAllocator: object {
     }
 
     ALLOCATOR_TABLE: ref AllocatorTable[GeneralAllocator] => ref general_allocator_table
-
-    /// The process-wide general allocator (`default_general_allocator`),
-    /// for every thread.
-    ALLOCATOR: Allocator => Allocator.from[GeneralAllocator](ref default_general_allocator)
 
     /// An empty allocator, as a constant (for globals); it maps nothing
     /// until the first allocation.

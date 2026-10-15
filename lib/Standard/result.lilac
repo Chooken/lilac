@@ -1,10 +1,10 @@
 /// The outcome of an operation that can fail: `Ok` with its value, or
-/// `Error` with why. A zeroed `Result` is `Ok` with a zero value.
+/// `Error` with why. A zeroed `Result` is `Error` with a zero value.
 Result[T, E]: enum {
-    /// It worked, giving this value.
-    Ok: T
     /// It failed, for this reason.
     Error: E
+    /// It worked, giving this value.
+    Ok: T
 
     is_ok: function(self) ok: Bool {
         match self {
