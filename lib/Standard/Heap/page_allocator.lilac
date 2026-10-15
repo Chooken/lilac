@@ -41,7 +41,7 @@ PageAllocator: object {
         self.free_raw(memory, old_size, alignment)
     }
 
-    free_raw: function (self, memory: ref unknown, size: Int, _alignment: Int) nothing {
+    free_raw: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
         Os.unmap_pages(memory, size as @bit_native)
     }
 }

@@ -1,0 +1,162 @@
+// The checks `general_allocator` and `general_allocator_release` run on
+// `GeneralAllocator`'s own behavior: size classes, reuse, large
+// mappings, in-place resizing and its accounting.
+
+using Standard
+using Standard.Heap
+
+/// `memory` as bytes.
+bytes_of: function (memory: ref unknown) ref @bit8 => memory as ref @bit8
+
+/// Whether `memory` is aligned to `alignment` (a power of two).
+aligned_to: function (memory: ref unknown, alignment: Int) Bool => address(memory) % alignment == 0 as Int
+
+/// Whether the first `size` bytes at `memory` are zero.
+all_zero: function (memory: ref unknown, size: Int) zero: Bool {
+    zero = true
+    index: Int = 0
+    loop {
+        if index == size {
+            break
+        }
+        if @load_u8(bytes_of(memory), index as @bit_native) != 0x0 {
+            zero = false
+            break
+        }
+        index = index + 1
+    }
+}
+
+/// Every check on `GeneralAllocator`; `base` numbers its failures.
+general_checks: function (base: @bit32) nothing {
+    page: Int = @builtin.Target.page_size
+    general: GeneralAllocator = GeneralAllocator.init()
+    check(general.get_capacity() == 0 as Int, base)
+
+    // Every size up to past the size classes, at every alignment up to
+    // past a page: aligned, zeroed, writable, and freed again.
+    alignment: Int = 1
+    loop {
+        if alignment > page * 4 {
+            break
+        }
+        size: Int = 1
+        loop {
+            if size > GeneralAllocator.MAX_SMALL * 2 {
+                break
+            }
+            memory: ref unknown = general.allocate_raw(size, alignment)
+            check(aligned_to(memory, alignment), @i_add_32(base, 0x1))
+            check(all_zero(memory, size), @i_add_32(base, 0x2))
+            @memset(memory, 0x5A, size as @bit_native)
+            general.free_raw(memory, size, alignment)
+            size = size * 3 + 1
+        }
+        alignment = alignment * 2
+    }
+    check(general.get_used() == 0 as Int, @i_add_32(base, 0x3))
+
+    // Freeing one allocation leaves its neighbours alone.
+    a: ref unknown = general.allocate_raw(16, 8)
+    @store_u8(bytes_of(a), 0x0, 0xAB)
+    b: ref unknown = general.allocate_raw(32, 8)
+    c: ref unknown = general.allocate_raw(16, 8)
+    @store_u8(bytes_of(c), 0xF, 0xCD)
+    @memset(b, 0xEE, 0x20)
+    general.free_raw(b, 32, 8)
+    check(@load_u8(bytes_of(a), 0x0) == 0xAB and @load_u8(bytes_of(c), 0xF) == 0xCD, @i_add_32(base, 0x4))
+
+    // A freed slot is the next of its class, zeroed again.
+    d: ref unknown = general.allocate_raw(32, 8)
+    check(address(d) == address(b), @i_add_32(base, 0x5))
+    check(all_zero(d, 32), @i_add_32(base, 0x6))
+
+    // Sizes that round to the same class share slots.
+    general.free_raw(d, 32, 8)
+    e: ref unknown = general.allocate_raw(17, 1)
+    check(address(e) == address(b), @i_add_32(base, 0x7))
+    general.free_raw(e, 17, 1)
+
+    // A byte, then an aligned allocation, then freeing it: the slot comes
+    // back (the class, not the address, says where it lives).
+    byte: ref unknown = general.allocate_raw(1, 1)
+    eight: ref unknown = general.allocate_raw(8, 8)
+    check(aligned_to(eight, 8), @i_add_32(base, 0x8))
+    general.free_raw(eight, 8, 8)
+    again: ref unknown = general.allocate_raw(8, 8)
+    check(address(again) == address(eight), @i_add_32(base, 0x9))
+    general.free_raw(again, 8, 8)
+    general.free_raw(byte, 1, 1)
+
+    // Growing within a class stays in place and zeroes what it adds,
+    // also after a shrink left bytes behind.
+    f: ref unknown = general.allocate_raw(100, 8)
+    @memset(f, 0x11, 0x64)
+    g: ref unknown = general.reallocate_raw(f, 100, 98, 8)
+    check(address(g) == address(f), @i_add_32(base, 0xA))
+    h: ref unknown = general.reallocate_raw(g, 98, 112, 8)
+    check(address(h) == address(f), @i_add_32(base, 0xB))
+    check(@load_u8(bytes_of(h), 0x61) == 0x11 and all_zero(@ptr_add(h, 0x62), 14), @i_add_32(base, 0xC))
+
+    // A shrink to another class moves only what still fits: nothing past
+    // the new allocation is written.
+    big: ref unknown = general.reallocate_raw(h, 112, 4096, 8)
+    @memset(big, 0xFF, 0x1000)
+    small: ref unknown = general.reallocate_raw(big, 4096, 16, 8)
+    check(@load_u8(bytes_of(small), 0xF) == 0xFF, @i_add_32(base, 0xD))
+    neighbour: ref unknown = general.allocate_raw(16, 8)
+    check(all_zero(neighbour, 16), @i_add_32(base, 0xE))
+    general.free_raw(neighbour, 16, 8)
+
+    // Small to large and back keeps the bytes; a large one is its own
+    // mapping, unmapped when freed.
+    before: Int = general.get_capacity()
+    large: ref unknown = general.reallocate_raw(small, 16, 100000, 8)
+    check(@load_u8(bytes_of(large), 0xF) == 0xFF and all_zero(@ptr_add(large, 0x10), 99984), @i_add_32(base, 0xF))
+    check(general.get_capacity() >= before + 100000, @i_add_32(base, 0x10))
+
+    // Large growth within its mapping stays in place; past it, moves.
+    in_place: ref unknown = general.reallocate_raw(large, 100000, 100001, 8)
+    check(address(in_place) == address(large), @i_add_32(base, 0x11))
+    moved: ref unknown = general.reallocate_raw(in_place, 100001, 1000000, 8)
+    check(@load_u8(bytes_of(moved), 0xF) == 0xFF and @load_u8(bytes_of(moved), 0x10) == 0x0, @i_add_32(base, 0x12))
+    check(all_zero(@ptr_add(moved, 0x186A1), 1000000 - 100001), @i_add_32(base, 0x13))
+    // A large one that shrinks to a fraction of its mapping moves to a
+    // smaller one.
+    shrunk: ref unknown = general.reallocate_raw(moved, 1000000, 20000, 8)
+    check(@load_u8(bytes_of(shrunk), 0xF) == 0xFF, @i_add_32(base, 0x14))
+    back: ref unknown = general.reallocate_raw(shrunk, 20000, 16, 8)
+    check(@load_u8(bytes_of(back), 0xF) == 0xFF, @i_add_32(base, 0x15))
+    general.free_raw(back, 16, 8)
+    check(general.get_capacity() == before, @i_add_32(base, 0x16))
+
+    // More aligned than a page: still in place.
+    wide: ref unknown = general.allocate_raw(100, page * 4)
+    check(aligned_to(wide, page * 4), @i_add_32(base, 0x17))
+    general.free_raw(wide, 100, page * 4)
+
+    // Many allocations fill several slabs; freeing them all leaves
+    // nothing used and the slabs mapped for reuse.
+    first: ref unknown = general.allocate_raw(48, 16)
+    count: Int = 1
+    loop {
+        if count == 5000 as Int {
+            break
+        }
+        general.allocate_raw(48, 16)
+        count = count + 1
+    }
+    check(general.get_used() == 32 as Int + 48 * 5000, @i_add_32(base, 0x18))
+    mapped: Int = general.get_capacity()
+    general.free_raw(first, 48, 16)
+    reused: ref unknown = general.allocate_raw(48, 16)
+    check(address(reused) == address(first) and general.get_capacity() == mapped, @i_add_32(base, 0x19))
+
+    // The typed functions go through the handle: a zero size takes
+    // nothing.
+    words: ref @bit64 = general.allocate[@bit64](4)
+    check(aligned_to(words as ref unknown, 8), @i_add_32(base, 0x1A))
+    general.deallocate[@bit64](words, 4)
+    none: ref Empty = general.create[Empty](Empty {})
+    general.destroy[Empty](none)
+}

@@ -43,7 +43,7 @@ AllocatorTable[T]: object {
     /// keeping its bytes up to the smaller size and zeroing the rest; null
     /// when out of memory, and `memory` is then untouched.
     reallocate: ref function (target: ref T, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown
-    /// Gives back `memory`, `size` bytes at `alignment` from `allocate`.
+    /// Gives back `memory`, `size` bytes from `allocate`.
     free: ref function (target: ref T, memory: ref unknown, size: Int, alignment: Int) nothing
 }
 

@@ -22,7 +22,7 @@ ArenaAllocator: object {
         block_size: Int
     }
 
-    ALLOCATOR_TABLE: ref AllocatorTable[ArenaAllocator] => ref allocator_table
+    ALLOCATOR_TABLE: ref AllocatorTable[ArenaAllocator] => ref arena_allocator_table
 
     /// `ArenaAllocator.init`'s block size: 512 KiB.
     DEFAULT_SIZE: Int => 512 * 1024
@@ -93,7 +93,7 @@ ArenaAllocator: object {
         allocation = self.reallocate_raw(ptr as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
     }
 
-    free[T]: function (self, ptr: ref T) nothing {
+    free[T]: function (self, ptr: ref T, count: Int, alignment: Int) nothing {
         // no-op
     }
 
@@ -123,7 +123,7 @@ ArenaAllocator: object {
 
         // The address is aligned, not the offset: a large alignment may
         // be more than the mapping's.
-        base_address: Int = @ptr_to_address(self.current_block.base)
+        base_address: Int = @ptr_to_address(self.current_block as ref unknown)
         start: Int = align_up(base_address.wrapping_add(self.current_block.used), alignment).wrapping_subtract(base_address)
 
         if size > self.block_size - start {
@@ -133,11 +133,11 @@ ArenaAllocator: object {
             } else {
                 self.add_new_general_block()
             }
-            base_address = @ptr_to_address(self.current_block.base)
+            base_address = @ptr_to_address(self.current_block as ref unknown)
             start = align_up(base_address.wrapping_add(self.current_block.used), alignment).wrapping_subtract(base_address)
         }
 
-        allocation = @ptr_add(self.current_block.base, start as @bit_native)
+        allocation = @ptr_add(self.current_block as ref unknown, start as @bit_native)
         self.current_block.used = start + size
     }
 
@@ -159,7 +159,7 @@ ArenaAllocator: object {
         // other block's allocation is out of this range (blocks never
         // overlap), so only this one is checked.
         block: ref ArenaBlock = self.current_block
-        offset: Int = @i_sub_native(@ptr_to_address(ptr), @ptr_to_address(block.base))
+        offset: Int = @i_sub_native(@ptr_to_address(ptr), @ptr_to_address(block as ref unknown))
         if offset >= @size_of(ArenaBlock) and offset <= block.used and old_size == block.used - offset and new_size <= block.size - offset {
             // Bytes it gives back go back to zero.
             if new_size < old_size {
@@ -197,7 +197,7 @@ ArenaAllocator: object {
 
             // Only the bytes used need zeroing; the header stays.
             header: Int = @size_of(ArenaBlock)
-            @memset(@ptr_add(block.base, header as @bit_native), 0x0, block.used - header)
+            @memset(@ptr_add(block as ref unknown, header as @bit_native), 0x0, block.used - header)
             block.used = header
 
         } else break
@@ -242,7 +242,7 @@ ArenaAllocator: object {
 
             arena_block: ref ArenaBlock = allocate_block(align_up(overhead + size, page))
 
-            base_address: Int = @ptr_to_address(arena_block.base)
+            base_address: Int = @ptr_to_address(arena_block as ref unknown)
             start: Int = align_up(base_address.wrapping_add(@size_of(ArenaBlock)), alignment).wrapping_subtract(base_address)
 
             if self.current_custom_block.get() -> value: ref ArenaBlock {
@@ -253,7 +253,7 @@ ArenaAllocator: object {
 
             self.current_custom_block = .Some(arena_block)
 
-            allocation = @ptr_add(arena_block.base, start as @bit_native)
+            allocation = @ptr_add(arena_block as ref unknown, start as @bit_native)
             arena_block.used = start + size
         }
 
@@ -266,7 +266,6 @@ ArenaAllocator: object {
             block = ptr as ref ArenaBlock
 
             @write(block, ArenaBlock {
-                base = ptr
                 size = size
                 used = @size_of(ArenaBlock)
                 next = .None
@@ -282,7 +281,7 @@ private {
         loop if optional_next.get() -> block: ref ArenaBlock {
             // Read before the unmap takes the header with it.
             optional_next = block.next
-            Os.unmap_pages(block.base, block.size)
+            Os.unmap_pages(block as ref unknown, block.size)
         } else break
     }
 
@@ -309,13 +308,12 @@ private {
     /// One mapping of pages: this header, then the allocations from
     /// `@size_of(ArenaBlock)` up to `used`; the rest up to `size` is zero.
     ArenaBlock: object {
-        base: ref unknown
         size: Int
         used: Int
         next: Optional[ref ArenaBlock]
     }
 
-    allocator_table: AllocatorTable[ArenaAllocator] = AllocatorTable {
+    arena_allocator_table: AllocatorTable[ArenaAllocator] = AllocatorTable {
         allocate = ref ArenaAllocator.allocate_raw
         reallocate = ref ArenaAllocator.reallocate_raw
         free = ref ArenaAllocator.free_raw

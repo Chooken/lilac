@@ -1,0 +1,17 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: Memory was written after it was freed.
+// expect-stderr:   at Standard.Heap.check_poison (Standard/Heap/general_allocator.lilac:606:17)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug `GeneralAllocator` finds a write to a freed slot when it hands the slot out again.
+
+using Standard
+using Standard.Heap
+
+main: function () nothing {
+    general: GeneralAllocator = GeneralAllocator.init()
+    memory: ref unknown = general.allocate_raw(64, 8)
+    general.free_raw(memory, 64, 8)
+    @store_u8(memory as ref @bit8, 0x20, 0x1)
+    general.allocate_raw(64, 8)
+}

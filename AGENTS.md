@@ -192,9 +192,21 @@
   checks sizes and alignments, answers a zero size with an aligned
   address, passes every size to `free`, and panics when an allocator
   returns null. Each allocator type is its own file: `PageAllocator`
-  (`Os.map_pages`, stateless), `ArenaAllocator`, and `CAllocator`
-  (`calloc`, needs `--libc`); the stateless ones offer
-  `Type.ALLOCATOR`. `default_allocator` is an `Optional[Allocator]`
+  (`Os.map_pages`, stateless), `ArenaAllocator`, `GeneralAllocator`
+  and `CAllocator` (`calloc`, needs `--libc`); the stateless ones offer
+  `Type.ALLOCATOR`, and so does `GeneralAllocator` (a zeroed one is
+  empty, so `default_general_allocator` is a plain global).
+  `GeneralAllocator` is size classes (36, up to `MAX_SMALL`, each a free
+  list of slots carved from slabs whose header sits at their end, so
+  slots start page-aligned and keep no header; `class_of` rounds the
+  size to the alignment first, which keeps every class's slots aligned
+  enough) and, past them or a page's alignment, a mapping per
+  allocation with a `LargeHeader` just before it. `free` picks the class
+  from the size and alignment it is given, so the two must match the
+  allocation's. One spin lock (`acquire`, yielding) guards every call;
+  Debug builds keep a live flag per slot after the slab header, poison
+  freed slots and check frees and resizes against them
+  (`tests/run/general_allocator_*`). `default_allocator` is an `Optional[Allocator]`
   global, `.None` until `Standard.Runtime`'s `@entry` sets it to a
   program-long arena (a private `Optional[ArenaAllocator]` global,
   reached by `get_ref`); `get_default_allocator` panics while it is

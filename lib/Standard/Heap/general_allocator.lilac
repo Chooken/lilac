@@ -1,0 +1,639 @@
+using Standard.Os as Os
+
+/// The process-wide `GeneralAllocator`, for `GeneralAllocator.ALLOCATOR`.
+/// A zeroed `GeneralAllocator` is an empty one, so it needs no setup.
+default_general_allocator: GeneralAllocator
+
+/// A general-purpose allocator: any size at any alignment, each
+/// allocation freed on its own. Thread-safe (one lock around every call).
+///
+/// A request of at most `MAX_SMALL` bytes, at an alignment of at most a
+/// page, is rounded up to one of 36 size classes (16 bytes apart up to
+/// 128, then four classes per doubling, so at most a quarter of a slot is
+/// rounding) and takes a slot of that class: the last slot the class
+/// freed, else the next slot of its newest slab (one mapping of pages,
+/// split into equal slots), else a new slab. A freed slot goes back to
+/// its class, so small allocation and free take constant time and keep
+/// no header. Slabs stay mapped for the class's later allocations until
+/// the allocator is dropped. Every larger (or more aligned) request is a
+/// mapping of its own, unmapped when it is freed.
+///
+/// `free` and `reallocate` must be given the size and alignment the
+/// memory was allocated with: they pick the class. In a Debug build every
+/// free and resize checks that: memory this allocator did not give, a
+/// wrong size or alignment, a double free, and a write to freed memory
+/// that is then reallocated all panic.
+GeneralAllocator: object {
+
+    private {
+        // Each size class's freed slots and slabs. A zeroed class has none.
+        classes: @array(SizeClass, 36)
+        // The live large allocations' headers, newest first; null when
+        // there are none.
+        large: ref unknown
+        // Bytes of live allocations, as requested, and bytes mapped.
+        used: Int
+        mapped: Int
+        // 0 when no call is running, 1 while one is.
+        lock: @bit32
+    }
+
+    ALLOCATOR_TABLE: ref AllocatorTable[GeneralAllocator] => ref general_allocator_table
+
+    /// The process-wide general allocator (`default_general_allocator`),
+    /// for every thread.
+    ALLOCATOR: Allocator => Allocator.from[GeneralAllocator](ref default_general_allocator)
+
+    /// The largest request a size class takes: 16 KiB.
+    MAX_SMALL: Int => 16 * 1024
+
+    /// An empty allocator; it maps nothing until the first allocation.
+    init: function () allocator: GeneralAllocator {
+        allocator = GeneralAllocator {
+            classes = @array(SizeClass, 36) {}
+            large = no_address()
+            used = 0
+            mapped = 0
+            lock = 0x0
+        }
+    }
+
+    /// Bytes of live allocations, as requested.
+    get_used: function (self) used: Int {
+        self.acquire()
+        used = self.used
+        self.release()
+    }
+
+    /// Bytes mapped: every slab, used or not, and every large allocation
+    /// with its header and padding.
+    get_capacity: function (self) mapped: Int {
+        self.acquire()
+        mapped = self.mapped
+        self.release()
+    }
+
+    /// This allocator as an `Allocator`. It must stay in place while the
+    /// handle is used.
+    allocator: function (self) Allocator => Allocator.from[GeneralAllocator](self)
+
+    /// A new allocation holding `value`, moved in. Free it with `destroy`.
+    create[T]: function (self, value: T) allocation: ref T {
+        allocation = self.allocator().create[T](value)
+    }
+
+    /// Drops the value at `allocation` (from `create`) and frees it.
+    destroy[T]: function (self, allocation: ref T) nothing {
+        self.allocator().destroy[T](allocation)
+    }
+
+    /// Frees `allocation` (from `create`) without dropping anything: its
+    /// value was moved out (`@read`).
+    free[T]: function (self, allocation: ref T) nothing {
+        self.allocator().free[T](allocation)
+    }
+
+    /// Room for `count` zeroed `T`s. Free it with `deallocate`.
+    allocate[T]: function (self, count: Int) allocation: ref T {
+        allocation = self.allocator().allocate[T](count)
+    }
+
+    /// `memory` (from `allocate`, `count` long) resized to `new_count`,
+    /// keeping the first of them; new elements are zeroed.
+    reallocate[T]: function (self, memory: ref T, count: Int, new_count: Int) allocation: ref T {
+        allocation = self.allocator().reallocate[T](memory, count, new_count)
+    }
+
+    /// Frees `memory` (from `allocate`, `count` long) without dropping
+    /// anything.
+    deallocate[T]: function (self, memory: ref T, count: Int) nothing {
+        self.allocator().deallocate[T](memory, count)
+    }
+
+    /// `size` zeroed bytes aligned to `alignment` (a power of two), or
+    /// null when out of memory.
+    allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        check_request(size, alignment)
+        self.acquire()
+        allocation = self.allocate_unlocked(size, alignment)
+        self.release()
+    }
+
+    /// `memory` (`old_size` bytes at `alignment` from this allocator)
+    /// resized to `new_size`, keeping its bytes up to the smaller size and
+    /// zeroing the rest: in place while the size class stays the same (or
+    /// a large allocation's mapping still fits it, and is not twice what it
+    /// needs), else moved. Null when out of memory, and `memory` is then
+    /// untouched.
+    reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        check_request(old_size, alignment)
+        check_request(new_size, alignment)
+        self.acquire()
+        allocation = self.reallocate_unlocked(memory, old_size, new_size, alignment)
+        self.release()
+    }
+
+    /// Gives back `memory`, `size` bytes at `alignment` from this
+    /// allocator.
+    free_raw: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+        check_request(size, alignment)
+        self.acquire()
+        self.free_unlocked(memory, size, alignment)
+        self.release()
+    }
+
+    /// Unmaps every slab and large allocation: everything allocated from
+    /// it is gone.
+    @on_drop: function (self) nothing {
+        index: Int = 0
+        loop {
+            if index == CLASS_COUNT {
+                break
+            }
+            state: ref SizeClass = @array_at(ref self.classes, index as @bit_native)
+            slab: ref unknown = state.slab
+            loop {
+                if is_none(slab) {
+                    break
+                }
+                // Read before the unmap takes the header with it.
+                header: ref Slab = slab as ref Slab
+                slab = header.next
+                Os.unmap_pages(header.base, header.size as @bit_native)
+            }
+            index = index + 1
+        }
+
+        large: ref unknown = self.large
+        loop {
+            if is_none(large) {
+                break
+            }
+            header: ref LargeHeader = large as ref LargeHeader
+            large = header.next
+            Os.unmap_pages(header.mapping, header.mapping_size as @bit_native)
+        }
+    }
+
+    private {
+
+        /// Waits until no other call is running, then holds the lock.
+        acquire: function (self) nothing {
+            loop {
+                if @atomic_compare_swap_acquire_32(ref self.lock, 0x0, 0x1) == 0x0 {
+                    break
+                }
+                // Wait for it to look free before trying again, so a
+                // waiting thread reads the lock instead of writing it.
+                loop {
+                    if @atomic_load_relaxed_32(ref self.lock) == 0x0 {
+                        break
+                    }
+                    wait_turn()
+                }
+            }
+        }
+
+        release: function (self) nothing {
+            @atomic_store_release_32(ref self.lock, 0x0)
+        }
+
+        allocate_unlocked: function (self, size: Int, alignment: Int) allocation: ref unknown {
+            class: Int = class_of(size, alignment)
+            if class < 0 {
+                allocation = self.allocate_large(size, alignment)
+            } else {
+                allocation = self.allocate_small(class, size)
+            }
+            if not is_none(allocation) {
+                self.used = self.used + size
+            }
+        }
+
+        reallocate_unlocked: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+            old_class: Int = class_of(old_size, alignment)
+            new_class: Int = class_of(new_size, alignment)
+
+            // The same slot.
+            if old_class >= 0 and old_class == new_class {
+                if @builtin.Build.mode == .Debug {
+                    state: ref SizeClass = @array_at(ref self.classes, old_class as @bit_native)
+                    flag: ref @bit8 = slot_flag(state, class_size(old_class), memory)
+                    if @load_u8(flag, 0x0) == 0x0 {
+                        @panic("Resized memory that was already freed.")
+                    }
+                }
+                self.resize_in_place(memory, old_size, new_size)
+                allocation = memory
+                return
+            }
+
+            // The same mapping, while it fits and is not mostly unused.
+            if old_class < 0 and new_class < 0 {
+                header: ref LargeHeader = self.large_header(memory, old_size)
+                offset: Int = @i_sub_native(@ptr_to_address(memory), @ptr_to_address(header.mapping))
+                if new_size <= header.mapping_size - offset {
+                    needed: Int = align_up(offset + new_size, @builtin.Target.page_size)
+                    if needed > header.mapping_size / 2 {
+                        self.resize_in_place(memory, old_size, new_size)
+                        header.size = new_size
+                        allocation = memory
+                        return
+                    }
+                }
+            }
+
+            allocation = self.allocate_unlocked(new_size, alignment)
+            if is_none(allocation) {
+                return
+            }
+            @memcpy(allocation, memory, smaller(old_size, new_size) as @bit_native)
+            self.free_unlocked(memory, old_size, alignment)
+        }
+
+        /// `memory`'s size changed where it is: new bytes are zeroed (a
+        /// shrink earlier may have left them used).
+        resize_in_place: function (self, memory: ref unknown, old_size: Int, new_size: Int) nothing {
+            if new_size > old_size {
+                @memset(@ptr_add(memory, old_size as @bit_native), 0x0, (new_size - old_size) as @bit_native)
+            }
+            self.used = self.used - old_size + new_size
+        }
+
+        free_unlocked: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+            class: Int = class_of(size, alignment)
+            if class < 0 {
+                self.free_large(memory, size)
+            } else {
+                self.free_small(class, memory)
+            }
+            self.used = self.used - size
+        }
+
+        /// A slot of `class` with its first `size` bytes zeroed, or null
+        /// when out of memory.
+        allocate_small: function (self, class: Int, size: Int) allocation: ref unknown {
+            state: ref SizeClass = @array_at(ref self.classes, class as @bit_native)
+            slot_size: Int = class_size(class)
+
+            if is_none(state.free) {
+                slab: ref unknown = state.slab
+                if is_none(slab) or slab_full(slab, slot_size) {
+                    slab = add_slab(state, slot_size)
+                    if is_none(slab) {
+                        allocation = no_address()
+                        return
+                    }
+                    self.mapped = self.mapped + (slab as ref Slab).size
+                }
+                // Never used: the pages are still zero.
+                header: ref Slab = slab as ref Slab
+                allocation = @ptr_add(header.base, header.carved as @bit_native)
+                header.carved = header.carved + slot_size
+            } else {
+                allocation = state.free
+                if @builtin.Build.mode == .Debug {
+                    check_poison(allocation, slot_size)
+                }
+                state.free = (allocation as ref FreeSlot).next
+                @memset(allocation, 0x0, size as @bit_native)
+            }
+
+            if @builtin.Build.mode == .Debug {
+                flag: ref @bit8 = slot_flag(state, slot_size, allocation)
+                if @load_u8(flag, 0x0) != 0x0 {
+                    @panic("GeneralAllocator is corrupted: a live slot was on the free list.")
+                }
+                @store_u8(flag, 0x0, 0x1)
+            }
+        }
+
+        /// Puts `memory`, a slot of `class`, back on its class's free list.
+        free_small: function (self, class: Int, memory: ref unknown) nothing {
+            state: ref SizeClass = @array_at(ref self.classes, class as @bit_native)
+
+            if @builtin.Build.mode == .Debug {
+                slot_size: Int = class_size(class)
+                flag: ref @bit8 = slot_flag(state, slot_size, memory)
+                if @load_u8(flag, 0x0) == 0x0 {
+                    @panic("Freed memory that was already freed.")
+                }
+                @store_u8(flag, 0x0, 0x0)
+                // Checked when the slot is handed out again.
+                @memset(memory, POISON, slot_size as @bit_native)
+            }
+
+            link: ref FreeSlot = memory as ref FreeSlot
+            link.next = state.free
+            state.free = memory
+        }
+
+        /// `size` zeroed bytes at `alignment` in a mapping of their own,
+        /// after a header, or null when out of memory.
+        allocate_large: function (self, size: Int, alignment: Int) allocation: ref unknown {
+            allocation = no_address()
+
+            page: Int = @builtin.Target.page_size
+            header_size: Int = @size_of(LargeHeader)
+            aligned: Int = alignment
+            if aligned < MIN_ALIGNMENT {
+                aligned = MIN_ALIGNMENT
+            }
+
+            // The header, then the padding up to the alignment: exact at
+            // most a page aligned (the mapping is), else at most
+            // `aligned - 1` bytes past the header.
+            padding: Int = align_up(header_size, aligned)
+            if aligned > page {
+                padding = header_size + (aligned - 1)
+            }
+            if size > Int.MAX - padding - (page - 1) {
+                return
+            }
+            mapping_size: Int = align_up(padding + size, page)
+
+            mapping: ref unknown = map(mapping_size)
+            if is_none(mapping) {
+                return
+            }
+            self.mapped = self.mapped + mapping_size
+
+            base: Int = @ptr_to_address(mapping)
+            offset: Int = align_up(base.wrapping_add(header_size), aligned).wrapping_subtract(base)
+            allocation = @ptr_add(mapping, offset as @bit_native)
+
+            header: ref LargeHeader = header_of(allocation)
+            @write(header, LargeHeader {
+                mapping = mapping
+                mapping_size = mapping_size
+                size = size
+                next = self.large
+                previous = no_address()
+            })
+            if not is_none(self.large) {
+                newest: ref LargeHeader = self.large as ref LargeHeader
+                newest.previous = header as ref unknown
+            }
+            self.large = header as ref unknown
+        }
+
+        /// Unmaps the large allocation `memory`, `size` bytes.
+        free_large: function (self, memory: ref unknown, size: Int) nothing {
+            header: ref LargeHeader = self.large_header(memory, size)
+
+            if is_none(header.previous) {
+                self.large = header.next
+            } else {
+                previous: ref LargeHeader = header.previous as ref LargeHeader
+                previous.next = header.next
+            }
+            if not is_none(header.next) {
+                next: ref LargeHeader = header.next as ref LargeHeader
+                next.previous = header.previous
+            }
+
+            // Read before the unmap takes the header with it.
+            mapping: ref unknown = header.mapping
+            mapping_size: Int = header.mapping_size
+            self.mapped = self.mapped - mapping_size
+            Os.unmap_pages(mapping, mapping_size as @bit_native)
+        }
+
+        /// The header of the large allocation `memory`, `size` bytes; in
+        /// a Debug build, a panic unless it is one of this allocator's live
+        /// ones, of that size.
+        large_header: function (self, memory: ref unknown, size: Int) header: ref LargeHeader {
+            header = header_of(memory)
+            if @builtin.Build.mode == .Debug {
+                large: ref unknown = self.large
+                loop {
+                    if is_none(large) {
+                        @panic(NOT_OURS)
+                    }
+                    if @ptr_to_address(large) == @ptr_to_address(header as ref unknown) {
+                        break
+                    }
+                    large = (large as ref LargeHeader).next
+                }
+                if header.size != size {
+                    @panic(NOT_OURS)
+                }
+            }
+        }
+    }
+}
+
+private {
+
+    /// The number of size classes, `GeneralAllocator.classes`' length.
+    CLASS_COUNT: Int => 36
+
+    /// Every allocation's least alignment: C's `max_align_t` on 64-bit
+    /// targets, and every class's size is a multiple of it.
+    MIN_ALIGNMENT: Int => 16
+
+    /// The least a slab maps: 64 KiB (Windows' allocation granularity).
+    MIN_SLAB: Int => 64 * 1024
+
+    /// What a freed slot holds past its link, in a Debug build.
+    POISON: @bit8 => 0xDE
+
+    NOT_OURS: @byte_buffer => "Freed or resized memory this allocator did not give, or with another size or alignment."
+
+    /// One size class: its freed slots and its slabs.
+    SizeClass: object {
+        // The first freed slot (a `FreeSlot`), null when none.
+        free: ref unknown
+        // The newest slab's header (a `Slab`), the one slots are carved
+        // from; null when none.
+        slab: ref unknown
+    }
+
+    /// A freed slot: the next freed slot of its class, null at the end.
+    FreeSlot: object {
+        next: ref unknown
+    }
+
+    /// A slab's header, at its end so the slots start at its first page
+    /// (aligned as the slot size is, up to a page). In a Debug build it is
+    /// followed by a live flag byte per slot.
+    Slab: object {
+        base: ref unknown
+        // Bytes mapped.
+        size: Int
+        // Bytes of slots handed out so far, from `base`.
+        carved: Int
+        // Bytes of slots the slab holds.
+        limit: Int
+        // The class's slab before this one, null when none.
+        next: ref unknown
+    }
+
+    /// A large allocation's header, just before it.
+    LargeHeader: object {
+        mapping: ref unknown
+        mapping_size: Int
+        // Bytes the allocation takes, as requested.
+        size: Int
+        // The live large allocations around it, null at either end.
+        next: ref unknown
+        previous: ref unknown
+    }
+
+    general_allocator_table: AllocatorTable[GeneralAllocator] = AllocatorTable {
+        allocate = ref GeneralAllocator.allocate_raw
+        reallocate = ref GeneralAllocator.reallocate_raw
+        free = ref GeneralAllocator.free_raw
+    }
+
+    no_address: function () ref unknown => @address_to_ptr(0x0)
+
+    is_none: function (memory: ref unknown) Bool => @ptr_to_address(memory) == 0x0
+
+    /// The size class of `size` bytes at `alignment`, or -1 when it is a
+    /// large allocation. A class's slots are aligned to every power of two
+    /// that divides the class's size, up to a page, so the size is first
+    /// rounded up to the alignment: the class of a multiple of a power of
+    /// two is a multiple of it.
+    class_of: function (size: Int, alignment: Int) class: Int {
+        class = -1
+        if size > GeneralAllocator.MAX_SMALL or alignment > GeneralAllocator.MAX_SMALL or alignment > @builtin.Target.page_size {
+            return
+        }
+
+        rounded: Int = size
+        if rounded < MIN_ALIGNMENT {
+            rounded = MIN_ALIGNMENT
+        }
+        if alignment > MIN_ALIGNMENT {
+            rounded = align_up(rounded, alignment)
+        }
+        if rounded > GeneralAllocator.MAX_SMALL {
+            return
+        }
+
+        if rounded <= 128 {
+            class = (rounded + 15) / 16 - 1
+            return
+        }
+
+        // 2^k < rounded <= 2^(k + 1), k >= 7: four classes 2^(k - 2)
+        // apart.
+        zeros: Int = @bit_leading_zeros_native((rounded - 1) as @bit_native)
+        width: Int = @size_of(Int)
+        k: Int = width * 8 - 1 - zeros
+        power: Int = @bit_shift_left_native(0x1, k as @bit_native)
+        class = 8 + (k - 7) * 4 + (rounded - 1 - power) / (power / 4)
+    }
+
+    /// The slot size of `class`, the inverse of `class_of`.
+    class_size: function (class: Int) size: Int {
+        if class < 8 {
+            size = (class + 1) * 16
+            return
+        }
+        group: Int = (class - 8) / 4
+        power: Int = @bit_shift_left_native(0x80, group as @bit_native)
+        size = power + ((class - 8) % 4 + 1) * (power / 4)
+    }
+
+    /// Whether the slab `slab` has no slot of `slot_size` left to carve.
+    slab_full: function (slab: ref unknown, slot_size: Int) Bool => (slab as ref Slab).carved > (slab as ref Slab).limit - slot_size
+
+    /// A new slab for `state`'s slots of `slot_size`, now its newest; null
+    /// when out of memory. It holds at least 16 slots.
+    add_slab: function (state: ref SizeClass, slot_size: Int) slab: ref unknown {
+        size: Int = align_up(slot_size * 16, @builtin.Target.page_size)
+        if size < MIN_SLAB {
+            size = MIN_SLAB
+        }
+
+        tail: Int = @size_of(Slab)
+        if @builtin.Build.mode == .Debug {
+            tail = tail + size / slot_size
+        }
+        tail = align_up(tail, MIN_ALIGNMENT)
+
+        slab = map(size)
+        if is_none(slab) {
+            return
+        }
+        base: ref unknown = slab
+        slab = @ptr_add(base, (size - tail) as @bit_native)
+        @write(slab as ref Slab, Slab {
+            base = base
+            size = size
+            carved = 0
+            limit = (size - tail) / slot_size * slot_size
+            next = state.slab
+        })
+        state.slab = slab
+    }
+
+    /// The Debug live flag of the slot at `memory` in `state`'s slabs of
+    /// `slot_size` slots; a panic when `memory` is no slot of them.
+    slot_flag: function (state: ref SizeClass, slot_size: Int, memory: ref unknown) flag: ref @bit8 {
+        address: @bit_native = @ptr_to_address(memory)
+        slab: ref unknown = state.slab
+        loop {
+            if is_none(slab) {
+                @panic(NOT_OURS)
+            }
+            header: ref Slab = slab as ref Slab
+            base: @bit_native = @ptr_to_address(header.base)
+            if @i_greater_than_or_equal_u_native(address, base) and @i_less_than_u_native(address, @i_add_native(base, header.carved as @bit_native)) {
+                offset: Int = @i_sub_native(address, base)
+                if offset % slot_size != 0 as Int {
+                    @panic(NOT_OURS)
+                }
+                flag = @ptr_add(slab, (@size_of(Slab) + offset / slot_size) as @bit_native) as ref @bit8
+                return
+            }
+            slab = header.next
+        }
+    }
+
+    /// Panics unless the freed slot `memory` still holds `POISON` past its
+    /// link: anything else was written after it was freed.
+    check_poison: function (memory: ref unknown, slot_size: Int) nothing {
+        bytes: ref @bit8 = memory as ref @bit8
+        index: Int = @size_of(FreeSlot)
+        loop {
+            if index == slot_size {
+                break
+            }
+            if @load_u8(bytes, index as @bit_native) != POISON {
+                @panic("Memory was written after it was freed.")
+            }
+            index = index + 1
+        }
+    }
+
+    /// The header just before the large allocation `memory`.
+    header_of: function (memory: ref unknown) ref LargeHeader => @address_to_ptr(@i_sub_native(@ptr_to_address(memory), @size_of(LargeHeader) as @bit_native)) as ref LargeHeader
+
+    /// `size` bytes of fresh zeroed pages, or null when out of memory.
+    map: function (size: Int) memory: ref unknown {
+        memory = no_address()
+        match Os.map_pages(size as @bit_native) {
+            .Ok -> pages: ref unknown => memory = pages
+        }
+    }
+
+    /// Lets the thread holding the lock run. Without an OS there are no
+    /// other threads, so the lock is never held when it is taken.
+    wait_turn: function () nothing {
+        match @builtin.Target.os {
+            .Windows => {
+                Os.yield_thread()
+            }
+            .Linux => {
+                Os.yield_thread()
+            }
+            .MacOs => {
+                Os.yield_thread()
+            }
+        } else {
+        }
+    }
+}

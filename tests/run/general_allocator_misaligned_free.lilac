@@ -1,0 +1,15 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: Freed or resized memory this allocator did not give, or with another size or alignment.
+// expect-stderr:   at Standard.Heap.slot_flag (Standard/Heap/general_allocator.lilac:587:21)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug `GeneralAllocator` panics on freeing an address inside a slot rather than its start.
+
+using Standard
+using Standard.Heap
+
+main: function () nothing {
+    general: GeneralAllocator = GeneralAllocator.init()
+    memory: ref unknown = general.allocate_raw(64, 8)
+    general.free_raw(@ptr_add(memory, 0x8), 64, 8)
+}

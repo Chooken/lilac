@@ -1,0 +1,23 @@
+// lib: HeapChecks=tests/libs/HeapChecks
+// build-arg: --release
+// expect-exit: 0
+// `Standard.Heap.GeneralAllocator` in a Release build (no checks on
+// free): size classes give aligned, zeroed memory and take freed slots
+// back, a free leaves its neighbours alone, resizing stays in place
+// while it can and never writes past the new size, and large ones are
+// mappings of their own (`HeapChecks.general_checks`). Then the
+// `Allocator` checks every allocator passes, through `from` and through
+// the process-wide `ALLOCATOR`. Exits with the number of the first failed
+// check.
+
+using Standard
+using Standard.Heap
+using HeapChecks
+
+main: function () nothing {
+    general_checks(0x10)
+    general: GeneralAllocator = GeneralAllocator.init()
+    exercise(Allocator.from[GeneralAllocator](ref general), 0x40)
+    check(general.get_used() == 0 as Int, 0x50)
+    exercise(GeneralAllocator.ALLOCATOR, 0x60)
+}
