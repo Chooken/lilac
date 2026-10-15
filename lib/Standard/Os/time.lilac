@@ -51,6 +51,7 @@ wall_clock_nanos: function () nanos: @bit64 {
 }
 
 /// Pauses the calling thread for at least `nanos`.
+/// Doesn't do anything if unsupported.
 sleep: function (nanos: @bit64) nothing {
     match @builtin.Target.os {
         .Windows => {
@@ -101,8 +102,6 @@ sleep: function (nanos: @bit64) nothing {
                 break
             }
         }
-    } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
     }
 }
 

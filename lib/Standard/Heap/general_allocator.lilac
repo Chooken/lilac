@@ -202,7 +202,7 @@ GeneralAllocator: object {
                     if @atomic_load_relaxed_32(ref self.lock) == 0x0 {
                         break
                     }
-                    wait_turn()
+                    Os.yield_thread()
                 }
             }
         }
@@ -370,7 +370,7 @@ GeneralAllocator: object {
             }
             mapping_size: Int = align_up(padding + size, page)
 
-            mapping: ref unknown = map(mapping_size)
+            mapping: ref unknown = map_or_panic(mapping_size)
             self.mapped = self.mapped + mapping_size
 
             base: Int = @ptr_to_address(mapping)
@@ -559,7 +559,7 @@ private {
     /// A new table of empty size classes; panics when out of memory. Each
     /// state is written, so none depends on zeroed memory.
     map_class_table: function () table: ref ClassTable {
-        memory: ref unknown = map(class_table_size())
+        memory: ref unknown = map_or_panic(class_table_size())
         classes: ref ClassTable = memory as ref ClassTable
         index: Int = 0
         loop {
@@ -605,7 +605,7 @@ private {
         }
         tail = align_up(tail, MIN_ALIGNMENT)
 
-        base: ref unknown = map(size)
+        base: ref unknown = map_or_panic(size)
         header: ref Slab = @ptr_add(base, (size - tail) as @bit_native) as ref Slab
         @write(header, Slab {
             base = base
@@ -660,27 +660,10 @@ private {
     header_of: function (memory: ref unknown) ref LargeHeader => @address_to_ptr(@i_sub_native(@ptr_to_address(memory), @size_of(LargeHeader) as @bit_native)) as ref LargeHeader
 
     /// `size` bytes of fresh zeroed pages; panics when out of memory.
-    map: function (size: Int) memory: ref unknown {
+    map_or_panic: function (size: Int) memory: ref unknown {
         pages: ref unknown = Os.map_pages(size as @bit_native).get() else {
             @panic("Out of memory.")
         }
         memory = pages
-    }
-
-    /// Lets the thread holding the lock run. Without an OS there are no
-    /// other threads, so the lock is never held when it is taken.
-    wait_turn: function () nothing {
-        match @builtin.Target.os {
-            .Windows => {
-                Os.yield_thread()
-            }
-            .Linux => {
-                Os.yield_thread()
-            }
-            .MacOs => {
-                Os.yield_thread()
-            }
-        } else {
-        }
     }
 }

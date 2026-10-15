@@ -117,7 +117,7 @@ read: function (handle: Handle, buffer: ref unknown, length: @bit_native) result
             result = posix_result(MacOs.read(fd(handle), buffer, length))
         }
     } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
+        result = .Error(.Unsupported)
     }
 }
 
@@ -188,7 +188,7 @@ open: function (path: @byte_buffer, mode: OpenMode) result: Result[Handle, Error
             }
         }
     } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
+        result = .Error(.Unsupported)
     }
 }
 
@@ -214,7 +214,7 @@ close: function (handle: Handle) error: Optional[Error] {
             }
         }
     } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
+        error = .Some(.Unsupported)
     }
 }
 
@@ -256,7 +256,7 @@ seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@
             }
         }
     } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
+        result = .Error(.Unsupported)
     }
 }
 
@@ -299,7 +299,7 @@ size: function (handle: Handle) result: Result[@bit64, Error] {
             }
         }
     } else {
-        @compile_error("Standard.Os has no files, clocks, random bytes or threads on a target with no OS")
+        result = .Error(.Unsupported)
     }
 }
 
