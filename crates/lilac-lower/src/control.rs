@@ -199,6 +199,11 @@ impl Lower<'_> {
     ) {
         let ty = place.ty;
         let operand = self.read(state, func, value);
+        let operand = if self.branches(place) {
+            LirOperand::Place(self.fresh_place(state, operand, ty, value.span))
+        } else {
+            operand
+        };
         let target = self.place_of(state, func, place);
         let override_ = self
             .hir

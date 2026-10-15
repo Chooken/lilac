@@ -1,0 +1,1186 @@
+// Floating-point formatting (`@format`, `Fixed`, `Scientific`) and number
+// parsing (`ParseError`, `Int*.parse`, `Uint*.parse`, `Float*.parse`).
+
+/// Why parsing a number from text failed.
+ParseError: enum {
+    /// The input was empty.
+    Empty
+    /// A byte was not a valid digit or part of the number format.
+    InvalidDigit
+    /// The value is outside the target type's finite range.
+    Overflow
+    /// Extra bytes followed a valid number.
+    Trailing
+
+    /// `Empty`, `InvalidDigit`, `Overflow` or `Trailing`.
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Empty => out.write_bytes("Empty")
+            .InvalidDigit => out.write_bytes("InvalidDigit")
+            .Overflow => out.write_bytes("Overflow")
+            .Trailing => out.write_bytes("Trailing")
+        }
+    }
+}
+
+/// A floating-point number formatted with `precision` digits after the
+/// decimal point (ties rounded to even): `{x.fixed(3)}`.
+Fixed: object {
+    bits: @bit64
+    width: @bit32
+    precision: @bit32
+
+    @format: function (self, out: ref Formatter) nothing {
+        write_float_fixed(out, self.bits, self.width, self.precision)
+    }
+}
+
+/// A floating-point number formatted in scientific notation with
+/// `precision` digits after the decimal point (ties rounded to even):
+/// `{x.scientific(4)}`.
+Scientific: object {
+    bits: @bit64
+    width: @bit32
+    precision: @bit32
+
+    @format: function (self, out: ref Formatter) nothing {
+        write_float_scientific(out, self.bits, self.width, self.precision)
+    }
+}
+
+// The float containers format as shortest round-trip decimal.
+@format: function (value: ref @fbit16, out: ref Formatter) nothing {
+    write_float_shortest(out, @extend_zero(@fbit_to_bits_16(value)), 16)
+}
+
+@format: function (value: ref @fbit32, out: ref Formatter) nothing {
+    write_float_shortest(out, @extend_zero(@fbit_to_bits_32(value)), 32)
+}
+
+@format: function (value: ref @fbit64, out: ref Formatter) nothing {
+    write_float_shortest(out, @fbit_to_bits_64(value), 64)
+}
+
+private {
+    // Fixed-capacity unsigned big integer on the stack: little-endian
+    // 64-bit limbs with no zero limb at the top. 64 limbs = 4096 bits,
+    // which holds every exact binary64 numerator/denominator and 780-digit
+    // decimal significand without heap allocation.
+    Big: object {
+        len: @bit_native
+        limbs: @array(@bit64, 64)
+    }
+
+    big_zero: function () Big => Big { len = 0x0, limbs = @array(@bit64, 64) {} }
+
+    big_from_u64: function (value: @bit64) out: Big {
+        out = Big { len = 0x0, limbs = @array(@bit64, 64) {} }
+        if value != 0x0 {
+            slot: ref @bit64 = @array_at(ref out.limbs, 0x0)
+            slot = value
+            out.len = 0x1
+        }
+    }
+
+    big_trim: function (b: ref Big) nothing {
+        loop {
+            if b.len == 0x0 { break }
+            top: @bit_native = @i_sub_native(b.len, 0x1)
+            if @array_at(ref b.limbs, top) == 0x0 {
+                b.len = top
+            } else {
+                break
+            }
+        }
+    }
+
+    big_bit_len: function (b: ref Big) bits: Int32 {
+        if b.len == 0x0 {
+            bits = 0
+            return
+        }
+        top_idx: @bit_native = @i_sub_native(b.len, 0x1)
+        top: @bit64 = @array_at(ref b.limbs, top_idx)
+        top_bits: Int32 = 64 - (@bit_leading_zeros_64(top) as Uint64).to_int32_wrapping()
+        bits = (top_idx as Uint).to_int32_wrapping() * 64 + top_bits
+    }
+
+    big_cmp: function (a: ref Big, b: ref Big) order: Ordering {
+        if @i_less_than_u_native(a.len, b.len) {
+            order = .Less
+            return
+        }
+        if @i_greater_than_u_native(a.len, b.len) {
+            order = .Greater
+            return
+        }
+        idx: @bit_native = a.len
+        loop {
+            if idx == 0x0 { break }
+            idx = @i_sub_native(idx, 0x1)
+            la: @bit64 = @array_at(ref a.limbs, idx)
+            lb: @bit64 = @array_at(ref b.limbs, idx)
+            if @i_less_than_u_64(la, lb) {
+                order = .Less
+                return
+            }
+            if @i_greater_than_u_64(la, lb) {
+                order = .Greater
+                return
+            }
+        }
+        order = .Equal
+    }
+
+    big_add_small: function (b: ref Big, addend: @bit64) nothing {
+        carry: @bit64 = addend
+        idx: @bit_native = 0x0
+        loop {
+            if carry == 0x0 or idx == b.len { break }
+            slot: ref @bit64 = @array_at(ref b.limbs, idx)
+            cur: @bit64 = slot
+            over: @bit8 = @i_add_overflows_u_64(cur, carry)
+            slot = @i_add_64(cur, carry)
+            carry = if over then 0x1 else 0x0
+            idx = @i_add_native(idx, 0x1)
+        }
+        if carry != 0x0 {
+            slot: ref @bit64 = @array_at(ref b.limbs, b.len)
+            slot = carry
+            b.len = @i_add_native(b.len, 0x1)
+        }
+    }
+
+    big_mul_small: function (b: ref Big, factor: @bit64) nothing {
+        if b.len == 0x0 or factor == 0x1 { return }
+        if factor == 0x0 {
+            b.len = 0x0
+            return
+        }
+        carry: @bit64 = 0x0
+        idx: @bit_native = 0x0
+        loop {
+            if idx == b.len { break }
+            slot: ref @bit64 = @array_at(ref b.limbs, idx)
+            cur: @bit64 = slot
+            lo1: @bit64 = @i_mul_64(cur, factor)
+            hi1: @bit64 = @i_multiply_high_u_64(cur, factor)
+            lo2: @bit64 = @i_add_64(lo1, carry)
+            over: @bit64 = if @i_add_overflows_u_64(lo1, carry) then 0x1 else 0x0
+            slot = lo2
+            carry = @i_add_64(hi1, over)
+            idx = @i_add_native(idx, 0x1)
+        }
+        if carry != 0x0 {
+            slot: ref @bit64 = @array_at(ref b.limbs, b.len)
+            slot = carry
+            b.len = @i_add_native(b.len, 0x1)
+        }
+        big_trim(b)
+    }
+
+    big_mul_pow10: function (b: ref Big, exponent: Int32) nothing {
+        rem: Int32 = exponent
+        loop {
+            if rem < 19 { break }
+            big_mul_small(b, 0x8AC7230489E80000)
+            rem = rem - 19
+        }
+        loop {
+            if rem <= 0 { break }
+            big_mul_small(b, 0xA)
+            rem = rem - 1
+        }
+    }
+
+    big_shl: function (b: ref Big, bits: Int32) nothing {
+        if b.len == 0x0 or bits <= 0 { return }
+        whole: @bit_native = ((bits / 64) as Int).to_uint_wrapping() as @bit_native
+        part: @bit64 = ((bits % 64) as Int64).to_uint64_wrapping() as @bit64
+        old_len: @bit_native = b.len
+        if part == 0x0 {
+            idx: @bit_native = old_len
+            loop {
+                if idx == 0x0 { break }
+                idx = @i_sub_native(idx, 0x1)
+                val: @bit64 = @array_at(ref b.limbs, idx)
+                @write(@array_at(ref b.limbs, @i_add_native(idx, whole)), val)
+            }
+            z: @bit_native = 0x0
+            loop {
+                if z == whole { break }
+                @write(@array_at(ref b.limbs, z), 0x0)
+                z = @i_add_native(z, 0x1)
+            }
+            b.len = @i_add_native(old_len, whole)
+            return
+        }
+        inv: @bit64 = @i_sub_64(0x40, part)
+        high: @bit64 = @bit_shift_right_u_64(@array_at(ref b.limbs, @i_sub_native(old_len, 0x1)), inv)
+        idx: @bit_native = old_len
+        loop {
+            if idx == 0x0 { break }
+            idx = @i_sub_native(idx, 0x1)
+            cur: @bit64 = @array_at(ref b.limbs, idx)
+            low_part: @bit64 = if idx == 0x0 then 0x0 else @bit_shift_right_u_64(@array_at(ref b.limbs, @i_sub_native(idx, 0x1)), inv)
+            dst: ref @bit64 = @array_at(ref b.limbs, @i_add_native(idx, whole))
+            dst = @bit_or_64(@bit_shift_left_64(cur, part), low_part)
+        }
+        z: @bit_native = 0x0
+        loop {
+            if z == whole { break }
+            dst: ref @bit64 = @array_at(ref b.limbs, z)
+            dst = 0x0
+            z = @i_add_native(z, 0x1)
+        }
+        new_len: @bit_native = @i_add_native(old_len, whole)
+        if high != 0x0 {
+            top_slot: ref @bit64 = @array_at(ref b.limbs, new_len)
+            top_slot = high
+            new_len = @i_add_native(new_len, 0x1)
+        }
+        b.len = new_len
+        big_trim(b)
+    }
+
+    big_shl_one: function (b: ref Big) nothing {
+        if b.len == 0x0 { return }
+        carry: @bit64 = 0x0
+        idx: @bit_native = 0x0
+        loop {
+            if idx == b.len { break }
+            slot: ref @bit64 = @array_at(ref b.limbs, idx)
+            cur: @bit64 = slot
+            slot = @bit_or_64(@bit_shift_left_64(cur, 0x1), carry)
+            carry = @bit_shift_right_u_64(cur, 0x3F)
+            idx = @i_add_native(idx, 0x1)
+        }
+        if carry != 0x0 {
+            top: ref @bit64 = @array_at(ref b.limbs, b.len)
+            top = carry
+            b.len = @i_add_native(b.len, 0x1)
+        }
+    }
+
+    big_shr_one: function (b: ref Big) nothing {
+        if b.len == 0x0 { return }
+        carry: @bit64 = 0x0
+        idx: @bit_native = b.len
+        loop {
+            if idx == 0x0 { break }
+            idx = @i_sub_native(idx, 0x1)
+            slot: ref @bit64 = @array_at(ref b.limbs, idx)
+            cur: @bit64 = slot
+            slot = @bit_or_64(@bit_shift_right_u_64(cur, 0x1), @bit_shift_left_64(carry, 0x3F))
+            carry = @bit_and_64(cur, 0x1)
+        }
+        big_trim(b)
+    }
+
+    big_add: function (a: ref Big, b: ref Big) out: Big {
+        out = big_zero()
+        max_len: @bit_native = if @i_greater_than_u_native(a.len, b.len) then a.len else b.len
+        carry: @bit8 = 0x0
+        idx: @bit_native = 0x0
+        loop {
+            if idx == max_len { break }
+            la: @bit64 = if @i_less_than_u_native(idx, a.len) then @array_at(ref a.limbs, idx) else 0x0
+            lb: @bit64 = if @i_less_than_u_native(idx, b.len) then @array_at(ref b.limbs, idx) else 0x0
+            s1: @bit64 = @i_add_64(la, lb)
+            o1: @bit8 = @i_add_overflows_u_64(la, lb)
+            cbit: @bit64 = if carry then 0x1 else 0x0
+            s2: @bit64 = @i_add_64(s1, cbit)
+            o2: @bit8 = @i_add_overflows_u_64(s1, cbit)
+            slot: ref @bit64 = @array_at(ref out.limbs, idx)
+            slot = s2
+            carry = o1 or o2
+            idx = @i_add_native(idx, 0x1)
+        }
+        if carry {
+            slot: ref @bit64 = @array_at(ref out.limbs, max_len)
+            slot = 0x1
+            out.len = @i_add_native(max_len, 0x1)
+        } else {
+            out.len = max_len
+        }
+        big_trim(ref out)
+    }
+
+    big_sub_assign: function (a: ref Big, b: ref Big) nothing {
+        borrow: @bit8 = 0x0
+        idx: @bit_native = 0x0
+        loop {
+            if idx == a.len { break }
+            la: @bit64 = @array_at(ref a.limbs, idx)
+            lb: @bit64 = if @i_less_than_u_native(idx, b.len) then @array_at(ref b.limbs, idx) else 0x0
+            d1: @bit64 = @i_sub_64(la, lb)
+            u1: @bit8 = @i_sub_overflows_u_64(la, lb)
+            bbit: @bit64 = if borrow then 0x1 else 0x0
+            d2: @bit64 = @i_sub_64(d1, bbit)
+            u2: @bit8 = @i_sub_overflows_u_64(d1, bbit)
+            slot: ref @bit64 = @array_at(ref a.limbs, idx)
+            slot = d2
+            borrow = u1 or u2
+            idx = @i_add_native(idx, 0x1)
+        }
+        big_trim(a)
+    }
+
+    big_div_rem_10: function (b: ref Big) rem: @bit64 {
+        rem = 0x0
+        idx: @bit_native = b.len
+        loop {
+            if idx == 0x0 { break }
+            idx = @i_sub_native(idx, 0x1)
+            cur: @bit64 = @array_at(ref b.limbs, idx)
+            hi: @bit64 = @bit_or_64(@bit_shift_left_64(rem, 0x20), @bit_shift_right_u_64(cur, 0x20))
+            q_hi: @bit64 = @i_div_u_64(hi, 0xA)
+            rem = @i_mod_u_64(hi, 0xA)
+            lo: @bit64 = @bit_or_64(@bit_shift_left_64(rem, 0x20), @bit_and_64(cur, 0xFFFFFFFF))
+            q_lo: @bit64 = @i_div_u_64(lo, 0xA)
+            rem = @i_mod_u_64(lo, 0xA)
+            slot: ref @bit64 = @array_at(ref b.limbs, idx)
+            slot = @bit_or_64(@bit_shift_left_64(q_hi, 0x20), q_lo)
+        }
+        big_trim(b)
+    }
+
+    write_big_decimal: function (out: ref Formatter, value: ref Big) nothing {
+        if value.len == 0x0 {
+            out.write_bytes("0")
+            return
+        }
+        work: Big = value
+        buf: @array(@bit8, 512) {}
+        first: ref @bit8 = @array_at(ref buf, 0x0)
+        pos: @bit_native = 0x200
+        loop {
+            if work.len == 0x0 { break }
+            d: @bit8 = @truncate(big_div_rem_10(ref work))
+            pos = @i_sub_native(pos, 0x1)
+            @store_u8(first, pos, @i_add_8(0x30, d))
+        }
+        at: ref @bit8 = @ptr_add(first as ref unknown, pos) as ref @bit8
+        out.write_bytes(@byte_buffer_from(at, @i_sub_native(0x200, pos)))
+    }
+
+    write_zeros: function (out: ref Formatter, count: Int32) nothing {
+        left: Int32 = count
+        loop {
+            if left <= 0 { break }
+            out.write_bytes("0")
+            left = left - 1
+        }
+    }
+
+    decode_float_bits: function (raw: @bit64, width: @bit32) (sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, lowest_e: Int32, mant_bits: Int32) {
+        prec: Int32 = if width == 16 then 11 else if width == 32 then 24 else 53
+        mant_bits = prec - 1
+        exp_bits: Int32 = (width as Uint32).to_int32_wrapping() - prec
+        bias: Int32 = @bit_shift_left_32(0x1, (exp_bits - 1) as @bit32) as Int32 - 1
+        exp_mask: @bit64 = @i_sub_64(@bit_shift_left_64(0x1, (exp_bits as Int64) as @bit64), 0x1)
+        mant_mask: @bit64 = @i_sub_64(@bit_shift_left_64(0x1, (mant_bits as Int64) as @bit64), 0x1)
+        sign = if @bit_and_64(@bit_shift_right_u_64(raw, @i_sub_64(@extend_zero(width), 0x1)), 0x1) != 0x0 then 0x1 else 0x0
+        biased: @bit64 = @bit_and_64(@bit_shift_right_u_64(raw, (mant_bits as Int64) as @bit64), exp_mask)
+        frac: @bit64 = @bit_and_64(raw, mant_mask)
+        is_inf = biased == exp_mask and frac == 0x0
+        is_nan = biased == exp_mask and frac != 0x0
+        is_zero = biased == 0x0 and frac == 0x0
+        lowest_e = 1 - bias - mant_bits
+        if biased == 0x0 {
+            f = frac
+            e = lowest_e
+        } else {
+            f = @bit_or_64(frac, @bit_shift_left_64(0x1, (mant_bits as Int64) as @bit64))
+            e = lowest_e + (biased as Uint64).to_int32_wrapping() - 1
+        }
+    }
+
+    write_float_shortest: function (out: ref Formatter, raw: @bit64, width: @bit32) nothing {
+        sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, lowest_e: Int32, mant_bits: Int32 = decode_float_bits(raw, width)
+        if is_nan {
+            out.write_bytes("nan")
+            return
+        }
+        if is_inf {
+            if sign { out.write_bytes("-inf") } else { out.write_bytes("inf") }
+            return
+        }
+        if is_zero {
+            if sign { out.write_bytes("-0") } else { out.write_bytes("0") }
+            return
+        }
+        if sign { out.write_bytes("-") }
+
+        even: @bit8 = @bit_and_64(f, 0x1) == 0x0
+        hidden: @bit64 = @bit_shift_left_64(0x1, (mant_bits as Int64) as @bit64)
+        lower_closer: @bit8 = f == hidden and e > lowest_e
+        scale_two: Int32 = if lower_closer then 2 else 1
+        pos_e: Int32 = if e > 0 then e else 0
+        neg_e: Int32 = if e < 0 then -e else 0
+
+        r: Big = big_from_u64(f)
+        big_shl(ref r, scale_two + pos_e)
+        s: Big = big_from_u64(0x1)
+        big_shl(ref s, scale_two + neg_e)
+        m_plus: Big = big_from_u64(0x1)
+        big_shl(ref m_plus, if lower_closer then pos_e + 1 else pos_e)
+        m_minus: Big = big_from_u64(0x1)
+        big_shl(ref m_minus, pos_e)
+
+        f_bits: Int32 = 64 - (@bit_leading_zeros_64(f) as Uint64).to_int32_wrapping()
+        bit_len: Int32 = e + f_bits
+        k: Int32 = ((bit_len - 1) * 30103).div_floor(100000)
+        if k >= 0 {
+            big_mul_pow10(ref s, k)
+        } else {
+            big_mul_pow10(ref r, -k)
+            big_mul_pow10(ref m_plus, -k)
+            big_mul_pow10(ref m_minus, -k)
+        }
+
+        top: Big = big_add(ref r, ref m_plus)
+        s10: Big = s
+        big_mul_small(ref s10, 0xA)
+        reaches_s10: @bit8 = if even then (big_cmp(ref top, ref s10) != .Less) else (big_cmp(ref top, ref s10) == .Greater)
+        below_s: @bit8 = if even then (big_cmp(ref top, ref s) == .Less) else (big_cmp(ref top, ref s) != .Greater)
+        if reaches_s10 {
+            s = s10
+            k = k + 1
+        } else if below_s {
+            big_mul_small(ref r, 0xA)
+            big_mul_small(ref m_plus, 0xA)
+            big_mul_small(ref m_minus, 0xA)
+            k = k - 1
+        }
+
+        digits: @array(@bit8, 32) {}
+        first: ref @bit8 = @array_at(ref digits, 0x0)
+        count: Int32 = 0
+        loop {
+            d: @bit8 = 0x0
+            loop {
+                if big_cmp(ref r, ref s) == .Less { break }
+                big_sub_assign(ref r, ref s)
+                d = @i_add_8(d, 0x1)
+            }
+            low: @bit8 = if even then (big_cmp(ref r, ref m_minus) != .Greater) else (big_cmp(ref r, ref m_minus) == .Less)
+            rmp: Big = big_add(ref r, ref m_plus)
+            high: @bit8 = if even then (big_cmp(ref rmp, ref s) != .Less) else (big_cmp(ref rmp, ref s) == .Greater)
+            if low and not high {
+                @store_u8(first, (count as Int) as @bit_native, d)
+                count = count + 1
+                break
+            }
+            if high and not low {
+                @store_u8(first, (count as Int) as @bit_native, @i_add_8(d, 0x1))
+                count = count + 1
+                break
+            }
+            if low and high {
+                twice_r: Big = r
+                big_shl_one(ref twice_r)
+                cmp_mid: Ordering = big_cmp(ref twice_r, ref s)
+                pick_up: @bit8 = cmp_mid == .Greater or (cmp_mid == .Equal and @bit_and_8(d, 0x1) == 0x1)
+                @store_u8(first, (count as Int) as @bit_native, if pick_up then @i_add_8(d, 0x1) else d)
+                count = count + 1
+                break
+            }
+            @store_u8(first, (count as Int) as @bit_native, d)
+            count = count + 1
+            big_mul_small(ref r, 0xA)
+            big_mul_small(ref m_plus, 0xA)
+            big_mul_small(ref m_minus, 0xA)
+        }
+
+        // Propagate any carry from the last rounded digit.
+        idx: Int32 = count - 1
+        loop {
+            if idx <= 0 { break }
+            cur_pos: @bit_native = (idx as Int) as @bit_native
+            if @i_greater_than_or_equal_u_8(@load_u8(first, cur_pos), 0xA) {
+                @store_u8(first, cur_pos, @i_sub_8(@load_u8(first, cur_pos), 0xA))
+                prev_pos: @bit_native = ((idx - 1) as Int) as @bit_native
+                @store_u8(first, prev_pos, @i_add_8(@load_u8(first, prev_pos), 0x1))
+            }
+            idx = idx - 1
+        }
+        if @i_greater_than_or_equal_u_8(@load_u8(first, 0x0), 0xA) {
+            @store_u8(first, 0x0, 0x1)
+            count = 1
+            k = k + 1
+        }
+        loop {
+            if count <= 1 { break }
+            last_pos: @bit_native = ((count - 1) as Int) as @bit_native
+            if @load_u8(first, last_pos) == 0x0 {
+                count = count - 1
+            } else {
+                break
+            }
+        }
+        pos: Int32 = 0
+        loop {
+            if pos == count { break }
+            p: @bit_native = (pos as Int) as @bit_native
+            @store_u8(first, p, @i_add_8(0x30, @load_u8(first, p)))
+            pos = pos + 1
+        }
+
+        if k >= 0 and k < 16 {
+            if k + 1 >= count {
+                out.write_bytes(@byte_buffer_from(first, (count as Int) as @bit_native))
+                write_zeros(out, k + 1 - count)
+            } else {
+                int_len: @bit_native = ((k + 1) as Int) as @bit_native
+                out.write_bytes(@byte_buffer_from(first, int_len))
+                out.write_bytes(".")
+                frac_ptr: ref @bit8 = @ptr_add(first as ref unknown, int_len) as ref @bit8
+                out.write_bytes(@byte_buffer_from(frac_ptr, ((count - (k + 1)) as Int) as @bit_native))
+            }
+        } else if k < 0 and k >= (-4 as Int32) {
+            out.write_bytes("0.")
+            write_zeros(out, -k - 1)
+            out.write_bytes(@byte_buffer_from(first, (count as Int) as @bit_native))
+        } else {
+            out.write_bytes(@byte_buffer_from(first, 0x1))
+            if count > 1 {
+                out.write_bytes(".")
+                rest_ptr: ref @bit8 = @ptr_add(first as ref unknown, 0x1) as ref @bit8
+                out.write_bytes(@byte_buffer_from(rest_ptr, ((count - 1) as Int) as @bit_native))
+            }
+            out.write_bytes("e")
+            write_signed(out, (k as Int64) as @bit64)
+        }
+    }
+
+    write_float_scientific: function (out: ref Formatter, raw: @bit64, width: @bit32, precision: @bit32) nothing {
+        sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, _le: Int32, _mb: Int32 = decode_float_bits(raw, width)
+        if is_nan {
+            out.write_bytes("nan")
+            return
+        }
+        if is_inf {
+            if sign { out.write_bytes("-inf") } else { out.write_bytes("inf") }
+            return
+        }
+        prec: Int32 = (precision as Uint32).to_int32_wrapping().clamp(0, 400)
+        if sign { out.write_bytes("-") }
+        if is_zero {
+            out.write_bytes("0")
+            if prec > 0 {
+                out.write_bytes(".")
+                write_zeros(out, prec)
+            }
+            out.write_bytes("e0")
+            return
+        }
+
+        r: Big = big_from_u64(f)
+        if e > 0 { big_shl(ref r, e) }
+        s: Big = big_from_u64(0x1)
+        if e < 0 { big_shl(ref s, -e) }
+
+        f_bits: Int32 = 64 - (@bit_leading_zeros_64(f) as Uint64).to_int32_wrapping()
+        bit_len: Int32 = e + f_bits
+        k: Int32 = ((bit_len - 1) * 30103).div_floor(100000)
+        if k >= 0 {
+            big_mul_pow10(ref s, k)
+        } else {
+            big_mul_pow10(ref r, -k)
+        }
+        s10: Big = s
+        big_mul_small(ref s10, 0xA)
+        if big_cmp(ref r, ref s10) != .Less {
+            s = s10
+            k = k + 1
+        } else if big_cmp(ref r, ref s) == .Less {
+            big_mul_small(ref r, 0xA)
+            k = k - 1
+        }
+
+        total: Int32 = prec + 1
+        digits: @array(@bit8, 512) {}
+        first: ref @bit8 = @array_at(ref digits, 0x0)
+        idx: Int32 = 0
+        loop {
+            if idx == total { break }
+            d: @bit8 = 0x0
+            loop {
+                if big_cmp(ref r, ref s) == .Less { break }
+                big_sub_assign(ref r, ref s)
+                d = @i_add_8(d, 0x1)
+            }
+            @store_u8(first, (idx as Int) as @bit_native, d)
+            idx = idx + 1
+            if idx < total {
+                big_mul_small(ref r, 0xA)
+            }
+        }
+
+        twice_r: Big = r
+        big_shl_one(ref twice_r)
+        cmp_mid: Ordering = big_cmp(ref twice_r, ref s)
+        last_pos: @bit_native = ((total - 1) as Int) as @bit_native
+        last_d: @bit8 = @load_u8(first, last_pos)
+        if cmp_mid == .Greater or (cmp_mid == .Equal and @bit_and_8(last_d, 0x1) == 0x1) {
+            c_idx: Int32 = total - 1
+            loop {
+                c_pos: @bit_native = (c_idx as Int) as @bit_native
+                next_d: @bit8 = @i_add_8(@load_u8(first, c_pos), 0x1)
+                if @i_less_than_u_8(next_d, 0xA) or c_idx == 0 as Int32 {
+                    @store_u8(first, c_pos, next_d)
+                    break
+                }
+                @store_u8(first, c_pos, 0x0)
+                c_idx = c_idx - 1
+            }
+            if @i_greater_than_or_equal_u_8(@load_u8(first, 0x0), 0xA) {
+                @store_u8(first, 0x0, 0x1)
+                z: Int32 = 1
+                loop {
+                    if z == total { break }
+                    @store_u8(first, (z as Int) as @bit_native, 0x0)
+                    z = z + 1
+                }
+                k = k + 1
+            }
+        }
+
+        pos: Int32 = 0
+        loop {
+            if pos == total { break }
+            p: @bit_native = (pos as Int) as @bit_native
+            @store_u8(first, p, @i_add_8(0x30, @load_u8(first, p)))
+            pos = pos + 1
+        }
+        out.write_bytes(@byte_buffer_from(first, 0x1))
+        if prec > 0 {
+            out.write_bytes(".")
+            frac_ptr: ref @bit8 = @ptr_add(first as ref unknown, 0x1) as ref @bit8
+            out.write_bytes(@byte_buffer_from(frac_ptr, (prec as Int) as @bit_native))
+        }
+        out.write_bytes("e")
+        write_signed(out, (k as Int64) as @bit64)
+    }
+
+    write_float_fixed: function (out: ref Formatter, raw: @bit64, width: @bit32, precision: @bit32) nothing {
+        sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, _le: Int32, _mb: Int32 = decode_float_bits(raw, width)
+        if is_nan {
+            out.write_bytes("nan")
+            return
+        }
+        if is_inf {
+            if sign { out.write_bytes("-inf") } else { out.write_bytes("inf") }
+            return
+        }
+        prec: Int32 = (precision as Uint32).to_int32_wrapping().clamp(0, 400)
+        if sign { out.write_bytes("-") }
+        if is_zero {
+            out.write_bytes("0")
+            if prec > 0 {
+                out.write_bytes(".")
+                write_zeros(out, prec)
+            }
+            return
+        }
+        if e >= 0 {
+            whole_big: Big = big_from_u64(f)
+            big_shl(ref whole_big, e)
+            write_big_decimal(out, ref whole_big)
+            if prec > 0 {
+                out.write_bytes(".")
+                write_zeros(out, prec)
+            }
+            return
+        }
+
+        shift: Int32 = -e
+        whole_u64: @bit64 = if shift >= 64 then 0x0 else @bit_shift_right_u_64(f, (shift as Int64) as @bit64)
+        frac_bits: @bit64 = if shift >= 64 then f else @i_sub_64(f, @bit_shift_left_64(whole_u64, (shift as Int64) as @bit64))
+        rem: Big = big_from_u64(frac_bits)
+        den: Big = big_from_u64(0x1)
+        big_shl(ref den, shift)
+
+        frac_buf: @array(@bit8, 512) {}
+        first: ref @bit8 = @array_at(ref frac_buf, 0x0)
+        idx: Int32 = 0
+        loop {
+            if idx == prec { break }
+            big_mul_small(ref rem, 0xA)
+            d: @bit8 = 0x0
+            loop {
+                if big_cmp(ref rem, ref den) == .Less { break }
+                big_sub_assign(ref rem, ref den)
+                d = @i_add_8(d, 0x1)
+            }
+            @store_u8(first, (idx as Int) as @bit_native, d)
+            idx = idx + 1
+        }
+
+        twice_rem: Big = rem
+        big_shl_one(ref twice_rem)
+        cmp_mid: Ordering = big_cmp(ref twice_rem, ref den)
+        last_odd: @bit8 = if prec == 0 as Int32 then (@bit_and_64(whole_u64, 0x1) == 0x1) else (@bit_and_8(@load_u8(first, ((prec - 1) as Int) as @bit_native), 0x1) == 0x1)
+        if cmp_mid == .Greater or (cmp_mid == .Equal and last_odd) {
+            carry: @bit8 = 0x1
+            c_idx: Int32 = prec - 1
+            loop {
+                if c_idx < 0 or not carry { break }
+                c_pos: @bit_native = (c_idx as Int) as @bit_native
+                next_d: @bit8 = @i_add_8(@load_u8(first, c_pos), 0x1)
+                if @i_less_than_u_8(next_d, 0xA) {
+                    @store_u8(first, c_pos, next_d)
+                    carry = 0x0
+                } else {
+                    @store_u8(first, c_pos, 0x0)
+                }
+                c_idx = c_idx - 1
+            }
+            if carry {
+                whole_u64 = @i_add_64(whole_u64, 0x1)
+            }
+        }
+
+        write_unsigned(out, whole_u64, 0xA)
+        if prec > 0 {
+            pos: Int32 = 0
+            loop {
+                if pos == prec { break }
+                p: @bit_native = (pos as Int) as @bit_native
+                @store_u8(first, p, @i_add_8(0x30, @load_u8(first, p)))
+                pos = pos + 1
+            }
+            out.write_bytes(".")
+            out.write_bytes(@byte_buffer_from(first, (prec as Int) as @bit_native))
+        }
+    }
+
+    // ---- Number parsing ---------------------------------------------------
+
+    parse_int_raw: function (text: @byte_buffer, allow_neg: @bit8, min_mag: @bit64, max: @bit64) (value: @bit64, negative: @bit8) else error: ParseError {
+        len: @bit_native = @byte_buffer_len(text)
+        if len == 0x0 {
+            error = .Empty
+            fail
+        }
+        ptr: ref @bit8 = @byte_buffer_ptr(text)
+        at: @bit_native = 0x0
+        negative = 0x0
+        first_ch: @bit8 = @load_u8(ptr, 0x0)
+        if first_ch == 0x2D {
+            negative = 0x1
+            at = 0x1
+        } else if first_ch == 0x2B {
+            at = 0x1
+        }
+        if at == len {
+            error = .InvalidDigit
+            fail
+        }
+        base: @bit64 = 0xA
+        if @i_less_than_u_native(@i_add_native(at, 0x1), len) and @load_u8(ptr, at) == 0x30 {
+            prefix: @bit8 = @load_u8(ptr, @i_add_native(at, 0x1))
+            if prefix == 0x78 or prefix == 0x58 {
+                base = 0x10
+                at = @i_add_native(at, 0x2)
+            } else if prefix == 0x62 or prefix == 0x42 {
+                base = 0x2
+                at = @i_add_native(at, 0x2)
+            }
+        }
+        if at == len {
+            error = .InvalidDigit
+            fail
+        }
+        acc: @bit64 = 0x0
+        saw_digit: @bit8 = 0x0
+        overflowed: @bit8 = 0x0
+        loop {
+            if at == len { break }
+            ch: @bit8 = @load_u8(ptr, at)
+            if ch == 0x5F {
+                if not saw_digit or @i_add_native(at, 0x1) == len {
+                    error = .InvalidDigit
+                    fail
+                }
+                at = @i_add_native(at, 0x1)
+                continue
+            }
+            digit: @bit64 = 0xFF
+            if @i_greater_than_or_equal_u_8(ch, 0x30) and @i_less_than_or_equal_u_8(ch, 0x39) {
+                digit = @extend_zero(@i_sub_8(ch, 0x30))
+            } else if @i_greater_than_or_equal_u_8(ch, 0x61) and @i_less_than_or_equal_u_8(ch, 0x66) {
+                digit = @extend_zero(@i_add_8(@i_sub_8(ch, 0x61), 0xA))
+            } else if @i_greater_than_or_equal_u_8(ch, 0x41) and @i_less_than_or_equal_u_8(ch, 0x46) {
+                digit = @extend_zero(@i_add_8(@i_sub_8(ch, 0x41), 0xA))
+            }
+            if @i_greater_than_or_equal_u_64(digit, base) {
+                error = .InvalidDigit
+                fail
+            }
+            saw_digit = 0x1
+            if @i_mul_overflows_u_64(acc, base) { overflowed = 0x1 }
+            prod: @bit64 = @i_mul_64(acc, base)
+            if @i_add_overflows_u_64(prod, digit) { overflowed = 0x1 }
+            acc = @i_add_64(prod, digit)
+            at = @i_add_native(at, 0x1)
+        }
+        if not saw_digit {
+            error = .InvalidDigit
+            fail
+        }
+        if overflowed {
+            error = .Overflow
+            fail
+        }
+        if negative {
+            if not allow_neg and acc != 0x0 {
+                error = .Overflow
+                fail
+            }
+            if allow_neg and @i_greater_than_u_64(acc, min_mag) {
+                error = .Overflow
+                fail
+            }
+            value = @i_negate_64(acc)
+        } else {
+            if @i_greater_than_u_64(acc, max) {
+                error = .Overflow
+                fail
+            }
+            value = acc
+        }
+    }
+
+    parse_signed_int: function (text: @byte_buffer, min_mag: @bit64, max: @bit64) value: @bit64 else error: ParseError {
+        raw: @bit64, _: @bit8 = parse_int_raw(text, 0x1, min_mag, max) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = raw
+    }
+
+    parse_unsigned_int: function (text: @byte_buffer, max: @bit64) value: @bit64 else error: ParseError {
+        raw: @bit64, _: @bit8 = parse_int_raw(text, 0x0, 0x0, max) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = raw
+    }
+
+    lower_ascii: function (ch: @bit8) @bit8 =>
+        if @i_greater_than_or_equal_u_8(ch, 0x41) and @i_less_than_or_equal_u_8(ch, 0x5A) then @i_add_8(ch, 0x20) else ch
+
+    matches_word: function (ptr: ref @bit8, at: @bit_native, len: @bit_native, word: @byte_buffer) matched: @bit8 {
+        wlen: @bit_native = @byte_buffer_len(word)
+        if @i_less_than_u_native(@i_sub_native(len, at), wlen) {
+            matched = 0x0
+            return
+        }
+        wptr: ref @bit8 = @byte_buffer_ptr(word)
+        idx: @bit_native = 0x0
+        loop {
+            if idx == wlen { break }
+            if lower_ascii(@load_u8(ptr, @i_add_native(at, idx))) != @load_u8(wptr, idx) {
+                matched = 0x0
+                return
+            }
+            idx = @i_add_native(idx, 0x1)
+        }
+        matched = 0x1
+    }
+
+    scale_pair: function (num: ref Big, den: ref Big, exponent: Int32) (snum: Big, sden: Big) {
+        snum = num
+        sden = den
+        if exponent >= 0 {
+            big_shl(ref sden, exponent)
+        } else {
+            big_shl(ref snum, -exponent)
+        }
+    }
+
+    parse_float_bits: function (text: @byte_buffer, width: @bit32) bits: @bit64 else error: ParseError {
+        len: @bit_native = @byte_buffer_len(text)
+        if len == 0x0 {
+            error = .Empty
+            fail
+        }
+        ptr: ref @bit8 = @byte_buffer_ptr(text)
+        at: @bit_native = 0x0
+        negative: @bit8 = 0x0
+        first_ch: @bit8 = @load_u8(ptr, 0x0)
+        if first_ch == 0x2D {
+            negative = 0x1
+            at = 0x1
+        } else if first_ch == 0x2B {
+            at = 0x1
+        }
+        if at == len {
+            error = .InvalidDigit
+            fail
+        }
+
+        prec: Int32 = if width == 16 then 11 else if width == 32 then 24 else 53
+        mant_bits: Int32 = prec - 1
+        exp_bits: Int32 = (width as Uint32).to_int32_wrapping() - prec
+        bias: Int32 = @bit_shift_left_32(0x1, (exp_bits - 1) as @bit32) as Int32 - 1
+        exp_mask: @bit64 = @i_sub_64(@bit_shift_left_64(0x1, (exp_bits as Int64) as @bit64), 0x1)
+        sign_bit: @bit64 = if negative then @bit_shift_left_64(0x1, @i_sub_64(@extend_zero(width), 0x1)) else 0x0
+        inf_bits: @bit64 = @bit_or_64(sign_bit, @bit_shift_left_64(exp_mask, (mant_bits as Int64) as @bit64))
+        nan_bits: @bit64 = @bit_or_64(inf_bits, @bit_shift_left_64(0x1, ((mant_bits - 1) as Int64) as @bit64))
+
+        if matches_word(ptr, at, len, "infinity") {
+            if @i_add_native(at, 0x8) != len {
+                error = .Trailing
+                fail
+            }
+            bits = inf_bits
+            return
+        }
+        if matches_word(ptr, at, len, "inf") {
+            if @i_add_native(at, 0x3) != len {
+                error = .Trailing
+                fail
+            }
+            bits = inf_bits
+            return
+        }
+        if matches_word(ptr, at, len, "nan") {
+            if @i_add_native(at, 0x3) != len {
+                error = .Trailing
+                fail
+            }
+            bits = nan_bits
+            return
+        }
+
+        digits: @array(@bit8, 800) {}
+        dfirst: ref @bit8 = @array_at(ref digits, 0x0)
+        dcount: Int32 = 0
+        exp10: Int32 = 0
+        saw_whole: @bit8 = 0x0
+        loop {
+            if at == len { break }
+            ch: @bit8 = @load_u8(ptr, at)
+            if ch == 0x5F {
+                if not saw_whole {
+                    error = .InvalidDigit
+                    fail
+                }
+                at = @i_add_native(at, 0x1)
+                continue
+            }
+            if @i_greater_than_or_equal_u_8(ch, 0x30) and @i_less_than_or_equal_u_8(ch, 0x39) {
+                saw_whole = 0x1
+                d: @bit8 = @i_sub_8(ch, 0x30)
+                if dcount > 0 or d != 0x0 {
+                    if dcount < 780 {
+                        @store_u8(dfirst, (dcount as Int) as @bit_native, d)
+                        dcount = dcount + 1
+                    } else {
+                        if d != 0x0 {
+                            @store_u8(dfirst, 780, 0x1)
+                            if dcount == 780 as Int32 { dcount = 781 }
+                        }
+                        exp10 = exp10 + 1
+                    }
+                }
+                at = @i_add_native(at, 0x1)
+            } else {
+                break
+            }
+        }
+        if not saw_whole {
+            error = .InvalidDigit
+            fail
+        }
+
+        if at != len and @load_u8(ptr, at) == 0x2E {
+            at = @i_add_native(at, 0x1)
+            saw_frac: @bit8 = 0x0
+            loop {
+                if at == len { break }
+                ch: @bit8 = @load_u8(ptr, at)
+                if ch == 0x5F {
+                    if not saw_frac {
+                        error = .InvalidDigit
+                        fail
+                    }
+                    at = @i_add_native(at, 0x1)
+                    continue
+                }
+                if @i_greater_than_or_equal_u_8(ch, 0x30) and @i_less_than_or_equal_u_8(ch, 0x39) {
+                    saw_frac = 0x1
+                    d: @bit8 = @i_sub_8(ch, 0x30)
+                    if dcount == 0 as Int32 and d == 0x0 {
+                        exp10 = exp10 - 1
+                    } else if dcount < 780 {
+                        @store_u8(dfirst, (dcount as Int) as @bit_native, d)
+                        dcount = dcount + 1
+                        exp10 = exp10 - 1
+                    } else if d != 0x0 and dcount == 780 as Int32 {
+                        @store_u8(dfirst, 780, 0x1)
+                        dcount = 781
+                        exp10 = exp10 - 1
+                    }
+                    at = @i_add_native(at, 0x1)
+                } else {
+                    break
+                }
+            }
+            if not saw_frac {
+                error = .InvalidDigit
+                fail
+            }
+        }
+
+        if at != len and (@load_u8(ptr, at) == 0x65 or @load_u8(ptr, at) == 0x45) {
+            at = @i_add_native(at, 0x1)
+            exp_neg: @bit8 = 0x0
+            if at != len and @load_u8(ptr, at) == 0x2D {
+                exp_neg = 0x1
+                at = @i_add_native(at, 0x1)
+            } else if at != len and @load_u8(ptr, at) == 0x2B {
+                at = @i_add_native(at, 0x1)
+            }
+            saw_exp: @bit8 = 0x0
+            written: Int32 = 0
+            loop {
+                if at == len { break }
+                ch: @bit8 = @load_u8(ptr, at)
+                if ch == 0x5F {
+                    if not saw_exp {
+                        error = .InvalidDigit
+                        fail
+                    }
+                    at = @i_add_native(at, 0x1)
+                    continue
+                }
+                if @i_greater_than_or_equal_u_8(ch, 0x30) and @i_less_than_or_equal_u_8(ch, 0x39) {
+                    saw_exp = 0x1
+                    d: Int32 = (@i_sub_8(ch, 0x30) as Uint8) as Int32
+                    if written < 1000000 {
+                        written = written * 10 + d
+                    }
+                    at = @i_add_native(at, 0x1)
+                } else {
+                    break
+                }
+            }
+            if not saw_exp {
+                error = .InvalidDigit
+                fail
+            }
+            if exp_neg {
+                exp10 = exp10 - written
+            } else {
+                exp10 = exp10 + written
+            }
+        }
+
+        if at != len {
+            error = .Trailing
+            fail
+        }
+
+        loop {
+            if dcount <= 0 { break }
+            last_pos: @bit_native = ((dcount - 1) as Int) as @bit_native
+            if @load_u8(dfirst, last_pos) == 0x0 {
+                dcount = dcount - 1
+                exp10 = exp10 + 1
+            } else {
+                break
+            }
+        }
+        if dcount == 0 as Int32 {
+            bits = sign_bit
+            return
+        }
+
+        magnitude: Int32 = dcount + exp10
+        high_mag: Int32 = ((bias + 1) * 30103 + 99999) / 100000 + 1
+        low_mag: Int32 = -((prec - (1 - bias)) * 30103 / 100000) - 2
+        if magnitude - 1 > high_mag {
+            error = .Overflow
+            fail
+        }
+        if magnitude < low_mag {
+            bits = sign_bit
+            return
+        }
+
+        num: Big = big_zero()
+        idx: Int32 = 0
+        loop {
+            if idx == dcount { break }
+            chunk_scale: @bit64 = 0x1
+            chunk_val: @bit64 = 0x0
+            step: Int32 = 0
+            loop {
+                if step == 19 as Int32 or idx == dcount { break }
+                d: @bit64 = @extend_zero(@load_u8(dfirst, (idx as Int) as @bit_native))
+                chunk_scale = @i_mul_64(chunk_scale, 0xA)
+                chunk_val = @i_add_64(@i_mul_64(chunk_val, 0xA), d)
+                idx = idx + 1
+                step = step + 1
+            }
+            big_mul_small(ref num, chunk_scale)
+            big_add_small(ref num, chunk_val)
+        }
+
+        den: Big = big_from_u64(0x1)
+        if exp10 >= 0 {
+            big_mul_pow10(ref num, exp10)
+        } else {
+            big_mul_pow10(ref den, -exp10)
+        }
+
+        k: Int32 = big_bit_len(ref num) - big_bit_len(ref den)
+        snum: Big, sden: Big = scale_pair(ref num, ref den, k)
+        log2: Int32 = if big_cmp(ref snum, ref sden) != .Less then k else k - 1
+        lowest: Int32 = 1 - bias - mant_bits
+        exponent: Int32 = (log2 - mant_bits).max(lowest)
+
+        rem: Big, div: Big = scale_pair(ref num, ref den, exponent)
+        step_big: Big = div
+        big_shl(ref step_big, mant_bits)
+        q: @bit64 = 0x0
+        bit: Int32 = mant_bits
+        loop {
+            if bit < 0 { break }
+            if big_cmp(ref rem, ref step_big) != .Less {
+                big_sub_assign(ref rem, ref step_big)
+                q = @bit_or_64(q, @bit_shift_left_64(0x1, (bit as Int64) as @bit64))
+            }
+            if bit > 0 {
+                big_shr_one(ref step_big)
+            }
+            bit = bit - 1
+        }
+
+        big_shl_one(ref rem)
+        cmp_mid: Ordering = big_cmp(ref rem, ref div)
+        if cmp_mid == .Greater or (cmp_mid == .Equal and @bit_and_64(q, 0x1) == 0x1) {
+            q = @i_add_64(q, 0x1)
+        }
+
+        hidden: @bit64 = @bit_shift_left_64(0x1, (mant_bits as Int64) as @bit64)
+        if q == @bit_shift_left_64(hidden, 0x1) {
+            q = hidden
+            exponent = exponent + 1
+        }
+        if exponent > bias - mant_bits {
+            error = .Overflow
+            fail
+        }
+        if @i_less_than_u_64(q, hidden) {
+            bits = @bit_or_64(sign_bit, q)
+        } else {
+            biased_out: @bit64 = ((exponent + mant_bits + bias) as Int64) as @bit64
+            bits = @bit_or_64(sign_bit, @bit_or_64(@bit_shift_left_64(biased_out, (mant_bits as Int64) as @bit64), @i_sub_64(q, hidden)))
+        }
+    }
+}

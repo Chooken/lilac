@@ -1,0 +1,78 @@
+// expect-stdout: 0 -0 1 -1.5 0.1 0.25 0.0001 1e-5 1e20 1e300 inf -inf nan
+// expect-stdout: 5e-324 2.2250738585072014e-308 1.7976931348623157e308 0.30000000000000004
+// expect-stdout: 0.1 3.4028235e38 1.5 65500
+// expect-stdout: roundtrip ok
+// Shortest round-trip `@format` for `Float64`, `Float32` and `Float16`
+// (math plan phase 6), checked on special values, Ryū hard cases and
+// generated bit patterns.
+
+using Standard
+using Standard.Io
+
+Buffer: object {
+    used: @bit_native
+    bytes: @array(@bit8, 128)
+}
+
+push_bytes: function (buf: ref Buffer, chunk: @byte_buffer) nothing {
+    len: @bit_native = @byte_buffer_len(chunk)
+    @memcpy(@ptr_add(@array_at(ref buf.bytes, 0x0) as ref unknown, buf.used), @byte_buffer_ptr(chunk) as ref unknown, len)
+    buf.used = @i_add_native(buf.used, len)
+}
+
+roundtrip64: function (x: Float64) ok: Bool {
+    buf: Buffer = Buffer { used = 0x0, bytes = @array(@bit8, 128) {} }
+    out: Formatter = Formatter.over[Buffer](ref buf, ref push_bytes)
+    out.write($"{x}")
+    text: @byte_buffer = @byte_buffer_from(@array_at(ref buf.bytes, 0x0), buf.used)
+    parsed: Float64 = Float64.parse(text) else {
+        ok = false
+        return
+    }
+    if x.is_nan() {
+        ok = parsed.is_nan()
+    } else {
+        ok = parsed == x
+    }
+}
+
+roundtrip32: function (x: Float32) ok: Bool {
+    buf: Buffer = Buffer { used = 0x0, bytes = @array(@bit8, 128) {} }
+    out: Formatter = Formatter.over[Buffer](ref buf, ref push_bytes)
+    out.write($"{x}")
+    text: @byte_buffer = @byte_buffer_from(@array_at(ref buf.bytes, 0x0), buf.used)
+    parsed: Float32 = Float32.parse(text) else {
+        ok = false
+        return
+    }
+    if x.is_nan() {
+        ok = parsed.is_nan()
+    } else {
+        ok = parsed == x
+    }
+}
+
+main: function () nothing {
+    z: Float64 = 0.0
+    nz: Float64 = -0.0
+    print_line($"{z} {nz} {1.0 as Float64} {-1.5 as Float64} {0.1 as Float64} {0.25 as Float64} {0.0001 as Float64} {1e-5 as Float64} {1e20 as Float64} {1e300 as Float64} {Float64.INFINITY} {Float64.NEG_INFINITY} {Float64.NAN}")
+    print_line($"{Float64.MIN_SUBNORMAL} {Float64.MIN_POSITIVE} {Float64.MAX} {(0.1 as Float64) + 0.2}")
+    print_line($"{0.1 as Float32} {Float32.MAX} {1.5 as Float16} {Float16.MAX}")
+
+    if not roundtrip64(0.0) or not roundtrip64(-0.0) or not roundtrip64(0.1) or not roundtrip64(0.3) { return }
+    if not roundtrip64(1e23) or not roundtrip64(1e-308) or not roundtrip64(Float64.MIN_SUBNORMAL) { return }
+    if not roundtrip64(Float64.MIN_POSITIVE) or not roundtrip64(Float64.EPSILON) or not roundtrip64(Float64.MAX) { return }
+    if not roundtrip64((1.0 as Float64).next_down()) or not roundtrip64((1.0 as Float64).next_up()) { return }
+    if not roundtrip64(Float64.INFINITY) or not roundtrip64(Float64.NEG_INFINITY) or not roundtrip64(Float64.NAN) { return }
+
+    state: Uint64 = 0x123456789ABCDEF0
+    i: Int32 = 0
+    loop {
+        if i == 32 as Int32 { break }
+        state = state.wrapping_multiply(0x5851F42D4C957F2D).wrapping_add(0x14057B7EF767814F)
+        if not roundtrip64(Float64.from_bits(state)) { return }
+        if not roundtrip32(Float32.from_bits(state.to_uint32_wrapping())) { return }
+        i += 1
+    }
+    print_line("roundtrip ok")
+}

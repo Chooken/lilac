@@ -1,0 +1,38 @@
+// expect-stdout: 400921fb54442d18 401921fb54442d18 4005bf0a8b145769 3ff6a09e667f3bcd 3fe6a09e667f3bcd 3fe62e42fefa39ef 40026bb1bbb55516 3ff71547652b82fe 3fdbcb7b1526e50e
+// expect-stdout: 7ff0000000000000 fff0000000000000 7ff8000000000000 3cb0000000000000 10000000000000 1 7fefffffffffffff ffefffffffffffff 52 11
+// expect-stdout: 40490fdb 40c90fdb 402df854 3fb504f3 3f3504f3 7f800000 ff800000 7fc00000 34000000 800000 1 7f7fffff ff7fffff 23 8
+// expect-stdout: 4248 4648 4170 3da8 39a8 7c00 fc00 7e00 1400 400 1 7bff fbff 10 5
+// expect-stdout: true false false false false false false false Nan
+// expect-stdout: false true false false false false false false Infinite
+// expect-stdout: false true false false false false true true Infinite
+// expect-stdout: false false true false false true false false Zero
+// expect-stdout: false false true false false true true true Zero
+// expect-stdout: false false true false true false false false Subnormal
+// expect-stdout: false false true true false false false false Normal
+// expect-stdout: false false true true false false true true Normal
+// Float constants and classification (math plan phase 4): each constant's
+// exact IEEE bit pattern, and `is_*`/`sign_bit`/`classify` on NaN, ±∞, ±0,
+// subnormal and normal values.
+
+using Standard
+using Standard.Io
+
+show_class: function (x: Float64) nothing {
+    print_line($"{x.is_nan()} {x.is_infinite()} {x.is_finite()} {x.is_normal()} {x.is_subnormal()} {x.is_zero()} {x.sign_bit()} {x.is_sign_negative()} {x.classify()}")
+}
+
+main: function () nothing {
+    print_line($"{Float64.PI.hex()} {Float64.TAU.hex()} {Float64.E.hex()} {Float64.SQRT_2.hex()} {Float64.FRAC_1_SQRT_2.hex()} {Float64.LN_2.hex()} {Float64.LN_10.hex()} {Float64.LOG2_E.hex()} {Float64.LOG10_E.hex()}")
+    print_line($"{Float64.INFINITY.hex()} {Float64.NEG_INFINITY.hex()} {Float64.NAN.hex()} {Float64.EPSILON.hex()} {Float64.MIN_POSITIVE.hex()} {Float64.MIN_SUBNORMAL.hex()} {Float64.MAX.hex()} {Float64.MIN.hex()} {Float64.MANTISSA_BITS} {Float64.EXPONENT_BITS}")
+    print_line($"{Float32.PI.hex()} {Float32.TAU.hex()} {Float32.E.hex()} {Float32.SQRT_2.hex()} {Float32.FRAC_1_SQRT_2.hex()} {Float32.INFINITY.hex()} {Float32.NEG_INFINITY.hex()} {Float32.NAN.hex()} {Float32.EPSILON.hex()} {Float32.MIN_POSITIVE.hex()} {Float32.MIN_SUBNORMAL.hex()} {Float32.MAX.hex()} {Float32.MIN.hex()} {Float32.MANTISSA_BITS} {Float32.EXPONENT_BITS}")
+    print_line($"{Float16.PI.hex()} {Float16.TAU.hex()} {Float16.E.hex()} {Float16.SQRT_2.hex()} {Float16.FRAC_1_SQRT_2.hex()} {Float16.INFINITY.hex()} {Float16.NEG_INFINITY.hex()} {Float16.NAN.hex()} {Float16.EPSILON.hex()} {Float16.MIN_POSITIVE.hex()} {Float16.MIN_SUBNORMAL.hex()} {Float16.MAX.hex()} {Float16.MIN.hex()} {Float16.MANTISSA_BITS} {Float16.EXPONENT_BITS}")
+
+    show_class(Float64.NAN)
+    show_class(Float64.INFINITY)
+    show_class(Float64.NEG_INFINITY)
+    show_class(0.0)
+    show_class(-0.0)
+    show_class(Float64.MIN_SUBNORMAL)
+    show_class(Float64.MIN_POSITIVE)
+    show_class(-1.0)
+}

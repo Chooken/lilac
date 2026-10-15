@@ -64,23 +64,361 @@ Uint8: object {
     @less_than_or_equal: function (lhs: @bit8, rhs: Uint8) Bool => @i_less_than_or_equal_u_8(lhs, rhs.data)
     @greater_than_or_equal: function (lhs: @bit8, rhs: Uint8) Bool => @i_greater_than_or_equal_u_8(lhs, rhs.data)
 
+    /// How `self` orders against `other`: `.Less`, `.Equal` or `.Greater`.
+    compare: function (self: Uint8, other: Uint8) Ordering =>
+        if @i_less_than_u_8(self.data, other.data) then .Less else if self.data == other.data then .Equal else .Greater
+
+    /// `self` (an unsigned integer is already non-negative).
+    abs: function (self: Uint8) Uint8 => self
+
+    /// `self`.
+    unsigned_abs: function (self: Uint8) Uint8 => self
+
+    /// `0` when zero, `1` when positive.
+    sign: function (self: Uint8) Uint8 => if self.data == 0x0 then 0 else 1
+
+    /// The smaller of `self` and `other`.
+    min: function (self: Uint8, other: Uint8) Uint8 =>
+        if @i_less_than_u_8(self.data, other.data) then self else other
+
+    /// The larger of `self` and `other`.
+    max: function (self: Uint8, other: Uint8) Uint8 =>
+        if @i_greater_than_u_8(self.data, other.data) then self else other
+
+    /// `self` bounded to `low..=high`; panics when `low > high`.
+    clamp: function (self: Uint8, low: Uint8, high: Uint8) Uint8 =>
+        if @i_greater_than_u_8(low.data, high.data) then @panic("clamp: low is greater than high") else if @i_less_than_u_8(self.data, low.data) then low else if @i_greater_than_u_8(self.data, high.data) then high else self
+
+    /// Whether `self` is a positive power of two.
+    is_power_of_two: function (self: Uint8) Bool => @bit_count_ones_8(self.data) == 0x1
+
+    /// The smallest power of two greater than or equal to `self`; fails
+    /// when the result overflows `Uint8`.
+    next_power_of_two: function (self: Uint8) power: Uint8 else nothing {
+        if @i_less_than_or_equal_u_8(self.data, 0x1) {
+            power = 1
+            return
+        }
+        zeros: @bit8 = @bit_leading_zeros_8(@i_sub_8(self.data, 0x1))
+        if @i_greater_than_u_8(zeros, 0x0) {
+            power = Uint8 { data = @i_add_8(@bit_shift_right_u_8(@bit_not_8(0x0), zeros), 0x1) }
+            return
+        }
+        fail
+    }
+
+    /// `self / other` rounded toward negative infinity; panics when `other` is 0.
+    div_floor: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_div_u_8(self.data, other.data) }
+
+    /// `self / other` rounded toward positive infinity; panics when `other` is 0.
+    div_ceil: function (self: Uint8, other: Uint8) quotient: Uint8 {
+        q: @bit8 = @i_div_u_8(self.data, other.data)
+        r: @bit8 = @i_mod_u_8(self.data, other.data)
+        if r != 0x0 {
+            quotient = Uint8 { data = @i_add_8(q, 0x1) }
+        } else {
+            quotient = Uint8 { data = q }
+        }
+    }
+
+    /// Euclidean quotient (`self / other`); panics when `other` is 0.
+    div_euclid: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_div_u_8(self.data, other.data) }
+
+    /// Euclidean remainder (`self % other`); panics when `other` is 0.
+    rem_euclid: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_mod_u_8(self.data, other.data) }
+
+    /// `self / other` and `self % other`.
+    div_rem: function (self: Uint8, other: Uint8) (quotient: Uint8, remainder: Uint8) {
+        quotient = Uint8 { data = @i_div_u_8(self.data, other.data) }
+        remainder = Uint8 { data = @i_mod_u_8(self.data, other.data) }
+    }
+
+    /// Greatest common divisor of `self` and `other` (`0` when both are `0`).
+    gcd: function (self: Uint8, other: Uint8) divisor: Uint8 {
+        u: @bit8 = self.data
+        v: @bit8 = other.data
+        if u == 0x0 {
+            divisor = other
+            return
+        }
+        if v == 0x0 {
+            divisor = self
+            return
+        }
+        u_zeros: @bit8 = @bit_trailing_zeros_8(u)
+        v_zeros: @bit8 = @bit_trailing_zeros_8(v)
+        shift: @bit8 = if @i_less_than_u_8(u_zeros, v_zeros) then u_zeros else v_zeros
+        u = @bit_shift_right_u_8(u, u_zeros)
+        loop {
+            v = @bit_shift_right_u_8(v, @bit_trailing_zeros_8(v))
+            if @i_greater_than_u_8(u, v) {
+                swap: @bit8 = u
+                u = v
+                v = swap
+            }
+            v = @i_sub_8(v, u)
+            if v == 0x0 { break }
+        }
+        divisor = Uint8 { data = @bit_shift_left_8(u, shift) }
+    }
+
+    /// Least common multiple of `self` and `other` (`0` when either is `0`);
+    /// panics on overflow in Debug and wraps in Release.
+    lcm: function (self: Uint8, other: Uint8) multiple: Uint8 {
+        if self.data == 0x0 or other.data == 0x0 {
+            multiple = 0
+            return
+        }
+        g: Uint8 = self.gcd(other)
+        multiple = (self / g) * other
+    }
+
+    /// `self^exponent`; panics on overflow in Debug builds and wraps in Release.
+    pow: function (self: Uint8, exponent: Uint32) power: Uint8 {
+        result: Uint8, overflowed: Bool = self.overflowing_pow(exponent)
+        if @builtin.Build.mode == .Debug and overflowed {
+            @panic("attempt to multiply with overflow")
+        }
+        power = result
+    }
+
+    /// `⌊√self⌋`.
+    isqrt: function (self: Uint8) root: Uint8 {
+        if @i_less_than_u_8(self.data, 0x2) {
+            root = self
+            return
+        }
+        rem: @bit8 = self.data
+        acc: @bit8 = 0x0
+        even_zeros: @bit8 = @bit_and_8(@bit_leading_zeros_8(rem), @bit_not_8(0x1))
+        top_four: @bit8 = @i_add_8(@bit_shift_right_u_8(@bit_not_8(0x0), 0x2), 0x1)
+        bit: @bit8 = @bit_shift_right_u_8(top_four, even_zeros)
+        loop {
+            if bit == 0x0 { break }
+            cand: @bit8 = @i_add_8(acc, bit)
+            acc = @bit_shift_right_u_8(acc, 0x1)
+            if @i_greater_than_or_equal_u_8(rem, cand) {
+                rem = @i_sub_8(rem, cand)
+                acc = @i_add_8(acc, bit)
+            }
+            bit = @bit_shift_right_u_8(bit, 0x2)
+        }
+        root = Uint8 { data = acc }
+    }
+
+    /// `⌊log2(self)⌋`; fails when `self <= 0`.
+    ilog2: function (self: Uint8) exponent: Uint8 else nothing {
+        if self.data == 0x0 { fail }
+        exponent = Uint8 { data = @i_sub_8(@bit_leading_zeros_8(0x1), @bit_leading_zeros_8(self.data)) }
+    }
+
+    /// `⌊log10(self)⌋`; fails when `self <= 0`.
+    ilog10: function (self: Uint8) exponent: Uint8 else nothing {
+        if self.data == 0x0 { fail }
+        rem: @bit8 = self.data
+        count: @bit8 = 0x0
+        loop {
+            if @i_less_than_u_8(rem, 0xA) { break }
+            rem = @i_div_u_8(rem, 0xA)
+            count = @i_add_8(count, 0x1)
+        }
+        exponent = Uint8 { data = count }
+    }
+
+    /// The number of `1` bits in `self`.
+    count_ones: function (self: Uint8) Uint8 => Uint8 { data = @bit_count_ones_8(self.data) }
+
+    /// The number of `0` bits in `self`.
+    count_zeros: function (self: Uint8) Uint8 => Uint8 { data = @bit_count_ones_8(@bit_not_8(self.data)) }
+
+    /// The number of leading `0` bits in `self`.
+    leading_zeros: function (self: Uint8) Uint8 => Uint8 { data = @bit_leading_zeros_8(self.data) }
+
+    /// The number of trailing `0` bits in `self`.
+    trailing_zeros: function (self: Uint8) Uint8 => Uint8 { data = @bit_trailing_zeros_8(self.data) }
+
+    /// The number of leading `1` bits in `self`.
+    leading_ones: function (self: Uint8) Uint8 => Uint8 { data = @bit_leading_zeros_8(@bit_not_8(self.data)) }
+
+    /// The number of trailing `1` bits in `self`.
+    trailing_ones: function (self: Uint8) Uint8 => Uint8 { data = @bit_trailing_zeros_8(@bit_not_8(self.data)) }
+
+    /// The bits of `self` rotated left by `amount` (modulo the bit width).
+    rotate_left: function (self: Uint8, amount: Uint8) Uint8 => Uint8 { data = @bit_rotate_left_8(self.data, amount.data) }
+
+    /// The bits of `self` rotated right by `amount` (modulo the bit width).
+    rotate_right: function (self: Uint8, amount: Uint8) Uint8 => Uint8 { data = @bit_rotate_right_8(self.data, amount.data) }
+
+    /// The bytes of `self` in reverse order.
+    swap_bytes: function (self: Uint8) Uint8 => self
+
+    /// The bits of `self` in reverse order.
+    reverse_bits: function (self: Uint8) Uint8 => Uint8 { data = @bit_reverse_8(self.data) }
+
+    /// `self` with its bytes in big-endian (network) order.
+    to_big_endian: function (self: Uint8) Uint8 => self
+
+    /// `self` with its bytes in little-endian order.
+    to_little_endian: function (self: Uint8) Uint8 => self
+
+    /// Native value from big-endian bytes.
+    from_big_endian: function (self: Uint8) Uint8 => self
+
+    /// Native value from little-endian bytes.
+    from_little_endian: function (self: Uint8) Uint8 => self
+
+    /// `self + other`; fails when the result overflows `Uint8`.
+    checked_add: function (self: Uint8, other: Uint8) sum: Uint8 else nothing {
+        if @i_add_overflows_u_8(self.data, other.data) { fail }
+        sum = Uint8 { data = @i_add_8(self.data, other.data) }
+    }
+
+    /// `self - other`; fails when the result overflows `Uint8`.
+    checked_subtract: function (self: Uint8, other: Uint8) difference: Uint8 else nothing {
+        if @i_sub_overflows_u_8(self.data, other.data) { fail }
+        difference = Uint8 { data = @i_sub_8(self.data, other.data) }
+    }
+
+    /// `self * other`; fails when the result overflows `Uint8`.
+    checked_multiply: function (self: Uint8, other: Uint8) product: Uint8 else nothing {
+        if @i_mul_overflows_u_8(self.data, other.data) { fail }
+        product = Uint8 { data = @i_mul_8(self.data, other.data) }
+    }
+
+    /// `-self`; fails when the result overflows `Uint8`.
+    checked_negate: function (self: Uint8) negated: Uint8 else nothing {
+        if self.data != 0x0 { fail }
+        negated = self
+    }
+
+    /// `self^exponent`; fails when the result overflows `Uint8`.
+    checked_pow: function (self: Uint8, exponent: Uint32) power: Uint8 else nothing {
+        result: Uint8, overflowed: Bool = self.overflowing_pow(exponent)
+        if overflowed { fail }
+        power = result
+    }
+
     /// `self + other`, wrapping around at the type's range in every build mode.
-    wrapping_add: function (self, other: Uint8) Uint8 => Uint8 { data = @i_add_8(self.data, other.data) }
+    wrapping_add: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_add_8(self.data, other.data) }
 
     /// `self - other`, wrapping around at the type's range in every build mode.
-    wrapping_subtract: function (self, other: Uint8) Uint8 => Uint8 { data = @i_sub_8(self.data, other.data) }
+    wrapping_subtract: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_sub_8(self.data, other.data) }
 
     /// `self * other`, wrapping around at the type's range in every build mode.
-    wrapping_multiply: function (self, other: Uint8) Uint8 => Uint8 { data = @i_mul_8(self.data, other.data) }
+    wrapping_multiply: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_mul_8(self.data, other.data) }
 
     /// `-self`, wrapping around at the type's range in every build mode (`2^w - self`, 0 for 0).
-    wrapping_negate: function (self) Uint8 => Uint8 { data = @i_negate_8(self.data) }
+    wrapping_negate: function (self: Uint8) Uint8 => Uint8 { data = @i_negate_8(self.data) }
+
+    /// `self^exponent`, wrapping around at the type's range in every build mode.
+    wrapping_pow: function (self: Uint8, exponent: Uint32) Uint8 => self.overflowing_pow(exponent)
+
+    /// `self + other`, clamped to `MIN..=MAX`.
+    saturating_add: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_add_saturating_u_8(self.data, other.data) }
+
+    /// `self - other`, clamped to `MIN..=MAX`.
+    saturating_subtract: function (self: Uint8, other: Uint8) Uint8 => Uint8 { data = @i_sub_saturating_u_8(self.data, other.data) }
+
+    /// `self * other`, clamped to `MIN..=MAX`.
+    saturating_multiply: function (self: Uint8, other: Uint8) Uint8 =>
+        if @i_mul_overflows_u_8(self.data, other.data) then Uint8.MAX else Uint8 { data = @i_mul_8(self.data, other.data) }
+
+    /// `-self`, clamped to `MIN..=MAX`.
+    saturating_negate: function (self: Uint8) Uint8 => Uint8.MIN
+
+    /// `self^exponent`, clamped to `MIN..=MAX`.
+    saturating_pow: function (self: Uint8, exponent: Uint32) power: Uint8 {
+        result: Uint8, overflowed: Bool = self.overflowing_pow(exponent)
+        if overflowed {
+            power = Uint8.MAX
+        } else {
+            power = result
+        }
+    }
+
+    /// Wrapping `self + other` and whether it overflowed.
+    overflowing_add: function (self: Uint8, other: Uint8) (value: Uint8, overflowed: Bool) {
+        value = Uint8 { data = @i_add_8(self.data, other.data) }
+        overflowed = @i_add_overflows_u_8(self.data, other.data)
+    }
+
+    /// Wrapping `self - other` and whether it overflowed.
+    overflowing_subtract: function (self: Uint8, other: Uint8) (value: Uint8, overflowed: Bool) {
+        value = Uint8 { data = @i_sub_8(self.data, other.data) }
+        overflowed = @i_sub_overflows_u_8(self.data, other.data)
+    }
+
+    /// Wrapping `self * other` and whether it overflowed.
+    overflowing_multiply: function (self: Uint8, other: Uint8) (value: Uint8, overflowed: Bool) {
+        value = Uint8 { data = @i_mul_8(self.data, other.data) }
+        overflowed = @i_mul_overflows_u_8(self.data, other.data)
+    }
+
+    /// Wrapping `-self` and whether it overflowed.
+    overflowing_negate: function (self: Uint8) (value: Uint8, overflowed: Bool) {
+        value = Uint8 { data = @i_negate_8(self.data) }
+        overflowed = self.data != 0x0
+    }
+
+    /// Wrapping `self^exponent` and whether it overflowed.
+    overflowing_pow: function (self: Uint8, exponent: Uint32) (value: Uint8, overflowed: Bool) {
+        exp: @bit32 = exponent as @bit32
+        if exp == 0x0 {
+            value = 1
+            overflowed = false
+            return
+        }
+        base: @bit8 = self.data
+        acc: @bit8 = 0x1
+        over: @bit8 = 0x0
+        loop {
+            if @bit_and_32(exp, 0x1) != 0x0 {
+                if @i_mul_overflows_u_8(acc, base) { over = 0x1 }
+                acc = @i_mul_8(acc, base)
+            }
+            exp = @bit_shift_right_u_32(exp, 0x1)
+            if exp == 0x0 { break }
+            if @i_mul_overflows_u_8(base, base) { over = 0x1 }
+            base = @i_mul_8(base, base)
+        }
+        value = Uint8 { data = acc }
+        overflowed = over
+    }
+
+    /// The double-width product `self * other` as its upper and lower halves.
+    widening_multiply: function (self: Uint8, other: Uint8) (high: Uint8, low: Uint8) {
+        high = Uint8 { data = @i_multiply_high_u_8(self.data, other.data) }
+        low = Uint8 { data = @i_mul_8(self.data, other.data) }
+    }
+
+    /// `self + other + carry`, with the wrapped sum and whether it overflowed.
+    carrying_add: function (self: Uint8, other: Uint8, carry: Bool) (sum: Uint8, carry_out: Bool) {
+        first: @bit8 = @i_add_8(self.data, other.data)
+        over1: @bit8 = @i_add_overflows_u_8(self.data, other.data)
+        bit: @bit8 = if carry then 0x1 else 0x0
+        second: @bit8 = @i_add_8(first, bit)
+        over2: @bit8 = @i_add_overflows_u_8(first, bit)
+        sum = Uint8 { data = second }
+        carry_out = over1 != over2
+    }
+
+    /// `self - other - borrow`, with the wrapped difference and whether it
+    /// overflowed.
+    borrowing_subtract: function (self: Uint8, other: Uint8, borrow: Bool) (difference: Uint8, borrow_out: Bool) {
+        first: @bit8 = @i_sub_8(self.data, other.data)
+        over1: @bit8 = @i_sub_overflows_u_8(self.data, other.data)
+        bit: @bit8 = if borrow then 0x1 else 0x0
+        second: @bit8 = @i_sub_8(first, bit)
+        over2: @bit8 = @i_sub_overflows_u_8(first, bit)
+        difference = Uint8 { data = second }
+        borrow_out = over1 != over2
+    }
 
     @conversion: function (from: @bit8) Uint8 => Uint8 { data = from }
     @conversion: function (from: Uint8) @bit8 => from.data
 
     /// This value as an `Int8`; fails when it is out of `Int8`'s range.
-    to_int8: function (self) value: Int8 else nothing {
+    to_int8: function (self: Uint8) value: Int8 else nothing {
         bits: @bit8 = self.data
         back: @bit8 = bits
         if back == self.data and @i_greater_than_or_equal_8(bits, 0x0) {
@@ -92,7 +430,17 @@ Uint8: object {
 
     /// This value as an `Int8`, wrapping around at `Int8`'s range: the
     /// low bits.
-    to_int8_wrapping: function (self) Int8 => self.data as @bit8 as Int8
+    to_int8_wrapping: function (self: Uint8) Int8 => self.data as @bit8 as Int8
+
+    /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Uint8 else error: ParseError {
+        raw: @bit64 = parse_unsigned_int(text, @extend_zero(Uint8.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Uint8 { data = @truncate(raw) }
+    }
 
     /// Unsigned decimal.
     @format: function (self, out: ref Formatter) nothing {
@@ -100,8 +448,8 @@ Uint8: object {
     }
 
     /// The bits in hexadecimal, at this type's width: `{n.hex()}`.
-    hex: function (self) Hex => Hex { value = @extend_zero(self.data) }
+    hex: function (self: Uint8) Hex => Hex { value = @extend_zero(self.data) }
 
     /// The bits in binary, at this type's width: `{n.binary()}`.
-    binary: function (self) Binary => Binary { value = @extend_zero(self.data) }
+    binary: function (self: Uint8) Binary => Binary { value = @extend_zero(self.data) }
 }

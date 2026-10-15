@@ -61,17 +61,355 @@ Uint32: object {
     @less_than_or_equal: function (lhs: @bit32, rhs: Uint32) Bool => @i_less_than_or_equal_u_32(lhs, rhs.data)
     @greater_than_or_equal: function (lhs: @bit32, rhs: Uint32) Bool => @i_greater_than_or_equal_u_32(lhs, rhs.data)
 
+    /// How `self` orders against `other`: `.Less`, `.Equal` or `.Greater`.
+    compare: function (self: Uint32, other: Uint32) Ordering =>
+        if @i_less_than_u_32(self.data, other.data) then .Less else if self.data == other.data then .Equal else .Greater
+
+    /// `self` (an unsigned integer is already non-negative).
+    abs: function (self: Uint32) Uint32 => self
+
+    /// `self`.
+    unsigned_abs: function (self: Uint32) Uint32 => self
+
+    /// `0` when zero, `1` when positive.
+    sign: function (self: Uint32) Uint32 => if self.data == 0x0 then 0 else 1
+
+    /// The smaller of `self` and `other`.
+    min: function (self: Uint32, other: Uint32) Uint32 =>
+        if @i_less_than_u_32(self.data, other.data) then self else other
+
+    /// The larger of `self` and `other`.
+    max: function (self: Uint32, other: Uint32) Uint32 =>
+        if @i_greater_than_u_32(self.data, other.data) then self else other
+
+    /// `self` bounded to `low..=high`; panics when `low > high`.
+    clamp: function (self: Uint32, low: Uint32, high: Uint32) Uint32 =>
+        if @i_greater_than_u_32(low.data, high.data) then @panic("clamp: low is greater than high") else if @i_less_than_u_32(self.data, low.data) then low else if @i_greater_than_u_32(self.data, high.data) then high else self
+
+    /// Whether `self` is a positive power of two.
+    is_power_of_two: function (self: Uint32) Bool => @bit_count_ones_32(self.data) == 0x1
+
+    /// The smallest power of two greater than or equal to `self`; fails
+    /// when the result overflows `Uint32`.
+    next_power_of_two: function (self: Uint32) power: Uint32 else nothing {
+        if @i_less_than_or_equal_u_32(self.data, 0x1) {
+            power = 1
+            return
+        }
+        zeros: @bit32 = @bit_leading_zeros_32(@i_sub_32(self.data, 0x1))
+        if @i_greater_than_u_32(zeros, 0x0) {
+            power = Uint32 { data = @i_add_32(@bit_shift_right_u_32(@bit_not_32(0x0), zeros), 0x1) }
+            return
+        }
+        fail
+    }
+
+    /// `self / other` rounded toward negative infinity; panics when `other` is 0.
+    div_floor: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_div_u_32(self.data, other.data) }
+
+    /// `self / other` rounded toward positive infinity; panics when `other` is 0.
+    div_ceil: function (self: Uint32, other: Uint32) quotient: Uint32 {
+        q: @bit32 = @i_div_u_32(self.data, other.data)
+        r: @bit32 = @i_mod_u_32(self.data, other.data)
+        if r != 0x0 {
+            quotient = Uint32 { data = @i_add_32(q, 0x1) }
+        } else {
+            quotient = Uint32 { data = q }
+        }
+    }
+
+    /// Euclidean quotient (`self / other`); panics when `other` is 0.
+    div_euclid: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_div_u_32(self.data, other.data) }
+
+    /// Euclidean remainder (`self % other`); panics when `other` is 0.
+    rem_euclid: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_mod_u_32(self.data, other.data) }
+
+    /// `self / other` and `self % other`.
+    div_rem: function (self: Uint32, other: Uint32) (quotient: Uint32, remainder: Uint32) {
+        quotient = Uint32 { data = @i_div_u_32(self.data, other.data) }
+        remainder = Uint32 { data = @i_mod_u_32(self.data, other.data) }
+    }
+
+    /// Greatest common divisor of `self` and `other` (`0` when both are `0`).
+    gcd: function (self: Uint32, other: Uint32) divisor: Uint32 {
+        u: @bit32 = self.data
+        v: @bit32 = other.data
+        if u == 0x0 {
+            divisor = other
+            return
+        }
+        if v == 0x0 {
+            divisor = self
+            return
+        }
+        u_zeros: @bit32 = @bit_trailing_zeros_32(u)
+        v_zeros: @bit32 = @bit_trailing_zeros_32(v)
+        shift: @bit32 = if @i_less_than_u_32(u_zeros, v_zeros) then u_zeros else v_zeros
+        u = @bit_shift_right_u_32(u, u_zeros)
+        loop {
+            v = @bit_shift_right_u_32(v, @bit_trailing_zeros_32(v))
+            if @i_greater_than_u_32(u, v) {
+                swap: @bit32 = u
+                u = v
+                v = swap
+            }
+            v = @i_sub_32(v, u)
+            if v == 0x0 { break }
+        }
+        divisor = Uint32 { data = @bit_shift_left_32(u, shift) }
+    }
+
+    /// Least common multiple of `self` and `other` (`0` when either is `0`);
+    /// panics on overflow in Debug and wraps in Release.
+    lcm: function (self: Uint32, other: Uint32) multiple: Uint32 {
+        if self.data == 0x0 or other.data == 0x0 {
+            multiple = 0
+            return
+        }
+        g: Uint32 = self.gcd(other)
+        multiple = (self / g) * other
+    }
+
+    /// `self^exponent`; panics on overflow in Debug builds and wraps in Release.
+    pow: function (self: Uint32, exponent: Uint32) power: Uint32 {
+        result: Uint32, overflowed: Bool = self.overflowing_pow(exponent)
+        if @builtin.Build.mode == .Debug and overflowed {
+            @panic("attempt to multiply with overflow")
+        }
+        power = result
+    }
+
+    /// `⌊√self⌋`.
+    isqrt: function (self: Uint32) root: Uint32 {
+        if @i_less_than_u_32(self.data, 0x2) {
+            root = self
+            return
+        }
+        rem: @bit32 = self.data
+        acc: @bit32 = 0x0
+        even_zeros: @bit32 = @bit_and_32(@bit_leading_zeros_32(rem), @bit_not_32(0x1))
+        top_four: @bit32 = @i_add_32(@bit_shift_right_u_32(@bit_not_32(0x0), 0x2), 0x1)
+        bit: @bit32 = @bit_shift_right_u_32(top_four, even_zeros)
+        loop {
+            if bit == 0x0 { break }
+            cand: @bit32 = @i_add_32(acc, bit)
+            acc = @bit_shift_right_u_32(acc, 0x1)
+            if @i_greater_than_or_equal_u_32(rem, cand) {
+                rem = @i_sub_32(rem, cand)
+                acc = @i_add_32(acc, bit)
+            }
+            bit = @bit_shift_right_u_32(bit, 0x2)
+        }
+        root = Uint32 { data = acc }
+    }
+
+    /// `⌊log2(self)⌋`; fails when `self <= 0`.
+    ilog2: function (self: Uint32) exponent: Uint32 else nothing {
+        if self.data == 0x0 { fail }
+        exponent = Uint32 { data = @i_sub_32(@bit_leading_zeros_32(0x1), @bit_leading_zeros_32(self.data)) }
+    }
+
+    /// `⌊log10(self)⌋`; fails when `self <= 0`.
+    ilog10: function (self: Uint32) exponent: Uint32 else nothing {
+        if self.data == 0x0 { fail }
+        rem: @bit32 = self.data
+        count: @bit32 = 0x0
+        loop {
+            if @i_less_than_u_32(rem, 0xA) { break }
+            rem = @i_div_u_32(rem, 0xA)
+            count = @i_add_32(count, 0x1)
+        }
+        exponent = Uint32 { data = count }
+    }
+
+    /// The number of `1` bits in `self`.
+    count_ones: function (self: Uint32) Uint32 => Uint32 { data = @bit_count_ones_32(self.data) }
+
+    /// The number of `0` bits in `self`.
+    count_zeros: function (self: Uint32) Uint32 => Uint32 { data = @bit_count_ones_32(@bit_not_32(self.data)) }
+
+    /// The number of leading `0` bits in `self`.
+    leading_zeros: function (self: Uint32) Uint32 => Uint32 { data = @bit_leading_zeros_32(self.data) }
+
+    /// The number of trailing `0` bits in `self`.
+    trailing_zeros: function (self: Uint32) Uint32 => Uint32 { data = @bit_trailing_zeros_32(self.data) }
+
+    /// The number of leading `1` bits in `self`.
+    leading_ones: function (self: Uint32) Uint32 => Uint32 { data = @bit_leading_zeros_32(@bit_not_32(self.data)) }
+
+    /// The number of trailing `1` bits in `self`.
+    trailing_ones: function (self: Uint32) Uint32 => Uint32 { data = @bit_trailing_zeros_32(@bit_not_32(self.data)) }
+
+    /// The bits of `self` rotated left by `amount` (modulo the bit width).
+    rotate_left: function (self: Uint32, amount: Uint32) Uint32 => Uint32 { data = @bit_rotate_left_32(self.data, amount.data) }
+
+    /// The bits of `self` rotated right by `amount` (modulo the bit width).
+    rotate_right: function (self: Uint32, amount: Uint32) Uint32 => Uint32 { data = @bit_rotate_right_32(self.data, amount.data) }
+
+    /// The bytes of `self` in reverse order.
+    swap_bytes: function (self: Uint32) Uint32 => Uint32 { data = @bit_swap_bytes_32(self.data) }
+
+    /// The bits of `self` in reverse order.
+    reverse_bits: function (self: Uint32) Uint32 => Uint32 { data = @bit_reverse_32(self.data) }
+
+    /// `self` with its bytes in big-endian (network) order.
+    to_big_endian: function (self: Uint32) Uint32 => match @builtin.Target.arch {} else Uint32 { data = @bit_swap_bytes_32(self.data) }
+
+    /// `self` with its bytes in little-endian order.
+    to_little_endian: function (self: Uint32) Uint32 => match @builtin.Target.arch {} else self
+
+    /// Native value from big-endian bytes.
+    from_big_endian: function (self: Uint32) Uint32 => match @builtin.Target.arch {} else Uint32 { data = @bit_swap_bytes_32(self.data) }
+
+    /// Native value from little-endian bytes.
+    from_little_endian: function (self: Uint32) Uint32 => match @builtin.Target.arch {} else self
+
+    /// `self + other`; fails when the result overflows `Uint32`.
+    checked_add: function (self: Uint32, other: Uint32) sum: Uint32 else nothing {
+        if @i_add_overflows_u_32(self.data, other.data) { fail }
+        sum = Uint32 { data = @i_add_32(self.data, other.data) }
+    }
+
+    /// `self - other`; fails when the result overflows `Uint32`.
+    checked_subtract: function (self: Uint32, other: Uint32) difference: Uint32 else nothing {
+        if @i_sub_overflows_u_32(self.data, other.data) { fail }
+        difference = Uint32 { data = @i_sub_32(self.data, other.data) }
+    }
+
+    /// `self * other`; fails when the result overflows `Uint32`.
+    checked_multiply: function (self: Uint32, other: Uint32) product: Uint32 else nothing {
+        if @i_mul_overflows_u_32(self.data, other.data) { fail }
+        product = Uint32 { data = @i_mul_32(self.data, other.data) }
+    }
+
+    /// `-self`; fails when the result overflows `Uint32`.
+    checked_negate: function (self: Uint32) negated: Uint32 else nothing {
+        if self.data != 0x0 { fail }
+        negated = self
+    }
+
+    /// `self^exponent`; fails when the result overflows `Uint32`.
+    checked_pow: function (self: Uint32, exponent: Uint32) power: Uint32 else nothing {
+        result: Uint32, overflowed: Bool = self.overflowing_pow(exponent)
+        if overflowed { fail }
+        power = result
+    }
+
     /// `self + other`, wrapping around at the type's range in every build mode.
-    wrapping_add: function (self, other: Uint32) Uint32 => Uint32 { data = @i_add_32(self.data, other.data) }
+    wrapping_add: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_add_32(self.data, other.data) }
 
     /// `self - other`, wrapping around at the type's range in every build mode.
-    wrapping_subtract: function (self, other: Uint32) Uint32 => Uint32 { data = @i_sub_32(self.data, other.data) }
+    wrapping_subtract: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_sub_32(self.data, other.data) }
 
     /// `self * other`, wrapping around at the type's range in every build mode.
-    wrapping_multiply: function (self, other: Uint32) Uint32 => Uint32 { data = @i_mul_32(self.data, other.data) }
+    wrapping_multiply: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_mul_32(self.data, other.data) }
 
     /// `-self`, wrapping around at the type's range in every build mode (`2^w - self`, 0 for 0).
-    wrapping_negate: function (self) Uint32 => Uint32 { data = @i_negate_32(self.data) }
+    wrapping_negate: function (self: Uint32) Uint32 => Uint32 { data = @i_negate_32(self.data) }
+
+    /// `self^exponent`, wrapping around at the type's range in every build mode.
+    wrapping_pow: function (self: Uint32, exponent: Uint32) Uint32 => self.overflowing_pow(exponent)
+
+    /// `self + other`, clamped to `MIN..=MAX`.
+    saturating_add: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_add_saturating_u_32(self.data, other.data) }
+
+    /// `self - other`, clamped to `MIN..=MAX`.
+    saturating_subtract: function (self: Uint32, other: Uint32) Uint32 => Uint32 { data = @i_sub_saturating_u_32(self.data, other.data) }
+
+    /// `self * other`, clamped to `MIN..=MAX`.
+    saturating_multiply: function (self: Uint32, other: Uint32) Uint32 =>
+        if @i_mul_overflows_u_32(self.data, other.data) then Uint32.MAX else Uint32 { data = @i_mul_32(self.data, other.data) }
+
+    /// `-self`, clamped to `MIN..=MAX`.
+    saturating_negate: function (self: Uint32) Uint32 => Uint32.MIN
+
+    /// `self^exponent`, clamped to `MIN..=MAX`.
+    saturating_pow: function (self: Uint32, exponent: Uint32) power: Uint32 {
+        result: Uint32, overflowed: Bool = self.overflowing_pow(exponent)
+        if overflowed {
+            power = Uint32.MAX
+        } else {
+            power = result
+        }
+    }
+
+    /// Wrapping `self + other` and whether it overflowed.
+    overflowing_add: function (self: Uint32, other: Uint32) (value: Uint32, overflowed: Bool) {
+        value = Uint32 { data = @i_add_32(self.data, other.data) }
+        overflowed = @i_add_overflows_u_32(self.data, other.data)
+    }
+
+    /// Wrapping `self - other` and whether it overflowed.
+    overflowing_subtract: function (self: Uint32, other: Uint32) (value: Uint32, overflowed: Bool) {
+        value = Uint32 { data = @i_sub_32(self.data, other.data) }
+        overflowed = @i_sub_overflows_u_32(self.data, other.data)
+    }
+
+    /// Wrapping `self * other` and whether it overflowed.
+    overflowing_multiply: function (self: Uint32, other: Uint32) (value: Uint32, overflowed: Bool) {
+        value = Uint32 { data = @i_mul_32(self.data, other.data) }
+        overflowed = @i_mul_overflows_u_32(self.data, other.data)
+    }
+
+    /// Wrapping `-self` and whether it overflowed.
+    overflowing_negate: function (self: Uint32) (value: Uint32, overflowed: Bool) {
+        value = Uint32 { data = @i_negate_32(self.data) }
+        overflowed = self.data != 0x0
+    }
+
+    /// Wrapping `self^exponent` and whether it overflowed.
+    overflowing_pow: function (self: Uint32, exponent: Uint32) (value: Uint32, overflowed: Bool) {
+        exp: @bit32 = exponent as @bit32
+        if exp == 0x0 {
+            value = 1
+            overflowed = false
+            return
+        }
+        base: @bit32 = self.data
+        acc: @bit32 = 0x1
+        over: @bit8 = 0x0
+        loop {
+            if @bit_and_32(exp, 0x1) != 0x0 {
+                if @i_mul_overflows_u_32(acc, base) { over = 0x1 }
+                acc = @i_mul_32(acc, base)
+            }
+            exp = @bit_shift_right_u_32(exp, 0x1)
+            if exp == 0x0 { break }
+            if @i_mul_overflows_u_32(base, base) { over = 0x1 }
+            base = @i_mul_32(base, base)
+        }
+        value = Uint32 { data = acc }
+        overflowed = over
+    }
+
+    /// The double-width product `self * other` as its upper and lower halves.
+    widening_multiply: function (self: Uint32, other: Uint32) (high: Uint32, low: Uint32) {
+        high = Uint32 { data = @i_multiply_high_u_32(self.data, other.data) }
+        low = Uint32 { data = @i_mul_32(self.data, other.data) }
+    }
+
+    /// `self + other + carry`, with the wrapped sum and whether it overflowed.
+    carrying_add: function (self: Uint32, other: Uint32, carry: Bool) (sum: Uint32, carry_out: Bool) {
+        first: @bit32 = @i_add_32(self.data, other.data)
+        over1: @bit8 = @i_add_overflows_u_32(self.data, other.data)
+        bit: @bit32 = if carry then 0x1 else 0x0
+        second: @bit32 = @i_add_32(first, bit)
+        over2: @bit8 = @i_add_overflows_u_32(first, bit)
+        sum = Uint32 { data = second }
+        carry_out = over1 != over2
+    }
+
+    /// `self - other - borrow`, with the wrapped difference and whether it
+    /// overflowed.
+    borrowing_subtract: function (self: Uint32, other: Uint32, borrow: Bool) (difference: Uint32, borrow_out: Bool) {
+        first: @bit32 = @i_sub_32(self.data, other.data)
+        over1: @bit8 = @i_sub_overflows_u_32(self.data, other.data)
+        bit: @bit32 = if borrow then 0x1 else 0x0
+        second: @bit32 = @i_sub_32(first, bit)
+        over2: @bit8 = @i_sub_overflows_u_32(first, bit)
+        difference = Uint32 { data = second }
+        borrow_out = over1 != over2
+    }
 
     @conversion: function (from: @bit32) Uint32 => Uint32 { data = from }
     @conversion: function (from: Uint32) @bit32 => from.data
@@ -81,7 +419,7 @@ Uint32: object {
     @conversion: function (from: Uint16) Uint32 => Uint32 { data = @extend_zero(from as @bit16) }
 
     /// This value as an `Int8`; fails when it is out of `Int8`'s range.
-    to_int8: function (self) value: Int8 else nothing {
+    to_int8: function (self: Uint32) value: Int8 else nothing {
         bits: @bit8 = @truncate(self.data)
         back: @bit32 = @extend_sign(bits)
         if back == self.data and @i_greater_than_or_equal_8(bits, 0x0) {
@@ -93,10 +431,10 @@ Uint32: object {
 
     /// This value as an `Int8`, wrapping around at `Int8`'s range: the
     /// low bits.
-    to_int8_wrapping: function (self) Int8 => @truncate(self.data) as @bit8 as Int8
+    to_int8_wrapping: function (self: Uint32) Int8 => @truncate(self.data) as @bit8 as Int8
 
     /// This value as an `Int16`; fails when it is out of `Int16`'s range.
-    to_int16: function (self) value: Int16 else nothing {
+    to_int16: function (self: Uint32) value: Int16 else nothing {
         bits: @bit16 = @truncate(self.data)
         back: @bit32 = @extend_sign(bits)
         if back == self.data and @i_greater_than_or_equal_16(bits, 0x0) {
@@ -108,10 +446,10 @@ Uint32: object {
 
     /// This value as an `Int16`, wrapping around at `Int16`'s range: the
     /// low bits.
-    to_int16_wrapping: function (self) Int16 => @truncate(self.data) as @bit16 as Int16
+    to_int16_wrapping: function (self: Uint32) Int16 => @truncate(self.data) as @bit16 as Int16
 
     /// This value as an `Int32`; fails when it is out of `Int32`'s range.
-    to_int32: function (self) value: Int32 else nothing {
+    to_int32: function (self: Uint32) value: Int32 else nothing {
         bits: @bit32 = self.data
         back: @bit32 = bits
         if back == self.data and @i_greater_than_or_equal_32(bits, 0x0) {
@@ -123,10 +461,10 @@ Uint32: object {
 
     /// This value as an `Int32`, wrapping around at `Int32`'s range: the
     /// low bits.
-    to_int32_wrapping: function (self) Int32 => self.data as @bit32 as Int32
+    to_int32_wrapping: function (self: Uint32) Int32 => self.data as @bit32 as Int32
 
     /// This value as an `Int`; fails when it is out of `Int`'s range.
-    to_int: function (self) value: Int else nothing {
+    to_int: function (self: Uint32) value: Int else nothing {
         bits: @bit_native = @extend_zero(self.data)
         back: @bit32 = @truncate(bits)
         if back == self.data and @i_greater_than_or_equal_native(bits, 0x0) {
@@ -138,10 +476,10 @@ Uint32: object {
 
     /// This value as an `Int`, wrapping around at `Int`'s range: the
     /// low bits, zero-extended.
-    to_int_wrapping: function (self) Int => @extend_zero(self.data) as @bit_native as Int
+    to_int_wrapping: function (self: Uint32) Int => @extend_zero(self.data) as @bit_native as Int
 
     /// This value as a `Uint8`; fails when it is out of `Uint8`'s range.
-    to_uint8: function (self) value: Uint8 else nothing {
+    to_uint8: function (self: Uint32) value: Uint8 else nothing {
         bits: @bit8 = @truncate(self.data)
         back: @bit32 = @extend_zero(bits)
         if back == self.data {
@@ -153,10 +491,10 @@ Uint32: object {
 
     /// This value as a `Uint8`, wrapping around at `Uint8`'s range: the
     /// low bits.
-    to_uint8_wrapping: function (self) Uint8 => @truncate(self.data) as @bit8 as Uint8
+    to_uint8_wrapping: function (self: Uint32) Uint8 => @truncate(self.data) as @bit8 as Uint8
 
     /// This value as a `Uint16`; fails when it is out of `Uint16`'s range.
-    to_uint16: function (self) value: Uint16 else nothing {
+    to_uint16: function (self: Uint32) value: Uint16 else nothing {
         bits: @bit16 = @truncate(self.data)
         back: @bit32 = @extend_zero(bits)
         if back == self.data {
@@ -168,14 +506,24 @@ Uint32: object {
 
     /// This value as a `Uint16`, wrapping around at `Uint16`'s range: the
     /// low bits.
-    to_uint16_wrapping: function (self) Uint16 => @truncate(self.data) as @bit16 as Uint16
+    to_uint16_wrapping: function (self: Uint32) Uint16 => @truncate(self.data) as @bit16 as Uint16
 
     /// This value as a `Float16`, rounded to the nearest (ties to even);
     /// past `Float16`'s largest finite value it is an infinity.
-    to_float16_rounded: function (self) Float16 => @uint_to_float(self.data) as @fbit16 as Float16
+    to_float16_rounded: function (self: Uint32) Float16 => @uint_to_float(self.data) as @fbit16 as Float16
 
     /// This value as a `Float32`, rounded to the nearest (ties to even);
-    to_float32_rounded: function (self) Float32 => @uint_to_float(self.data) as @fbit32 as Float32
+    to_float32_rounded: function (self: Uint32) Float32 => @uint_to_float(self.data) as @fbit32 as Float32
+
+    /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary
+    /// (`_` separators allowed).
+    parse: function (text: @byte_buffer) value: Uint32 else error: ParseError {
+        raw: @bit64 = parse_unsigned_int(text, @extend_zero(Uint32.MAX.data)) else -> err: ParseError {
+            error = err
+            fail
+        }
+        value = Uint32 { data = @truncate(raw) }
+    }
 
     /// Unsigned decimal.
     @format: function (self, out: ref Formatter) nothing {
@@ -183,8 +531,8 @@ Uint32: object {
     }
 
     /// The bits in hexadecimal, at this type's width: `{n.hex()}`.
-    hex: function (self) Hex => Hex { value = @extend_zero(self.data) }
+    hex: function (self: Uint32) Hex => Hex { value = @extend_zero(self.data) }
 
     /// The bits in binary, at this type's width: `{n.binary()}`.
-    binary: function (self) Binary => Binary { value = @extend_zero(self.data) }
+    binary: function (self: Uint32) Binary => Binary { value = @extend_zero(self.data) }
 }

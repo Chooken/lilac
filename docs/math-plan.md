@@ -1,6 +1,6 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; phases 0-2 done.
+> Status: agreed, 2026-10-14; phases 0-4, 6 done.
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -356,8 +356,8 @@ Tests:
 
 ## Phase 3: integer methods
 
-On every integer type (`self` by value, all `=>` where one intrinsic
-does it):
+**Done.** On every integer type (`self` by value, all `=>` where one
+intrinsic does it):
 
 - Basics:
   - `abs`, `unsigned_abs` (to the unsigned type, defined for `MIN`),
@@ -379,29 +379,33 @@ does it):
   - `to_big_endian`, `to_little_endian`, `from_big_endian`,
     `from_little_endian` (constant on `@builtin.Target.arch`'s byte
     order).
-- Overflow, in four families for `add`/`sub`/`multiply`/`pow`:
+- Overflow, in four families for `add`/`subtract`/`multiply`/`negate`/`pow`:
   - `checked_*` fail;
-  - `wrapping_*` wrap (phase 2 has `add`/`sub`/`multiply`/`negate`;
+  - `wrapping_*` wrap (phase 2 has `add`/`subtract`/`multiply`/`negate`;
     this adds `wrapping_pow`);
   - `saturating_*` clamp;
   - `overflowing_*` return `value, overflowed: Bool`.
 - Wide arithmetic:
-  - `widening_multiply(other) high, low` (on `Uint64`, through
-    `@i_multiply_high`);
-  - `carrying_add(other, carry: Bool) sum, carry`;
-  - `borrowing_sub`.
+  - `widening_multiply(other) high, low` (through `@i_multiply_high`);
+  - `carrying_add(other, carry: Bool) sum, carry_out`;
+  - `borrowing_subtract(other, borrow: Bool) difference, borrow_out`.
 
-`Ordering` (STDLIB §3.1) lands here if nothing has added it yet:
-`enum { Less; Equal; Greater }`, with `compare` on every numeric type.
+`Ordering` (STDLIB §3.1, `lib/Standard/ordering.lilac`) landed here:
+`enum { Less; Equal; Greater }` with `is_less`/`is_equal`/`is_greater`/
+`is_less_or_equal`/`is_greater_or_equal`, `reverse`, `and_then` (`then`
+is a keyword) and `@format`, plus `compare` on every numeric type
+(on floats it fails when either operand is a NaN).
 
 Tests:
-- One run test per method family, printing boundary values (`MIN`,
+- `integer_basics.lilac`, `integer_division.lilac`,
+  `integer_powers_roots.lilac`, `integer_bits.lilac` and
+  `integer_overflow_methods.lilac`, printing boundary values (`MIN`,
   `MAX`, 0, ±1, powers of two).
 - `checked_*` exercised through `if … -> sum` and guards.
 
 ## Phase 4: float core
 
-On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
+**Done.** On `Float16`, `Float32` and `Float64`:
 
 - **Constants** (member constants, folded through phase 1):
   - `PI`, `TAU`, `E`, `SQRT_2`, `FRAC_1_SQRT_2`, `LN_2`, `LN_10`,
@@ -416,9 +420,9 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
 - **Classification:**
   - `is_nan`, `is_infinite`, `is_finite`, `is_normal`, `is_subnormal`,
     `is_zero`;
-  - `sign_bit`, `is_sign_negative`;
-  - `classify` (an enum: `Nan`, `Infinite`, `Zero`, `Subnormal`,
-    `Normal`).
+  - `sign_bit`, `is_sign_negative`, `is_sign_positive`;
+  - `classify` (`FloatClass` in `lib/Standard/float_class.lilac`: `Nan`,
+    `Infinite`, `Zero`, `Subnormal`, `Normal`).
 
   All are bit tests through `@fbit_to_bits`.
 - **Exact operations**, each one intrinsic and `=>`:
@@ -432,7 +436,8 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
   - `recip`;
   - `to_radians`, `to_degrees`.
 - **Bits and ULPs:**
-  - `to_bits`/`from_bits` (to and from the same-width `Uint`);
+  - `to_bits`/`from_bits` (to and from the same-width `Uint`),
+    `hex`/`binary`;
   - `next_up`, `next_down`, `ulp`;
   - `exponent`, `mantissa`;
   - `scale_by_power_of_two(n)` (exact `ldexp`);
@@ -454,8 +459,8 @@ On `Float32` and `Float64` (and on `Float16` as far as phase 2 goes):
   - `inverse_lerp`, `remap`, `smooth_step`.
 
 Tests:
-- A run test per family, printing bits through phase 6's `@format` (or
-  `hex()` until it lands).
+- `float_constants_classify.lilac`, `float_exact_ops.lilac`,
+  `float_bits_ulps.lilac` and `float_comparison_lerp.lilac`.
 - The NaN, ±0, ±∞ and subnormal rows, on every function.
 
 ## Phase 5: elementary functions
@@ -529,28 +534,36 @@ Verification (the production-grade gate):
 
 ## Phase 6: printing and parsing floats
 
-A beginner's first math program prints a float.
+**Done.** (`lib/Standard/float_format.lilac`, plus `scripts/numeric_types.pl`):
 
-- **`@format`.** `Float32`/`Float64` print the shortest decimal string
-  that reads back to the same bits, using the Ryū or Schubfach
-  algorithm (no big integers, no allocation). Output looks like `0.1`,
-  `1e300`, `-0`, `inf`, `nan`.
-- **Fixed and scientific.** Two wrappers, like `hex()`: `{x.fixed(3)}`
-  and `{x.scientific(4)}`. They are correctly rounded and need exact
-  decimal expansion: Ryū-printf or a fixed-size big integer on the
-  stack.
+- **`@format`.** `Float16`, `Float32` and `Float64` (and `@fbit16`/
+  `@fbit32`/`@fbit64`) print the shortest decimal string that reads back
+  to the same bits (Burger–Dybvig exact interval over a stack-allocated
+  64-limb big integer, no heap allocation). Output looks like `0.1`,
+  `1e300`, `-0`, `inf`, `-inf`, `nan`.
+- **Fixed and scientific.** `Fixed` and `Scientific` wrappers:
+  `{x.fixed(3)}` and `{x.scientific(4)}`, correctly rounded (ties to
+  even) from the exact binary value.
 - **Parsing.** `Float64.parse(text: @byte_buffer) value: Float64 else
-  error: ParseError` and `Int*.parse`. Floats use Eisel–Lemire with a
-  big-decimal fallback, so every input is correctly rounded. The
-  formats are the language's literal formats plus `inf`/`nan`. This sits
-  in `Standard` until `Text` exists (STDLIB §3.3 names `parse_float`).
-- Remove `FAILS_standard_float_hole` and update STDLIB §3.1a's note.
+  error: ParseError` (`Float32.parse`, `Float16.parse`, `Int*.parse` and
+  `Uint*.parse`), with `ParseError: enum { Empty; InvalidDigit;
+  Overflow; Trailing }`. Floats use the exact stack big-integer
+  converter (780 significant digits plus a sticky digit), so every input
+  including halfway points and subnormals is correctly rounded. The
+  formats are the language's literal formats (`0x` and `0b` on integers,
+  `_` separators) plus `inf`/`infinity`/`nan` on floats.
+- Removed `FAILS_standard_float_hole` and updated STDLIB §3.1a.
+- Fixed a lowering bug in `Lower::lower_assign` where a branching
+  assignment target (`@write(@array_at(…), v)`) read `v`'s register
+  across the bounds-check block.
 
 Tests:
-- Round-trip on random bits and on the hard cases (from Ryū's test
-  suite).
-- The fixed-precision rounding cases (`0.125` to 2 digits, `1e23`).
-- Parse cases at the halfway points.
+- `float_format.lilac`: special values, Ryū hard cases and round-trip on
+  generated `Float64` and `Float32` bit patterns.
+- `float_fixed_scientific.lilac`: fixed and scientific rounding cases
+  (`0.125` to 2 digits, `1e23`, ties to even, rollover).
+- `numeric_parse.lilac`: integer and float parsing, `ParseError`
+  variants, and IEEE halfway points.
 
 ## Phase 7: `Standard.Math.Random`
 

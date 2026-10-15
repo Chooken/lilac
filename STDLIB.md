@@ -191,15 +191,17 @@ unsigned variants; float variants. Unsigned comparisons bind
 |---|---|---|
 | `Option[T]` | `enum { Some: T; None }` | `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`, `and_then`, `or`, `or_else`, `take`, `replace`, `iter` |
 | `Result[T, E]` | `enum { Ok: T; Error: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
-| `Ordering` | `enum { Less; Equal; Greater }` | `then`, `reverse`, `is_less`… |
+| `Ordering` | `enum { Less; Equal; Greater }` | `and_then`, `reverse`, `is_less`… |
 | `Never` | `enum {}` (empty) | uninhabited; result of `panic`/`abort` |
 | `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
 
 > **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
 > `get_ref: value: ref T else nothing` (the value in place),
-> `unwrap_or`, `unwrap_or_default`) and a first `Result[T, E]` (`Ok`,
+> `unwrap_or`, `unwrap_or_default`), a first `Result[T, E]` (`Ok`,
 > `Error`; `is_ok`, `get: value: T else error: E`, `error: error: E else
-> nothing`, `unwrap_or`). `get`, `error` and the `unwrap_or`s take `self`
+> nothing`, `unwrap_or`), and `Ordering` (`Less`, `Equal`, `Greater`;
+> `is_less`, `is_equal`, `is_greater`, `is_less_or_equal`,
+> `is_greater_or_equal`, `reverse`, `and_then`, `@format`). `get`, `error` and the `unwrap_or`s take `self`
 > by value, so they move the optional or result. Both start zeroed as their first variant:
 > a zeroed `Optional` is `Some`, so set `.None` explicitly.
 
@@ -217,15 +219,36 @@ unsigned variants; float variants. Unsigned comparisons bind
 `@conversion(from: @bit8) to: @bit32`), `Char`↔`@bit32`, `@bit*`↔float,
 `@bit*`→`@byte_buffer` textual? (textual lives in `Text`).
 
-> **Today** (math plan phase 2, generated one file per type): every
+> **Today** (math plan phases 2-4, generated one file per type): every
 > integer type has `MIN`/`MAX`, the operators with a bit container on
 > either side (so `n * 2` and `1 < n` need no `as`), `@format`,
-> `hex`/`binary`, and `wrapping_add`/`_subtract`/`_multiply`/`_negate`.
+> `hex`/`binary`, `compare`, `abs`/`unsigned_abs`/`sign`,
+> `min`/`max`/`clamp`, `is_power_of_two`/`next_power_of_two`,
+> `div_floor`/`div_ceil`/`div_euclid`/`rem_euclid`/`div_rem`/`gcd`/`lcm`,
+> `pow`/`isqrt`/`ilog2`/`ilog10`, bit counts/rotates/byte swaps/endian
+> conversions, the four overflow families (`checked_*`, `wrapping_*`,
+> `saturating_*`, `overflowing_*` for `add`/`subtract`/`multiply`/
+> `negate`/`pow`), and `widening_multiply`/`carrying_add`/
+> `borrowing_subtract` (`self` by value, `=>` where one intrinsic does
+> it).
 > `+`, `-`, `*` and negation panic on overflow in Debug builds
 > (`attempt to add with overflow`, …) and wrap in Release; `/` and `%`
 > panic on a zero divisor (and `MIN / -1`) in every mode. Floats
-> (`Float16` too) have their arithmetic and comparisons, with an
-> `@fbitW` on either side. `as` is an `@conversion` only where every
+> (`Float16`, `Float32`, `Float64`) have their arithmetic and
+> comparisons with an `@fbitW` on either side, mathematical and format
+> constants (`PI`, `TAU`, `E`, `SQRT_2`, `INFINITY`, `NAN`, `EPSILON`,
+> `MIN_POSITIVE`, `MIN_SUBNORMAL`, `MAX`, `MIN`, `MANTISSA_BITS`,
+> `EXPONENT_BITS`), classification (`is_nan`, `is_infinite`, `is_finite`,
+> `is_normal`, `is_subnormal`, `is_zero`, `sign_bit`, `is_sign_negative`,
+> `is_sign_positive`, `classify` → `FloatClass`), exact operations
+> (`abs`, `copy_sign`, `floor`, `ceil`, `trunc`, `round`, `round_even`,
+> `fract`, `sqrt`, `multiply_add`, `min`, `max`, `min_number`,
+> `max_number`, `clamp`, `recip`, `to_radians`, `to_degrees`), bit/ULP
+> operations (`to_bits`, `from_bits`, `hex`, `binary`, `next_up`,
+> `next_down`, `ulp`, `exponent`, `mantissa`, `scale_by_power_of_two`,
+> `split_exponent`), comparisons (`equals`, `approximately_equals`,
+> `total_compare`, `compare`), and interpolation (`lerp`, `inverse_lerp`,
+> `remap`, `smooth_step`). `as` is an `@conversion` only where every
 > value converts exactly: widening of one signedness, unsigned into a
 > wider signed type, an integer into a float whose significand holds it,
 > and a narrower float into a wider one. Everything else is a method
@@ -252,7 +275,8 @@ consumer meet in it:
 | `Formatter` | Where formatted text goes: an object holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
 | `Format` | `alias @format_args(Formatter)`: the type of an f-string written into a `Formatter`. |
 | `FormatSink` | `alias function (target: ref unknown, bytes: @byte_buffer) nothing`: what a consumer hands a `Formatter`. |
-| `Hex`, `Binary` | An integer's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}` on `Int`, `Int8`…`Int64`. |
+| `Hex`, `Binary` | A number's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}`. |
+| `Fixed`, `Scientific` | A float formatted with `precision` digits after the decimal point (ties rounded to even), fixed-point or scientific: `{x.fixed(3)}`, `{x.scientific(4)}`. |
 | `Padded` | `pad_left(ref f, width)`, `pad_right` and `pad_center` (an odd space goes after) pad a `Format` with spaces to `width` code points; a counting `Formatter` measures it first. |
 
 A type is formattable when it has a `@format` hook for `Formatter`, found
@@ -270,13 +294,14 @@ Point: object {
 ```
 
 `Standard` defines `@format` for `@bit8`…`@bit64` and `@bit_native`
-(unsigned decimal), `Int` and `Int8`…`Int64` (signed decimal), `Bool`
-(`true`/`false`), `@byte_buffer` (its bytes), `Format` (a nested format)
-and `Optional[T]` / `Result[T, E]` (`Some(v)`, `None`, `Ok(v)`,
+(unsigned decimal), `Int`/`Int8`…`Int64` (signed decimal),
+`Uint`/`Uint8`…`Uint64` (unsigned decimal), `@fbit16`/`@fbit32`/`@fbit64`
+and `Float16`/`Float32`/`Float64` (shortest round-trip decimal), `Bool`
+(`true`/`false`), `@byte_buffer` (its bytes), `Format` (a nested format),
+`Ordering`, `FloatClass`, `ParseError` and `Optional[T]` / `Result[T, E]` (`Some(v)`, `None`, `Ok(v)`,
 `Error(e)`: their hooks capture the payload through `self`, so they work
 when the payload types copy and have a `@format`, checked where they are
-used). Floats have none yet: shortest round-trip printing is its own work
-item, so a float hole is `E071`, never wrong digits. A character literal
+used). Every numeric type also provides `parse(text: @byte_buffer) value: T else error: ParseError`. A character literal
 is a `@bit32`, so `{'A'}` prints `65` until `Standard` has a `Char` type.
 
 A consumer makes a `Formatter` over its own storage: `Io.print` over a

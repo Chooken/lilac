@@ -1,0 +1,44 @@
+/// The result of comparing two values.
+Ordering: enum {
+    /// The left value is less than the right.
+    Less
+    /// The two values are equal.
+    Equal
+    /// The left value is greater than the right.
+    Greater
+
+    /// Whether this is `.Less`.
+    is_less: function (self: Ordering) Bool => self == .Less
+
+    /// Whether this is `.Equal`.
+    is_equal: function (self: Ordering) Bool => self == .Equal
+
+    /// Whether this is `.Greater`.
+    is_greater: function (self: Ordering) Bool => self == .Greater
+
+    /// Whether this is `.Less` or `.Equal`.
+    is_less_or_equal: function (self: Ordering) Bool => self != .Greater
+
+    /// Whether this is `.Greater` or `.Equal`.
+    is_greater_or_equal: function (self: Ordering) Bool => self != .Less
+
+    /// The opposite order: `.Less` and `.Greater` swapped, `.Equal` unchanged.
+    reverse: function (self: Ordering) Ordering =>
+        match self {
+            .Less => .Greater
+            .Greater => .Less
+        } else .Equal
+
+    /// `self` unless it is `.Equal`, in which case `other` (lexicographic chaining).
+    and_then: function (self: Ordering, other: Ordering) Ordering =>
+        if self == .Equal then other else self
+
+    /// `Less`, `Equal` or `Greater`.
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Less => out.write_bytes("Less")
+            .Equal => out.write_bytes("Equal")
+            .Greater => out.write_bytes("Greater")
+        }
+    }
+}
