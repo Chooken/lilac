@@ -124,6 +124,18 @@ Allocator: object {
     deallocate[T]: function (self, memory: ref T, count: Int) nothing {
         self.functions.free(self.target, memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
     }
+
+    allocate_raw: function (self, size: Int, alignment: Int) allocation: ref unknown {
+        allocation = self.functions.allocate(self.target, size, alignment)
+    }
+
+    reallocate_raw: function (self, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown {
+        allocation = self.functions.reallocate(self.target, memory, old_size, new_size, alignment)
+    }
+    
+    free_raw: function (self, memory: ref unknown, size: Int, alignment: Int) nothing {
+        self.functions.free(self.target, memory, size, alignment)
+    } 
 }
 
 

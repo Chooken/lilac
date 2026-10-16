@@ -1,7 +1,7 @@
 // build-arg: --stack-traces=off
 // expect-exit: 101
 // expect-stderr: panic: Freed or resized memory this allocator did not give, or with another size or alignment.
-// expect-stderr:   at Standard.Heap.GeneralAllocator.large_header (Standard/Heap/general_allocator.lilac:417:25)
+// expect-stderr:   at Standard.Heap.GeneralAllocator.large_header (Standard/Heap/general_allocator.lilac:424:25)
 // expect-stderr:   (stack trace disabled; build with --stack-traces=on)
 // A Debug `GeneralAllocator` panics on freeing memory another one gave, small or large.
 

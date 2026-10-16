@@ -62,14 +62,14 @@ work: function (argument: ref unknown) nothing {
             if not holds(slot.memory, slot.size, job.tag) {
                 job.failed = 0x1
             }
-            allocator.free_bytes(slot.memory, slot.size, 16)
+            allocator.free_raw(slot.memory, slot.size, 16)
         }
         // Mostly small, now and then large.
         size: Int = (round * 37) % 3000 + 1
         if round % 97 == 0 as Int {
             size = 40000 + round
         }
-        memory: ref unknown = allocator.allocate_bytes(size, 16)
+        memory: ref unknown = allocator.allocate_raw(size, 16)
         if not holds(memory, size, 0x0) {
             job.failed = 0x2
         }
@@ -88,7 +88,7 @@ work: function (argument: ref unknown) nothing {
         if not holds(slot.memory, slot.size, job.tag) {
             job.failed = 0x3
         }
-        allocator.free_bytes(slot.memory, slot.size, 16)
+        allocator.free_raw(slot.memory, slot.size, 16)
         index = index + 1
     }
 }
