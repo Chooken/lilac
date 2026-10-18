@@ -19,8 +19,9 @@ Counted: object {
 
 main: function () nothing {
     a: Counted = Counted { copies = 0x0 }
+    // `a` is read again below, so this copies (a last use would move).
     b: Counted = a
-    a = Counted { copies = 0x5 }
+    a = Counted { copies = @i_add_32(a.copies, 0x5) }
     print_char(0xA)
     exit(b.copies)
 }

@@ -1,0 +1,20 @@
+// expect-error: E042
+// expect-stderr: error[E042]: type `Handle` does not satisfy `Slice.copy_to[T]` requirements
+// A `List` copies its elements, so it holds only types that copy: one
+// with an `@on_drop` and no `@on_copy` fails the list's `@on_copy`, and
+// the error is traced to where the list was named.
+
+using Standard
+using Standard.Collections
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+main: function () nothing {
+    handles: List[Handle] = List[Handle].init()
+    handles.add(Handle { id = 0x1 })
+}

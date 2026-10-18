@@ -13,8 +13,16 @@
 //! - Reading a place into a new owner copies it when its type copies
 //!   ([`Checker::is_copyable`]) and moves it otherwise: the read is wrapped
 //!   in [`HirExprKind::Move`] and the place becomes empty. Reading an empty
-//!   place is `E063`; moving out through a `ref`, out of a global or a
+//!   place is `E063`, which says why an implicit move happened
+//!   ([`Pass::moved_here`]); moving out through a `ref`, out of a global or a
 //!   temporary, or out of a type with its own `@on_drop` is `E064`.
+//! - Taking a `ref` to a local (or a field of it) borrows it for the rest
+//!   of its scope, on the paths that took it ([`Flow::borrowed`]); a
+//!   borrowed local moves only by `@move`, and an implicit move of one is
+//!   `E079` (`docs/moves-plan.md`).
+//! - A copyable local's last by-value use moves it instead of copying
+//!   ([`Pass::last_use`], over [`crate::liveness::last_uses`]) when no
+//!   `ref` to it was taken.
 //! - Every block ends with a [`HirStmt::Drop`] of its full locals, and each
 //!   early exit drops the scopes it leaves. A place that may be empty where
 //!   it drops gets a flag ([`HirFunc::flags`]), which lowering keeps.
@@ -23,7 +31,7 @@
 //!   the end of the body, failure outs at every `fail` (`E065`); an out of
 //!   the other side that is full there drops.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lilac_error::{codes, Diagnostic};
 use lilac_hir::{
@@ -161,9 +169,27 @@ enum Summary {
     Discarded(Span),
 }
 
-/// The state at one point: each local's [`Own`], or `None` where no path
-/// reaches.
-type State = Option<HashMap<LocalId, Own>>;
+/// What the pass knows at one point that a path reaches.
+#[derive(Clone, Debug, Default)]
+struct Flow {
+    /// Each tracked local's [`Own`].
+    owns: HashMap<LocalId, Own>,
+    /// The locals a `ref` was taken to (to them or a field), each with
+    /// where the first was: never moved but by `@move` (`E079`). A `ref`
+    /// has no lifetime, so a local stays borrowed until its scope ends.
+    borrowed: HashMap<LocalId, Span>,
+}
+
+impl Flow {
+    /// Forgets `local`, whose scope ended.
+    fn forget(&mut self, local: LocalId) {
+        self.owns.remove(&local);
+        self.borrowed.remove(&local);
+    }
+}
+
+/// The state at one point, or `None` where no path reaches.
+type State = Option<Flow>;
 
 /// One enclosing loop.
 struct LoopFrame {
@@ -201,13 +227,14 @@ impl Checker<'_> {
             }
             None => (func.returns.clone(), Vec::new()),
         };
-        let mut state = HashMap::new();
+        let mut state = Flow::default();
         for id in &func.params {
-            state.insert(*id, Own::Full);
+            state.owns.insert(*id, Own::Full);
         }
         for id in &func.returns {
-            state.insert(*id, Own::Empty(None));
+            state.owns.insert(*id, Own::Empty(None));
         }
+        let last = crate::liveness::last_uses(&body, &func.returns);
         let mut pass = Pass {
             c: self,
             locals: &mut func.locals,
@@ -221,6 +248,8 @@ impl Checker<'_> {
             torn: Vec::new(),
             heights: HashMap::new(),
             bound: None,
+            implicit: HashMap::new(),
+            last,
         };
         let mut stmts = Vec::new();
         for stmt in std::mem::take(&mut body.stmts) {
@@ -267,6 +296,24 @@ impl Checker<'_> {
         result
     }
 
+    /// Why a `ty` does not copy: the type in it (`ty` itself, or one of
+    /// its slots, however deep) with an `@on_drop` and no `@on_copy`.
+    /// `None` when it copies.
+    fn copy_blocker(&mut self, ty: TypeRef) -> Option<TypeRef> {
+        if self.is_copyable(ty) {
+            return None;
+        }
+        if let TypeKind::Array { elem, .. } = self.types.kind(ty.id).clone() {
+            return self.copy_blocker(TypeRef::value(elem));
+        }
+        if self.raii_hook("@on_drop", ty.id).is_some() {
+            return Some(ty);
+        }
+        self.slot_types(ty)
+            .into_iter()
+            .find_map(|slot| self.copy_blocker(slot))
+    }
+
     /// Whether dropping a `ty` does anything: its own `@on_drop`, or a slot
     /// that needs a drop (lowering's rule).
     pub(crate) fn needs_drop(&mut self, ty: TypeRef) -> bool {
@@ -288,6 +335,31 @@ impl Checker<'_> {
         };
         if self.out.layouts.contains_key(&ty.id) {
             self.droppable.insert(ty.id, result);
+        }
+        result
+    }
+
+    /// Whether copying a `ty` runs an `@on_copy`: its own, or a slot's
+    /// (lowering's rule).
+    pub(crate) fn needs_copy(&mut self, ty: TypeRef) -> bool {
+        if ty.is_ref {
+            return false;
+        }
+        if let Some(known) = self.copy_hooked.get(&ty.id) {
+            return *known;
+        }
+        let result = match self.types.kind(ty.id) {
+            TypeKind::Object(_) | TypeKind::Instance { .. } => {
+                self.raii_hook("@on_copy", ty.id).is_some()
+                    || self
+                        .slot_types(ty)
+                        .into_iter()
+                        .any(|slot| self.needs_copy(slot))
+            }
+            _ => return false,
+        };
+        if self.out.layouts.contains_key(&ty.id) {
+            self.copy_hooked.insert(ty.id, result);
         }
         result
     }
@@ -352,6 +424,14 @@ struct Pass<'p, 'a> {
     heights: HashMap<TypeId, usize>,
     /// [`Pass::round_bound`], once worked out.
     bound: Option<usize>,
+    /// The implicit moves (a by-value use or a capture of a type that
+    /// does not copy), by span, with the type moved: `E063` says why
+    /// such a move happened.
+    implicit: HashMap<Span, TypeRef>,
+    /// The reads of a whole local that are its last on every path from
+    /// them ([`crate::liveness::last_uses`]): one that would copy moves
+    /// instead ([`Pass::last_use`]).
+    last: HashSet<(LocalId, Span)>,
 }
 
 impl Pass<'_, '_> {
@@ -435,7 +515,7 @@ impl Pass<'_, '_> {
                 if let Some(state) = &mut state {
                     for frame in &self.frames[depth..] {
                         for local in frame {
-                            state.remove(local);
+                            state.forget(*local);
                         }
                     }
                 }
@@ -485,7 +565,8 @@ impl Pass<'_, '_> {
                 for arm in &mut arms {
                     self.state = start.clone();
                     if let Some(capture) = arm.capture {
-                        arm.moves = !arm.by_ref && self.capture(&scrutinee, path.as_ref(), capture);
+                        arm.moves =
+                            self.bind_capture(&scrutinee, path.as_ref(), arm.by_ref, capture);
                     }
                     self.block(&mut arm.body, arm.capture.into_iter().collect());
                     end = merge_states(self.c, self.locals, end, self.state.take());
@@ -529,7 +610,7 @@ impl Pass<'_, '_> {
         block.stmts = stmts;
         if let (Some(state), Some(frame)) = (&mut self.state, self.frames.pop()) {
             for local in frame {
-                state.remove(&local);
+                state.forget(local);
             }
         }
     }
@@ -590,10 +671,10 @@ impl Pass<'_, '_> {
     }
 
     /// How many rounds a loop's head can take: one more than the times a
-    /// state can climb. Each climb adds a tracked local or raises one of
-    /// them, and a local of type `T` rises at most [`height`]`(T)` times,
-    /// so the sum over this body's locals bounds it (locals added later
-    /// are drop flags, never tracked).
+    /// state can climb. Each climb adds a tracked local, borrows one, or
+    /// raises one's [`Own`], and a local of type `T` rises at most
+    /// [`height`]`(T)` times, so the sum over this body's locals bounds it
+    /// (locals added later are drop flags, never tracked).
     fn round_bound(&mut self) -> usize {
         if let Some(bound) = self.bound {
             return bound;
@@ -601,7 +682,7 @@ impl Pass<'_, '_> {
         let mut bound = 1usize;
         for index in 0..self.locals.len() {
             let ty = self.locals[index].ty;
-            let rises = height(self.c, &mut self.heights, ty).saturating_add(1);
+            let rises = height(self.c, &mut self.heights, ty).saturating_add(2);
             bound = bound.saturating_add(rises);
         }
         self.bound = Some(bound);
@@ -634,7 +715,7 @@ impl Pass<'_, '_> {
     /// Declares `local` in the innermost scope, holding `own`.
     fn init(&mut self, local: LocalId, own: Own) {
         if let Some(state) = &mut self.state {
-            state.insert(local, own);
+            state.owns.insert(local, own);
         }
         if let Some(frame) = self.frames.last_mut() {
             frame.push(local);
@@ -682,7 +763,7 @@ impl Pass<'_, '_> {
         let Some(mut own) = self
             .state
             .as_ref()
-            .and_then(|s| s.get(&path.local))
+            .and_then(|s| s.owns.get(&path.local))
             .cloned()
         else {
             return true;
@@ -707,7 +788,7 @@ impl Pass<'_, '_> {
                     )
                     .label(span, true, format!("sets a field of `{name}`"));
                     if let Some(at) = empty.moved_at() {
-                        diagnostic = diagnostic.label(at, false, "moved here");
+                        diagnostic = self.moved_here(diagnostic, at, "moved here", &name);
                     }
                     let shown = self.c.show_id(ty.id);
                     self.report(diagnostic.help(format!(
@@ -787,6 +868,16 @@ impl Pass<'_, '_> {
     fn expr(&mut self, expr: &mut HirExpr, consume: bool) {
         if let Some(path) = HirPath::of(expr) {
             if consume && !self.c.is_copyable(expr.ty) {
+                self.unborrowed(&path, expr.span, expr.ty, None);
+                self.implicit.insert(expr.span, expr.ty);
+                self.move_path(&path, expr.span);
+                let inner = std::mem::replace(expr, HirExpr::poison(expr.span));
+                *expr = HirExpr {
+                    ty: inner.ty,
+                    span: inner.span,
+                    kind: HirExprKind::Move(Box::new(inner)),
+                };
+            } else if consume && self.last_use(&path, expr.span, expr.ty) {
                 self.move_path(&path, expr.span);
                 let inner = std::mem::replace(expr, HirExpr::poison(expr.span));
                 *expr = HirExpr {
@@ -860,7 +951,13 @@ impl Pass<'_, '_> {
                     self.state = None;
                 }
             }
-            HirExprKind::RefOf(inner) | HirExprKind::Retype(inner) | HirExprKind::Not(inner) => {
+            HirExprKind::RefOf(inner) => {
+                self.expr(inner, false);
+                if let Some(path) = HirPath::of(inner) {
+                    self.borrow(path.local, span);
+                }
+            }
+            HirExprKind::Retype(inner) | HirExprKind::Not(inner) => {
                 self.expr(inner, false);
             }
             HirExprKind::Eq(lhs, rhs) => {
@@ -893,7 +990,8 @@ impl Pass<'_, '_> {
                 for arm in arms {
                     self.state = start.clone();
                     if let Some(capture) = arm.capture {
-                        arm.moves = !arm.by_ref && self.capture(scrutinee, path.as_ref(), capture);
+                        arm.moves =
+                            self.bind_capture(scrutinee, path.as_ref(), arm.by_ref, capture);
                         self.init_free(capture);
                     }
                     self.expr(&mut arm.value, true);
@@ -906,7 +1004,7 @@ impl Pass<'_, '_> {
                         }
                         arm.drops = drops;
                         if let Some(state) = &mut self.state {
-                            state.remove(&capture);
+                            state.forget(capture);
                         }
                     }
                     end = merge_states(self.c, self.locals, end, self.state.take());
@@ -931,10 +1029,25 @@ impl Pass<'_, '_> {
         }
     }
 
+    /// Whether the by-value read of `path` (a `ty`, which copies) at
+    /// `span` moves instead: it is a whole local, this read is its last on
+    /// every path, no `ref` to it was taken, and copying would run a hook
+    /// (a plain-data move and copy are the same bytes). A language rule,
+    /// the same in every build: hooks run only where a copy is needed.
+    fn last_use(&mut self, path: &HirPath, span: Span, ty: TypeRef) -> bool {
+        path.fields.is_empty()
+            && self.last.contains(&(path.local, span))
+            && !self
+                .state
+                .as_ref()
+                .is_some_and(|state| state.borrowed.contains_key(&path.local))
+            && (self.c.needs_copy(ty) || self.c.needs_drop(ty))
+    }
+
     /// A value-match capture: full in its arm, owned by no scope.
     fn init_free(&mut self, local: LocalId) {
         if let Some(state) = &mut self.state {
-            state.insert(local, Own::Full);
+            state.owns.insert(local, Own::Full);
         }
     }
 
@@ -974,6 +1087,88 @@ impl Pass<'_, '_> {
         }
     }
 
+    /// Binds an arm's `capture`: whether it moves the payload out. A
+    /// by-reference capture moves nothing and borrows the matched place.
+    fn bind_capture(
+        &mut self,
+        scrutinee: &HirExpr,
+        path: Option<&HirPath>,
+        by_ref: bool,
+        capture: LocalId,
+    ) -> bool {
+        if by_ref {
+            if let Some(path) = path {
+                let span = self.locals[capture.0 as usize].span;
+                self.borrow(path.local, span);
+            }
+            return false;
+        }
+        self.capture(scrutinee, path, capture)
+    }
+
+    /// Marks `local` borrowed: a `ref` to it (or a field) is taken at `at`.
+    fn borrow(&mut self, local: LocalId, at: Span) {
+        if let Some(state) = &mut self.state {
+            state.borrowed.entry(local).or_insert(at);
+        }
+    }
+
+    /// `E079` when the owned place `path`, about to move implicitly at
+    /// `span` (a `ty` that does not copy), is borrowed: a `ref` may still
+    /// point at it. `scrutinee` is the matched value's span when a capture
+    /// moves a payload out of it. It still moves after, so one mistake is
+    /// one error.
+    fn unborrowed(&mut self, path: &HirPath, span: Span, ty: TypeRef, scrutinee: Option<Span>) {
+        let local = &self.locals[path.local.0 as usize];
+        // A hidden local is the compiler's: it never moves while borrowed.
+        if local.name.is_empty() {
+            return;
+        }
+        let local_name = local.name.clone();
+        let Some(at) = self
+            .state
+            .as_ref()
+            .and_then(|state| state.borrowed.get(&path.local))
+            .copied()
+        else {
+            return;
+        };
+        let name = self.path_name(path);
+        let shown = self.c.show(ty);
+        let mut diagnostic = Diagnostic::error(
+            codes::E079,
+            format!("cannot move `{name}` implicitly: a reference to `{local_name}` was taken"),
+        )
+        .label(
+            at,
+            false,
+            format!("a reference to `{local_name}` is taken here"),
+        )
+        .note(format!(
+            "a `ref` may still point at `{local_name}`, so it moves only by `@move`"
+        ));
+        diagnostic = match scrutinee {
+            None => diagnostic
+                .label(
+                    span,
+                    true,
+                    format!("`{shown}` cannot be copied, so this would move `{name}`"),
+                )
+                .fix(
+                    span,
+                    format!("@move({name})"),
+                    format!("write `@move({name})` if no reference to `{local_name}` is used after this"),
+                ),
+            Some(matched) => diagnostic
+                .label(span, true, format!("`{shown}` cannot be copied, so this capture would move it out"))
+                .label(matched, false, format!("out of `{name}`"))
+                .help(format!(
+                    "capture it by reference (`ref {shown}`), or match on `@move({name})` if no reference to `{local_name}` is used after this"
+                )),
+        };
+        self.report(diagnostic);
+    }
+
     /// Binds `capture` from the payload of `scrutinee` (the owned place
     /// `path`, when it is one): whether it moves the payload out, which
     /// uses the matched value up. A payload that copies is copied. A
@@ -1004,6 +1199,8 @@ impl Pass<'_, '_> {
         }
         match path {
             Some(path) => {
+                self.unborrowed(path, span, ty, Some(scrutinee.span));
+                self.implicit.insert(span, ty);
                 self.set(path, Own::Empty(Some(span)));
                 true
             }
@@ -1046,7 +1243,7 @@ impl Pass<'_, '_> {
         let mut own = self
             .state
             .as_ref()
-            .and_then(|state| state.get(&path.local))
+            .and_then(|state| state.owns.get(&path.local))
             .cloned();
         for (depth, field) in path.fields.iter().enumerate() {
             // A discarded value's `@on_drop` no longer runs.
@@ -1113,6 +1310,37 @@ impl Pass<'_, '_> {
         );
     }
 
+    /// Labels the move at `at` that emptied `name` (`label`), and, when it
+    /// was implicit, says why it moved and how to keep the value.
+    fn moved_here(
+        &mut self,
+        diagnostic: Diagnostic,
+        at: Span,
+        label: &str,
+        name: &str,
+    ) -> Diagnostic {
+        let Some(ty) = self.implicit.get(&at).copied() else {
+            return diagnostic.label(at, false, label);
+        };
+        let shown = self.c.show(ty);
+        let diagnostic =
+            diagnostic.label(at, false, format!("{label}: `{shown}` cannot be copied"));
+        let Some(blocker) = self.c.copy_blocker(ty) else {
+            return diagnostic;
+        };
+        let cause = self.c.show(blocker);
+        let why = if blocker == ty {
+            format!("`{shown}` has an `@on_drop` and no `@on_copy`, so a use by value moves it")
+        } else {
+            format!(
+                "`{shown}` holds a `{cause}`, which has an `@on_drop` and no `@on_copy`, so a use by value moves it"
+            )
+        };
+        diagnostic.note(why).help(format!(
+            "to keep using `{name}`, pass a `ref` to it where it moved, or give `{cause}` an `@on_copy` so it copies"
+        ))
+    }
+
     /// Requires the owned place `path` to be full at a read (`E063`).
     fn require_full(&mut self, path: &HirPath, span: Span) {
         let Some(own) = self.own_at(path) else {
@@ -1155,7 +1383,7 @@ impl Pass<'_, '_> {
         let discarded = matches!(own.summary(), Summary::Discarded(_));
         let mut diagnostic = Diagnostic::error(codes::E063, message).label(span, true, used);
         diagnostic = match moved {
-            Some((at, label)) => diagnostic.label(at, false, label),
+            Some((at, label)) => self.moved_here(diagnostic, at, label, &name),
             None => diagnostic.help("an out starts empty: set it before reading it"),
         };
         if discarded {
@@ -1171,7 +1399,7 @@ impl Pass<'_, '_> {
     /// What the owned place `path` holds (a leaf above it covers it), or
     /// `None` when its local is not tracked here.
     fn own_at(&self, path: &HirPath) -> Option<Own> {
-        let mut own = self.state.as_ref()?.get(&path.local)?;
+        let mut own = self.state.as_ref()?.owns.get(&path.local)?;
         for field in &path.fields {
             match own {
                 Own::Parts(parts) | Own::Discarded { parts, .. } => own = &parts[*field as usize],
@@ -1187,7 +1415,7 @@ impl Pass<'_, '_> {
         let Some(state) = &mut self.state else {
             return;
         };
-        let root = state.entry(path.local).or_insert(Own::Full);
+        let root = state.owns.entry(path.local).or_insert(Own::Full);
         set_in(self.c, root, ty, &path.fields, value);
     }
 
@@ -1439,12 +1667,16 @@ fn merge_states(c: &impl FieldTypes, locals: &[HirLocal], a: State, b: State) ->
     match (a, b) {
         (None, other) | (other, None) => other,
         (Some(mut a), Some(b)) => {
-            for (id, own) in b {
-                let merged = match a.get(&id) {
+            for (id, own) in b.owns {
+                let merged = match a.owns.get(&id) {
                     Some(mine) => merge(c, locals[id.0 as usize].ty, mine, &own),
                     None => own,
                 };
-                a.insert(id, merged);
+                a.owns.insert(id, merged);
+            }
+            // Borrowed on either path is borrowed.
+            for (id, at) in b.borrowed {
+                a.borrowed.entry(id).or_insert(at);
             }
             Some(a)
         }
@@ -1456,9 +1688,12 @@ fn same_states(a: &State, b: &State) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(a), Some(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .all(|(id, own)| b.get(id).is_some_and(|other| own.same(other)))
+            a.owns.len() == b.owns.len()
+                && a.owns
+                    .iter()
+                    .all(|(id, own)| b.owns.get(id).is_some_and(|other| own.same(other)))
+                && a.borrowed.len() == b.borrowed.len()
+                && a.borrowed.keys().all(|id| b.borrowed.contains_key(id))
         }
         _ => false,
     }
@@ -1470,7 +1705,7 @@ fn refine(state: State, flag: Option<LocalId>, taken: bool) -> State {
     let (Some(mut state), Some(flag)) = (state.clone(), flag) else {
         return state;
     };
-    for own in state.values_mut() {
+    for own in state.owns.values_mut() {
         if let Own::Cond {
             flag: of,
             full_when,

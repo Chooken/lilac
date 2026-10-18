@@ -671,7 +671,8 @@ impl Checker<'_> {
 
     // ---- places and members ---------------------------------------------
 
-    /// Checks an assignable place (a local or a field chain).
+    /// Checks an assignable place: a local, a global, a field chain, or
+    /// what a call's returned `ref` points to.
     pub(crate) fn check_place(
         &mut self,
         fcx: &mut FnCx,
@@ -708,11 +709,30 @@ impl Checker<'_> {
                 let shadowed = self.shadowed_alias(fcx, &base);
                 Ok(self.field_access(base, field, *span, None, false, shadowed))
             }
+            Expr::Call { span, .. } => {
+                let call = self.check_expr(fcx, expr, None);
+                if call.ty.is_error() {
+                    return Ok(call);
+                }
+                if call.ty.is_ref && !self.types.is_opaque_ref(call.ty) {
+                    // What the returned `ref` points to.
+                    return Ok(self.auto_deref(call));
+                }
+                let label = if call.ty.is_ref {
+                    "this call returns an opaque `ref`, which has nothing to write through"
+                } else {
+                    "this call returns a value, not a `ref`"
+                };
+                Err(self.diags.emit(
+                    Diagnostic::error(codes::E010, "cannot assign to a call's result")
+                        .label(*span, true, label),
+                ))
+            }
             _ => Err(self.diags.emit(
                 Diagnostic::error(codes::E010, "cannot assign to this expression").label(
                     expr.span(),
                     true,
-                    "only variables and fields are assignable",
+                    "only variables, fields and calls returning a `ref` are assignable",
                 ),
             )),
         }

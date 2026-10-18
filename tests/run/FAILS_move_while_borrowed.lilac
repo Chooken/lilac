@@ -1,0 +1,20 @@
+// expect-error: E079
+// expect-stderr: error[E079]: cannot move `a` implicitly: a reference to `a` was taken
+// Once a `ref` to a value that cannot be copied is taken, using the value
+// by value would move it out from under the reference: only `@move` may.
+
+Handle: object {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+keep: function (handle: Handle) nothing {
+}
+
+main: function () nothing {
+    a: Handle = Handle { id = 0x1 }
+    first: ref Handle = ref a
+    keep(a)
+}

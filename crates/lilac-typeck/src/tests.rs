@@ -2533,6 +2533,128 @@ fn a_generic_that_moves_its_argument_twice_fails_as_e042() {
     );
 }
 
+/// A value that cannot be copied does not move implicitly once a `ref` to
+/// it, or to a field, was taken on a path that reaches the use (`E079`):
+/// `ref`, a `self` receiver, a by-reference capture, and a `ref` taken
+/// later in a loop's body all borrow. `@move`, a copyable type and a
+/// borrow on another branch do not stop it.
+#[test]
+fn borrowed_values_move_only_by_move() {
+    let prefix = format!(
+        "{HANDLE}Pair: object {{\n    h: Handle\n}}\n\
+         Slot: enum {{\n    Empty\n    Full: Handle\n}}\n\
+         peek: function (handle: ref Handle) nothing {{\n}}\n"
+    );
+    let a = "    a: Handle = Handle { id = 0x1 }\n";
+    for (body, code) in [
+        ("    r: ref Handle = ref a\n    take(a)\n", Some("E079")),
+        ("    peek(ref a)\n    b: Handle = a\n", Some("E079")),
+        (
+            "    p: Pair = Pair { h = a }\n    r: ref Handle = ref p.h\n    q: Pair = p\n",
+            Some("E079"),
+        ),
+        (
+            "    p: Pair = Pair { h = a }\n    r: ref Pair = ref p\n    h: Handle = p.h\n",
+            Some("E079"),
+        ),
+        (
+            "    loop if c {\n        take(a)\n        a = Handle { id = 0x2 }\n        \
+             r: ref Handle = ref a\n    } else break\n",
+            Some("E079"),
+        ),
+        (
+            "    s: Slot = .Full(a)\n    r: ref Slot = ref s\n    \
+             match s {\n        .Full -> h: Handle {\n            take(h)\n        }\n    } else {}\n",
+            Some("E079"),
+        ),
+        (
+            "    s: Slot = .Full(a)\n    match s {\n        .Full -> h: ref Handle {\n        }\n    } else {}\n    \
+             take2: Slot = s\n",
+            Some("E079"),
+        ),
+        ("    r: ref Handle = ref a\n    take(@move(a))\n", None),
+        (
+            "    n: @bit32 = 0x1\n    r: ref @bit32 = ref n\n    m: @bit32 = n\n",
+            None,
+        ),
+        (
+            "    if c {\n        r: ref Handle = ref a\n    } else {\n        take(a)\n    }\n",
+            None,
+        ),
+        ("    take(a)\n    a = Handle { id = 0x2 }\n", None),
+    ] {
+        let diags = check_src(&format!(
+            "{prefix}run: function (c: @bit8) nothing {{\n{a}{body}}}\n\
+             main: function () nothing {{\n}}\n"
+        ));
+        let codes: Vec<&str> = codes_of(&diags);
+        match code {
+            Some(code) => assert_eq!(codes, [code], "{body}: {:?}", messages(&diags)),
+            None => assert!(codes.is_empty(), "{body}: {:?}", messages(&diags)),
+        }
+    }
+}
+
+/// `E079` names the `ref` and offers `@move` as a fix.
+#[test]
+fn borrowed_move_points_at_the_ref_and_offers_move() {
+    let diags = check_src(&format!(
+        "{HANDLE}main: function () nothing {{\n    a: Handle = Handle {{ id = 0x1 }}\n    \
+         r: ref Handle = ref a\n    take(a)\n}}\n"
+    ));
+    let [diagnostic] = diags.diagnostics() else {
+        panic!("{:?}", messages(&diags));
+    };
+    assert_eq!(diagnostic.code, "E079");
+    assert_eq!(diagnostic.labels.len(), 2);
+    let fixes: Vec<&str> = diagnostic
+        .suggestions()
+        .map(|fix| fix.replacement.as_str())
+        .collect();
+    assert_eq!(fixes, ["@move(a)"]);
+}
+
+/// `E063` after an implicit move says which type stopped the copy: the
+/// moved type, or a type it holds. An `@move` needs no reason.
+#[test]
+fn use_after_implicit_move_says_why_it_moved() {
+    let explain = |body: &str| {
+        let diags = check_src(&format!(
+            "{HANDLE}Pair: object {{\n    handle: Handle\n    n: @bit32\n}}\n\
+             keep: function (pair: Pair) nothing {{\n}}\n\
+             main: function () nothing {{\n{body}}}\n"
+        ));
+        let [diagnostic] = diags.diagnostics() else {
+            panic!("{:?}", messages(&diags));
+        };
+        assert_eq!(diagnostic.code, "E063");
+        let moved = diagnostic
+            .labels
+            .iter()
+            .find(|label| !label.primary)
+            .expect("a label at the move");
+        (moved.msg.clone(), diagnostic.notes.clone())
+    };
+    let (label, notes) = explain("    a: Handle = Handle { id = 0x1 }\n    take(a)\n    take(a)\n");
+    assert_eq!(label, "moved here: `Handle` cannot be copied");
+    assert_eq!(
+        notes,
+        ["`Handle` has an `@on_drop` and no `@on_copy`, so a use by value moves it"]
+    );
+    let (label, notes) = explain(
+        "    p: Pair = Pair { handle = Handle { id = 0x1 }, n = 0x2 }\n    keep(p)\n    keep(p)\n",
+    );
+    assert_eq!(label, "moved here: `Pair` cannot be copied");
+    assert_eq!(
+        notes,
+        ["`Pair` holds a `Handle`, which has an `@on_drop` and no `@on_copy`, so a use by value moves it"]
+    );
+    let (label, notes) =
+        explain("    a: Handle = Handle { id = 0x1 }\n    take(@move(a))\n    take(a)\n");
+    assert_eq!(label, "moved here");
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
 /// A cancelled check stops before the next instance: nothing more is
 /// checked, and it reports nothing about what it skipped.
 #[test]
@@ -2990,6 +3112,83 @@ fn compound_assignment_in_a_generic_folds_into_e042() {
     assert!(!has_code(&diags, "E043"), "{diags:?}");
 }
 
+const CELL: &str = "Point: object {\n    x: @bit32\n    y: @bit32\n}\n\
+                    Cell: object {\n    p: Point\n\n    \
+                    get: function (self) value: ref Point {\n        value = ref self.p\n    }\n\n    \
+                    copy: function (self) value: Point => self.p\n\n    \
+                    raw: function (self) value: ref unknown => (ref self.p) as ref unknown\n}\n";
+
+/// The statements of the function declaring `local`.
+fn stmts_of<'a>(hir: &'a HirProgram, local: &str) -> &'a [HirStmt] {
+    &body_of(hir, local).body.as_ref().expect("body").stmts
+}
+
+#[test]
+fn assigning_through_a_returned_ref_writes_through_it() {
+    let (diags, hir, _) = check(&format!(
+        "{CELL}main: function () nothing {{\n    c: Cell = Cell {{ p = Point {{ x = 0x1, y = 0x2 }} }}\n    \
+         c.get() = Point {{ x = 0x3, y = 0x4 }}\n    c.get().y = 0x5\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let stmts = stmts_of(&hir, "c");
+    let HirStmt::Assign { place, .. } = &stmts[1] else {
+        panic!("expected an assignment, got {:?}", stmts[1]);
+    };
+    let HirExprKind::Deref(call) = &place.kind else {
+        panic!("expected a place through the `ref`, got {:?}", place.kind);
+    };
+    assert!(matches!(call.kind, HirExprKind::Call { .. }));
+    let HirStmt::Assign { place, .. } = &stmts[2] else {
+        panic!("expected an assignment, got {:?}", stmts[2]);
+    };
+    let HirExprKind::Field { base, index: 1 } = &place.kind else {
+        panic!("expected field `y`, got {:?}", place.kind);
+    };
+    assert!(matches!(base.kind, HirExprKind::Deref(_)));
+}
+
+#[test]
+fn assigning_to_a_call_without_a_ref_is_e010() {
+    for call in ["c.copy()", "c.raw()"] {
+        let diags = check_src(&format!(
+            "{CELL}main: function () nothing {{\n    c: Cell = Cell {{ p = Point {{ x = 0x1, y = 0x2 }} }}\n    \
+             {call} = Point {{ x = 0x3, y = 0x4 }}\n}}\n"
+        ));
+        assert_eq!(codes_of(&diags), ["E010"], "{call}: {diags:?}");
+        assert!(messages(&diags)
+            .iter()
+            .any(|m| m.contains("cannot assign to a call's result")));
+    }
+}
+
+#[test]
+fn compound_assignment_through_a_call_calls_it_once() {
+    let (diags, hir, _) = check(&format!(
+        "{CELL}{COUNTER}main: function () nothing {{\n    c: Cell = Cell {{ p = Point {{ x = 0x1, y = 0x2 }} }}\n    \
+         c.get().x += 0x3\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let stmts = stmts_of(&hir, "c");
+    // The call's `ref` is bound once, then read and written through.
+    let HirStmt::Let { local, value } = &stmts[1] else {
+        panic!("expected the call bound first, got {:?}", stmts[1]);
+    };
+    assert!(matches!(value.kind, HirExprKind::Call { .. }));
+    let HirStmt::Assign { place, value, .. } = &stmts[2] else {
+        panic!("expected an assignment, got {:?}", stmts[2]);
+    };
+    let through_hidden = |expr: &lilac_hir::HirExpr| {
+        matches!(&expr.kind, HirExprKind::Field { base, .. }
+            if matches!(&base.kind, HirExprKind::Deref(inner)
+                if matches!(inner.kind, HirExprKind::Local(l) if l == *local)))
+    };
+    assert!(through_hidden(place), "{place:?}");
+    let HirExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected the `@add` call, got {:?}", value.kind);
+    };
+    assert!(through_hidden(&args[0]), "{:?}", args[0]);
+}
+
 const ADD_ONE: &str =
     "add_one: function (value: @bit32) result: @bit32 {\n    result = @i_add_32(value, 0x1)\n}\n";
 
@@ -3039,6 +3238,20 @@ fn bare_function_type_reports_once() {
         ["E077", "E077", "E077"],
         "{src}"
     );
+}
+
+/// A template's local and field types are laid out (unsized), so a tag
+/// finds the variants of an enum over a parameter, and a misspelled one
+/// is still `E021`.
+#[test]
+fn template_tags_of_enums_over_parameters() {
+    let opt = "Opt[T]: enum {\n    None\n    Some: T\n}\n";
+    let src = format!(
+        "{opt}Holder[T]: object {{\n    data: Opt[ref T]\n    make: function () h: Holder[T] {{\n        h = Holder[T] {{ data = .None }}\n    }}\n}}\nf[T]: function () nothing {{\n    a: Opt[T] = .None\n    b: Opt[ref T] = .None\n    match b {{\n        .None => {{}}\n    }} else {{}}\n}}\nmain: function () nothing {{}}\n"
+    );
+    assert!(!check_src(&src).has_errors(), "{src}");
+    let src = format!("{opt}f[T]: function () nothing {{\n    a: Opt[ref T] = .Nnoe\n}}\nmain: function () nothing {{}}\n");
+    assert_eq!(codes_of(&check_src(&src)), ["E021"], "{src}");
 }
 
 /// In a template, `value.f(x)` is decided per instance: a method in one,

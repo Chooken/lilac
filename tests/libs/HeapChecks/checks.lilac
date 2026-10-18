@@ -27,36 +27,36 @@ address: function (memory: ref unknown) Int => @ptr_to_address(memory)
 
 /// Every check on one allocator; `base` numbers its failures.
 exercise: function (allocator: Allocator, base: @bit32) nothing {
-    words: ref @bit64 = allocator.allocate[@bit64](4)
-    check(address(words as ref unknown) % 8 == 0 as Int, base)
-    allocator.deallocate[@bit64](words, 4)
+    words: Slice[@bit64] = allocator.allocate[@bit64](4)
+    check(address(words.base() as ref unknown) % 8 == 0 as Int, base)
+    allocator.deallocate[@bit64](words)
 
-    bytes: ref @bit8 = allocator.allocate[@bit8](32)
-    check(@load_u8(bytes, 0x1F) == 0x0, @i_add_32(base, 0x1))
-    @store_u8(bytes, 0x0, 0x2A)
-    @store_u8(bytes, 0x1F, 0x2B)
+    bytes: Slice[@bit8] = allocator.allocate[@bit8](32)
+    check(@load_u8(bytes.base(), 0x1F) == 0x0, @i_add_32(base, 0x1))
+    @store_u8(bytes.base(), 0x0, 0x2A)
+    @store_u8(bytes.base(), 0x1F, 0x2B)
 
     // Growing keeps the bytes and zeroes the rest.
-    grown: ref @bit8 = allocator.reallocate[@bit8](bytes, 32, 0x10000)
-    check(@load_u8(grown, 0x0) == 0x2A, @i_add_32(base, 0x2))
-    check(@load_u8(grown, 0x1F) == 0x2B, @i_add_32(base, 0x3))
-    check(@load_u8(grown, 0xFFFF) == 0x0, @i_add_32(base, 0x4))
-    @store_u8(grown, 0x20, 0x2C)
+    grown: Slice[@bit8] = allocator.reallocate[@bit8](bytes, 0x10000)
+    check(@load_u8(grown.base(), 0x0) == 0x2A, @i_add_32(base, 0x2))
+    check(@load_u8(grown.base(), 0x1F) == 0x2B, @i_add_32(base, 0x3))
+    check(@load_u8(grown.base(), 0xFFFF) == 0x0, @i_add_32(base, 0x4))
+    @store_u8(grown.base(), 0x20, 0x2C)
 
     // A shrink then a growth: what came back is zero again.
-    shrunk: ref @bit8 = allocator.reallocate[@bit8](grown, 0x10000, 1)
-    regrown: ref @bit8 = allocator.reallocate[@bit8](shrunk, 1, 0x40)
-    check(@load_u8(regrown, 0x0) == 0x2A, @i_add_32(base, 0x5))
-    check(@load_u8(regrown, 0x1F) == 0x0 and @load_u8(regrown, 0x20) == 0x0, @i_add_32(base, 0x6))
-    allocator.deallocate[@bit8](regrown, 0x40)
+    shrunk: Slice[@bit8] = allocator.reallocate[@bit8](grown, 1)
+    regrown: Slice[@bit8] = allocator.reallocate[@bit8](shrunk, 0x40)
+    check(@load_u8(regrown.base(), 0x0) == 0x2A, @i_add_32(base, 0x5))
+    check(@load_u8(regrown.base(), 0x1F) == 0x0 and @load_u8(regrown.base(), 0x20) == 0x0, @i_add_32(base, 0x6))
+    allocator.deallocate[@bit8](regrown)
 
     // A zero size is an aligned address that takes nothing.
     empty: ref Empty = allocator.create[Empty](Empty {})
     check(address(empty as ref unknown) != 0 as Int, @i_add_32(base, 0x7))
     allocator.destroy[Empty](empty)
-    none: ref @bit64 = allocator.allocate[@bit64](0)
-    check(address(none as ref unknown) % 8 == 0 as Int, @i_add_32(base, 0x8))
-    allocator.deallocate[@bit64](none, 0)
+    none: Slice[@bit64] = allocator.allocate[@bit64](0)
+    check(address(none.base() as ref unknown) % 8 == 0 as Int, @i_add_32(base, 0x8))
+    allocator.deallocate[@bit64](none)
 
     // `create` moves in, `destroy` drops once, `free` drops nothing.
     before: Int = drops

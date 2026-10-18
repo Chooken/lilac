@@ -23,6 +23,7 @@ mod generics;
 mod indices;
 mod layout;
 mod literals;
+mod liveness;
 mod memory;
 mod own;
 mod paths;
@@ -340,6 +341,8 @@ pub(crate) struct Checker<'a> {
     pub copyable: HashMap<TypeId, bool>,
     /// [`Checker::needs_drop`] per laid-out type.
     pub droppable: HashMap<TypeId, bool>,
+    /// [`Checker::needs_copy`] per laid-out type.
+    pub copy_hooked: HashMap<TypeId, bool>,
     /// [`Options::cancel`].
     pub cancel: Option<Arc<AtomicBool>>,
     /// Generic instances built so far in this pass (`E068` past
@@ -423,6 +426,7 @@ impl<'a> Checker<'a> {
             failures: Vec::new(),
             copyable: HashMap::new(),
             droppable: HashMap::new(),
+            copy_hooked: HashMap::new(),
             cancel: options.cancel,
             generic_instances: 0,
             instance_limit: None,

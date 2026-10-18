@@ -156,9 +156,9 @@ general_checks: function (base: @bit32) nothing {
 
     // The typed functions go through the handle: a zero size takes
     // nothing.
-    words: ref @bit64 = general.allocate[@bit64](4)
-    check(aligned_to(words as ref unknown, 8), @i_add_32(base, 0x1A))
-    general.deallocate[@bit64](words, 4)
+    words: Slice[@bit64] = general.allocate[@bit64](4)
+    check(aligned_to(words.base() as ref unknown, 8), @i_add_32(base, 0x1A))
+    general.deallocate[@bit64](words)
     none: ref Empty = general.create[Empty](Empty {})
     general.destroy[Empty](none)
 }

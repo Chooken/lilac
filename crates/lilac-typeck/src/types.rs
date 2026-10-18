@@ -18,7 +18,9 @@ use crate::{Checker, TypeState, MAX_RECURSION, MAX_TYPE_NESTING};
 impl Checker<'_> {
     /// Resolves type syntax in the current environment: generic parameter
     /// names become the environment's arguments (or `Param` placeholders in a
-    /// template), and every concrete type mentioned gets its layout.
+    /// template), and every type mentioned gets its layout: a template's
+    /// too, unsized, so its fields and variants are known
+    /// (`o: Optional[ref T] = .None` in a generic body).
     pub(crate) fn resolve_type(&mut self, ty: &AstType) -> TypeRef {
         let template = self.resolve_syntax(ty);
         if template.is_error() {
@@ -30,7 +32,7 @@ impl Checker<'_> {
             let args = self.env.args.clone();
             self.types.substitute(template, &args)
         };
-        if !self.types.contains_param(resolved.id) && self.ensure_syntax(resolved, ty).is_err() {
+        if self.ensure_syntax(resolved, ty).is_err() {
             return TypeRef::ERROR;
         }
         resolved

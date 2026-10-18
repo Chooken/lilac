@@ -1,0 +1,299 @@
+using Standard.Heap as Heap
+
+/// A growable array of `T`s, in memory from its allocator. It owns its
+/// elements: dropping the list drops each, then frees the memory, and
+/// copying it copies each (through `T`'s `@on_copy`) into new memory from
+/// the same allocator. So `T` must be copyable: hold a value that only
+/// moves through a wrapper that copies, such as a reference-counted one.
+/// Every index is checked, and one out of range panics.
+List[T]: object {
+
+    private {
+        allocator: Heap.Allocator
+
+        data: Optional[Slice[T]]
+        count: Int
+        capacity: Int
+    }
+
+    /// An empty list over the default allocator. Nothing is allocated
+    /// until the first element is added.
+    init: function () list: List[T] {
+        list = init_using(Heap.get_default_allocator())
+    }
+
+    /// An empty list over `allocator`, which must outlive it. Nothing is
+    /// allocated until the first element is added.
+    init_using: function (allocator: Heap.Allocator) list: List[T] {
+        list = List[T] {
+            allocator = allocator
+            data = .None
+            count = 0
+            capacity = 0
+        }
+    }
+
+    /// How many elements the list holds.
+    get_count: function (self) Int => self.count
+
+    /// How many elements fit before the list next grows.
+    get_capacity: function (self) Int => self.capacity
+
+    /// Element `index`, in place; panics unless `0 <= index < count`. The
+    /// reference lasts until the list next grows, shrinks or shifts its
+    /// elements.
+    get: function (self, index: Int) value: ref T {
+
+        data: Slice[T] = self.data.get() else {
+            @panic($"Tried to get index {index} from an empty list.")
+        }
+
+        if index >= self.count {
+            @panic($"Tried to get index {index} when the list only has {self.count}")
+        }
+
+        if index < 0 {
+            @panic($"Tried to get index {index} indexes must be non negative.")
+        }
+
+        value = data.get(index)
+    }
+
+    /// Adds `value` (moved in) at the end, growing the list when it is
+    /// full.
+    add: function (self, value: T) nothing {
+
+        if self.count >= self.capacity {
+            self.grow()
+        }
+
+        data: Slice[T] = self.data.unwrap_or_panic()
+
+        @write(data.get(self.count), value)
+
+        self.count += 1
+    }
+
+    /// Adds a copy of each of `slice`'s elements at the end (through `T`'s
+    /// `@on_copy`), growing the list when they do not fit. `slice` must
+    /// not view this list's own elements, whose memory growing may move.
+    add_slice: function (self, slice: Slice[T]) nothing {
+
+        if self.capacity - self.count < slice.get_count() {
+            self.reserve(self.count + slice.get_count() + 8)
+        }
+
+        if slice.get_count() == 0 as Int {
+            return
+        }
+
+        data: Slice[T] = self.data.unwrap_or_panic()
+
+        slice.copy_to(data, self.count)
+
+        self.count += slice.get_count()
+    }
+
+    /// Puts `value` (moved in) at `index`, shifting the elements from
+    /// there on up by one; `index` may be `count`, which adds it at the
+    /// end. Panics unless `0 <= index <= count`.
+    insert: function (self, index: Int, value: T) nothing {
+
+        if index > self.count {
+            @panic($"Tried to insert index {index} when the list only has {self.count}")
+        }
+
+        if index < 0 {
+            @panic($"Tried to insert index {index} indexes must be non negative.")
+        }
+
+        if self.count >= self.capacity {
+            self.grow()
+        }
+
+        data: Slice[T] = self.data.unwrap_or_panic()
+
+        if index != self.count {
+            move_slice: Slice[T] = data.slice(Range.of(index, self.count))
+            move_slice.move_to(data, index + 1)
+        }
+
+        @write(data.get(index), value)
+
+        self.count += 1
+    }
+
+    /// The last element, moved out of the list, or `.None` when it is
+    /// empty.
+    pop: function (self) value: Optional[T] {
+
+        if self.count == 0 as Int {
+            value = .None
+            return
+        }
+
+        self.count -= 1
+
+        data: Slice[T] = self.data.get() else {
+            value = .None
+            return
+        }
+
+        item: ref T = data.get(self.count)
+
+        value = .Some(@read(item))
+
+        @memset(item as ref unknown, 0x0, @size_of(T))
+    }
+
+    /// Drops the element at `index` and shifts the ones after it down by
+    /// one. Panics unless `0 <= index < count`.
+    remove: function (self, index: Int) nothing {
+
+        data: Slice[T] = self.data.get() else {
+            @panic($"Tried to remove index {index} from an empty list.")
+        }
+
+        if index >= self.count {
+            @panic($"Tried to remove index {index} when the list only has {self.count}")
+        }
+
+        if index < 0 {
+            @panic($"Tried to remove index {index} indexes must be non negative.")
+        }
+
+        value: ref T = data.get(index)
+        @drop(value)
+
+        if index != self.count - 1 {
+            move_slice: Slice[T] = data.slice(Range.of(index + 1, self.count))
+            move_slice.move_to(data, index)
+        }
+
+        self.count -= 1
+        @memset(data.get(self.count) as ref unknown, 0x0, @size_of(T))
+    }
+
+    /// Drops the elements `range` covers and shifts the ones after it
+    /// down to close the gap. Panics unless the range lies inside
+    /// `0..count`.
+    remove_range: function (self, range: Range) nothing {
+
+        if range.max() > self.count {
+            @panic($"Tried to remove {range} when the list only has {self.count}")
+        }
+
+        if range.min() < 0 {
+            @panic($"Tried to remove {range} indexes must be non negative.")
+        }
+
+        if range.length() == 0 as Int {
+            return
+        }
+
+        // Not empty: the range holds an element.
+        data: Slice[T] = self.data.unwrap_or_panic()
+
+        index: Int = range.min()
+
+        loop if index < range.max() {
+
+            value: ref T = data.get(index)
+            @drop(value)
+            index += 1
+
+        } else break
+
+        if range.max() != self.count {
+            move_slice: Slice[T] = data.slice(Range.of(range.max(), self.count))
+            move_slice.move_to(data, range.min())
+        }
+
+        self.count -= range.length()
+        @memset(data.get(self.count) as ref unknown, 0x0, @size_of(T) * range.length())
+    }
+
+    /// Doubles the capacity (to 4 when it is 0).
+    grow: function (self) nothing {
+
+        new_capacity: Int = self.capacity * 2
+
+        if new_capacity == 0 as Int {
+            self.reserve(4)
+        } else {
+            self.reserve(new_capacity)
+        }
+    }
+
+    /// Grows the capacity to at least `capacity` elements; a smaller one
+    /// changes nothing. The elements may move.
+    reserve: function (self, capacity: Int) nothing {
+
+        if capacity <= self.capacity {
+            return
+        }
+
+        data: Slice[T] = self.data.get() else {
+            self.data = .Some(self.allocator.allocate[T](capacity))
+            self.count = 0
+            self.capacity = capacity
+            return
+        }
+
+        new_data: Slice[T] = self.allocator.reallocate[T](data, capacity)
+
+        self.data = .Some(new_data)
+        self.capacity = capacity
+    }
+
+    /// Shrinks the capacity to the count. The elements may move.
+    trim: function (self) nothing {
+
+        data: Slice[T] = self.data.get() else {
+            return
+        }
+
+        self.data = .Some(self.allocator.reallocate[T](data, self.count))
+        self.capacity = self.count
+    }
+
+    /// A list of copies of the elements, over the same allocator, with
+    /// room for exactly them; an empty list allocates nothing.
+    @on_copy: function (self) copy: List[T] {
+
+        copy = init_using(self.allocator)
+
+        if self.count == 0 as Int {
+            return
+        }
+
+        // Not empty: the list holds an element.
+        data: Slice[T] = self.data.unwrap_or_panic()
+
+        copied: Slice[T] = self.allocator.allocate[T](self.count)
+        data.slice(Range.of(0, self.count)).copy_to(copied, 0)
+
+        copy.data = .Some(copied)
+        copy.count = self.count
+        copy.capacity = self.count
+    }
+
+    @on_drop: function (self) nothing {
+
+        data: Slice[T] = self.data.get() else {
+            return
+        }
+
+        index: Int = 0
+
+        loop if index < self.count {
+
+            value: ref T = data.get(index)
+            @drop(value)
+            index += 1
+
+        } else break
+
+        self.allocator.deallocate[T](data)
+    }
+}

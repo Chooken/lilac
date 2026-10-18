@@ -322,7 +322,10 @@ formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
 > (`get_default_allocator()` reads it). The handle has
 > `create[T](value) ref T` (allocate, then `@write` the value in),
 > `destroy[T](ref T)` (`@drop`, then free) and `free[T](ref T)` (free a
-> slot whose value was moved out with `@read`). `Box[T]` (in `Standard`)
+> slot whose value was moved out with `@read`). Arrays of `T` are
+> `Slice[T]`s: `allocate[T](count)` (zeroed), `reallocate[T](memory,
+> new_count)` and `deallocate[T](memory)` take the whole slice, never a
+> count beside an address. `Box[T]` (in `Standard`)
 > is the owned heap box: `create(value)`, `into_inner() T` (by `@discard`
 > and `@read`), and its drop drops the value and frees it. The inventory
 > below is the target design.
@@ -382,6 +385,24 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 ---
 
 ### 3.4 `Standard.Collections`
+
+> **Today:** `Standard.Collections.List[T]` owns its elements in one
+> allocation from an `Allocator` (`init`, `init_using`): `add`,
+> `add_slice` (copies, through `@on_copy`), `insert`, `get` (a `ref T`),
+> `pop() Optional[T]`, `remove`, `remove_range`, `reserve`, `trim`,
+> `get_count`, `get_capacity`; its drop drops each element and frees
+> the memory, and its copy copies each element (through `@on_copy`)
+> into new memory from the same allocator, so `T` must be copyable
+> (`E042` otherwise; a move-only value needs a copying wrapper, such as
+> a future reference-counted `Arc`). `Box[T]` stays move-only: it is
+> the wrapper for a single owner. A `ref T` a call returns is
+> assignable, so `list.get(i) = v` and `list.get(i) += 1` write in
+> place. In `Standard` itself, `Slice[T]` is an
+> unowned view (`create(ptr, count)`, `get`, `slice(range)`, `base`,
+> `copy_to`, which copies through `@on_copy`, and `move_to`, which moves
+> bytes and may overlap), and `Range` is a half-open `Int` range
+> (`of(from, to)`, either order). The inventory below is the target
+> design.
 
 **Containers:**
 

@@ -82,19 +82,39 @@ ArenaAllocator: object {
         @drop(allocation)
     }
 
-    /// Room for `count` zeroed `T`s.
-    allocate[T]: function (self, count: Int) allocation: ref T {
-        allocation = self.allocate_raw(array_size(@size_of(T), count), @align_of(T)) as ref T
+    /// Does nothing: an arena gives memory back only at `reset`.
+    free[T]: function (self, allocation: ref T) nothing {}
+
+    /// Room for `count` zeroed `T`s, as a slice of them; it stays used
+    /// until `reset`.
+    allocate[T]: function (self, count: Int) allocation: Slice[T] {
+        allocation = Slice[T].create(
+            self.allocate_raw(
+                array_size(@size_of(T), count), 
+                @align_of(T)
+            ) as ref T, 
+            count
+        )
     }
 
-    /// `ptr` (from `alloc`, `count` long) resized to `new_count`, keeping
-    /// the first of them; new elements are zeroed.
-    reallocate[T]: function (self, ptr: ref T, count: Int, new_count: Int) allocation: ref T {
-        allocation = self.reallocate_raw(ptr as ref unknown, array_size(@size_of(T), count), array_size(@size_of(T), new_count), @align_of(T)) as ref T
+    /// `memory` (from `allocate` or `reallocate`, whole) resized to
+    /// `new_count` elements, keeping the first of them; new elements are
+    /// zeroed. The elements may move: use the returned slice, never
+    /// `memory` again.
+    reallocate[T]: function (self, memory: Slice[T], new_count: Int) allocation: Slice[T] {
+        allocation = Slice[T].create(
+            self.reallocate_raw(
+                memory.base() as ref unknown, 
+                array_size(@size_of(T), memory.get_count()), 
+                array_size(@size_of(T), new_count), 
+                @align_of(T)
+            ) as ref T,
+            new_count
+        )
     }
 
-    // Nothing: an arena gives memory back only at `reset`. 
-    free[T]: function (self, ptr: ref T, count: Int, alignment: Int) nothing {}
+    /// Does nothing: an arena gives memory back only at `reset`.
+    deallocate[T]: function (self, memory: Slice[T]) nothing {}
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two); a
     /// zero size takes no memory, giving an aligned address. Panics when

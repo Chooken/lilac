@@ -92,26 +92,42 @@ GeneralAllocator: object {
         self.free_raw(allocation as ref unknown, @size_of(T), @align_of(T))
     }
 
-    /// Room for `count` zeroed `T`s. Free it with `deallocate`.
-    allocate[T]: function (self, count: Int) allocation: ref T {
-        allocation = self.allocate_raw(array_size(@size_of(T), count), @align_of(T)) as ref T
+    /// Room for `count` zeroed `T`s, as a slice of them. Free it with
+    /// `deallocate`.
+    allocate[T]: function (self, count: Int) allocation: Slice[T] {
+        allocation = Slice[T].create(
+            self.allocate_raw(
+                array_size(@size_of(T), count), 
+                @align_of(T)
+            ) as ref T, 
+            count
+        )
     }
 
-    /// `memory` (from `allocate`, `count` long) resized to `new_count`,
-    /// keeping the first of them; new elements are zeroed.
-    reallocate[T]: function (self, memory: ref T, count: Int, new_count: Int) allocation: ref T {
-        allocation = self.reallocate_raw(
-            memory as ref unknown, 
-            array_size(@size_of(T), count), 
-            array_size(@size_of(T), new_count), 
+    /// `memory` (from `allocate` or `reallocate`, whole) resized to
+    /// `new_count` elements, keeping the first of them; new elements are
+    /// zeroed. The elements may move: use the returned slice, never
+    /// `memory` again.
+    reallocate[T]: function (self, memory: Slice[T], new_count: Int) allocation: Slice[T] {
+        allocation = Slice[T].create(
+            self.reallocate_raw(
+                memory.base() as ref unknown, 
+                array_size(@size_of(T), memory.get_count()), 
+                array_size(@size_of(T), new_count), 
+                @align_of(T)
+            ) as ref T,
+            new_count
+        )
+    }
+
+    /// Frees `memory` (from `allocate` or `reallocate`, whole) without
+    /// dropping anything.
+    deallocate[T]: function (self, memory: Slice[T]) nothing {
+        self.free_raw(
+            memory.base() as ref unknown, 
+            array_size(@size_of(T), memory.get_count()), 
             @align_of(T)
-        ) as ref T
-    }
-
-    /// Frees `memory` (from `allocate`, `count` long) without dropping
-    /// anything.
-    deallocate[T]: function (self, memory: ref T, count: Int) nothing {
-        self.free_raw(memory as ref unknown, array_size(@size_of(T), count), @align_of(T))
+        )
     }
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two);

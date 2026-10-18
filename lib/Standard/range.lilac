@@ -1,0 +1,24 @@
+/// The integers from the smaller of `from` and `to` up to, not including,
+/// the larger: `Range.of(2, 5)` and `Range.of(5, 2)` both cover 2, 3 and
+/// 4, and `Range.of(3, 3)` covers nothing.
+Range: object {
+
+    from: Int
+    to: Int
+
+    /// The range between `from` and `to`.
+    of: function (from: Int, to: Int) Range => Range { from = from to = to }
+
+    /// The first integer covered.
+    min: function (self) Int => Int.min(self.from, self.to)
+
+    /// One past the last integer covered.
+    max: function (self) Int => Int.max(self.from, self.to)
+
+    /// How many integers are covered.
+    length: function (self) Int => self.max() - self.min()
+
+    @format: function (self, out: ref Formatter) nothing {
+        out.write($"{self.from}..{self.to}")
+    }
+}

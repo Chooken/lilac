@@ -214,7 +214,23 @@
   (`tests/run/general_allocator_*`). `default_allocator` is an `Optional[Allocator]`
   global, `.None` until `Standard.Runtime`'s `@entry` sets it to a
   program-long general allocator; `get_default_allocator` panics while
-  it is unset. `Box` keeps the `Allocator` it came from.
+  it is unset. `Box` keeps the `Allocator` it came from. The typed
+  array functions (`allocate[T]`, `reallocate[T]`, `deallocate[T]`, on
+  the handle and each allocator) work in `Slice[T]`s (`slice.lilac`: an
+  address and a count, owning nothing). `Slice.copy_to` copies element
+  by element with `@write` from a `ref T`, so `@on_copy` runs;
+  `move_to` is a `@memmove` that leaves the source slots empty.
+  `Standard.Collections.List` (`tests/run/list.lilac`) shifts with
+  `move_to` and copies in with `copy_to`. A `List` copies (its
+  `@on_copy` copies the elements into memory from the same allocator,
+  `tests/run/list_copies.lilac`), so `List[T]` needs a copyable `T`: a
+  move-only one fails the hook, `E042` traced to the user's `List[…]`
+  (`FAILS_list_of_move_only`). `Box` stays move-only, the single-owner
+  wrapper (`docs/copies-plan.md`). A by-value `T` parameter
+  passed on or stored as its last use moves (a last-use move, even when
+  `T` is copyable), so `create`, `Box` and `List.add` need no `@move`
+  (`tests/run/box_moves_copyable.lilac`); one read again later, or
+  borrowed, copies unless it says `@move(value)`.
 - Compiler-generated symbols use the reserved `.lilac.` namespace
   (`.lilac.byte_buffer_ptr`, `.lilac.main`, `.lilac.ptr_add`). User
   identifiers cannot contain `.`, so the namespace is collision-proof; the IR
@@ -897,7 +913,12 @@ Where things live:
   `x += e`) is desugared in typeck, not the parser
   (`check_compound_assign`): the target is checked once and its place is
   the left operand of `operator_call`, then `assign_checked` stores the
-  result, so the HIR is that of `x = x + e`.
+  result, so the HIR is that of `x = x + e`. A call returning a non-opaque
+  `ref T` is a place too (`check_place`: `*call`, `E010` otherwise), so
+  `list.get(i) = v` writes through it; `op=` first binds each such call's
+  `ref` to a hidden local (`bind_call_refs`), so the call runs once.
+  Ownership, liveness and lowering need nothing new: a non-path place
+  is walked as an expression and `place_of` spills the `ref`.
 - Ownership (`lilac-typeck/src/places.rs`, `Checker::check_places`): a
   tree walk over each instance body that checked without an error
   (`Sink::holds_error`). The state is an `Own` per local (full, empty,
@@ -919,7 +940,18 @@ Where things live:
   initialized and clears them when it moves (`Lower::mark`), and never
   decides a drop itself; it only drops statement temporaries.
   `Checker::is_copyable`/`needs_drop` are the copy and drop rules
-  (`Param` copies, so templates rarely fail). `E063`/`E064` go through
+  (`Param` copies, so templates rarely fail). The state (`Flow`) also
+  holds the borrowed locals: a `RefOf` of an owned path (so a `self`
+  receiver and an f-string hole too) or a by-reference capture borrows
+  its local for the rest of its scope on that path (merged as a union),
+  and an implicit move of a borrowed local, a by-value read or a
+  moving capture, is `E079` with a `@move` fix (`Pass::unborrowed`;
+  `docs/moves-plan.md`). The pass records each implicit move
+  (`Pass::implicit`), so `E063` says why one happened: the type that
+  stopped the copy (`Checker::copy_blocker`, `Pass::moved_here`). A
+  copyable local's last by-value use moves instead of copying when it is
+  unborrowed and copying would run a hook (`Pass::last_use`, over
+  `liveness::last_uses`, a backward walk run before the pass). `E063`/`E064`/`E079` go through
   `emit_requirement` (`Requirement::Ownership`), so a failing generic
   instance folds them into `E042`; `E065` is plain.
   `@panic`, `@trap` and `@compile_error` end a path, and a `match`

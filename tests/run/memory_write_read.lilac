@@ -23,18 +23,19 @@ Leaf: object {
 }
 
 main: function () nothing {
-    slots: ref Leaf = get_default_allocator().allocate[Leaf](2)
-    second: ref Leaf = @ptr_add(slots as ref unknown, @size_of(Leaf)) as ref Leaf
+    slots: Slice[Leaf] = get_default_allocator().allocate[Leaf](2)
+    first: ref Leaf = slots.get(0)
+    second: ref Leaf = slots.get(1)
     {
-        @write(slots, Leaf { c = 'a' })
+        @write(first, Leaf { c = 'a' })
         @write(second, Leaf { c = 'b' })
-        print_char(@read(slots).c)
+        print_char(@read(first).c)
         @drop(second)
         print_char('|')
         @write(second, Leaf { c = 'b' })
         moved: Leaf = @read(second)
         print_char('|')
     }
-    get_default_allocator().deallocate[Leaf](slots, 2)
+    get_default_allocator().deallocate[Leaf](slots)
     print_char(0xA)
 }

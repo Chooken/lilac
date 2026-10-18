@@ -101,6 +101,22 @@ through the function:
   with no `@on_drop` of its own; the object can then not be used whole,
   its other fields can, and those still full drop with it. Setting the
   field again makes the object whole.
+* **A borrowed place moves only by `@move`.** Once a `ref` to a local, or
+  to a field of it, is taken (`ref a`, a method call with a `self`
+  receiver, an f-string hole, a by-reference capture), a use that would
+  move it implicitly is `E079`: the reference could still point at it.
+  `@move(a)` moves it anyway, for code that knows no reference is used
+  again. A `ref` has no lifetime, so the local stays borrowed to the end
+  of its scope, even after it is set again; only paths that took the
+  `ref` count. A type that copies is unaffected.
+* **A last use moves.** A by-value read of a whole local of a type that
+  copies moves it instead when no path from there reads the local again
+  (before setting it again) and no `ref` to it was taken: its `@on_copy`
+  does not run, and it drops once, where it moved to. A read in a loop
+  that can come round to another read copies. This is the same in every
+  build, so code may not count on `@on_copy` running where no copy is
+  needed; a plain-data type is unaffected (its copy and move are the same
+  bytes).
 * **Drops:** at the end of its block (or at the `return`, `fail`, `break`
   or `continue` leaving it) each local that is still full is dropped, in
   reverse declaration order; an empty one is skipped, and one that is full
@@ -113,6 +129,11 @@ through the function:
   then runs `@on_override(ref place, ref value)` if defined and drops the
   old value; an empty place (an out's first assignment) is just filled.
   Then the new value moves in. Memory behind a `ref` is always full.
+  A place is a variable, a global, a field, or a call returning a
+  `ref T`: `list.get(i) = v` writes through the returned reference (the
+  call runs after `value`, so it sees what `value` did). A call
+  returning a value, or an opaque `ref` (`ref unknown`, a function
+  reference), is no place (`E010`).
 * **Outs** are set on every path that returns (`E065`): success outs at
   each `return` and the end of the body, failure outs at each `fail`. An
   out of the other side that is full there is dropped. Paths ending in
@@ -1576,7 +1597,9 @@ member access or call, so `not a == b` is `(not a) == b`; write `a != b` or
 A compound assignment `x op= rhs` is a statement, like `=`. It is
 `x = x op rhs`: the operator's hook found by exact signature, then an
 ordinary assignment. The target is a place (a variable, global or field),
-so naming it twice has no side effects. There are no separate in-place
+so naming it twice has no side effects; a place through a call
+(`list.get(i) += 1`) runs the call once, before `rhs`, and reads and
+writes through the `ref` it returned. There are no separate in-place
 hooks.
 
 #### Operator hooks

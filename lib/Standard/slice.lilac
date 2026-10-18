@@ -1,0 +1,126 @@
+/// A view of `count` `T`s in a row from `ptr`, such as an allocation from
+/// `Heap.Allocator.allocate[T]`. It owns nothing: copying one copies the
+/// view, and dropping one drops neither the elements nor the memory.
+/// Every index is checked, and one out of range panics.
+Slice[T]: object {
+
+    private {
+        ptr: ref T
+        count: Int
+
+        /// Panics unless this view's elements fit in `slice` from
+        /// element `offset` on.
+        check_fits: function (self, slice: Slice[T], offset: Int) nothing {
+
+            if offset < 0 {
+                @panic($"Tried to offset slice by {offset}. You can't have a negative offset.")
+            }
+
+            if self.count > slice.count - offset {
+                @panic($"Tried to copy from a slice with {self.count} items to a slice with {slice.count} with an offset of {offset}.")
+            }
+        }
+    }
+
+    /// The view of the `count` `T`s from `ptr`.
+    create: function (ptr: ref T, count: Int) slice: Slice[T] {
+        slice = Slice[T] {
+            ptr = ptr
+            count = count
+        }
+    }
+
+    /// How many elements the view holds.
+    get_count: function (self) Int => self.count
+
+    /// The address of the first element. For an empty view it is only an
+    /// address (an allocator's aligned one, say): nothing is read there.
+    base: function (self) ref T => self.ptr
+
+    /// Element `index`, in place; panics unless `0 <= index < count`.
+    get: function (self, index: Int) value: ref T {
+
+        if index >= self.count {
+            @panic($"Tried to get index {index} when the slice only has {self.count}.")
+        }
+
+        if index < 0 {
+            @panic($"Tried to get index {index} indexes must be non negative.")
+        }
+
+        value = @ptr_add(self.ptr as ref unknown, (@size_of(T) * index) as @bit_native) as ref T
+    }
+
+    /// The view of the elements `range` covers; panics unless it lies
+    /// inside this one.
+    slice: function (self, range: Range) slice: Slice[T] {
+
+        if range.max() > self.count {
+            @panic($"Tried to get range {range} when the slice only has {self.count}.")
+        }
+
+        if range.min() < 0 {
+            @panic($"Tried to get range {range} must be non negative.")
+        }
+
+        slice = Slice[T] {
+            ptr = @ptr_add(self.ptr as ref unknown, (@size_of(T) * range.min()) as @bit_native) as ref T
+            count = range.length()
+        }
+    }
+
+    /// Copies every element into `slice`, from element `offset` on, through
+    /// `T`'s `@on_copy` (a plain copy for a type without one); this view
+    /// keeps its own. The target slots must be empty, since they are
+    /// written without dropping what was there, and the two views must
+    /// not overlap. Panics unless the elements fit.
+    copy_to: function (self, slice: Slice[T], offset: Int) nothing {
+
+        self.check_fits(slice, offset)
+
+        index: Int = 0
+
+        loop if index < self.count {
+
+            @write(slice.get(offset + index), self.get(index))
+            index += 1
+
+        } else break
+    }
+
+    /// Moves every element into `slice`, from element `offset` on, as
+    /// bytes: no hook runs, and the views may overlap. The elements then
+    /// live in the target, so a slot of this view the target does not
+    /// cover is empty: write a value into it or zero it, never read or
+    /// drop it. The target slots must be empty. Panics unless the
+    /// elements fit.
+    move_to: function (self, slice: Slice[T], offset: Int) nothing {
+
+        self.check_fits(slice, offset)
+
+        @memmove(
+            @ptr_add(slice.ptr as ref unknown, (@size_of(T) * offset) as @bit_native),
+            self.ptr as ref unknown,
+            (@size_of(T) * self.count) as @bit_native
+        )
+    }
+
+    @format: function (self, out: ref Formatter) nothing {
+        out.write_bytes("[")
+
+        index: Int = 0
+
+        loop if index < self.count {
+
+            if index != 0 as Int {
+                out.write_bytes(", ")
+            }
+
+            out.write($"{self.get(index)}")
+
+            index += 1
+        } else break
+
+        out.write_bytes("]")
+    }
+}

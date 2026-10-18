@@ -201,7 +201,7 @@ fn use_after_move_links_the_move() {
         .unwrap_or_else(|| panic!("{:?}", params.diagnostics));
     assert_eq!(error.range.start.line, 10, "{error:?}");
     let related = error.related_information.as_ref().expect("the move");
-    assert_eq!(related[0].message, "moved here");
+    assert_eq!(related[0].message, "moved here: `Handle` cannot be copied");
     assert_eq!(related[0].location.range.start.line, 9);
     shutdown(&client);
     handle.join().expect("server thread");

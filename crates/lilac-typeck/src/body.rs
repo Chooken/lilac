@@ -150,6 +150,38 @@ pub(crate) fn local_expr(id: LocalId, ty: TypeRef, span: Span) -> HirExpr {
     }
 }
 
+/// `place` with each `ref` it is read through that a call returned bound
+/// to a hidden local first (a `Let` in `out`), so the place can be read
+/// and written without running the call twice.
+fn bind_call_refs(fcx: &mut FnCx, place: HirExpr, out: &mut Vec<HirStmt>) -> HirExpr {
+    let HirExpr { ty, span, kind } = place;
+    let kind = match kind {
+        HirExprKind::Field { base, index } => HirExprKind::Field {
+            base: Box::new(bind_call_refs(fcx, *base, out)),
+            index,
+        },
+        HirExprKind::Deref(inner) => match inner.kind {
+            HirExprKind::Local(_)
+            | HirExprKind::Global(_)
+            | HirExprKind::Field { .. }
+            | HirExprKind::Deref(_) => {
+                HirExprKind::Deref(Box::new(bind_call_refs(fcx, *inner, out)))
+            }
+            _ => {
+                let local = fcx.hidden(inner.ty, inner.span);
+                let reference = local_expr(local, inner.ty, inner.span);
+                out.push(HirStmt::Let {
+                    local,
+                    value: *inner,
+                });
+                HirExprKind::Deref(Box::new(reference))
+            }
+        },
+        kind => kind,
+    };
+    HirExpr { ty, span, kind }
+}
+
 /// A hidden local moved out (it is never read again).
 pub(crate) fn moved_local(id: LocalId, ty: TypeRef, span: Span) -> HirExpr {
     HirExpr {
@@ -572,8 +604,10 @@ impl Checker<'_> {
     }
 
     /// `target op= value`: `target = target op value`, with the target
-    /// checked once and read as the left operand (a place has no side
-    /// effects, so reading it twice is what the long form does).
+    /// checked once and read as the left operand. A place through a call
+    /// (`list.get(i) += 1`) first binds the call's `ref` to a hidden
+    /// local, so the call runs once; any other place has no side effects,
+    /// so reading it twice is what the long form does.
     #[allow(clippy::too_many_arguments)]
     fn check_compound_assign(
         &mut self,
@@ -593,6 +627,7 @@ impl Checker<'_> {
             let _ = self.check_expr(fcx, value, Some(TypeId::ERROR));
             return;
         }
+        let place = bind_call_refs(fcx, place, out);
         let left = self.auto_deref(place.clone());
         let right = self.check_expr(fcx, value, Some(left.ty.id));
         if right.ty.is_error() {
