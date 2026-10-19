@@ -1,0 +1,15 @@
+Watcher: object {
+    private {
+        seen: @bit8
+    }
+
+    handle: function (self) handle: Handle {
+        handle = Handle { count = self.seen }
+    }
+}
+
+main: function () nothing {
+    handle: Handle = Handle { count = 0x1 }
+    watcher: Watcher = handle.watch()
+    count: @bit8 = inner.peek(watcher.handle())
+}

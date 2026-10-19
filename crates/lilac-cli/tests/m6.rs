@@ -346,27 +346,43 @@ fn two_namespaces_same_named_generics_keep_their_own_shapes() {
     );
 }
 
-/// An object-private member called from outside the object is `E026`, labelled
-/// at the access site and the declaration.
+/// An object-private member called from outside the object's namespace is
+/// `E026`, labelled at the access site and the declaration, with a note naming
+/// the namespace that reaches it.
 #[test]
 fn private_member_denied_is_e026() {
     let output = lilac()
         .arg("check")
-        .arg(ui("FAILS_private_member.lilac"))
+        .arg(modules("FAILS_private_member"))
         .output()
         .expect("runs lilac");
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[E026]"), "stderr:\n{stderr}");
+    assert!(stderr.contains("main.lilac:10:20"), "stderr:\n{stderr}");
     assert!(
-        stderr.contains("FAILS_private_member.lilac:16"),
+        stderr.contains("things/object.lilac:5:9") && stderr.contains("declared private here"),
         "stderr:\n{stderr}"
     );
-    // The private declaration is labelled in the same snippet.
     assert!(
-        stderr.contains("\n 5 |") && stderr.contains("declared private here"),
+        stderr.contains("only code in `things` and the namespaces inside it"),
         "stderr:\n{stderr}"
     );
+}
+
+/// A member `private` reaches its type's whole namespace, like a top-level
+/// one: two types in one folder (in different files) build and read each
+/// other's private fields, and so does a namespace inside it.
+#[test]
+fn private_member_reaches_its_namespace() {
+    let output = lilac()
+        .arg("check")
+        .arg(modules("private_member_namespace_ok"))
+        .output()
+        .expect("runs lilac");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
 /// A `private` member is visible inside the owning object's own member bodies.
@@ -396,12 +412,13 @@ fn namespace_private_function_compiles() {
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
-/// An external static `Object.member()` call to a private member is `E026`.
+/// A static `Object.member()` call to a private member from another
+/// namespace is `E026`.
 #[test]
 fn private_static_member_denied_is_e026() {
     let output = lilac()
         .arg("check")
-        .arg(ui("FAILS_private_static_member.lilac"))
+        .arg(modules("FAILS_private_static_member"))
         .output()
         .expect("runs lilac");
     assert_eq!(output.status.code(), Some(1));
@@ -436,13 +453,13 @@ fn nested_private_field_resolves_inside_object() {
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
 }
 
-/// External access to a field wrapped in nested `private` blocks is `E026`
-/// (not a spurious missing-field `E021`).
+/// Access from another namespace to a field wrapped in nested `private`
+/// blocks is `E026` (not a spurious missing-field `E021`).
 #[test]
 fn nested_private_field_denied_is_e026() {
     let output = lilac()
         .arg("check")
-        .arg(ui("FAILS_private_nested_member.lilac"))
+        .arg(modules("FAILS_private_nested_member"))
         .output()
         .expect("runs lilac");
     assert_eq!(output.status.code(), Some(1));

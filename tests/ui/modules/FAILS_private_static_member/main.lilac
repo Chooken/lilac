@@ -1,0 +1,5 @@
+using things
+
+main: function () nothing {
+    value: @bit8 = Object.secret()
+}

@@ -373,8 +373,11 @@
   file's `using`s to its live items.
 - Visibility reach is ancestor-public + descendant-private (Rust's rule). A
   top-level `private { … }` excludes an item from `using` (importers see it as
-  unresolved, not `E026`); an object-member `private { … }` gates external access
-  with `E026`. Top-level hooks are unit-global and carry no namespace prefix.
+  unresolved, not `E026`); an object-member `private { … }` reaches the same
+  way (the type's namespace and its descendants, `Checker::private_denied`
+  over `Resolved::reaches`, so `Shared` and `Weak` build each other) and gates
+  any other access with `E026`. Top-level hooks are unit-global and carry no
+  namespace prefix.
 - Paths (`lilac-typeck/src/paths.rs`): a type name is a dotted path
   (`A.B.Type`), and an expression member chain is flattened into one
   (`Checker::qualified_name`) while it walks namespaces;

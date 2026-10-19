@@ -1,0 +1,53 @@
+
+
+AtomicInt: object {
+
+    private {
+        data: @bit_native
+    }
+
+    new: function (value: Int) AtomicInt => AtomicInt { data = value }
+
+    get: function (self) result: Int {
+        result = @atomic_load_native(ref self.data)
+    }
+
+    set: function (self, value: Int) nothing {
+        @atomic_store_native(ref self.data, value as @bit_native)
+    }
+
+    increment: function (self) old_value: Int {
+        old_value = @atomic_add_native(ref self.data, 0x1)
+    }
+
+    decrement: function (self) old_value: Int {
+        old_value = @atomic_sub_native(ref self.data, 0x1)
+    }
+
+    get_then_add: function (self, amount: Int) old_value: Int {
+        old_value = @atomic_add_native(ref self.data, amount as @bit_native)
+    }
+
+    get_then_subtract: function (self, amount: Int) old_value: Int {
+        old_value = @atomic_sub_native(ref self.data, amount as @bit_native)
+    }
+
+    get_then_min: function (self, value: Int) old_value: Int {
+        old_value = @atomic_min_native(ref self.data, value as @bit_native)
+    }
+
+    get_then_max: function (self, value: Int) old_value: Int {
+        old_value = @atomic_max_native(ref self.data, value as @bit_native)
+    }
+
+    get_then_swap: function (self, value: Int) old_value: Int {
+        old_value = @atomic_swap_native(ref self.data, value as @bit_native)
+    }
+
+    compare_and_swap: function (self, current_value: Int, new_value: Int) nothing else old_value: Int {
+        old_value = @atomic_compare_swap_native(ref self.data, current_value as @bit_native, new_value as @bit_native)
+        if current_value != old_value {
+            fail
+        }
+    }
+}

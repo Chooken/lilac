@@ -1,0 +1,3 @@
+peek: function (handle: Handle) count: @bit8 {
+    count = handle.count
+}

@@ -1,0 +1,9 @@
+// expect-error: E026
+// A private constant is named only from its type's namespace (`boxes`)
+// and the namespaces inside it.
+
+using boxes
+
+main: function () nothing {
+    x: @bit32 = Box.SECRET
+}

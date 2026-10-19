@@ -1,0 +1,5 @@
+Box: object {
+    private {
+        SECRET: @bit32 => 0x2A
+    }
+}

@@ -7,11 +7,3 @@ Object: object {
         }
     }
 }
-
-main: function () nothing {
-    variable: Object = Object {
-        member = 0x1
-    }
-
-    value: @bit8 = variable.secret()
-}

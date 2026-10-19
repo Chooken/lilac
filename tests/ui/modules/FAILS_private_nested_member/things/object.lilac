@@ -11,8 +11,3 @@ Object: object {
         }
     }
 }
-
-main: function () nothing {
-    variable: Object = Object.create()
-    value: @bit8 = variable.f
-}

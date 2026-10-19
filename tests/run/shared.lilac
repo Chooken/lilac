@@ -1,0 +1,56 @@
+// expect-stdout: 7 7
+// expect-stdout: 8 8
+// expect-stdout: upgraded 8
+// expect-stdout: drop 8
+// expect-stdout: gone
+// expect-stdout: copied weak: gone
+// expect-stdout: done
+// Copies of a `Shared` own one value (a change through one shows through
+// the others) and drop it once, with the last. A `Weak` upgrades while an
+// owner lives, fails after, and its copies outlive the value without
+// dropping it again.
+
+using Standard
+using Standard.Io
+
+Noisy: object {
+    n: Int
+
+    @on_drop: function (self) nothing {
+        print_line($"drop {self.n}")
+    }
+}
+
+main: function () nothing {
+    weak: Weak[Noisy] = make()
+
+    if weak.upgrade() -> again: Shared[Noisy] {
+        print_line($"upgraded (wrong) {again.value().n}")
+    } else {
+        print_line("gone")
+    }
+
+    copy: Weak[Noisy] = weak
+    if copy.upgrade() -> again: Shared[Noisy] {
+        print_line($"copied weak: upgraded (wrong) {again.value().n}")
+    } else {
+        print_line("copied weak: gone")
+    }
+    print_line("done")
+}
+
+make: function () weak: Weak[Noisy] {
+    first: Shared[Noisy] = Shared[Noisy].new(Noisy { n = 7 })
+    second: Shared[Noisy] = first
+    print_line($"{first.value().n} {second.value().n}")
+
+    second.value().n = 8
+    print_line($"{first.value().n} {second.value().n}")
+
+    weak = second.new_weak()
+    if weak.upgrade() -> third: Shared[Noisy] {
+        print_line($"upgraded {third.value().n}")
+    } else {
+        print_line("gone (wrong)")
+    }
+}

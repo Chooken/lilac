@@ -1467,11 +1467,13 @@ fn nested_private_object_field_resolves() {
 }
 
 #[test]
-fn nested_private_object_field_is_e026_outside() {
+fn nested_private_object_field_reaches_its_namespace() {
+    // A member `private` reaches the type's whole namespace, so `main`
+    // beside `Object` reads the field (`E026` from another namespace is
+    // `m6.rs`'s `nested_private_field_denied_is_e026`).
     let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.f\n}\n";
     let diags = check_src(src);
-    assert!(has_code(&diags, "E026"), "{diags:?}");
-    assert!(!has_code(&diags, "E021"), "{diags:?}");
+    assert!(!diags.has_errors(), "{diags:?}");
 }
 
 #[test]

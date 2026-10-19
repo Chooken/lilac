@@ -1,0 +1,130 @@
+using Standard.Sync as Sync
+using Standard.Heap as Heap
+
+/// One value on the heap with many owners: copying a `Shared` gives another
+/// owner of the same value (nothing is copied but the handle), and the value
+/// is dropped when the last owner is dropped.
+///
+/// Copies may be made and dropped on any thread. The value itself is not
+/// guarded: to change it from more than one thread, make its parts atomics
+/// (`Sync.AtomicInt`) or guard it with a lock. Two values that hold `Shared`s of each other keep each other alive
+/// forever; make one of the links a `Weak`.
+Shared[T]: object {
+
+    private {
+        ptr: ref SharedData[T]
+    }
+
+    /// A first owner of `value`, moved onto the heap from
+    /// `Heap.default_allocator`.
+    new: function (value: T) result: Shared[T] {
+        result = new_using(value, Heap.get_default_allocator())
+    }
+
+    /// A first owner of `value`, moved into memory from `allocator`, which
+    /// must stay in place until the last `Shared` and `Weak` of it are gone.
+    new_using: function (value: T, allocator: Heap.Allocator) result: Shared[T] {
+        result = Shared[T] {
+            ptr = allocator.create[SharedData[T]](SharedData[T] {
+                strong_references = Sync.AtomicInt.new(1)
+                weak_references = Sync.AtomicInt.new(1)
+                allocator = allocator
+                data = value
+            })
+        }
+    }
+
+    /// The shared value. Every owner sees the same value, so a change
+    /// through one is seen through all of them.
+    value: function (self) value: ref T {
+        value = ref self.ptr.data
+    }
+
+    /// A `Weak` of this value: it can reach the value while an owner still
+    /// holds it, but does not keep it alive.
+    new_weak: function (self) weak: Weak[T] {
+        self.ptr.weak_references.increment()
+        weak = Weak[T] { ptr = self.ptr }
+    }
+
+    @on_copy: function (self) to: Shared[T] {
+        self.ptr.strong_references.increment()
+        to = Shared[T] { ptr = self.ptr }
+    }
+
+    @on_drop: function (self) nothing {
+        value: Int = self.ptr.strong_references.decrement()
+        if value == 1 as Int {
+            // The last owner: the value goes now, its memory once no
+            // `Weak` needs to look at the counts.
+            @drop(ref self.ptr.data)
+            release[T](self.ptr)
+        }
+    }
+}
+
+/// A handle to a `Shared` value that does not keep it alive: the value is
+/// dropped when its last `Shared` is, whatever `Weak`s are left. Use one for
+/// a link back to an owner (a child pointing at its parent), so the two do
+/// not keep each other alive forever.
+///
+/// Like `Shared`, copies may be made and dropped on any thread.
+Weak[T]: object {
+
+    private {
+        ptr: ref SharedData[T]
+    }
+
+    /// A new owner of the value, if it is still alive; fails once the last
+    /// `Shared` of it has been dropped.
+    upgrade: function (self) shared: Shared[T] else nothing {
+        count: Int = self.ptr.strong_references.get()
+        loop {
+
+            if count == 0 as Int {
+                fail
+            }
+
+            // Another thread may drop or copy an owner meanwhile: count up
+            // only from a count still above zero, never back from zero.
+            if self.ptr.strong_references.compare_and_swap(count, count + 1) {
+                shared = Shared[T] { ptr = self.ptr }
+                return
+            } else -> actual: Int {
+                count = actual
+            }
+        }
+    }
+
+    @on_copy: function (self) to: Weak[T] {
+        self.ptr.weak_references.increment()
+        to = Weak[T] { ptr = self.ptr }
+    }
+
+    @on_drop: function (self) nothing {
+        release[T](self.ptr)
+    }
+}
+
+private {
+    // One allocation holds the counts beside the value, so reaching the
+    // value from a handle is one step.
+    SharedData[T]: object {
+        strong_references: Sync.AtomicInt
+        // The `Weak`s, plus one held by all the `Shared`s together, so the
+        // last `Shared` and the last `Weak` never both free the memory.
+        weak_references: Sync.AtomicInt
+        allocator: Heap.Allocator
+        data: T
+    }
+
+    // Gives up one weak count, freeing the memory (the value is already
+    // dropped) with the last.
+    release[T]: function (shared_data: ref SharedData[T]) nothing {
+        value: Int = shared_data.weak_references.decrement()
+        if value == 1 as Int {
+            allocator: Heap.Allocator = shared_data.allocator
+            allocator.free[SharedData[T]](shared_data)
+        }
+    }
+}

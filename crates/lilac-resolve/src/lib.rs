@@ -39,7 +39,7 @@ pub enum Visibility {
     /// Visible to importers (and, by namespace reach, to descendants).
     Public,
     /// Top level: excluded from `using`. Member: inaccessible outside the
-    /// owning type (`E026`).
+    /// owning type's namespace and its descendants (`E026`).
     Private,
 }
 

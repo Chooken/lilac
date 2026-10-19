@@ -828,18 +828,31 @@ impl Checker<'_> {
         HirExpr::poison(span)
     }
 
-    /// `E026` for a private member used outside its type.
+    /// `E026` for a private member used outside its type's namespace. A
+    /// member `private` reaches like a top-level one: the type's own
+    /// namespace and those inside it (`Resolved::reaches`), so types in one
+    /// folder (`Shared` and `Weak`) build and read each other.
     pub(crate) fn private_denied(&mut self, member: DefId, owner: DefId, access: Span) -> bool {
         let def = self.res.def(member);
-        if def.vis != Visibility::Private || self.env.owner == Some(owner) {
+        if def.vis != Visibility::Private
+            || self.env.owner == Some(owner)
+            || self.res.reaches(self.file_ns(), self.res.def(owner).ns)
+        {
             return false;
         }
         let decl = def.span;
-        self.diags.emit(
+        let path = match self.res.namespace_path(self.res.def(owner).ns) {
+            "" => "the root namespace".to_owned(),
+            path => format!("`{path}`"),
+        };
+        let diagnostic =
             Diagnostic::error(codes::E026, format!("`{}` is a private member", def.name))
-                .label(access, true, "accessed from outside its object")
-                .label(decl, false, "declared private here"),
-        );
+                .label(access, true, "accessed from outside its object's namespace")
+                .label(decl, false, "declared private here")
+                .note(format!(
+                    "only code in {path} and the namespaces inside it can use it"
+                ));
+        self.diags.emit(diagnostic);
         true
     }
 

@@ -1099,7 +1099,7 @@ for every instance (`Gen.SIZE` is `Gen[@bit8].SIZE`), so its type and
 initializer cannot name the type's parameters (`E023`, `E021`). A type
 parameter's constant, `T.LIMIT` in a generic body, is looked up on each
 instance's type. A constant in a `private { }` block is named only from
-the type's own members and constants (`E026`). A type's body declares no
+the type's namespace and those inside it (`E026`). A type's body declares no
 globals: `NAME: Type = value` there is `E001`.
 
 ```lilac
@@ -1238,8 +1238,10 @@ namespaces, and it imports only their public items.
 *namespace-private*: they are excluded from the namespace's `using` export, so an
 importer sees an unresolved name (`E021`, not a privacy error), while the
 defining namespace and its descendants still see them. Inside an `object` it
-marks members *object-private*: the member is found but inaccessible from outside
-the object, which is `E026`. A private declaration still occupies its name (a
+marks members *object-private*, which reach like namespace-private items: the
+object's own namespace and its descendants use them (so two types in one folder
+build and read each other's private fields), and from anywhere else the member
+is found but inaccessible, which is `E026`. A private declaration still occupies its name (a
 private/public clash is `E020`), and `private` does not gate hook resolution:
 hooks are unit-global and scope-independent, so a `private` member hook is still
 found for operators and `@conversion`.

@@ -1,0 +1,11 @@
+// `things` is not inside the root namespace, so its private members are
+// out of reach here.
+using things
+
+main: function () nothing {
+    variable: Object = Object {
+        member = 0x1
+    }
+
+    value: @bit8 = variable.secret()
+}

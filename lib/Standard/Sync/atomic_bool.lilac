@@ -1,0 +1,49 @@
+
+// Maybe check for atomic @bit8 support or default to @bit32?
+AtomicBool: object {
+
+    private {
+        data: @bit8
+    }
+
+    new: function (value: Bool) AtomicBool => AtomicBool { data = value }
+
+    set: function (self, value: Bool) nothing {
+        @atomic_store_8(ref self.data, value as @bit8)
+    }
+
+    get: function (self) result: Bool {
+        result = @atomic_load_8(ref self.data)
+    }
+
+    get_then_and: function (self, value: Bool) old_value: Bool {
+        old_value = @atomic_and_8(ref self.data, value as @bit8)
+    }
+
+    get_then_not: function (self) old_value: Bool {
+        old_value = @atomic_xor_8(ref self.data, 0x1)
+    }
+
+    get_then_nand: function (self, value: Bool) old_value: Bool {
+        old_value = if value then @atomic_xor_8(ref self.data, 0x1) else @atomic_swap_8(ref self.data, 0x1)
+    }
+
+    get_then_or: function (self, value: Bool) old_value: Bool {
+        old_value = @atomic_or_8(ref self.data, value as @bit8)
+    }
+
+    get_then_xor: function (self, value: Bool) old_value: Bool {
+        old_value = @atomic_xor_8(ref self.data, value as @bit8)
+    }
+
+    get_then_swap: function (self, value: Bool) old_value: Bool {
+        old_value = @atomic_swap_8(ref self.data, value as @bit8)
+    }
+
+    compare_and_swap: function (self, current_value: Bool, new_value: Bool) nothing else old_value: Bool {
+        old_value = @atomic_compare_swap_8(ref self.data, current_value as @bit8, new_value as @bit8)
+        if current_value != old_value {
+            fail
+        }
+    }
+}
