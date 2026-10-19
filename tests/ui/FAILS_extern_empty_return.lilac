@@ -1,0 +1,9 @@
+// C has no empty struct: `E028`.
+Nothing: object {
+}
+
+get: extern function () result: Nothing
+
+main: function () nothing {
+    f: Nothing = get()
+}

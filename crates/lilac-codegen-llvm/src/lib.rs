@@ -19,6 +19,7 @@ use lilac_error::Emitter;
 use lilac_ir::LirModule;
 use lilac_target::Arch;
 
+mod abi;
 mod float;
 mod lower;
 mod native;
@@ -343,7 +344,7 @@ mod tests {
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         bad.funcs.push(LirFunc {
             name: "puts".into(),
-            ins: vec![("s".into(), t("#byte_buffer"))],
+            ins: vec![("s".into(), t("[4 x #bit8]"))],
             outs: Vec::new(),
             is_extern: true,
             export: None,
@@ -501,15 +502,15 @@ mod tests {
         );
     }
 
-    /// An `extern` parameter outside the scalar/pointer set is `E028`, not a
-    /// mis-compiled struct pointer.
+    /// An `extern` parameter C cannot take (an array by value) is `E028`, not
+    /// a mis-compiled pointer.
     #[test]
-    fn extern_aggregate_param_is_e028() {
+    fn extern_array_param_is_e028() {
         let mut module =
             LirModule::new(lilac_target::Target::parse("x86_64-pc-windows-msvc").expect("triple"));
         module.funcs.push(LirFunc {
             name: "puts".into(),
-            ins: vec![("s".into(), t("#byte_buffer"))],
+            ins: vec![("s".into(), t("[4 x #bit8]"))],
             outs: Vec::new(),
             is_extern: true,
             export: None,
@@ -519,7 +520,7 @@ mod tests {
         });
         let err = backend()
             .emit_llvm(&module)
-            .expect_err("aggregate parameter must be E028");
+            .expect_err("array parameter must be E028");
         assert!(err.contains("error[E028]"), "{err}");
     }
 
@@ -1955,24 +1956,29 @@ mod tests {
     }
 
     /// A native object has no C `main` wrapper and defines what LLVM may call
-    /// in place of the C runtime; Windows adds `_fltused` and `__chkstk`.
+    /// in place of the C runtime; Windows adds `_fltused` and `__chkstk`. All
+    /// are weak, so a static library's own definitions win.
     #[test]
     fn native_entry_defines_its_own_support() {
         let windows = native_ir("x86_64-pc-windows-msvc");
         assert!(!windows.contains("define i32 @main()"), "{windows}");
         for symbol in ["@memcpy(", "@memmove(", "@memset("] {
             assert!(
-                windows.contains(&format!("define ptr {symbol}")),
+                windows.contains(&format!("define weak ptr {symbol}")),
                 "{symbol}"
             );
         }
-        assert!(windows.contains("define i32 @memcmp("), "{windows}");
+        assert!(windows.contains("define weak i32 @memcmp("), "{windows}");
         assert!(windows.contains("\"no-builtins\""), "{windows}");
         assert!(
             !windows.contains("ptrtoint") && !windows.contains("inttoptr"),
             "native support addresses bytes with `getelementptr`:\n{windows}"
         );
-        assert!(windows.contains("@_fltused = global i32 0"), "{windows}");
+        assert!(
+            windows.contains("@_fltused = weak global i32 0"),
+            "{windows}"
+        );
+        assert!(windows.contains(".weak __chkstk"), "{windows}");
         assert!(windows.contains("__chkstk:"), "{windows}");
         let arm = native_ir("aarch64-pc-windows-msvc");
         assert!(arm.contains("ldr xzr"), "{arm}");
@@ -1981,7 +1987,7 @@ mod tests {
             !linux.contains("_fltused") && !linux.contains("__chkstk"),
             "{linux}"
         );
-        assert!(linux.contains("define ptr @memcpy("), "{linux}");
+        assert!(linux.contains("define weak ptr @memcpy("), "{linux}");
     }
 
     /// `@linux_syscall` reaches the kernel through `.lilac.linux_syscall`, the

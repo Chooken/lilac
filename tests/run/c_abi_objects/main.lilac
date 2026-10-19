@@ -1,0 +1,139 @@
+// c-source: objects.c
+// expect-stdout: vec2 4 6
+// expect-stdout: vec3 3 6 9
+// expect-stdout: color 254 155 55 7
+// expect-stdout: rgb 3 1 2
+// expect-stdout: mixed 2 8
+// expect-stdout: big 40 80 120
+// expect-stdout: num 42 5
+// expect-stdout: sprite 11 22 9 128
+// expect-stdout: lilac 12321
+// expect-stdout: apply 12 13 14
+// expect-stdout: apply 5 8
+// expect-stdout: value 9 10 11 4 6
+// Objects by value through the C ABI, against C compiled by Clang
+// (`objects.c`): floats in vector registers, bytes packed in an integer,
+// an odd-sized struct, a mixed pair, large structs in memory with the
+// registers used up, an enum as its tagged union, a nested struct, and
+// C calling Lilac exports by name and through function pointers.
+
+using Standard
+using Standard.Io
+
+Vec2: object {
+    x: Float32
+    y: Float32
+}
+
+Vec3: object {
+    x: Float32
+    y: Float32
+    z: Float32
+}
+
+Color: object {
+    r: Uint8
+    g: Uint8
+    b: Uint8
+    a: Uint8
+}
+
+Rgb: object {
+    a: Uint8
+    b: Uint8
+    c: Uint8
+}
+
+Mixed: object {
+    d: Float64
+    i: Uint32
+}
+
+Big: object {
+    a: Uint64
+    b: Uint64
+    c: Uint64
+}
+
+Num: enum {
+    Whole: Uint32
+    Real: Float32
+}
+
+Sprite: object {
+    position: Vec2
+    tint: Color
+}
+
+vec2_add: extern function (a: Vec2, b: Vec2) r: Vec2
+vec3_scale: extern function (v: Vec3, s: Float32) r: Vec3
+color_invert: extern function (c: Color) r: Color
+rgb_rotate: extern function (c: Rgb) r: Rgb
+mixed_bump: extern function (m: Mixed) r: Mixed
+big_sum: extern function (a: Big, b: Big, c: Big, d: Big, scale: @bit32) r: Big
+num_double: extern function (n: Num) r: Num
+sprite_move: extern function (s: Sprite, by: Vec2) r: Sprite
+call_lilac: extern function () r: Uint64
+apply_vec3: extern function (f: ref export function (v: Vec3, s: Float32) r: Vec3, v: Vec3, s: Float32) r: Vec3
+apply_mixed: extern function (f: ref export function (m: Mixed) r: Mixed, m: Mixed) r: Mixed
+
+rgb_swap: export "lilac_rgb_swap" function (c: Rgb) r: Rgb {
+    r = Rgb { a = c.c, b = c.b, c = c.a }
+}
+
+big_twice: export "lilac_big_twice" function (b: Big, by: @bit32) r: Big {
+    r = Big { a = b.a * 2, b = b.b * 2, c = b.c * 2 }
+}
+
+shift: export function (v: Vec3, s: Float32) r: Vec3 {
+    r = Vec3 { x = v.x + s, y = v.y + s, z = v.z + s }
+}
+
+bump: export function (m: Mixed) r: Mixed {
+    r = Mixed { d = m.d + 1.0, i = m.i * 2 }
+}
+
+main: function () nothing {
+    v: Vec2 = vec2_add(Vec2 { x = 1.5, y = 2.5 }, Vec2 { x = 2.5, y = 3.5 })
+    print_line($"vec2 {v.x} {v.y}")
+    w: Vec3 = vec3_scale(Vec3 { x = 1.0, y = 2.0, z = 3.0 }, 3.0)
+    print_line($"vec3 {w.x} {w.y} {w.z}")
+    c: Color = color_invert(Color { r = 1, g = 100, b = 200, a = 7 })
+    print_line($"color {c.r} {c.g} {c.b} {c.a}")
+    o: Rgb = rgb_rotate(Rgb { a = 1, b = 2, c = 3 })
+    print_line($"rgb {o.a} {o.b} {o.c}")
+    m: Mixed = mixed_bump(Mixed { d = 1.5, i = 7 })
+    print_line($"mixed {m.d} {m.i}")
+    one: Big = Big { a = 1, b = 2, c = 3 }
+    b: Big = big_sum(one, one, one, one, 0xa)
+    print_line($"big {b.a} {b.b} {b.c}")
+    whole: Uint32 = 0
+    match num_double(.Whole(21)) {
+        .Whole -> n: Uint32 {
+            whole = n
+        }
+        .Real {
+        }
+    }
+    half: Float32 = 0.0
+    match num_double(.Real(2.5)) {
+        .Real -> x: Float32 {
+            half = x
+        }
+        .Whole {
+        }
+    }
+    print_line($"num {whole} {half}")
+    s: Sprite = sprite_move(Sprite { position = Vec2 { x = 10.0, y = 20.0 }, tint = Color { r = 9, g = 0, b = 0, a = 255 } }, Vec2 { x = 1.0, y = 2.0 })
+    print_line($"sprite {s.position.x} {s.position.y} {s.tint.r} {s.tint.a}")
+    print_line($"lilac {call_lilac()}")
+    a: Vec3 = apply_vec3(ref shift, Vec3 { x = 2.0, y = 3.0, z = 4.0 }, 10.0)
+    print_line($"apply {a.x} {a.y} {a.z}")
+    p: Mixed = apply_mixed(ref bump, Mixed { d = 3.0, i = 2 })
+    print_line($"apply {p.d} {p.i}")
+    g: ref export function (v: Vec3, s: Float32) r: Vec3 = ref shift
+    h: ref export function (m: Mixed) r: Mixed = ref bump
+    q: Vec3 = g(Vec3 { x = 1.0, y = 2.0, z = 3.0 }, 8.0)
+    n: Mixed = h(Mixed { d = 3.0, i = 3 })
+    print_line($"value {q.x} {q.y} {q.z} {n.d} {n.i}")
+}

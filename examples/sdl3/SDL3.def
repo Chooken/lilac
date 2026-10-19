@@ -1,0 +1,21 @@
+LIBRARY SDL3.dll
+EXPORTS
+    SDL_Init
+    SDL_Quit
+    SDL_GetError
+    SDL_CreateWindow
+    SDL_DestroyWindow
+    SDL_CreateRenderer
+    SDL_DestroyRenderer
+    SDL_SetRenderDrawColor
+    SDL_RenderClear
+    SDL_RenderFillRect
+    SDL_RenderGeometry
+    SDL_RenderDebugText
+    SDL_SetRenderScale
+    SDL_RenderPresent
+    SDL_PollEvent
+    SDL_GetTicks
+    SDL_Delay
+    SDL_StringToGUID
+    SDL_GUIDToString

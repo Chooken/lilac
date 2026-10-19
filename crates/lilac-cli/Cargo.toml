@@ -18,5 +18,8 @@ lilac-module = { path = "../lilac-module" }
 lilac-manifest = { path = "../lilac-manifest" }
 lilac-ty = { path = "../lilac-ty" }
 
+[dev-dependencies]
+lilac-target = { path = "../lilac-target" }
+
 [lints]
 workspace = true

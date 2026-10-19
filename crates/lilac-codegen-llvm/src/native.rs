@@ -6,7 +6,9 @@
 //! it also references `_fltused` from any function that uses floats, and
 //! calls `__chkstk` to probe stack frames larger than a page. With no C
 //! runtime linked, the object defines all of them itself, as Rust's
-//! `compiler-builtins` does.
+//! `compiler-builtins` does. Each definition is weak, so a static library
+//! that brings its own (a freestanding one such as SDL built with
+//! `SDL_LIBC=OFF`) links without a duplicate symbol, and its copy wins.
 //!
 //! On Linux it also defines the process entry `.lilac.native_entry` in
 //! assembly: only assembly can read the arguments the kernel leaves on the
@@ -32,7 +34,7 @@ use crate::threads::{append_assembly, append_ir, has_thread_locals, windows_tls_
 /// `chkstk.S`.
 const CHKSTK_X86_64: &str = "\
 .text
-.globl __chkstk
+.weak __chkstk
 .p2align 4
 __chkstk:
     pushq %rcx
@@ -59,7 +61,7 @@ __chkstk:
 /// `chkstk.S`.
 const CHKSTK_AARCH64: &str = "\
 .text
-.globl __chkstk
+.weak __chkstk
 .p2align 2
 __chkstk:
     lsl x16, x15, #4
@@ -131,7 +133,7 @@ pub(crate) fn define<'ctx>(
     if triple.contains("windows") {
         let fltused = module.add_global(context.i32_type(), None, "_fltused");
         fltused.set_initializer(&context.i32_type().const_zero());
-        fltused.set_linkage(Linkage::External);
+        fltused.set_linkage(Linkage::WeakAny);
         if triple.starts_with("x86_64") {
             append_assembly(module, "__chkstk", CHKSTK_X86_64);
         } else if triple.starts_with("aarch64") {
@@ -163,7 +165,7 @@ fn is_apple(triple: &str) -> bool {
 /// `getelementptr` (inkwell's GEP builders are `unsafe`, so they are IR
 /// text). `INATIVE` stands for the pointer-sized integer.
 const MEMORY: &str = r#"
-define ptr @memcpy(ptr %dest, ptr %src, INATIVE %len) #0 {
+define weak ptr @memcpy(ptr %dest, ptr %src, INATIVE %len) #0 {
 entry:
   br label %check
 check:
@@ -181,7 +183,7 @@ done:
   ret ptr %dest
 }
 
-define ptr @memmove(ptr %dest, ptr %src, INATIVE %len) #0 {
+define weak ptr @memmove(ptr %dest, ptr %src, INATIVE %len) #0 {
 entry:
   %below = icmp ult ptr %dest, %src
   br i1 %below, label %forward, label %backward
@@ -211,7 +213,7 @@ done:
   ret ptr %dest
 }
 
-define ptr @memset(ptr %dest, i32 %value, INATIVE %len) #0 {
+define weak ptr @memset(ptr %dest, i32 %value, INATIVE %len) #0 {
 entry:
   %byte = trunc i32 %value to i8
   br label %check
@@ -228,7 +230,7 @@ done:
   ret ptr %dest
 }
 
-define i32 @memcmp(ptr %left, ptr %right, INATIVE %len) #0 {
+define weak i32 @memcmp(ptr %left, ptr %right, INATIVE %len) #0 {
 entry:
   br label %check
 check:

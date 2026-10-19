@@ -1,0 +1,15 @@
+# A window through SDL3, linked in native mode: no C library, only
+# SDL3.dll's import library (see README.md).
+
+[project]
+name = "sdl3_demo"
+root = "src"
+
+[build]
+target = "host"
+
+[libraries]
+Standard = "../../lib/Standard"
+
+[link]
+args = ["SDL3.lib"]

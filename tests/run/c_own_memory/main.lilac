@@ -1,0 +1,31 @@
+// c-source: memory.c
+// expect-stdout: sums 8192 4096
+// expect-stdout: copied by C
+// A C object that defines `memcpy`, `memmove`, `memset` and `memcmp`
+// links with a native Lilac program, which defines them too (weakly), and
+// its `memcpy` is the one a large copy calls.
+
+using Standard
+using Standard.Io
+
+Page: object {
+    bytes: @array(Uint8, 0x1000)
+}
+
+page_fill: extern function (page: ref Page, value: Uint8) nothing
+page_sum: extern function (page: ref Page) sum: Uint32
+memcpy_calls: extern function () calls: Uint32
+
+main: function () nothing {
+    a: Page = Page { bytes = @array(Uint8, 0x1000) { } }
+    page_fill(ref a, 1)
+    b: Page = a
+    page_fill(ref a, 2)
+    print_line($"sums {page_sum(ref a)} {page_sum(ref b)}")
+    none: Uint32 = 0
+    if memcpy_calls() > none {
+        print_line("copied by C")
+    } else {
+        print_line("copied by Lilac")
+    }
+}

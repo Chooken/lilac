@@ -29,6 +29,9 @@
 //!   runtime).
 //! - `// libc` — builds with `--libc` (the program uses `Standard.C`).
 //! - `// build-arg: <flag>` — an extra `lilac build` flag (repeatable).
+//! - `// c-source: <file>` — a C file, relative to the program's folder,
+//!   compiled freestanding by the toolchain `clang` for the host and linked
+//!   in (`--link-arg=`) (repeatable).
 //!
 //! `lilac` runs in `tests/run` and is given the program's bare name, so
 //! source locations (in diagnostics and stack traces) read the same on every
@@ -73,6 +76,7 @@ struct Expect {
     libs: Vec<String>,
     libc: bool,
     no_standard: bool,
+    c_sources: Vec<String>,
 }
 
 fn parse_header(text: &str) -> Expect {
@@ -92,6 +96,8 @@ fn parse_header(text: &str) -> Expect {
                 .push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
         } else if let Some(rest) = comment.strip_prefix("build-arg:") {
             expect.build_args.push(rest.trim().to_owned());
+        } else if let Some(rest) = comment.strip_prefix("c-source:") {
+            expect.c_sources.push(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("expect-exit:") {
             if rest.trim() == "trap" {
                 expect.trap = true;
@@ -138,6 +144,35 @@ fn programs() -> Vec<PathBuf> {
     sources
 }
 
+/// Compiles a `// c-source:` file to an object in `scratch` for the host,
+/// freestanding: native programs link no C library.
+fn compile_c(file: &Path, toolchain: &Toolchain, scratch: &Path) -> Result<PathBuf, String> {
+    let stem = file.file_stem().expect("C source has a name");
+    let object = scratch.join(stem).with_extension("o");
+    let mut clang = Command::new(&toolchain.clang);
+    clang.args([
+        "-c",
+        "-O1",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fno-stack-protector",
+    ]);
+    let out = clang
+        .arg(file)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("runs clang");
+    if !out.status.success() {
+        return Err(format!(
+            "clang failed on {}:\n{}",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(object)
+}
+
 /// Compiles, links and runs one program; `Err` describes the first mismatch.
 fn run_one(
     source: &Path,
@@ -171,6 +206,18 @@ fn run_one(
         return Ok(());
     }
 
+    let mut link_args = Vec::new();
+    for c_source in &expect.c_sources {
+        let folder = if source.is_dir() {
+            source
+        } else {
+            source.parent().unwrap()
+        };
+        link_args.push(format!(
+            "--link-arg={}",
+            compile_c(&folder.join(c_source), toolchain, scratch)?.display()
+        ));
+    }
     let exe = scratch.join(format!("{name}.exe"));
     let mut build = lilac();
     build
@@ -180,6 +227,7 @@ fn run_one(
         .arg(format!("--build-dir={}", scratch.join("build").display()))
         .args(&expect.libs)
         .args(&expect.build_args)
+        .args(&link_args)
         .arg(file)
         .env("LILAC_LINKER", &toolchain.clang);
     match &toolchain.sysroot {

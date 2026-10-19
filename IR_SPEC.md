@@ -519,7 +519,8 @@ call &f (in %a) (out %b)
 `call c &f` calls a C function's address (an `export function` value) with
 the platform C ABI: each `in` place's type is its C parameter type, and the
 `out` place (at most one) receives the C result. Every place must be a C
-type.
+type: a scalar, or a struct or tagged layout, which crosses as the
+target's C compiler passes that struct by value.
 ```lilac-ir
 call c &f (in %a) (out %b)
 ```

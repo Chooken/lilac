@@ -513,6 +513,14 @@ impl Target {
         self.os == Os::Linux && matches!(self.arch, Arch::X86_64 | Arch::Aarch64)
     }
 
+    /// Whether a C function here may take or return an aggregate by value
+    /// (`E028` elsewhere): every target but 32-bit Arm on macOS, whose old
+    /// APCS rules the backend does not implement.
+    #[must_use]
+    pub fn passes_c_aggregates(&self) -> bool {
+        !(self.arch == Arch::Arm && self.os == Os::Macos)
+    }
+
     /// Returns the native pointer width in bits for this target.
     #[must_use]
     pub fn bit_native_width(&self) -> u32 {

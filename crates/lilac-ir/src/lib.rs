@@ -330,8 +330,10 @@ impl LirFunc {
 /// The C entry of an `export`: the backend defines `symbol` with the C
 /// signature `ins` -> `outs` (at most one), which stores each argument in
 /// a stack slot, calls the function with the place ABI, and returns its
-/// out place. Every type is an [`is_c_abi_type`]; a wrapper object's slot
-/// has its field's type, which has the object's layout.
+/// out place. Every type is an [`is_c_abi_type`]: a scalar, or an object
+/// passed as the target's C compiler passes the struct (the backend's
+/// `abi` module); a wrapper object's slot has its field's type, which has
+/// the object's layout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LirExport {
     /// The unmangled C symbol.
@@ -1259,14 +1261,23 @@ pub fn builtin_sig(name: &str) -> Option<BuiltinSig> {
 }
 
 /// Whether a LIR type is representable in the platform C ABI used by
-/// `extern`: an integer or float by value, or any `ref T` (an opaque pointer).
+/// `extern`: an integer or float by value, any `ref T` (an opaque pointer),
+/// or an aggregate by value (a C struct: an object, an enum's tagged union
+/// or a builtin layout), which each backend passes by its target's rules.
+/// An array is not one, since C passes no array by value, and neither is
+/// `#unknown`, which has no size.
 ///
 /// This is the single source of truth for the `extern` accept-set, shared by
 /// the `E028` frontend validation (`lilac-lower`) and the LLVM signature
-/// lowering (`lilac-codegen-llvm`), so the two cannot drift.
+/// lowering (`lilac-codegen-llvm`), so the two cannot drift. An empty
+/// aggregate (size 0, no C type) is the frontend's own `E028`.
 #[must_use]
 pub fn is_c_abi_type(ty: &LirTy) -> bool {
-    !matches!(ty, LirTy::Named(_) | LirTy::Array(..))
+    match ty {
+        LirTy::Array(..) => false,
+        LirTy::Named(name) => name != "unknown",
+        _ => true,
+    }
 }
 
 /// Whether `ty` may be passed as a C variadic argument: C promotes narrower

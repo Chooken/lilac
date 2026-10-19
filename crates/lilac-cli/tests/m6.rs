@@ -470,8 +470,8 @@ fn nested_private_field_denied_is_e026() {
 
 // --- extern C ABI signatures (E028) --------------------------------------
 
-/// An `extern` signature the C ABI cannot represent is `E028`: a `>1` out, or a
-/// parameter/return that is neither a bit integer nor `ref T`. The diagnostic
+/// An `extern` signature the C ABI cannot represent is `E028`: a `>1` out, an
+/// array parameter or an empty object return. The diagnostic
 /// must reach the user as an ordinary `error[E028]` — never the
 /// `internal error: LLVM codegen failed:` framing — and must never
 /// panic/signal (the `m4_regressions` contract).
@@ -479,8 +479,8 @@ fn nested_private_field_denied_is_e026() {
 fn unsupported_extern_signatures_are_e028() {
     for fixture in [
         "FAILS_extern_multi_out.lilac",
-        "FAILS_extern_aggregate_param.lilac",
-        "FAILS_extern_aggregate_return.lilac",
+        "FAILS_extern_array_param.lilac",
+        "FAILS_extern_empty_return.lilac",
     ] {
         for cmd in ["check", "emit-llvm"] {
             let output = lilac()

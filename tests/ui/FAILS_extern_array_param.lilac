@@ -1,0 +1,6 @@
+// C passes no array by value: `E028`.
+fill: extern function (bytes: @array(@bit8, 0x4)) nothing
+
+main: function () nothing {
+    fill(@array(@bit8, 0x4) { })
+}

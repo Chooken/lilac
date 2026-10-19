@@ -571,7 +571,8 @@ impl Session {
         if self.diags.has_errors() {
             return Err(self.diags.already_reported());
         }
-        lilac_lower::check_extern_signatures(hir, resolved, types, &mut self.diags);
+        let target = self.target;
+        lilac_lower::check_extern_signatures(hir, resolved, types, &target, &mut self.diags);
         if self.require_entry {
             self.check_platform_hooks(resolved);
         }

@@ -1,5 +1,0 @@
-get: extern function () result: @byte_buffer
-
-main: function () nothing {
-    f: @byte_buffer = get()
-}

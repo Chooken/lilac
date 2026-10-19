@@ -8,6 +8,7 @@ use lilac_hir::{FuncKey, HirFunc, HirProgram, LocalId};
 use lilac_ir::{LirModule, LirTy, Symbol};
 use lilac_resolve::{DefKind, Resolved};
 use lilac_span::{SourceMap, Span};
+use lilac_target::Target;
 use lilac_ty::{TypeId, TypeKind, TypeRef, Types};
 
 use crate::Lower;
@@ -22,11 +23,20 @@ pub(crate) fn extern_symbol(res: &Resolved, def: lilac_resolve::DefId) -> String
 }
 
 /// Diagnoses `extern` and `export` signatures the C ABI cannot carry
-/// (`E028`): parameters
-/// and returns must be bit integers, floats, `ref T`, or an object wrapping
-/// exactly one such field; at most one return; never linked as `main`. Two
-/// externs with one link name must declare the same C signature.
-pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, diags: &mut Diags) {
+/// (`E028`): parameters and returns must be bit integers, floats, `ref T`,
+/// or objects (a C struct by value, or an object wrapping exactly one
+/// scalar field, which passes as that field), never an array, an empty
+/// type, or an aggregate on a `target` that passes none
+/// ([`lilac_target::Target::passes_c_aggregates`]); at most one return;
+/// never linked as `main`. Two externs with one link name must declare the
+/// same C signature.
+pub fn check_extern_signatures(
+    hir: &HirProgram,
+    res: &Resolved,
+    types: &Types,
+    target: &Target,
+    diags: &mut Diags,
+) {
     let sources = SourceMap::new();
     let lower = Lower {
         hir,
@@ -37,9 +47,8 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         bad_indices: Vec::new(),
         bad_panics: Vec::new(),
         bad_globals: Vec::new(),
-        // Signatures need no layout, so any target does.
-        target: lilac_target::Target::default(),
-        module: LirModule::new(lilac_target::Target::default()),
+        target: *target,
+        module: LirModule::new(*target),
         symbols: HashMap::new(),
         externs: HashSet::new(),
         drop_glue: HashMap::new(),
@@ -50,7 +59,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         funcs: HashMap::new(),
     };
     check_link_names(&lower, diags);
-    check_c_function_types(&lower, diags);
+    check_c_function_types(&lower, *target, diags);
     for func in &hir.funcs {
         let is_export = res
             .def(func.key.def)
@@ -84,13 +93,16 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
         };
         for id in &func.params {
             let local = func.local(*id);
-            let ty = lower.abi_ty(local.ty).0;
-            if !lilac_ir::is_c_abi_type(&ty) {
+            if let Some((label, help)) = c_slot_problem(&lower, local.ty, *target) {
+                let ty = lower.abi_ty(local.ty).0;
                 let place = place(*id, "arg");
                 diags.emit(
-                    Diagnostic::error(codes::E028, format!("`{kind}` parameter `{place}` has unsupported C type `{ty}`"))
-                        .label(local.span, true, "not a C ABI type")
-                        .help(format!("`{kind}` parameters must be a bit integer, a float, `ref T`, or an object wrapping one of those")),
+                    Diagnostic::error(
+                        codes::E028,
+                        format!("`{kind}` parameter `{place}` has unsupported C type `{ty}`"),
+                    )
+                    .label(local.span, true, label)
+                    .help(help),
                 );
             }
         }
@@ -109,15 +121,79 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
             );
         } else if let Some(id) = func.returns.first() {
             let local = func.local(*id);
-            let ty = lower.abi_ty(local.ty).0;
-            if !lilac_ir::is_c_abi_type(&ty) {
+            if let Some((label, help)) = c_slot_problem(&lower, local.ty, *target) {
+                let ty = lower.abi_ty(local.ty).0;
                 let place = place(*id, "out");
                 diags.emit(
-                    Diagnostic::error(codes::E028, format!("`{kind}` return `{place}` has unsupported C type `{ty}`"))
-                        .label(local.span, true, "not a C ABI type")
-                        .help(format!("`{kind}` returns must be a bit integer, a float, `ref T`, or an object wrapping one of those")),
+                    Diagnostic::error(
+                        codes::E028,
+                        format!("`{kind}` return `{place}` has unsupported C type `{ty}`"),
+                    )
+                    .label(local.span, true, label)
+                    .help(help),
                 );
             }
+        }
+    }
+}
+
+/// Why a slot of type `ty` cannot cross the C ABI on `target`, as a label
+/// and a help line, or `None` when it can.
+fn c_slot_problem(
+    lower: &Lower<'_>,
+    ty: TypeRef,
+    target: Target,
+) -> Option<(&'static str, String)> {
+    let lir = lower.abi_ty(ty).0;
+    if matches!(lir, LirTy::Array(..)) {
+        return Some((
+            "an array",
+            "C passes no array by value; pass a `ref` to it, or wrap it in an object".to_owned(),
+        ));
+    }
+    if !lilac_ir::is_c_abi_type(&lir) {
+        return Some((
+            "not a C ABI type",
+            "C slots must be a bit integer, a float, `ref T` or an object".to_owned(),
+        ));
+    }
+    if lir.is_scalar() {
+        return None;
+    }
+    if lower.is_empty_type(ty) {
+        return Some((
+            "an empty type",
+            "C has no empty type; leave the slot out".to_owned(),
+        ));
+    }
+    if !target.passes_c_aggregates() {
+        return Some((
+            "an aggregate by value",
+            format!("C on `{target}` takes no aggregate by value here; pass a `ref` to it"),
+        ));
+    }
+    None
+}
+
+impl Lower<'_> {
+    /// Whether a value of `ty` holds no bytes: an object of empty fields
+    /// (or none), or an array of none or of empty elements. C has no such
+    /// type, so it cannot cross the C ABI.
+    fn is_empty_type(&self, ty: TypeRef) -> bool {
+        if ty.is_ref {
+            return false;
+        }
+        match self.hir.layouts.get(&ty.id) {
+            Some(lilac_hir::Layout::Object { fields }) => {
+                fields.iter().all(|(_, field)| self.is_empty_type(*field))
+            }
+            Some(lilac_hir::Layout::Enum { .. }) => false,
+            None => match self.types.kind(ty.id) {
+                TypeKind::Array { elem, len } => {
+                    *len == 0 || self.is_empty_type(TypeRef::value(*elem))
+                }
+                _ => false,
+            },
         }
     }
 }
@@ -125,7 +201,7 @@ pub fn check_extern_signatures(hir: &HirProgram, res: &Resolved, types: &Types, 
 /// `E028` for an `export function` type C cannot carry: each slot must be
 /// a C type, with at most one result. Reported once per type, at the
 /// first local of it.
-fn check_c_function_types(lower: &Lower<'_>, diags: &mut Diags) {
+fn check_c_function_types(lower: &Lower<'_>, target: Target, diags: &mut Diags) {
     let mut seen: HashSet<TypeId> = HashSet::new();
     for func in &lower.hir.funcs {
         for local in &func.locals {
@@ -141,20 +217,21 @@ fn check_c_function_types(lower: &Lower<'_>, diags: &mut Diags) {
                 continue;
             }
             let name = lower.types.display(local.ty.id);
-            let bad = params
-                .iter()
-                .chain(returns)
-                .map(|slot| lower.abi_ty(*slot).0)
-                .find(|ty| !lilac_ir::is_c_abi_type(ty));
-            let problem = match (bad, returns.len()) {
-                (Some(ty), _) => format!("has the non-C slot type `{ty}`"),
+            let bad = params.iter().chain(returns).find_map(|slot| {
+                Some((lower.abi_ty(*slot).0, c_slot_problem(lower, *slot, target)?))
+            });
+            let (problem, help) = match (bad, returns.len()) {
+                (Some((ty, (_, help))), _) => (format!("has the non-C slot type `{ty}`"), help),
                 (None, 0 | 1) => continue,
-                (None, count) => format!("returns {count} values; C returns at most one"),
+                (None, count) => (
+                    format!("returns {count} values; C returns at most one"),
+                    "a C function returns at most one value".to_owned(),
+                ),
             };
             diags.emit(
                 Diagnostic::error(codes::E028, format!("`{name}` {problem}"))
                     .label(local.span, true, "a C function type")
-                    .help("C function slots must be a bit integer, a float, `ref T`, or an object wrapping one of those"),
+                    .help(help),
             );
         }
     }

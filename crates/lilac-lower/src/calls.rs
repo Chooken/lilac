@@ -18,15 +18,15 @@ impl Lower<'_> {
     }
 
     /// The Lilac type an `extern` slot carries: the type itself, or for an
-    /// object wrapping exactly one C-representable field, that field
-    /// (`true`).
+    /// object wrapping exactly one scalar field (a bit integer, a float or a
+    /// `ref`), that field (`true`). Any other object passes as a C struct.
     pub(crate) fn abi_slot(&self, ty: TypeRef) -> (LirTy, bool) {
         let lir = self.lir_ty(ty);
         if !ty.is_ref {
             if let Some(Layout::Object { fields }) = self.hir.layouts.get(&ty.id) {
                 if let [(_, field)] = fields.as_slice() {
                     let inner = self.lir_ty(*field);
-                    if lilac_ir::is_c_abi_type(&inner) {
+                    if inner.is_scalar() {
                         return (inner, true);
                     }
                 }

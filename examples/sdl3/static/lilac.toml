@@ -1,0 +1,22 @@
+# The same program as ../, with SDL3 linked in statically: one .exe that
+# loads no SDL3.dll and no C runtime (see ../README.md).
+
+[project]
+name = "sdl3_demo"
+root = "../src"
+
+[build]
+target = "host"
+
+[libraries]
+Standard = "../../../lib/Standard"
+
+[link]
+# SDL3-static.lib built with SDL_LIBC=OFF, then the Windows libraries it
+# imports from. The linker finds those in the Windows SDK (`/libpath:`).
+args = [
+    "SDL3-static.lib",
+    "kernel32.lib", "user32.lib", "gdi32.lib", "winmm.lib", "imm32.lib",
+    "ole32.lib", "oleaut32.lib", "version.lib", "uuid.lib", "advapi32.lib",
+    "setupapi.lib", "shell32.lib",
+]

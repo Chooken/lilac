@@ -445,10 +445,30 @@
 ## Extern C ABI (M6b)
 
 - `extern` declarations and calls use the platform C ABI on the LLVM backend:
-  bit integers by value, `ref T` → pointer, 0 outs = `void`, 1 out = the C
-  return value, and an unmangled symbol: the `extern "name"` link name, else
-  the declared name (`lilac_lower::extern_symbol`). `>1` out or an
-  unsupported param/return is `E028`.
+  bit integers by value, `ref T` → pointer, objects and enums by value as
+  their C struct, 0 outs = `void`, 1 out = the C return value, and an
+  unmangled symbol: the `extern "name"` link name, else the declared name
+  (`lilac_lower::extern_symbol`). `>1` out, an array, an empty type or an
+  aggregate where `Target::passes_c_aggregates` is false (32-bit Arm
+  macOS) is `E028` (`c_slot_problem`). An object wrapping one scalar
+  passes as that scalar (`abi_slot`), even where C would pass the struct
+  differently.
+- Aggregates by value (`lilac-codegen-llvm/src/abi.rs`, pure Rust):
+  `classify` takes each slot's `Shape` (a struct, union, array or scalar
+  tree built from `LirModule::layouts` by `Lower::shape_of`; a tagged
+  layout is the tag then a union) and returns a `Pass`/`Return` per slot,
+  mirroring clang's `TargetInfo` for every supported target: SysV x86-64
+  eightbytes with register exhaustion, Win64 power-of-two sizes, i386,
+  AArch64 HFAs (AAPCS and Darwin), 32-bit Arm, RISC-V and wasm.
+  `lower/c_call.rs` turns that into LLVM: `CSignature` (the function type
+  plus `byval`/`sret`/`align`/`alignstack` attributes, on the
+  declaration and every call site), `c_call` (extern calls and `call c`
+  through `CTarget::Func`/`Pointer`) and `emit_export`.
+  `crates/lilac-cli/tests/c_abi.rs` emits a generated corpus of objects
+  and enums through `emit-llvm` and clang for every target `Target::parse`
+  accepts and compares the normalized signatures; `tests/run/c_abi_objects`
+  calls real C both ways (`// c-source:`). Change the classifier only with
+  that test green.
 - Externs sharing a link name lower to one `LirFunc` (named by the link
   name); `check_extern_signatures` makes a signature mismatch `E028`.
 - Variadic externs (`...`, `FuncDecl::variadic` → `LirFunc::variadic`,
@@ -510,7 +530,8 @@
   `TypeKind::Func::c_abi`). `ref` of an `export` or non-variadic `extern`
   has that type, and `addr.func` of an export is its C entry. A call
   through one is `LirCallee::CReg` (`call c &r`), lowered by
-  `emit_c_call` like an extern call (wrapper objects pass their field),
+  `emit_c_call` and the backend's `c_call` like an extern call (wrapper
+  objects pass their field),
   and `check_c_function_types` makes a non-C slot or `>1` out `E028`.
 
 ## Build and link
@@ -599,7 +620,10 @@
   `environment_vector`); `main` takes nothing. The backend also defines
   `memcpy`/`memmove`/`memset`/`memcmp` (IR text marked `no-builtins`),
   plus `_fltused` and
-  `__chkstk` on Windows (`lilac-codegen-llvm`'s `native.rs`). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
+  `__chkstk` on Windows (`lilac-codegen-llvm`'s `native.rs`), all weak, so
+  a static library that brings its own links and its copy wins
+  (`tests/run/c_own_memory`; `examples/sdl3/static` links SDL3 built with
+  `SDL_LIBC=OFF`). Linux links `-static`, or with `-dynamic-linker` (from `LinkInfo`)
   when a `--link-arg` names a shared library (`.so`, `-l`). macOS links
   `libSystem` (Apple's only stable system interface; lld ad-hoc signs arm64
   executables) and takes `memcpy`/`memset`/`bzero`/`memcmp` from it, so the backend
@@ -609,7 +633,8 @@
   else `cc`/`clang` on `PATH`) with a C `main(argc, argv, envp)`
   (`Entry::CMain`) that calls `.lilac.start`; `@builtin.Target.libc` is then set, so `Standard.Os`
   takes its exit from the C library and `CAllocator` works. It is the
-  permanent opt-in for static C libraries, and how code using `Standard.C`
+  permanent opt-in for static C libraries that need a C runtime (a
+  freestanding one links natively), and how code using `Standard.C`
   builds while that is phased out. Shared C libraries work in native mode
   (an `extern` plus `--link-arg=`); free their memory with their own free
   function, and note a native exit skips C `atexit`/`stdio` flushing.
@@ -979,7 +1004,7 @@ Where things live:
 
 Run tests live in `tests/run/` (a file, or a folder with `main.lilac`); see
 the header of `crates/lilac-cli/tests/run.rs` for the `// expect-*`
-(including `expect-stderr:`), `// build-arg:`, `// pending:` and `// lib:`
+(including `expect-stderr:`), `// build-arg:`, `// c-source:`, `// pending:` and `// lib:`
 directives. The harness runs `lilac` in `tests/run` with the program's bare
 name, so source locations are machine-independent. Add a run test for every
 bug fix that changes generated code.

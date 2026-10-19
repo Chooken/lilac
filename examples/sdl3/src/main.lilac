@@ -1,0 +1,170 @@
+// SDL3 from Lilac: a window with an animated, vertex-coloured triangle
+// and a bouncing square for a few seconds (or until closed or a key is
+// pressed). `SDL_StringToGUID` and `SDL_GUIDToString` pass the 16-byte
+// `SDL_GUID` by value, returned and taken, through the C ABI.
+
+using Standard
+using Standard.Io
+using Standard.Process
+
+// SDL_GUID: `struct { Uint8 data[16]; }`.
+Guid: object {
+    data: @array(Uint8, 0x10)
+}
+
+GuidText: object {
+    bytes: @array(@bit8, 0x21)
+}
+
+FPoint: object {
+    x: Float32
+    y: Float32
+}
+
+FColor: object {
+    r: Float32
+    g: Float32
+    b: Float32
+    a: Float32
+}
+
+FRect: object {
+    x: Float32
+    y: Float32
+    w: Float32
+    h: Float32
+}
+
+Vertex: object {
+    position: FPoint
+    color: FColor
+    tex_coord: FPoint
+}
+
+// SDL_Event is a 128-byte union whose first field is the event type.
+Event: object {
+    type: @bit32
+    rest: @array(@bit8, 0x7C)
+}
+
+INIT_VIDEO: @bit32 => 0x20
+EVENT_QUIT: @bit32 => 0x100
+EVENT_KEY_DOWN: @bit32 => 0x300
+
+SDL_Init: extern function (flags: @bit32) ok: @bit8
+SDL_Quit: extern function () nothing
+SDL_GetError: extern function () text: ref @bit8
+SDL_CreateWindow: extern function (title: ref @bit8, w: @bit32, h: @bit32, flags: @bit64) window: ref unknown
+SDL_DestroyWindow: extern function (window: ref unknown) nothing
+SDL_CreateRenderer: extern function (window: ref unknown, name: ref unknown) renderer: ref unknown
+SDL_DestroyRenderer: extern function (renderer: ref unknown) nothing
+SDL_SetRenderDrawColor: extern function (renderer: ref unknown, r: @bit8, g: @bit8, b: @bit8, a: @bit8) ok: @bit8
+SDL_RenderClear: extern function (renderer: ref unknown) ok: @bit8
+SDL_RenderFillRect: extern function (renderer: ref unknown, rect: ref FRect) ok: @bit8
+SDL_RenderGeometry: extern function (renderer: ref unknown, texture: ref unknown, vertices: ref Vertex, count: @bit32, indices: ref unknown, index_count: @bit32) ok: @bit8
+SDL_RenderDebugText: extern function (renderer: ref unknown, x: Float32, y: Float32, text: ref @bit8) ok: @bit8
+SDL_SetRenderScale: extern function (renderer: ref unknown, x: Float32, y: Float32) ok: @bit8
+SDL_RenderPresent: extern function (renderer: ref unknown) ok: @bit8
+SDL_PollEvent: extern function (event: ref Event) ok: @bit8
+SDL_GetTicks: extern function () ms: Uint64
+SDL_Delay: extern function (ms: @bit32) nothing
+SDL_StringToGUID: extern function (text: ref @bit8) guid: Guid
+SDL_GUIDToString: extern function (guid: Guid, text: ref GuidText, size: @bit32) nothing
+
+/// Prints a C string.
+print_c: function (text: ref @bit8) nothing {
+    at: ref @bit8 = text
+    loop if at != 0x0 {
+        print_byte(at)
+        at = @ptr_add(at as ref unknown, 0x1) as ref @bit8
+    } else break
+}
+
+die: function (what: @byte_buffer) nothing {
+    print_error($"{what} failed: ")
+    print_c(SDL_GetError())
+    print_line("")
+    exit(0x1)
+}
+
+/// `text` through SDL_StringToGUID and back.
+guid_round_trip: function (text: @byte_buffer) nothing {
+    guid: Guid = SDL_StringToGUID(@byte_buffer_ptr(text))
+    first: Uint8 = @array_at(ref guid.data, 0x0)
+    last: Uint8 = @array_at(ref guid.data, 0xF)
+    back: GuidText = GuidText { bytes = @array(@bit8, 0x21) { } }
+    SDL_GUIDToString(guid, ref back, 0x21)
+    print("guid ")
+    print_c(@array_at(ref back.bytes, 0x0))
+    print_line($" (first byte {first.hex()}, last {last.hex()})")
+}
+
+vertex: function (x: Float32, y: Float32, r: Float32, g: Float32, b: Float32) v: Vertex {
+    v = Vertex {
+        position = FPoint { x = x, y = y }
+        color = FColor { r = r, g = g, b = b, a = 1.0 }
+        tex_coord = FPoint { x = 0.0, y = 0.0 }
+    }
+}
+
+/// 0 to 1 and back over `period` milliseconds.
+wave: function (ms: Uint64, period: Uint64) t: Float32 {
+    phase: Uint64 = ms % (period * 2)
+    if phase > period {
+        phase = period * 2 - phase
+    }
+    t = phase.to_float32_rounded() / period.to_float32_rounded()
+}
+
+main: function () nothing {
+    guid_round_trip("030000005e0400008e02000014010000\x00")
+    if SDL_Init(INIT_VIDEO) == 0x0 {
+        die("SDL_Init")
+    }
+    window: ref unknown = SDL_CreateWindow(@byte_buffer_ptr("Lilac + SDL3\x00"), 0x280, 0x1E0, 0x0)
+    if @ptr_to_address(window) == 0x0 {
+        die("SDL_CreateWindow")
+    }
+    renderer: ref unknown = SDL_CreateRenderer(window, @address_to_ptr(0x0))
+    if @ptr_to_address(renderer) == 0x0 {
+        die("SDL_CreateRenderer")
+    }
+    triangle: @array(Vertex, 3) = @array(Vertex, 3) { }
+    event: Event = Event { type = 0x0, rest = @array(@bit8, 0x7C) { } }
+    start: Uint64 = SDL_GetTicks()
+    frames: Uint32 = 0
+    running: @bit8 = 0x1
+    loop if running != 0x0 {
+        loop if SDL_PollEvent(ref event) != 0x0 {
+            if event.type == EVENT_QUIT or event.type == EVENT_KEY_DOWN {
+                running = 0x0
+            }
+        } else break
+        now: Uint64 = SDL_GetTicks() - start
+        if now > 6000 {
+            running = 0x0
+        }
+        t: Float32 = wave(now, 1500)
+        u: Float32 = wave(now, 2300)
+        SDL_SetRenderDrawColor(renderer, 0x18, 0x14, 0x24, 0xFF)
+        SDL_RenderClear(renderer)
+        @array_at(ref triangle, 0x0) = vertex(320.0, 60.0 + 40.0 * t, 1.0, 0.3, 0.4)
+        @array_at(ref triangle, 0x1) = vertex(120.0 + 60.0 * u, 400.0, 0.3, 1.0 - u, 0.5)
+        @array_at(ref triangle, 0x2) = vertex(520.0 - 60.0 * t, 400.0, 0.6, 0.4, 1.0)
+        SDL_RenderGeometry(renderer, @address_to_ptr(0x0), @array_at(ref triangle, 0x0), 0x3, @address_to_ptr(0x0), 0x0)
+        square: FRect = FRect { x = 40.0 + 520.0 * u, y = 40.0 + 360.0 * t, w = 40.0, h = 40.0 }
+        SDL_SetRenderDrawColor(renderer, 0xC8, 0xA2, 0xC8, 0xFF)
+        SDL_RenderFillRect(renderer, ref square)
+        SDL_SetRenderScale(renderer, 2.0, 2.0)
+        SDL_SetRenderDrawColor(renderer, 0xFF, 0xFF, 0xFF, 0xFF)
+        SDL_RenderDebugText(renderer, 8.0, 8.0, @byte_buffer_ptr("Lilac + SDL3\x00"))
+        SDL_SetRenderScale(renderer, 1.0, 1.0)
+        SDL_RenderPresent(renderer)
+        frames += 1
+        SDL_Delay(0x10)
+    } else break
+    print_line($"drew {frames} frames")
+    SDL_DestroyRenderer(renderer)
+    SDL_DestroyWindow(window)
+    SDL_Quit()
+}

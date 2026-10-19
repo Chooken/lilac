@@ -8,6 +8,7 @@
 //! `unreachable`). Builtin calls use the value ABI and reuse the runtime
 //! definitions the `runtime` module emits before any user function.
 
+mod c_call;
 mod math;
 
 use std::cell::Cell;
@@ -31,8 +32,8 @@ use lilac_codegen::Entry;
 use lilac_error::{bug, codes, Diagnostic};
 use lilac_ir::{
     builtin_layout, builtin_sig, format_template_layout, AddressTarget, ArithOp, AtomicOrdering,
-    ConvertOp, FloatWidth, LirCallee, LirConst, LirExport, LirFunc, LirGlobal, LirInst, LirLayout,
-    LirModule, LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
+    ConvertOp, FloatWidth, LirCallee, LirConst, LirFunc, LirGlobal, LirInst, LirLayout, LirModule,
+    LirOperand, LirTerm, LirTy, PlaceName, Reg, RmwOp, Symbol,
 };
 use lilac_span::Span;
 use lilac_target::{is_64_bit_triple, Arch, Os, Scalar, Target};
@@ -581,7 +582,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
     /// calls and `addr.func` reference functions defined later.
     fn declare_func(&self, func: &LirFunc) -> Result<(), Diagnostic> {
         if func.uses_c_abi() {
-            let fn_type = self.extern_fn_type(func)?;
+            let sig = self.extern_c_signature(func)?;
+            let fn_type = sig.fn_type;
             // The runtime declares the C functions the backend calls itself
             // (`memcmp`); an `extern` of one shares that declaration, so it
             // must agree with it.
@@ -599,7 +601,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     .help("declare it with the C library's own signature"));
                 }
                 None => {
-                    self.module.add_function(func.name.as_str(), fn_type, None);
+                    let function = self.module.add_function(func.name.as_str(), fn_type, None);
+                    self.add_c_attributes(function, &sig);
                 }
             }
             return Ok(());
@@ -616,37 +619,40 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             function.add_attribute(AttributeLoc::Function, attribute);
         }
         if let Some(export) = &func.export {
-            let fn_type = self.export_fn_type(export);
-            self.module
-                .add_function(export.symbol.as_str(), fn_type, None);
+            let sig = self.export_signature(export);
+            let entry = self
+                .module
+                .add_function(export.symbol.as_str(), sig.fn_type, None);
+            self.add_c_attributes(entry, &sig);
         }
         Ok(())
     }
 
-    /// The platform C signature of an `extern` function: every `in` maps to its
-    /// C type and the single `out` (if any) becomes the return value. A slot
-    /// outside [`Self::extern_c_type`]'s set, or more than one out, is `E028`.
-    fn extern_fn_type(&self, func: &LirFunc) -> Result<FunctionType<'ctx>, Diagnostic> {
-        let mut params = Vec::with_capacity(func.ins.len());
+    /// The platform C signature of an `extern` function
+    /// ([`Self::extern_signature`]): every `in` is a C slot and the single
+    /// `out` (if any) the result. A slot that is no C type, or more than
+    /// one out, is `E028` (the frontend reports both first).
+    fn extern_c_signature(&self, func: &LirFunc) -> Result<c_call::CSignature<'ctx>, Diagnostic> {
         for (place, ty) in &func.ins {
-            let c_type = self.extern_c_type(ty).ok_or_else(|| {
-                Diagnostic::error(
+            if !lilac_ir::is_c_abi_type(ty) {
+                return Err(Diagnostic::error(
                     codes::E028,
                     format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
                 )
-                .help("`extern` parameters must be a bit integer, a float, or `ref T`")
-            })?;
-            params.push(BasicMetadataTypeEnum::from(c_type));
+                .help("C slots must be a bit integer, a float, `ref T` or an object"));
+            }
         }
-        let returns = match func.outs.as_slice() {
-            [] => None,
-            [(place, ty)] => Some(self.extern_c_type(ty).ok_or_else(|| {
-                Diagnostic::error(
-                    codes::E028,
-                    format!("`extern` return `{place}` has unsupported C type `{ty}`"),
-                )
-                .help("`extern` returns must be a bit integer, a float, or `ref T`")
-            })?),
+        match func.outs.as_slice() {
+            [] => {}
+            [(place, ty)] => {
+                if !lilac_ir::is_c_abi_type(ty) {
+                    return Err(Diagnostic::error(
+                        codes::E028,
+                        format!("`extern` return `{place}` has unsupported C type `{ty}`"),
+                    )
+                    .help("C slots must be a bit integer, a float, `ref T` or an object"));
+                }
+            }
             _ => {
                 return Err(Diagnostic::error(
                     codes::E028,
@@ -657,100 +663,10 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     ),
                 ))
             }
-        };
+        }
         // A variadic prototype lets LLVM apply each target's varargs rules
         // (stack slots on Apple arm64, `%al` on x86-64 System V).
-        Ok(match returns {
-            Some(return_ty) => return_ty.fn_type(&params, func.variadic),
-            None => self.context.void_type().fn_type(&params, func.variadic),
-        })
-    }
-
-    /// The C signature of an `export`'s entry.
-    fn export_fn_type(&self, export: &LirExport) -> FunctionType<'ctx> {
-        let c_type = |ty: &LirTy| {
-            self.extern_c_type(ty).unwrap_or_else(|| {
-                bug!(
-                    self.at(),
-                    "export `{}` has the non-C type `{ty}`",
-                    export.symbol
-                )
-            })
-        };
-        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
-            export.ins.iter().map(|ty| c_type(ty).into()).collect();
-        match export.outs.first() {
-            Some(out) => c_type(out).fn_type(&params, false),
-            None => self.context.void_type().fn_type(&params, false),
-        }
-    }
-
-    /// The C entry of an `export`: `symbol` with its C signature stores
-    /// each argument in a stack slot, calls the function with the place
-    /// ABI (each slot's address, then a slot per out), and returns the out.
-    /// A `ref` slot holds the pointer, as the place ABI passes a `ref`.
-    fn emit_export(&self, func: &LirFunc, export: &LirExport) {
-        let c_type = |ty: &LirTy| {
-            self.extern_c_type(ty).unwrap_or_else(|| {
-                bug!(
-                    self.at(),
-                    "export `{}` has the non-C type `{ty}`",
-                    export.symbol
-                )
-            })
-        };
-        let symbol = export.symbol.as_str();
-        let Some(entry) = self.module.get_function(symbol) else {
-            bug!(self.at(), "export `{symbol}` was not declared");
-        };
-        let Some(body) = self.module.get_function(self::symbol(func.name.as_str())) else {
-            bug!(self.at(), "export of undeclared `{}`", func.name);
-        };
-        let builder = self.context.create_builder();
-        builder.position_at_end(self.context.append_basic_block(entry, "entry"));
-        let mut slots: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-        for (index, ty) in export.ins.iter().enumerate() {
-            let slot = self.checked(builder.build_alloca(c_type(ty), "arg"), "export argument");
-            let Some(value) = entry.get_nth_param(u32::try_from(index).unwrap_or(u32::MAX)) else {
-                bug!(self.at(), "export `{symbol}` lost a parameter");
-            };
-            self.store(&builder, slot, value, "export argument store");
-            slots.push(slot.into());
-        }
-        let outs: Vec<_> = export
-            .outs
-            .iter()
-            .map(|ty| {
-                (
-                    c_type(ty),
-                    self.checked(builder.build_alloca(c_type(ty), "out"), "export out"),
-                )
-            })
-            .collect();
-        slots.extend(
-            outs.iter()
-                .map(|(_, slot)| BasicMetadataValueEnum::from(*slot)),
-        );
-        self.checked(builder.build_call(body, &slots, ""), "export call");
-        match outs.first() {
-            Some((ty, slot)) => {
-                let value = self.load(&builder, *ty, *slot, "export result");
-                self.checked(builder.build_return(Some(&value)), "export return");
-            }
-            None => {
-                self.checked(builder.build_return(None), "export return");
-            }
-        }
-    }
-
-    /// Maps a LIR type to its platform C ABI type, or `None` when it is not one
-    /// of the supported by-value scalars or a reference (pointer).
-    ///
-    /// The accept-set comes from [`lilac_ir::is_c_abi_type`] — the same
-    /// predicate the frontend `E028` check uses — so a type the driver accepts
-    /// always has a mapping here.
-    fn extern_c_type(&self, ty: &LirTy) -> Option<BasicTypeEnum<'ctx>> {
-        lilac_ir::is_c_abi_type(ty).then(|| self.lir_type(ty))
+        Ok(self.extern_signature(func))
     }
 
     /// Lowers one function body: its signature places are bound to the incoming
@@ -1406,8 +1322,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
 
     /// A direct user call. An internal callee uses the pointer-place ABI
     /// `call void @f(ptr %in…, ptr %out…)`; an `extern` callee uses the
-    /// platform C ABI, with scalars by value, `ref T` as a pointer, and the
-    /// single return stored into the out place.
+    /// platform C ABI ([`Self::c_call`]).
     fn lower_direct_call(
         &self,
         name: &Symbol,
@@ -1428,59 +1343,13 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             bug!(self.at(), "call to unknown function `{name}`");
         };
         if callee.uses_c_abi() {
-            let args = self.extern_call_args(callee, ins, builder, state);
-            let result = self.checked(builder.build_call(function, &args, ""), "extern call");
-            if let Some(out) = outs.first() {
-                let value = match result.try_as_basic_value() {
-                    ValueKind::Basic(value) => value,
-                    ValueKind::Instruction(_) => {
-                        bug!(self.at(), "extern `{name}` unexpectedly returned void")
-                    }
-                };
-                self.store(
-                    builder,
-                    self.place_ptr(out, state),
-                    value,
-                    "extern result store",
-                );
-            }
+            let sig = self.extern_signature(callee);
+            let target = c_call::CTarget::Func(function);
+            self.c_call(target, &sig, ins, outs, builder, state);
         } else {
             let args = self.direct_call_args(callee, ins, outs, builder, state);
             self.checked(builder.build_call(function, &args, ""), "direct call");
         }
-    }
-
-    /// C-ABI arguments for an `extern` call: scalar `in` places are loaded and
-    /// passed by value; a `ref T` parameter gets a pointer (the load of a `ref`
-    /// place, or the address of a non-`ref` one). A variadic extern's extra
-    /// places are loaded at their own type (a `ref` place yields its pointer).
-    fn extern_call_args(
-        &self,
-        callee: &LirFunc,
-        ins: &[PlaceName],
-        builder: &Builder<'ctx>,
-        state: &FnState<'ctx>,
-    ) -> Vec<BasicMetadataValueEnum<'ctx>> {
-        ins.iter()
-            .zip(&callee.ins)
-            .map(|(place, (_, param_ty))| {
-                if param_ty.is_ref() {
-                    let arg_is_ref = state.place_types.get(place).is_some_and(LirTy::is_ref);
-                    if arg_is_ref {
-                        BasicMetadataValueEnum::from(self.load_place(place, builder, state))
-                    } else {
-                        BasicMetadataValueEnum::from(self.place_ptr(place, state))
-                    }
-                } else {
-                    BasicMetadataValueEnum::from(self.load_as(place, param_ty, builder, state))
-                }
-            })
-            .chain(
-                ins.iter().skip(callee.ins.len()).map(|place| {
-                    BasicMetadataValueEnum::from(self.load_place(place, builder, state))
-                }),
-            )
-            .collect()
     }
 
     /// The address of every listed place (pointer ABI), inputs then outputs,
@@ -1556,8 +1425,8 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         );
     }
 
-    /// An indirect C call: each `in` place is loaded and passed by value
-    /// at its own (C) type, and the result is stored into the `out` place.
+    /// An indirect C call: the slot types are the places' own, and the
+    /// call passes them by the C ABI ([`Self::c_call`]).
     fn lower_c_indirect_call(
         &self,
         reg: &Reg,
@@ -1585,33 +1454,19 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
             let Some(ty) = state.place_types.get(place) else {
                 bug!(self.at(), "C call with the undeclared place `{place}`");
             };
-            self.lir_type(ty)
+            ty.clone()
         };
-        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
-            ins.iter().map(|place| place_type(place).into()).collect();
-        let fn_type = match outs.first() {
-            Some(out) => place_type(out).fn_type(&params, false),
-            None => self.context.void_type().fn_type(&params, false),
-        };
-        let args: Vec<BasicMetadataValueEnum<'ctx>> = ins
-            .iter()
-            .map(|place| self.load_place(place, builder, state).into())
-            .collect();
-        let result = self.checked(
-            builder.build_indirect_call(fn_type, ptr, &args, ""),
-            "C indirect call",
+        let params: Vec<LirTy> = ins.iter().map(place_type).collect();
+        let ret = outs.first().map(place_type);
+        let sig = self.c_signature(&params, ret.as_ref(), false);
+        self.c_call(
+            c_call::CTarget::Pointer(ptr),
+            &sig,
+            ins,
+            outs,
+            builder,
+            state,
         );
-        if let Some(out) = outs.first() {
-            let ValueKind::Basic(value) = result.try_as_basic_value() else {
-                bug!(self.at(), "C call through `{reg}` returned void");
-            };
-            self.store(
-                builder,
-                self.place_ptr(out, state),
-                value,
-                "C call result store",
-            );
-        }
     }
 
     /// A builtin call uses the value ABI: each input place is loaded, the

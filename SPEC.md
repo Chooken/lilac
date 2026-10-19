@@ -1802,9 +1802,11 @@ Rules: an `extern` uses the platform C ABI. Each parameter maps to its C type:
 a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) or float
 (`@fbitN`) by value, any `ref T` to an opaque pointer, and an object with a
 single field of one of those types (a transparent wrapper such as a library
-`CInt` or `FILE`) as that field. A single return slot becomes the C return
-value; no return slot is `void`. More than one out, or a parameter/return
-outside that set (an aggregate such as `@byte_buffer`, say), is `E028`,
+`CInt` or `FILE`) as that field. Any other object or enum passes by
+value as its C struct does (below). A single return slot becomes the C
+return value; no return slot is `void`. More than one out, an array by
+value (C has none; pass a `ref`, or wrap it in an object), an empty object
+(C has no empty struct) or an aggregate on 32-bit Arm macOS is `E028`,
 validated before codegen so it reports as an ordinary diagnostic. An `extern`
 may not be named `main`: extern symbols are unmangled, so the C symbol `main`
 would collide with the entry point the LLVM backend emits, and that is also
@@ -1813,14 +1815,18 @@ declaration is user error and is diagnosed nowhere — declare carefully);
 libraries to link (`link = ["c"]`) are declared in the package manifest,
 never in code. No overloads, no calling-convention annotations in v1.
 
-**Aggregates cross as their C layout.** An object or enum is not passed by
-value, but behind a `ref` C sees exactly the C layout of the Lilac type: an
-`object` is the C struct of its fields in order, and an `enum` is
-`struct { uintN_t tag; union { … } payload; }` (see Objects and Enums), on
-every target, with the same `sizeof`, `_Alignof` and `offsetof`s. So a
-`ref Object` or `ref Enum` is a `struct … *` to C with no conversion, and a
-C header translates field by field. (An enum written by C must keep the
-zero bytes past its live payload for `==` to hold.)
+**Aggregates cross as their C layout.** C sees exactly the C layout of the
+Lilac type: an `object` is the C struct of its fields in order, and an
+`enum` is `struct { uintN_t tag; union { … } payload; }` (see Objects and
+Enums), on every target, with the same `sizeof`, `_Alignof` and
+`offsetof`s. So a `ref Object` or `ref Enum` is a `struct … *` to C with no
+conversion, and a C header translates field by field. By value, an object
+or enum goes exactly as the target's C compiler passes that struct (in
+registers, split across them, in memory or behind a hidden pointer), in
+every direction: `extern` calls, `export`s and C function values. (`==` on
+objects and enums compares every byte, padding included, and one C built
+may hold garbage in its padding or past its live payload: compare such
+values field by field.)
 
 **Link names.** The symbol an `extern` links is its declared name, unmangled
 (no namespace prefix), unless a string after `extern` names it:
