@@ -37,7 +37,7 @@ show: function (list: ref List[Leaf]) nothing {
 
 main: function () nothing {
     {
-        list: List[Leaf] = List[Leaf].init()
+        list: List[Leaf] = List[Leaf].new()
         list.add(Leaf { c = 'a' })
         list.add(Leaf { c = 'c' })
         list.insert(1, Leaf { c = 'b' })

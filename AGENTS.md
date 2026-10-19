@@ -203,7 +203,7 @@
   keep no header; `class_of` rounds the size to the alignment first,
   which keeps every class's slots aligned enough) and, past them or a
   page's alignment, a mapping per allocation with a `LargeHeader` just
-  before it. `init` maps the size classes' table (panicking when out of
+  before it. `new` maps the size classes' table (panicking when out of
   memory), so no allocator state depends on zeroed memory; only the
   links (`SizeClass.free`/`slab`, `Slab.next`, `LargeHeader.next`/
   `previous`) are `Optional`s of their real types. `free` picks the

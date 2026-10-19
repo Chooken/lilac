@@ -740,7 +740,7 @@ impl Checker<'_> {
             Diagnostic::error(codes::E056, format!("type `{name}` is not callable"))
                 .label(span, true, "a type, not a function")
                 .help(format!(
-                    "call a static function: `{name}.create(...)`, or declare `variable: {name}.create(...)`"
+                    "call a static function: `{name}.new(...)`, or declare `variable: {name}.new(...)`"
                 )),
         );
         self.callee_failed(fcx, args, error)

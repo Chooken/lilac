@@ -24,17 +24,17 @@ ArenaAllocator: object {
 
     ALLOCATOR_TABLE: ref AllocatorTable[ArenaAllocator] => ref arena_allocator_table
 
-    /// `ArenaAllocator.init`'s block size: 512 KiB.
+    /// `ArenaAllocator.new`'s block size: 512 KiB.
     DEFAULT_SIZE: Int => 512 * 1024
 
     /// An arena of `DEFAULT_SIZE` blocks.
-    init: function () allocator: ArenaAllocator {
-        allocator = init_sized(DEFAULT_SIZE)
+    new: function () allocator: ArenaAllocator {
+        allocator = new_sized(DEFAULT_SIZE)
     }
 
     /// An arena of blocks of at least `default_block_size` bytes (rounded
     /// up to whole pages). The first block is mapped now.
-    init_sized: function (default_block_size: Int) allocator: ArenaAllocator {
+    new_sized: function (default_block_size: Int) allocator: ArenaAllocator {
 
         if default_block_size < 0 {
             @panic("Can't allocate a negative block size.")
@@ -88,7 +88,7 @@ ArenaAllocator: object {
     /// Room for `count` zeroed `T`s, as a slice of them; it stays used
     /// until `reset`.
     allocate[T]: function (self, count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.allocate_raw(
                 array_size(@size_of(T), count), 
                 @align_of(T)
@@ -102,7 +102,7 @@ ArenaAllocator: object {
     /// zeroed. The elements may move: use the returned slice, never
     /// `memory` again.
     reallocate[T]: function (self, memory: Slice[T], new_count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.reallocate_raw(
                 memory.base() as ref unknown, 
                 array_size(@size_of(T), memory.get_count()), 

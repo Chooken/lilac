@@ -5,7 +5,7 @@ using Standard
 using Standard.Process
 
 main: function () nothing {
-    b: Box[@bit32] = Box[@bit32].create(0x7)
+    b: Box[@bit32] = Box[@bit32].new(0x7)
     if false {
         c: Box[@bit32] = b
     }

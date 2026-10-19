@@ -77,7 +77,7 @@ Weak[T]: object {
 
     /// A new owner of the value, if it is still alive; fails once the last
     /// `Shared` of it has been dropped.
-    upgrade: function (self) shared: Shared[T] else nothing {
+    to_shared: function (self) shared: Shared[T] else nothing {
         count: Int = self.ptr.strong_references.get()
         loop {
 

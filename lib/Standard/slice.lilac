@@ -23,7 +23,7 @@ Slice[T]: object {
     }
 
     /// The view of the `count` `T`s from `ptr`.
-    create: function (ptr: ref T, count: Int) slice: Slice[T] {
+    new: function (ptr: ref T, count: Int) slice: Slice[T] {
         slice = Slice[T] {
             ptr = ptr
             count = count

@@ -4,8 +4,6 @@ Bool: object {
         data: @bit8
     }
 
-    from_int8: function (from: @bit8) Bool => Bool { data = from }
-
     @conversion: function (from: Bool) to: @bit8 => from.data
     @conversion: function (from: @bit8) to: Bool => Bool { data = from }
 
@@ -19,5 +17,5 @@ Bool: object {
     }
 }
 
-true: Bool => Bool.from_int8(0x1)
-false: Bool => Bool.from_int8(0x0)
+true: Bool => Bool { data = 0x1 }
+false: Bool => Bool { data = 0x0 }

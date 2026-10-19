@@ -9,8 +9,8 @@ using Standard
 using Standard.Heap
 
 main: function () nothing {
-    general: GeneralAllocator = GeneralAllocator.init()
-    other: GeneralAllocator = GeneralAllocator.init()
+    general: GeneralAllocator = GeneralAllocator.new()
+    other: GeneralAllocator = GeneralAllocator.new()
     memory: ref unknown = other.allocate_raw(100000, 8)
     general.free_raw(memory, 100000, 8)
 }

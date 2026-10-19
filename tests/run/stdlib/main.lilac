@@ -108,12 +108,12 @@ optionals: function () nothing {
 }
 
 boxes: function () nothing {
-    box: Box[Int32] = Box[Int32].create(0x5 as Int32)
+    box: Box[Int32] = Box[Int32].new(0x5 as Int32)
     moved: Box[Int32] = box
 }
 
 consts: function () nothing {
-    c: Const[Int32] = Const[Int32].create(0x3 as Int32)
+    c: Const[Int32] = Const[Int32].new(0x3 as Int32)
     expect(c.get() == 0x3 as Int32, 0x40)
 }
 

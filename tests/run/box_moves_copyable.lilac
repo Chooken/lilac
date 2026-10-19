@@ -1,5 +1,5 @@
 // expect-stdout: |x
-// `Box.create` (an allocator's `create`) moves a copyable value into the
+// `Box.new` (an allocator's `create`) moves a copyable value into the
 // heap with no `@move`: each hand-off is the parameter's last use, so no
 // `@on_copy` (`+`) runs into the slot and no early drop of the parameter,
 // and the value drops once, with the box.
@@ -22,7 +22,7 @@ Leaf: object {
 
 main: function () nothing {
     {
-        b: Box[Leaf] = Box[Leaf].create(Leaf { c = 'x' })
+        b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
         print_char('|')
     }
     print_char(0xA)

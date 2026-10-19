@@ -14,7 +14,7 @@ using Standard.Os as Os
 /// the allocator is dropped. Every larger (or more aligned) request is a
 /// mapping of its own, unmapped when it is freed.
 ///
-/// `init` maps the size classes' table, so a new allocator either is
+/// `new` maps the size classes' table, so a new allocator either is
 /// ready or the program already panicked. Every allocation panics when
 /// out of memory: a returned reference is always live.
 ///
@@ -26,7 +26,7 @@ using Standard.Os as Os
 GeneralAllocator: object {
 
     private {
-        // Every size class's freed slots and slabs; mapped by `init`.
+        // Every size class's freed slots and slabs; mapped by `new`.
         classes: ref ClassTable
         // The live large allocations' headers, newest first.
         large: Optional[ref LargeHeader]
@@ -44,7 +44,7 @@ GeneralAllocator: object {
 
     /// A new allocator. It maps the size classes' table now, panicking
     /// when out of memory.
-    init: function () allocator: GeneralAllocator {
+    new: function () allocator: GeneralAllocator {
         table: ref ClassTable = map_class_table()
         allocator = GeneralAllocator {
             classes = table
@@ -95,7 +95,7 @@ GeneralAllocator: object {
     /// Room for `count` zeroed `T`s, as a slice of them. Free it with
     /// `deallocate`.
     allocate[T]: function (self, count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.allocate_raw(
                 array_size(@size_of(T), count), 
                 @align_of(T)
@@ -109,7 +109,7 @@ GeneralAllocator: object {
     /// zeroed. The elements may move: use the returned slice, never
     /// `memory` again.
     reallocate[T]: function (self, memory: Slice[T], new_count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.reallocate_raw(
                 memory.base() as ref unknown, 
                 array_size(@size_of(T), memory.get_count()), 
@@ -469,7 +469,7 @@ private {
 
     NOT_OURS: @byte_buffer => "Freed or resized memory this allocator did not give, or with another size or alignment."
 
-    /// Every size class's state. The table is mapped by `init`, which
+    /// Every size class's state. The table is mapped by `new`, which
     /// writes each state, so no state depends on zeroed memory.
     ClassTable: object {
         classes: @array(SizeClass, 36)

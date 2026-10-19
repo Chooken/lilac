@@ -724,7 +724,7 @@ loop if lines.next() -> line: Text {
 
 Captures on a condition that cannot fail, and a guard on a call that
 cannot fail, are `E062`. The declaration shorthand may fail too:
-`arena: Arena.create(size) else -> why: Os.Error { return }`.
+`arena: Arena.new(size) else -> why: Os.Error { return }`.
 
 A function that can fail cannot be a function value, a function type cannot fail
 (`E057`), and neither can an `extern`, an `export` (`E028`) or a hook
@@ -955,7 +955,7 @@ Variables are declared using `name: Type = value` syntax. Two shorthands
 avoid writing the type twice: `name: Type { fields }` means
 `name: Type = Type { fields }`, and `name: Type.function(args)` means
 `name: Type = Type.function(args)`. Both work for generic types
-(`b: Box[@bit32] { value = 0x1 }`, `b: Box[@bit32].create(0x1)`).
+(`b: Box[@bit32] { value = 0x1 }`, `b: Box[@bit32].new(0x1)`).
 
 In the second, `function` is a static function of `Type` (declared in its
 body, without `self`) that returns exactly one `Type`; anything else is
@@ -969,7 +969,7 @@ plain functions do not overload, so each constructor gets its own name.
 ```lilac
 counter: @bit32 = 0x0
 user: Object {}
-custom_user: Object.create(0x1, "Lilac") // `Object = Object.create(0x1, "Lilac")`
+custom_user: Object.new(0x1, "Lilac") // `Object = Object.new(0x1, "Lilac")`
 ```
 
 Redeclaring a name in the same block is `E020`; a nested block may shadow
@@ -1721,8 +1721,8 @@ Example of defining a constructor and RAII rules
 Buffer: object {
     ptr: ref @bit8
 
-    // A constructor: `buffer: Buffer.create(size)`
-    create: function (size: @bit32) buffer: Buffer {
+    // A constructor: `buffer: Buffer.new(size)`
+    new: function (size: @bit32) buffer: Buffer {
         // allocation logic
     }
 

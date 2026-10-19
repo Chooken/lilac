@@ -94,7 +94,7 @@ work: function (argument: ref unknown) nothing {
 }
 
 main: function () nothing {
-    general: GeneralAllocator = GeneralAllocator.init()
+    general: GeneralAllocator = GeneralAllocator.new()
     jobs: @array(Work, 4) = @array(Work, 4) {}
     at: ref @array(Work, 4) = ref jobs
     threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}

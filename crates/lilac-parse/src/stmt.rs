@@ -557,7 +557,7 @@ impl Parser {
     }
 
     /// Whether a declaration shorthand follows `name: Type`: `{`, `(`, or
-    /// the `.` of `Box[T].create(args)` on the same line.
+    /// the `.` of `Box[T].new(args)` on the same line.
     pub(crate) fn at_decl_shorthand(&self) -> bool {
         let next = self.peek();
         match next.kind {
@@ -573,7 +573,7 @@ impl Parser {
     /// name read before `(` loses its last segment to the function, which
     /// takes the name's generic arguments (`Type.make[T](args)`); a type
     /// with generic arguments is followed by its own `.function`
-    /// (`Box[T].create(args)`). `Type(args)` with no function stays a call
+    /// (`Box[T].new(args)`). `Type(args)` with no function stays a call
     /// of the type, which typeck rejects.
     pub(crate) fn parse_decl_shorthand(
         &mut self,

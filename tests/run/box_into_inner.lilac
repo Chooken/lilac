@@ -16,7 +16,7 @@ Leaf: object {
 
 main: function () nothing {
     {
-        box: Box[Leaf] = Box[Leaf].create(Leaf { c = 'x' })
+        box: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
         print_char('|')
         leaf: Leaf = box.into_inner()
     }

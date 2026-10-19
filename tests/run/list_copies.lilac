@@ -27,7 +27,7 @@ Leaf: object {
 }
 
 main: function () nothing {
-    a: List[Int] = List[Int].init()
+    a: List[Int] = List[Int].new()
     a.add(1)
     a.add(2)
     b: List[Int] = a
@@ -36,7 +36,7 @@ main: function () nothing {
     print_line($"{a.get(0)} {b.get(0)} {a.get_count()} {b.get_count()}")
 
     {
-        leaves: List[Leaf] = List[Leaf].init()
+        leaves: List[Leaf] = List[Leaf].new()
         leaves.add(Leaf { c = 'a' })
         leaves.add(Leaf { c = 'b' })
         copied: List[Leaf] = leaves
@@ -59,12 +59,12 @@ main: function () nothing {
     }
     print_char(0xA)
 
-    empty: List[Leaf] = List[Leaf].init()
+    empty: List[Leaf] = List[Leaf].new()
     empty_copy: List[Leaf] = empty
     print_line($"{empty.get_capacity()} {empty_copy.get_capacity()}")
 }
 
 make: function (c: @bit32) list: List[Leaf] {
-    list = List[Leaf].init()
+    list = List[Leaf].new()
     list.add(Leaf { c = c })
 }

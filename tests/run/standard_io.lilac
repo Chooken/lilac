@@ -11,7 +11,7 @@ using Standard.Process
 Noisy: object {
     char: @bit32
 
-    // The box drops its value once, at the end of the block (`Box.create`
+    // The box drops its value once, at the end of the block (`Box.new`
     // moves it onto the heap, so nothing drops early).
     @on_drop: function (self) nothing {
         print_char(self.char)
@@ -23,7 +23,7 @@ main: function () nothing {
     print_line("world")
     print_error_line("to stderr")
     {
-        b: Box[Noisy] = Box[Noisy].create(Noisy { char = 0xE9 })
+        b: Box[Noisy] = Box[Noisy].new(Noisy { char = 0xE9 })
     }
     print_line("!")
     exit(0x5)

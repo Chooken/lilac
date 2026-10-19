@@ -15,7 +15,7 @@ using Standard.Heap as Heap
     Os.argument_vector = arguments
     Os.environment_vector = environment
 
-    general_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.init()
+    general_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.new()
     Heap.default_allocator = .Some(general_allocator.allocator())
 
     main()

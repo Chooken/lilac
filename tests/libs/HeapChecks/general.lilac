@@ -30,8 +30,8 @@ all_zero: function (memory: ref unknown, size: Int) zero: Bool {
 /// Every check on `GeneralAllocator`; `base` numbers its failures.
 general_checks: function (base: @bit32) nothing {
     page: Int = @builtin.Target.page_size
-    general: GeneralAllocator = GeneralAllocator.init()
-    // `init` maps the size classes' table, so capacity is already
+    general: GeneralAllocator = GeneralAllocator.new()
+    // `new` maps the size classes' table, so capacity is already
     // nonzero while nothing is used.
     check(general.get_capacity() > 0 as Int, base)
 

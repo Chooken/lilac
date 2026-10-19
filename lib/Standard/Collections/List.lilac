@@ -18,13 +18,13 @@ List[T]: object {
 
     /// An empty list over the default allocator. Nothing is allocated
     /// until the first element is added.
-    init: function () list: List[T] {
-        list = init_using(Heap.get_default_allocator())
+    new: function () list: List[T] {
+        list = new_using(Heap.get_default_allocator())
     }
 
     /// An empty list over `allocator`, which must outlive it. Nothing is
     /// allocated until the first element is added.
-    init_using: function (allocator: Heap.Allocator) list: List[T] {
+    new_using: function (allocator: Heap.Allocator) list: List[T] {
         list = List[T] {
             allocator = allocator
             data = .None
@@ -261,7 +261,7 @@ List[T]: object {
     /// room for exactly them; an empty list allocates nothing.
     @on_copy: function (self) copy: List[T] {
 
-        copy = init_using(self.allocator)
+        copy = new_using(self.allocator)
 
         if self.count == 0 as Int {
             return

@@ -31,7 +31,7 @@ Pair: object {
 main: function () nothing {
     page: Int = @builtin.Target.page_size
     four_pages: Int = page * 4
-    arena: ArenaAllocator = ArenaAllocator.init_sized(four_pages - page + 1)
+    arena: ArenaAllocator = ArenaAllocator.new_sized(four_pages - page + 1)
 
     // One block of four pages, less its header.
     block: Int = arena.get_capacity()
@@ -124,7 +124,7 @@ main: function () nothing {
     check(address(again_spill.base() as ref unknown) == address(spill.base() as ref unknown), 0x1C)
 
     // The default arena.
-    default: ArenaAllocator = ArenaAllocator.init()
+    default: ArenaAllocator = ArenaAllocator.new()
     one: Slice[@bit32] = default.allocate[@bit32](1)
     check(default.get_capacity() > 0 as Int, 0x1D)
 }

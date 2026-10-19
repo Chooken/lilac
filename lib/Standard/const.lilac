@@ -4,7 +4,7 @@ Const[T]: object {
         value: T
     }
 
-    create: function(value: T) constant: Const[T] {
+    new: function(value: T) constant: Const[T] {
         constant = Const[T] { value = value }
     }
 

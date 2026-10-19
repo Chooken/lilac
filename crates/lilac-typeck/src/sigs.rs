@@ -228,8 +228,8 @@ impl Checker<'_> {
                             "make this a static function",
                         )
                         .help(
-                            "name it (`create: function (...) value: Type`) and declare \
-                             `variable: Type.create(...)`",
+                            "name it (`new: function (...) value: Type`) and declare \
+                             `variable: Type.new(...)`",
                         ),
                 );
                 return false;

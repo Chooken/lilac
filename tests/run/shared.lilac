@@ -6,7 +6,7 @@
 // expect-stdout: copied weak: gone
 // expect-stdout: done
 // Copies of a `Shared` own one value (a change through one shows through
-// the others) and drop it once, with the last. A `Weak` upgrades while an
+// the others) and drop it once, with the last. A `Weak` gives a `Shared` while an
 // owner lives, fails after, and its copies outlive the value without
 // dropping it again.
 
@@ -24,14 +24,14 @@ Noisy: object {
 main: function () nothing {
     weak: Weak[Noisy] = make()
 
-    if weak.upgrade() -> again: Shared[Noisy] {
+    if weak.to_shared() -> again: Shared[Noisy] {
         print_line($"upgraded (wrong) {again.value().n}")
     } else {
         print_line("gone")
     }
 
     copy: Weak[Noisy] = weak
-    if copy.upgrade() -> again: Shared[Noisy] {
+    if copy.to_shared() -> again: Shared[Noisy] {
         print_line($"copied weak: upgraded (wrong) {again.value().n}")
     } else {
         print_line("copied weak: gone")
@@ -48,7 +48,7 @@ make: function () weak: Weak[Noisy] {
     print_line($"{first.value().n} {second.value().n}")
 
     weak = second.new_weak()
-    if weak.upgrade() -> third: Shared[Noisy] {
+    if weak.to_shared() -> third: Shared[Noisy] {
         print_line($"upgraded {third.value().n}")
     } else {
         print_line("gone (wrong)")

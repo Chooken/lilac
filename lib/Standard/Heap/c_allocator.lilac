@@ -31,7 +31,7 @@ CAllocator: object {
     /// Room for `count` zeroed `T`s, as a slice of them. Free it with
     /// `deallocate`.
     allocate[T]: function (self, count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.allocate_raw(
                 array_size(@size_of(T), count), 
                 @align_of(T)
@@ -45,7 +45,7 @@ CAllocator: object {
     /// zeroed. The elements may move: use the returned slice, never
     /// `memory` again.
     reallocate[T]: function (self, memory: Slice[T], new_count: Int) allocation: Slice[T] {
-        allocation = Slice[T].create(
+        allocation = Slice[T].new(
             self.reallocate_raw(
                 memory.base() as ref unknown, 
                 array_size(@size_of(T), memory.get_count()), 

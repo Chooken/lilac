@@ -15,6 +15,6 @@ Handle: object {
 }
 
 main: function () nothing {
-    handles: List[Handle] = List[Handle].init()
+    handles: List[Handle] = List[Handle].new()
     handles.add(Handle { id = 0x1 })
 }

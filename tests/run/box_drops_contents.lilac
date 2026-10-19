@@ -1,5 +1,5 @@
 // expect-stdout: |x
-// `Box.create` moves the value into the heap (no early drop of the
+// `Box.new` moves the value into the heap (no early drop of the
 // parameter, no zero drop of the fresh slot), and dropping the box drops
 // the value exactly once. A zero drop would print `z`.
 
@@ -20,7 +20,7 @@ Leaf: object {
 
 main: function () nothing {
     {
-        b: Box[Leaf] = Box[Leaf].create(Leaf { c = 'x' })
+        b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
         print_char('|')
     }
     print_char(0xA)

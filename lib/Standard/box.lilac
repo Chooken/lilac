@@ -11,13 +11,13 @@ Box[T]: object {
 
     /// A box holding `data`, moved onto the heap from
     /// `Heap.default_allocator`.
-    create: function(data: T) box: Box[T] {
-        box = create_in(Heap.get_default_allocator(), data)
+    new: function(data: T) box: Box[T] {
+        box = new_using(data, Heap.get_default_allocator())
     }
 
     /// A box holding `data`, moved into memory from `allocator`, which
     /// must stay in place while the box lives.
-    create_in: function(allocator: Heap.Allocator, data: T) box: Box[T] {
+    new_using: function(data: T, allocator: Heap.Allocator) box: Box[T] {
         box = Box[T] {
             value = allocator.create[T](data)
             allocator = allocator

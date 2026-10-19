@@ -5,7 +5,7 @@
 // default (the runtime's arena), pages, and an arena through `from`. Each
 // gives zeroed, aligned memory; `reallocate` keeps the bytes and zeroes
 // what it adds, also after a shrink; a zero size takes no memory;
-// `destroy` drops and `Box.create_in` uses the allocator it is given
+// `destroy` drops and `Box.new_using` uses the allocator it is given
 // (`HeapChecks.exercise`). Exits with the number of the first failed
 // check.
 
@@ -18,7 +18,7 @@ main: function () nothing {
     exercise(get_default_allocator(), 0x10)
     exercise(PageAllocator.ALLOCATOR, 0x20)
 
-    arena: ArenaAllocator = ArenaAllocator.init()
+    arena: ArenaAllocator = ArenaAllocator.new()
     exercise(Allocator.from[ArenaAllocator](ref arena), 0x30)
     used: Int = arena.get_used()
     check(used > 0 as Int, 0x40)
@@ -27,10 +27,10 @@ main: function () nothing {
     // default does not.
     drops = 0
     {
-        boxed: Box[Counted] = Box[Counted].create_in(Allocator.from[ArenaAllocator](ref arena), Counted { value = 0x5 })
+        boxed: Box[Counted] = Box[Counted].new_using(Counted { value = 0x5 }, Allocator.from[ArenaAllocator](ref arena))
         check(arena.get_used() > used, 0x41)
         grown: Int = arena.get_used()
-        plain: Box[Counted] = Box[Counted].create(Counted { value = 0x6 })
+        plain: Box[Counted] = Box[Counted].new(Counted { value = 0x6 })
         check(arena.get_used() == grown, 0x42)
     }
     print_line($"dropped {drops}")

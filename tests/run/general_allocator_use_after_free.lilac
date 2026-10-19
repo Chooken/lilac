@@ -9,7 +9,7 @@ using Standard
 using Standard.Heap
 
 main: function () nothing {
-    general: GeneralAllocator = GeneralAllocator.init()
+    general: GeneralAllocator = GeneralAllocator.new()
     memory: ref unknown = general.allocate_raw(64, 8)
     general.free_raw(memory, 64, 8)
     @store_u8(memory as ref @bit8, 0x20, 0x1)

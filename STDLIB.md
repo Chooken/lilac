@@ -326,7 +326,8 @@ formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
 > `Slice[T]`s: `allocate[T](count)` (zeroed), `reallocate[T](memory,
 > new_count)` and `deallocate[T](memory)` take the whole slice, never a
 > count beside an address. `Box[T]` (in `Standard`)
-> is the owned heap box: `create(value)`, `into_inner() T` (by `@discard`
+> is the owned heap box: `new(value)` (`new_using(value, allocator)` for
+> another allocator), `into_inner() T` (by `@discard`
 > and `@read`), and its drop drops the value and frees it. The inventory
 > below is the target design.
 
@@ -387,7 +388,7 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 ### 3.4 `Standard.Collections`
 
 > **Today:** `Standard.Collections.List[T]` owns its elements in one
-> allocation from an `Allocator` (`init`, `init_using`): `add`,
+> allocation from an `Allocator` (`new`, `new_using`): `add`,
 > `add_slice` (copies, through `@on_copy`), `insert`, `get` (a `ref T`),
 > `pop() Optional[T]`, `remove`, `remove_range`, `reserve`, `trim`,
 > `get_count`, `get_capacity`; its drop drops each element and frees
@@ -398,7 +399,7 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 > the wrapper for a single owner. A `ref T` a call returns is
 > assignable, so `list.get(i) = v` and `list.get(i) += 1` write in
 > place. In `Standard` itself, `Slice[T]` is an
-> unowned view (`create(ptr, count)`, `get`, `slice(range)`, `base`,
+> unowned view (`new(ptr, count)`, `get`, `slice(range)`, `base`,
 > `copy_to`, which copies through `@on_copy`, and `move_to`, which moves
 > bytes and may overlap), and `Range` is a half-open `Int` range
 > (`of(from, to)`, either order). The inventory below is the target
