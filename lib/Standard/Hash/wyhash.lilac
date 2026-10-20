@@ -1,0 +1,281 @@
+
+
+Wyhash: object {
+    
+    private {
+        SECRET_0: @bit64 => 0xa0761d6478bd642f
+        SECRET_1: @bit64 => 0xe7037ed1a0b428db
+        SECRET_2: @bit64 => 0x8ebc6af09c88c6e3
+        SECRET_3: @bit64 => 0x589965cc75374cc3
+
+        a: @bit64
+        b: @bit64
+        state: @array(@bit64, 3)
+        total_length: Int
+
+        buffer: @array(@bit8, 48)
+        buffer_length: Int
+    }
+
+    new: function (seed: @bit64) hasher: Wyhash {
+        hasher = Wyhash {
+            a = 0x0
+            b = 0x0
+            state = @array(@bit64, 3) {}
+            total_length = 0
+            buffer = @array(@bit8, 48) {}
+            buffer_length = 0
+        }
+
+        @array_at(ref hasher.state, 0) = @bit_xor_64(seed, mix(@bit_xor_64(seed, SECRET_0), SECRET_1))
+        @array_at(ref hasher.state, 1) = @array_at(ref hasher.state, 0)
+        @array_at(ref hasher.state, 2) = @array_at(ref hasher.state, 0)
+    }
+
+    update: function (self, input: Slice[@bit8]) nothing {
+        self.total_length += input.count
+
+        buffer_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(self.buffer))
+
+        if input.get_count() <= 48 - self.buffer_length {
+            input.move_to(buffer_slice.slice(Range.of(self.buffer_length, self.buffer_length + input.get_count())), 0)
+            self.buffer_length += input.get_count()
+            return
+        }
+
+        index: Int = 0
+
+        if self.buffer_length > 0 {
+            index = 48 - self.buffer_length
+            input.slice(Range.of(0, index)).move_to(buffer_slice.slice(Range.of(self.buffer_length, self.buffer_length + index)), 0)
+            self.round(buffer_slice)
+            self.buffer_length = 0
+        }
+
+        loop if index + 48 < input.get_count() {
+
+            self.round(input.slice(Range.of(index, index + 48)))
+
+        } else break
+
+        remaining_slice: Slice[@bit8] = input.slice(Range.of(index, input.get_count()))
+
+        if remaining_slice.get_count() < 16 and index >= 48 {
+            rem: Int = 16 - remaining_slice.get_count()
+            input.slice(Range.of(index - rem, index)).move_to(buffer_slice, buffer_slice.get_count() - rem)
+        }
+
+        remaining_slice.move_to(buffer_slice, 0)
+        self.buffer_length = remaining_slice.get_count()
+    }
+
+    final: function (self) result: @bit64 {
+
+        input: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, self.buffer_length)
+
+        new_hasher: Wyhash {
+            a = self.a
+            b = self.b
+            state = self.state
+            total_length = self.total_length
+            buffer = @array(@bit8, 48) {}
+            buffer_length = 0
+        }
+
+        if self.total_length <= 16 {
+            new_hasher.small_key(input)
+        } else {
+            offset: Int = 0
+            scratch: @array(@bit8, 16) {}
+            scratch_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(scratch))
+
+            buffer_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(self.buffer))
+
+            if self.buffer_length < 16 {
+                rem: Int = 16 - self.buffer_length
+
+                buffer_slice.slice(Range.of(self.buffer_length - rem, self.buffer_length + rem)).move_to(scratch_slice, 0)
+                buffer_slice.slice(Range.of(0, self.buffer_length)).move_to(scratch_slice.slice(Range.of(0, self.buffer_length)), 0)
+
+                input = scratch_slice
+                offset = rem
+            }
+
+            new_hasher.final0()
+            new_hasher.final1(input, offset)
+        }
+
+        result = new_hasher.final2()
+    }
+
+    hash: function (seed: @bit64, input: Slice[@bit8]) result: @bit64 {
+
+        hasher: Wyhash.new(seed)
+
+        if input.get_count() <= 16 {
+            hasher.small_key(input)
+        } else {
+            index: Int = 0
+            if input.get_count() >= 48 {
+                loop if index + 48 < input.get_count() {
+
+                    hasher.round(input.slice(Range.of(index, index + 48)))
+
+                } else break
+                hasher.final0()
+            }
+            hasher.final1(input, index)
+        }
+
+        hasher.total_length = input.get_count()
+        result = hasher.final2()
+    }
+
+    private {
+
+        read[T]: function (input: ref @bit8) result: @bit64 {
+            bits: T = input as ref unknown as ref T
+            result = @extend_zero(bits)
+        }
+
+        small_key: function (self, input: Slice[@bit8]) nothing {
+
+            if input.get_count() >= 4 {
+
+                end: Int = input.get_count() - 4
+                quarter: Int = @bit_shift_left_native(@bit_shift_right_native(input.get_count() as @bit_native, 3), 2)
+
+                self.a = @bit_or_64(
+                    @bit_shift_left_64(
+                        read[@bit32](input.get(0)),
+                        32
+                    ),
+                    read[@bit32](input.get(quarter))
+                )
+                self.b = @bit_or_64(
+                    @bit_shift_left_64(
+                        read[@bit32](input.get(end)),
+                        32
+                    ),
+                    read[@bit32](input.get(end - quarter))
+                )
+
+            } else if input.get_count() > 0 {
+
+                self.a = @bit_or_64(
+                    @bit_or_64(
+                        @bit_shift_left_64(input.get(0) as ref unknown as ref @bit64, 16),
+                        @bit_shift_left_64(
+                            input.get(
+                                @bit_shift_right_native(input.get_count() as @bit_native, 1)
+                            ) as ref unknown as ref @bit64, 
+                            8
+                        ),
+                    ),
+                    input.get(input.get_count() - 1) as ref unknown as ref @bit64
+                )
+
+            } else {
+                self.a = 0x0
+                self.b = 0x0
+            }
+        }
+
+        round: function (self, slice: Slice[@bit8]) nothing {
+
+            // I manually unwrapped the loop to get rid of array. as lilac can't do const arrays from my knowledge.
+            
+            // index 0
+            a: @bit64 = read[@bit64](slice.get(8 * (2 * 0)))
+            b: @bit64 = read[@bit64](slice.get(8 * (2 * 0 + 1)))
+            @array_at(ref self.state, 0) = mix(
+                @bit_xor_64(a, SECRET_1), 
+                @bit_xor_64(b, SECRET_0)
+            )
+
+            // index 1
+            a = read[@bit64](slice.get(8 * (2 * 1)))
+            b = read[@bit64](slice.get(8 * (2 * 1 + 1)))
+            @array_at(ref self.state, 1) = mix(
+                @bit_xor_64(a, SECRET_2), 
+                @bit_xor_64(b, SECRET_1)
+            )
+
+            // index 2
+            a = read[@bit64](slice.get(8 * (2 * 2)))
+            b = read[@bit64](slice.get(8 * (2 * 2 + 1)))
+            @array_at(ref self.state, 2) = mix(
+                @bit_xor_64(a, SECRET_3), 
+                @bit_xor_64(b, SECRET_2)
+            )
+        }
+
+        mum: function (a: @bit64, b: @bit64) high: @bit64, low: @bit64 {
+            high = @i_multiply_high_u_64(a, b)
+            low = @i_mul_64(a, b)
+        }
+
+        mix: function (a: @bit64, b: @bit64) result: @bit64 {
+            high: @bit64, low: @bit64 = mum(a, b)
+            result = @bit_xor_64(high, low)
+        }
+
+        final0: function (self) nothing {
+            @array_at(ref self.state, 0) = @bit_xor_64(
+                @array_at(ref self.state, 0), 
+                @bit_xor_64(
+                    @array_at(ref self.state, 1), 
+                    @array_at(ref self.state, 2)
+                )
+            )
+        }
+
+        final1: function (self, input_lb: Slice[@bit8], start_position: Int) nothing {
+
+            input: Slice[@bit8] = input_lb.slice(Range.of(start_position, input_lb.count))
+
+            index: Int = 0
+
+            loop if index + 16 < input.get_count() {
+
+                @array_at(ref self.state, 0) = mix(
+                    @bit_xor_64(
+                        read[@bit64](input.get(index)),
+                        SECRET_1
+                    ),
+                    @bit_xor_64(
+                        read[@bit64](input.get(index + 8)),
+                        @array_at(ref self.state, 0)
+                    )
+                )
+
+                index += 16
+
+            } else break
+
+            self.a = read[@bit64](input_lb.get(input_lb.get_count() - 16))
+            self.b = read[@bit64](input_lb.get(input_lb.get_count() - 8))
+        }
+
+        final2: function (self) result: @bit64 {
+            self.a = @bit_xor_64(self.a, SECRET_1)
+            self.b = @bit_xor_64(self.b,  @array_at(ref self.state, 0))
+            
+            a: @bit64, b: @bit64 = mum(self.a, self.b)
+
+            result = mix(
+                @bit_xor_64 (
+                    @bit_xor_64(
+                        a,
+                        SECRET_0
+                    ),
+                    @extend_sign(self.total_length as @bit_native)
+                ),
+                @bit_xor_64(
+                    b, 
+                    SECRET_1
+                )
+            )
+        }
+    }
+}
