@@ -20,16 +20,29 @@ fn standard_dir() -> PathBuf {
 
 /// The float objects expose only the `@fbitN -> FloatN` value conversion; the
 /// `@bitN <-> FloatN` reinterpret pairs are removed, so an integer literal
-/// cannot silently bitcast into a float (the intrinsics remain available).
+/// cannot silently bitcast into a float. The intrinsics remain available, and
+/// methods such as `to_bits` and `next_up` use them; only a `@conversion` hook
+/// may not.
 #[test]
 fn float_objects_do_not_expose_bit_reinterpret_conversions() {
     let standard = standard_dir();
-    for file in ["float32.lilac", "float64.lilac"] {
+    for file in ["float16.lilac", "float32.lilac", "float64.lilac"] {
         let text = std::fs::read_to_string(standard.join(file)).expect("reads stdlib file");
-        assert!(
-            !text.contains("@bits_to_fbit") && !text.contains("@fbit_to_bits"),
-            "`{file}` must not wrap the reinterpret intrinsics in `@conversion`"
-        );
+        let hooks: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("@conversion"))
+            .collect();
+        assert!(!hooks.is_empty(), "`{file}` has no `@conversion` hooks");
+        for line in hooks {
+            let signature = line.split("=>").next().unwrap_or(line);
+            assert!(
+                !line.contains("@bits_to_fbit")
+                    && !line.contains("@fbit_to_bits")
+                    && !signature.contains("@bit"),
+                "`{file}` must not convert between `@bitN` and a float: {}",
+                line.trim()
+            );
+        }
     }
 }
 

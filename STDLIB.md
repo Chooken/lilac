@@ -610,22 +610,59 @@ becomes fully thread-safe through them.
 
 ---
 
-### 3.8 `Standard.Math`
+### 3.8 Numeric methods and `Standard.Math`
 
-* **Integer:** `abs`, `min`, `max`, `clamp`, `pow`, `gcd`, `lcm`, `div_rem`,
-  `div_floor`, `div_ceil`, `is_power_of_two`, `next_power_of_two`,
-  `checked_add`/`sub`/`mul` (`Result`), `saturating_*`, `wrapping_*`
-  (`wrapping_*` landed with the numeric types, §3.1).
-* **Float:** `abs`, `min`, `max`, `clamp`, `sqrt`, `cbrt`, `pow`, `exp`, `ln`,
-  `log2`, `log10`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`, `trunc`,
-  `fract`, `is_nan`, `is_infinite`, `is_finite`, `copysign`, `lerp`.
-* **Constants:** `PI`, `E`, `TAU`, `INFINITY`, `NAN`, `EPSILON` (per width).
-* **`Random`:** `new(seed)`, `next_u32`, `next_u64`, `next_int(range)`,
-  `next_float()`, `shuffle[T](ref List[T])`; `Seed`/entropy from `C.Time`.
-* **Numeric conversions:** on the numeric types (§3.1): `as` only where
-  exact, named `to_…` methods otherwise.
+> **Today:** the numeric types' methods (math plan phases 1-4) and float
+> printing and parsing (phase 6) are implemented. Elementary functions
+> (phase 5), `Random` (phase 7) and the rest of `Standard.Math`
+> (phases 9-10) are planned (`docs/math-plan.md`).
 
-> `sqrt`/`pow`/trig need `libm` (`link = ["m"]`) or C externs — see §5.
+Math is methods on the numeric types (§3.1), not free functions: Lilac
+has no overloading and no type-argument inference, so `x.sqrt()`,
+`n.count_ones()` and `Float32.PI` serve every width and show up in `.`
+completion. `Standard.Math` holds only what is not one scalar's method.
+Nothing links libm or calls C: each operation is an LLVM intrinsic, an
+aarch64 instruction or an internal routine the backend writes, and gives
+the same bits on every target in every build mode.
+
+* **Integer** (`Int*`, `Uint*`): `abs`, `unsigned_abs`, `sign`, `min`,
+  `max`, `clamp`, `compare`, `pow`, `isqrt`, `ilog2`, `ilog10`, `gcd`,
+  `lcm`, `div_rem`, `div_floor`, `div_ceil`, `div_euclid`, `rem_euclid`,
+  `is_power_of_two`, `next_power_of_two`; the bit toolkit (`count_ones`,
+  `leading_zeros`, `trailing_zeros`, `rotate_left`, `swap_bytes`,
+  `reverse_bits`, endian conversions); `widening_multiply`,
+  `carrying_add`, `borrowing_subtract`; and the overflow families
+  `checked_*` (fail), `wrapping_*`, `saturating_*` and `overflowing_*`
+  for `add`/`subtract`/`multiply`/`negate`/`pow`. `+ - *` panic on
+  overflow in Debug and wrap in Release.
+* **Float** (`Float16/32/64`): `abs`, `min`/`max` (and the IEEE
+  `min_number`/`max_number`), `clamp`, `copy_sign`, `sqrt`, `recip`,
+  `multiply_add` (fused, one rounding), `floor`, `ceil`, `round`,
+  `round_even`, `trunc`, `fract`; classification (`classify` →
+  `FloatClass`, `is_nan`, `is_finite`, `is_subnormal`, …); bits and ULPs
+  (`to_bits`, `from_bits`, `next_up`, `next_down`, `ulp`, `exponent`,
+  `mantissa`, `scale_by_power_of_two`); `compare`, `total_compare`,
+  `approximately_equals`; `lerp`, `inverse_lerp`, `remap`, `smooth_step`,
+  `to_degrees`, `to_radians`. `%` is the exact `fmod` remainder.
+* **Constants** (per width): `PI`, `TAU`, `E`, `SQRT_2`, `LN_2`, `LN_10`,
+  `LOG2_E`, `LOG10_E`, `INFINITY`, `NAN`, `EPSILON`, `MIN_POSITIVE`,
+  `MIN_SUBNORMAL`, `MAX`, `MIN`; integers have `MIN`/`MAX`.
+* **Printing and parsing:** `{x}` is the shortest decimal that reads back
+  to the same bits, `{x.fixed(p)}`/`{x.scientific(p)}` round the exact
+  binary value (ties to even) to any precision, and every numeric type
+  has `parse(text) value: T else error: ParseError`, correctly rounded
+  for floats (§3.1a; `lib/Standard/float_format.lilac`). They are tested
+  bit for bit against Rust (`numeric_differential.rs`,
+  `float_format_differential.rs`).
+* **Numeric conversions:** `as` only where exact; otherwise `to_X()`
+  (fails), `to_X_wrapping()`, `to_X_truncated()` and
+  `to_floatN_rounded()`.
+* **Planned — elementary functions** (phase 5): `exp`, `ln`, `log2`,
+  `log10`, `pow`, `cbrt`, `hypot`, `sin`, `cos`, `tan`, `atan2`, the
+  hyperbolic and special functions, correctly rounded, in Lilac.
+* **Planned — `Standard.Math`:** `Random` (phase 7: no global state, seeded
+  or from `Os.fill_random`), linear algebra (phase 9) and
+  SIMD types (phase 10).
 
 ---
 
@@ -728,8 +765,6 @@ stdlib workaround via `extern`.
    (`Box.into_inner`).
 8. **Non-transitive `using`, no re-export.** There is no umbrella import; each
    domain is imported explicitly, and cross-domain needs are explicit imports.
-9. **libm dependency.** `sqrt`/`pow`/trig come from libm (`link = ["m"]`) via
-   the package manifest, or from `C` externs.
 
 ---
 
@@ -742,5 +777,6 @@ stdlib workaround via `extern`.
 * **Networking, JSON, regex, compression** — Tier-3 extras, later.
 * **A `Standard` umbrella that re-exports children** — impossible without
   re-export; the root is a real prelude instead.
-* **Floating-point formatting edge cases** — depends on `lilac-decimal` and
-  libm; specified when `Text` lands.
+* ~~**Floating-point formatting edge cases**~~ — done (math plan phase 6;
+  §3.1a, §3.8): shortest round-trip output, `fixed`/`scientific` at any
+  precision and correctly rounded `parse`, in Lilac with no libm and no heap.

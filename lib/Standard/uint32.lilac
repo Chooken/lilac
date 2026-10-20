@@ -512,7 +512,7 @@ Uint32: object {
     /// past `Float16`'s largest finite value it is an infinity.
     to_float16_rounded: function (self: Uint32) Float16 => @uint_to_float(self.data) as @fbit16 as Float16
 
-    /// This value as a `Float32`, rounded to the nearest (ties to even);
+    /// This value as a `Float32`, rounded to the nearest (ties to even).
     to_float32_rounded: function (self: Uint32) Float32 => @uint_to_float(self.data) as @fbit32 as Float32
 
     /// Parses an unsigned integer in decimal, `0x` hexadecimal or `0b` binary

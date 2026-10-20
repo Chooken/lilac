@@ -593,7 +593,7 @@ sub int_file {
     for my $f (grep { !float_exact($t, $_) } @floats) {
         my ($fname, $fbits) = @$f;
         my $m = method_name($fname);
-        $text .= "    /// This value as a `$fname`, rounded to the nearest (ties to even);\n";
+        $text .= "    /// This value as a `$fname`, rounded to the nearest (ties to even)" . ($fbits == 16 ? ";" : ".") . "\n";
         $text .= "    /// past `$fname`'s largest finite value it is an infinity.\n" if $fbits == 16;
         $text .= "    to_$m\_rounded: function (self: $name) $fname => $to_float(self.data) as \@fbit$fbits as $fname\n\n";
     }

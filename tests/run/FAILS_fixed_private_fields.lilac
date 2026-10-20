@@ -1,0 +1,11 @@
+// expect-error: E026
+// `Fixed`'s fields are private to `Standard`: a `Fixed` comes only from
+// `fixed(precision)`, so its width is always a float's.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    bad: Fixed = Fixed { bits = 0x0, width = 7, precision = 2 }
+    print_line($"{bad}")
+}

@@ -26,9 +26,11 @@ ParseError: enum {
 /// A floating-point number formatted with `precision` digits after the
 /// decimal point (ties rounded to even): `{x.fixed(3)}`.
 Fixed: object {
-    bits: @bit64
-    width: @bit32
-    precision: @bit32
+    private {
+        bits: @bit64
+        width: @bit32
+        precision: @bit32
+    }
 
     @format: function (self, out: ref Formatter) nothing {
         write_float_fixed(out, self.bits, self.width, self.precision)
@@ -39,9 +41,11 @@ Fixed: object {
 /// `precision` digits after the decimal point (ties rounded to even):
 /// `{x.scientific(4)}`.
 Scientific: object {
-    bits: @bit64
-    width: @bit32
-    precision: @bit32
+    private {
+        bits: @bit64
+        width: @bit32
+        precision: @bit32
+    }
 
     @format: function (self, out: ref Formatter) nothing {
         write_float_scientific(out, self.bits, self.width, self.precision)
@@ -364,13 +368,51 @@ private {
         out.write_bytes(@byte_buffer_from(at, @i_sub_native(0x200, pos)))
     }
 
-    write_zeros: function (out: ref Formatter, count: Int32) nothing {
-        left: Int32 = count
+    // Writes `count` copies of the digit `d` (0 to 9), 32 at a time.
+    write_repeated: function (out: ref Formatter, d: @bit8, count: Int64) nothing {
+        if count <= 0 { return }
+        chunk: @array(@bit8, 32) {}
+        first: ref @bit8 = @array_at(ref chunk, 0x0)
+        idx: @bit_native = 0x0
+        loop {
+            if idx == 0x20 { break }
+            @store_u8(first, idx, @i_add_8(0x30, d))
+            idx = @i_add_native(idx, 0x1)
+        }
+        left: Int64 = count
         loop {
             if left <= 0 { break }
-            out.write_bytes("0")
-            left = left - 1
+            n: Int64 = left.min(32)
+            out.write_bytes(@byte_buffer_from(first, (n.to_int32_wrapping() as Int) as @bit_native))
+            left = left - n
         }
+    }
+
+    // Writes `count` copies of the digit `d` as the digits at positions
+    // `at`, `at + 1`, ..., with the decimal point before position `point`.
+    write_digit_run: function (out: ref Formatter, d: @bit8, count: Int64, at: Int64, point: Int64) nothing {
+        if count <= 0 { return }
+        if at < point and at + count > point {
+            write_repeated(out, d, point - at)
+            out.write_bytes(".")
+            write_repeated(out, d, at + count - point)
+        } else {
+            if at == point { out.write_bytes(".") }
+            write_repeated(out, d, count)
+        }
+    }
+
+    // Writes the digit `pending` waiting at position `at` and the `nines`
+    // 9s after it, or, when `carry`, the digit plus one and `nines` 0s.
+    // Position -1 is `whole`, the integer part of a fixed format.
+    write_pending: function (out: ref Formatter, whole: @bit64, pending: @bit8, at: Int64, nines: Int64, carry: @bit8, point: Int64) nothing {
+        bump: @bit8 = if carry then 0x1 else 0x0
+        if at < 0 {
+            write_unsigned(out, @i_add_64(whole, @extend_zero(bump)), 0xA)
+        } else {
+            write_digit_run(out, @i_add_8(pending, bump), 1, at, point)
+        }
+        write_digit_run(out, if carry then 0x0 else 0x9, nines, at + 1, point)
     }
 
     decode_float_bits: function (raw: @bit64, width: @bit32) (sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, lowest_e: Int32, mant_bits: Int32) {
@@ -530,7 +572,7 @@ private {
         if k >= 0 and k < 16 {
             if k + 1 >= count {
                 out.write_bytes(@byte_buffer_from(first, (count as Int) as @bit_native))
-                write_zeros(out, k + 1 - count)
+                write_repeated(out, 0x0, (k + 1 - count) as Int64)
             } else {
                 int_len: @bit_native = ((k + 1) as Int) as @bit_native
                 out.write_bytes(@byte_buffer_from(first, int_len))
@@ -540,7 +582,7 @@ private {
             }
         } else if k < 0 and k >= (-4 as Int32) {
             out.write_bytes("0.")
-            write_zeros(out, -k - 1)
+            write_repeated(out, 0x0, (-k - 1) as Int64)
             out.write_bytes(@byte_buffer_from(first, (count as Int) as @bit_native))
         } else {
             out.write_bytes(@byte_buffer_from(first, 0x1))
@@ -554,6 +596,13 @@ private {
         }
     }
 
+    // `write_float_scientific` and `write_float_fixed` make one digit at a
+    // time from the exact value. The last digit that is not a 9 waits, with
+    // the 9s after it, until a later digit or the final rounding says
+    // whether a carry reaches it, so no digit is stored. A float's decimal
+    // expansion is finite: once the remainder is zero every later digit is
+    // 0, so any precision is exact.
+
     write_float_scientific: function (out: ref Formatter, raw: @bit64, width: @bit32, precision: @bit32) nothing {
         sign: @bit8, is_inf: @bit8, is_nan: @bit8, is_zero: @bit8, f: @bit64, e: Int32, _le: Int32, _mb: Int32 = decode_float_bits(raw, width)
         if is_nan {
@@ -564,14 +613,11 @@ private {
             if sign { out.write_bytes("-inf") } else { out.write_bytes("inf") }
             return
         }
-        prec: Int32 = (precision as Uint32).to_int32_wrapping().clamp(0, 400)
+        prec: Int64 = (precision as Uint32) as Int64
         if sign { out.write_bytes("-") }
         if is_zero {
             out.write_bytes("0")
-            if prec > 0 {
-                out.write_bytes(".")
-                write_zeros(out, prec)
-            }
+            write_digit_run(out, 0x0, prec, 1, 1)
             out.write_bytes("e0")
             return
         }
@@ -599,21 +645,32 @@ private {
             k = k - 1
         }
 
-        total: Int32 = prec + 1
-        digits: @array(@bit8, 512) {}
-        first: ref @bit8 = @array_at(ref digits, 0x0)
-        idx: Int32 = 0
+        // Digit positions start at 0, the one before the point.
+        total: Int64 = prec + 1
+        pending: @bit8 = 0x0
+        pending_at: Int64 = 0
+        nines: Int64 = 0
+        made: Int64 = 0
         loop {
-            if idx == total { break }
+            if made == total or r.len == 0x0 { break }
             d: @bit8 = 0x0
             loop {
                 if big_cmp(ref r, ref s) == .Less { break }
                 big_sub_assign(ref r, ref s)
                 d = @i_add_8(d, 0x1)
             }
-            @store_u8(first, (idx as Int) as @bit_native, d)
-            idx = idx + 1
-            if idx < total {
+            if made == 0 as Int64 {
+                pending = d
+            } else if d == 0x9 {
+                nines = nines + 1
+            } else {
+                write_pending(out, 0x0, pending, pending_at, nines, 0x0, 1)
+                pending = d
+                pending_at = made
+                nines = 0
+            }
+            made = made + 1
+            if made < total {
                 big_mul_small(ref r, 0xA)
             }
         }
@@ -621,45 +678,17 @@ private {
         twice_r: Big = r
         big_shl_one(ref twice_r)
         cmp_mid: Ordering = big_cmp(ref twice_r, ref s)
-        last_pos: @bit_native = ((total - 1) as Int) as @bit_native
-        last_d: @bit8 = @load_u8(first, last_pos)
-        if cmp_mid == .Greater or (cmp_mid == .Equal and @bit_and_8(last_d, 0x1) == 0x1) {
-            c_idx: Int32 = total - 1
-            loop {
-                c_pos: @bit_native = (c_idx as Int) as @bit_native
-                next_d: @bit8 = @i_add_8(@load_u8(first, c_pos), 0x1)
-                if @i_less_than_u_8(next_d, 0xA) or c_idx == 0 as Int32 {
-                    @store_u8(first, c_pos, next_d)
-                    break
-                }
-                @store_u8(first, c_pos, 0x0)
-                c_idx = c_idx - 1
-            }
-            if @i_greater_than_or_equal_u_8(@load_u8(first, 0x0), 0xA) {
-                @store_u8(first, 0x0, 0x1)
-                z: Int32 = 1
-                loop {
-                    if z == total { break }
-                    @store_u8(first, (z as Int) as @bit_native, 0x0)
-                    z = z + 1
-                }
-                k = k + 1
-            }
+        last_odd: @bit8 = nines > 0 or @bit_and_8(pending, 0x1) == 0x1
+        carry: @bit8 = cmp_mid == .Greater or (cmp_mid == .Equal and last_odd)
+        if carry and pending == 0x9 {
+            // Every digit was a 9: 9.99... rounds to 1.00... at the next power.
+            write_digit_run(out, 0x1, 1, 0, 1)
+            write_digit_run(out, 0x0, nines, 1, 1)
+            k = k + 1
+        } else {
+            write_pending(out, 0x0, pending, pending_at, nines, carry, 1)
         }
-
-        pos: Int32 = 0
-        loop {
-            if pos == total { break }
-            p: @bit_native = (pos as Int) as @bit_native
-            @store_u8(first, p, @i_add_8(0x30, @load_u8(first, p)))
-            pos = pos + 1
-        }
-        out.write_bytes(@byte_buffer_from(first, 0x1))
-        if prec > 0 {
-            out.write_bytes(".")
-            frac_ptr: ref @bit8 = @ptr_add(first as ref unknown, 0x1) as ref @bit8
-            out.write_bytes(@byte_buffer_from(frac_ptr, (prec as Int) as @bit_native))
-        }
+        write_digit_run(out, 0x0, total - made, made, 1)
         out.write_bytes("e")
         write_signed(out, (k as Int64) as @bit64)
     }
@@ -674,24 +703,18 @@ private {
             if sign { out.write_bytes("-inf") } else { out.write_bytes("inf") }
             return
         }
-        prec: Int32 = (precision as Uint32).to_int32_wrapping().clamp(0, 400)
+        prec: Int64 = (precision as Uint32) as Int64
         if sign { out.write_bytes("-") }
         if is_zero {
             out.write_bytes("0")
-            if prec > 0 {
-                out.write_bytes(".")
-                write_zeros(out, prec)
-            }
+            write_digit_run(out, 0x0, prec, 0, 0)
             return
         }
         if e >= 0 {
             whole_big: Big = big_from_u64(f)
             big_shl(ref whole_big, e)
             write_big_decimal(out, ref whole_big)
-            if prec > 0 {
-                out.write_bytes(".")
-                write_zeros(out, prec)
-            }
+            write_digit_run(out, 0x0, prec, 0, 0)
             return
         }
 
@@ -702,11 +725,14 @@ private {
         den: Big = big_from_u64(0x1)
         big_shl(ref den, shift)
 
-        frac_buf: @array(@bit8, 512) {}
-        first: ref @bit8 = @array_at(ref frac_buf, 0x0)
-        idx: Int32 = 0
+        // Digit positions start at 0 after the point; the integer part
+        // waits first, at position -1.
+        pending: @bit8 = 0x0
+        pending_at: Int64 = -1
+        nines: Int64 = 0
+        made: Int64 = 0
         loop {
-            if idx == prec { break }
+            if made == prec or rem.len == 0x0 { break }
             big_mul_small(ref rem, 0xA)
             d: @bit8 = 0x0
             loop {
@@ -714,46 +740,25 @@ private {
                 big_sub_assign(ref rem, ref den)
                 d = @i_add_8(d, 0x1)
             }
-            @store_u8(first, (idx as Int) as @bit_native, d)
-            idx = idx + 1
+            if d == 0x9 {
+                nines = nines + 1
+            } else {
+                write_pending(out, whole_u64, pending, pending_at, nines, 0x0, 0)
+                pending = d
+                pending_at = made
+                nines = 0
+            }
+            made = made + 1
         }
 
         twice_rem: Big = rem
         big_shl_one(ref twice_rem)
         cmp_mid: Ordering = big_cmp(ref twice_rem, ref den)
-        last_odd: @bit8 = if prec == 0 as Int32 then (@bit_and_64(whole_u64, 0x1) == 0x1) else (@bit_and_8(@load_u8(first, ((prec - 1) as Int) as @bit_native), 0x1) == 0x1)
-        if cmp_mid == .Greater or (cmp_mid == .Equal and last_odd) {
-            carry: @bit8 = 0x1
-            c_idx: Int32 = prec - 1
-            loop {
-                if c_idx < 0 or not carry { break }
-                c_pos: @bit_native = (c_idx as Int) as @bit_native
-                next_d: @bit8 = @i_add_8(@load_u8(first, c_pos), 0x1)
-                if @i_less_than_u_8(next_d, 0xA) {
-                    @store_u8(first, c_pos, next_d)
-                    carry = 0x0
-                } else {
-                    @store_u8(first, c_pos, 0x0)
-                }
-                c_idx = c_idx - 1
-            }
-            if carry {
-                whole_u64 = @i_add_64(whole_u64, 0x1)
-            }
-        }
-
-        write_unsigned(out, whole_u64, 0xA)
-        if prec > 0 {
-            pos: Int32 = 0
-            loop {
-                if pos == prec { break }
-                p: @bit_native = (pos as Int) as @bit_native
-                @store_u8(first, p, @i_add_8(0x30, @load_u8(first, p)))
-                pos = pos + 1
-            }
-            out.write_bytes(".")
-            out.write_bytes(@byte_buffer_from(first, (prec as Int) as @bit_native))
-        }
+        pending_odd: @bit8 = if pending_at < 0 then @bit_and_64(whole_u64, 0x1) == 0x1 else @bit_and_8(pending, 0x1) == 0x1
+        last_odd: @bit8 = nines > 0 or pending_odd
+        carry: @bit8 = cmp_mid == .Greater or (cmp_mid == .Equal and last_odd)
+        write_pending(out, whole_u64, pending, pending_at, nines, carry, 0)
+        write_digit_run(out, 0x0, prec - made, made, 0)
     }
 
     // ---- Number parsing ---------------------------------------------------
