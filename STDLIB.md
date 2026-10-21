@@ -243,7 +243,8 @@ unsigned variants; float variants. Unsigned comparisons bind
 > `is_sign_positive`, `classify` → `FloatClass`), exact operations
 > (`abs`, `copy_sign`, `floor`, `ceil`, `trunc`, `round`, `round_even`,
 > `fract`, `sqrt`, `multiply_add`, `min`, `max`, `min_number`,
-> `max_number`, `clamp`, `recip`, `to_radians`, `to_degrees`), bit/ULP
+> `max_number`, `clamp`, `recip`, `to_radians`, `to_degrees`), the
+> elementary functions (§3.8), bit/ULP
 > operations (`to_bits`, `from_bits`, `hex`, `binary`, `next_up`,
 > `next_down`, `ulp`, `exponent`, `mantissa`, `scale_by_power_of_two`,
 > `split_exponent`), comparisons (`equals`, `approximately_equals`,
@@ -613,8 +614,8 @@ becomes fully thread-safe through them.
 ### 3.8 Numeric methods and `Standard.Math`
 
 > **Today:** the numeric types' methods (math plan phases 1-4) and float
-> printing and parsing (phase 6) are implemented. Elementary functions
-> (phase 5), `Random` (phase 7) and the rest of `Standard.Math`
+> printing and parsing (phase 6) and the elementary functions (phase 5)
+> are implemented. `Random` (phase 7) and the rest of `Standard.Math`
 > (phases 9-10) are planned (`docs/math-plan.md`).
 
 Math is methods on the numeric types (§3.1), not free functions: Lilac
@@ -657,9 +658,19 @@ the same bits on every target in every build mode.
 * **Numeric conversions:** `as` only where exact; otherwise `to_X()`
   (fails), `to_X_wrapping()`, `to_X_truncated()` and
   `to_floatN_rounded()`.
-* **Planned — elementary functions** (phase 5): `exp`, `ln`, `log2`,
-  `log10`, `pow`, `cbrt`, `hypot`, `sin`, `cos`, `tan`, `atan2`, the
-  hyperbolic and special functions, correctly rounded, in Lilac.
+* **Elementary functions** (`Float16/32/64`, math plan phase 5, in
+  Lilac on double-double kernels; no libm): `exp`, `exp2`, `exp10`,
+  `exp_m1`, `ln`, `log2`, `log10`, `ln_1p`, `log(base)`; `pow`,
+  `pow_int(n)`, `cbrt`, `hypot`, `root(n)`; `sin`, `cos`, `tan`,
+  `sin_cos`, `sin_pi`, `cos_pi`, `tan_pi` (any finite argument, reduced
+  exactly by Payne-Hanek), `asin`, `acos`, `atan`, `atan2`; `sinh`,
+  `cosh`, `tanh`, `asinh`, `acosh`, `atanh`; `erf`, `erfc`, `gamma`,
+  `ln_gamma`. Domain errors return NaN and overflow returns an infinity
+  (no errno), with C Annex F's special values. Each `///` states its
+  accuracy: within 0.5 ulp plus 2^-37 ulp for `Float64` (correctly
+  rounded unless the exact value is that close to a rounding boundary)
+  and plus 2^-60 ulp for `Float32`/`Float16`. The reference tables are
+  in `tools/math-reference/`.
 * **Planned — `Standard.Math`:** `Random` (phase 7: no global state, seeded
   or from `Os.fill_random`), linear algebra (phase 9) and
   SIMD types (phase 10).

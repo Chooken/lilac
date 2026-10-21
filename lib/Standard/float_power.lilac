@@ -1,0 +1,176 @@
+// Powers and roots (math plan phase 5): `pow`, `pow_int`, `cbrt`, `hypot`
+// and `root`, in double-double like the exponentials they build on.
+//
+// `x^y` is `exp(y ln x)` with `ln x` kept as a pair, so the product is
+// good to about 2^-104 of itself and the result to about 2^-93 relative
+// even at the edge of the range. `cbrt` and `hypot` refine a double
+// estimate by one Newton step in double-double.
+
+private {
+    /// Whether the finite `y` is an integer.
+    is_integer: function (y: Float64) Bool => y.abs() >= 4503599627370496.0 or y.floor().equals(y)
+
+    /// Whether the finite `y` is an odd integer.
+    is_odd_integer: function (y: Float64) Bool =>
+        y.abs() < 9007199254740992.0 and y.floor().equals(y) and not (y * 0.5).floor().equals(y * 0.5)
+
+    /// `x^y` for `x != 0`, finite `y`, non-NaN `x`, with the sign decided
+    /// by the caller: the magnitude `|x|^y` as a scaled pair.
+    pow_magnitude: function (a: Float64, y: Float64) res: Scaled {
+        if a.equals(1.0) {
+            res = Scaled.exact(1.0)
+            return
+        }
+        l: Dd = ln_positive(a)
+        estimate: Float64 = l.hi * y
+        if estimate > 1200.0 or estimate < -1200.0 {
+            res = Scaled.exact(if estimate > 0.0 then Float64.INFINITY else 0.0)
+            return
+        }
+        t: Dd = l * y
+        if t.hi > 1100.0 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if t.hi < -1100.0 {
+            res = Scaled.exact(0.0)
+            return
+        }
+        res = exp_reduced(t)
+    }
+
+    /// `x^y`, with the C Annex F special values.
+    pow_kernel: function (x: Float64, y: Float64) res: Scaled {
+        if y.is_zero() or x.equals(1.0) {
+            res = Scaled.exact(1.0)
+            return
+        }
+        if x.is_nan() or y.is_nan() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        a: Float64 = x.abs()
+        odd: Bool = is_odd_integer(y)
+        negative: Bool = x.is_sign_negative() and odd
+        if y.is_infinite() {
+            if a.equals(1.0) {
+                res = Scaled.exact(1.0)
+            } else if (a > 1.0) == (y > 0.0) {
+                res = Scaled.exact(Float64.INFINITY)
+            } else {
+                res = Scaled.exact(0.0)
+            }
+            return
+        }
+        if x.is_zero() or x.is_infinite() {
+            // x^y for a zero or infinite base: a zero or an infinity by y's sign.
+            big: Bool = (x.is_zero() and y < 0.0) or (x.is_infinite() and y > 0.0)
+            value: Float64 = if big then Float64.INFINITY else 0.0
+            res = Scaled.exact(if negative then -value else value)
+            return
+        }
+        if x < 0.0 and not is_integer(y) {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        s: Scaled = pow_magnitude(a, y)
+        if negative {
+            res = Scaled.new(-s.v, s.k)
+        } else {
+            res = s
+        }
+    }
+
+    /// The cube root.
+    cbrt_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_infinite() or x.is_zero() {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        adjust: Int32 = 0
+        if a < Float64.MIN_POSITIVE {
+            a = a * 18014398509481984.0
+            adjust = -54
+        }
+        e: Int32 = a.exponent()
+        // e = 3 q + r with r in 0..=2
+        q: Int32 = (if e >= 0 as Int32 then e else e - 2) / 3
+        m: Float64 = a.scale_by_power_of_two(-(q * 3))
+        y: Float64 = 1.5
+        i: Int32 = 0
+        loop {
+            if i >= 8 as Int32 { break }
+            y = y - (y * y * y - m) / (3.0 * y * y)
+            i = i + 1
+        }
+        y2: Dd = Dd.two_prod(y, y)
+        cube: Dd = y2 * y
+        r: Dd = m - cube
+        c: Dd = r / (y2 * 3.0)
+        v: Dd = Dd.fast_two_sum(y, c.hi) + c.lo
+        if x < 0.0 {
+            v = -v
+        }
+        res = Scaled.new(v, q + adjust / 3)
+    }
+
+    /// `sqrt(x^2 + y^2)` without overflow or underflow in the middle.
+    hypot_kernel: function (x: Float64, y: Float64) res: Scaled {
+        if x.is_infinite() or y.is_infinite() {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x.is_nan() or y.is_nan() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        a: Float64 = x.abs()
+        b: Float64 = y.abs()
+        big: Float64 = a.max(b)
+        if big.is_zero() {
+            res = Scaled.exact(0.0)
+            return
+        }
+        e: Int32 = big.exponent()
+        if big < Float64.MIN_POSITIVE {
+            e = -1022
+        }
+        a = a.scale_by_power_of_two(-e)
+        b = b.scale_by_power_of_two(-e)
+        s: Dd = Dd.two_prod(a, a) + Dd.two_prod(b, b)
+        res = Scaled.new(s.sqrt(), e)
+    }
+
+    /// The `n`-th root.
+    root_kernel: function (x: Float64, n: Int32) res: Scaled {
+        if n == 0 as Int32 or x.is_nan() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        nf: Float64 = n as Float64
+        odd: Bool = n.rem_euclid(2 as Int32) == 1 as Int32
+        if x < 0.0 and not odd {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.is_zero() or x.is_infinite() {
+            // the limit: x^(1/n) is 0 or an infinity, with x's sign for odd n
+            big: Bool = x.is_infinite() == (n > 0 as Int32)
+            value: Float64 = if big then Float64.INFINITY else 0.0
+            res = Scaled.exact(if x.is_sign_negative() then -value else value)
+            return
+        }
+        a: Float64 = x.abs()
+        s: Scaled = Scaled.exact(1.0)
+        if not a.equals(1.0) {
+            t: Dd = ln_positive(a) / nf
+            s = exp_reduced(t)
+        }
+        if x < 0.0 {
+            res = Scaled.new(-s.v, s.k)
+        } else {
+            res = s
+        }
+    }
+}

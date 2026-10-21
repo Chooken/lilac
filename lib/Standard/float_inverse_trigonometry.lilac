@@ -1,0 +1,167 @@
+// Inverse trigonometry (math plan phase 5): `atan`, `atan2`, `asin`, `acos`.
+//
+// `atan u` for `u` in `[0, 1]` is `atan(c) + atan((u - c) / (1 + u c))` with
+// `c = j / 64` from a table, leaving an argument of at most 2^-7 for the
+// Taylor series; larger arguments use `atan q = pi/2 - atan(1/q)`. `asin`
+// and `acos` are `atan` of `x / sqrt((1 - x)(1 + x))` and its reciprocal,
+// with both factors exact, so they keep their accuracy near 1.
+
+private {
+    /// `atan u` for a pair with `0 <= u <= 1`.
+    atan_unit: function (u: Dd) res: Dd {
+        j: Int32 = nearest(u.hi * 64.0)
+        c: Float64 = (j as Float64) * 0.015625
+        w: Dd = (u - c) / (1.0 + u * c)
+        z: Dd = w.sqr()
+        res = atan_table_entry(j) + (w + (w * z) * atan_poly(z))
+    }
+
+    /// `atan q` for a pair `q >= 0`.
+    atan_positive: function (q: Dd) res: Dd {
+        if q.hi > 1e100 {
+            res = PI_2 - Dd.of(1.0 / q.hi)
+        } else if q.hi > 1.0 {
+            res = PI_2 - atan_unit(Dd.of(1.0) / q)
+        } else {
+            res = atan_unit(q)
+        }
+    }
+
+    /// `atan x`.
+    atan_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_zero() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.is_infinite() {
+            res = Scaled.plain(if x < 0.0 then -PI_2 else PI_2)
+            return
+        }
+        if x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Dd = atan_positive(Dd.of(x.abs()))
+        res = Scaled.plain(if x < 0.0 then -a else a)
+    }
+
+    /// A positive finite value as `(m, e)` with `m` in `[1, 2)` and the value `m 2^e`.
+    normalized: function (v: Float64) (m: Float64, e: Int32) {
+        if v < Float64.MIN_POSITIVE {
+            w: Float64 = v * 18014398509481984.0
+            e = w.exponent() - 54
+            m = w.scale_by_power_of_two(-(e + 54))
+        } else {
+            e = v.exponent()
+            m = v.scale_by_power_of_two(-e)
+        }
+    }
+
+    /// `atan2(y, x)`: the angle of the point `(x, y)`, in `[-pi, pi]`.
+    atan2_kernel: function (y: Float64, x: Float64) res: Scaled {
+        if y.is_nan() or x.is_nan() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        negative_y: Bool = y.is_sign_negative()
+        negative_x: Bool = x.is_sign_negative()
+        angle: Dd = Dd.of(0.0)
+        if y.is_zero() {
+            if negative_x {
+                angle = PI
+            } else {
+                res = Scaled.exact(y)
+                return
+            }
+        } else if x.is_zero() {
+            angle = PI_2
+        } else if y.is_infinite() {
+            if x.is_infinite() {
+                if negative_x {
+                    angle = PI - PI_4
+                } else {
+                    angle = PI_4
+                }
+            } else {
+                angle = PI_2
+            }
+        } else if x.is_infinite() {
+            if negative_x {
+                angle = PI
+            } else {
+                res = Scaled.exact((0.0 as Float64).copy_sign(y))
+                return
+            }
+        } else {
+            ay: Float64 = y.abs()
+            ax: Float64 = x.abs()
+            my: Float64, ey: Int32 = normalized(ay)
+            mx: Float64, ex: Int32 = normalized(ax)
+            d: Int32 = ey - ex
+            if d > 60 as Int32 {
+                angle = PI_2 - Dd.of(ax / ay)
+                if negative_x {
+                    angle = PI - angle
+                }
+            } else if d < (-60 as Int32) {
+                q: Dd = Dd.quotient(my, mx)
+                if negative_x {
+                    angle = PI - q.scale(d)
+                } else {
+                    res = Scaled.new(if negative_y then -q else q, d)
+                    return
+                }
+            } else {
+                angle = atan_positive(Dd.quotient(my, mx).scale(d))
+                if negative_x {
+                    angle = PI - angle
+                }
+            }
+        }
+        res = Scaled.plain(if negative_y then -angle else angle)
+    }
+
+    /// `sqrt((1 - a)(1 + a))` for `0 <= a < 1`, with both factors exact.
+    complement: function (a: Float64) Dd => ((Dd.two_sum(1.0, -a)) * (Dd.two_sum(1.0, a))).sqrt()
+
+    /// `asin x`.
+    asin_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.abs() > 1.0 {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.is_zero() or x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        angle: Dd = PI_2
+        if not a.equals(1.0) {
+            angle = atan_positive(Dd.of(a) / complement(a))
+        }
+        res = Scaled.plain(if x < 0.0 then -angle else angle)
+    }
+
+    /// `acos x`.
+    acos_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.abs() > 1.0 {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.equals(1.0) {
+            res = Scaled.exact(0.0)
+            return
+        }
+        if x.equals(-1.0) {
+            res = Scaled.plain(PI)
+            return
+        }
+        a: Float64 = x.abs()
+        if a < 1e-30 {
+            res = Scaled.plain(PI_2 - Dd.of(x))
+            return
+        }
+        angle: Dd = atan_positive(complement(a) / Dd.of(a))
+        res = Scaled.plain(if x < 0.0 then PI - angle else angle)
+    }
+}

@@ -1,0 +1,162 @@
+// Hyperbolic functions (math plan phase 5): `sinh`, `cosh`, `tanh`,
+// `asinh`, `acosh`, `atanh`, in double-double on top of the exponential and
+// logarithm kernels.
+//
+// The forward functions use `e^a - 1` as a pair (the series for small `a`,
+// the reduced exponential otherwise), so `sinh` and `tanh` keep their
+// relative accuracy near zero. The inverses are logarithms of arguments
+// built from exact factors: `asinh a = ln(1 + a + a^2 / (1 + sqrt(a^2 + 1)))`,
+// `acosh x = ln(1 + (x - 1) + sqrt((x - 1)(x + 1)))` and
+// `atanh a = ln(1 + 2a / (1 - a)) / 2`.
+
+private {
+    /// `e^a - 1` for `0 < a < 80`, as a pair.
+    expm1_pair: function (a: Float64) res: Dd {
+        if a <= 0.3466 {
+            r: Dd = Dd.of(a)
+            res = r * expm1_poly(r)
+        } else {
+            s: Scaled = exp_reduced(Dd.of(a))
+            res = s.v.scale(s.k) - 1.0
+        }
+    }
+
+    /// `ln m` for a pair with `m.hi >= 1`.
+    ln_of: function (m: Dd) res: Dd {
+        e: Int32 = m.hi.exponent()
+        scaled: Dd = m.scale(-e)
+        if scaled.hi >= 1.40625 {
+            scaled = scaled * 0.5
+            e = e + 1
+        }
+        lm: Dd = log_mantissa(scaled)
+        if e == 0 as Int32 {
+            res = lm
+        } else {
+            res = LN_2 * (e as Float64) + lm
+        }
+    }
+
+    /// `sinh x`.
+    sinh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_infinite() or x.is_zero() or x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        v: Scaled = Scaled.exact(Float64.INFINITY)
+        if a < 40.0 {
+            em: Dd = expm1_pair(a)
+            v = Scaled.plain((em + em / (em + 1.0)) * 0.5)
+        } else if a <= 711.0 {
+            s: Scaled = exp_reduced(Dd.of(a))
+            v = Scaled.new(s.v, s.k - 1)
+        }
+        if x < 0.0 {
+            res = Scaled.new(-v.v, v.k)
+        } else {
+            res = v
+        }
+    }
+
+    /// `cosh x`.
+    cosh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.is_infinite() {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        a: Float64 = x.abs()
+        if a < 7.450580596923828e-9 {
+            res = Scaled.exact(1.0)
+        } else if a < 40.0 {
+            e: Dd = expm1_pair(a) + 1.0
+            res = Scaled.plain((e + Dd.of(1.0) / e) * 0.5)
+        } else if a <= 711.0 {
+            s: Scaled = exp_reduced(Dd.of(a))
+            res = Scaled.new(s.v, s.k - 1)
+        } else {
+            res = Scaled.exact(Float64.INFINITY)
+        }
+    }
+
+    /// `tanh x`.
+    tanh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_zero() or x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        v: Dd = Dd.of(1.0)
+        if a < 22.0 {
+            em: Dd = expm1_pair(2.0 * a)
+            v = em / (em + 2.0)
+        }
+        res = Scaled.plain(if x < 0.0 then -v else v)
+    }
+
+    /// `asinh x`.
+    asinh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_infinite() or x.is_zero() or x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        v: Dd = Dd.of(0.0)
+        if a >= 1.2676506002282294e30 {
+            v = ln_positive(a) + LN_2
+        } else {
+            t: Dd = Dd.two_prod(a, a)
+            s: Dd = (t + 1.0).sqrt()
+            v = ln_of(Dd.of(1.0) + (a + t / (s + 1.0)))
+        }
+        res = Scaled.plain(if x < 0.0 then -v else v)
+    }
+
+    /// `acosh x`.
+    acosh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x < 1.0 {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.equals(1.0) {
+            res = Scaled.exact(0.0)
+            return
+        }
+        if x.is_infinite() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x >= 1.2676506002282294e30 {
+            res = Scaled.plain(ln_positive(x) + LN_2)
+            return
+        }
+        below: Dd = Dd.two_sum(x, -1.0)
+        above: Dd = Dd.two_sum(x, 1.0)
+        s: Dd = (below * above).sqrt()
+        res = Scaled.plain(ln_of(Dd.of(1.0) + (below + s)))
+    }
+
+    /// `atanh x`.
+    atanh_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.abs() > 1.0 {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.is_zero() or x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        a: Float64 = x.abs()
+        if a.equals(1.0) {
+            res = Scaled.exact(Float64.INFINITY.copy_sign(x))
+            return
+        }
+        u: Dd = Dd.of(2.0 * a) / Dd.two_sum(1.0, -a)
+        v: Dd = ln_of(Dd.of(1.0) + u) * 0.5
+        res = Scaled.plain(if x < 0.0 then -v else v)
+    }
+}

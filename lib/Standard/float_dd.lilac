@@ -1,0 +1,356 @@
+// Double-double arithmetic and the final rounding of the elementary
+// functions (math plan phase 5).
+//
+// A `Dd` is an unevaluated sum `hi + lo` of two `Float64`s with
+// `|lo| <= ulp(hi) / 2`, about 106 bits. Every operation is built from the
+// error-free transformations (`two_sum`, `two_prod` with the fused
+// multiply-add), so it gives the same bits on every target and in every
+// build mode. The elementary functions evaluate in `Dd` (about 2^-100
+// relative error per operation, less than 2^-90 for a whole function) and
+// round once at the end: `finish64` for `Float64`, `finish32` and
+// `finish16` for the narrower types, which round the pair to odd first so
+// the second rounding cannot be a double rounding.
+
+private {
+    Dd: object {
+        hi: Float64
+        lo: Float64
+
+        new: function (hi: Float64, lo: Float64) d: Dd {
+            d = Dd { hi = hi, lo = lo }
+        }
+
+        of: function (x: Float64) d: Dd {
+            d = Dd { hi = x, lo = 0.0 }
+        }
+
+        /// `a + b` exactly, as the rounded sum and its error.
+        two_sum: function (a: Float64, b: Float64) d: Dd {
+            s: Float64 = a + b
+            bb: Float64 = s - a
+            d = Dd { hi = s, lo = (a - (s - bb)) + (b - bb) }
+        }
+
+        /// `a + b` exactly when `|a| >= |b|` (or `a` is zero).
+        fast_two_sum: function (a: Float64, b: Float64) d: Dd {
+            s: Float64 = a + b
+            d = Dd { hi = s, lo = b - (s - a) }
+        }
+
+        /// `a * b` exactly (barring underflow), as the rounded product and its error.
+        two_prod: function (a: Float64, b: Float64) d: Dd {
+            p: Float64 = a * b
+            if a.abs() < 6.7e299 and b.abs() < 6.7e299 {
+                // Dekker's product: splits each factor into 26-bit halves,
+                // so no fused multiply-add is needed (a target without the
+                // instruction would run a slow software one).
+                ca: Float64 = 134217729.0 * a
+                ah: Float64 = ca - (ca - a)
+                al: Float64 = a - ah
+                cb: Float64 = 134217729.0 * b
+                bh: Float64 = cb - (cb - b)
+                bl: Float64 = b - bh
+                d = Dd { hi = p, lo = ((ah * bh - p) + ah * bl + al * bh) + al * bl }
+            } else {
+                d = Dd { hi = p, lo = a.multiply_add(b, -p) }
+            }
+        }
+
+        neg: function (self: Dd) d: Dd {
+            d = Dd { hi = -self.hi, lo = -self.lo }
+        }
+
+        @negate: function (x: Dd) d: Dd {
+            d = Dd { hi = -x.hi, lo = -x.lo }
+        }
+
+        @add: function (x: Dd, y: Dd) d: Dd {
+            s: Dd = Dd.two_sum(x.hi, y.hi)
+            t: Dd = Dd.two_sum(x.lo, y.lo)
+            c: Float64 = s.lo + t.hi
+            u: Dd = Dd.fast_two_sum(s.hi, c)
+            d = Dd.fast_two_sum(u.hi, u.lo + t.lo)
+        }
+
+        @add: function (x: Dd, y: Float64) d: Dd {
+            s: Dd = Dd.two_sum(x.hi, y)
+            d = Dd.fast_two_sum(s.hi, s.lo + x.lo)
+        }
+
+        @add: function (x: Float64, y: Dd) d: Dd {
+            s: Dd = Dd.two_sum(x, y.hi)
+            d = Dd.fast_two_sum(s.hi, s.lo + y.lo)
+        }
+
+        @sub: function (x: Dd, y: Dd) d: Dd {
+            d = x + (-y)
+        }
+
+        @sub: function (x: Dd, y: Float64) d: Dd {
+            d = x + (-y)
+        }
+
+        @sub: function (x: Float64, y: Dd) d: Dd {
+            d = x + (-y)
+        }
+
+        @mul: function (x: Dd, y: Dd) d: Dd {
+            p: Dd = Dd.two_prod(x.hi, y.hi)
+            d = Dd.fast_two_sum(p.hi, p.lo + (x.hi * y.lo + x.lo * y.hi))
+        }
+
+        @mul: function (x: Dd, y: Float64) d: Dd {
+            p: Dd = Dd.two_prod(x.hi, y)
+            d = Dd.fast_two_sum(p.hi, p.lo + x.lo * y)
+        }
+
+        @mul: function (x: Float64, y: Dd) d: Dd {
+            p: Dd = Dd.two_prod(x, y.hi)
+            d = Dd.fast_two_sum(p.hi, p.lo + y.lo * x)
+        }
+
+        @div: function (x: Dd, y: Dd) d: Dd {
+            q1: Float64 = x.hi / y.hi
+            r: Dd = x - y * q1
+            q2: Float64 = r.hi / y.hi
+            r = r - y * q2
+            q3: Float64 = r.hi / y.hi
+            s: Dd = Dd.fast_two_sum(q1, q2)
+            d = s + q3
+        }
+
+        @div: function (x: Dd, y: Float64) d: Dd {
+            d = x / Dd.of(y)
+        }
+
+        @div: function (x: Float64, y: Dd) d: Dd {
+            d = Dd.of(x) / y
+        }
+
+        // With a float container on either side, so a literal operand
+        // takes `Float64`'s width: `x * 2.0`, `1.0 + x`.
+        @add: function (x: Dd, y: @fbit64) d: Dd {
+            d = x + (y as Float64)
+        }
+
+        @add: function (x: @fbit64, y: Dd) d: Dd {
+            d = (x as Float64) + y
+        }
+
+        @sub: function (x: Dd, y: @fbit64) d: Dd {
+            d = x - (y as Float64)
+        }
+
+        @sub: function (x: @fbit64, y: Dd) d: Dd {
+            d = (x as Float64) - y
+        }
+
+        @mul: function (x: Dd, y: @fbit64) d: Dd {
+            d = x * (y as Float64)
+        }
+
+        @mul: function (x: @fbit64, y: Dd) d: Dd {
+            d = (x as Float64) * y
+        }
+
+        @div: function (x: Dd, y: @fbit64) d: Dd {
+            d = x / (y as Float64)
+        }
+
+        @div: function (x: @fbit64, y: Dd) d: Dd {
+            d = (x as Float64) / y
+        }
+
+        /// `x / y` for two doubles, as a double-double.
+        quotient: function (x: Float64, y: Float64) d: Dd {
+            q1: Float64 = x / y
+            p: Dd = Dd.two_prod(q1, y)
+            r: Float64 = ((x - p.hi) - p.lo)
+            q2: Float64 = r / y
+            d = Dd.fast_two_sum(q1, q2)
+        }
+
+        sqr: function (self: Dd) d: Dd {
+            p: Dd = Dd.two_prod(self.hi, self.hi)
+            d = Dd.fast_two_sum(p.hi, p.lo + 2.0 * self.hi * self.lo)
+        }
+
+        /// The square root of a non-negative `Dd`.
+        sqrt: function (self: Dd) d: Dd {
+            if self.hi <= 0.0 {
+                d = Dd.of(self.hi.sqrt())
+                return
+            }
+            r: Float64 = self.hi.sqrt()
+            p: Dd = Dd.two_prod(r, r)
+            e: Dd = (self - p)
+            c: Float64 = e.hi / (2.0 * r)
+            d = Dd.fast_two_sum(r, c)
+        }
+
+        /// `self * 2^n`; exact unless a part underflows.
+        scale: function (self: Dd, n: Int32) d: Dd {
+            d = Dd { hi = self.hi.scale_by_power_of_two(n), lo = self.lo.scale_by_power_of_two(n) }
+        }
+
+        abs: function (self: Dd) d: Dd {
+            if self.hi < 0.0 {
+                d = -self
+            } else {
+                d = self
+            }
+        }
+
+        /// Whether this value is finite.
+        is_finite: function (self: Dd) Bool => self.hi.is_finite()
+    }
+
+    /// A function's result `(v.hi + v.lo) * 2^k`: the exponent travels apart
+    /// so a result past `Float64`'s range is rounded once, at the end.
+    Scaled: object {
+        v: Dd
+        k: Int32
+
+        new: function (v: Dd, k: Int32) s: Scaled {
+            s = Scaled { v = v, k = k }
+        }
+
+        /// A result with no scale.
+        plain: function (v: Dd) s: Scaled {
+            s = Scaled { v = v, k = 0 }
+        }
+
+        /// A result that is exactly the double `x` (a special value).
+        exact: function (x: Float64) s: Scaled {
+            s = Scaled { v = Dd { hi = x, lo = 0.0 }, k = 0 }
+        }
+
+        round64: function (self: Scaled) Float64 => finish64(self.v, self.k)
+
+        /// For results that can be exactly half way between two doubles.
+        round64_ties: function (self: Scaled) Float64 => finish64_ties(self.v, self.k)
+
+        round32: function (self: Scaled) Float32 => finish32(self.v, self.k)
+
+        round16: function (self: Scaled) Float16 => finish16(self.v, self.k)
+    }
+
+    /// `2^n` for `n` in `-1022..=1023`.
+    pow2: function (n: Int32) Float64 =>
+        Float64.from_bits(@bit_shift_left_64((n + 1023).to_uint64_wrapping() as @bit64, 0x34) as Uint64)
+
+    /// The nearest integer to `x` (ties to even) as an `Int32`; `x` must be within `Int32`.
+    nearest: function (x: Float64) Int32 => x.round_even().to_int32_truncated()
+
+    /// `hi + lo` rounded to odd at `Float64`'s precision: `hi` when `lo` is
+    /// zero or `hi`'s last bit is already odd, else the neighbour of `hi`
+    /// towards `lo` (which has the odd last bit). Rounding this to a narrower
+    /// format is the same as rounding `hi + lo` itself.
+    round_odd: function (hi: Float64, lo: Float64) r: Float64 {
+        r = hi
+        if lo.equals(0.0) or not hi.is_finite() {
+            return
+        }
+        bits: @bit64 = hi.to_bits() as @bit64
+        if @bit_and_64(bits, 0x1) != 0x0 {
+            return
+        }
+        if (lo > 0.0) == (hi > 0.0) {
+            r = Float64.from_bits(@i_add_64(bits, 0x1) as Uint64)
+        } else {
+            r = Float64.from_bits(@i_sub_64(bits, 0x1) as Uint64)
+        }
+    }
+
+    /// A value within 2^-86 relative of a double is that double: the
+    /// kernels' exact results (`hypot(3, 4)`, `pow(11, 7)`) arrive as the
+    /// double plus an error, which rounding to a narrower type would
+    /// otherwise treat as a tie-breaker.
+    snap: function (d: Dd) res: Dd {
+        if d.lo.abs() <= d.hi.abs() * 1.2924697071141057e-26 {
+            res = Dd { hi = d.hi, lo = 0.0 }
+            return
+        }
+        res = d
+        return
+    }
+
+    /// `(d.hi + d.lo) * 2^k` as a `Float64`, rounded once to nearest.
+    finish64: function (d: Dd, k: Int32) r: Float64 {
+        r = d.hi
+        if k == 0 as Int32 or d.hi.is_zero() or not d.hi.is_finite() {
+            return
+        }
+        ex: Int32 = d.hi.exponent()
+        if ex + k >= (-1022 as Int32) {
+            r = d.hi.scale_by_power_of_two(k)
+        } else {
+            r = subnormal_result(d, k)
+        }
+    }
+
+    /// `(d.hi + d.lo) * 2^k` rounded once to the nearest multiple of
+    /// `2^-1074` (ties to even), for a result below the smallest normal
+    /// `Float64`. Rounding `d.hi * 2^k` alone would round twice; rounding
+    /// to odd first fails in the top subnormal binade, where the target
+    /// keeps 52 bits.
+    subnormal_result: function (d: Dd, k: Int32) r: Float64 {
+        negative: Bool = d.hi < 0.0
+        u: Dd = if negative then (-d).scale(k + 1074) else d.scale(k + 1074)
+        whole: Float64 = u.hi.floor()
+        fraction: Float64 = u.hi - whole
+        up: Bool = false
+        if fraction > 0.5 {
+            up = true
+        } else if fraction.equals(0.5) {
+            if u.lo > 0.0 {
+                up = true
+            } else if u.lo.equals(0.0) {
+                up = (whole * 0.5).floor() * 2.0 != whole
+            }
+        }
+        n: Float64 = if up then whole + 1.0 else whole
+        r = n.scale_by_power_of_two(-1074)
+        if negative {
+            r = -r
+        }
+    }
+
+    /// Like `finish64`, for a value that may be exactly half way between two
+    /// doubles (`hypot`, `pow`, `root` of exact operands): a pair within
+    /// 2^-42 ulp of that midpoint is the midpoint and rounds to even.
+    finish64_ties: function (d: Dd, k: Int32) r: Float64 {
+        h: Float64 = d.hi
+        if h.is_finite() and not h.is_zero() and k == 0 as Int32 and not d.lo.equals(0.0) {
+            half: Float64 = h.ulp() * 0.5
+            gap: Float64 = d.lo.abs() - half
+            if gap.abs() <= half * 3.637978807091713e-12 {
+                // `h + lo` is the midpoint: pick the even neighbour.
+                other: Float64 = if d.lo > 0.0 then h.next_up() else h.next_down()
+                if @bit_and_64(h.to_bits() as @bit64, 0x1) == 0x0 {
+                    r = h
+                } else {
+                    r = other
+                }
+                return
+            }
+        }
+        r = finish64(d, k)
+    }
+
+    /// `(d.hi + d.lo) * 2^k` as a `Float32`, rounded once to nearest.
+    finish32: function (d: Dd, k: Int32) Float32 =>
+        finish_wide(snap(d), k).to_float32_rounded()
+
+    /// `(d.hi + d.lo) * 2^k` as a `Float16`, rounded once to nearest.
+    finish16: function (d: Dd, k: Int32) Float16 =>
+        finish_wide(snap(d), k).to_float16_rounded()
+
+    /// The value for a narrower type to round: the round-to-odd double.
+    finish_wide: function (d: Dd, k: Int32) r: Float64 {
+        r = round_odd(d.hi, d.lo)
+        if k != 0 as Int32 and r.is_finite() and not r.is_zero() {
+            r = r.scale_by_power_of_two(k)
+        }
+    }
+}

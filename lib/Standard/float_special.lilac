@@ -1,0 +1,249 @@
+// Special functions (math plan phase 5): `erf`, `erfc`, `gamma` and
+// `ln_gamma`, in double-double.
+//
+// `erf a` is the positive-term series `2/sqrt(pi) e^-a^2 sum 2^n a^(2n+1) /
+// (2n+1)!!` below 2 (no cancellation), and `erfc a` above is Laplace's
+// continued fraction `e^-a^2 / sqrt(pi) / (a + (1/2) / (a + 1 / (a + ...)))`
+// with a depth that covers 2^-110. `gamma` is Stirling's series for
+// `ln Gamma(z)` at `z >= 20`, reached by `Gamma(z) = Gamma(z + m) / (z (z+1)
+// ... (z+m-1))`, and the reflection formula for negative arguments;
+// `ln_gamma` also has a Taylor series around its zeros at 1 and 2.
+
+private {
+    /// `erf a` for `0 < a < 2`, as a pair.
+    erf_series: function (a: Float64) res: Dd {
+        square: Dd = Dd.two_prod(a, a)
+        twice: Dd = square * 2.0
+        term: Dd = Dd.of(a)
+        sum: Dd = Dd.of(a)
+        divisor: Float64 = 1.0
+        loop {
+            divisor = divisor + 2.0
+            term = term * twice / divisor
+            sum = sum + term
+            if term.hi < sum.hi * 1e-34 {
+                break
+            }
+        }
+        s: Scaled = exp_reduced(-square)
+        res = (sum * s.v).scale(s.k) * TWO_OVER_SQRT_PI
+    }
+
+    /// `erfc a` for `a >= 2` (Laplace's continued fraction), scaled.
+    erfc_fraction: function (a: Float64) res: Scaled {
+        if a > 27.3 {
+            res = Scaled.exact(0.0)
+            return
+        }
+        depth: Float64 = 20.0 / (a * a) * 40.0 + 14.0
+        k: Int32 = depth.to_int32_truncated()
+        f: Dd = Dd.of(a)
+        loop {
+            if k <= 0 as Int32 {
+                break
+            }
+            f = Dd.of((k as Float64) * 0.5) / f + a
+            k = k - 1
+        }
+        s: Scaled = exp_reduced(-Dd.two_prod(a, a))
+        res = Scaled.new((s.v * INV_SQRT_PI) / f, s.k)
+    }
+
+    /// `erf x`.
+    erf_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.is_zero() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.is_infinite() {
+            res = Scaled.exact((1.0 as Float64).copy_sign(x))
+            return
+        }
+        a: Float64 = x.abs()
+        v: Dd = Dd.of(1.0)
+        if a < 1e-100 {
+            tiny: Dd = Dd.of(a.scale_by_power_of_two(600)) * TWO_OVER_SQRT_PI
+            res = Scaled.new(if x < 0.0 then -tiny else tiny, -600)
+            return
+        } else if a < 2.0 {
+            v = erf_series(a)
+        } else if a < 5.95 {
+            s: Scaled = erfc_fraction(a)
+            v = Dd.of(1.0) - s.v.scale(s.k)
+        }
+        res = Scaled.plain(if x < 0.0 then -v else v)
+    }
+
+    /// `erfc x`.
+    erfc_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.equals(Float64.INFINITY) {
+            res = Scaled.exact(0.0)
+            return
+        }
+        if x < -5.95 {
+            res = Scaled.exact(2.0)
+            return
+        }
+        if x.abs() < 1e-30 {
+            res = Scaled.plain(Dd.of(1.0) - Dd.of(x) * TWO_OVER_SQRT_PI)
+            return
+        }
+        a: Float64 = x.abs()
+        if a >= 2.0 {
+            s: Scaled = erfc_fraction(a)
+            if x > 0.0 {
+                res = s
+            } else {
+                res = Scaled.plain(Dd.of(2.0) - s.v.scale(s.k))
+            }
+            return
+        }
+        e: Dd = erf_series(a)
+        res = Scaled.plain(if x > 0.0 then Dd.of(1.0) - e else Dd.of(1.0) + e)
+    }
+
+    /// `ln Gamma(z)` for `z >= 20`, by Stirling's series.
+    lgamma_stirling: function (z: Dd) res: Dd {
+        lnz: Dd = ln_of(z)
+        r: Dd = (z - 0.5) * lnz - z + HALF_LN_2PI
+        if z.hi < 1e100 {
+            w: Dd = Dd.of(1.0) / z.sqr()
+            r = r + stirling_poly(w) / z
+        }
+        res = r
+    }
+
+    /// `z (z + 1) ... (z + m - 1)`.
+    rising_product: function (z: Dd, m: Int32) res: Dd {
+        res = Dd.of(1.0)
+        i: Int32 = 0
+        loop {
+            if i >= m {
+                break
+            }
+            res = res * (z + (i as Float64))
+            i = i + 1
+        }
+    }
+
+    /// `ln Gamma(z)` for a pair `z > 0`.
+    lgamma_pair: function (z: Dd) res: Dd {
+        if z.hi >= 20.0 {
+            res = lgamma_stirling(z)
+            return
+        }
+        near_one: Dd = z - 1.0
+        if near_one.hi.abs() <= 0.25 {
+            res = near_one * lgamma1_poly(near_one)
+            return
+        }
+        near_two: Dd = z - 2.0
+        if near_two.hi.abs() <= 0.25 {
+            res = ln_of(Dd.of(1.0) + near_two) + near_two * lgamma1_poly(near_two)
+            return
+        }
+        m: Int32 = (20.0 - z.hi).ceil().to_int32_truncated()
+        res = lgamma_stirling(z + (m as Float64)) - ln_of(rising_product(z, m))
+    }
+
+    /// `Gamma(z)` for a pair with `0 < z < 190`, scaled.
+    gamma_pair: function (z: Dd) res: Scaled {
+        m: Int32 = 0
+        if z.hi < 20.0 {
+            m = (20.0 - z.hi).ceil().to_int32_truncated()
+        }
+        l: Dd = lgamma_stirling(z + (m as Float64))
+        s: Scaled = exp_reduced(l)
+        res = Scaled.new(s.v / rising_product(z, m), s.k)
+    }
+
+    /// Whether the finite `x` is an integer.
+    is_whole: function (x: Float64) Bool => x.abs() >= 4503599627370496.0 or x.floor().equals(x)
+
+    /// `Gamma(x)`.
+    gamma_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x.equals(Float64.INFINITY) {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.equals(Float64.NEG_INFINITY) {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.is_zero() {
+            res = Scaled.exact(Float64.INFINITY.copy_sign(x))
+            return
+        }
+        if x > 171.7 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x.abs() < 1e-300 {
+            q: Dd = Dd.quotient(1.0, x.scale_by_power_of_two(200))
+            res = Scaled.new(q, 200)
+            return
+        }
+        if x > 0.0 {
+            res = gamma_pair(Dd.of(x))
+            return
+        }
+        if is_whole(x) {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x < -190.0 {
+            odd: Bool = not (x.floor() * 0.5).floor().equals(x.floor() * 0.5)
+            zero: Float64 = 0.0
+            res = Scaled.exact(if odd then -zero else zero)
+            return
+        }
+        // reflection: Gamma(x) = pi / (sin(pi x) Gamma(1 - x))
+        sine: Scaled, cosine: Scaled = sincos_pi(x)
+        g: Scaled = gamma_pair(Dd.two_sum(1.0, -x))
+        res = Scaled.new(PI / (sine.v * g.v), (0 as Int32) - sine.k - g.k)
+    }
+
+    /// `ln |Gamma(x)|`.
+    lgamma_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x.is_infinite() or x.is_zero() {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x > 2.5563e305 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x.equals(1.0) or x.equals(2.0) {
+            res = Scaled.exact(0.0)
+            return
+        }
+        if x > 0.0 {
+            if x < 1e-300 {
+                res = Scaled.plain(-ln_positive(x))
+            } else {
+                res = Scaled.plain(lgamma_pair(Dd.of(x)))
+            }
+            return
+        }
+        if is_whole(x) {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        // reflection: ln |Gamma(x)| = ln(pi / |sin(pi x)|) - ln Gamma(1 - x)
+        sine: Scaled, cosine: Scaled = sincos_pi(x)
+        magnitude: Dd = if sine.v.hi < 0.0 then -sine.v else sine.v
+        logs: Dd = ln_of(PI / magnitude)
+        if sine.k != 0 as Int32 {
+            logs = logs - LN_2 * (sine.k as Float64)
+        }
+        res = Scaled.plain(logs - lgamma_pair(Dd.two_sum(1.0, -x)))
+    }
+}

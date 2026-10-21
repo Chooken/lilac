@@ -5,3 +5,4 @@ target/
 .cargo/
 build/
 package/
+tools/math-reference/data

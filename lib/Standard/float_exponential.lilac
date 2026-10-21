@@ -1,0 +1,259 @@
+// Exponentials and logarithms (math plan phase 5): `exp`, `exp2`, `exp10`,
+// `exp_m1`, `ln`, `log2`, `log10`, `ln_1p` and `log`, evaluated in
+// double-double (`float_dd.lilac`) with the constants and polynomials of
+// `float_tables.lilac`.
+//
+// `e^y` is `2^k * (1 + p(r))` with `y = k ln 2 + r` and `|r| <= ln 2 / 2`,
+// `r` reduced with `ln 2` as three doubles so that `k * part` is exact. The
+// logarithm splits `x = m 2^e` with `m` in `[0.703125, 1.40625)`, finds the
+// table entry `c` near `1 / m` so that `f = m c - 1` is exact and small, and
+// sums the series `ln(1 + f) = 2 s (1 + z W(z))` with `s = f / (2 + f)`.
+
+private {
+    /// `e^y` as `v * 2^k`, for a finite `y` with `|y.hi| < 1100`.
+    exp_reduced: function (y: Dd) s: Scaled {
+        kf: Float64 = (y.hi * 1.4426950408889634).round_even()
+        r: Dd = y - Dd.two_prod(kf, LN_2_PART_1)
+        r = r - Dd.two_prod(kf, LN_2_PART_2)
+        r = r - kf * LN_2_PART_3
+        p: Dd = r * expm1_poly(r)
+        s = Scaled.new(p + 1.0, kf.to_int32_truncated())
+    }
+
+    /// `e^x`.
+    exp_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x == Float64.INFINITY {
+            res = Scaled.exact(x)
+            return
+        }
+        if x > 710.0 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x < -746.0 {
+            res = Scaled.exact(0.0)
+            return
+        }
+        res = exp_reduced(Dd.of(x))
+        return
+    }
+
+    /// `2^x`.
+    exp2_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x == Float64.INFINITY {
+            res = Scaled.exact(x)
+            return
+        }
+        if x > 1100.0 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x < -1100.0 {
+            res = Scaled.exact(0.0)
+            return
+        }
+        n: Float64 = x.round_even()
+        s: Scaled = exp_reduced(Dd.of(x - n) * LN_2)
+        res = Scaled.new(s.v, s.k + n.to_int32_truncated())
+        return
+    }
+
+    /// `10^x`.
+    exp10_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x == Float64.INFINITY {
+            res = Scaled.exact(x)
+            return
+        }
+        if x > 330.0 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x < -330.0 {
+            res = Scaled.exact(0.0)
+            return
+        }
+        res = exp_reduced(LN_10 * x)
+        return
+    }
+
+    /// `e^x - 1`.
+    expm1_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x == Float64.INFINITY or x.is_zero() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x == Float64.NEG_INFINITY or x < -40.0 {
+            res = Scaled.exact(-1.0)
+            return
+        }
+        if x.abs() < 5.551115123125783e-17 {
+            res = Scaled.exact(x)
+            return
+        }
+        if x > 710.0 {
+            res = Scaled.exact(Float64.INFINITY)
+            return
+        }
+        if x.abs() <= 0.3466 {
+            r: Dd = Dd.of(x)
+            res = Scaled.plain(r * expm1_poly(r))
+            return
+        }
+        s: Scaled = exp_reduced(Dd.of(x))
+        if s.k > 900 {
+            res = s
+            return
+        }
+        res = Scaled.plain(s.v.scale(s.k) - 1.0)
+        return
+    }
+
+    /// `ln m` for `m` (hi, lo) with `hi` in `[0.703125, 1.40625)`.
+    log_mantissa: function (m: Dd) lm: Dd {
+        j: Int32 = nearest(m.hi * 64.0)
+        c: Float64, t: Dd = log_table_entry(j - LOG_TABLE_FIRST)
+        // `m c - 1` exactly: the product is exact as a pair, and its high
+        // half is within a factor of two of 1.
+        p: Dd = Dd.two_prod(m.hi, c)
+        f: Dd = Dd.two_sum(p.hi - 1.0, p.lo) + m.lo * c
+        s: Dd = f / (f + 2.0)
+        z: Dd = s.sqr()
+        s2: Dd = s * 2.0
+        lm = t + (s2 + (s2 * z) * log_poly(z))
+    }
+
+    /// Splits positive finite `x` into `m 2^e` with `m` in `[0.703125, 1.40625)`.
+    split_log: function (x: Float64) (m: Float64, e: Int32) {
+        y: Float64 = x
+        adjust: Int32 = 0
+        if y < Float64.MIN_POSITIVE {
+            y = y * 18014398509481984.0
+            adjust = -54
+        }
+        e = y.exponent()
+        m = y.scale_by_power_of_two(-e)
+        if m >= 1.40625 {
+            m = m * 0.5
+            e = e + 1
+        }
+        e = e + adjust
+    }
+
+    /// `ln x` as a `Dd` for finite `x > 0`.
+    ln_positive: function (x: Float64) res: Dd {
+        m: Float64, e: Int32 = split_log(x)
+        lm: Dd = log_mantissa(Dd.of(m))
+        if e == 0 as Int32 {
+            res = lm
+            return
+        }
+        res = LN_2 * (e as Float64) + lm
+        return
+    }
+
+    /// The results of the logarithms at their special arguments, or none.
+    log_special: function (x: Float64) result: Float64 else nothing {
+        if x.is_nan() or x == Float64.INFINITY {
+            result = x
+            return
+        }
+        if x < 0.0 {
+            result = Float64.NAN
+            return
+        }
+        if x.is_zero() {
+            result = Float64.NEG_INFINITY
+            return
+        }
+        if x.equals(1.0) {
+            result = 0.0
+            return
+        }
+        fail
+    }
+
+    /// `ln x`.
+    ln_kernel: function (x: Float64) res: Scaled {
+        if log_special(x) -> special: Float64 {
+            res = Scaled.exact(special)
+            return
+        }
+        res = Scaled.plain(ln_positive(x))
+        return
+    }
+
+    /// `log2 x`.
+    log2_kernel: function (x: Float64) res: Scaled {
+        if log_special(x) -> special: Float64 {
+            res = Scaled.exact(special)
+            return
+        }
+        m: Float64, e: Int32 = split_log(x)
+        lm: Dd = log_mantissa(Dd.of(m))
+        res = Scaled.plain((e as Float64) + lm * LOG2_E)
+        return
+    }
+
+    /// `log10 x`.
+    log10_kernel: function (x: Float64) res: Scaled {
+        if log_special(x) -> special: Float64 {
+            res = Scaled.exact(special)
+            return
+        }
+        m: Float64, e: Int32 = split_log(x)
+        lm: Dd = log_mantissa(Dd.of(m))
+        res = Scaled.plain(LOG10_2 * (e as Float64) + lm * LOG10_E)
+        return
+    }
+
+    /// `ln(1 + x)`.
+    ln_1p_kernel: function (x: Float64) res: Scaled {
+        if x.is_nan() or x == Float64.INFINITY or x.is_zero() {
+            res = Scaled.exact(x)
+            return
+        }
+        if x < -1.0 {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.equals(-1.0) {
+            res = Scaled.exact(Float64.NEG_INFINITY)
+            return
+        }
+        if x.abs() < 5.551115123125783e-17 {
+            res = Scaled.exact(x)
+            return
+        }
+        u: Dd = Dd.two_sum(1.0, x)
+        e: Int32 = u.hi.exponent()
+        m: Dd = u.scale(-e)
+        if m.hi >= 1.40625 {
+            m = m * 0.5
+            e = e + 1
+        }
+        lm: Dd = log_mantissa(m)
+        if e == 0 as Int32 {
+            res = Scaled.plain(lm)
+            return
+        }
+        res = Scaled.plain(LN_2 * (e as Float64) + lm)
+        return
+    }
+
+    /// `ln x / ln base`.
+    log_base_kernel: function (x: Float64, base: Float64) res: Scaled {
+        if x.is_nan() or base.is_nan() or x < 0.0 or base <= 0.0 or base.equals(1.0) {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if not x.is_finite() or x.is_zero() or not base.is_finite() or x.equals(1.0) {
+            // An infinite or zero logarithm: the quotient of the doubles.
+            ln_x: Float64 = ln_kernel(x).v.hi
+            ln_b: Float64 = ln_kernel(base).v.hi
+            res = Scaled.exact(ln_x / ln_b)
+            return
+        }
+        res = Scaled.plain(ln_positive(x) / ln_positive(base))
+        return
+    }
+}

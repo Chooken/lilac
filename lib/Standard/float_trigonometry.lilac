@@ -1,0 +1,372 @@
+// Trigonometry (math plan phase 5): `sin`, `cos`, `tan`, `sin_cos`,
+// `sin_pi`, `cos_pi` and `tan_pi`.
+//
+// An argument `a >= pi / 4` is reduced by Payne-Hanek: `a = M 2^E` times the
+// bits of `2 / pi` gives `a 2/pi = n + f` with `|f| <= 1/2`, computed on
+// 64-bit limbs to 192 bits after the point, so that even an argument whose
+// `f` is 2^-62 (the closest a double comes to a multiple of `pi / 2`) keeps
+// more than 128 significant bits, and `(1e300).sin()` is right. The angle
+// `t = f pi / 2` then goes through the Taylor series in double-double.
+// `sin_pi` and friends reduce exactly instead (`x % 2` and a half-integer
+// are exact), so they never need `pi` until the final multiplication.
+
+private {
+    /// An argument reduced to an angle: the quadrant `n` (0 to 3) and the
+    /// angle `t` in `[-pi/4, pi/4]` with `a = n pi/2 + t` modulo `2 pi`.
+    Reduced: object {
+        quadrant: Int32
+        angle: Dd
+    }
+
+    /// Adds `value` to limb `index` of `d`, carrying towards limb 0.
+    add_limb: function (d: ref @array(@bit64, 8), index: @bit_native, value: @bit64) nothing {
+        i: @bit_native = index
+        carry: @bit64 = value
+        loop {
+            if carry == 0x0 {
+                break
+            }
+            slot: ref @bit64 = @array_at(d, i)
+            old: @bit64 = slot
+            sum: @bit64 = @i_add_64(old, carry)
+            slot = sum
+            if @i_less_than_u_64(sum, carry) {
+                carry = 0x1
+            } else {
+                carry = 0x0
+            }
+            if i == 0x0 {
+                break
+            }
+            i = @i_sub_native(i, 0x1)
+        }
+    }
+
+    /// Limb `index` of `d`.
+    limb: function (d: ref @array(@bit64, 8), index: @bit_native) res: @bit64 {
+        if @i_less_than_u_native(index, 0x8) {
+            res = @array_at(d, index)
+        } else {
+            res = 0x0
+        }
+    }
+
+    /// `a >= pi / 4`, finite, as a quadrant and an angle (Payne-Hanek).
+    trig_reduce: function (a: Float64) res: Reduced {
+        bits: @bit64 = a.to_bits() as @bit64
+        m: @bit64 = @bit_or_64(@bit_and_64(bits, 0xFFFFFFFFFFFFF), 0x10000000000000)
+        big_e: Int32 = a.exponent() - 52
+        i0: Int32 = 0
+        if big_e >= 2 as Int32 {
+            i0 = (big_e - 2) / 64
+        }
+        b: Int32 = big_e - 64 * (i0 + 1)
+        b1: Int32 = -2
+        if b >= 0 as Int32 {
+            b1 = 0
+        } else if b >= (-64 as Int32) {
+            b1 = -1
+        }
+        b0: @bit64 = (b - 64 * b1).to_uint64_wrapping() as @bit64
+
+        d: @array(@bit64, 8) = @array(@bit64, 8) {}
+        j: Int32 = 0
+        loop {
+            if j >= 6 as Int32 {
+                break
+            }
+            w: @bit64 = two_over_pi_word((i0 + j).to_uint_wrapping() as @bit_native)
+            high: Uint64, low: Uint64 = (m as Uint64).widening_multiply(w as Uint64)
+            at: @bit_native = (j + 1).to_uint_wrapping() as @bit_native
+            add_limb(ref d, at, high as @bit64)
+            add_limb(ref d, @i_add_native(at, 0x1), low as @bit64)
+            j = j + 1
+        }
+        // d is the sum scaled by 2^b: shift left by b0 bits (b = 64 b1 + b0)
+        if b0 != 0x0 {
+            k: @bit_native = 0x0
+            loop {
+                if k == 0x8 {
+                    break
+                }
+                here: @bit64 = @array_at(ref d, k)
+                next: @bit64 = limb(ref d, @i_add_native(k, 0x1))
+                slot: ref @bit64 = @array_at(ref d, k)
+                slot = @bit_or_64(@bit_shift_left_64(here, b0), @bit_shift_right_u_64(next, @i_sub_64(0x40, b0)))
+                k = @i_add_native(k, 0x1)
+            }
+        }
+        unit: @bit_native = (2 + b1).to_uint_wrapping() as @bit_native
+        quadrant: @bit64 = @bit_and_64(@array_at(ref d, unit), 0x3)
+        f0: @bit64 = limb(ref d, @i_add_native(unit, 0x1))
+        f1: @bit64 = limb(ref d, @i_add_native(unit, 0x2))
+        f2: @bit64 = limb(ref d, @i_add_native(unit, 0x3))
+        negative: Bool = @bit_and_64(f0, 0x8000000000000000) != 0x0
+        if negative {
+            quadrant = @bit_and_64(@i_add_64(quadrant, 0x1), 0x3)
+            // f = 2^192 - f
+            t2: @bit64 = @i_add_64(@bit_not_64(f2), 0x1)
+            c2: @bit64 = if t2 == 0x0 then 0x1 else 0x0
+            t1: @bit64 = @i_add_64(@bit_not_64(f1), c2)
+            c1: @bit64 = if t1 == 0x0 and c2 == 0x1 then 0x1 else 0x0
+            t0: @bit64 = @i_add_64(@bit_not_64(f0), c1)
+            f0 = t0
+            f1 = t1
+            f2 = t2
+        }
+        angle: Dd = fraction_angle(f0, f1, f2)
+        if negative {
+            angle = -angle
+        }
+        res = Reduced { quadrant = (quadrant as Uint64).to_int32_wrapping(), angle = angle }
+    }
+
+    /// `(f0 2^-64 + f1 2^-128 + f2 2^-192) * pi / 2` as a pair.
+    fraction_angle: function (f0: @bit64, f1: @bit64, f2: @bit64) res: Dd {
+        lz: @bit64 = 0x0
+        top: @bit64 = f0
+        mid: @bit64 = f1
+        low: @bit64 = f2
+        if top == 0x0 {
+            top = mid
+            mid = low
+            low = 0x0
+            lz = 0x40
+            if top == 0x0 {
+                top = mid
+                mid = 0x0
+                lz = 0x80
+                if top == 0x0 {
+                    res = Dd.of(0.0)
+                    return
+                }
+            }
+        }
+        z: @bit64 = @bit_leading_zeros_64(top)
+        if z != 0x0 {
+            top = @bit_or_64(@bit_shift_left_64(top, z), @bit_shift_right_u_64(mid, @i_sub_64(0x40, z)))
+            mid = @bit_or_64(@bit_shift_left_64(mid, z), @bit_shift_right_u_64(low, @i_sub_64(0x40, z)))
+        }
+        lz = @i_add_64(lz, z)
+        // the value is (top 2^-64 + mid 2^-128) 2^-lz
+        first: @bit64 = @bit_shift_right_u_64(top, 0xB)
+        second: @bit64 = @bit_or_64(@bit_shift_left_64(@bit_and_64(top, 0x7FF), 0x2A), @bit_shift_right_u_64(mid, 0x16))
+        shift: Int32 = (lz as Uint64).to_int32_wrapping()
+        hi: Float64 = (first as Uint64).to_float64_rounded().scale_by_power_of_two((0 as Int32) - (shift + 53))
+        lo: Float64 = (second as Uint64).to_float64_rounded().scale_by_power_of_two((0 as Int32) - (shift + 106))
+        res = Dd.fast_two_sum(hi, lo) * PI_2
+    }
+
+    /// `sin t` and `cos t` for `|t| <= pi / 4 + eps`.
+    sincos_series: function (t: Dd) (s: Dd, c: Dd) {
+        z: Dd = t.sqr()
+        s = t + (t * z) * sin_poly(z)
+        c = z * cos_poly(z) + 1.0
+    }
+
+    /// The quadrant and angle of any finite `a >= 0`.
+    reduce_angle: function (a: Float64) res: Reduced {
+        if a < 0.7853981633974483 {
+            res = Reduced { quadrant = 0, angle = Dd.of(a) }
+        } else {
+            res = trig_reduce(a)
+        }
+    }
+
+    /// `sin a` and `cos a` as pairs for finite `a >= 0`.
+    sincos_positive: function (a: Float64) (s: Dd, c: Dd) {
+        r: Reduced = reduce_angle(a)
+        ss: Dd, cc: Dd = sincos_series(r.angle)
+        q: Int32 = r.quadrant
+        if q == 0 as Int32 {
+            s = ss
+            c = cc
+        } else if q == 1 as Int32 {
+            s = cc
+            c = -ss
+        } else if q == 2 as Int32 {
+            s = -ss
+            c = -cc
+        } else {
+            s = -cc
+            c = ss
+        }
+    }
+
+    /// `sin x`.
+    sin_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        s: Dd, c: Dd = sincos_positive(x.abs())
+        res = Scaled.plain(if x < 0.0 then -s else s)
+    }
+
+    /// `cos x`.
+    cos_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(1.0)
+            return
+        }
+        s: Dd, c: Dd = sincos_positive(x.abs())
+        res = Scaled.plain(c)
+    }
+
+    /// `tan x`.
+    tan_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.abs() < 7.450580596923828e-9 {
+            res = Scaled.exact(x)
+            return
+        }
+        s: Dd, c: Dd = sincos_positive(x.abs())
+        t: Dd = s / c
+        res = Scaled.plain(if x < 0.0 then -t else t)
+    }
+
+    /// `sin x` and `cos x`.
+    sin_cos_kernel: function (x: Float64) (sine: Scaled, cosine: Scaled) {
+        if not x.is_finite() {
+            sine = Scaled.exact(Float64.NAN)
+            cosine = Scaled.exact(Float64.NAN)
+            return
+        }
+        if x.abs() < 7.450580596923828e-9 {
+            sine = Scaled.exact(x)
+            cosine = Scaled.exact(1.0)
+            return
+        }
+        s: Dd, c: Dd = sincos_positive(x.abs())
+        sine = Scaled.plain(if x < 0.0 then -s else s)
+        cosine = Scaled.plain(c)
+    }
+
+    /// For `x` times pi: the quadrant (0 to 3), the exact reduced multiple
+    /// `r` in `[-1/4, 1/4]`, and whether `r` is zero.
+    reduce_pi: function (x: Float64) (quadrant: Int32, r: Float64) {
+        t: Float64 = x % 2.0
+        n: Float64 = (t * 2.0).round_even()
+        r = t - n * 0.5
+        q: Int32 = n.to_int32_truncated()
+        quadrant = q.rem_euclid(4 as Int32)
+    }
+
+    /// `sin(pi x)` and `cos(pi x)` as scaled pairs for finite `x`, with the
+    /// exact values at the multiples of 1/2.
+    sincos_pi: function (x: Float64) (s: Scaled, c: Scaled) {
+        q: Int32, r: Float64 = reduce_pi(x)
+        if r.is_zero() {
+            // x is a multiple of 1/2: the values are 0, 1 or -1
+            zero: Float64 = (0.0 as Float64).copy_sign(x)
+            if q == 0 as Int32 {
+                s = Scaled.exact(zero)
+                c = Scaled.exact(1.0)
+            } else if q == 1 as Int32 {
+                s = Scaled.exact(1.0)
+                c = Scaled.exact(0.0)
+            } else if q == 2 as Int32 {
+                s = Scaled.exact(zero)
+                c = Scaled.exact(-1.0)
+            } else {
+                s = Scaled.exact(-1.0)
+                c = Scaled.exact(0.0)
+            }
+            return
+        }
+        if r.abs() < 1e-100 {
+            // a tiny angle: sin t is t and cos t is 1, up to 2^-300; t is
+            // formed from a scaled copy of r so no step underflows
+            tiny: Dd = Dd.of(r.scale_by_power_of_two(600)) * PI
+            one: Dd = Dd.of(1.0)
+            k600: Int32 = -600
+            if q == 0 as Int32 {
+                s = Scaled.new(tiny, k600)
+                c = Scaled.plain(one)
+            } else if q == 1 as Int32 {
+                s = Scaled.plain(one)
+                c = Scaled.new(-tiny, k600)
+            } else if q == 2 as Int32 {
+                s = Scaled.new(-tiny, k600)
+                c = Scaled.plain(-one)
+            } else {
+                s = Scaled.plain(-one)
+                c = Scaled.new(tiny, k600)
+            }
+            return
+        }
+        ss: Dd, cc: Dd = sincos_series(Dd.of(r) * PI)
+        s = Scaled.plain(ss)
+        c = Scaled.plain(cc)
+        if q == 1 as Int32 {
+            s = Scaled.plain(cc)
+            c = Scaled.plain(-ss)
+        } else if q == 2 as Int32 {
+            s = Scaled.plain(-ss)
+            c = Scaled.plain(-cc)
+        } else if q == 3 as Int32 {
+            s = Scaled.plain(-cc)
+            c = Scaled.plain(ss)
+        }
+    }
+
+    /// `sin(pi x)`.
+    sin_pi_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        s: Scaled, c: Scaled = sincos_pi(x)
+        res = s
+    }
+
+    /// `cos(pi x)`.
+    cos_pi_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        s: Scaled, c: Scaled = sincos_pi(x)
+        res = c
+    }
+
+    /// `tan(pi x)`: an infinity with the sign of `x` at the half-integers.
+    tan_pi_kernel: function (x: Float64) res: Scaled {
+        if not x.is_finite() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        q: Int32, r: Float64 = reduce_pi(x)
+        if r.is_zero() {
+            if q.rem_euclid(2 as Int32) == 0 as Int32 {
+                res = Scaled.exact((0.0 as Float64).copy_sign(x))
+            } else {
+                res = Scaled.exact(Float64.INFINITY.copy_sign(x))
+            }
+            return
+        }
+        s: Scaled, c: Scaled = sincos_pi(x)
+        if s.k != 0 as Int32 {
+            // a tiny angle in an even quadrant: tan is the sine
+            res = s
+            return
+        }
+        if c.k != 0 as Int32 {
+            // a tiny angle in an odd quadrant: tan is s / c with c scaled
+            res = Scaled.new(s.v / c.v, 600)
+            return
+        }
+        res = Scaled.plain(s.v / c.v)
+    }
+}

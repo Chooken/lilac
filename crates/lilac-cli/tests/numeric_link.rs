@@ -102,10 +102,20 @@ const FLOAT_COMPARE: [&str; 4] = [
     "greater_than_or_equal",
 ];
 
+/// Phase 5's methods (`Standard`'s elementary functions): written in Lilac
+/// on the operations above, so they must link wherever those do.
+const MATH_UNARY: [&str; 28] = [
+    "exp", "exp2", "exp10", "exp_m1", "ln", "log2", "log10", "ln_1p", "sin", "cos", "tan",
+    "sin_pi", "cos_pi", "tan_pi", "atan", "asin", "acos", "sinh", "cosh", "tanh", "asinh", "acosh",
+    "atanh", "erf", "erfc", "gamma", "ln_gamma", "cbrt",
+];
+
+const MATH_BINARY: [&str; 4] = ["pow", "hypot", "atan2", "log"];
+
 /// The probe program: a `main` and one export per operation and width.
 #[allow(clippy::too_many_lines, reason = "one template")]
 fn program() -> String {
-    let mut text = String::from("main: function () nothing {\n}\n");
+    let mut text = String::from("using Standard\n\nmain: function () nothing {\n}\n");
     for width in INT_WIDTHS {
         let ty = format!("@bit{width}");
         let ty = if width == "native" {
@@ -219,6 +229,46 @@ fn program() -> String {
                 .expect("writes to a string");
             }
         }
+    }
+    for (float, bits) in [("Float16", 16), ("Float32", 32), ("Float64", 64)] {
+        for (index, name) in MATH_UNARY.iter().enumerate() {
+            writeln!(
+                text,
+                "probe_math_{name}_{float}_{index}: export function (a: @bit{bits}) r: @bit{bits} {{
+    x: {float} = {float}.from_bits(a as Uint{bits})
+    r = x.{name}().to_bits() as @bit{bits}
+}}
+"
+            )
+            .expect("writes to a string");
+        }
+        for (index, name) in MATH_BINARY.iter().enumerate() {
+            writeln!(
+                text,
+                "probe_math_{name}_{float}_{index}: export function (a: @bit{bits}, b: @bit{bits}) r: @bit{bits} {{
+    x: {float} = {float}.from_bits(a as Uint{bits})
+    y: {float} = {float}.from_bits(b as Uint{bits})
+    r = x.{name}(y).to_bits() as @bit{bits}
+}}
+"
+            )
+            .expect("writes to a string");
+        }
+        writeln!(
+            text,
+            "probe_math_sin_cos_{float}: export function (a: @bit{bits}) r: @bit{bits} {{
+    x: {float} = {float}.from_bits(a as Uint{bits})
+    s: {float}, c: {float} = x.sin_cos()
+    r = (s + c).to_bits() as @bit{bits}
+}}
+
+probe_math_ints_{float}: export function (a: @bit{bits}, n: @bit32) r: @bit{bits} {{
+    x: {float} = {float}.from_bits(a as Uint{bits})
+    r = (x.pow_int(n as Int32) + x.root(n as Int32)).to_bits() as @bit{bits}
+}}
+"
+        )
+        .expect("writes to a string");
     }
     text
 }
