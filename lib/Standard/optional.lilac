@@ -17,6 +17,10 @@ Optional[T]: enum {
         fail
     }
 
+    get_unchecked: function (self: Optional[T]) value: T {
+        value = (ref self) as ref unknown as ref T
+    }
+
     /// A reference to the `Some` value, left in place; fails on `None`.
     /// Writes through it change the optional's value. For an
     /// `Optional[ref X]` it is the stored reference itself.
@@ -28,6 +32,10 @@ Optional[T]: enum {
             }
         }
         fail
+    }
+
+    get_ref_unchecked: function (self) value: ref T {
+        value = self as ref unknown as ref T
     }
 
     unwrap_or: function(self: Optional[T], default: T) value: T {

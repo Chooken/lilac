@@ -1,0 +1,7 @@
+
+
+swap[T]: function (a: ref T, b: ref T) nothing {
+    c: T = @read(a)
+    a = @read(b)
+    b = @read(c)
+}

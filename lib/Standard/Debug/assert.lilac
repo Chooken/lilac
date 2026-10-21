@@ -1,0 +1,9 @@
+
+
+assert: function (condition: Bool, expected: Bool, format: Format) nothing {
+    if @builtin.Build.mode == @builtin.Mode.Debug {
+        if condition != expected {
+            @panic(format)
+        }
+    }
+}

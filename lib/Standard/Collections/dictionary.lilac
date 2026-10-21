@@ -1,0 +1,284 @@
+using Standard.Heap as Heap
+
+Map[K, V]: object {
+
+    private {
+
+        allocator: Heap.Allocator
+        data: Slice[MapBucket[K, V]]
+        used: Int
+
+        DEFAULT_INITIAL_CAPACITY: Int => 16
+        MAX_OCCUPENCY: Int => 75
+    }
+
+    new: function () result: Map[K, V] {
+        result = new_using(Heap.get_default_allocator())
+    }
+
+    new_using: function (allocator: Heap.Allocator) result: Map[K, V] {
+        result = Map[K,V] {
+            allocator = allocator
+            data = allocator.allocate[MapBucket[K, V]](
+                DEFAULT_INITIAL_CAPACITY
+            )
+            used = 0
+        }
+    }
+
+    add: function (self, key: K, value: V) nothing {
+
+        if self.get_occupency() >= MAX_OCCUPENCY {
+            self.grow()
+        }
+
+        if insert_into(key, value, ref self.data) {
+            self.used += 1
+        }
+    }
+
+    get: function (self, key: K) value: ref V else nothing {
+
+        index: Int = get_index_of(key, ref self.data) else {
+            fail
+        }
+
+        value = ref self.data.get(index).value
+    }
+
+    remove: function (self, key: K) nothing {
+
+        index: Int = get_index_of(key, ref self.data) else {
+            return
+        }
+
+        bucket: ref MapBucket[K, V] = self.data.get(index)
+
+        @drop(ref bucket.key)
+        @drop(ref bucket.value)
+        bucket.psl = 0
+        bucket.is_occupied = false
+
+        self.used -= 1
+
+        capacity: Int = self.data.get_count()
+        index = wrap_index(index + 1, capacity)
+
+        probe_count: Int = 0
+
+        loop if probe_count < capacity {
+
+            next_bucket: ref MapBucket[K, V] = self.data.get(index)
+
+            if not next_bucket.is_occupied or next_bucket.psl == 0 as Int32 {
+                break
+            }
+
+            Standard.Memory.swap[MapBucket[K, V]](bucket, next_bucket)
+
+            bucket.psl -= 1
+
+            bucket = next_bucket
+            index = wrap_index(index + 1, capacity)
+            probe_count += 1
+        }
+    }
+
+    clear: function (self) nothing {
+
+        index: Int = 0
+        capacity: Int = self.data.get_count()
+
+        loop if index < capacity {
+
+            bucket: ref MapBucket[K,V] = self.data.get(index)
+
+            if bucket.is_occupied {
+                @drop(ref bucket.key)
+                @drop(ref bucket.value)
+                bucket.psl = 0
+                bucket.is_occupied = false
+            }
+
+            index += 1
+
+        } else break
+
+        self.used = 0
+    }
+
+    reserve: function (self, capacity: Int) nothing {
+
+        Standard.Debug.assert(Int.is_power_of_two(capacity), true, "Dictionary's can only reserve capacities that are a power of two.")
+
+        old_capacity: Int = self.data.get_count()
+
+        if capacity <= old_capacity {
+            return
+        }
+
+        if self.used == 0 as Int {
+            self.data = self.allocator.reallocate[MapBucket[K, V]](self.data, capacity)
+            return
+        }
+
+        new_data: Slice[MapBucket[K, V]] = self.allocator.allocate[MapBucket[K, V]](capacity)
+
+        index: Int = 0
+
+        loop if index < old_capacity {
+
+            bucket: ref MapBucket[K, V] = self.data.get(index)
+
+            if bucket.is_occupied {
+                insert_into(@read(ref bucket.key), @read(ref bucket.value), ref new_data)
+            }
+
+            index += 1
+
+        } else break
+
+        self.allocator.deallocate[MapBucket[K, V]](self.data)
+        self.data = new_data
+    }
+
+    @on_copy: function (self) to: Map[K, V] {
+
+        capacity: Int = self.data.get_count()
+
+        new_slice: Slice[MapBucket[K, V]] = self.allocator.create[MapBucket[K, V]](capacity)
+
+        index: Int = 0
+
+        loop if index < capacity {
+
+            bucket: ref MapBucket[K,V] = self.data.get(index)
+
+            if bucket.is_occupied {
+                @write(new_slice.get(index), bucket)
+            }
+
+            index += 1
+
+        } else break
+
+        to = Map[K, V] {
+            allocator = self.allocator
+            data = new_slice
+            used = self.used
+        }
+    }
+
+    @on_drop: function (self) nothing {
+
+        index: Int = 0
+        capacity: Int = self.data.get_count()
+
+        loop if index < capacity {
+
+            bucket: ref MapBucket[K,V] = self.data.get(index)
+
+            if bucket.is_occupied {
+                @drop(bucket.key)
+                @drop(bucket.value)
+            }
+
+            index += 1
+
+        } else break
+
+        self.allocator.deallocate[MapBucket[K, V]](self.data)
+    }
+
+    private {
+
+        get_occupency: function (self) Int => ((self.used + 1) * 100) / self.data.get_count()
+
+        grow: function (self) nothing {
+            self.reserve(self.data.get_count() * 2)
+        }
+
+        get_ideal_index: function (key: ref K, capacity: Int) index: Int {
+            hash: @bit64 = key.hash()
+            index = @truncate(@bit_and_64(hash, @extend_zero((capacity - 1) as @bit_native))) as @bit_native
+        }
+
+        wrap_index: function (index: Int, capacity: Int) Int => @bit_and_native(index as @bit_native, (capacity - 1) as @bit_native)
+
+        insert_into: function (key: K, value: V, slice: ref Slice[MapBucket[K, V]]) inserted_new: Bool {
+
+            capacity: Int = slice.get_count()
+
+            index: Int = get_ideal_index(ref key, capacity)
+
+            bucket: ref MapBucket[K, V] = slice.get(index)
+
+            new_bucket: MapBucket[K, V] {
+                key = @move(key)
+                value = @move(value)
+                psl = 0
+                is_occupied = true
+            }
+
+            inserted_new = true
+
+            loop if bucket.is_occupied {
+
+                if bucket.key == new_bucket.key {
+                    @drop(bucket.key)
+                    @drop(bucket.value)
+                    inserted_new = false
+                    break
+                }
+
+                if new_bucket.psl > bucket.psl {
+                    Standard.Memory.swap[MapBucket[K, V]](ref new_bucket, bucket)
+                }
+                
+                new_bucket.psl += 1
+                index = wrap_index(index + 1, capacity)
+                bucket = slice.get(index)
+
+            } else break
+
+            @write(bucket, @move(new_bucket))
+        }
+
+        get_index_of: function (key: K, slice: ref Slice[MapBucket[K,V]]) index: Int else nothing {
+
+            capacity: Int = slice.get_count()
+            index = get_ideal_index(ref key, capacity)
+
+            probe_count: Int = 0
+
+            loop if probe_count < capacity {
+
+                bucket: ref MapBucket[K, V] = slice.get(index)
+
+                if not bucket.is_occupied or probe_count.to_int32_wrapping() > bucket.psl {
+                    break
+                }
+
+                if bucket.key == key {
+                    return
+                }
+
+                index = wrap_index(index + 1, capacity)
+                probe_count += 1
+            }
+
+            fail
+        } 
+    }
+    
+}
+
+private {
+
+    MapBucket[K, V]: object {
+        key: K
+        value: V
+        psl: Int32
+        is_occupied: Bool
+    }
+}
