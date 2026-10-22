@@ -37,6 +37,14 @@ Map[K, V]: object {
         }
     }
 
+    contains: function (self, key: K) result: Bool {
+        if get_index_of(key, ref self.data) {
+            result = true
+        } else {
+            result = false
+        }
+    }
+
     get: function (self, key: K) value: ref V else nothing {
 
         index: Int = get_index_of(key, ref self.data) else {

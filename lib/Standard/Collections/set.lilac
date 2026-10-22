@@ -1,0 +1,24 @@
+using Standard.Heap as Heap
+
+Set[K]: object {
+
+    private {
+        map: Map[K, Nothing]
+    }
+
+    new: function () Set[K] => Map[K, Nothing].new()
+
+    new_using: function (allocator: Heap.Allocator) Set[K] => Map[K, Nothing].new_using(allocator)
+
+    add: function (self, key: K) nothing {
+        self.map.add(key, Nothing {})
+    }
+
+    contains: function (self, key: K) result: Bool {
+        result = self.map.contains(key)
+    }
+
+    remove: function (self, key: K) nothing {
+        self.map.remove(key)
+    }
+}
