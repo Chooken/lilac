@@ -10,6 +10,18 @@
 - The official release omits `libxml2s.lib`. A link-time stub was placed at
   `C:\Users\joshu\llvm-18.1.8\lib\libxml2s.lib`. **Do not remove it** or
   `llvm-sys`/`inkwell` linking breaks.
+- On macOS the LLVM tree is Homebrew's `llvm@18` (`LLVM_SYS_181_PREFIX =
+  "/opt/homebrew/opt/llvm@18"`), and `zstd` must be installed for its
+  `libzstd.a`. `lilac-codegen-llvm/build.rs` links LLVM there instead of
+  `llvm-sys` (`no-llvm-linking`, macOS only): every archive, `libzstd.a`
+  included, from a folder of its own, so `lilac` loads nothing outside
+  `/usr/lib` (`llvm-sys` linked Homebrew's `libzstd.dylib`, and its search
+  path let Apple's linker bind `libSystem`'s `libunwind` re-export to
+  LLVM's). Homebrew's `lld` loads `@rpath/libLLVM.dylib`, so it runs only
+  from its own place: the run tests' sysroot symlinks it on Unix, and
+  `scripts/package.sh` builds a static one (`scripts/build-lld.sh`,
+  `scripts/lld/main.cpp`, every flavor). Both scripts refuse a binary that
+  loads a library outside `/usr/lib`.
 - **`inkwell` is confined to `lilac-codegen-llvm`.** No other crate may depend
   on `inkwell`, `llvm-sys`, or link LLVM. Only `lilac-codegen-llvm` needs
   `unsafe` internally via those crates; the workspace `unsafe_code = "forbid"`

@@ -1,0 +1,90 @@
+using Standard.Sync as Sync
+using Standard.Heap as Heap
+
+Memory[T]: object {
+
+    private {
+        ptr: ref MemoryHeader[T]
+    }
+
+    new: function (count: Int) result: Memory[T] {
+        result = new_using(count, Heap.get_default_allocator())
+    }
+
+    new_using: function (count: Int, allocator: Heap.Allocator) result: Memory[T] {
+
+        header_size: Int = align_up(
+            @size_of(MemoryHeader[T]), 
+            @align_of(T)
+        )
+
+        result = Memory[T] {
+            ptr = allocator.allocate_raw(
+                header_size, 
+                @align_of(T)
+            ) as ref MemoryHeader[T]
+        }
+
+        result.ptr = MemoryHeader[T] {
+            allocator = allocator
+            data = Slice[T].new(
+                @ptr_add(result.ptr as ref unknown, header_size) as ref T, 
+                count
+            )
+        }
+    }
+
+    get: function (self, index: Int) ref T => self.ptr.data.get(index)
+
+    get_count: function (self) Int => self.ptr.data.get_count()
+
+    get_slice: function (self) slice: Slice[T] {
+        slice = self.ptr.data
+    }
+
+    get_allocator: function (self) Heap.Allocator => self.ptr.allocator
+
+    slice: function (self, range: Range) Slice[T] => self.ptr.data.slice(range)
+
+    resize: function (self, new_size: Int) nothing {
+
+        header_size: Int = align_up(
+            @size_of(MemoryHeader[T]), 
+            @align_of(T)
+        )
+
+        allocator: Heap.Allocator = self.ptr.allocator
+
+        ptr: ref unknown = self.ptr as ref unknown
+
+        self.ptr = allocator.reallocate_raw(
+            ptr, 
+            header_size + self.ptr.data.get_count(), 
+            new_size, 
+            @align_of(T)
+        ) as ref MemoryHeader[T]
+    }
+
+    free: function (self) nothing {
+        header_size: Int = align_up(
+            @size_of(MemoryHeader[T]), 
+            @align_of(T)
+        )
+
+        allocator: Heap.Allocator = self.ptr.allocator
+
+        allocator.free_raw(self.ptr as ref unknown, header_size + self.ptr.data.get_count(), @align_of(T))
+    }
+}
+
+private {
+
+    MemoryHeader[T]: object {
+        allocator: Heap.Allocator
+        data: Slice[T]
+    }
+
+    /// `value` rounded up to a multiple of `alignment` (a power of two),
+    /// wrapping: an address may be past `Int.MAX` on a 32-bit target.
+    align_up: function (value: Int, alignment: Int) Int => @bit_and_native(value.wrapping_add(alignment - 1) as @bit_native, @bit_not_native((alignment - 1) as @bit_native))
+}

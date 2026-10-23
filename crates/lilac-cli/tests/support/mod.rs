@@ -72,8 +72,31 @@ pub fn sysroot() -> Option<PathBuf> {
             place(&stub.path(), &root.join(&triple).join(stub.file_name()))?;
         }
     }
-    place(&lld, &root.join("bin").join(lld_name))?;
+    place_lld(&lld, &root.join("bin").join(lld_name))?;
     Some(root)
+}
+
+/// Puts `lld` at `dest`. On Unix it is a symbolic link: an LLVM tree's `lld`
+/// may load `@rpath/libLLVM.dylib` from beside itself (Homebrew's does), which
+/// only its own location finds.
+fn place_lld(lld: &Path, dest: &Path) -> Option<()> {
+    #[cfg(unix)]
+    {
+        if std::fs::read_link(dest).is_ok_and(|target| target == lld) {
+            return Some(());
+        }
+        std::fs::create_dir_all(dest.parent()?).ok()?;
+        let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        std::os::unix::fs::symlink(lld, &tmp).ok()?;
+        if std::fs::rename(&tmp, dest).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::metadata(dest).ok()?;
+        }
+        Some(())
+    }
+    #[cfg(not(unix))]
+    place(lld, dest)
 }
 
 /// Puts a copy of `src` at `dest` (a hard link when possible), unless a file

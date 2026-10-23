@@ -1,0 +1,149 @@
+using Standard.Collections
+using Standard.Heap as Heap
+
+String: object {
+
+    private {
+        layout: StringLayout
+    }
+
+    new: function (format: Format) result: String {
+        result = String {
+            layout = .Inline(StringInline.new())
+        }
+        result.formatter().write(format)
+    }
+
+    new_using: function (format: Format, allocator: Heap.Allocator) result: String {
+        result = String {
+            layout = .Inline(StringInline.new())
+        }
+        result.formatter().write(format)
+    }
+
+    add: function (self, text: @byte_buffer) nothing {
+        match self.layout {
+            .Inline -> inline: ref StringInline { 
+                inline.add(text) else -> buffer: StringBuffer {
+                    self.layout = .Heap(buffer)
+                    return
+                }
+            }
+
+            .Heap -> buffer: ref StringBuffer {
+                buffer.add(text)
+            }
+        }
+    }
+
+    formatter: function (self) result: Formatter {
+        result = Formatter.over[String](self, ref String.add)
+    }
+
+    @conversion: function (from: Format) String => new(from)
+
+    @format: function (self, format: ref Formatter) nothing {
+        
+        match self.layout {
+
+            .Inline -> inline: ref StringInline {
+                format.write_bytes(@byte_buffer_from(
+                    (ref inline.buffer) as ref unknown as ref @bit8,
+                    inline.count as Int
+                ))
+            }
+
+            .Heap -> buffer: ref StringBuffer {
+
+                slice: Slice[Uint8] = buffer.list.get_slice()
+
+                format.write_bytes(@byte_buffer_from(
+                    (slice.base()) as ref unknown as ref @bit8,
+                    buffer.list.get_count()
+                ))
+            }
+        }
+    }
+}
+
+StringLayout: enum {
+    Inline: StringInline
+    Heap: StringBuffer
+}
+
+StringInline: object {
+
+    buffer: @array(Uint8, 15)
+    count: Uint8
+
+    SIZE: Int => 15
+
+    new: function () result: StringInline {
+        result = StringInline {
+            buffer = @array(Uint8, 15) {}
+            count = 0
+        }
+    }
+
+    add: function (self, text: @byte_buffer) nothing else buffer: StringBuffer {
+
+        new_slice: Slice[Uint8] = Slice[Uint8].new(
+            @byte_buffer_ptr(text) as ref unknown as ref Uint8, 
+            @byte_buffer_len(text)
+        )
+
+        count: Int = @byte_buffer_len(text)
+
+        if SIZE < self.count as Int + count {
+
+            buffer = StringBuffer.new()
+
+            // Add existing.
+            buffer.list.add_slice(
+                Slice[Uint8].new(
+                    (ref self.buffer) as ref unknown as ref Uint8,
+                    self.count
+                )
+            )
+
+            // Add new. 
+            buffer.list.add_slice(new_slice)
+            fail
+        }
+
+        buffer_slice: Slice[Uint8].new(
+            (ref self.buffer) as ref unknown as ref Uint8,
+            @array_len(self.buffer)
+        )
+
+        new_slice.move_to(buffer_slice, self.count)
+        self.count += count.to_uint8_wrapping()
+    }
+}
+
+StringBuffer: object {
+
+    private {
+        list: List[Uint8]
+    }
+
+    new: function () result: StringBuffer {
+        result = new_using(Heap.get_default_allocator())
+    }
+
+    new_using: function (allocator: Heap.Allocator) result: StringBuffer {
+        result = StringBuffer {
+            list = List[Uint8].new_using(allocator)
+        }
+    }
+
+    add: function (self, text: @byte_buffer) nothing {
+
+        new_slice: Slice[Uint8] = Slice[Uint8].new(
+            @byte_buffer_ptr(text) as ref unknown as ref Uint8, 
+            @byte_buffer_len(text)
+        )
+
+        self.list.add_slice(new_slice)
+    }
+}

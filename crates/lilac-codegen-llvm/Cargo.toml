@@ -14,3 +14,8 @@ lilac-codegen = { path = "../lilac-codegen" }
 
 [lints]
 workspace = true
+
+# On macOS `build.rs` links LLVM, so the compiler needs nothing outside
+# macOS (see the script).
+[target.'cfg(target_os = "macos")'.dependencies]
+llvm-sys = { version = "181", features = ["no-llvm-linking"] }

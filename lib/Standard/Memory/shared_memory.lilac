@@ -1,0 +1,131 @@
+using Standard.Sync as Sync
+using Standard.Heap as Heap
+
+SharedMemory[T]: object {
+
+    private {
+        ptr: ref SharedHeader[T]
+    }
+
+    new: function (count: Int) result: SharedMemory[T] {
+        result = new_using(count, Heap.get_default_allocator())
+    }
+
+    new_using: function (count: Int, allocator: Heap.Allocator) result: SharedMemory[T] {
+
+        header_size: Int = align_up(
+            @size_of(SharedHeader[T]), 
+            @align_of(T)
+        )
+
+        result = SharedMemory[T] {
+            ptr = allocator.allocate_raw(
+                header_size, 
+                @align_of(T)
+            ) as ref SharedHeader[T]
+        }
+
+        result.ptr = SharedHeader[T] {
+            strong_references = Sync.AtomicInt.new(1)
+            weak_references = Sync.AtomicInt.new(1)
+            allocator = allocator
+            data = Slice[T].new(
+                @ptr_add(result.ptr as ref unknown, header_size) as ref T, 
+                count
+            )
+        } as ref SharedHeader[T]
+    }
+
+    slice: function (self) slice: Slice[T] {
+        slice = self.ptr.data
+    }
+
+    get_reference_count: function (self) Int => self.ptr.strong_references.get()
+
+    has_single_owner: function (self) Bool => self.ptr.strong_references.get() == 1 as Int
+
+    resize: function (self, new_size: Int) nothing {
+
+        header_size: Int = align_up(
+            @size_of(SharedHeader[T]), 
+            @align_of(T)
+        )
+
+        allocator: Heap.Allocator = self.ptr.allocator
+
+        self.ptr = allocator.reallocate_raw(
+            self.ptr as ref unknown, 
+            header_size + self.ptr.data.get_count(), 
+            new_size, 
+            @align_of(T)
+        )
+    }
+
+    new_weak: function (self) weak: WeakMemory[T] {
+        self.ptr.weak_references.increment()
+        weak = WeakMemory[T] { ptr = self.ptr }
+    }
+
+    @on_copy: function (self) to: SharedMemory[T] {
+        self.ptr.strong_references.increment()
+        to = SharedMemory[T] { ptr = self.ptr }
+    }
+
+    @on_drop: function (self) nothing {
+        value: Int = self.ptr.strong_references.decrement()
+        if value == 1 as Int {
+            release[T](self.ptr)
+        }
+    }
+}
+
+WeakMemory[T]: object {
+
+    private {
+        ptr: ref SharedHeader[T]
+    }
+
+    to_shared: function (self) shared: SharedMemory[T] else nothing {
+        count: Int = self.ptr.strong_references.get()
+        loop {
+
+            if count == 0 as Int {
+                fail
+            }
+
+            if self.ptr.strong_references.compare_and_swap(count, count + 1) {
+                shared = Shared[T] { ptr = self.ptr }
+                return
+            } else -> actual: Int {
+                count = actual
+            }
+        }
+    }
+
+    @on_copy: function (self) to: WeakMemory[T] {
+        self.ptr.weak_references.increment()
+        to = WeakMemory[T] { ptr = self.ptr }
+    }
+
+    @on_drop: function (self) nothing {
+        release[T](self.ptr)
+    }
+}
+
+private {
+
+    SharedHeader[T]: object {
+        strong_references: Sync.AtomicInt
+        weak_references: Sync.AtomicInt
+        allocator: Heap.Allocator
+        data: Slice[T]
+    }
+
+    release[T]: function (shared_data: ref SharedHeader[T]) nothing {
+        value: Int = shared_data.weak_references.decrement()
+        if value == 1 as Int {
+            allocator: Heap.Allocator = shared_data.allocator
+            allocator.free[SharedHeader[T]](shared_data)
+        }
+    }
+}

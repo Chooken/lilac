@@ -265,7 +265,13 @@ fn enum_layouts_match_clang_on_every_target() {
         let file = scratch.join(format!("{target}.c"));
         std::fs::write(&file, &corpus.text).expect("write the corpus");
         let output = Command::new(&clang)
-            .args(["-ffreestanding", "-fsyntax-only", "-std=c11", "-w"])
+            .args([
+                "-ffreestanding",
+                "-nostdlibinc",
+                "-fsyntax-only",
+                "-std=c11",
+                "-w",
+            ])
             .arg(format!("--target={target}"))
             .arg(&file)
             .output()

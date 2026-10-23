@@ -1,11 +1,11 @@
+using Standard.Memory
 using Standard.Heap as Heap
 
 Map[K, V]: object {
 
     private {
 
-        allocator: Heap.Allocator
-        data: Slice[MapBucket[K, V]]
+        data: Memory[MapBucket[K, V]]
         used: Int
 
         DEFAULT_INITIAL_CAPACITY: Int => 16
@@ -18,9 +18,9 @@ Map[K, V]: object {
 
     new_using: function (allocator: Heap.Allocator) result: Map[K, V] {
         result = Map[K,V] {
-            allocator = allocator
-            data = allocator.allocate[MapBucket[K, V]](
-                DEFAULT_INITIAL_CAPACITY
+            data = Memory[MapBucket[K, V]].new_using(
+                DEFAULT_INITIAL_CAPACITY, 
+                allocator
             )
             used = 0
         }
@@ -126,11 +126,14 @@ Map[K, V]: object {
         }
 
         if self.used == 0 as Int {
-            self.data = self.allocator.reallocate[MapBucket[K, V]](self.data, capacity)
+            self.data.resize(capacity)
             return
         }
 
-        new_data: Slice[MapBucket[K, V]] = self.allocator.allocate[MapBucket[K, V]](capacity)
+        new_data: Memory[MapBucket[K, V]] = Memory[MapBucket[K, V]].new_using(
+            capacity, 
+            self.data.get_allocator()
+        )
 
         index: Int = 0
 
@@ -146,7 +149,7 @@ Map[K, V]: object {
 
         } else break
 
-        self.allocator.deallocate[MapBucket[K, V]](self.data)
+        self.data.free()
         self.data = new_data
     }
 
@@ -154,7 +157,10 @@ Map[K, V]: object {
 
         capacity: Int = self.data.get_count()
 
-        new_slice: Slice[MapBucket[K, V]] = self.allocator.create[MapBucket[K, V]](capacity)
+        new_data: Memory[MapBucket[K, V]] = Memory[MapBucket[K, V]].new_using(
+            capacity,
+            self.data.get_allocator()
+        )
 
         index: Int = 0
 
@@ -163,7 +169,7 @@ Map[K, V]: object {
             bucket: ref MapBucket[K,V] = self.data.get(index)
 
             if bucket.is_occupied {
-                @write(new_slice.get(index), bucket)
+                @write(new_data.get_slice().get(index), bucket)
             }
 
             index += 1
@@ -171,8 +177,7 @@ Map[K, V]: object {
         } else break
 
         to = Map[K, V] {
-            allocator = self.allocator
-            data = new_slice
+            data = new_data
             used = self.used
         }
     }
@@ -187,15 +192,15 @@ Map[K, V]: object {
             bucket: ref MapBucket[K,V] = self.data.get(index)
 
             if bucket.is_occupied {
-                @drop(bucket.key)
-                @drop(bucket.value)
+                @drop(ref bucket.key)
+                @drop(ref bucket.value)
             }
 
             index += 1
 
         } else break
 
-        self.allocator.deallocate[MapBucket[K, V]](self.data)
+        self.data.free()
     }
 
     private {

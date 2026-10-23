@@ -258,6 +258,7 @@ dependencies = [
  "lilac-layout",
  "lilac-span",
  "lilac-target",
+ "llvm-sys",
 ]
 
 [[package]]
